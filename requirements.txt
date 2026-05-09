@@ -1,0 +1,14 @@
+# Frontier Insight — Python dependencies
+#
+# This file lists runtime dependencies for the pipeline. It will grow as the
+# project matures. Pin versions when reproducibility becomes important.
+
+# Core (stdlib only for the current scaffold). Add libraries below as modules
+# are implemented, e.g.:
+#
+# numpy
+# pandas
+# scipy
+# matplotlib
+# requests
+# pyyaml
