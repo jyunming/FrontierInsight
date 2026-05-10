@@ -31,6 +31,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .config import ProviderConfig
 
@@ -324,7 +330,21 @@ class LLMClient:
         # proxies have rejected it. Only attach when we actually have a key.
         if self.endpoint.api_key and self.endpoint.api_key != _NO_KEY_SENTINEL:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
-        r = await self._http.post(url, json=body, headers=headers)
-        r.raise_for_status()
+        # Retry on transient upstream failures (5xx from cloud-routed Ollama
+        # models, brief network blips). 4xx errors are not retried.
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=1, min=2, max=20),
+            retry=retry_if_exception_type(
+                (httpx.HTTPStatusError, httpx.TransportError, httpx.ReadTimeout)
+            ),
+            reraise=True,
+        ):
+            with attempt:
+                r = await self._http.post(url, json=body, headers=headers)
+                if r.status_code >= 500:
+                    r.raise_for_status()
+                # 4xx surfaces immediately — no retry on auth/quota errors.
+                r.raise_for_status()
         data = r.json()
         return data["choices"][0]["message"]["content"]

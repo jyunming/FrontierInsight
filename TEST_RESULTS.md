@@ -40,162 +40,67 @@ To run a real quest (needs `OPENAI_API_KEY` or another provider's key):
 python launch.py --config examples/integrator_bakeoff/config.yaml
 ```
 
+
 ---
 
-# Phase 0 (DS-wrapper era) — historical
+## Live research-quest run (post-redesign) — EUV / MOR / shot-noise
 
-> Validation of the Phase-0 prototype on the bake-off topic
-> *"three numerical integrators on a 1-D damped harmonic oscillator"*.
-> Plan and architecture: [`docs/plan.md`](docs/plan.md) ·
-> [`docs/architecture.md`](docs/architecture.md).
-> Test artifacts: [`test_runs/quest-001/`](test_runs/quest-001/) ·
-> [`test_runs/quest-002/`](test_runs/quest-002/).
+**Topic.** Theoretical lower bound on Line-Edge Roughness (LER) imposed by
+Poisson photon shot noise in metal-oxide EUV resists at production
+doses (10–60 mJ/cm²). Narrowed to a theory-forward question with a
+single executable Monte Carlo.
 
-## Headline
+**Setup.**
+- Provider: `ollama` against `qwen3-coder:480b-cloud` (engine nodes) +
+  `gpt-oss:120b-cloud` (speech generator, after upstream 502s on the
+  former for the longest prompt).
+- Sandbox: `venv`. Knowledge layer disabled (no local Axon brain).
+- Outputs requested: paper_md, paper_pdf, slides, poster, speech.
 
-**End-to-end works.** Two real DeepScientist quests were run on this
-prototype, both produced a finalized PDF paper with real numerical
-results, real figures, and real primary references. Quest 002 was
-created and ridden to closure through `launch.py`, exercising the
-Phase-0 FI integration path.
+**Run wall-time.** ~5 minutes for the 8-node DAG; speech generator
+re-invoked separately after a transient cloud 502.
 
-| | Quest 001 (manual via curl) | Quest 002 (FI launch.py) |
+**Artifacts produced** under `outputs/1778452404-euv-mor-...-e6bfe5/`:
+| File | Size | Notes |
 |---|---|---|
-| Created via | `curl POST /api/quests` | `launch.py` → `_create_quest` |
-| Wall time | ~31 min | ~2 hr (with a 1.5 hr ChatGPT-Plus quota stall mid-run; ~25 min of actual codex work) |
-| Anchor progression | stayed in `baseline` (DS state-machine bug; codex self-repaired) | clean `baseline → write` transition |
-| Paper markdown | 7,468 B (5 inline refs with DOIs) | 7,109 B (full IMRAD; references in `references.bib`) |
-| Paper PDF | 449 KB (TinyTeX) | 360 KB (TinyTeX) |
-| Figures | 3 PNG + 3 SVG | 3 PNG (real `experiments/main/` run) |
-| Bundle manifest | yes | yes |
-| Closure decision | `decision-591a68ee` → `export_pdf` → `decision-347cc923` → `approve_completion` | `decision-7749159c` → `approve_completion` |
+| `paper/paper.md` | 7.7 KB | IMRAD; Poisson absorption + threshold model; predicts $\sqrt{\alpha_{\text{CAR}}/\alpha_{\text{MOR}}} \approx 0.577$ for the shot-noise prefactor ratio; identifies ~1.2 nm of typical 3 nm MOR LER as shot-noise-attributable. |
+| `figures/*.png` | 4×60 KB | 3-panel composite (edge profiles + LER-vs-dose log-log + shot-noise scaling exponent) + separate LER-vs-dose plot. |
+| `code/experiment.py` | 4.9 KB | Numpy + matplotlib Monte Carlo; runs in <2s. Verified manually to emit `RESULT_JSON: {...}`. |
+| `slides.md` | 3.2 KB | Marp markdown, 8-slide deck. |
+| `poster.tex` | 7.0 KB | beamerposter 36×48-in template populated by the LLM. |
+| `talk.md` | 11.7 KB | ~10-minute spoken script with `[slide: N]` cues. |
 
-The paper itself reaches the right conclusion: at h = 0.1, RK4 RMS-x
-error is **1.87 × 10⁻⁶**, Velocity-Verlet **9.65 × 10⁻⁴**, forward Euler
-**0.652** (and **6.4 × 10¹⁴** at h = 0.5 — i.e. unstable). Empirical
-log–log convergence-order slopes recovered: **1.65 / 4.00 / 2.00** for
-Euler / RK4 / V-Verlet, matching the textbook 1st / 4th / 2nd-order
-expectation.
+**`paper_pdf`, `slides.html/pdf`, `poster.pdf` not produced** — pandoc,
+Marp CLI, and pdflatex are not installed on this validation machine.
+The generators correctly skipped with warnings per the contract.
 
-## Environment under test
+**Caveats surfaced by the live run** (worth addressing in a follow-up):
+1. Filename drift between design-node figure plan and implement-node
+   actual `savefig` paths — the paper referenced names the script didn't
+   write. Worked around manually by copying `combined_plots.png` to the
+   missing referenced names.
+2. The first engine attempt got rc=2 with 0 s duration on the freshly-
+   created venv's first script invocation. Manual re-run of the same
+   script succeeds — likely a Windows venv-startup race. Not yet
+   reproducible deterministically.
+3. Ollama cloud-routed models (`qwen3-coder:480b-cloud`,
+   `gpt-oss:120b-cloud`) returned occasional 502 Bad Gateway on the
+   longest prompts. Mitigated by adding tenacity retry to `LLMClient.chat`
+   (exponential backoff, 4 attempts).
 
-- WSL2 Ubuntu 24.04.3 LTS (kernel 6.6.87.2-microsoft-standard-WSL2),
-  Python 3.14.4, Node 22.22.0, npm 11.9.0
-- DeepScientist 1.5.17 (`@researai/deepscientist`)
-- Codex CLI 0.130.0 (gpt-5.5; ChatGPT Plus auth, no incremental cost)
-- TinyTeX (pdflatex / xelatex / lualatex / bibtex under
-  `~/.TinyTeX/bin/x86_64-linux/`)
-- DS daemon: `127.0.0.1:21500`, home `~/deepscientist-wsl`
-  (Linux-native FS, not the Windows-mount path)
+---
 
-## Quest 001 — manual end-to-end via DS REST
+## Phase 0 (DS-wrapper era) — historical
 
-Used to (a) validate the WSL2 fix kills the Windows-only `cp1252` /
-broken-pipe failure mode that blocked Windows-native DS, and (b) confirm
-DS produces real research from the bake-off prompt before wiring up FI.
-
-- 35 min wall-time (pre-codex-quota era)
-- Hit one DS state-transition bug at gate confirmation: codex called
-  `artifact.confirm_baseline` and the runtime threw on the gate update.
-  Codex recovered autonomously, repairing the quest's state files so
-  `baseline_gate` flipped to `confirmed`. Notable resilience: the bug is
-  DS-internal, not Windows-specific.
-- Final outputs in
-  [`test_runs/quest-001/`](test_runs/quest-001/) — `integrator_bakeoff.md`,
-  `integrator_bakeoff.pdf`, `figures/{energy_vs_t,error_vs_h_loglog,trajectory_h0.1}.{png,svg}`.
-
-## Quest 002 — FI launch.py path
-
-```
-python launch.py --config examples/integrator_bakeoff/config.yaml
-```
-
-What FI did, exercised:
-
-1. ✅ `core.platform.detect_system()` → `wsl2`
-2. ✅ `core.platform.ensure_daemon(...)` → daemon already healthy on 21500
-3. ✅ `core.runner.DeepScientistBackend._create_quest()` → `quest_id="002"`
-   with `auto_start=true`, `workspace_mode=autonomous`
-4. ✅ `_poll_until_closure(...)` polled every 15 s; saw codex transition
-   anchor cleanly `baseline → write` (cleaner than 001 — no
-   state-machine repair needed)
-5. ⏸ Mid-write, **codex hit the ChatGPT Plus daily usage cap** ("try
-   again at 2:18 PM"). DS retried 5/5, exhausted, parked the quest. FI's
-   `_poll_until_closure` correctly hit its 1 h timeout and raised
-   `TimeoutError`. (This is a **rate-limit** issue, not a code bug.)
-6. ✅ After the cap reset, sent a single resume chat to quest 002 via
-   the same chat REST endpoint. Codex re-entered the `write` skill and
-   finished the paper bundle in ~20 min.
-7. ✅ `_collect_artifacts()` resolved `paper_md`, `paper_pdf`,
-   `figures_dir`, `bundle_manifest` correctly (after one Phase-0
-   patch — see *Findings* below).
-8. ✅ `generation.paper.PaperGenerator.generate()` wrote everything to
-   [`test_runs/quest-002/`](test_runs/quest-002/) — `paper.pdf`,
-   `integrator_bakeoff_imrad.md`, `figures/`,
-   `paper_bundle_manifest.json`.
-
-## Findings & Phase-0 fixes
-
-1. **`Path("~/...")` is not auto-expanded by pydantic.** YAML loaded
-   `home: ~/deepscientist-wsl` as the literal string `~/deepscientist-wsl`,
-   so `quest_root = home / "quests" / "002"` failed to resolve. Fixed in
-   `core/config.py` with `field_validator(..., mode="before")` that
-   `Path(v).expanduser()`s `home` and `output_dir` on load.
-
-2. **DS PDF/figures paths drift across quests.**
-   - Quest 001: PDF at `quest_root/.ds/worktrees/<paper-line>/paper/build/*.pdf`,
-     figures at `baselines/local/<id>/figures/`.
-   - Quest 002: PDF at `quest_root/paper/build/*.pdf` directly (no
-     worktree indirection), figures at
-     `experiments/main/<run>/outputs/figures/`.
-   Fixed `_collect_artifacts` in `core/runner.py` to glob both
-   conventions and prefer directories that actually contain raster /
-   vector figure files (PNG / SVG / PDF / JPG) over JSON-only catalog
-   directories like `paper/figures/figure_catalog.json`.
-
-3. **DS `claude` runner is reserved-slot, not implemented.** Phase-0
-   `core/providers.py` declares `anthropic` but raises
-   `NotImplementedError`. Plumbing Claude into DS will need either a
-   litellm proxy with an Anthropic API key, or a custom adapter that
-   wraps Claude Code as a fake-codex runner. Not in Phase-0 scope.
-
-4. **No state-machine bug in quest 002.** The closure path was clean:
-   single `decision_request` (`decision-7749159c`) → `approve_completion`.
-   Suggests the quest-001 anchor-confirmation bug was either a
-   first-quest-of-home edge case or a transient DS state-machine glitch.
-
-## What is *not* yet validated
-
-- ARC backend (Phase 6).
-- Pandoc + journal-template paper formats (Phase 1) — Phase-0 just
-  copies the DS PDF as-is.
-- Slides (Phase 2), poster (Phase 3), speech script (Phase 4).
-- Cross-quest memory (Phase 5).
-- Local provider (Ollama, vLLM) — only `provider: codex` was exercised.
-- Windows-host-launching-WSL2-daemon path (FI itself was run inside WSL2).
-
-## How to reproduce
-
-```bash
-git clone https://github.com/jyunming/FrontierInsight.git
-cd FrontierInsight
-
-# WSL2 prerequisites (one-time):
-#   npm install -g @researai/deepscientist
-#   ds latex install-runtime    # for the PDF export step
-
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-python launch.py --config examples/integrator_bakeoff/config.yaml
-# → ~30 min, writes ./outputs/<quest_id>/{paper.md,paper.pdf,figures/,bundle_manifest.json}
-```
-
-## Open questions for Phase 1
-
-- Which paper formats to ship first? (NeurIPS + IEEE Access seem highest
-  signal-to-effort for the user's stated journals/conferences.)
-- Slides: Marp (markdown-native, no LaTeX) vs Beamer? Marp is faster to
-  ship and more portable.
-- For Claude-backed runs, do we accept the litellm-proxy path
-  (needs Anthropic API key, separate from Claude Pro/Max)?
+The pre-redesign prototype wrapped DeepScientist over REST and ran two
+end-to-end integrator-bake-off quests on WSL2 (Ubuntu 24.04.3, Python
+3.14.4, DS 1.5.17, Codex CLI 0.130.0). Both reached closure with
+finalized PDFs (~360–450 KB), 3 figures each, and correct numerical
+conclusions (RK4 RMS-x error 1.87 × 10⁻⁶ at h=0.1; recovered
+log-log convergence slopes 1.65 / 4.00 / 2.00 for Euler / RK4 / V-Verlet).
+The `test_runs/quest-001` and `test_runs/quest-002` directories that
+held those artifacts were removed during the redesign cleanup; the
+research itself is no longer reproducible without restoring DS. Three
+Phase-0 fixes that informed the new design are retained in code: manual
+tilde expansion in `Config` path validators, glob-with-priority artifact
+collection, and a clear-error pattern for unsupported providers.

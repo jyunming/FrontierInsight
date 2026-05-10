@@ -1,0 +1,87 @@
+topic: |
+  TOPIC. Theoretical lower bound on Line-Edge Roughness (LER) imposed by
+  Poisson photon shot noise in metal-oxide EUV photoresists (MORs) at
+  production-relevant dose ranges.
+
+  CONTEXT. EUV lithography at 13.5 nm uses photons with ~92 eV energy. At
+  exposure doses in the 10–60 mJ/cm^2 range, the absolute photon flux per
+  pixel of a sub-30 nm half-pitch line is finite and stochastic. The
+  theoretically irreducible Line-Edge Roughness (LER) contribution from
+  Poisson photon shot noise sets a floor: σ_LER ≳ k / sqrt(N_abs), where
+  N_abs is the number of photons absorbed in the photoresist volume that
+  defines a small segment of the line edge. Metal-oxide resists (MORs,
+  e.g., HfO2- and SnOx-based platforms such as Inpria's commercial
+  formulation) have higher EUV absorption coefficients than chemically
+  amplified resists (CARs), so for a given exposure dose they absorb more
+  photons per unit volume — narrowing the shot-noise gap but not closing it.
+
+  SCOPE (THEORY-FORWARD, NO FAB EQUIPMENT NEEDED).
+    1. Build a minimal Monte Carlo simulation: a 1D line edge of length L,
+       binned into segments of length Δ. For each segment, sample the
+       number of absorbed photons from Poisson(λ), where λ depends on
+       dose D, absorbance α, segment volume, and EUV photon energy.
+    2. Apply a dose-threshold model: the resist clears iff the local
+       absorbed dose exceeds a threshold D_th. Sweep D_th to study how
+       the LER vs dose curve shifts. Use a binary (deterministic-once-
+       absorbed) clearing rule — no electron-blur convolution beyond
+       Δ-scale binning.
+    3. Sweep absorbed dose D in {10, 20, 30, 40, 50, 60} mJ/cm^2 for
+       MOR-class absorbance α_MOR and CAR-class absorbance α_CAR; report
+       σ_LER for each (D, material) pair.
+    4. Fit σ_LER(D) to the predicted 1/sqrt(D) scaling and extract the
+       coefficient k. Compare k_MOR to k_CAR; the MOR coefficient should
+       be smaller by a factor sqrt(α_MOR / α_CAR).
+    5. Quantify how much of typical experimentally-observed MOR LER
+       (~2–4 nm at production dose ~30 mJ/cm^2) is explainable by photon
+       shot noise alone, and discuss the residual that must come from
+       non-photon sources (secondary-electron yield variance, acid blur
+       analogues, line-bridging defects, etc.).
+
+  GOALS.
+    - Implement the Monte Carlo + threshold model in a single Python
+      script using numpy and matplotlib (Agg backend, headless).
+    - Produce three figures: (a) sample edge profiles at low and high
+      dose, (b) σ_LER vs dose log-log plot for MOR and CAR with the
+      expected -0.5 slope overlaid, (c) the fitted shot-noise coefficient
+      and the residual gap to a 3-nm experimental reference.
+    - Write a short IMRAD paper (≤ 4 pages) citing the foundational
+      theoretical work (Mack 2008/2009 on stochastic effects in EUV
+      lithography; De Bisschop 2015–2018 on dose-trade observations;
+      Naulleau on shot-noise-limited resolution).
+    - Cite at least three primary references.
+
+  CONSTRAINTS.
+    - CPU-only; under 60 seconds runtime.
+    - Pure numpy + matplotlib; no fancy stochastics packages.
+    - Treat secondary-electron-blur and acid-amplification as out of
+      scope — this is the photon-noise floor only.
+
+title: euv-mor-photon-shot-noise-ler
+
+provider:
+  name: ollama
+  model: gpt-oss:120b-cloud
+  base_url: http://127.0.0.1:11434/v1
+
+engine:
+  framework: langgraph
+  max_iterations: 1
+  review_loop: false
+
+execution:
+  sandbox: venv
+  timeout_s: 600
+  python_version: "3.11"
+
+knowledge:
+  enabled: false   # No Axon brain configured locally; degrade cleanly.
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+    - slides
+    - poster
+    - speech
+  paper_format: generic
+  output_dir: ./outputs

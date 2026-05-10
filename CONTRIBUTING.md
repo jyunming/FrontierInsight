@@ -1,49 +1,51 @@
 # Contributing to Frontier Insight
 
-Thank you for your interest in contributing to **Frontier Insight**! This project aims to build an end-to-end automated research pipeline, and we welcome contributions of all kinds.
+Thanks for your interest. FI is a Windows + Linux native automated research pipeline (async LangGraph engine, per-quest venv/Docker execution, Axon-backed knowledge layer). Contributions of all kinds welcome.
 
-## Ways to Contribute
+## Ways to contribute
 
-- **Code** — Add agent capabilities, improve the cross-referencing engine, integrate new simulation tools, or improve pipeline orchestration.
-- **Documentation** — Improve the README, write tutorials, or document internals under `docs/`.
-- **Examples** — Add example research runs under `examples/` to help others learn the system.
-- **Bug reports & feature requests** — Open an issue with a clear description and reproduction steps where applicable.
+- **Code** — improve any node body, generator, executor, or provider in `core/` and `generation/`. New paper templates (`templates/paper/<format>/template.tex`), slide themes, or poster layouts.
+- **Tests** — expand the pytest suite in `tests/` (currently ~155 tests, all using fake LLMs via `monkeypatch`).
+- **Examples** — add a config under `examples/<topic>/config.yaml` that demonstrates a new use case.
+- **Bug reports / feature requests** — open an issue with a clear description and reproduction steps.
 
-## Getting Started
+## Getting started
 
-1. Fork the repository and create a feature branch from `main`:
-   ```bash
-   git checkout -b feat/my-change
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Make your changes. Keep them focused and small where possible.
-4. Commit with a descriptive message and open a pull request.
+```bash
+git clone https://github.com/jyunming/FrontierInsight.git
+cd FrontierInsight
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux/macOS
+pip install -r requirements.txt
+pip install pytest pytest-asyncio
+python -m pytest -v
+```
 
-## Pull Request Guidelines
+## Pull request guidelines
 
 - Describe **what** the change does and **why** it is needed.
 - Reference any related issues (e.g., `Closes #123`).
 - Keep PRs focused — split unrelated changes into separate PRs.
-- Update documentation when behavior or interfaces change.
-- Ensure your code runs and any added examples execute end-to-end.
+- Update `docs/plan.md` / `docs/architecture.md` / `CLAUDE.md` when behavior or contracts change.
+- All tests must pass: `python -m pytest -v`. New code should add direct tests for the module it touches.
+- Tests must not call real LLM APIs — use `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or the analogous path for generators). Tests that need external CLIs (Docker, pandoc, marp, pdflatex) must `pytest.mark.skipif(shutil.which("...") is None, ...)`.
 
-## Code Style
+## Code style
 
-- Follow [PEP 8](https://peps.python.org/pep-0008/) for Python code.
-- Prefer clear, descriptive names for agents, modules, and pipeline stages.
-- Add docstrings to public functions, classes, and modules.
+- Python 3.10+, PEP 8.
+- Async-first in `core/`: `async def`, `httpx.AsyncClient`, `asyncio.create_subprocess_exec`. Sync libraries (`docker-py`, `venv.EnvBuilder`) wrapped in `asyncio.to_thread`.
+- `pathlib.Path` everywhere — no `os.path.join` with literal `/`.
+- Pydantic v2 syntax (`field_validator(..., mode='before')`, `model_validate`, `model_dump`). Path-shaped Config fields use the `mode='before'` validator for tilde expansion.
+- Prompts in `agents/*.md` use Python `string.Template` (`$placeholder`), not f-strings.
+- The `RESULT_JSON: {...}` contract: experiment scripts emit one line on the LAST line of stdout; `_extract_result_json` parses it.
+
+See `CLAUDE.md` for the longer rationale on conventions.
 
 ## Licensing
 
-By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE), the same license that covers the project.
+By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
 
-## Code of Conduct
+## Code of conduct
 
-Be respectful, constructive, and inclusive. We aim to keep this a welcoming space for researchers and engineers from all backgrounds.
-
----
-
-Questions? Open an issue — we're happy to help.
+Be respectful, constructive, and inclusive.
