@@ -33,13 +33,14 @@ from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="frontier-insight",
         description="End-to-end automated research pipeline.",
     )
-    p.add_argument("--config", type=Path, help="YAML config for a single quest.")
-    p.add_argument(
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--config", type=Path, help="YAML config for a single quest.")
+    mode.add_argument(
         "--fleet",
         type=Path,
         nargs="+",
@@ -68,9 +69,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override config.output.output_dir (single-quest mode only).",
     )
-    args = p.parse_args()
-    if not args.config and not args.fleet:
-        p.error("provide --config <path> or --fleet <path>...")
+    args = p.parse_args(argv)
+    if args.fleet and args.output is not None:
+        p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
     return args
 
 
@@ -202,9 +203,12 @@ async def run_fleet(
         )
 
     async def gated(cfg: Config) -> dict[str, object] | Exception:
-        if memory_cap_mb is not None:
-            await _await_under_cap(memory_cap_mb)
         async with sem:
+            # Memory cap is checked at actual start (after semaphore admit),
+            # not at entry — otherwise queued tasks could pass the early
+            # check and start later when RSS has grown past the cap.
+            if memory_cap_mb is not None:
+                await _await_under_cap(memory_cap_mb)
             state["running"] += 1
             engine = Engine(cfg, supervisor=supervisor)
             _status_line(engine.quest_id, "start")
