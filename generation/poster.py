@@ -16,7 +16,12 @@ from pathlib import Path
 
 from core.config import Config
 from core.engine import QuestArtifacts
-from core.provider import LLMClient, ProxySupervisor, resolve_endpoint_async
+from core.provider import (
+    LLMClient,
+    ProxySupervisor,
+    _PROXY_PROVIDERS,
+    resolve_endpoint_async,
+)
 
 _log = logging.getLogger("frontier_insight.poster")
 
@@ -43,23 +48,34 @@ class PosterGenerator:
         figures = []
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
-        prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).substitute(
+        # safe_substitute (rather than substitute) because the inputs that
+        # land here aren't fully trusted: paper_md is LLM-authored prose
+        # which may contain stray `$` (LaTeX inline math, currency, etc.),
+        # and substitute() raises ValueError on unmatched `$`.
+        prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
             paper_md=paper_md[:8000],
             figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
         )
-        endpoint = await resolve_endpoint_async(
-            self.config.provider, supervisor or ProxySupervisor()
-        )
+        own_supervisor = supervisor is None
+        sup = supervisor or ProxySupervisor()
+        endpoint = await resolve_endpoint_async(self.config.provider, sup)
         client = LLMClient(endpoint)
         try:
             text = await client.chat([{"role": "user", "content": prompt}], temperature=0.2)
         finally:
             await client.aclose()
+            if self.config.provider.name in _PROXY_PROVIDERS:
+                await sup.release(self.config.provider.name)
+            if own_supervisor:
+                await sup.shutdown()
 
         parsed = _lenient_json(text) or {
             "title": "Untitled", "left": "", "middle": "", "right": ""
         }
-        body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).substitute(
+        # safe_substitute again: the LLM-supplied left/middle/right columns
+        # are LaTeX with arbitrary `$math$` content that would break
+        # substitute()'s strict placeholder matcher.
+        body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
             title=parsed.get("title") or "Untitled",
             left=parsed.get("left") or "",
             middle=parsed.get("middle") or "",
@@ -82,7 +98,11 @@ class PosterGenerator:
             _log.warning("pdflatex poster timeout; skipped")
             return result
         if r.returncode != 0:
-            _log.warning("pdflatex poster rc=%d stderr=%s", r.returncode, r.stdout[-500:])
+            # pdflatex writes diagnostics to stdout; stderr usually empty.
+            _log.warning(
+                "pdflatex poster rc=%d stdout=%s stderr=%s",
+                r.returncode, r.stdout[-500:], r.stderr[-200:],
+            )
             return result
         out_pdf = out_dir / "poster.pdf"
         if out_pdf.exists():
