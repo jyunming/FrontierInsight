@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Frontier Insight (FI) is a Windows + Linux native automated research pipeline. **FI owns the research loop itself**: an async LangGraph DAG (`ideate → literature → design → implement → execute → analyze → write → review`) drives an LLM through experimentation; agent-generated code runs in a per-quest venv (default) or Docker container (opt-in). Knowledge is delegated to [`jyunming/Axon`](https://github.com/jyunming/Axon) — do not reimplement vector search, literature retrieval, or cross-quest memory inside FI.
 
-The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. References to DS in `test_runs/` and the historical section of `TEST_RESULTS.md` are kept for context only.
+The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. The historical section of `TEST_RESULTS.md` retains DS-era results for context only — links to `test_runs/` artifacts inside that file are historical and the directory is no longer in the repo.
 
 ## Run / develop
 
