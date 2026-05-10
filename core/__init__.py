@@ -1,0 +1,1 @@
+"""Frontier Insight — core orchestration."""

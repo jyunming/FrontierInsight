@@ -1,153 +1,126 @@
 # Frontier Insight
 
-**End-to-end automated research pipeline for scientific discovery across any domain.**
+**End-to-end automated research pipeline. Windows + Linux native, async-first, knowledge-grounded.**
 
-Frontier Insight is a multi-agent AI system that automates the full research lifecycle — from initial brainstorming and literature synthesis to experiment design, simulation execution, cross-referencing for hidden patterns, paper writing, presentation creation, and intelligent follow-up research suggestions.
-
-Inspired by systems like The AI Scientist but designed to be **broader, more general-purpose, and stronger at deep cross-domain synthesis**.
+Frontier Insight (FI) takes a research topic and produces a finished IMRAD paper, slide deck, conference poster, and 10-minute talk script — running the experiment code itself in a per-quest sandbox along the way. The orchestrator is async LangGraph; the knowledge layer is [Axon](https://github.com/jyunming/Axon); experiment code runs in a per-quest venv (default) or a Docker container (opt-in).
 
 ---
 
-## ✨ Key Features
+## What works today
 
-- **Full Research Pipeline** — Brainstorming → Literature review & cross-referencing → Experiment design → Simulation & execution → Analysis & validation → Manuscript & presentation generation → Follow-up suggestions
-- **Deep Cross-Referencing Engine** — Intelligently connects literature, simulation outputs, and experimental data to surface undiscovered behaviors and novel insights
-- **Multi-Agent Architecture** — Specialized agents (Researcher, Experimenter, Analyst, Writer, Reviewer) that collaborate and iterate
-- **Domain Agnostic** — Works with any code-executable research (simulation, modeling, data analysis, ML experiments, etc.)
-- **Reproducible & Transparent** — Full logging, artifact tracking, and versioned outputs
-- **Self-Improving Loop** — Review feedback is fed back into future idea generation
+| Capability | Status |
+|---|---|
+| Async LangGraph engine: `ideate → literature → design → implement → execute → analyze → write → review` with a `revise` loop | ✅ |
+| Per-quest venv; agent-generated Python is installed and run in isolation | ✅ |
+| Docker sandbox via `execution.sandbox: docker` (network disabled, mounted at `/work`) | ✅ |
+| Provider matrix: `codex` / `openai` / `gemini` / `ollama` / `vllm` direct; `claude_code` and `github_copilot_*` via local proxies | ✅ structurally; live auth user-validated |
+| Axon-backed knowledge layer: literature retrieval + cross-quest memory write-back | ✅ |
+| Paper PDF via pandoc + LaTeX (`generic` and `neurips` templates ship; others stub) | ✅ |
+| Slides via Marp; poster via `beamerposter`; speech script via single LLM call | ✅ |
+| SQLite-checkpointed state for resumability (`<quest_root>/.fi/state.sqlite`) | ✅ |
+| `--fleet` runner with bounded concurrency, ref-counted proxies, `--memory-cap-mb`, optional `viztracer --profile` | ✅ |
+
+11/11 pytest tests pass on Windows-native Python 3.11.9 (no WSL2). See [`TEST_RESULTS.md`](TEST_RESULTS.md).
 
 ---
 
-## 🚀 Quick Start
-
-> **Note:** This project is under active development. The following instructions will be updated as the system matures.
+## Quick start
 
 ```bash
-# Clone the repository
-git clone https://github.com/jyunming/FrontierInsight.git
-cd FrontierInsight
-
-# Install dependencies
+# Python 3.10+
 pip install -r requirements.txt
 
-# Run the pipeline on a new research topic
-python launch.py --topic "High-NA EUV stochastic effects in photoresist modeling" --output ./outputs/my-first-run
+# (optional) Knowledge layer:
+#   pip install -e <path-to-Axon-checkout>
+# (optional) Paper PDF:  install pandoc + a TeX engine (MiKTeX on Windows, TinyTeX on Linux/macOS).
+# (optional) Slides:     npm install -g @marp-team/marp-cli
+# (optional) Docker sandbox: install Docker Desktop / dockerd.
+# (optional) Provider proxies (only if you use them):
+#   claude_code:           clone RichardAtCT/claude-code-openai-wrapper, `poetry install`,
+#                          set FI_CLAUDE_CODE_WRAPPER_DIR, then `claude auth login`.
+#   github_copilot_*:      `npx copilot-api@latest auth` (one-time).
+
+# Single quest
+export OPENAI_API_KEY=sk-...
+python launch.py --config examples/integrator_bakeoff/config.yaml
+
+# Many quests in parallel
+python launch.py --fleet quests/a.yaml quests/b.yaml quests/c.yaml \
+                 --max-concurrent 4 --memory-cap-mb 4096
 ```
 
+Artifacts land at `<output_dir>/<quest_id>/`: `paper.md`, `paper.pdf`, `figures/`, optional `slides.{md,html,pdf}` / `poster.{tex,pdf}` / `talk.md`, the run log at `.fi/run.log`, the LangGraph checkpoint at `.fi/state.sqlite`, and a `frontier_insight_summary.json` index.
+
 ---
 
-## 🏗️ Architecture Overview
+## Architecture
 
 ```
-┌─────────────────────┐
-│   Idea Generation   │  ← Brainstorming + Novelty Scoring
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│  Literature & Data  │  ← Semantic search + Cross-referencing
-│     Cross-Ref       │    (unbury hidden patterns)
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│ Experiment Design & │  ← Protocol + Code generation
-│     Execution       │    (Python, simulators, custom tools)
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│   Analysis &        │  ← Statistics, visualization, validation
-│   Insight Synthesis │
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│ Paper / Poster /    │  ← LaTeX, figures, slides, speech script
-│   Presentation      │
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│ Follow-up Research  │  ← Prioritized next-step recommendations
-└─────────────────────┘
+launch.py → Config → Engine(LangGraph) → QuestArtifacts → generators
+                          │
+                ┌─────────┼─────────┐
+                ▼         ▼         ▼
+           provider  execution  knowledge
+            (httpx)  (venv|docker) (Axon)
 ```
 
----
-
-## 📁 Project Structure
-
-```
-FrontierInsight/
-├── agents/                 # Specialized agent implementations
-├── core/                   # Pipeline orchestration & state management
-├── templates/              # Domain-specific experiment templates
-├── literature/             # Cross-referencing & embedding engine
-├── generation/             # Paper, poster, presentation generators
-├── evaluation/             # Self-review and quality scoring
-├── examples/               # Example runs and outputs
-├── docs/                   # Documentation
-├── launch.py               # Pipeline entry point
-├── requirements.txt        # Python dependencies
-└── README.md
-```
+See [`docs/architecture.md`](docs/architecture.md) for the layered diagram, contracts (`Config`, `QuestState`, `QuestArtifacts`, `Executor`, generator protocol), and the concurrency model. See [`docs/plan.md`](docs/plan.md) for the phased history (A through H).
 
 ---
 
-## 🛠️ Roadmap
+## Configuration
 
-- [ ] Core multi-agent orchestration
-- [ ] Literature + simulation cross-referencing engine
-- [ ] Support for popular simulation frameworks (TorchResist, ELitho, Optolithium, etc.)
-- [ ] Full LaTeX paper + figure generation
-- [ ] Presentation & poster auto-generation
-- [ ] Persistent research knowledge graph
-- [ ] Web UI / Dashboard
-- [ ] Docker + one-click deployment
+A minimal `config.yaml`:
 
----
+```yaml
+topic: |
+  Compare three numerical integrators on a damped harmonic oscillator...
 
-## 🤝 Contributing
+provider:
+  name: codex          # or openai, gemini, ollama, vllm, claude_code, github_copilot_cli
+  # model: gpt-5
+  # base_url: ...      # override per provider
+  # api_key_env: ...   # env var name for the key
 
-We welcome contributions! Whether you're interested in:
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
 
-- Adding new agent capabilities
-- Improving cross-referencing algorithms
-- Adding support for new simulation tools
-- Writing documentation or examples
-- Suggesting new features
+execution:
+  sandbox: venv        # or docker
+  timeout_s: 1800
 
-Please open an issue or pull request. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.
+knowledge:
+  enabled: true
+  axon_config:         # inline AxonConfig — or pass a path to a YAML
+    embedding: { provider: ollama, model: nomic-embed-text }
+    llm:       { provider: ollama, model: qwen2.5-coder:32b }
+  top_k: 5
+  write_back_quests: true
 
----
-
-## 📄 License
-
-This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.
-
----
-
-## 📖 Citation
-
-If you use Frontier Insight in your research or build upon it, please cite:
-
-```bibtex
-@software{frontier_insight_2026,
-  author = {Frontier Insight Contributors},
-  title  = {Frontier Insight: End-to-End Automated Research Pipeline},
-  year   = {2026},
-  url    = {https://github.com/jyunming/FrontierInsight}
-}
+output:
+  kinds: [paper_md, paper_pdf, slides, poster, speech]
+  paper_format: generic    # or neurips, iclr, ieee_access, nature_mi
+  output_dir: ./outputs
 ```
 
----
-
-## 🙏 Acknowledgments
-
-- Inspired by [The AI Scientist](https://github.com/SakanaAI/AI-Scientist) (Sakana AI)
-- Built with ideas from multi-agent frameworks (AutoGen, CrewAI, LangGraph)
-- Special thanks to the open-source lithography and scientific computing communities
+See [`examples/integrator_bakeoff/config.yaml`](examples/integrator_bakeoff/config.yaml).
 
 ---
 
-**Frontier Insight** — Pushing the frontier of automated scientific discovery.
+## Honest about scope
+
+**What's intentionally not in scope.** A web UI / Docker-deploy / one-click installer (Phase ≥7 if ever). A custom embedding service or vector store — Axon owns that. A Rust rewrite — orchestration is LLM-network-bound, so Rust gives ~5% wall-time win at best (within noise); the hybrid Python+Rust route via `maturin` is reserved for the day Phase H profiling surfaces a real CPU hot spot. See `docs/plan.md`.
+
+**What's structural, not yet user-validated.** Live runs against `claude_code` and `github_copilot_*` proxies require their respective auth/install prerequisites; the spawn paths are wired and use `GET /v1/models` for readiness. The Phase-1 paper templates ship `generic` + `neurips` fully; `iclr`, `ieee_access`, `nature_mi` are stubs that fall back to pandoc's default. Slides require the Marp CLI; poster requires pdflatex.
 
 ---
 
-*This README is a living document. Contributions and feedback are highly encouraged!*
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## License
+
+Apache 2.0 — see [`LICENSE`](LICENSE).

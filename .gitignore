@@ -23,3 +23,8 @@ env/
 # Pipeline outputs
 outputs/
 *.log
+
+# Pytest scratch (per pytest.ini basetemp).
+.pytest_tmp/
+.pytest_cache/
+.testmondata*

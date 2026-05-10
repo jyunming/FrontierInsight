@@ -1,0 +1,50 @@
+topic: |
+  TOPIC: Compare three numerical integrators (forward Euler, 4th-order
+  Runge–Kutta, and Velocity-Verlet) on a 1-D damped harmonic oscillator
+  m * x'' + c * x' + k * x = 0, m = k = 1, c = 0.1, x(0) = 1, x'(0) = 0.
+
+  GOALS:
+  1. Implement all three integrators in Python (numpy).
+  2. Compare trajectory error vs analytical reference for h ∈ {0.5, 0.1, 0.05, 0.01}.
+  3. Quantify long-time energy drift over t ∈ [0, 200] for each (h, integrator) pair.
+  4. Cross-reference results with literature on symplectic vs non-symplectic methods.
+  5. Produce a short markdown paper (≤ 4 pages, IMRAD) with three figures.
+  6. Cite at least three primary references.
+
+title: bakeoff-integrators-fi-redesign
+
+provider:
+  name: codex
+  # api_key_env defaults to OPENAI_API_KEY; model defaults to gpt-5.
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+
+execution:
+  sandbox: venv
+  timeout_s: 1800
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  # Inline AxonConfig fields are passed straight through. Substitute a
+  # path like `axon_config: ~/axon-config.yaml` if you keep your Axon
+  # config separate.
+  axon_config:
+    embedding:
+      provider: ollama
+      model: nomic-embed-text
+    llm:
+      provider: ollama
+      model: qwen2.5-coder:32b
+  top_k: 5
+  write_back_quests: true
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs

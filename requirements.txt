@@ -1,14 +1,41 @@
-# Frontier Insight — Python dependencies
+# Frontier Insight — runtime dependencies (post-DS redesign).
 #
-# This file lists runtime dependencies for the pipeline. It will grow as the
-# project matures. Pin versions when reproducibility becomes important.
+# Core orchestration is LangGraph; the unified LLM client uses the OpenAI
+# Python SDK against any OpenAI-compatible endpoint (codex, openai, gemini's
+# /v1beta/openai/, ollama, vllm, plus locally-spawned proxies for claude_code
+# and copilot). The knowledge layer is delegated to jyunming/Axon.
+#
+# Optional providers spawned as Node CLIs (install separately):
+#   npm install -g @anthropic-ai/claude-code         # for provider: claude_code
+#   npm install -g claude-code-openai-wrapper        # OpenAI-compat shim for Claude
+#   npm install -g copilot-api                       # OpenAI-compat shim for Copilot
 
-# Core (stdlib only for the current scaffold). Add libraries below as modules
-# are implemented, e.g.:
-#
-# numpy
-# pandas
-# scipy
-# matplotlib
-# requests
-# pyyaml
+pydantic>=2.5
+pyyaml>=6.0
+requests>=2.31
+
+# Async HTTP — shared connection pool across the engine.
+httpx>=0.27
+tenacity>=8.2
+
+# Unified LLM client (used against any OpenAI-compatible base_url).
+openai>=1.40
+
+# Engine.
+langgraph>=0.2
+langchain-core>=0.3
+langgraph-checkpoint-sqlite>=2.0
+
+# Knowledge base (research literature + cross-quest memory).
+# https://github.com/jyunming/Axon
+axon>=0.4
+
+# Optional sandbox executor (Phase D). Used when execution.sandbox=docker.
+# Requires Docker Desktop on Windows/macOS or `dockerd` on Linux.
+docker>=7.1
+
+# Optional concurrency-aware extras (Phase H).
+# psutil enables `--memory-cap-mb` throttling in fleet mode.
+# viztracer enables `--profile` per-quest tracing.
+psutil>=5.9
+# viztracer>=0.16   # uncomment when you want a real profile run
