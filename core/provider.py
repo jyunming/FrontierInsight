@@ -66,6 +66,12 @@ _DIRECT_DEFAULTS: dict[str, dict[str, str]] = {
 
 _PROXY_PROVIDERS = {"claude_code", "github_copilot_cli", "github_copilot_vscode"}
 
+# Sentinel returned by `resolve_endpoint` when no API key env var was set
+# (or the provider is configured as keyless, e.g. ollama/vllm). The OpenAI
+# SDK requires a non-empty key string; downstream callers special-case this
+# value to skip the `Authorization` header entirely.
+_NO_KEY_SENTINEL = "not-needed"
+
 
 @dataclass
 class ResolvedEndpoint:
@@ -100,7 +106,11 @@ class ProxySupervisor:
         async with self._lock:
             handle = self._handles.get(provider_name)
             if handle is None:
-                handle = self._spawn(provider_name)
+                # `_spawn` ends with a blocking poll of `/v1/models` (up to
+                # 60s). Run it in a worker thread so concurrent quests doing
+                # other work don't stall the event loop while one of them
+                # waits for the proxy to come up.
+                handle = await asyncio.to_thread(self._spawn, provider_name)
                 self._handles[provider_name] = handle
             handle.refcount += 1
             return handle
@@ -157,11 +167,22 @@ class ProxySupervisor:
         else:
             raise NotImplementedError(provider_name)
 
+        # cwd validation gives a clearer error than the generic
+        # "proxy CLI not found" when the wrapper checkout is missing.
+        if cwd is not None and not Path(cwd).is_dir():
+            raise RuntimeError(
+                f"proxy {provider_name!r}: working directory {cwd!r} does not exist. "
+                f"Set FI_CLAUDE_CODE_WRAPPER_DIR to a clone of "
+                f"RichardAtCT/claude-code-openai-wrapper with `poetry install` run."
+            )
         try:
+            # stdout/stderr -> DEVNULL: the proxies are long-lived and
+            # write enough log volume to fill an OS pipe buffer if we
+            # left them as PIPE without draining. Drop them entirely.
             proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 cwd=cwd,
                 env=env,
             )
@@ -173,7 +194,16 @@ class ProxySupervisor:
                 f"For github_copilot_*: ensure Node and `npx` are on PATH; "
                 f"run `npx copilot-api@latest auth` once."
             ) from e
-        _wait_for_openai_endpoint(port, timeout_s=60)
+        # If readiness times out, kill the orphan to avoid leaking proxies.
+        try:
+            _wait_for_openai_endpoint(port, timeout_s=60)
+        except Exception:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise
         return _ProxyHandle(name=provider_name, port=port, proc=proc)
 
 
@@ -223,11 +253,11 @@ def resolve_endpoint(
     if defaults is None:
         raise ValueError(f"unknown provider: {name!r}")
     api_key_env = provider.api_key_env or defaults["api_key_env"]
-    api_key = os.environ.get(api_key_env, "") if api_key_env else "not-needed"
+    api_key = os.environ.get(api_key_env, "") if api_key_env else _NO_KEY_SENTINEL
     return ResolvedEndpoint(
         base_url=provider.base_url or defaults["base_url"],
         model=provider.model or defaults["model"],
-        api_key=api_key or "not-needed",
+        api_key=api_key or _NO_KEY_SENTINEL,
     )
 
 
@@ -238,7 +268,7 @@ async def resolve_endpoint_async(
     if provider.name not in _PROXY_PROVIDERS:
         return resolve_endpoint(provider)
     handle = await supervisor.acquire(provider.name)
-    api_key = os.environ.get(provider.api_key_env or "", "") or "not-needed"
+    api_key = os.environ.get(provider.api_key_env or "", "") or _NO_KEY_SENTINEL
     return ResolvedEndpoint(
         base_url=f"http://127.0.0.1:{handle.port}/v1",
         model=provider.model or "default",
@@ -287,10 +317,13 @@ class LLMClient:
         if extra:
             body.update(extra)
         url = self.endpoint.base_url.rstrip("/") + "/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.endpoint.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        # Ollama (and vLLM with auth disabled) treat the OpenAI-compat
+        # endpoint as keyless. Sending `Authorization: Bearer not-needed`
+        # is harmless against most servers but Ollama's strict-mode reverse
+        # proxies have rejected it. Only attach when we actually have a key.
+        if self.endpoint.api_key and self.endpoint.api_key != _NO_KEY_SENTINEL:
+            headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
         r = await self._http.post(url, json=body, headers=headers)
         r.raise_for_status()
         data = r.json()
