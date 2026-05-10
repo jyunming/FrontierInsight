@@ -30,6 +30,8 @@ from .provider import LLMClient, ProxySupervisor, resolve_endpoint_async
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
+_FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
+
 
 @dataclass
 class QuestArtifacts:
@@ -243,7 +245,7 @@ class Engine:
         )
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
-            if p.is_file() and p.suffix.lower() in {".png", ".svg", ".jpg", ".jpeg", ".pdf"}
+            if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
         result_json = _extract_result_json(result.stdout)
         self._log.info(
@@ -333,12 +335,19 @@ class Engine:
         paper_md = self.quest_root / "paper" / "paper.md"
         figures = self.quest_root / "figures"
         manifest = self.quest_root / "paper" / "paper_bundle_manifest.json"
+        figures_present = (
+            figures.is_dir()
+            and any(
+                p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
+                for p in figures.iterdir()
+            )
+        )
         return QuestArtifacts(
             quest_id=self.quest_id,
             quest_root=self.quest_root,
             paper_md=paper_md if paper_md.exists() else None,
             paper_pdf=None,
-            figures_dir=figures if figures.is_dir() and any(figures.iterdir()) else None,
+            figures_dir=figures if figures_present else None,
             bundle_manifest=manifest if manifest.exists() else None,
             raw_state=dict(state),
         )
@@ -409,8 +418,10 @@ def _parse_json_lenient(text: str) -> dict[str, Any] | None:
     """Find and parse a JSON object inside arbitrary LLM output.
 
     LLMs frequently wrap JSON in markdown fences, prose, or trailing
-    commentary. This tries strict parse first; on failure, scans for the
-    largest balanced `{...}` block.
+    commentary. This tries strict parse first; on failure, slices from
+    the first `{` to the last `}` and parses that. The slice is NOT
+    balance-aware — if the LLM emits two top-level objects in one
+    response, the slice will span both and parsing will fail.
     """
     if not text:
         return None
