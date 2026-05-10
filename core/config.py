@@ -74,8 +74,10 @@ class KnowledgeConfig(BaseModel):
     @field_validator("axon_config", mode="before")
     @classmethod
     def _expand_axon_path(cls, v: object) -> object:
-        if isinstance(v, str):
-            return Path(v).expanduser()
+        # Path-shaped input (str or Path) gets `~` expansion; dicts pass
+        # through untouched so they reach AxonConfig.model_validate(...).
+        if isinstance(v, (str, Path)):
+            return _expand(v)
         return v
 
 
