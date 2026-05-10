@@ -43,7 +43,9 @@ class PosterGenerator:
         figures = []
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
-        prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).substitute(
+        # safe_substitute: paper_md is LLM-written and may contain raw `$`
+        # from LaTeX inline math; substitute() would raise on those.
+        prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
             paper_md=paper_md[:8000],
             figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
         )
@@ -59,7 +61,9 @@ class PosterGenerator:
         parsed = _lenient_json(text) or {
             "title": "Untitled", "left": "", "middle": "", "right": ""
         }
-        body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).substitute(
+        # safe_substitute so future LaTeX template edits can carry raw `$`
+        # (inline math) without colliding with Template's syntax.
+        body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
             title=parsed.get("title") or "Untitled",
             left=parsed.get("left") or "",
             middle=parsed.get("middle") or "",
@@ -82,7 +86,11 @@ class PosterGenerator:
             _log.warning("pdflatex poster timeout; skipped")
             return result
         if r.returncode != 0:
-            _log.warning("pdflatex poster rc=%d stderr=%s", r.returncode, r.stdout[-500:])
+            # pdflatex writes diagnostics to stdout; stderr usually empty.
+            _log.warning(
+                "pdflatex poster rc=%d stdout=%s stderr=%s",
+                r.returncode, r.stdout[-500:], r.stderr[-200:],
+            )
             return result
         out_pdf = out_dir / "poster.pdf"
         if out_pdf.exists():
