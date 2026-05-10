@@ -58,7 +58,11 @@ class PaperGenerator:
             result["bundle_manifest"] = dst
 
         if "paper_pdf" in kinds and art.paper_md is not None:
-            pdf = self._compile_pdf(out_dir / "paper.md", out_dir)
+            # If paper_md wasn't requested, the markdown wasn't copied above.
+            # Compile from art.paper_md directly so the PDF doesn't depend on
+            # paper_md being in output.kinds.
+            pdf_src = result.get("paper_md") or art.paper_md
+            pdf = self._compile_pdf(pdf_src, out_dir)
             if pdf is not None:
                 result["paper_pdf"] = pdf
 
