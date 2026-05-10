@@ -33,13 +33,14 @@ from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="frontier-insight",
         description="End-to-end automated research pipeline.",
     )
-    p.add_argument("--config", type=Path, help="YAML config for a single quest.")
-    p.add_argument(
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--config", type=Path, help="YAML config for a single quest.")
+    mode.add_argument(
         "--fleet",
         type=Path,
         nargs="+",
@@ -68,10 +69,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override config.output.output_dir (single-quest mode only).",
     )
-    args = p.parse_args()
-    if not args.config and not args.fleet:
-        p.error("provide --config <path> or --fleet <path>...")
-    return args
+    return p.parse_args(argv)
 
 
 # ---- single-quest path ----------------------------------------------------
