@@ -42,9 +42,12 @@ class PaperGenerator:
 
         if art.figures_dir is not None and art.figures_dir.exists():
             dst = out_dir / "figures"
-            if dst.exists() and dst != art.figures_dir:
-                shutil.rmtree(dst)
-            if dst != art.figures_dir:
+            # resolve() so symlinks / alternate spellings of the same directory
+            # don't trigger rmtree-then-copytree on the source.
+            same = dst.resolve() == art.figures_dir.resolve()
+            if not same:
+                if dst.exists():
+                    shutil.rmtree(dst)
                 shutil.copytree(art.figures_dir, dst)
             result["figures_dir"] = dst
 
