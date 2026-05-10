@@ -13,12 +13,16 @@ import asyncio
 import logging
 import shutil
 import string
-import subprocess
 from pathlib import Path
 
 from core.config import Config
 from core.engine import QuestArtifacts
-from core.provider import LLMClient, ProxySupervisor, resolve_endpoint_async
+from core.provider import (
+    LLMClient,
+    ProxySupervisor,
+    _PROXY_PROVIDERS,
+    resolve_endpoint_async,
+)
 
 _log = logging.getLogger("frontier_insight.slides")
 
@@ -46,18 +50,25 @@ class SlideGenerator:
             return result
 
         for ext in ("html", "pdf"):
-            cmd = ["marp", str(slides_md), "-o", str(out_dir / f"slides.{ext}")]
+            out_path = out_dir / f"slides.{ext}"
             try:
-                r = subprocess.run(
-                    cmd, capture_output=True, text=True, cwd=str(out_dir), timeout=120
+                proc = await asyncio.create_subprocess_exec(
+                    "marp", str(slides_md), "-o", str(out_path),
+                    cwd=str(out_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-            except subprocess.TimeoutExpired:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            except asyncio.TimeoutError:
                 _log.warning("marp %s timeout; skipped", ext)
                 continue
-            if r.returncode != 0:
-                _log.warning("marp %s rc=%d stderr=%s", ext, r.returncode, r.stderr[-400:])
+            if proc.returncode != 0:
+                _log.warning(
+                    "marp %s rc=%d stderr=%s",
+                    ext, proc.returncode, stderr.decode("utf-8", errors="replace")[-400:],
+                )
                 continue
-            result[f"slides_{ext}"] = out_dir / f"slides.{ext}"
+            result[f"slides_{ext}"] = out_path
         return result
 
     async def _author_marp(
@@ -75,14 +86,18 @@ class SlideGenerator:
             paper_md=paper_md[:8000],
             figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
         )
-        endpoint = await resolve_endpoint_async(
-            self.config.provider, supervisor or ProxySupervisor()
-        )
+        own_supervisor = supervisor is None
+        sup = supervisor or ProxySupervisor()
+        endpoint = await resolve_endpoint_async(self.config.provider, sup)
         client = LLMClient(endpoint)
         try:
             text = await client.chat([{"role": "user", "content": prompt}], temperature=0.2)
         finally:
             await client.aclose()
+            if self.config.provider.name in _PROXY_PROVIDERS:
+                await sup.release(self.config.provider.name)
+            if own_supervisor:
+                await sup.shutdown()
 
         slides_md = out_dir / "slides.md"
         slides_md.write_text(_strip_outer_fence(text), encoding="utf-8")

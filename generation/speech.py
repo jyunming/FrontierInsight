@@ -12,7 +12,12 @@ from pathlib import Path
 
 from core.config import Config
 from core.engine import QuestArtifacts
-from core.provider import LLMClient, ProxySupervisor, resolve_endpoint_async
+from core.provider import (
+    LLMClient,
+    ProxySupervisor,
+    _PROXY_PROVIDERS,
+    resolve_endpoint_async,
+)
 
 _log = logging.getLogger("frontier_insight.speech")
 
@@ -43,14 +48,18 @@ class SpeechGenerator:
             paper_md=paper_md[:8000],
             slides_outline=slides_outline or "(no slide deck available)",
         )
-        endpoint = await resolve_endpoint_async(
-            self.config.provider, supervisor or ProxySupervisor()
-        )
+        own_supervisor = supervisor is None
+        sup = supervisor or ProxySupervisor()
+        endpoint = await resolve_endpoint_async(self.config.provider, sup)
         client = LLMClient(endpoint)
         try:
             text = await client.chat([{"role": "user", "content": prompt}], temperature=0.3)
         finally:
             await client.aclose()
+            if self.config.provider.name in _PROXY_PROVIDERS:
+                await sup.release(self.config.provider.name)
+            if own_supervisor:
+                await sup.shutdown()
 
         talk_path = out_dir / "talk.md"
         talk_path.write_text(text.strip() + "\n", encoding="utf-8")
