@@ -33,7 +33,7 @@ try:
     _AXON_AVAILABLE = True
 except Exception as e:  # ImportError or any init-time failure inside axon
     _AXON_AVAILABLE = False
-    _AXON_IMPORT_ERROR: Exception | None = e
+    _AXON_IMPORT_ERROR: Exception = e
     AxonBrain = None  # type: ignore[assignment]
     AxonConfig = None  # type: ignore[assignment]
     AxonRetriever = None  # type: ignore[assignment]
@@ -55,11 +55,10 @@ class Knowledge:
         self._brain: Any | None = None
         self._retriever: Any | None = None
         if cfg.enabled and not _AXON_AVAILABLE:
-            err = globals().get("_AXON_IMPORT_ERROR")
             _log.warning(
                 "axon not importable (%s); knowledge layer disabled. "
                 "Install with `pip install axon` or via the repo to enable.",
-                err,
+                _AXON_IMPORT_ERROR,
             )
         if self.enabled:
             self._brain = self._build_brain(cfg)
