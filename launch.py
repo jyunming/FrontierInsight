@@ -69,7 +69,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override config.output.output_dir (single-quest mode only).",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.fleet and args.output is not None:
+        p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
+    return args
 
 
 # ---- single-quest path ----------------------------------------------------
@@ -200,9 +203,12 @@ async def run_fleet(
         )
 
     async def gated(cfg: Config) -> dict[str, object] | Exception:
-        if memory_cap_mb is not None:
-            await _await_under_cap(memory_cap_mb)
         async with sem:
+            # Memory cap is checked at actual start (after semaphore admit),
+            # not at entry — otherwise queued tasks could pass the early
+            # check and start later when RSS has grown past the cap.
+            if memory_cap_mb is not None:
+                await _await_under_cap(memory_cap_mb)
             state["running"] += 1
             engine = Engine(cfg, supervisor=supervisor)
             _status_line(engine.quest_id, "start")
