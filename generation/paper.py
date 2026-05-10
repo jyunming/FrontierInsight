@@ -42,9 +42,12 @@ class PaperGenerator:
 
         if art.figures_dir is not None and art.figures_dir.exists():
             dst = out_dir / "figures"
-            if dst.exists() and dst != art.figures_dir:
-                shutil.rmtree(dst)
-            if dst != art.figures_dir:
+            # resolve() so symlinks / alternate spellings of the same directory
+            # don't trigger rmtree-then-copytree on the source.
+            same = dst.resolve() == art.figures_dir.resolve()
+            if not same:
+                if dst.exists():
+                    shutil.rmtree(dst)
                 shutil.copytree(art.figures_dir, dst)
             result["figures_dir"] = dst
 
@@ -55,7 +58,11 @@ class PaperGenerator:
             result["bundle_manifest"] = dst
 
         if "paper_pdf" in kinds and art.paper_md is not None:
-            pdf = self._compile_pdf(out_dir / "paper.md", out_dir)
+            # If paper_md wasn't requested, the markdown wasn't copied above.
+            # Compile from art.paper_md directly so the PDF doesn't depend on
+            # paper_md being in output.kinds.
+            pdf_src = result.get("paper_md") or art.paper_md
+            pdf = self._compile_pdf(pdf_src, out_dir)
             if pdf is not None:
                 result["paper_pdf"] = pdf
 
