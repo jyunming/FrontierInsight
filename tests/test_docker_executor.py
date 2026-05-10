@@ -27,16 +27,28 @@ from core.execution import (
     make_executor,
 )
 
-# Importorskip at module top — if docker-py isn't installed, *integration*
-# tests are skipped, but the unit tests below (which use mocks) still run.
-docker = pytest.importorskip("docker", reason="docker python package not installed")
+# Soft import: keep all *unit* tests in this file runnable without docker-py.
+# Integration tests use the `docker_module` fixture below which skips
+# explicitly when the package or the daemon is unavailable.
+try:
+    import docker as _docker_module  # type: ignore[import-not-found]
+except ImportError:
+    _docker_module = None
 
 
 @pytest.fixture(scope="module")
-def docker_available() -> bool:
-    """True iff the Docker daemon is reachable."""
+def docker_module():
+    """Yield the docker-py module; skip if it's not installed."""
+    if _docker_module is None:
+        pytest.skip("docker python package not installed")
+    return _docker_module
+
+
+@pytest.fixture(scope="module")
+def docker_available(docker_module) -> bool:
+    """True iff the Docker daemon is reachable. Skips when docker-py missing."""
     try:
-        client = docker.from_env()
+        client = docker_module.from_env()
         client.ping()
         return True
     except Exception:
