@@ -98,8 +98,12 @@ in `core/execution.py` is the constructor.
 
 ### Generator protocol
 
-Each generator exposes an interface like
-`generate(art, out_dir, *, supervisor=None) -> dict[str, Path]`.
+Each generator exposes a `generate(art, out_dir, ...) -> dict[str, Path]`
+returning the files it wrote. `PaperGenerator.generate(art, out_dir)` is
+sync (pandoc shell-out only). `SlideGenerator`, `PosterGenerator`, and
+`SpeechGenerator` are `async` and additionally accept
+`*, supervisor: ProxySupervisor | None = None` because they make LLM
+calls and may need the proxy supervisor to resolve the endpoint.
 Generators run sequentially after the engine; one failure does not
 abort the rest (see `_run_generators` in `launch.py`).
 
