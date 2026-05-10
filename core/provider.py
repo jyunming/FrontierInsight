@@ -167,11 +167,22 @@ class ProxySupervisor:
         else:
             raise NotImplementedError(provider_name)
 
+        # cwd validation gives a clearer error than the generic
+        # "proxy CLI not found" when the wrapper checkout is missing.
+        if cwd is not None and not Path(cwd).is_dir():
+            raise RuntimeError(
+                f"proxy {provider_name!r}: working directory {cwd!r} does not exist. "
+                f"Set FI_CLAUDE_CODE_WRAPPER_DIR to a clone of "
+                f"RichardAtCT/claude-code-openai-wrapper with `poetry install` run."
+            )
         try:
+            # stdout/stderr -> DEVNULL: the proxies are long-lived and
+            # write enough log volume to fill an OS pipe buffer if we
+            # left them as PIPE without draining. Drop them entirely.
             proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 cwd=cwd,
                 env=env,
             )
@@ -183,7 +194,16 @@ class ProxySupervisor:
                 f"For github_copilot_*: ensure Node and `npx` are on PATH; "
                 f"run `npx copilot-api@latest auth` once."
             ) from e
-        _wait_for_openai_endpoint(port, timeout_s=60)
+        # If readiness times out, kill the orphan to avoid leaking proxies.
+        try:
+            _wait_for_openai_endpoint(port, timeout_s=60)
+        except Exception:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise
         return _ProxyHandle(name=provider_name, port=port, proc=proc)
 
 

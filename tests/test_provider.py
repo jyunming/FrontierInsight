@@ -137,11 +137,12 @@ async def test_proxy_refcount_under_concurrent_acquire_release():
         wait_endpoint.assert_called_once_with(54321, timeout_s=60)
 
 
-async def test_proxy_refcount_concurrent_gather():
+async def test_proxy_refcount_concurrent_gather(tmp_path, monkeypatch):
     """Many concurrent `acquire` calls must spawn exactly one process; the
     final ref-count after matching releases must be zero."""
     fake_proc = MagicMock()
     fake_proc.wait = MagicMock(return_value=0)
+    monkeypatch.setenv("FI_CLAUDE_CODE_WRAPPER_DIR", str(tmp_path))
 
     sup = ProxySupervisor()
     with patch("core.provider.subprocess.Popen", return_value=fake_proc) as popen, \
@@ -164,11 +165,11 @@ async def test_proxy_release_unknown_provider_is_noop():
     await sup.release("claude_code")  # should not raise
 
 
-async def test_proxy_spawn_uses_correct_cli_for_claude_code(monkeypatch):
+async def test_proxy_spawn_uses_correct_cli_for_claude_code(tmp_path, monkeypatch):
     """`claude_code` spawns via poetry inside FI_CLAUDE_CODE_WRAPPER_DIR."""
     fake_proc = MagicMock()
     fake_proc.wait = MagicMock(return_value=0)
-    monkeypatch.setenv("FI_CLAUDE_CODE_WRAPPER_DIR", "/tmp/wrapper")
+    monkeypatch.setenv("FI_CLAUDE_CODE_WRAPPER_DIR", str(tmp_path))
 
     sup = ProxySupervisor()
     with patch("core.provider.subprocess.Popen", return_value=fake_proc) as popen, \
@@ -180,7 +181,7 @@ async def test_proxy_spawn_uses_correct_cli_for_claude_code(monkeypatch):
     cmd = args[0]
     assert cmd[:4] == ["poetry", "run", "python", "main.py"]
     assert cmd[4] == "55555"
-    assert kwargs["cwd"] == "/tmp/wrapper"
+    assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["env"]["PORT"] == "55555"
 
 
@@ -206,11 +207,12 @@ async def test_proxy_spawn_uses_correct_cli_for_copilot():
     assert kwargs["cwd"] is None
 
 
-async def test_resolve_endpoint_async_proxy_uses_supervisor_port():
+async def test_resolve_endpoint_async_proxy_uses_supervisor_port(tmp_path, monkeypatch):
     """For a proxy provider, the resolved base_url must point at the local
     port the supervisor allocated, not the configured one."""
     fake_proc = MagicMock()
     fake_proc.wait = MagicMock(return_value=0)
+    monkeypatch.setenv("FI_CLAUDE_CODE_WRAPPER_DIR", str(tmp_path))
 
     sup = ProxySupervisor()
     with patch("core.provider.subprocess.Popen", return_value=fake_proc), \
