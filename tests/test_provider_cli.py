@@ -26,6 +26,18 @@ from core.provider import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_shutil_which():
+    """`_run_cli` now resolves argv[0] via `shutil.which()` before spawning,
+    so on a CI host where claude/codex/copilot aren't installed the tests
+    would all error out at "binary not on PATH" before reaching their real
+    assertions. Pin `shutil.which` to a fake-but-truthy path by default;
+    tests that need to exercise the missing-binary branch override this
+    via their own `patch` context."""
+    with patch("core.provider.shutil.which", return_value="/fake/path/bin") as p:
+        yield p
+
+
 # ---------------------------------------------------------------------------
 # Endpoint resolution
 # ---------------------------------------------------------------------------
@@ -301,13 +313,14 @@ async def test_copilot_cli_passes_prompt_via_arg_and_returns_stdout() -> None:
 
 @pytest.mark.asyncio
 async def test_cli_missing_binary_raises_clear_runtime_error() -> None:
+    """When `shutil.which` returns None (binary not on PATH), `_run_cli`
+    raises a clean RuntimeError BEFORE attempting to spawn — this is the
+    up-front check that fixed the Windows PATHEXT mis-diagnosis."""
     ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
     client = LLMClient(ep)
     try:
-        with patch(
-            "core.provider.asyncio.create_subprocess_exec",
-            new=AsyncMock(side_effect=FileNotFoundError("claude not on PATH")),
-        ):
+        # Override the autouse stub.
+        with patch("core.provider.shutil.which", return_value=None):
             with pytest.raises(RuntimeError, match="not found on PATH"):
                 await client.chat([{"role": "user", "content": "x"}])
     finally:
