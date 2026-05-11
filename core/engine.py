@@ -26,7 +26,12 @@ from langgraph.graph import END, START, StateGraph
 from .config import Config
 from .execution import ExecutionResult, make_executor
 from .knowledge import Knowledge, RetrievedDoc
-from .provider import LLMClient, ProxySupervisor, resolve_endpoint_async
+from .provider import (
+    LLMClient,
+    ProxySupervisor,
+    _PROXY_PROVIDERS,
+    resolve_endpoint_async,
+)
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
@@ -109,9 +114,7 @@ class Engine:
                 final_state: QuestState = await graph.ainvoke(initial, config=run_config)
         finally:
             await self._client.aclose()
-            if self.config.provider.name in {
-                "claude_code", "github_copilot_cli", "github_copilot_vscode"
-            }:
+            if self.config.provider.name in _PROXY_PROVIDERS:
                 await self.supervisor.release(self.config.provider.name)
 
         artifacts = self._collect_artifacts(final_state)
