@@ -39,3 +39,8 @@ docker>=7.1
 # viztracer enables `--profile` per-quest tracing.
 psutil>=5.9
 # viztracer>=0.16   # uncomment when you want a real profile run
+
+# Optional PDF support for `knowledge.local_papers` (manually-fed
+# paywalled papers). Without it, .md / .txt local papers still work
+# but .pdf files are skipped with a warning.
+pypdf>=4.0

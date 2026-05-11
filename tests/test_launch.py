@@ -177,8 +177,10 @@ async def test_run_fleet_counters_at_end_state(
     cfg_a = _make_cfg(tmp_path)
     cfg_b = _make_cfg(tmp_path)
 
-    async def fake_run_one(cfg, *, supervisor, profile):  # noqa: ANN001
-        return {"quest_id": "q-" + cfg.title, "ok": True}
+    async def fake_run_one(cfg, *, supervisor, profile, engine=None):  # noqa: ANN001
+        # Engine is now constructed in gated() and passed through — accept it.
+        qid = engine.quest_id if engine is not None else "q-" + cfg.title
+        return {"quest_id": qid, "ok": True}
 
     monkeypatch.setattr(launch, "run_one", fake_run_one)
 
@@ -212,11 +214,12 @@ async def test_run_fleet_failure_isolation(
     # serializes the gather so order is deterministic.
     state = {"first": True}
 
-    async def fake_run_one(cfg, *, supervisor, profile):  # noqa: ANN001
+    async def fake_run_one(cfg, *, supervisor, profile, engine=None):  # noqa: ANN001
         if state["first"]:
             state["first"] = False
             raise RuntimeError("first quest exploded")
-        return {"quest_id": "q-ok", "ok": True}
+        qid = engine.quest_id if engine is not None else "q-ok"
+        return {"quest_id": qid, "ok": True}
 
     monkeypatch.setattr(launch, "run_one", fake_run_one)
     monkeypatch.setattr("builtins.print", lambda *a, **kw: None)
