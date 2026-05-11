@@ -258,39 +258,38 @@ class Engine:
         # load of newly-installed packages (matplotlib, numpy, etc.),
         # not generic Python startup. A pure `import sys` warmup does
         # NOT trigger the same DLL-load path; importing the deps does.
-        # Pip package names usually equal module names for our
-        # scientific deps; non-matching names are tolerated via the
-        # outer try (`-c "import x, y, z"` raises ImportError without
-        # stopping us).
+        # Gated so we don't pay the cost where the race cannot occur:
+        #   - Docker sandbox: each execute() spawns a fresh container,
+        #     so a warmup call is one full container spin-up wasted.
+        #   - No deps: nothing was just pip-installed to race against.
         warmup_modules = _deps_to_warmup_modules(deps)
-        warmup_code = "import sys" + (
-            f"; import {warmup_modules}" if warmup_modules else ""
-        )
-        warmup = await self.executor.execute(
-            [str(py), "-c", warmup_code],
-            cwd=self.quest_root,
-            timeout_s=60,
-        )
-        if (
-            warmup.returncode != 0
-            and not warmup.timed_out
-            and warmup.duration_s < 0.5
-        ):
-            self._log.info(
-                "[execute] warmup fast-failed (rc=%d t=%.2fs); retrying once",
-                warmup.returncode, warmup.duration_s,
-            )
+        if self.config.execution.sandbox == "venv" and warmup_modules:
+            warmup_code = f"import sys; import {warmup_modules}"
             warmup = await self.executor.execute(
                 [str(py), "-c", warmup_code],
                 cwd=self.quest_root,
                 timeout_s=60,
             )
-        if warmup.returncode != 0:
-            self._log.warning(
-                "[execute] venv warmup failed rc=%d stderr_tail=%s; "
-                "proceeding to real script anyway",
-                warmup.returncode, warmup.stderr[-200:],
-            )
+            if (
+                warmup.returncode != 0
+                and not warmup.timed_out
+                and warmup.duration_s < 0.5
+            ):
+                self._log.info(
+                    "[execute] warmup fast-failed (rc=%d t=%.2fs); retrying once",
+                    warmup.returncode, warmup.duration_s,
+                )
+                warmup = await self.executor.execute(
+                    [str(py), "-c", warmup_code],
+                    cwd=self.quest_root,
+                    timeout_s=60,
+                )
+            if warmup.returncode != 0:
+                self._log.warning(
+                    "[execute] venv warmup failed rc=%d stderr_tail=%s; "
+                    "proceeding to real script anyway",
+                    warmup.returncode, warmup.stderr[-200:],
+                )
 
         # Run from quest_root so figures/ is the relative target.
         result: ExecutionResult = await self.executor.execute(
@@ -549,16 +548,35 @@ _PKG_TO_MODULE = {
 }
 
 
+# PEP 508 splits the package name from version specifiers / extras /
+# markers on the first occurrence of any of these. We strip on this set
+# rather than just `>=`/`==`/`<` so deps like `numpy!=1.26.0`,
+# `pandas~=2.0`, `urllib3<2;python_version<"3.10"` all yield a clean name.
+_DEP_NAME_BOUNDARY = re.compile(r"[\s;<>=!~\[]")
+# A valid Python module identifier (or dotted import path). After
+# pip→module remapping + dash→underscore substitution, the final token
+# MUST match this; anything else gets dropped rather than splatted
+# into `-c "import ..."` where it would SyntaxError.
+_PY_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
 def _deps_to_warmup_modules(deps: list[str]) -> str:
     """Convert a pip-style deps list into a comma-separated module list
-    safe for `python -c "import a, b, c"`. Drops version pins and
-    extras; remaps known name-mismatched packages."""
+    safe for `python -c "import a, b, c"`. Strips version pins / extras
+    / environment markers (PEP 508), remaps known name-mismatched
+    packages, and validates each token against `_PY_MODULE_RE` so a
+    malformed dep can never produce invalid import syntax."""
     out: list[str] = []
     for d in deps:
-        name = d.split(">=")[0].split("==")[0].split("<")[0].split("[")[0].strip()
-        if not name or "/" in name or " " in name:
-            continue  # skip URL/path deps
-        out.append(_PKG_TO_MODULE.get(name.lower(), name.replace("-", "_")))
+        head = _DEP_NAME_BOUNDARY.split(d, 1)[0].strip()
+        if not head or "/" in head:
+            continue  # blank or URL/path dep
+        module = _PKG_TO_MODULE.get(head.lower(), head.replace("-", "_"))
+        if not _PY_MODULE_RE.match(module):
+            # Anything that didn't reduce to a clean identifier gets
+            # dropped silently rather than risk a SyntaxError in `-c`.
+            continue
+        out.append(module)
     return ", ".join(out)
 
 

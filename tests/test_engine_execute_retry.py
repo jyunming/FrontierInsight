@@ -27,11 +27,19 @@ from core.execution import ExecutionResult
 _WARMUP_OK = ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.05)
 
 
-def test_engine_quest_root_is_absolute(tmp_path: Path) -> None:
+def test_engine_quest_root_is_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression: prior live runs failed with rc=2 fast-fail because
     `quest_root` was relative (`./outputs/<id>`), so `cwd=quest_root` +
     a relative argv path produced a duplicated `<quest_root>/<quest_root>/...`
-    path. Engine.__init__ must `.resolve()` quest_root unconditionally."""
+    path. Engine.__init__ must `.resolve()` quest_root unconditionally.
+
+    Hermeticity: `Engine.__init__` calls `_quest_logger(...)` which
+    `mkdir`s `<quest_root>/.fi/` on disk. To exercise the relative-path
+    bug WITHOUT leaking files into the repo cwd, chdir into tmp_path
+    first — the relative `outputs_relative` then resolves under it."""
+    monkeypatch.chdir(tmp_path)
     cfg = Config(
         topic="abs-path test",
         title="abs",
@@ -52,8 +60,9 @@ def _mock_execute_router(real_script_result, warmup_result=_WARMUP_OK):
     """Route `executor.execute` mock calls: any invocation whose argv
     contains `-c` is treated as the warmup, anything else is the real
     experiment script. Returns the per-call AsyncMock to assign to
-    `eng.executor.execute`. Use `.real_calls` on the returned mock to
-    count just the real-script invocations.
+    `eng.executor.execute`. Use the module-level `_count_real_calls(...)`
+    helper on the returned mock to count just the real-script invocations
+    (the mock has no `.real_calls` attribute of its own).
     """
     async def fn(cmd, *_, **__):
         # cmd is a list like [str(py), "-c", "pass"] for warmup
@@ -236,7 +245,9 @@ async def test_execute_warmup_retries_on_fast_fail_then_runs_real_script(
     )
     eng.executor.execute = AsyncMock(side_effect=router)
 
-    update = await eng._node_execute({"deps": []})
+    # Non-empty deps so the warmup is actually scheduled (it's gated on
+    # `_deps_to_warmup_modules(deps)` being non-empty).
+    update = await eng._node_execute({"deps": ["matplotlib"]})
 
     # 2 warmup calls (one retry) + 1 real script call.
     assert eng.executor.execute.await_count == 3
@@ -259,7 +270,84 @@ async def test_execute_warmup_skips_retry_when_warmup_succeeds_first(
     )
     eng.executor.execute = _mock_execute_router(happy_script)
 
-    await eng._node_execute({"deps": []})
+    await eng._node_execute({"deps": ["matplotlib"]})
 
     # 1 warmup + 1 real script — no retries anywhere.
     assert eng.executor.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_skips_warmup_when_deps_empty(tmp_path: Path) -> None:
+    """No declared deps → nothing was just pip-installed → the
+    DLL-load race can't fire → warmup is wasted. Skip it."""
+    eng = _mk_engine(tmp_path)
+    eng.executor.install = AsyncMock(
+        return_value=ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1)
+    )
+    happy = ExecutionResult(
+        returncode=0, stdout="RESULT_JSON: {}", stderr="", duration_s=1.0
+    )
+    eng.executor.execute = _mock_execute_router(happy)
+
+    await eng._node_execute({"deps": []})
+
+    # No warmup, just the real script.
+    assert eng.executor.execute.await_count == 1
+    assert _count_real_calls(eng.executor.execute) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_skips_warmup_in_docker_sandbox(tmp_path: Path) -> None:
+    """Each Docker `execute()` spawns a fresh container, so a warmup
+    call is a full container spin-up wasted. Skip warmup for docker."""
+    cfg = Config(
+        topic="docker warmup-skip test",
+        title="docker-skip",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="docker", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    eng = Engine(cfg)
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
+    for sub in ("code", "figures"):
+        (eng.quest_root / sub).mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "code" / "experiment.py").write_text("print('hi')", encoding="utf-8")
+
+    eng.executor.install = AsyncMock(
+        return_value=ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1)
+    )
+    eng.executor.execute = _mock_execute_router(
+        ExecutionResult(returncode=0, stdout="RESULT_JSON: {}", stderr="", duration_s=1.0)
+    )
+
+    # Even with non-empty deps, docker sandbox skips warmup entirely.
+    await eng._node_execute({"deps": ["matplotlib", "numpy"]})
+
+    assert eng.executor.execute.await_count == 1
+    assert _count_real_calls(eng.executor.execute) == 1
+
+
+def test_deps_to_warmup_modules_drops_invalid_identifier_tokens() -> None:
+    """A malformed dep like `numpy!=1.26.0` previously slipped through
+    the simple `>=`/`==`/`<` split and would produce a SyntaxError when
+    spliced into `python -c "import numpy!=1.26.0"`. The new PEP-508
+    boundary split + `_PY_MODULE_RE` validation must drop these
+    silently rather than break the warmup."""
+    from core.engine import _deps_to_warmup_modules
+
+    # Common pip operators all reduce to the bare module name.
+    assert _deps_to_warmup_modules(["numpy!=1.26.0"]) == "numpy"
+    assert _deps_to_warmup_modules(["pandas~=2.0"]) == "pandas"
+    assert _deps_to_warmup_modules(['urllib3<2;python_version<"3.10"']) == "urllib3"
+    assert _deps_to_warmup_modules(["requests[security]>=2.28"]) == "requests"
+    # Path / URL deps are dropped (no module name to import).
+    assert _deps_to_warmup_modules(["/tmp/local.whl"]) == ""
+    assert _deps_to_warmup_modules(["git+https://github.com/x/y"]) == ""
+    # Known mismatches still get remapped.
+    assert _deps_to_warmup_modules(["scikit-learn>=1.3"]) == "sklearn"
+    assert _deps_to_warmup_modules(["pillow"]) == "PIL"
+    # Mix of valid + malformed: valid names pass, garbage drops.
+    out = _deps_to_warmup_modules(["matplotlib", "$&garbage", "numpy"])
+    assert out == "matplotlib, numpy"
