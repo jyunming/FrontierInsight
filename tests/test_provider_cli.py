@@ -9,8 +9,9 @@ All tests mock `asyncio.create_subprocess_exec` so no real CLI is invoked.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -392,6 +393,90 @@ def test_gemini_response_extractor_skips_unrelated_brace_before_envelope() -> No
         '{"session_id": "abc", "response": "the real answer"}\n'
     )
     assert _extract_gemini_response(raw) == "the real answer"
+
+
+@pytest.mark.asyncio
+async def test_cli_model_flag_injected_when_provider_model_set() -> None:
+    """When the YAML config sets `provider.model`, `_run_cli` inserts
+    `[model_flag, model]` right after argv[0]. Empty model passes the
+    CLI's own default through (covered by the explicit-default test)."""
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli", model="opus"))
+    client = LLMClient(ep)
+    try:
+        proc = _fake_proc(stdout=b"ok")
+        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ) as spawn:
+            await client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        await client.aclose()
+
+    args = spawn.call_args[0]
+    # ["/usr/bin/claude", "--model", "opus", "--print", "--output-format", "text"]
+    assert args[0] == "/usr/bin/claude"
+    assert args[1] == "--model"
+    assert args[2] == "opus"
+    assert "--print" in args[3:]
+
+
+@pytest.mark.asyncio
+async def test_cli_model_flag_omitted_when_provider_model_blank() -> None:
+    """No `provider.model` => the CLI's own default is preserved (the
+    user can set e.g. `~/.codex/config.toml` or claude `/model` and have
+    it honored)."""
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))  # no model
+    client = LLMClient(ep)
+    try:
+        proc = _fake_proc(stdout=b"ok")
+        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ) as spawn:
+            await client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        await client.aclose()
+
+    args = spawn.call_args[0]
+    # No --model flag injected.
+    assert "--model" not in args
+    assert args[1] == "--print"
+
+
+@pytest.mark.asyncio
+async def test_cli_call_killed_after_timeout_raises_transient() -> None:
+    """A CLI that hangs longer than `cli_timeout_s` is killed and the
+    raised `_CliTransientError` is retryable (so tenacity will try
+    again up to 4 attempts before giving up)."""
+    from core.provider import _CliTransientError
+
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    # Very short cli_timeout_s so the test doesn't actually wait.
+    client = LLMClient(ep, cli_timeout_s=0.05)
+    try:
+        # communicate() that never returns within the timeout window.
+        proc = AsyncMock()
+        async def hang_forever(_=None):
+            await asyncio.sleep(10)
+        proc.communicate = hang_forever
+        # Process.kill() is sync; Process.wait() is async.
+        proc.kill = MagicMock()
+        async def _wait_done():
+            return 0
+        proc.wait = _wait_done
+        proc.returncode = -1
+        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ), \
+             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+            with pytest.raises(_CliTransientError, match="exceeded.*wall-clock"):
+                await client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio
