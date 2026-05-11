@@ -49,23 +49,41 @@ provider proxies.
 - pytest harness: `tests/test_config.py`, `test_execution.py`,
   `test_engine_smoke.py` (full-DAG fake-LLM smoke).
 
-### Phase C — Provider proxies ✅ structurally landed
+### Phase C — Non-OpenAI providers ✅ landed (proxy + CLI transports)
 
-`ProxySupervisor._spawn` now ships verbatim invocations:
+Two transport patterns, both reusing existing CLI OAuth so no API key is
+required:
 
+**Proxy transport** (`ProxySupervisor._spawn`, ref-counted across quests):
 - `claude_code` → `poetry run python main.py <port>` from
   `RichardAtCT/claude-code-openai-wrapper`. Path is
   `FI_CLAUDE_CODE_WRAPPER_DIR` (defaults to `~/claude-code-openai-wrapper`).
-  Auth: `claude auth login` or `ANTHROPIC_API_KEY`.
+  Auth: `claude login` or `ANTHROPIC_API_KEY`.
 - `github_copilot_cli` / `github_copilot_vscode` →
   `npx copilot-api@latest start --port <N> --rate-limit 60 --wait`.
   Auth: `npx copilot-api@latest auth` once.
-- `gemini` → direct `base_url`
-  `https://generativelanguage.googleapis.com/v1beta/openai/`.
+- Readiness probed via `GET /v1/models` rather than raw TCP.
 
-Readiness probe is `GET /v1/models` rather than raw TCP. Live
-authentication and per-provider bake-off runs are user-validated when
-the prereqs are installed.
+**CLI-exec transport** (no daemon, no port — `LLMClient` spawns the
+binary per chat call):
+- `claude_cli` → `claude --print --output-format text` with the prompt
+  piped to stdin and the response read from stdout. Auth: `claude login`.
+  Live-verified end-to-end against Claude Pro/Max OAuth on Windows.
+- `codex_cli` → `codex exec --output-last-message <tmpfile> "<prompt>"`
+  reading the final assistant message back from the tmpfile. Auth:
+  `codex login`.
+
+**Direct transport** (HTTP, OpenAI-compatible):
+- `gemini` → `https://generativelanguage.googleapis.com/v1beta/openai/`.
+- `openai` / `codex` → `https://api.openai.com/v1` with `OPENAI_API_KEY`.
+- `ollama` / `vllm` → local OpenAI-compat endpoints.
+
+When picking between `claude_code` (proxy) and `claude_cli` (CLI exec):
+the CLI path has zero infrastructure cost (no clone, no FastAPI proxy
+process) but spawns a new subprocess per chat call (~1–3 s overhead on
+top of the LLM latency). For fleet runs of many concurrent quests, the
+proxy path amortizes one process across all of them and is the right
+choice; for one-off runs or local development, the CLI path is simpler.
 
 ### Phase D — Docker sandbox ✅ landed
 

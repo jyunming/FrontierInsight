@@ -13,7 +13,7 @@ Frontier Insight (FI) takes a research topic and produces a finished IMRAD paper
 | Async LangGraph engine: `ideate → literature → design → implement → execute → analyze → write → review` with a `revise` loop | ✅ |
 | Per-quest venv; agent-generated Python is installed and run in isolation | ✅ |
 | Docker sandbox via `execution.sandbox: docker` (network disabled, mounted at `/work`) | ✅ |
-| Provider matrix: `codex` / `openai` / `gemini` / `ollama` / `vllm` direct; `claude_code` and `github_copilot_*` via local proxies | ✅ structurally; live auth user-validated |
+| Provider matrix: `codex` / `openai` / `gemini` / `ollama` / `vllm` direct; `claude_code` and `github_copilot_*` via local proxies; `claude_cli` / `codex_cli` via CLI exec (reuses CLI OAuth) | ✅ direct + proxy paths structural, `claude_cli` live-verified |
 | Axon-backed knowledge layer: literature retrieval + cross-quest memory write-back | ✅ |
 | Paper PDF via pandoc + LaTeX (`generic` and `neurips` templates ship; others stub) | ✅ |
 | Slides via Marp; poster via `beamerposter`; speech script via single LLM call | ✅ |
@@ -37,8 +37,11 @@ pip install -r requirements.txt
 # (optional) Docker sandbox: install Docker Desktop / dockerd.
 # (optional) Provider proxies (only if you use them):
 #   claude_code:           clone RichardAtCT/claude-code-openai-wrapper, `poetry install`,
-#                          set FI_CLAUDE_CODE_WRAPPER_DIR, then `claude auth login`.
+#                          set FI_CLAUDE_CODE_WRAPPER_DIR, then `claude login`.
 #   github_copilot_*:      `npx copilot-api@latest auth` (one-time).
+# (optional) CLI providers (zero infra; reuses CLI OAuth):
+#   claude_cli:            npm i -g @anthropic-ai/claude-code && claude login.
+#   codex_cli:             npm i -g @openai/codex && codex login.
 
 # Single quest
 export OPENAI_API_KEY=sk-...
@@ -77,7 +80,8 @@ topic: |
   Compare three numerical integrators on a damped harmonic oscillator...
 
 provider:
-  name: codex          # or openai, gemini, ollama, vllm, claude_code, github_copilot_cli
+  name: codex          # or openai, gemini, ollama, vllm, claude_code,
+                       # github_copilot_cli, claude_cli, codex_cli
   # model: gpt-5
   # base_url: ...      # override per provider
   # api_key_env: ...   # env var name for the key

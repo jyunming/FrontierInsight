@@ -34,7 +34,10 @@ External prerequisites are all optional and feature-gated:
 
 **`QuestState`** (TypedDict in `core/engine.py`) is the contract between every node and the prompts in `agents/*.md`. Field names are stable; any Phase-G alternate graph must keep them backwards-compatible. `QuestArtifacts` is the contract between the engine and the generators.
 
-**Provider layer** (`core/provider.py`): all paths terminate at OpenAI Chat Completions over `httpx.AsyncClient`. `resolve_endpoint_async` returns a `ResolvedEndpoint` for direct providers; for proxy providers (`claude_code`, `github_copilot_*`) it goes through `ProxySupervisor`, which spawns a child process on a free port and reference-counts so concurrent quests share one proxy process. Readiness is probed via `GET /v1/models`, not raw TCP.
+**Provider layer** (`core/provider.py`): three transports, one `LLMClient.chat(messages) -> str` surface.
+- **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
+- **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`.
+- **CLI exec** (`claude_cli`/`codex_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth (`claude login`, `codex login`). Spawn details are in `_CLI_SPECS`; `claude_cli` passes the prompt via stdin and reads stdout; `codex_cli` passes via argv and reads `--output-last-message <tmpfile>`. Retries on `_CliTransientError` (non-zero exit) with the same exponential backoff as the HTTP path.
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled.
 
