@@ -57,7 +57,7 @@ async def probe(name: str) -> dict[str, object]:
 
 async def main() -> int:
     results = []
-    for name in ("claude_cli", "codex_cli", "copilot_cli"):
+    for name in ("claude_cli", "codex_cli", "copilot_cli", "gemini_cli"):
         print(f"[probe] {name}...", flush=True)
         r = await probe(name)
         results.append(r)
