@@ -128,6 +128,14 @@ async def test_quest_writeback_invokes_axon_when_enabled(
     assert meta["key_findings"] == ["linear"]
     assert meta["provider"] == "openai"
     assert "result_json" in meta
+    # Path stored relative to quest_root, NOT absolute. Storing
+    # `/home/<user>/.../paper.md` in Axon would leak the user's
+    # directory layout into the long-term corpus and break corpus
+    # portability across machines.
+    assert "paper_md_relpath" in meta
+    assert "paper_md_path" not in meta  # the absolute-path field is gone
+    assert not Path(meta["paper_md_relpath"]).is_absolute()
+    assert meta["paper_md_relpath"].endswith("paper.md")
 
 
 # Build a "revise"-verdict variant of the fake responses so the engine

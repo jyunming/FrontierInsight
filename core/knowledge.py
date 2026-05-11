@@ -2,31 +2,58 @@
 
 Two responsibilities:
 
-1. **Retrieval** for the engine's `literature` node. Tries Axon first
-   (the long-term, FI-curated store). If Axon returns nothing — empty
-   corpus, disabled, or no hits — `LiteratureRouter` falls through to a
-   configurable list of external sources, merges results across them,
-   de-duplicates by DOI / arXiv-id / normalized title, and returns the
-   top-k overall.
+1. **Retrieval** (`Knowledge.asearch`) for the engine's `ideate` and
+   `literature` nodes. Three layers, in order:
+     a. Pinned `local_papers` — files the user dropped into the config;
+        always at the head of the result.
+     b. Axon — the FI long-term, curated store.
+     c. External router — fires when Axon returns empty. With
+        `source_routing="auto"` the LLM picks 1–5 sources from a
+        12-entry catalog (extensible via Axon-ingested `fi_source_catalog`
+        entries); otherwise uses the YAML `external_fallback` list
+        verbatim. Adapters run in parallel; results are merged and
+        de-duplicated by DOI / arXiv-id / PMID / normalized title.
+   When `try_fetch_full_text` is true, external hits are augmented
+   with publisher-PDF text where the host network has access (login
+   walls are rejected by a Content-Type + `%PDF-` magic-bytes check).
 
-2. **Ingest** for the post-quest write-back. Finished, accepted research
-   lands as **two documents** per quest: the paper body (kind
-   `fi_quest_paper`) and a structured findings JSON (kind
-   `fi_quest_summary`). The engine builds rich metadata (verdict, score,
-   hypothesis, key_findings, result_json, provider, model) and the
-   summary doc is text-searchable on every finding.
+2. **Ingest** (`Knowledge.add_quest_artifacts`) for the post-quest
+   write-back, gated on `verdict == "accept"` by default. Finished
+   research lands as a *structured bundle*, NOT a flat blob, so the
+   chunked-RAG corpus stays title-searchable and topic-linkable:
+     - `fi_paper_spine`        — single-chunk card-catalog entry per
+                                 paper (title + authors + DOI + topic
+                                 + abstract + key claims).
+     - `fi_quest_paper`        — full paper body with a 1-line
+                                 `[Title · Year · Venue · DOI]` citation
+                                 header prepended to every chunk.
+     - `fi_quest_summary`      — analysis summary + structured JSON
+                                 (hypothesis / findings / result_json
+                                 / verdict / score / provider / model).
+                                 Carries `paper_refs` (short-ids) in
+                                 metadata.
+     - `fi_topic_event`        — per-accept pointer keyed by topic slug
+                                 listing this quest + the papers it
+                                 cited. Enables topic-scoped rollups.
+     - `fi_external_ref_spine` — curated card-catalog entries for the
+                                 external papers an accepted quest
+                                 consumed (only refs from accepted
+                                 quests persist).
 
-External sources implemented (all free, no auth):
-  - openalex          — broadest single index, ~200M works, all fields
+External sources currently implemented (all free, all best-effort —
+network failures log and return [] rather than raising):
+  - openalex          — broadest single open index, ~200M works
   - arxiv             — physics / CS / math / quant-ph / q-bio / stats
   - crossref          — DOI metadata across paywalled publishers
-                        (Springer, Elsevier, IEEE, ACM, SPIE, ACS, ...)
+                        (Springer, Elsevier, IEEE, ACM, SPIE, ACS, …)
   - semantic_scholar  — broad coverage with citation graph
   - pubmed            — biomedical (NCBI E-utilities)
+  - core              — 240M open-access papers (requires CORE_API_KEY)
+  - google_scholar    — EXPERIMENTAL via `scholarly`; no official API,
+                        rate-limited / sometimes blocked by Google
 
-Each adapter implements `search(query, top_k) -> list[RetrievedDoc]`
-and is best-effort: network failures log and return [] rather than
-raising. The router parallelizes calls and merges results.
+Each adapter implements `search(query, top_k) -> list[RetrievedDoc]`.
+The router parallelizes calls via `asyncio.to_thread` + `asyncio.gather`.
 """
 
 from __future__ import annotations
@@ -455,7 +482,12 @@ def _load_local_paper(path: Path) -> RetrievedDoc | None:
         metadata={
             "source": "local_paper",
             "title": path.stem.replace("_", " ").replace("-", " "),
-            "path": str(path.resolve()),
+            # `filename` only — we intentionally do NOT store the absolute
+            # filesystem path. That leaks the user's home directory layout
+            # into Axon's long-term store and makes the corpus non-portable
+            # (an exported / shared Axon corpus would reveal `/home/<user>/`
+            # or `C:\Users\<user>\...` paths). The filename is sufficient
+            # to reconstruct provenance during review.
             "filename": path.name,
             "size_bytes": path.stat().st_size,
             "kind": "local_paper",
@@ -683,35 +715,75 @@ async def _enrich_with_full_text(
     start = time.monotonic()
     enriched: list[RetrievedDoc] = list(docs)
     successes = 0
+
+    # Use `as_completed` with a per-task deadline rather than
+    # `wait_for(gather(...))`. On budget timeout the gather form
+    # cancels every in-flight task AND discards any already-completed
+    # results — so partial enrichment doesn't actually return partial
+    # results. With as_completed we apply any result that lands before
+    # the deadline and only abandon the *still-running* ones when the
+    # budget expires.
+    #
+    # Caveat: `asyncio.to_thread` tasks cannot truly be cancelled
+    # mid-blocking-call — the underlying thread will keep running its
+    # synchronous httpx GET to completion. Since the per-doc HTTP
+    # timeout (`timeout_s`) bounds that, the leaked threads are
+    # short-lived. This is the best we can do without a custom
+    # cancellable HTTP layer.
+    pending = {asyncio.create_task(fetch_one(i)) for i in targets}
+    deadline = start + total_budget_s
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*(fetch_one(i) for i in targets)),
-            timeout=total_budget_s,
-        )
-    except asyncio.TimeoutError:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                # Wait returned because the timeout fired with nothing
+                # finishing — bail out of the loop.
+                break
+            for task in done:
+                try:
+                    idx, text = task.result()
+                except Exception as e:
+                    _log.info("full-text fetch task raised: %s", e)
+                    continue
+                if not text:
+                    continue
+                original = enriched[idx]
+                new_meta = {
+                    **original.metadata,
+                    "fetched_full_text": True,
+                    "full_text_bytes": len(text.encode("utf-8", errors="replace")),
+                }
+                enriched[idx] = RetrievedDoc(
+                    content=f"{original.content}\n\n---FULL TEXT (fetched)---\n\n{text}",
+                    metadata=new_meta,
+                )
+                successes += 1
+    finally:
+        # Cancel anything still running. The underlying threads will
+        # finish their bounded HTTP call but won't deliver results.
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    if pending:
         _log.info(
-            "full-text fetch budget %.0fs exceeded; returning partial enrichment",
-            total_budget_s,
+            "full-text fetch budget %.1fs exceeded; "
+            "enriched %d/%d docs (%d abandoned)",
+            total_budget_s, successes, len(targets), len(pending),
         )
-        return enriched
-
-    for idx, text in results:
-        if not text:
-            continue
-        original = enriched[idx]
-        new_meta = {**original.metadata, "fetched_full_text": True,
-                    "full_text_bytes": len(text.encode("utf-8", errors="replace"))}
-        # Prepend the original title+abstract so the model sees both.
-        enriched[idx] = RetrievedDoc(
-            content=f"{original.content}\n\n---FULL TEXT (fetched)---\n\n{text}",
-            metadata=new_meta,
+    else:
+        _log.info(
+            "full-text fetch: enriched %d/%d docs in %.1fs",
+            successes, len(targets), time.monotonic() - start,
         )
-        successes += 1
-
-    _log.info(
-        "full-text fetch: enriched %d/%d docs in %.1fs",
-        successes, len(targets), time.monotonic() - start,
-    )
     return enriched
 
 

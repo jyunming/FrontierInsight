@@ -72,7 +72,7 @@ class KnowledgeConfig(BaseModel):
 
     enabled: bool = True
     axon_config: Path | dict[str, Any] | None = None
-    top_k: int = 5
+    top_k: int = Field(default=5, ge=1)
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
     # `Knowledge.search()` when Axon is disabled OR returns zero results.

@@ -367,6 +367,10 @@ def test_local_paper_load_markdown(tmp_path: Path) -> None:
     assert doc.metadata["filename"] == "grenville_2015_inpria.md"
     # Underscores/hyphens in filename → spaces in displayable title.
     assert doc.metadata["title"] == "grenville 2015 inpria"
+    # Absolute path is intentionally NOT stored — leaks home directory
+    # layout into Axon and makes exported corpora non-portable. Only
+    # `filename` is preserved.
+    assert "path" not in doc.metadata
 
 
 def test_local_paper_load_txt(tmp_path: Path) -> None:
@@ -624,6 +628,42 @@ async def test_enrich_with_full_text_respects_total_budget(monkeypatch) -> None:
     )
     # Budget exceeded → returns originals unchanged, no raise.
     assert all(d.metadata.get("fetched_full_text") is not True for d in out)
+
+
+@pytest.mark.asyncio
+async def test_enrich_with_full_text_returns_partial_results_on_budget(
+    monkeypatch,
+) -> None:
+    """If some fetches complete and others run long, the budget timer
+    must NOT discard the completed work. The previous implementation
+    used `wait_for(gather(...))` which cancels every in-flight task and
+    drops their results on timeout — partial enrichment was a fiction.
+    The current `as_completed` loop applies finished results as they
+    land and only abandons the still-running ones at the deadline."""
+    import time as _t
+    from core.knowledge import _enrich_with_full_text, RetrievedDoc as RD
+
+    docs = [
+        RD(content="fast", metadata={"source": "x", "url": "https://e/fast"}),
+        RD(content="slow", metadata={"source": "x", "url": "https://e/slow"}),
+    ]
+
+    def mixed_fetch(doc, *, timeout_s, max_kb):
+        # First doc returns immediately; second blocks past the budget.
+        if doc.metadata["url"].endswith("fast"):
+            return "fetched body for the fast doc"
+        _t.sleep(2.0)
+        return "this should be abandoned"
+    monkeypatch.setattr("core.knowledge._fetch_full_text", mixed_fetch)
+
+    out = await _enrich_with_full_text(
+        docs, timeout_s=5, total_budget_s=0.5, max_kb=64,
+    )
+    # Fast doc gets enriched; slow doc is left untouched.
+    assert out[0].metadata.get("fetched_full_text") is True
+    assert "fetched body for the fast doc" in out[0].content
+    assert out[1].metadata.get("fetched_full_text") is not True
+    assert out[1].content == "slow"
 
 
 def test_source_catalog_known_searchable_names_match_registry() -> None:

@@ -51,8 +51,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         nargs="+",
         help="Ingest one or more PDF / Markdown / TXT files into Axon "
-             "(kind=fi_local_paper) and exit. Requires `knowledge.enabled: true` "
-             "in --axon-config. PDF support requires `pypdf` installed.",
+             "(kind=fi_local_paper) and exit. Requires `axon` to be "
+             "installed; optionally pass --axon-config to point at a "
+             "non-default Axon corpus. PDF support requires `pypdf` installed.",
     )
     p.add_argument(
         "--axon-config",

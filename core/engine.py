@@ -501,6 +501,19 @@ class Engine:
 
         # Rich, indexable metadata that future quests' ideate node can
         # filter / rank past work by. Keep the keys flat and JSON-safe.
+        #
+        # `paper_md_relpath` is the path RELATIVE TO `quest_root` (not
+        # absolute) — Axon stores this; the absolute path would leak
+        # the user's home-directory layout into the long-term corpus
+        # and make exported / shared Axon corpora non-portable. Callers
+        # that need the on-disk file should join with `quest_root`.
+        try:
+            paper_md_relpath = str(
+                artifacts.paper_md.relative_to(artifacts.quest_root)
+            )
+        except ValueError:
+            # paper_md outside quest_root (shouldn't happen, but be safe).
+            paper_md_relpath = artifacts.paper_md.name
         meta: dict[str, Any] = {
             "title": state.get("title", ""),
             "topic": state.get("topic", "")[:1000],
@@ -514,7 +527,7 @@ class Engine:
             "figures": list(state.get("figures", []) or []),
             "provider": self.config.provider.name,
             "model": self.config.provider.model or "(cli-default)",
-            "paper_md_path": str(artifacts.paper_md.resolve()),
+            "paper_md_relpath": paper_md_relpath,
             "external_refs": external_refs,
         }
         ok = self.knowledge.add_quest_artifacts(

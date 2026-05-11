@@ -166,3 +166,37 @@ def test_full_config_yaml_roundtrip_stable(tmp_path: Path) -> None:
     assert cfg2.output.paper_format == "neurips"
     assert cfg2.output.kinds == ["paper_md", "slides"]
     assert cfg2.knowledge.top_k == 3
+
+
+def test_top_k_rejects_zero_and_negative(tmp_path: Path) -> None:
+    """`top_k` < 1 produces surprising slicing behavior in
+    `Knowledge.asearch` (e.g., local-paper slice returns empty even
+    though papers are pinned). Pydantic must reject these up-front."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        KnowledgeConfig(top_k=0)
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        KnowledgeConfig(top_k=-3)
+    # Boundary: 1 is the minimum.
+    assert KnowledgeConfig(top_k=1).top_k == 1
+
+
+def test_ingest_help_text_does_not_reference_knowledge_enabled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The `--ingest` mode bypasses `KnowledgeConfig.enabled` entirely
+    (it goes through a one-off Knowledge instance). Earlier the help
+    text said `Requires knowledge.enabled: true in --axon-config`,
+    which is wrong on two counts: --axon-config is an AxonConfig YAML
+    (no `knowledge.*` namespace), and the flag bypasses that check
+    anyway. Pin the corrected wording."""
+    from launch import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--help"])
+    help_text = capsys.readouterr().out
+    # Locate the --ingest section.
+    assert "--ingest" in help_text
+    assert "knowledge.enabled" not in help_text
+    assert "axon" in help_text.lower()
