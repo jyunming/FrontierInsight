@@ -26,15 +26,17 @@
             │   AsyncSqliteSaver          │
             └──┬──────────┬──────────┬────┘
                │          │          │
-   ┌───────────▼──┐  ┌────▼─────┐  ┌─▼──────────────┐
-   │ core/        │  │ core/    │  │ core/          │
-   │ provider.py  │  │ execution│  │ knowledge.py   │
-   │              │  │ .py      │  │  (wraps Axon)  │
-   │ LLMClient    │  │ Venv|    │  │ AxonRetriever  │
-   │ Proxy-       │  │ Docker   │  │ ingest, search │
-   │ Supervisor   │  │ Executor │  │ quest write-   │
-   │              │  │          │  │ back           │
-   └───────┬──────┘  └──────────┘  └────────────────┘
+   ┌───────────▼──┐  ┌────▼─────┐  ┌─▼─────────────────┐
+   │ core/        │  │ core/    │  │ core/             │
+   │ provider.py  │  │ execution│  │ knowledge.py      │
+   │              │  │ .py      │  │                   │
+   │ LLMClient    │  │ Venv|    │  │ asearch():        │
+   │ Proxy-       │  │ Docker   │  │  local → Axon →   │
+   │ Supervisor   │  │ Executor │  │  router (7 srcs)  │
+   │              │  │          │  │ +full-text fetch  │
+   │              │  │          │  │ structured write- │
+   │              │  │          │  │ back (5 doc kinds)│
+   └───────┬──────┘  └──────────┘  └───────────────────┘
            │                           ▲
            │ OpenAI Chat Completions   │
            ▼                           │
