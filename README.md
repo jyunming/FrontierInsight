@@ -20,7 +20,7 @@ Frontier Insight (FI) takes a research topic and produces a finished IMRAD paper
 | SQLite-checkpointed state for resumability (`<quest_root>/.fi/state.sqlite`) | ✅ |
 | `--fleet` runner with bounded concurrency, ref-counted proxies, `--memory-cap-mb`, optional `viztracer --profile` | ✅ |
 
-11/11 pytest tests pass on Windows-native Python 3.11.9 (no WSL2). See [`TEST_RESULTS.md`](TEST_RESULTS.md).
+**176 tests pass** on Windows-native Python 3.11.9, no WSL2, ~2 minutes (2 skipped — Docker daemon and Marp CLI not on PATH). See [`TEST_RESULTS.md`](TEST_RESULTS.md) for the live-research run logs.
 
 ---
 
@@ -109,7 +109,15 @@ output:
   output_dir: ./outputs
 ```
 
-See [`examples/integrator_bakeoff/config.yaml`](examples/integrator_bakeoff/config.yaml).
+### Examples
+
+| Example | Provider used | Topic |
+|---|---|---|
+| [`integrator_bakeoff`](examples/integrator_bakeoff/config.yaml) | (any) | Three numerical integrators on a damped harmonic oscillator (RK4 / Velocity-Verlet / forward Euler). Original validation topic from the DS-wrapper era. |
+| [`euv_mor_shot_noise`](examples/euv_mor_shot_noise/config.yaml) | `ollama` → cloud-routed reasoning models | Theoretical LER floor imposed by Poisson photon shot noise in metal-oxide EUV resists at production doses (10–60 mJ/cm²). |
+| [`bernstein_vazirani_noise`](examples/bernstein_vazirani_noise/config.yaml) | `claude_cli` (reuses `claude login` OAuth) | Bernstein-Vazirani algorithm under per-gate depolarizing noise — pure-numpy state-vector simulator for n ∈ {2..10}, MC validated against closed-form fidelity. |
+
+Each example is a single `config.yaml` and produces a `paper.md`, figures, `slides.md`, `poster.tex`, and `talk.md` under `outputs/<quest_id>/`. PDFs require pandoc / Marp CLI / pdflatex on PATH.
 
 ---
 
