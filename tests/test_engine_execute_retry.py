@@ -8,7 +8,7 @@ fresh `pip install`. A second attempt usually succeeds.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -113,6 +113,30 @@ async def test_execute_does_not_retry_when_some_output_was_produced(
         return_value=ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1)
     )
     eng.executor.execute = AsyncMock(return_value=partial)
+
+    await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_retry_when_stderr_was_produced(
+    tmp_path: Path,
+) -> None:
+    """A fast failure with stderr text (e.g., an ImportError traceback or
+    a missing-DLL message) means the interpreter ran and the script is
+    deterministically broken — retrying would just mask the real error."""
+    eng = _mk_engine(tmp_path)
+    deterministic_import_error = ExecutionResult(
+        returncode=1,
+        stdout="",
+        stderr="ImportError: DLL load failed while importing _ctypes",
+        duration_s=0.15,
+    )
+    eng.executor.install = AsyncMock(
+        return_value=ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1)
+    )
+    eng.executor.execute = AsyncMock(return_value=deterministic_import_error)
 
     await eng._node_execute({"deps": []})
 

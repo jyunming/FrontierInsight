@@ -251,12 +251,17 @@ class Engine:
         # exits with rc != 0 and duration < 0.5 s (the process never reaches
         # user code). A repeat run in the same venv works. Suspect a Windows
         # file-cache / DLL-load race between pip-install completion and the
-        # interpreter's startup imports. Retry once on that signature only.
+        # interpreter's startup imports. Retry once on that signature only:
+        # fast fail, not a timeout, AND empty stdout AND empty stderr — any
+        # output (including a real ImportError traceback to stderr) means
+        # the interpreter started and the script is deterministically
+        # broken, so retrying just masks the error.
         if (
             result.returncode != 0
             and not result.timed_out
             and result.duration_s < 0.5
             and not result.stdout.strip()
+            and not result.stderr.strip()
         ):
             self._log.warning(
                 "[execute] suspicious fast-fail (rc=%d t=%.2fs); retrying once",
