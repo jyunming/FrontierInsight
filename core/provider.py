@@ -14,7 +14,8 @@ but resolves to one of three transports:
   pipes the prompt in, and reads the response back. No proxy process,
   no HTTP. Used by:
   - `codex_cli` — `codex exec --output-last-message <tmp>` reusing the
-    user's `codex auth login` ChatGPT Plus/Pro OAuth.
+    user's `codex login` ChatGPT Plus/Pro OAuth. Prompt is piped on
+    stdin (not argv) so it does not appear in local process listings.
   - `claude_cli` — `claude --print --output-format text` reusing the
     user's `claude login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
     needed; OAuth from the CLI's keychain is honored).
@@ -82,7 +83,12 @@ _DIRECT_DEFAULTS: dict[str, dict[str, str]] = {
     },
 }
 
-_PROXY_PROVIDERS = {"claude_code", "github_copilot_cli", "github_copilot_vscode"}
+PROXY_PROVIDERS: frozenset[str] = frozenset(
+    {"claude_code", "github_copilot_cli", "github_copilot_vscode"}
+)
+# Back-compat alias for code that already imports the underscore-prefixed name.
+# New callers should prefer `PROXY_PROVIDERS`.
+_PROXY_PROVIDERS = PROXY_PROVIDERS
 
 
 @dataclass(frozen=True)
@@ -105,15 +111,20 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         output_via="stdout",
     ),
     "codex_cli": _CliSpec(
-        # `codex exec` runs Codex non-interactively. stdout is the agent
-        # log (token counts, tool calls); the final assistant message is
-        # written to the file passed via --output-last-message.
+        # `codex exec` runs Codex non-interactively. We pipe the prompt
+        # on stdin (codex reads "instructions from stdin" when no
+        # positional PROMPT is given) rather than placing it on the
+        # command line — argv would otherwise be visible in `ps`/Task
+        # Manager and any other local process listing. stdout is the
+        # agent log (token counts, tool calls); the final assistant
+        # message is written to the file passed via --output-last-message.
         argv=("codex", "exec"),
-        pass_prompt_via="arg",
+        pass_prompt_via="stdin",
         output_via="last_message_file",
     ),
 }
-_CLI_PROVIDERS = frozenset(_CLI_SPECS)
+CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
+_CLI_PROVIDERS = CLI_PROVIDERS  # back-compat alias
 
 # Sentinel returned by `resolve_endpoint` when no API key env var was set
 # (or the provider is configured as keyless, e.g. ollama/vllm). The OpenAI
@@ -307,38 +318,58 @@ async def _run_cli(spec: _CliSpec, prompt: str) -> str:
     else:  # stdin
         stdin_bytes = prompt.encode("utf-8")
 
+    # When the real answer lands in `tmp_out_path`, the CLI's stdout is
+    # just an agent log; capturing it into a PIPE for a long prompt
+    # wastes memory. Drop it. stderr stays piped so we can include its
+    # tail in error messages.
+    stdout_target = (
+        asyncio.subprocess.DEVNULL
+        if spec.output_via == "last_message_file"
+        else asyncio.subprocess.PIPE
+    )
+
+    # Single try/finally so the tmpfile is unlinked on every exit path —
+    # spawn failure, transient error, exception during communicate(), or
+    # success. Previously a `FileNotFoundError` from spawn leaked the file.
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            f"CLI provider binary {argv[0]!r} not found on PATH. "
-            f"Install and log in (`claude login` or `codex login`) before using this provider."
-        ) from e
-
-    stdout_b, stderr_b = await proc.communicate(stdin_bytes)
-    if proc.returncode != 0:
-        # Treat as transient (retryable). Auth failures usually appear here
-        # too, but in practice OAuth refresh handles them — if a failure
-        # persists across 4 retries the error surfaces.
-        raise _CliTransientError(
-            f"{argv[0]} exited rc={proc.returncode}: "
-            f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
-        )
-
-    if spec.output_via == "last_message_file":
-        assert tmp_out_path is not None
         try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=(
+                    asyncio.subprocess.PIPE
+                    if stdin_bytes is not None
+                    else asyncio.subprocess.DEVNULL
+                ),
+                stdout=stdout_target,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"CLI provider binary {argv[0]!r} not found on PATH. "
+                f"Install and log in (`claude login` or `codex login`) "
+                f"before using this provider."
+            ) from e
+
+        stdout_b, stderr_b = await proc.communicate(stdin_bytes)
+        if proc.returncode != 0:
+            # Retryable: covers transient backend hiccups. Auth/quota
+            # failures also land here but in practice clear after the
+            # CLI refreshes OAuth; if they persist across 4 attempts the
+            # error surfaces.
+            raise _CliTransientError(
+                f"{argv[0]} exited rc={proc.returncode}: "
+                f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
+            )
+
+        if spec.output_via == "last_message_file":
+            assert tmp_out_path is not None
             content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
-        finally:
+        else:
+            content = (stdout_b or b"").decode("utf-8", errors="replace")
+        return content.strip()
+    finally:
+        if tmp_out_path is not None:
             tmp_out_path.unlink(missing_ok=True)
-    else:
-        content = stdout_b.decode("utf-8", errors="replace")
-    return content.strip()
 
 
 def _wait_for_openai_endpoint(port: int, *, timeout_s: int) -> None:
@@ -489,10 +520,14 @@ class LLMClient:
 
         Flattens the OpenAI-style `messages` list into a single text prompt
         (most LLM CLIs don't have a separate system/user channel — they
-        accept one block of text). Retries on non-zero exit with the same
-        exponential backoff as the HTTP path, but only on the broad
-        `OSError` family — auth/quota failures raise as `RuntimeError` and
-        are NOT retried.
+        accept one block of text). Retries with exponential backoff on
+        `OSError` (transport-level OS errors during spawn) and
+        `_CliTransientError` (any non-zero CLI exit). A missing CLI binary
+        on PATH raises `RuntimeError` from `_run_cli` and is NOT retried —
+        the user must install the CLI before this provider can succeed.
+        Persistent auth/quota failures also surface here when the CLI's
+        OAuth refresh has run out of options, since they are reported as
+        non-zero exits and so will be retried up to 4 times before raising.
         """
         spec = self.endpoint.cli_spec
         if spec is None:  # pragma: no cover — guarded by transport check
