@@ -19,7 +19,7 @@ from core.engine import QuestArtifacts
 from core.provider import (
     LLMClient,
     ProxySupervisor,
-    _PROXY_PROVIDERS,
+    PROXY_PROVIDERS,
     resolve_endpoint_async,
 )
 
@@ -64,7 +64,7 @@ class PosterGenerator:
             text = await client.chat([{"role": "user", "content": prompt}], temperature=0.2)
         finally:
             await client.aclose()
-            if self.config.provider.name in _PROXY_PROVIDERS:
+            if self.config.provider.name in PROXY_PROVIDERS:
                 await sup.release(self.config.provider.name)
             if own_supervisor:
                 await sup.shutdown()

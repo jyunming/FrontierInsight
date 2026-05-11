@@ -22,7 +22,7 @@ ProviderName = Literal[
     "claude_code",
     "github_copilot_cli",
     "github_copilot_vscode",
-    "codex_cli",      # local Codex CLI (uses ChatGPT Plus/Pro OAuth via `codex auth login`)
+    "codex_cli",      # local Codex CLI (uses ChatGPT Plus/Pro OAuth via `codex login`)
     "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude login`)
 ]
 EngineFramework = Literal["langgraph"]

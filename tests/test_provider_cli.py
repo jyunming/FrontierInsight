@@ -148,7 +148,7 @@ async def test_claude_cli_passes_prompt_via_stdin_and_returns_stdout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_cli_passes_prompt_as_arg_and_reads_last_message_file(
+async def test_codex_cli_passes_prompt_via_stdin_and_reads_last_message_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Force tempfile to land inside the test tmp_path so we can assert on
@@ -161,7 +161,11 @@ async def test_codex_cli_passes_prompt_as_arg_and_reads_last_message_file(
         tf = real_NamedTemporaryFile(*args, **kwargs)
         seen_paths.append(tf.name)
         # Pre-fill what the CLI would write so _run_cli can read it back.
-        Path(tf.name).write_text("RESULT: nine", encoding="utf-8")
+        # On Windows, NamedTemporaryFile can't always be reopened by name
+        # while the original handle is open — write through the original
+        # handle and flush rather than `Path(...).write_text(...)`.
+        tf.write(b"RESULT: nine")
+        tf.flush()
         return tf
 
     monkeypatch.setattr("core.provider.tempfile.NamedTemporaryFile", stub_named_tempfile)
@@ -179,14 +183,88 @@ async def test_codex_cli_passes_prompt_as_arg_and_reads_last_message_file(
         await client.aclose()
 
     assert result == "RESULT: nine"
-    # argv = ["codex", "exec", "--output-last-message", <tmpfile>, "<prompt>"].
+    # argv = ["codex", "exec", "--output-last-message", <tmpfile>]
+    # — prompt is NOT in argv (security: avoid leaking via local process listings).
     args = spawn.call_args[0]
     assert args[0] == "codex" and args[1] == "exec"
     assert args[2] == "--output-last-message"
     assert args[3] == seen_paths[0]
-    assert args[4] == "What is 3*3?"
+    assert all(a != "What is 3*3?" for a in args), "prompt must NOT be in argv"
+    # Prompt was passed on stdin.
+    proc.communicate.assert_awaited_once()
+    stdin_arg = proc.communicate.await_args[0][0]
+    assert stdin_arg == b"What is 3*3?"
     # The tmpfile is cleaned up after reading.
     assert not Path(seen_paths[0]).exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_cli_sends_stdout_to_devnull_when_using_last_message_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """stdout for codex_cli is just the agent log — we should not pipe it
+    into memory. Verify the spawn was called with stdout=DEVNULL."""
+    import asyncio as _asyncio
+
+    real_NamedTemporaryFile = __import__("tempfile").NamedTemporaryFile
+
+    def stub_named_tempfile(*args, **kwargs):
+        kwargs["dir"] = str(tmp_path)
+        tf = real_NamedTemporaryFile(*args, **kwargs)
+        tf.write(b"ok")
+        tf.flush()
+        return tf
+
+    monkeypatch.setattr("core.provider.tempfile.NamedTemporaryFile", stub_named_tempfile)
+
+    ep = resolve_endpoint(ProviderConfig(name="codex_cli"))
+    client = LLMClient(ep)
+    try:
+        proc = _fake_proc()
+        with patch(
+            "core.provider.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=proc),
+        ) as spawn:
+            await client.chat([{"role": "user", "content": "x"}])
+    finally:
+        await client.aclose()
+
+    kwargs = spawn.call_args[1]
+    assert kwargs["stdout"] == _asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.asyncio
+async def test_cli_tmpfile_cleaned_up_on_spawn_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If `create_subprocess_exec` raises FileNotFoundError for a CLI
+    using `last_message_file` mode, the temp file must still be removed
+    so we don't accumulate `fi_cli_out_*.txt` litter over time."""
+    real_NamedTemporaryFile = __import__("tempfile").NamedTemporaryFile
+    seen: list[str] = []
+
+    def stub_named_tempfile(*args, **kwargs):
+        kwargs["dir"] = str(tmp_path)
+        tf = real_NamedTemporaryFile(*args, **kwargs)
+        seen.append(tf.name)
+        return tf
+
+    monkeypatch.setattr("core.provider.tempfile.NamedTemporaryFile", stub_named_tempfile)
+
+    ep = resolve_endpoint(ProviderConfig(name="codex_cli"))
+    client = LLMClient(ep)
+    try:
+        with patch(
+            "core.provider.asyncio.create_subprocess_exec",
+            new=AsyncMock(side_effect=FileNotFoundError("codex not on PATH")),
+        ):
+            with pytest.raises(RuntimeError, match="not found on PATH"):
+                await client.chat([{"role": "user", "content": "x"}])
+    finally:
+        await client.aclose()
+
+    assert seen, "the codex_cli path must allocate a tmp file"
+    assert not Path(seen[0]).exists(), "tmp file leaked after spawn failure"
 
 
 @pytest.mark.asyncio
