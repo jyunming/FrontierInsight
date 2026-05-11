@@ -73,7 +73,17 @@ class Engine:
     def __init__(self, config: Config, *, supervisor: ProxySupervisor | None = None) -> None:
         self.config = config
         self.quest_id = _new_quest_id(config.title or config.topic)
-        self.quest_root: Path = config.output.output_dir / self.quest_id
+        # quest_root MUST be absolute. When the config sets a relative
+        # `output_dir` (e.g. `./outputs`) and the executor later runs a
+        # subprocess with `cwd=quest_root`, an absolute argv path is
+        # required — otherwise the relative argv path gets cwd-prefixed
+        # by the OS, producing a duplicated nonsense path like
+        # `<quest_root>/<quest_root>/code/experiment.py` and the
+        # subprocess silently falls back to the SYSTEM Python (because
+        # the relative venv-python path also fails to resolve relative
+        # to its own cwd). Calling `.resolve()` once here pins the path
+        # for every downstream consumer.
+        self.quest_root: Path = (config.output.output_dir / self.quest_id).resolve()
         self.fi_dir: Path = self.quest_root / ".fi"
         self.supervisor = supervisor or ProxySupervisor()
         self.executor = make_executor(
@@ -240,28 +250,69 @@ class Engine:
 
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
+
+        # Venv warmup: invoke the freshly-installed Python and import the
+        # declared deps before the real experiment. This consumes the
+        # rc=2 fast-fail race specific to the first invocation of a
+        # fresh venv on Windows — the race is in the C-extension DLL
+        # load of newly-installed packages (matplotlib, numpy, etc.),
+        # not generic Python startup. A pure `import sys` warmup does
+        # NOT trigger the same DLL-load path; importing the deps does.
+        # Pip package names usually equal module names for our
+        # scientific deps; non-matching names are tolerated via the
+        # outer try (`-c "import x, y, z"` raises ImportError without
+        # stopping us).
+        warmup_modules = _deps_to_warmup_modules(deps)
+        warmup_code = "import sys" + (
+            f"; import {warmup_modules}" if warmup_modules else ""
+        )
+        warmup = await self.executor.execute(
+            [str(py), "-c", warmup_code],
+            cwd=self.quest_root,
+            timeout_s=60,
+        )
+        if (
+            warmup.returncode != 0
+            and not warmup.timed_out
+            and warmup.duration_s < 0.5
+        ):
+            self._log.info(
+                "[execute] warmup fast-failed (rc=%d t=%.2fs); retrying once",
+                warmup.returncode, warmup.duration_s,
+            )
+            warmup = await self.executor.execute(
+                [str(py), "-c", warmup_code],
+                cwd=self.quest_root,
+                timeout_s=60,
+            )
+        if warmup.returncode != 0:
+            self._log.warning(
+                "[execute] venv warmup failed rc=%d stderr_tail=%s; "
+                "proceeding to real script anyway",
+                warmup.returncode, warmup.stderr[-200:],
+            )
+
         # Run from quest_root so figures/ is the relative target.
         result: ExecutionResult = await self.executor.execute(
             [str(py), str(code_path)],
             cwd=self.quest_root,
             timeout_s=self.config.execution.timeout_s,
         )
-        # Observed twice on Windows-native: the very first invocation of a
-        # freshly-created venv's python.exe immediately after `pip install`
-        # exits with rc != 0 and duration < 0.5 s (the process never reaches
-        # user code). A repeat run in the same venv works. Suspect a Windows
-        # file-cache / DLL-load race between pip-install completion and the
-        # interpreter's startup imports. Retry once on that signature only:
-        # fast fail, not a timeout, AND empty stdout AND empty stderr — any
-        # output (including a real ImportError traceback to stderr) means
-        # the interpreter started and the script is deterministically
-        # broken, so retrying just masks the error.
+        # Observed on Windows-native: the first invocation of a freshly-
+        # created venv's python.exe — even after a warmup `python -c
+        # "import <deps>"` — sometimes exits with rc != 0 and duration <
+        # 0.5 s. The process never reaches user code; a repeat in the
+        # same venv works. Suspect a Windows file-cache / DLL-load race.
+        # Retry once on the fast-fail signature (rc != 0, not timed-out,
+        # duration < 0.5 s). We INTENTIONALLY don't gate on empty
+        # stdout/stderr — a real deterministically-broken script will
+        # fail the same way on retry, costing ~5 s of wall clock, but
+        # the gain is reliably catching the race even when its tail
+        # output is non-empty (e.g., a DLL-load message on stderr).
         if (
             result.returncode != 0
             and not result.timed_out
             and result.duration_s < 0.5
-            and not result.stdout.strip()
-            and not result.stderr.strip()
         ):
             self._log.warning(
                 "[execute] suspicious fast-fail (rc=%d t=%.2fs); retrying once",
@@ -485,6 +536,30 @@ def _extract_result_json(stdout: str) -> dict[str, Any] | None:
         return json.loads(matches[-1].group(1))
     except json.JSONDecodeError:
         return None
+
+
+_PKG_TO_MODULE = {
+    # pip package name -> import name when they differ. Conservative —
+    # only fills in cases we've observed our `implement` node produce.
+    "scikit-learn": "sklearn",
+    "pillow": "PIL",
+    "opencv-python": "cv2",
+    "beautifulsoup4": "bs4",
+    "pyyaml": "yaml",
+}
+
+
+def _deps_to_warmup_modules(deps: list[str]) -> str:
+    """Convert a pip-style deps list into a comma-separated module list
+    safe for `python -c "import a, b, c"`. Drops version pins and
+    extras; remaps known name-mismatched packages."""
+    out: list[str] = []
+    for d in deps:
+        name = d.split(">=")[0].split("==")[0].split("<")[0].split("[")[0].strip()
+        if not name or "/" in name or " " in name:
+            continue  # skip URL/path deps
+        out.append(_PKG_TO_MODULE.get(name.lower(), name.replace("-", "_")))
+    return ", ".join(out)
 
 
 def _new_quest_id(seed: str) -> str:
