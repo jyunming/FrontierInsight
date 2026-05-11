@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import socket
@@ -65,6 +66,8 @@ from tenacity import (
 )
 
 from .config import ProviderConfig
+
+_log = logging.getLogger("frontier_insight.provider")
 
 # Known direct providers and their default endpoints. Users override via
 # `provider.base_url` / `provider.model` / `provider.api_key_env`.
@@ -196,6 +199,12 @@ class ResolvedEndpoint:
     api_key: str
     transport: str = "http"          # "http" | "cli"
     cli_spec: _CliSpec | None = None  # set when transport == "cli"
+    # Only set (non-empty) when the user explicitly chose a CLI model via
+    # YAML `provider.model`. `_run_cli` injects `[spec.model_flag, value]`
+    # into argv only when this is non-empty. Keeps `model` free to carry
+    # a human-readable display string for the Engine's startup log line
+    # (e.g. "claude_cli (CLI default)") rather than going blank.
+    cli_model_override: str = ""
 
 
 @dataclass
@@ -474,13 +483,30 @@ async def _run_cli(
                 proc.communicate(stdin_bytes), timeout=timeout_s,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            # Format the timeout for the error message at full precision
+            # so sub-second values (test timeouts, fast retries) don't
+            # round to "0s" and lose debuggability.
+            elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # already exited between communicate-timeout and our kill
+            kill_clean = True
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                pass
+                # Child did not reap within 5s after SIGKILL. Surface
+                # this — a leaked child on POSIX becomes a zombie until
+                # the parent dies, and on Windows the handle stays open.
+                kill_clean = False
+                _log.warning(
+                    "CLI %s did not reap within 5s after SIGKILL; "
+                    "process may be wedged in uninterruptible state",
+                    spec.argv[0],
+                )
             raise _CliTransientError(
-                f"{spec.argv[0]} exceeded {timeout_s:.0f}s wall-clock and was killed"
+                f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
+                + ("" if kill_clean else " (post-kill wait timed out)")
             )
         if proc.returncode != 0:
             # Retryable: covers transient backend hiccups. Auth/quota
@@ -543,17 +569,17 @@ def resolve_endpoint(
         )
     if name in _CLI_PROVIDERS:
         # CLI providers exec a local binary per chat call. No URL, no key
-        # (the CLI uses its own OAuth keychain). `model` is the
-        # user-specified model name when set in YAML, empty otherwise.
-        # `_run_cli` injects [model_flag, model] into argv only when
-        # both are non-empty, so an empty `model` falls through to
-        # whatever default the CLI carries.
+        # (the CLI uses its own OAuth keychain). `cli_model_override` is
+        # the user's explicit YAML choice (empty → CLI keeps its own
+        # default). `model` carries a human-readable display string for
+        # the Engine's startup log so the line never goes blank.
         return ResolvedEndpoint(
             base_url="",
-            model=provider.model or "",
+            model=provider.model or f"{name} (CLI default)",
             api_key=_NO_KEY_SENTINEL,
             transport="cli",
             cli_spec=_CLI_SPECS[name],
+            cli_model_override=provider.model or "",
         )
     defaults = _DIRECT_DEFAULTS.get(name)
     if defaults is None:
@@ -686,7 +712,7 @@ class LLMClient:
             with attempt:
                 return await _run_cli(
                     spec, prompt,
-                    model=self.endpoint.model,
+                    model=self.endpoint.cli_model_override,
                     timeout_s=self._cli_timeout_s,
                 )
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")

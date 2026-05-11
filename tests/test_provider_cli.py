@@ -479,6 +479,88 @@ async def test_cli_call_killed_after_timeout_raises_transient() -> None:
         await client.aclose()
 
 
+def test_cli_resolve_endpoint_preserves_display_model_when_unset() -> None:
+    """When the user does not pin `provider.model`, the resolved
+    endpoint still carries a human-readable display string so Engine's
+    startup log `provider claude_cli -> (...)` is not blank. The
+    invisible `cli_model_override` field stays empty so `_run_cli` does
+    NOT inject a model flag (= CLI default is honored)."""
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    assert ep.model == "claude_cli (CLI default)"
+    assert ep.cli_model_override == ""
+
+    ep2 = resolve_endpoint(ProviderConfig(name="codex_cli", model="gpt-5"))
+    assert ep2.model == "gpt-5"
+    assert ep2.cli_model_override == "gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_cli_timeout_subsecond_value_keeps_precision_in_error() -> None:
+    """When `cli_timeout_s` is below 1 second (as test timeouts often
+    are), the raised `_CliTransientError` message must NOT round to
+    `0s`. Sub-second values format as milliseconds with `:g` precision."""
+    from core.provider import _CliTransientError
+
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    client = LLMClient(ep, cli_timeout_s=0.05)
+    try:
+        proc = AsyncMock()
+        async def hang_forever(_=None):
+            await asyncio.sleep(10)
+        proc.communicate = hang_forever
+        proc.kill = MagicMock()
+        async def _wait_done():
+            return 0
+        proc.wait = _wait_done
+        proc.returncode = -1
+        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ), \
+             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+            with pytest.raises(_CliTransientError) as ei:
+                await client.chat([{"role": "user", "content": "hi"}])
+        msg = str(ei.value)
+        assert "50ms" in msg  # 0.05s = 50ms with :g precision
+        assert "0s" not in msg.replace("50ms", "")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cli_timeout_handles_already_exited_child() -> None:
+    """If the child exits between the communicate() timeout firing and
+    our `proc.kill()`, Python raises `ProcessLookupError`. The cleanup
+    must swallow it (not propagate) so the user still sees the original
+    _CliTransientError describing the wall-clock cause."""
+    from core.provider import _CliTransientError
+
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    client = LLMClient(ep, cli_timeout_s=0.05)
+    try:
+        proc = AsyncMock()
+        async def hang_forever(_=None):
+            await asyncio.sleep(10)
+        proc.communicate = hang_forever
+        # Simulate the race: by the time we kill, child is already gone.
+        proc.kill = MagicMock(side_effect=ProcessLookupError("[WinError 87]"))
+        async def _wait_done():
+            return -1
+        proc.wait = _wait_done
+        proc.returncode = -1
+        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ), \
+             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+            with pytest.raises(_CliTransientError, match="exceeded.*wall-clock"):
+                await client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_cli_missing_binary_raises_clear_runtime_error() -> None:
     """When `shutil.which` returns None (binary not on PATH), `_run_cli`
