@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import socket
@@ -65,6 +66,8 @@ from tenacity import (
 )
 
 from .config import ProviderConfig
+
+_log = logging.getLogger("frontier_insight.provider")
 
 # Known direct providers and their default endpoints. Users override via
 # `provider.base_url` / `provider.model` / `provider.api_key_env`.
@@ -116,6 +119,13 @@ class _CliSpec:
     # response in a JSON envelope (see gemini_cli). `None` means no
     # extraction — `_run_cli` returns the raw collected content as-is.
     output_extractor: Callable[[str], str] | None = None
+    # If set, and the user passed `provider.model` in their YAML config,
+    # FI inserts `[model_flag, <provider.model>]` after argv[0] so the
+    # CLI uses the user-specified model instead of its default. Leave
+    # `provider.model` empty in YAML to keep the CLI's own default
+    # (set by e.g. `~/.codex/config.toml` for codex, or the most-recent
+    # `/model` selection for claude).
+    model_flag: str | None = None
 
 
 _CLI_SPECS: dict[str, _CliSpec] = {
@@ -127,6 +137,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         argv=("claude", "--print", "--output-format", "text"),
         pass_prompt_via="stdin",
         output_via="stdout",
+        model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
     ),
     "codex_cli": _CliSpec(
         # `codex exec` runs Codex non-interactively. We pipe the prompt
@@ -139,6 +150,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         argv=("codex", "exec"),
         pass_prompt_via="stdin",
         output_via="last_message_file",
+        model_flag="-m",        # provider.model = "gpt-5.5"; default reads ~/.codex/config.toml
     ),
     "copilot_cli": _CliSpec(
         # GitHub Copilot CLI (`copilot --prompt`). `-s/--silent` strips
@@ -151,6 +163,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         argv=("copilot", "-s", "--allow-all-tools", "-p"),
         pass_prompt_via="arg",
         output_via="stdout",
+        model_flag="--model",   # provider.model = "gpt-5.2"
     ),
     "gemini_cli": _CliSpec(
         # `@google/gemini-cli` non-interactive. `--yolo` auto-approves
@@ -166,6 +179,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="stdin",
         output_via="stdout",
         output_extractor=lambda raw: _extract_gemini_response(raw),
+        model_flag="-m",        # provider.model = "gemini-3-pro"
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -185,6 +199,12 @@ class ResolvedEndpoint:
     api_key: str
     transport: str = "http"          # "http" | "cli"
     cli_spec: _CliSpec | None = None  # set when transport == "cli"
+    # Only set (non-empty) when the user explicitly chose a CLI model via
+    # YAML `provider.model`. `_run_cli` injects `[spec.model_flag, value]`
+    # into argv only when this is non-empty. Keeps `model` free to carry
+    # a human-readable display string for the Engine's startup log line
+    # (e.g. "claude_cli (CLI default)") rather than going blank.
+    cli_model_override: str = ""
 
 
 @dataclass
@@ -380,7 +400,13 @@ class _CliTransientError(RuntimeError):
     so the retry predicate can target it precisely."""
 
 
-async def _run_cli(spec: _CliSpec, prompt: str) -> str:
+async def _run_cli(
+    spec: _CliSpec,
+    prompt: str,
+    *,
+    model: str = "",
+    timeout_s: float = 300.0,
+) -> str:
     # Resolve the binary up front. On Windows, `asyncio.create_subprocess_exec`
     # does NOT honor PATHEXT, so an unqualified name like "codex" raises
     # FileNotFoundError even when `codex.CMD` is sitting in a PATH directory.
@@ -394,7 +420,13 @@ async def _run_cli(spec: _CliSpec, prompt: str) -> str:
             f"Install and log in (`claude login`, `codex login`, or "
             f"`copilot` via GitHub Copilot CLI) before using this provider."
         )
-    argv = [resolved, *spec.argv[1:]]
+    # Inject explicit model selection right after the resolved binary,
+    # if both the spec supports it and the caller supplied a model.
+    # Empty model => CLI keeps its own default.
+    argv = [resolved]
+    if spec.model_flag and model:
+        argv.extend([spec.model_flag, model])
+    argv.extend(spec.argv[1:])
     tmp_out_path: Path | None = None
     if spec.output_via == "last_message_file":
         tmp = tempfile.NamedTemporaryFile(
@@ -442,7 +474,40 @@ async def _run_cli(spec: _CliSpec, prompt: str) -> str:
                 f"before using this provider."
             ) from e
 
-        stdout_b, stderr_b = await proc.communicate(stdin_bytes)
+        # Bounded wait: a CLI that hangs (e.g. concurrent-fleet
+        # contention on a CLI that does heavy startup like gemini's MCP
+        # bootup) gets killed here so tenacity retries the call. Without
+        # this, a single stuck child blocks the whole quest indefinitely.
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(stdin_bytes), timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            # Format the timeout for the error message at full precision
+            # so sub-second values (test timeouts, fast retries) don't
+            # round to "0s" and lose debuggability.
+            elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # already exited between communicate-timeout and our kill
+            kill_clean = True
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                # Child did not reap within 5s after SIGKILL. Surface
+                # this — a leaked child on POSIX becomes a zombie until
+                # the parent dies, and on Windows the handle stays open.
+                kill_clean = False
+                _log.warning(
+                    "CLI %s did not reap within 5s after SIGKILL; "
+                    "process may be wedged in uninterruptible state",
+                    spec.argv[0],
+                )
+            raise _CliTransientError(
+                f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
+                + ("" if kill_clean else " (post-kill wait timed out)")
+            )
         if proc.returncode != 0:
             # Retryable: covers transient backend hiccups. Auth/quota
             # failures also land here but in practice clear after the
@@ -504,14 +569,17 @@ def resolve_endpoint(
         )
     if name in _CLI_PROVIDERS:
         # CLI providers exec a local binary per chat call. No URL, no key
-        # (the CLI uses its own OAuth keychain). `model` carries the
-        # provider name so the LLMClient can look up the spec.
+        # (the CLI uses its own OAuth keychain). `cli_model_override` is
+        # the user's explicit YAML choice (empty → CLI keeps its own
+        # default). `model` carries a human-readable display string for
+        # the Engine's startup log so the line never goes blank.
         return ResolvedEndpoint(
             base_url="",
-            model=provider.model or name,
+            model=provider.model or f"{name} (CLI default)",
             api_key=_NO_KEY_SENTINEL,
             transport="cli",
             cli_spec=_CLI_SPECS[name],
+            cli_model_override=provider.model or "",
         )
     defaults = _DIRECT_DEFAULTS.get(name)
     if defaults is None:
@@ -554,10 +622,17 @@ class LLMClient:
         *,
         http: httpx.AsyncClient | None = None,
         timeout_s: float = 120.0,
+        cli_timeout_s: float = 300.0,
     ) -> None:
         self.endpoint = endpoint
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(timeout=timeout_s)
+        # CLI providers (claude_cli/codex_cli/copilot_cli/gemini_cli)
+        # use this wall-clock cap per chat call; a stuck child gets
+        # killed and tenacity retries. Defaults to 5 minutes — longer
+        # than the typical 10–90 s per call but bounded so concurrent
+        # fleet contention can't hang the whole quest indefinitely.
+        self._cli_timeout_s = cli_timeout_s
 
     async def aclose(self) -> None:
         if self._owns_http:
@@ -635,5 +710,9 @@ class LLMClient:
             reraise=True,
         ):
             with attempt:
-                return await _run_cli(spec, prompt)
+                return await _run_cli(
+                    spec, prompt,
+                    model=self.endpoint.cli_model_override,
+                    timeout_s=self._cli_timeout_s,
+                )
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
