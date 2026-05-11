@@ -26,13 +26,25 @@ from core.provider import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_shutil_which():
+    """`_run_cli` now resolves argv[0] via `shutil.which()` before spawning,
+    so on a CI host where claude/codex/copilot aren't installed the tests
+    would all error out at "binary not on PATH" before reaching their real
+    assertions. Pin `shutil.which` to a fake-but-truthy path by default;
+    tests that need to exercise the missing-binary branch override this
+    via their own `patch` context."""
+    with patch("core.provider.shutil.which", return_value="/fake/path/bin") as p:
+        yield p
+
+
 # ---------------------------------------------------------------------------
 # Endpoint resolution
 # ---------------------------------------------------------------------------
 
 
 def test_cli_provider_set_matches_known_providers() -> None:
-    assert _CLI_PROVIDERS == {"codex_cli", "claude_cli"}
+    assert _CLI_PROVIDERS == {"codex_cli", "claude_cli", "copilot_cli"}
 
 
 def test_cli_specs_have_required_fields() -> None:
@@ -125,10 +137,13 @@ async def test_claude_cli_passes_prompt_via_stdin_and_returns_stdout() -> None:
     client = LLMClient(ep)
     try:
         proc = _fake_proc(stdout=b"42\n")
-        with patch(
-            "core.provider.asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=proc),
-        ) as spawn:
+        # Pin shutil.which so the assertion can compare to a known sentinel
+        # instead of whatever the test host's PATH happens to resolve to.
+        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ) as spawn:
             result = await client.chat(
                 [{"role": "user", "content": "what is 6 * 7?"}]
             )
@@ -138,8 +153,8 @@ async def test_claude_cli_passes_prompt_via_stdin_and_returns_stdout() -> None:
     assert result == "42"
     spawn.assert_awaited_once()
     args, kwargs = spawn.call_args
-    # claude CLI argv: no prompt appended (stdin transport).
-    assert args[0] == "claude"
+    # argv[0] is the shutil.which-resolved path, not the bare name.
+    assert args[0] == "/usr/bin/claude"
     assert "--print" in args and "--output-format" in args and "text" in args
     assert all(a != "what is 6 * 7?" for a in args), "prompt should NOT be in argv"
     proc.communicate.assert_awaited_once()
@@ -174,19 +189,20 @@ async def test_codex_cli_passes_prompt_via_stdin_and_reads_last_message_file(
     client = LLMClient(ep)
     try:
         proc = _fake_proc(stdout=b"tokens used\n9,000\n")
-        with patch(
-            "core.provider.asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=proc),
-        ) as spawn:
+        with patch("core.provider.shutil.which", return_value="/usr/bin/codex"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ) as spawn:
             result = await client.chat([{"role": "user", "content": "What is 3*3?"}])
     finally:
         await client.aclose()
 
     assert result == "RESULT: nine"
-    # argv = ["codex", "exec", "--output-last-message", <tmpfile>]
+    # argv = [<resolved-codex-path>, "exec", "--output-last-message", <tmpfile>]
     # — prompt is NOT in argv (security: avoid leaking via local process listings).
     args = spawn.call_args[0]
-    assert args[0] == "codex" and args[1] == "exec"
+    assert args[0] == "/usr/bin/codex" and args[1] == "exec"
     assert args[2] == "--output-last-message"
     assert args[3] == seen_paths[0]
     assert all(a != "What is 3*3?" for a in args), "prompt must NOT be in argv"
@@ -268,14 +284,43 @@ async def test_cli_tmpfile_cleaned_up_on_spawn_failure(
 
 
 @pytest.mark.asyncio
+async def test_copilot_cli_passes_prompt_via_arg_and_returns_stdout() -> None:
+    """`copilot_cli` argv contract: `copilot -s --allow-all-tools -p <prompt>`,
+    stdout returns the agent response (stats stripped by --silent)."""
+    ep = resolve_endpoint(ProviderConfig(name="copilot_cli"))
+    client = LLMClient(ep)
+    try:
+        proc = _fake_proc(stdout=b"42\n")
+        with patch("core.provider.shutil.which", return_value="/usr/bin/copilot"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ) as spawn:
+            result = await client.chat([{"role": "user", "content": "what is 6 * 7?"}])
+    finally:
+        await client.aclose()
+
+    assert result == "42"
+    args = spawn.call_args[0]
+    # argv = [<resolved-copilot-path>, "-s", "--allow-all-tools", "-p", "<prompt>"]
+    assert args[0] == "/usr/bin/copilot"
+    assert "-s" in args and "--allow-all-tools" in args and "-p" in args
+    assert args[-1] == "what is 6 * 7?", "prompt must be the last argv element after -p"
+    # No stdin for copilot_cli — communicate() is called with no input.
+    proc.communicate.assert_awaited_once()
+    assert proc.communicate.await_args[0] == () or proc.communicate.await_args[0][0] is None
+
+
+@pytest.mark.asyncio
 async def test_cli_missing_binary_raises_clear_runtime_error() -> None:
+    """When `shutil.which` returns None (binary not on PATH), `_run_cli`
+    raises a clean RuntimeError BEFORE attempting to spawn — this is the
+    up-front check that fixed the Windows PATHEXT mis-diagnosis."""
     ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
     client = LLMClient(ep)
     try:
-        with patch(
-            "core.provider.asyncio.create_subprocess_exec",
-            new=AsyncMock(side_effect=FileNotFoundError("claude not on PATH")),
-        ):
+        # Override the autouse stub.
+        with patch("core.provider.shutil.which", return_value=None):
             with pytest.raises(RuntimeError, match="not found on PATH"):
                 await client.chat([{"role": "user", "content": "x"}])
     finally:
