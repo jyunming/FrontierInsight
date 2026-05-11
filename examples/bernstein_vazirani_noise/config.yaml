@@ -1,0 +1,96 @@
+topic: |
+  TOPIC. Bernstein-Vazirani algorithm under depolarizing noise:
+  theoretical success-probability scaling vs hidden-string length and
+  per-gate noise strength.
+
+  CONTEXT. The Bernstein-Vazirani (BV) algorithm recovers an n-bit
+  hidden string s from a black-box oracle U_s |x> = (-1)^(s·x) |x> in
+  exactly one query, where any classical algorithm needs n queries on
+  average against an adversarial oracle. The quantum advantage rests on
+  a single layer of Hadamards, one oracle call, and another layer of
+  Hadamards: the resulting state collapses deterministically to |s> in
+  the absence of noise.
+
+  Under a depolarizing channel with per-qubit per-gate error rate p,
+  each qubit independently loses its coherent contribution with
+  probability p per gate. For BV on n qubits the circuit has O(n)
+  parallel gates and exactly one oracle call. A first-order theoretical
+  prediction is that the single-shot success probability of recovering
+  the exact n-bit string s falls as roughly (1-p)^(c*n) for some small
+  constant c that depends on how depolarizing noise is modeled (single-
+  layer vs whole-circuit, qubit-local vs global), with a uniform
+  1/2^n floor from a fully depolarized (maximally mixed) final state.
+
+  SCOPE (THEORY-FORWARD, NO QUANTUM HARDWARE NEEDED).
+    1. Implement an explicit, dense state-vector simulator in pure numpy
+       for n in {2, 3, ..., 10}. No qiskit / cirq dependency — keep the
+       simulator readable and reproducible.
+    2. Apply the BV circuit: H^{⊗n} -> oracle U_s -> H^{⊗n}, measure.
+    3. Inject a single-qubit depolarizing channel at every gate layer,
+       parametrized by p in {0, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1}. The
+       channel is realized exactly by mixing the pre-noise density
+       matrix rho with the maximally mixed state I/(2^n), each qubit
+       independently. To keep memory tractable we operate on state
+       vectors and sample noise stochastically per shot (Monte Carlo),
+       running 1000 shots per (n, p) cell. Validate the MC estimator
+       against a closed-form formula in at least one cell where the
+       formula is tractable.
+    4. For each (n, p), compute the empirical success probability
+       Pr[measurement == s], averaged over 20 random hidden strings.
+       Plot success vs n at several p; plot success vs p at several n;
+       fit (1-p)^{cn} and report c.
+    5. Compare to the 1/2^n random-guess floor and to the classical
+       baseline (n queries needed, where one BV oracle call corresponds
+       to one quantum "query").
+    6. Identify the regime (in p) where the BV quantum advantage
+       persists (success > 1/2 + 1/2 * 1/2^n) as a function of n.
+
+  GOALS.
+    - Single Python script in numpy + matplotlib (Agg headless backend)
+      that runs under 60 seconds on CPU for n up to 10.
+    - Three figures: (a) success probability vs n at several p, (b)
+      success probability vs p at several n with the (1-p)^{cn} fit
+      overlaid, (c) the critical p* below which BV beats classical
+      majority-guessing, as a function of n.
+    - A short IMRAD paper (≤ 4 pages) citing the original BV 1993 paper
+      and at least two follow-ups on noise robustness or fault tolerance.
+    - The last line of stdout must be `RESULT_JSON: {...}` with
+      numerical findings (the fitted c, the breakeven p* at n = 8, the
+      ratio of empirical to (1-p)^n at one cell).
+
+  CONSTRAINTS.
+    - CPU-only; do not import qiskit, cirq, pennylane, or any external
+      quantum library. Pure numpy + matplotlib.
+    - Memory: keep state vectors of size 2^n with n <= 10 (so at most
+      ~16 kB). No need for sparse arrays.
+    - Treat amplitude damping and dephasing as out of scope — this
+      study is the depolarizing-only theoretical floor.
+
+title: bv-depolarizing-noise
+
+provider:
+  name: claude_cli
+  # No api_key_env needed — claude_cli reuses `claude login` OAuth.
+
+engine:
+  framework: langgraph
+  max_iterations: 1
+  review_loop: false
+
+execution:
+  sandbox: venv
+  timeout_s: 600
+  python_version: "3.11"
+
+knowledge:
+  enabled: false   # No Axon brain configured locally.
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+    - slides
+    - poster
+    - speech
+  paper_format: generic
+  output_dir: ./outputs

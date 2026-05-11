@@ -246,6 +246,27 @@ class Engine:
             cwd=self.quest_root,
             timeout_s=self.config.execution.timeout_s,
         )
+        # Observed twice on Windows-native: the very first invocation of a
+        # freshly-created venv's python.exe immediately after `pip install`
+        # exits with rc != 0 and duration < 0.5 s (the process never reaches
+        # user code). A repeat run in the same venv works. Suspect a Windows
+        # file-cache / DLL-load race between pip-install completion and the
+        # interpreter's startup imports. Retry once on that signature only.
+        if (
+            result.returncode != 0
+            and not result.timed_out
+            and result.duration_s < 0.5
+            and not result.stdout.strip()
+        ):
+            self._log.warning(
+                "[execute] suspicious fast-fail (rc=%d t=%.2fs); retrying once",
+                result.returncode, result.duration_s,
+            )
+            result = await self.executor.execute(
+                [str(py), str(code_path)],
+                cwd=self.quest_root,
+                timeout_s=self.config.execution.timeout_s,
+            )
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
