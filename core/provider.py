@@ -113,7 +113,8 @@ class _CliSpec:
     output_via: str                  # "stdout" | "last_message_file"
     # Optional post-process step on the raw collected content. Used when
     # the CLI emits warnings/info before the real response or wraps the
-    # response in a JSON envelope (see gemini_cli). Default = identity.
+    # response in a JSON envelope (see gemini_cli). `None` means no
+    # extraction — `_run_cli` returns the raw collected content as-is.
     output_extractor: Callable[[str], str] | None = None
 
 
@@ -321,22 +322,35 @@ def _free_port() -> int:
 
 def _extract_gemini_response(raw: str) -> str:
     """`gemini -o json` emits a structured envelope after a few lines of
-    CLI-level warnings (true-color hint, MCP issues, etc.). Find the
-    first balanced `{...}` block in the stdout and return its `response`
-    field. Falls back to the raw text if the envelope isn't parseable —
-    most failures still yield usable content for `_parse_json_lenient`
-    downstream."""
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start < 0 or end <= start:
-        return raw
-    try:
-        envelope = json.loads(raw[start : end + 1])
-    except json.JSONDecodeError:
-        return raw
-    response = envelope.get("response")
-    if isinstance(response, str):
-        return response
+    CLI-level warnings (true-color hint, MCP issues, etc.). Scan stdout
+    for the first valid JSON object (incrementally decoding from each
+    `{`) and return its `response` field. Falls back to the raw text if
+    no envelope is parseable — most failures still yield usable content
+    for `_parse_json_lenient` downstream.
+
+    Incremental decode avoids two failure modes of a naive
+    `find('{')` + `rfind('}')` slice: (a) trailing non-JSON output after
+    the envelope confuses `json.loads`, and (b) an earlier `{` inside a
+    warning line shifts the start past the real envelope's opening
+    brace, again breaking the parse."""
+    decoder = json.JSONDecoder()
+    i = 0
+    n = len(raw)
+    while i < n:
+        if raw[i] != "{":
+            i += 1
+            continue
+        try:
+            envelope, _ = decoder.raw_decode(raw, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        if isinstance(envelope, dict):
+            response = envelope.get("response")
+            if isinstance(response, str):
+                return response
+        # Parsed an unrelated object; keep scanning past its opening brace.
+        i += 1
     return raw
 
 

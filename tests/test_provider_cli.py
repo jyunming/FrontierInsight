@@ -362,6 +362,38 @@ def test_gemini_response_extractor_falls_back_on_unparseable_envelope() -> None:
     ) == '{"session_id": "abc", "stats": {}}'
 
 
+def test_gemini_response_extractor_handles_trailing_output_after_envelope() -> None:
+    """`gemini -o json` sometimes emits a closing log line after the JSON
+    envelope. A naive `find('{')` + `rfind('}')` slice would include that
+    trailing chunk, breaking `json.loads`. The incremental decoder used
+    by `_extract_gemini_response` scans `raw_decode` from each `{` and
+    succeeds on the first valid object, ignoring whatever follows."""
+    from core.provider import _extract_gemini_response
+
+    raw = (
+        'Warning: True color not detected.\n'
+        '{"session_id": "abc", "response": "the real answer", "stats": {}}\n'
+        'Done in 1.3s.\n'
+    )
+    assert _extract_gemini_response(raw) == "the real answer"
+
+
+def test_gemini_response_extractor_skips_unrelated_brace_before_envelope() -> None:
+    """A CLI warning line containing `{...}` (e.g. a JSON-formatted error
+    message printed before the real envelope) must NOT shift the start
+    position past the real envelope's opening brace. The incremental
+    decoder retries from each `{` until one yields a valid JSON object
+    with the `response` field."""
+    from core.provider import _extract_gemini_response
+
+    raw = (
+        'Warning: invalid config {something=1}\n'
+        'MCP issues: {server="x"}\n'
+        '{"session_id": "abc", "response": "the real answer"}\n'
+    )
+    assert _extract_gemini_response(raw) == "the real answer"
+
+
 @pytest.mark.asyncio
 async def test_cli_missing_binary_raises_clear_runtime_error() -> None:
     """When `shutil.which` returns None (binary not on PATH), `_run_cli`
