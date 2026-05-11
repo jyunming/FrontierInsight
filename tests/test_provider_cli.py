@@ -44,7 +44,7 @@ def _stub_shutil_which():
 
 
 def test_cli_provider_set_matches_known_providers() -> None:
-    assert _CLI_PROVIDERS == {"codex_cli", "claude_cli", "copilot_cli"}
+    assert _CLI_PROVIDERS == {"codex_cli", "claude_cli", "copilot_cli", "gemini_cli"}
 
 
 def test_cli_specs_have_required_fields() -> None:
@@ -309,6 +309,57 @@ async def test_copilot_cli_passes_prompt_via_arg_and_returns_stdout() -> None:
     # No stdin for copilot_cli — communicate() is called with no input.
     proc.communicate.assert_awaited_once()
     assert proc.communicate.await_args[0] == () or proc.communicate.await_args[0][0] is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_cli_pipes_prompt_on_stdin_and_extracts_json_response() -> None:
+    """`gemini_cli` passes prompt on stdin (no argv leakage) and parses
+    the `response` field out of the `-o json` envelope, stripping the
+    leading CLI warnings."""
+    fake_stdout = (
+        b"Warning: True color not detected.\n"
+        b"YOLO mode is enabled.\n"
+        b"Ripgrep is not available. Falling back to GrepTool.\n"
+        b"MCP issues detected.\n"
+        b'{\n  "session_id": "abc",\n  "response": "the real answer",\n'
+        b'  "stats": {"tokens": {"total": 42}}\n}\n'
+    )
+    ep = resolve_endpoint(ProviderConfig(name="gemini_cli"))
+    client = LLMClient(ep)
+    try:
+        proc = _fake_proc(stdout=fake_stdout)
+        with patch("core.provider.shutil.which", return_value="/usr/bin/gemini"), \
+             patch(
+                 "core.provider.asyncio.create_subprocess_exec",
+                 new=AsyncMock(return_value=proc),
+             ) as spawn:
+            result = await client.chat([{"role": "user", "content": "say hi"}])
+    finally:
+        await client.aclose()
+
+    assert result == "the real answer"
+    args = spawn.call_args[0]
+    assert args[0] == "/usr/bin/gemini"
+    assert "--yolo" in args and "-o" in args and "json" in args
+    # Prompt is on stdin (`-p ""` triggers non-interactive mode that reads stdin).
+    assert "say hi" not in args
+    proc.communicate.assert_awaited_once()
+    assert proc.communicate.await_args[0][0] == b"say hi"
+
+
+def test_gemini_response_extractor_falls_back_on_unparseable_envelope() -> None:
+    """If the JSON envelope can't be parsed, the extractor returns the
+    raw text rather than raising — keeps the engine's downstream
+    `_parse_json_lenient` available as the last line of defense."""
+    from core.provider import _extract_gemini_response
+
+    assert _extract_gemini_response("just plain text, no braces") == \
+        "just plain text, no braces"
+    assert _extract_gemini_response("warnings...\n{not valid json}\n") == \
+        "warnings...\n{not valid json}\n"
+    assert _extract_gemini_response(
+        '{"session_id": "abc", "stats": {}}'
+    ) == '{"session_id": "abc", "stats": {}}'
 
 
 @pytest.mark.asyncio

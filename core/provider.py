@@ -23,8 +23,13 @@ but resolves to one of three transports:
     the user's `gh auth login` Copilot Pro/Business credentials.
     `-s/--silent` strips the trailing stats block; `--allow-all-tools`
     is required for non-interactive mode. **Prompt is on argv** because
-    the CLI doesn't document a stdin path — prefer `claude_cli` or
-    `codex_cli` for sensitive prompts.
+    the CLI doesn't document a stdin path — prefer `claude_cli`,
+    `codex_cli`, or `gemini_cli` for sensitive prompts.
+  - `gemini_cli` — `gemini --yolo -o json -p ""` (from
+    `@google/gemini-cli`) with the prompt on stdin. `--yolo` auto-
+    approves tool calls (else stdin deadlocks on confirmation prompts).
+    `-o json` emits a structured envelope after some CLI warnings; the
+    `output_extractor` pulls out the `response` field.
 
 Proxy spawn details:
 * `claude_code` — `poetry run python main.py <port>` from
@@ -40,17 +45,18 @@ same proxy provider shares one proxy process — see Phase H.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
-import shutil
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -105,6 +111,10 @@ class _CliSpec:
     argv: tuple[str, ...]            # base command; prompt may be appended
     pass_prompt_via: str             # "stdin" | "arg"
     output_via: str                  # "stdout" | "last_message_file"
+    # Optional post-process step on the raw collected content. Used when
+    # the CLI emits warnings/info before the real response or wraps the
+    # response in a JSON envelope (see gemini_cli). Default = identity.
+    output_extractor: Callable[[str], str] | None = None
 
 
 _CLI_SPECS: dict[str, _CliSpec] = {
@@ -140,6 +150,21 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         argv=("copilot", "-s", "--allow-all-tools", "-p"),
         pass_prompt_via="arg",
         output_via="stdout",
+    ),
+    "gemini_cli": _CliSpec(
+        # `@google/gemini-cli` non-interactive. `--yolo` auto-approves
+        # tool calls (otherwise stdin would deadlock waiting for user
+        # confirmation). `-o json` emits a structured envelope whose
+        # `response` field holds the agent answer; the envelope is
+        # preceded by a few lines of CLI-level warnings (true-color,
+        # MCP issues, etc.) that we strip via the output extractor.
+        # Prompt is piped on stdin (the CLI documents stdin support and
+        # appends -p text after it; we pass an empty -p so stdin alone
+        # is the prompt content). Avoids argv leakage.
+        argv=("gemini", "--yolo", "-o", "json", "-p", ""),
+        pass_prompt_via="stdin",
+        output_via="stdout",
+        output_extractor=lambda raw: _extract_gemini_response(raw),
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -294,6 +319,27 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _extract_gemini_response(raw: str) -> str:
+    """`gemini -o json` emits a structured envelope after a few lines of
+    CLI-level warnings (true-color hint, MCP issues, etc.). Find the
+    first balanced `{...}` block in the stdout and return its `response`
+    field. Falls back to the raw text if the envelope isn't parseable —
+    most failures still yield usable content for `_parse_json_lenient`
+    downstream."""
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return raw
+    try:
+        envelope = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return raw
+    response = envelope.get("response")
+    if isinstance(response, str):
+        return response
+    return raw
+
+
 def _messages_to_text(messages: list[dict[str, str]]) -> str:
     """Flatten OpenAI Chat-Completions messages into one text block.
 
@@ -398,6 +444,8 @@ async def _run_cli(spec: _CliSpec, prompt: str) -> str:
             content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
         else:
             content = (stdout_b or b"").decode("utf-8", errors="replace")
+        if spec.output_extractor is not None:
+            content = spec.output_extractor(content)
         return content.strip()
     finally:
         if tmp_out_path is not None:

@@ -3,16 +3,25 @@
 > Latest results live at the top; Phase-0 (DS-wrapper era) results are
 > retained below for historical reference.
 
-## CLI-exec providers — live probe (claude_cli, codex_cli, copilot_cli)
+## CLI-exec providers — live probe (claude_cli, codex_cli, copilot_cli, gemini_cli)
 
-**3 / 3 providers respond** against their real local CLIs on Windows
+**4 / 4 providers respond** against their real local CLIs on Windows
 (`scripts/probe_cli_providers.py`, one-shot `{"a": 1}` JSON prompt):
 
 | Provider | Binary | Wall-time | Result |
 |---|---|---|---|
-| `claude_cli` | `claude` 2.1.138 (Claude Code) | 10.8 s | `{"a": 1}` |
-| `codex_cli` | `codex-cli` 0.128.0 | 9.6 s | `{"a":1}` |
-| `copilot_cli` | GitHub Copilot CLI 1.0.40 | 12.6 s | `{"a": 1}` |
+| `claude_cli` | `claude` 2.1.138 (Claude Code) | 9.2 s | `{"a": 1}` |
+| `codex_cli` | `codex-cli` 0.128.0 | 8.4 s | `{"a": 1}` |
+| `copilot_cli` | GitHub Copilot CLI 1.0.40 | 11.1 s | `{"a": 1}` |
+| `gemini_cli` | `@google/gemini-cli` 0.40.1 | 10.7 s | `{"a": 1}` |
+
+**Note: full-quest validation status differs from chat-layer status.**
+Only `claude_cli` has been exercised through a complete 8-node engine
+quest end-to-end (the Bernstein-Vazirani quantum study). `codex_cli`,
+`copilot_cli`, and `gemini_cli` are chat-layer verified but not yet
+full-quest validated — the chat probe is a single LLM call, while a
+real quest is 7–9 calls (including the longer implement-node prompt
+that historically surfaces transient backend hiccups).
 
 The probe required one fix to land first: on Windows
 `asyncio.create_subprocess_exec("codex", ...)` raises FileNotFoundError
