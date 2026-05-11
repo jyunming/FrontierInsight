@@ -24,6 +24,7 @@ ProviderName = Literal[
     "github_copilot_vscode",
     "codex_cli",      # local Codex CLI (uses ChatGPT Plus/Pro OAuth via `codex login`)
     "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude login`)
+    "copilot_cli",    # local GitHub Copilot CLI (uses `gh auth login` Copilot Pro/Business)
 ]
 EngineFramework = Literal["langgraph"]
 SandboxKind = Literal["venv", "docker"]

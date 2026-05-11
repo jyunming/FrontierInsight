@@ -3,6 +3,24 @@
 > Latest results live at the top; Phase-0 (DS-wrapper era) results are
 > retained below for historical reference.
 
+## CLI-exec providers — live probe (claude_cli, codex_cli, copilot_cli)
+
+**3 / 3 providers respond** against their real local CLIs on Windows
+(`scripts/probe_cli_providers.py`, one-shot `{"a": 1}` JSON prompt):
+
+| Provider | Binary | Wall-time | Result |
+|---|---|---|---|
+| `claude_cli` | `claude` 2.1.138 (Claude Code) | 10.8 s | `{"a": 1}` |
+| `codex_cli` | `codex-cli` 0.128.0 | 9.6 s | `{"a":1}` |
+| `copilot_cli` | GitHub Copilot CLI 1.0.40 | 12.6 s | `{"a": 1}` |
+
+The probe required one fix to land first: on Windows
+`asyncio.create_subprocess_exec("codex", ...)` raises FileNotFoundError
+even though `codex.CMD` is on PATH, because the subprocess family does
+not honor `PATHEXT`. `_run_cli` now resolves the binary name via
+`shutil.which()` before spawning, so the qualified path (e.g.,
+`...\codex.CMD`) is passed in instead.
+
 ## Post-DS redesign — Phases A through H landed
 
 **Status:** structural validation complete on Windows-native (no WSL2),

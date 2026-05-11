@@ -18,7 +18,13 @@ but resolves to one of three transports:
     stdin (not argv) so it does not appear in local process listings.
   - `claude_cli` — `claude --print --output-format text` reusing the
     user's `claude login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
-    needed; OAuth from the CLI's keychain is honored).
+    needed; OAuth from the CLI's keychain is honored). Prompt on stdin.
+  - `copilot_cli` — `copilot -s --allow-all-tools -p <prompt>` reusing
+    the user's `gh auth login` Copilot Pro/Business credentials.
+    `-s/--silent` strips the trailing stats block; `--allow-all-tools`
+    is required for non-interactive mode. **Prompt is on argv** because
+    the CLI doesn't document a stdin path — prefer `claude_cli` or
+    `codex_cli` for sensitive prompts.
 
 Proxy spawn details:
 * `claude_code` — `poetry run python main.py <port>` from
@@ -44,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import shutil
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -121,6 +128,18 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         argv=("codex", "exec"),
         pass_prompt_via="stdin",
         output_via="last_message_file",
+    ),
+    "copilot_cli": _CliSpec(
+        # GitHub Copilot CLI (`copilot --prompt`). `-s/--silent` strips
+        # the trailing "Changes/Requests/Tokens" stats block so stdout
+        # contains only the agent response. `--allow-all-tools` is
+        # required for non-interactive mode (the CLI otherwise prompts
+        # for tool-permission confirmations). The prompt is passed on
+        # argv because the CLI doesn't document a stdin path — be aware
+        # that the prompt is visible in local process listings.
+        argv=("copilot", "-s", "--allow-all-tools", "-p"),
+        pass_prompt_via="arg",
+        output_via="stdout",
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -302,7 +321,20 @@ class _CliTransientError(RuntimeError):
 
 
 async def _run_cli(spec: _CliSpec, prompt: str) -> str:
-    argv = list(spec.argv)
+    # Resolve the binary up front. On Windows, `asyncio.create_subprocess_exec`
+    # does NOT honor PATHEXT, so an unqualified name like "codex" raises
+    # FileNotFoundError even when `codex.CMD` is sitting in a PATH directory.
+    # `shutil.which` does honor PATHEXT and returns the qualified path, so
+    # we substitute argv[0] with whatever it resolves to.
+    binary_name = spec.argv[0]
+    resolved = shutil.which(binary_name)
+    if resolved is None:
+        raise RuntimeError(
+            f"CLI provider binary {binary_name!r} not found on PATH. "
+            f"Install and log in (`claude login`, `codex login`, or "
+            f"`copilot` via GitHub Copilot CLI) before using this provider."
+        )
+    argv = [resolved, *spec.argv[1:]]
     tmp_out_path: Path | None = None
     if spec.output_via == "last_message_file":
         tmp = tempfile.NamedTemporaryFile(
