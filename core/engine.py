@@ -179,7 +179,12 @@ class Engine:
     async def _node_ideate(self, state: QuestState) -> QuestState:
         self._log.info("[ideate] topic=%s", state["topic"][:80].replace("\n", " "))
         # Pull a few related items from the knowledge base to ground ideation.
-        seeded = self.knowledge.search(state["topic"], top_k=3)
+        # No chosen_idea yet — pass chat_fn so the source-router (if
+        # enabled) can still pick sources from the catalog using the
+        # topic alone.
+        seeded = await self.knowledge.asearch(
+            state["topic"], top_k=3, chat_fn=self._chat_messages,
+        )
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
             literature_block=_format_lit(seeded),
@@ -193,8 +198,13 @@ class Engine:
     async def _node_literature(self, state: QuestState) -> QuestState:
         chosen = state.get("chosen_idea") or {}
         query = (chosen.get("title") or "") + " " + state["topic"][:200]
-        docs = self.knowledge.search(query.strip(), top_k=self.config.knowledge.top_k)
-        self._log.info("[literature] retrieved %d docs from Axon", len(docs))
+        docs = await self.knowledge.asearch(
+            query.strip(),
+            top_k=self.config.knowledge.top_k,
+            chosen_idea=chosen,
+            chat_fn=self._chat_messages,
+        )
+        self._log.info("[literature] retrieved %d docs", len(docs))
         return {
             "literature": [
                 {"content": d.content[:2000], "metadata": d.metadata} for d in docs
@@ -410,6 +420,14 @@ class Engine:
         messages = [{"role": "user", "content": prompt}]
         return await self._client.chat(messages, temperature=0.2)
 
+    async def _chat_messages(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.2,
+    ) -> str:
+        """Lower-level chat hook for callers (e.g. the knowledge layer's
+        source-router) that build their own messages array."""
+        assert self._client is not None
+        return await self._client.chat(messages, temperature=temperature)
+
     def _collect_artifacts(self, state: QuestState) -> QuestArtifacts:
         paper_md = self.quest_root / "paper" / "paper.md"
         figures = self.quest_root / "figures"
@@ -436,19 +454,92 @@ class Engine:
             return
         if artifacts.paper_md is None:
             return
-        summary_parts: list[str] = []
+
+        review = state.get("review") or {}
+        verdict = review.get("verdict", "accept")
+
+        # Gate on the accept verdict so the long-term store accumulates
+        # only research the review node signed off on. With
+        # `write_back_only_on_accept = False`, every finished quest
+        # lands — useful while bootstrapping an empty corpus.
+        if self.config.knowledge.write_back_only_on_accept and verdict != "accept":
+            self._log.info(
+                "[write-back] skipped: verdict=%s (write_back_only_on_accept=True)",
+                verdict,
+            )
+            return
+
         analysis = state.get("analysis") or {}
+        design = state.get("design") or {}
+        summary_parts: list[str] = []
         if analysis.get("summary"):
             summary_parts.append(str(analysis["summary"]))
         for kf in analysis.get("key_findings", []) or []:
             summary_parts.append(f"- {kf}")
         summary = "\n".join(summary_parts)
+
+        # Distill the literature the agent actually saw into a curated
+        # `external_refs` list. The Knowledge layer writes a spine doc
+        # per ref so Axon becomes title-/topic-searchable after accept.
+        external_refs: list[dict[str, Any]] = []
+        for d in (state.get("literature") or []):
+            m = d.get("metadata") or {}
+            if not (m.get("title") or m.get("doi") or m.get("arxiv_id") or m.get("pmid")):
+                continue
+            external_refs.append({
+                "title": m.get("title", ""),
+                "authors": m.get("authors", []),
+                "year": m.get("year") or (m.get("published") or "")[:4] or None,
+                "venue": m.get("venue") or m.get("publisher") or "",
+                "doi": m.get("doi", ""),
+                "arxiv_id": m.get("arxiv_id", ""),
+                "pmid": m.get("pmid", ""),
+                "source": m.get("source", ""),
+                "url": m.get("url", ""),
+                "abstract": (d.get("content") or "")[:1500],
+            })
+
+        # Rich, indexable metadata that future quests' ideate node can
+        # filter / rank past work by. Keep the keys flat and JSON-safe.
+        #
+        # `paper_md_relpath` is the path RELATIVE TO `quest_root` (not
+        # absolute) — Axon stores this; the absolute path would leak
+        # the user's home-directory layout into the long-term corpus
+        # and make exported / shared Axon corpora non-portable. Callers
+        # that need the on-disk file should join with `quest_root`.
+        try:
+            paper_md_relpath = str(
+                artifacts.paper_md.relative_to(artifacts.quest_root)
+            )
+        except ValueError:
+            # paper_md outside quest_root (shouldn't happen, but be safe).
+            paper_md_relpath = artifacts.paper_md.name
+        meta: dict[str, Any] = {
+            "title": state.get("title", ""),
+            "topic": state.get("topic", "")[:1000],
+            "verdict": verdict,
+            "score": review.get("score"),
+            "iteration": state.get("iteration", 0),
+            "hypothesis": design.get("hypothesis", ""),
+            "method_summary": design.get("method", ""),
+            "key_findings": list(analysis.get("key_findings", []) or [])[:20],
+            "result_json": state.get("result_json") or {},
+            "figures": list(state.get("figures", []) or []),
+            "provider": self.config.provider.name,
+            "model": self.config.provider.model or "(cli-default)",
+            "paper_md_relpath": paper_md_relpath,
+            "external_refs": external_refs,
+        }
         ok = self.knowledge.add_quest_artifacts(
             quest_id=self.quest_id,
             paper_md_path=artifacts.paper_md,
             summary=summary,
+            metadata=meta,
         )
-        self._log.info("[write-back] axon ingest=%s", ok)
+        self._log.info(
+            "[write-back] axon ingest=%s (verdict=%s, score=%s)",
+            ok, verdict, review.get("score"),
+        )
 
 
 # ---- module-level helpers ------------------------------------------------

@@ -92,19 +92,20 @@ async def test_quest_writeback_invokes_axon_when_enabled(
     # Stand-in for Axon: capture add_quest_artifacts calls.
     captured: list[dict] = []
 
-    def fake_add(self, *, quest_id: str, paper_md_path: Path, summary: str) -> bool:  # noqa: ANN001
+    def fake_add(self, *, quest_id, paper_md_path, summary, metadata=None) -> bool:  # noqa: ANN001
         captured.append({
             "quest_id": quest_id,
             "paper_md_exists": paper_md_path.exists(),
             "summary": summary,
+            "metadata": metadata or {},
         })
         return True
 
-    def fake_search(self, query: str, *, top_k=None):  # noqa: ANN001
+    async def fake_asearch(self, query, *, top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
         return []
 
     monkeypatch.setattr("core.knowledge.Knowledge.add_quest_artifacts", fake_add)
-    monkeypatch.setattr("core.knowledge.Knowledge.search", fake_search)
+    monkeypatch.setattr("core.knowledge.Knowledge.asearch", fake_asearch)
     # Force enabled even without axon installed.
     monkeypatch.setattr(
         "core.knowledge.Knowledge.__init__",
@@ -121,3 +122,122 @@ async def test_quest_writeback_invokes_axon_when_enabled(
     assert captured[0]["paper_md_exists"] is True
     assert "Two points plotted." in captured[0]["summary"]
     assert "- linear" in captured[0]["summary"]
+    # Rich metadata threaded through: verdict + structured findings.
+    meta = captured[0]["metadata"]
+    assert meta["verdict"] == "accept"
+    assert meta["key_findings"] == ["linear"]
+    assert meta["provider"] == "openai"
+    assert "result_json" in meta
+    # Path stored relative to quest_root, NOT absolute. Storing
+    # `/home/<user>/.../paper.md` in Axon would leak the user's
+    # directory layout into the long-term corpus and break corpus
+    # portability across machines.
+    assert "paper_md_relpath" in meta
+    assert "paper_md_path" not in meta  # the absolute-path field is gone
+    assert not Path(meta["paper_md_relpath"]).is_absolute()
+    assert meta["paper_md_relpath"].endswith("paper.md")
+
+
+# Build a "revise"-verdict variant of the fake responses so the engine
+# terminates with verdict != accept and the accept-gate fires.
+_FAKE_REVISE = dict(_FAKE)
+_FAKE_REVISE["Review"] = json.dumps({
+    "verdict": "revise", "score": 2,
+    "strengths": [], "weaknesses": ["thin"], "suggestions": ["redo"], "blocking": "n",
+})
+
+
+def _fake_response_revise(prompt: str) -> str:
+    head = prompt.lstrip().splitlines()[0]
+    for tag, resp in _FAKE_REVISE.items():
+        if tag in head:
+            return resp
+    return "{}"
+
+
+@pytest.mark.asyncio
+async def test_quest_writeback_skipped_when_verdict_revise_and_accept_gate_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `write_back_only_on_accept=True` (default), a quest whose
+    final review verdict is `revise` must NOT be ingested."""
+    cfg = Config(
+        topic="revise-verdict test",
+        title="revise-test",
+        provider=ProviderConfig(name="openai"),
+        # max_iterations=1 + review_loop=False means a single pass; the
+        # review-node verdict goes straight to "done" regardless.
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(
+            enabled=True, write_back_quests=True, write_back_only_on_accept=True,
+        ),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_revise(messages[-1]["content"])
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    captured: list[dict] = []
+    def fake_add(self, *, quest_id, paper_md_path, summary, metadata=None) -> bool:  # noqa: ANN001
+        captured.append({"quest_id": quest_id})
+        return True
+    async def fake_asearch(self, q, *, top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
+        return []
+    monkeypatch.setattr("core.knowledge.Knowledge.add_quest_artifacts", fake_add)
+    monkeypatch.setattr("core.knowledge.Knowledge.asearch", fake_asearch)
+    monkeypatch.setattr(
+        "core.knowledge.Knowledge.__init__",
+        lambda self, c: setattr(self, "cfg", c) or setattr(self, "enabled", True)
+        or setattr(self, "_brain", object()) or setattr(self, "_retriever", None),
+    )
+
+    engine = Engine(cfg)
+    await engine.run()
+
+    # Accept-gate fired: no write-back happened despite write_back_quests=True.
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_quest_writeback_runs_on_revise_when_accept_gate_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `write_back_only_on_accept=False`, every finished quest
+    lands (used for bootstrapping an empty corpus)."""
+    cfg = Config(
+        topic="ungated writeback test",
+        title="ungated-test",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(
+            enabled=True, write_back_quests=True, write_back_only_on_accept=False,
+        ),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_revise(messages[-1]["content"])
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    captured: list[dict] = []
+    def fake_add(self, *, quest_id, paper_md_path, summary, metadata=None) -> bool:  # noqa: ANN001
+        captured.append({"quest_id": quest_id, "verdict": (metadata or {}).get("verdict")})
+        return True
+    async def fake_asearch(self, q, *, top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
+        return []
+    monkeypatch.setattr("core.knowledge.Knowledge.add_quest_artifacts", fake_add)
+    monkeypatch.setattr("core.knowledge.Knowledge.asearch", fake_asearch)
+    monkeypatch.setattr(
+        "core.knowledge.Knowledge.__init__",
+        lambda self, c: setattr(self, "cfg", c) or setattr(self, "enabled", True)
+        or setattr(self, "_brain", object()) or setattr(self, "_retriever", None),
+    )
+
+    engine = Engine(cfg)
+    await engine.run()
+
+    assert len(captured) == 1
+    assert captured[0]["verdict"] == "revise"

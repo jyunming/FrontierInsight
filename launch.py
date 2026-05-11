@@ -46,6 +46,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="+",
         help="Run multiple quests concurrently (one config path per quest).",
     )
+    mode.add_argument(
+        "--ingest",
+        type=Path,
+        nargs="+",
+        help="Ingest one or more PDF / Markdown / TXT files into Axon "
+             "(kind=fi_local_paper) and exit. Requires `axon` to be "
+             "installed; optionally pass --axon-config to point at a "
+             "non-default Axon corpus. PDF support requires `pypdf` installed.",
+    )
+    p.add_argument(
+        "--axon-config",
+        type=Path,
+        default=None,
+        help="YAML AxonConfig for --ingest mode (the same shape the engine "
+             "passes via knowledge.axon_config). Defaults to AxonConfig() if omitted.",
+    )
     p.add_argument(
         "--max-concurrent",
         type=int,
@@ -72,6 +88,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
+    if args.ingest and args.output is not None:
+        p.error("--output is irrelevant in --ingest mode.")
     return args
 
 
@@ -83,8 +101,14 @@ async def run_one(
     *,
     supervisor: ProxySupervisor,
     profile: bool = False,
+    engine: Engine | None = None,
 ) -> dict[str, object]:
-    engine = Engine(cfg, supervisor=supervisor)
+    # Engine may be constructed by the caller (e.g. `gated()` builds it
+    # once so the status-line `quest_id` matches the quest that actually
+    # runs — instead of creating a second Engine here with a fresh
+    # quest_id and stranding the status-line one). When omitted, build.
+    if engine is None:
+        engine = Engine(cfg, supervisor=supervisor)
     print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
     art: QuestArtifacts = await _maybe_profiled(engine, profile=profile)
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
@@ -210,10 +234,17 @@ async def run_fleet(
             if memory_cap_mb is not None:
                 await _await_under_cap(memory_cap_mb)
             state["running"] += 1
+            # Construct the Engine ONCE and reuse it in run_one so the
+            # status-line quest_id matches the quest that actually runs.
+            # Previously a second Engine (with a fresh quest_id) was
+            # built inside run_one, leaving a stranded sibling quest_dir
+            # on disk and breaking per-quest accounting.
             engine = Engine(cfg, supervisor=supervisor)
             _status_line(engine.quest_id, "start")
             try:
-                summary = await run_one(cfg, supervisor=supervisor, profile=profile)
+                summary = await run_one(
+                    cfg, supervisor=supervisor, profile=profile, engine=engine,
+                )
                 state["running"] -= 1
                 state["done"] += 1
                 _status_line(str(summary.get("quest_id")), "done ")
@@ -237,6 +268,9 @@ async def run_fleet(
 async def main_async(args: argparse.Namespace) -> int:
     supervisor = ProxySupervisor()
     try:
+        if args.ingest:
+            return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
+
         if args.config:
             cfg = Config.from_yaml(args.config)
             if args.output is not None:
@@ -254,6 +288,40 @@ async def main_async(args: argparse.Namespace) -> int:
         )
     finally:
         await supervisor.shutdown()
+
+
+def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
+    """Permanently ingest paper files into Axon (kind=fi_local_paper)
+    outside of any quest. Useful before launching a new quest that
+    should benefit from manually-downloaded paywalled PDFs."""
+    from core.config import KnowledgeConfig
+    from core.knowledge import Knowledge
+
+    cfg = KnowledgeConfig(
+        enabled=True,
+        axon_config=axon_config_path if axon_config_path else None,
+        local_papers=list(paths),
+        # Avoid re-seeding the source catalog every time we run --ingest.
+        seed_source_catalog=False,
+    )
+    try:
+        k = Knowledge(cfg)
+    except Exception as e:
+        print(f"[FI ingest] Axon init failed: {e}", file=sys.stderr)
+        return 1
+    if not k.enabled:
+        print(
+            "[FI ingest] Axon not available (is the `axon` package installed?). "
+            "Files were parsed but not ingested into a persistent store.",
+            file=sys.stderr,
+        )
+        return 1
+    loaded = [d.metadata["filename"] for d in k._local_papers]
+    if not loaded:
+        print("[FI ingest] no files loaded — check paths / file types.", file=sys.stderr)
+        return 1
+    print(f"[FI ingest] ingested {len(loaded)} file(s) into Axon: {loaded}")
+    return 0
 
 
 def main() -> int:

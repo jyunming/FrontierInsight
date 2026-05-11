@@ -13,9 +13,10 @@ The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. The 
 ```bash
 pip install -r requirements.txt
 pip install pytest pytest-asyncio          # dev
-python -m pytest -v                         # 11 tests, ~3 minutes (real venv creates)
+python -m pytest -v                         # 217 tests, ~3 minutes (real venv creates)
 python launch.py --config examples/integrator_bakeoff/config.yaml
 python launch.py --fleet a.yaml b.yaml --max-concurrent 4 --memory-cap-mb 4096
+python launch.py --ingest paper1.pdf paper2.md   # permanent ingest into Axon (no quest)
 ```
 
 External prerequisites are all optional and feature-gated:
@@ -41,11 +42,11 @@ External prerequisites are all optional and feature-gated:
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled.
 
-**Knowledge layer** (`core/knowledge.py`): one in-process `AxonBrain` per quest. Tolerates missing axon install (degrades to no-op + warning). `add_quest_artifacts(quest_id, paper_md_path, summary)` writes the finished paper back into Axon for cross-quest memory; the `ideate` node reads it.
+**Knowledge layer** (`core/knowledge.py`): one in-process `AxonBrain` per quest. Tolerates missing axon install (degrades to no-op + warning). Retrieval (`Knowledge.asearch`) is three-layer: pinned `local_papers` → Axon → external router (`arxiv` / `openalex` / `crossref` / `semantic_scholar` / `pubmed` / `core` / `google_scholar`, parallel + DOI-dedup). With `source_routing: auto` (default) the LLM picks 1–5 sources from a 12-entry catalog (`_SOURCE_CATALOG`); users extend the catalog by ingesting `kind=fi_source_catalog` entries into Axon. With `try_fetch_full_text: true` external hits get opportunistic publisher-PDF fetch via the host's existing network access (VPN/Shibboleth/EZproxy); login walls are rejected by a Content-Type + `%PDF-` magic-bytes two-factor check, so paywalled venues never hang a quest. Write-back (`add_quest_artifacts`) is **gated on `verdict == "accept"`** by default and lays down a *structured bundle*, NOT a flat doc: `fi_paper_spine` (single-chunk card-catalog entry — title/authors/DOI/abstract/key-claims — for title-searchability), `fi_quest_paper` (full body with a 1-line `[Title · Year · Venue · DOI]` citation header prepended to every chunk so retrieval hits are self-describing), `fi_quest_summary` (structured findings JSON; carries `paper_refs` short-id list in metadata), `fi_topic_event` (per-topic rollup pointer keyed by slug; lists the quest + the papers it cited), and `fi_external_ref_spine` × N (curated card-catalog entries for cited externals — only refs that contributed to an accepted quest persist). The `ideate` node reads spines + summaries for cross-quest memory.
 
 ## Conventions and gotchas worth knowing
 
-- **Tilde expansion is manual.** `Config` uses `field_validator(..., mode="before")` to expand `~` in path-shaped YAML fields (`output_dir`, `axon_config` when given as a path). When adding new path fields, mirror that pattern — pydantic does not expand `~`.
+- **Tilde expansion is manual.** `Config` uses `field_validator(..., mode="before")` to expand `~` in path-shaped YAML fields (`output_dir`, `axon_config` when given as a path, every entry in `knowledge.local_papers`). When adding new path fields, mirror that pattern — pydantic does not expand `~`.
 - **All node prompts live in `agents/*.md`** as Python `string.Template` files (`$placeholder`, not f-strings) so prompt content can contain literal `{...}` (e.g., JSON examples). Loaded once at engine init.
 - **JSON parsing from LLMs is lenient.** `core.engine._parse_json_lenient` strips fences and finds the largest balanced `{...}`. When you add a new node, return JSON and feed it through this helper.
 - **`RESULT_JSON: {...}` contract.** Generated experiment scripts emit a single line beginning with `RESULT_JSON: ` as the **last** line of stdout; `_extract_result_json` parses it back into state. This is the cheap, reliable channel for numerical findings to flow from the experiment to the analysis node.
@@ -57,6 +58,6 @@ External prerequisites are all optional and feature-gated:
 
 ## Tests
 
-`tests/test_config.py` covers the YAML schema and tilde expansion (5 tests). `tests/test_execution.py` covers `VenvExecutor` (3 tests; creates a real venv — slow). `tests/test_engine_smoke.py` runs the full 8-node DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge_writeback.py` verifies cross-quest memory write-back is invoked. **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` to keep that property.
+`tests/test_config.py` covers the YAML schema and tilde expansion. `tests/test_execution.py` covers `VenvExecutor` (creates a real venv — slow). `tests/test_engine_smoke.py` runs the full 8-node DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge.py` (50 tests) covers source adapters, dedup, router-LLM happy/failure paths, local-paper load + pin, Phase-2 PDF magic-bytes check + login-wall rejection, structured-ingest helpers (spine / header / topic event), external-ref spine writes. `tests/test_knowledge_writeback.py` verifies the cross-quest memory write-back call shape and the accept-gate. **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.
 
 `pytest.ini` redirects `tmp_path` to `./.pytest_tmp/` because the default Windows `%TEMP%` path was inaccessible to the harness sandbox. If a test fails on a fresh checkout, that path is the first thing to check.
