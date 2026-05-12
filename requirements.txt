@@ -1,4 +1,4 @@
-# Frontier Insight — runtime dependencies (post-DS redesign).
+# Frontier Insight — runtime + test dependencies.
 #
 # Core orchestration is LangGraph; the unified LLM client uses the OpenAI
 # Python SDK against any OpenAI-compatible endpoint (codex, openai, gemini's
@@ -6,9 +6,10 @@
 # and copilot). The knowledge layer is delegated to jyunming/Axon.
 #
 # Optional providers spawned as Node CLIs (install separately):
-#   npm install -g @anthropic-ai/claude-code         # for provider: claude_code
-#   npm install -g claude-code-openai-wrapper        # OpenAI-compat shim for Claude
-#   npm install -g copilot-api                       # OpenAI-compat shim for Copilot
+#   npm install -g @anthropic-ai/claude-code         # for provider: claude_cli
+#   npm install -g @openai/codex                     # for provider: codex_cli
+#   npm install -g @github/copilot-cli               # for provider: copilot_cli
+#   npm install -g @google/gemini-cli                # for provider: gemini_cli
 
 pydantic>=2.5
 pyyaml>=6.0
@@ -28,7 +29,12 @@ langgraph-checkpoint-sqlite>=2.0
 
 # Knowledge base (research literature + cross-quest memory).
 # https://github.com/jyunming/Axon
-axon>=0.4
+axon-rag>=0.4
+
+# Phase J — FastAPI status GUI. Loaded lazily only when `launch.py --serve`
+# is used; the rest of FI runs without invoking it.
+fastapi>=0.110
+uvicorn>=0.27
 
 # Optional sandbox executor (Phase D). Used when execution.sandbox=docker.
 # Requires Docker Desktop on Windows/macOS or `dockerd` on Linux.
@@ -44,3 +50,36 @@ psutil>=5.9
 # paywalled papers). Without it, .md / .txt local papers still work
 # but .pdf files are skipped with a warning.
 pypdf>=4.0
+
+# ---- Dev / test ----------------------------------------------------------
+# Used by `python -m pytest`. Not strictly required for runtime FI usage.
+
+pytest>=8.0
+pytest-asyncio>=0.24
+pytest-mock>=3.14
+pytest-cov>=6.0
+pytest-testmon>=2.2
+
+# Optional knowledge-layer source adapter (Phase L source-router):
+#   scholarly  → Google Scholar (no official API; rate-limited; EXPERIMENTAL).
+# Skip install if you don't want to chance hitting Google's anti-bot
+# defences — other sources (arxiv/openalex/crossref) cover most queries.
+# scholarly>=1.7
+
+# ---- Required system tools (NOT pip-installable) -------------------------
+# These are not Python packages — install them via your OS package manager:
+#
+#   pandoc + pdflatex   for paper_pdf output (output.kinds includes paper_pdf)
+#       Windows:  install pandoc.org/installing.html + miktex.org
+#       mac/Linux: pandoc.org/installing.html + tinytex.org
+#
+#   marp                for slides.{html,pdf} output (`npm i -g @marp-team/marp-cli`)
+#
+#   pdflatex            for poster.pdf output (bundled with miktex/tinytex)
+#
+#   Node.js 18+         for the FI VSCode extension (vscode-frontier-insight/)
+#                       AND for the proxy-based providers (claude_code,
+#                       github_copilot_*) which spawn npm packages.
+#
+# Without these, FI degrades gracefully — paper.md, slides.md, and
+# poster.tex are still produced, just not the rendered final formats.

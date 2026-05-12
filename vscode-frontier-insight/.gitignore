@@ -1,0 +1,8 @@
+# Build output from `npm run compile` / `tsc`.
+out/
+
+# Dependencies — restored via `npm install`.
+node_modules/
+
+# Packaged extension binary — produced by `npm run package`.
+*.vsix

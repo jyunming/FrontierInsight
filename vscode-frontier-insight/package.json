@@ -1,0 +1,86 @@
+{
+  "name": "vscode-frontier-insight",
+  "displayName": "Frontier Insight",
+  "description": "Run autonomous research quests inside VSCode, powered by your Copilot subscription via the sanctioned vscode.lm Language Model API. Local Python engine drives an 11-node async LangGraph DAG; this extension hosts the LLM calls.",
+  "version": "0.1.0",
+  "publisher": "frontier-insight",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jyunming/FrontierInsight.git",
+    "directory": "vscode-frontier-insight"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onChatParticipant:frontier-insight.fi"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "frontier-insight.fi",
+        "name": "fi",
+        "fullName": "Frontier Insight",
+        "description": "Run a research quest through the FI engine.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "new",
+            "description": "Interactive setup — walks you through topic, outputs, clarify mode, reviewer panel; generates a config.yaml and runs it. Recommended for first-time users."
+          },
+          {
+            "name": "start",
+            "description": "Start a quest from an existing YAML. Example: @fi /start examples/integrator_bakeoff/config.yaml"
+          },
+          {
+            "name": "fleet",
+            "description": "Start a fleet of quests (space-separated YAML paths). Each YAML's provider.node_models is honored independently."
+          },
+          {
+            "name": "help",
+            "description": "Show the available commands."
+          }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Frontier Insight",
+      "properties": {
+        "frontierInsight.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python interpreter for the FI engine. Must have FI's requirements.txt installed."
+        },
+        "frontierInsight.repoPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the FrontierInsight repo (containing launch.py). Defaults to the open workspace root."
+        },
+        "frontierInsight.outputDir": {
+          "type": "string",
+          "default": "outputs",
+          "description": "Where finished quests are written (relative to repoPath or absolute)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --out vscode-frontier-insight.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}

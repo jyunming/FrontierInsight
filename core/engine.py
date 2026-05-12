@@ -10,6 +10,8 @@ coexist in one process for the fleet runner.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import re
@@ -18,10 +20,16 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
+
+ClarifyCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+"""User-supplied async function that collects answers to clarify-node
+questions. Receives the `clarify_questions` dict and must return the
+answers dict (same keys, resolved values)."""
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from .config import Config
 from .execution import ExecutionResult, make_executor
@@ -53,8 +61,19 @@ class QuestState(TypedDict, total=False):
     topic: str
     title: str
     iteration: int
+    # Phase I clarify-node state. Both dicts share the same 5 keys
+    # (`comparative_baseline`, `empirical_vs_theoretical`,
+    # `success_metric`, `budget`, `output_kinds`); `clarify_questions`
+    # carries `{question, default}` per slot, `clarify_answers` carries
+    # the resolved values (default or user-overridden).
+    clarify_questions: dict[str, Any]
+    clarify_answers: dict[str, Any]
+    clarify_done: bool
     ideas: list[dict[str, Any]]
     chosen_idea: dict[str, Any]
+    # Phase M — ideate self-reflection result. Optional; describes what
+    # the agent considered before locking in `chosen_idea`.
+    ideate_critique: dict[str, Any]
     literature: list[dict[str, Any]]
     design: dict[str, Any]
     code: str
@@ -62,9 +81,23 @@ class QuestState(TypedDict, total=False):
     exec_result: dict[str, Any]
     figures: list[str]
     result_json: dict[str, Any]
+    # Phase K — execute-repair loop counter + history. The reflect
+    # node increments `exec_reflect_iter` and appends a one-line
+    # record per attempt, so analyze/write/review can describe what
+    # was fixed.
+    exec_reflect_iter: int
+    exec_reflect_history: list[dict[str, Any]]
+    exec_give_up_reason: str
     analysis: dict[str, Any]
+    # Phase L — cross-paper check per finding. List of per-finding
+    # records carrying supporting / conflicting / neutral classifications.
+    cross_check: list[dict[str, Any]]
     paper_md: str
     review: dict[str, Any]
+    # Phase N — per-persona reviews from the panel, before moderation.
+    # One entry per `engine.review_panel` member, each with the same
+    # JSON shape the single reviewer produces plus a `persona` field.
+    review_panel: list[dict[str, Any]]
 
 
 class Engine:
@@ -72,6 +105,7 @@ class Engine:
 
     def __init__(self, config: Config, *, supervisor: ProxySupervisor | None = None) -> None:
         self.config = config
+        _warn_if_unsanctioned_provider(config.provider.name)
         self.quest_id = _new_quest_id(config.title or config.topic)
         # quest_root MUST be absolute. When the config sets a relative
         # `output_dir` (e.g. `./outputs`) and the executor later runs a
@@ -96,7 +130,21 @@ class Engine:
         self._prompts = _load_prompts()
         self._client: LLMClient | None = None
 
-    async def run(self) -> QuestArtifacts:
+    async def run(
+        self,
+        *,
+        clarify_callback: ClarifyCallback | None = None,
+    ) -> QuestArtifacts:
+        """Run the quest to terminal state.
+
+        ``clarify_callback`` is called only when ``engine.clarify_mode``
+        is ``"interactive"`` AND the clarify node fires an
+        ``interrupt()``. The callback receives the questions dict and
+        must return the answers dict; the engine then resumes the graph
+        with ``Command(resume=answers)``. When the callback is None and
+        clarify is interactive, the engine raises — set the mode to
+        ``"auto"`` or ``"off"`` for headless runs.
+        """
         self.fi_dir.mkdir(parents=True, exist_ok=True)
         (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
         (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
@@ -121,7 +169,29 @@ class Engine:
                     "iteration": 0,
                 }
                 run_config = {"configurable": {"thread_id": self.quest_id}}
-                final_state: QuestState = await graph.ainvoke(initial, config=run_config)
+
+                # Run, handling clarify interrupts via the callback.
+                payload: Any = initial
+                while True:
+                    final_state = await graph.ainvoke(payload, config=run_config)
+                    interrupts = (final_state or {}).get("__interrupt__")
+                    if not interrupts:
+                        break
+                    # Clarify node raised `interrupt(...)`. Hand the
+                    # questions to the caller's callback for answers.
+                    questions = interrupts[0].value.get("clarify_questions", {})
+                    if clarify_callback is None:
+                        raise RuntimeError(
+                            f"quest {self.quest_id} paused at clarify node but no "
+                            f"clarify_callback was supplied; set clarify_mode to "
+                            f"'auto' or 'off' for headless runs."
+                        )
+                    self._log.info(
+                        "[run] clarify interrupt fired with %d questions; "
+                        "invoking callback", len(questions),
+                    )
+                    answers = await clarify_callback(questions)
+                    payload = Command(resume=answers)
         finally:
             await self._client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:
@@ -141,22 +211,38 @@ class Engine:
         # The QuestState TypedDict is the contract — keep field names
         # backwards-compatible if you add a graph here.
         g: StateGraph[QuestState] = StateGraph(QuestState)
+        g.add_node("clarify", self._node_clarify)
         g.add_node("ideate", self._node_ideate)
         g.add_node("literature", self._node_literature)
         g.add_node("design", self._node_design)
         g.add_node("implement", self._node_implement)
         g.add_node("execute", self._node_execute)
+        # Phase K: execute → execute_reflect (loops back to execute on failure)
+        g.add_node("execute_reflect", self._node_execute_reflect)
         g.add_node("analyze", self._node_analyze)
+        # Phase L: analyze → cross_check (always) → write OR design
+        g.add_node("cross_check", self._node_cross_check)
         g.add_node("write", self._node_write)
         g.add_node("review", self._node_review)
 
-        g.add_edge(START, "ideate")
+        g.add_edge(START, "clarify")
+        g.add_edge("clarify", "ideate")
         g.add_edge("ideate", "literature")
         g.add_edge("literature", "design")
         g.add_edge("design", "implement")
         g.add_edge("implement", "execute")
-        g.add_edge("execute", "analyze")
-        g.add_edge("analyze", "write")
+        g.add_edge("execute", "execute_reflect")
+        g.add_conditional_edges(
+            "execute_reflect",
+            self._route_after_execute_reflect,
+            {"retry": "execute", "proceed": "analyze"},
+        )
+        g.add_edge("analyze", "cross_check")
+        g.add_conditional_edges(
+            "cross_check",
+            self._route_after_cross_check,
+            {"write": "write", "redesign": "design"},
+        )
         g.add_edge("write", "review")
         g.add_conditional_edges(
             "review",
@@ -164,6 +250,40 @@ class Engine:
             {"revise": "design", "done": END},
         )
         return g
+
+    # ---- conditional edges --------------------------------------------------
+
+    def _route_after_execute_reflect(self, state: QuestState) -> str:
+        """Phase K: route based on whether the reflect node patched the
+        code (→ retry execute) or accepted the failure / success
+        (→ proceed to analyze)."""
+        result = state.get("exec_result") or {}
+        rc = result.get("returncode", 0)
+        has_result_json = state.get("result_json") is not None
+        # Success path: nothing to repair.
+        if rc == 0 and has_result_json:
+            return "proceed"
+        # Give-up sentinel set by the reflect node OR iterations exhausted.
+        if state.get("exec_give_up_reason"):
+            return "proceed"
+        iters = state.get("exec_reflect_iter", 0)
+        if iters >= self.config.engine.exec_reflect_max_iterations:
+            return "proceed"
+        return "retry"
+
+    def _route_after_cross_check(self, state: QuestState) -> str:
+        """Phase L: route based on analyze's `next_step` field. If the
+        config disables analyze-rerouting, always go to write."""
+        if not self.config.engine.enable_analyze_reroute:
+            return "write"
+        analysis = state.get("analysis") or {}
+        next_step = analysis.get("next_step", "publish")
+        if next_step in ("re_experiment", "broaden_lit"):
+            # Share the review-loop iteration budget so the whole quest
+            # stays bounded.
+            if state.get("iteration", 0) < self.config.engine.max_iterations:
+                return "redesign"
+        return "write"
 
     def _route_after_review(self, state: QuestState) -> str:
         if not self.config.engine.review_loop:
@@ -176,6 +296,73 @@ class Engine:
 
     # ---- nodes -----------------------------------------------------------
 
+    async def _node_clarify(self, state: QuestState) -> QuestState:
+        """Phase I pre-flight clarification.
+
+        Three modes, controlled by `engine.clarify_mode`:
+
+        * ``"off"`` (default) — skip entirely. Returns an empty patch so
+          downstream nodes see ``clarify_done=False`` and ignore the slot.
+        * ``"auto"`` — agent generates the 5-question survey AND uses
+          its own `default` values as answers. No human loop. Cheap way
+          to sharpen framing.
+        * ``"interactive"`` — generates the questions, then calls
+          LangGraph's ``interrupt()`` so a CLI prompt (`launch.py
+          --interactive`) or the web UI's clarify panel can collect
+          answers from the user. ``interrupt()`` returns the payload
+          the caller resumed with, which becomes ``clarify_answers``.
+
+        Idempotent across restart: when ``clarify_done`` is already True
+        (e.g. resuming after a kill), the node passes through.
+        """
+        mode = self.config.engine.clarify_mode
+        if state.get("clarify_done"):
+            return {}
+        if mode == "off":
+            self._log.info("[clarify] mode=off; skipping")
+            return {"clarify_done": True}
+
+        prompt = self._prompts["clarify"].substitute(topic=state["topic"])
+        text = await self._chat(prompt, node="clarify")
+        questions = _parse_json_lenient(text) or {}
+        if not isinstance(questions, dict) or not questions:
+            # Degrade gracefully: if the LLM produced unparseable JSON,
+            # synthesize a minimal default questionnaire from the topic
+            # alone so the downstream nodes get *something*.
+            self._log.warning("[clarify] LLM returned no parseable questions; using minimal defaults")
+            questions = _default_clarify_questions(state["topic"])
+
+        if mode == "auto":
+            answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
+            self._log.info("[clarify] mode=auto; agent self-answered %d slots", len(answers))
+            return {
+                "clarify_questions": questions,
+                "clarify_answers": answers,
+                "clarify_done": True,
+            }
+
+        # Interactive: pause the graph until the caller resumes with answers.
+        self._log.info(
+            "[clarify] mode=interactive; pausing for human input (%d questions)",
+            len(questions),
+        )
+        payload = interrupt({"clarify_questions": questions})
+        # payload is whatever the resume call sent. Accept either a
+        # dict (the answers) or a dict that includes a "clarify_answers"
+        # key (the GUI wraps it that way for forward-compat).
+        if isinstance(payload, dict) and "clarify_answers" in payload:
+            answers = payload["clarify_answers"]
+        elif isinstance(payload, dict):
+            answers = payload
+        else:
+            # Resumed with a non-dict (or None) — fall through to defaults.
+            answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
+        return {
+            "clarify_questions": questions,
+            "clarify_answers": answers,
+            "clarify_done": True,
+        }
+
     async def _node_ideate(self, state: QuestState) -> QuestState:
         self._log.info("[ideate] topic=%s", state["topic"][:80].replace("\n", " "))
         # Pull a few related items from the knowledge base to ground ideation.
@@ -183,17 +370,61 @@ class Engine:
         # enabled) can still pick sources from the catalog using the
         # topic alone.
         seeded = await self.knowledge.asearch(
-            state["topic"], top_k=3, chat_fn=self._chat_messages,
+            state["topic"], top_k=3,
+            chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
             literature_block=_format_lit(seeded),
+            clarify_block=_format_clarify(state),
         )
-        text = await self._chat(prompt)
+        text = await self._chat(prompt, node="ideate")
         parsed = _parse_json_lenient(text) or {}
         ideas = parsed.get("ideas") or []
         chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
-        return {"ideas": ideas, "chosen_idea": chosen}
+
+        # Phase M — self-reflection. Single extra LLM call that may swap
+        # chosen_idea to a different entry from the brainstormed list.
+        critique: dict[str, Any] = {}
+        if self.config.engine.ideate_reflect and ideas:
+            try:
+                critique_prompt = self._prompts["ideate_reflect"].substitute(
+                    topic=state["topic"],
+                    clarify_block=_format_clarify(state),
+                    ideas_block=json.dumps(ideas, indent=2),
+                    chosen_block=json.dumps(chosen, indent=2),
+                )
+                ctext = await self._chat(critique_prompt, node="ideate_reflect")
+                critique = _parse_json_lenient(ctext) or {}
+                swap_to = (critique.get("swap_to") or "").strip()
+                if swap_to:
+                    swapped = next(
+                        (i for i in ideas if i.get("title") == swap_to), None,
+                    )
+                    if swapped is not None:
+                        self._log.info(
+                            "[ideate] reflection swapped chosen: %r -> %r",
+                            chosen.get("title", "?"), swap_to,
+                        )
+                        chosen = {
+                            **swapped,
+                            "rationale": critique.get("refined_rationale")
+                            or swapped.get("rationale", ""),
+                        }
+                    else:
+                        self._log.info(
+                            "[ideate] reflection wanted unknown title %r; keeping original pick",
+                            swap_to,
+                        )
+                elif critique.get("refined_rationale"):
+                    chosen = {**chosen, "rationale": critique["refined_rationale"]}
+            except Exception as e:
+                self._log.warning("[ideate] reflection skipped: %s", e)
+
+        out: QuestState = {"ideas": ideas, "chosen_idea": chosen}
+        if critique:
+            out["ideate_critique"] = critique
+        return out
 
     async def _node_literature(self, state: QuestState) -> QuestState:
         chosen = state.get("chosen_idea") or {}
@@ -202,7 +433,7 @@ class Engine:
             query.strip(),
             top_k=self.config.knowledge.top_k,
             chosen_idea=chosen,
-            chat_fn=self._chat_messages,
+            chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
         self._log.info("[literature] retrieved %d docs", len(docs))
         return {
@@ -223,8 +454,9 @@ class Engine:
             literature_block=_format_lit_from_state(state),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
+            clarify_block=_format_clarify(state),
         )
-        text = await self._chat(prompt)
+        text = await self._chat(prompt, node="design")
         design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
         return {"design": design}
 
@@ -234,7 +466,7 @@ class Engine:
             design_block=json.dumps(state.get("design") or {}, indent=2),
             timeout_s=str(self.config.execution.timeout_s),
         )
-        text = await self._chat(prompt)
+        text = await self._chat(prompt, node="implement")
         parsed = _parse_json_lenient(text) or {}
         code = parsed.get("code") or 'print("RESULT_JSON: {}")'
         deps = parsed.get("deps") or []
@@ -353,6 +585,109 @@ class Engine:
             "result_json": result_json or {},
         }
 
+    async def _node_execute_reflect(self, state: QuestState) -> QuestState:
+        """Phase K: post-execute repair node.
+
+        If the experiment ran cleanly (rc==0 AND RESULT_JSON parsed),
+        this is a no-op pass-through. Otherwise we read the traceback,
+        ask the LLM to patch the code, and write the new code into
+        state. The conditional edge after this node routes back to
+        `execute` (bounded by `engine.exec_reflect_max_iterations`).
+
+        If the LLM emits a `give_up_reason`, we record it and let the
+        graph proceed to analyze with the failure intact — `analyze`
+        will surface it in the paper and `review` will mark it down.
+        """
+        exec_result = state.get("exec_result") or {}
+        rc = exec_result.get("returncode", 0)
+        has_result_json = state.get("result_json") is not None
+
+        if rc == 0 and has_result_json:
+            self._log.info("[execute_reflect] script succeeded; skipping repair")
+            return {}
+
+        iters = state.get("exec_reflect_iter", 0)
+        if iters >= self.config.engine.exec_reflect_max_iterations:
+            self._log.warning(
+                "[execute_reflect] iterations exhausted (%d); proceeding to analyze with broken state",
+                iters,
+            )
+            return {}
+
+        history = list(state.get("exec_reflect_history") or [])
+        history_block = _format_reflect_history(history)
+
+        prompt = self._prompts["execute_reflect"].substitute(
+            previous_code=(state.get("code") or "")[:8000],
+            returncode=str(rc),
+            stdout_tail=exec_result.get("stdout_tail", "")[:2000],
+            stderr_tail=exec_result.get("stderr_tail", "")[:2000],
+            duration_s=f"{exec_result.get('duration_s', 0):.2f}",
+            figures_count=str(len(state.get("figures") or [])),
+            result_json_present="yes" if has_result_json else "no",
+            reflect_history_block=history_block,
+            design_block=json.dumps(state.get("design") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+        )
+        text = await self._chat(prompt, node="execute_reflect")
+        parsed = _parse_json_lenient(text) or {}
+
+        give_up = (parsed.get("give_up_reason") or "").strip()
+        if give_up:
+            self._log.warning("[execute_reflect] LLM gave up: %s", give_up[:200])
+            history.append({
+                "iter": iters + 1,
+                "returncode": rc,
+                "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
+                "patch_summary": f"(gave up: {give_up[:120]})",
+            })
+            return {
+                "exec_give_up_reason": give_up,
+                "exec_reflect_iter": iters + 1,
+                "exec_reflect_history": history,
+            }
+
+        new_code = parsed.get("code") or ""
+        if not new_code.strip():
+            self._log.warning(
+                "[execute_reflect] LLM returned no `code` field; proceeding without repair"
+            )
+            return {
+                "exec_give_up_reason": "(LLM produced no patched code)",
+                "exec_reflect_iter": iters + 1,
+            }
+
+        patch_summary = parsed.get("patch_summary") or "(no summary)"
+        history.append({
+            "iter": iters + 1,
+            "returncode": rc,
+            "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
+            "patch_summary": patch_summary[:200],
+        })
+        self._log.info(
+            "[execute_reflect] iter=%d patch=%s",
+            iters + 1, patch_summary[:120],
+        )
+
+        # Write the patched code to disk so the next `execute` picks it
+        # up. We mirror the implement node's behavior.
+        code_path = self.quest_root / "code" / "experiment.py"
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        code_path.write_text(new_code, encoding="utf-8")
+
+        patch: QuestState = {
+            "code": new_code,
+            "exec_reflect_iter": iters + 1,
+            "exec_reflect_history": history,
+        }
+        # If the agent declared additional deps for the fix, merge them
+        # so the next `execute` pip-installs them.
+        new_deps = parsed.get("deps") or []
+        if isinstance(new_deps, list) and new_deps:
+            existing = list(state.get("deps") or [])
+            patch["deps"] = list(dict.fromkeys(existing + [str(d) for d in new_deps]))
+        return patch
+
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
         exec_result = state.get("exec_result") or {}
@@ -366,9 +701,98 @@ class Engine:
             result_json=json.dumps(state.get("result_json") or {}, indent=2),
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
         )
-        text = await self._chat(prompt)
+        text = await self._chat(prompt, node="analyze")
         analysis = _parse_json_lenient(text) or {"summary": "(parse failed)", "key_findings": []}
+        # Default `next_step` to publish when the LLM omits it (older
+        # prompts, parse failures) so the route doesn't break.
+        analysis.setdefault("next_step", "publish")
         return {"analysis": analysis}
+
+    async def _node_cross_check(self, state: QuestState) -> QuestState:
+        """Phase L: for each key finding, search literature with the
+        finding text as the query, then classify hits as supporting /
+        conflicting / neutral. Results land in ``state['cross_check']``
+        and are surfaced in the write prompt's ``$cross_check_block``."""
+        findings = list((state.get("analysis") or {}).get("key_findings") or [])
+        if not findings:
+            self._log.info("[cross_check] no key_findings; skipping")
+            return {"cross_check": []}
+
+        per_finding_k = self.config.engine.cross_check_per_finding_k
+        if per_finding_k <= 0:
+            self._log.info("[cross_check] disabled by config (per_finding_k=0)")
+            return {"cross_check": []}
+
+        out: list[dict[str, Any]] = []
+        for finding in findings[:10]:  # cap to avoid runaway LLM cost
+            text = str(finding).strip()
+            if not text:
+                continue
+            self._log.info("[cross_check] searching for: %s", text[:80])
+            try:
+                hits = await self.knowledge.asearch(
+                    text, top_k=per_finding_k,
+                    chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                )
+            except Exception as e:
+                self._log.warning("[cross_check] retrieval failed: %s", e)
+                hits = []
+            if not hits:
+                out.append({
+                    "finding": text,
+                    "supporting": [], "conflicting": [], "neutral": [],
+                    "summary": "(no related literature surfaced)",
+                    "candidates": [],
+                })
+                continue
+            # Classify with one LLM call.
+            cand_block = _format_lit(hits)
+            prompt = self._prompts["cross_check"].substitute(
+                topic=state.get("topic", "")[:1000],
+                finding=text,
+                candidate_literature=cand_block,
+            )
+            try:
+                resp = await self._chat(prompt, node="cross_check")
+                parsed = _parse_json_lenient(resp) or {}
+            except Exception as e:
+                self._log.warning("[cross_check] classify call failed: %s", e)
+                parsed = {}
+            candidates = [
+                {
+                    "title": d.metadata.get("title", "")[:200],
+                    "source": d.metadata.get("source", ""),
+                    "doi": d.metadata.get("doi", ""),
+                    "url": d.metadata.get("url", ""),
+                }
+                for d in hits
+            ]
+            out.append({
+                "finding": text,
+                "supporting": parsed.get("supporting") or [],
+                "conflicting": parsed.get("conflicting") or [],
+                "neutral": parsed.get("neutral") or [],
+                "summary": parsed.get("summary") or "",
+                "candidates": candidates,
+            })
+        self._log.info("[cross_check] checked %d findings", len(out))
+        patch: QuestState = {"cross_check": out}
+        # Phase L iteration accounting: if analyze flagged a re-route AND
+        # there's budget left, bump the shared iteration counter here so
+        # the design node sees the new iteration on its next visit. This
+        # mirrors how `_node_review` bumps on `verdict=revise`.
+        if self.config.engine.enable_analyze_reroute:
+            next_step = (state.get("analysis") or {}).get("next_step", "publish")
+            if (
+                next_step in ("re_experiment", "broaden_lit")
+                and state.get("iteration", 0) < self.config.engine.max_iterations
+            ):
+                patch["iteration"] = state.get("iteration", 0) + 1
+                self._log.info(
+                    "[cross_check] analyze.next_step=%s -> redesign (iteration %d)",
+                    next_step, patch["iteration"],
+                )
+        return patch
 
     async def _node_write(self, state: QuestState) -> QuestState:
         self._log.info("[write] authoring IMRAD paper.md")
@@ -379,8 +803,10 @@ class Engine:
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             literature_block=_format_lit_from_state(state),
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
+            clarify_block=_format_clarify(state),
+            cross_check_block=_format_cross_check(state),
         )
-        markdown = await self._chat(prompt)
+        markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
         paper_path = self.quest_root / "paper" / "paper.md"
@@ -389,6 +815,17 @@ class Engine:
         return {"paper_md": str(paper_path)}
 
     async def _node_review(self, state: QuestState) -> QuestState:
+        """Single-reviewer (default) OR panel-mode review.
+
+        When ``engine.review_panel`` is empty, behave exactly as before:
+        one LLM call, one verdict.
+
+        When non-empty, fire N parallel persona-prefixed reviews
+        (`asyncio.gather`), aggregate the results deterministically,
+        and call a moderator LLM for the prose `rationale`. Each
+        persona's per-call model is resolvable via
+        ``provider.node_models["review_panel.<name>"]``.
+        """
         self._log.info("[review] judging paper")
         paper_md = ""
         paper_path = state.get("paper_md")
@@ -397,36 +834,151 @@ class Engine:
                 paper_md = Path(paper_path).read_text(encoding="utf-8")
             except OSError:
                 paper_md = ""
-        prompt = self._prompts["review"].substitute(
+        base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             paper_md=paper_md[:8000],
         )
-        text = await self._chat(prompt)
-        review = _parse_json_lenient(text) or {"verdict": "accept", "score": 3, "suggestions": []}
-        update: QuestState = {"review": review}
+
+        panel_names = list(self.config.engine.review_panel or [])
+        if not panel_names:
+            # Legacy single-reviewer path — unchanged behavior.
+            text = await self._chat(base_prompt, node="review")
+            review = _parse_json_lenient(text) or {
+                "verdict": "accept", "score": 3, "suggestions": [],
+            }
+            update: QuestState = {"review": review}
+            if review.get("verdict") == "revise":
+                update["iteration"] = state.get("iteration", 0) + 1
+                self._log.info("[review] verdict=revise -> iteration %d", update["iteration"])
+            else:
+                self._log.info(
+                    "[review] verdict=%s score=%s",
+                    review.get("verdict"), review.get("score"),
+                )
+            return update
+
+        # Panel path. Fire each persona in parallel; aggregate.
+        self._log.info("[review] panel mode: %s", panel_names)
+
+        async def run_persona(name: str) -> dict[str, Any]:
+            try:
+                prefix = _load_persona_prefix(name)
+            except ValueError as e:
+                self._log.warning("[review] %s; skipping", e)
+                return {"persona": name, "verdict": "accept", "score": 3,
+                        "strengths": [], "weaknesses": [],
+                        "suggestions": [], "blocking": "",
+                        "error": str(e)}
+            prompt = f"{prefix}\n\n{base_prompt}"
+            text = await self._chat(prompt, node=f"review_panel.{name}")
+            parsed = _parse_json_lenient(text) or {}
+            return {
+                "persona": name,
+                "verdict": parsed.get("verdict") or "accept",
+                "score": parsed.get("score") if isinstance(parsed.get("score"), (int, float)) else 3,
+                "strengths": parsed.get("strengths") or [],
+                "weaknesses": parsed.get("weaknesses") or [],
+                "suggestions": parsed.get("suggestions") or [],
+                "blocking": parsed.get("blocking") or "",
+            }
+
+        panel_results = await asyncio.gather(
+            *(run_persona(n) for n in panel_names),
+            return_exceptions=False,
+        )
+        agg = _aggregate_panel_reviews(list(panel_results))
+
+        # Moderator call — best effort for the rationale + suggestion
+        # attribution prose. Numeric fields are taken from `agg`.
+        panel_block = json.dumps(panel_results, indent=2)
+        try:
+            mod_prompt = self._prompts["review_moderate"].substitute(
+                topic=state["topic"],
+                panel_block=panel_block,
+            )
+            mod_text = await self._chat(mod_prompt, node="review_moderator")
+            mod_parsed = _parse_json_lenient(mod_text) or {}
+        except Exception as e:
+            self._log.warning("[review] moderator call failed: %s", e)
+            mod_parsed = {}
+
+        # Merge: numeric/voting fields from the deterministic aggregator
+        # always win; prose fields prefer the moderator's version when
+        # present.
+        review: dict[str, Any] = {**agg}
+        rationale = mod_parsed.get("rationale")
+        if isinstance(rationale, str) and rationale.strip():
+            review["rationale"] = rationale.strip()
+        # Use the moderator's suggestions if they're well-formed and
+        # carry the persona-attribution prefix; otherwise keep agg's.
+        mod_suggs = mod_parsed.get("suggestions")
+        if isinstance(mod_suggs, list) and mod_suggs:
+            review["suggestions"] = [str(s) for s in mod_suggs]
+
+        update: QuestState = {"review": review, "review_panel": panel_results}
         if review.get("verdict") == "revise":
             update["iteration"] = state.get("iteration", 0) + 1
-            self._log.info("[review] verdict=revise -> iteration %d", update["iteration"])
+            self._log.info(
+                "[review] panel verdict=revise (agreement=%s, score=%s) -> iteration %d",
+                agg.get("agreement"), agg.get("score"), update["iteration"],
+            )
         else:
-            self._log.info("[review] verdict=%s score=%s", review.get("verdict"), review.get("score"))
+            self._log.info(
+                "[review] panel verdict=%s (agreement=%s, score=%s)",
+                agg.get("verdict"), agg.get("agreement"), agg.get("score"),
+            )
         return update
 
     # ---- helpers ---------------------------------------------------------
 
-    async def _chat(self, prompt: str) -> str:
+    async def _chat(self, prompt: str, *, node: str | None = None) -> str:
+        """Single-user-message chat. ``node`` is the engine node name
+        (e.g. ``"ideate"``, ``"review"``); when present and the YAML
+        config sets ``provider.node_models[node]``, that model is sent
+        on this call only. Otherwise the endpoint default applies."""
         assert self._client is not None
         messages = [{"role": "user", "content": prompt}]
-        return await self._client.chat(messages, temperature=0.2)
+        return await self._client.chat(
+            messages, temperature=0.2, model=self._model_for_node(node),
+        )
 
     async def _chat_messages(
-        self, messages: list[dict[str, str]], *, temperature: float = 0.2,
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.2,
+        node: str | None = None,
     ) -> str:
         """Lower-level chat hook for callers (e.g. the knowledge layer's
-        source-router) that build their own messages array."""
+        source-router) that build their own messages array. Honors the
+        same Phase-O per-node model routing as ``_chat``."""
         assert self._client is not None
-        return await self._client.chat(messages, temperature=temperature)
+        return await self._client.chat(
+            messages, temperature=temperature, model=self._model_for_node(node),
+        )
+
+    def _model_for_node(self, node: str | None) -> str | None:
+        """Resolve the effective model for a node — empty string when
+        the lookup misses so the transport falls through to the
+        endpoint default. Accepts hierarchical keys like
+        ``"review_panel.methodologist"`` (Phase N panel personas)."""
+        if not node:
+            return None
+        node_models = self.config.provider.node_models or {}
+        if not node_models:
+            return None
+        # Exact match wins; then prefix match (e.g., "review_panel"
+        # catches "review_panel.methodologist" when no persona-specific
+        # entry exists).
+        if node in node_models:
+            return node_models[node]
+        if "." in node:
+            base = node.split(".", 1)[0]
+            if base in node_models:
+                return node_models[base]
+        return None
 
     def _collect_artifacts(self, state: QuestState) -> QuestArtifacts:
         paper_md = self.quest_root / "paper" / "paper.md"
@@ -546,7 +1098,11 @@ class Engine:
 
 
 def _load_prompts() -> dict[str, string.Template]:
-    names = ("ideate", "design", "implement", "analyze", "write", "review")
+    names = (
+        "clarify", "ideate", "ideate_reflect", "design", "implement",
+        "execute_reflect", "analyze", "cross_check", "write", "review",
+        "review_moderate",  # Phase N — panel-moderator prompt
+    )
     out: dict[str, string.Template] = {}
     for n in names:
         path = PROMPTS_DIR / f"{n}.md"
@@ -574,6 +1130,237 @@ def _format_lit_from_state(state: QuestState) -> str:
         title = meta.get("title") or meta.get("source") or f"item-{i}"
         lines.append(f"[{i}] {title}\n{item.get('content', '')[:600]}")
     return "\n\n".join(lines)
+
+
+_CLARIFY_LABELS = {
+    "comparative_baseline": "Comparative baseline",
+    "empirical_vs_theoretical": "Empirical / theoretical",
+    "success_metric": "Success metric",
+    "budget": "Time / compute budget",
+    "output_kinds": "Desired output kinds",
+}
+
+
+def _format_clarify(state: QuestState) -> str:
+    """Render the resolved clarify-answer slots as a small bulleted block
+    for downstream prompts. Returns an empty-marker string when clarify
+    was skipped (mode=off) so the prompt still parses cleanly."""
+    answers = state.get("clarify_answers") or {}
+    if not answers:
+        return "(none — clarify mode is off)"
+    lines: list[str] = []
+    for key, label in _CLARIFY_LABELS.items():
+        if key not in answers:
+            continue
+        value = answers[key]
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value) or "(empty)"
+        lines.append(f"- **{label}**: {value}")
+    return "\n".join(lines) or "(no answers recorded)"
+
+
+def _default_clarify_questions(topic: str) -> dict[str, Any]:
+    """Minimal fallback when the LLM produces unparseable JSON. Keeps
+    the same 5-slot shape so downstream code doesn't branch."""
+    topic_hint = topic[:80].replace("\n", " ")
+    return {
+        "comparative_baseline": {
+            "question": f"What existing method or dataset should this study be compared against, for: {topic_hint}?",
+            "default": "(none specified — agent will pick a sensible baseline)",
+        },
+        "empirical_vs_theoretical": {
+            "question": "Does this study run code and measure something, or derive results analytically?",
+            "default": "empirical",
+        },
+        "success_metric": {
+            "question": "What number changing in what direction would count as the headline result?",
+            "default": "(none specified — agent will pick a metric)",
+        },
+        "budget": {
+            "question": "Soft cap on experiment wall-clock?",
+            "default": "a few minutes on a laptop CPU",
+        },
+        "output_kinds": {
+            "question": "Which deliverables matter for this study?",
+            "default": ["paper_md"],
+        },
+    }
+
+
+def _format_reflect_history(history: list[dict[str, Any]]) -> str:
+    """Phase K: render the per-iteration repair history for the reflect
+    prompt — keeps the LLM from re-trying patches that already failed."""
+    if not history:
+        return "(no prior repair attempts on this experiment)"
+    lines: list[str] = []
+    for h in history:
+        lines.append(
+            f"- iter {h.get('iter')}: rc={h.get('returncode')} "
+            f"→ {h.get('patch_summary', '(no summary)')[:200]}"
+        )
+        stderr_tail = (h.get("stderr_tail") or "").strip()
+        if stderr_tail:
+            lines.append(f"    stderr_tail: {stderr_tail[-300:]}")
+    return "\n".join(lines)
+
+
+_PERSONA_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _load_persona_prefix(name: str) -> str:
+    """Phase N: load the persona-specific prefix that gets prepended to
+    `agents/review.md` when this persona reviews. Falls back to a
+    generic prefix when no per-persona file exists, so users can
+    declare a custom persona name in YAML without shipping a new file."""
+    if not _PERSONA_NAME_RE.match(name):
+        raise ValueError(
+            f"invalid persona name {name!r}: must match [a-z][a-z0-9_]*"
+        )
+    persona_path = PROMPTS_DIR / f"review_persona_{name}.md"
+    if persona_path.exists():
+        return persona_path.read_text(encoding="utf-8").strip()
+    generic_path = PROMPTS_DIR / "review_persona_generic.md"
+    if not generic_path.exists():
+        return f"**Persona: {name}.**"
+    template = string.Template(generic_path.read_text(encoding="utf-8"))
+    return template.safe_substitute(persona_name=name).strip()
+
+
+def _aggregate_panel_reviews(
+    panel: list[dict[str, Any]], *, fallback_verdict: str = "accept",
+) -> dict[str, Any]:
+    """Phase N: deterministic aggregator the moderator prompt is also
+    instructed to follow. We compute the canonical answer programmatically
+    so tests can pin the rules even when the LLM moderator is unavailable
+    or produces malformed JSON. The moderator's output, when usable, is
+    preferred for prose (`rationale`, `suggestions` attribution) but the
+    numeric verdict/score is recomputed here to enforce the rules.
+
+    Rules:
+      - Any persona votes `revise` with `score < 3` → final verdict revise.
+      - Otherwise majority verdict; ties → revise (conservative).
+      - Score = median of panel scores, rounded.
+      - Weaknesses = deduped union.
+      - Strengths = intersection.
+      - Suggestions = deduped union, persona-attributed.
+      - Agreement = "unanimous" / "split" / "controversial".
+    """
+    if not panel:
+        return {"verdict": fallback_verdict, "score": 3,
+                "agreement": "unanimous", "strengths": [],
+                "weaknesses": [], "suggestions": [], "blocking": ""}
+
+    verdicts = [(r.get("verdict") or "accept") for r in panel]
+    scores: list[int] = []
+    for r in panel:
+        s = r.get("score")
+        if isinstance(s, (int, float)):
+            scores.append(int(round(float(s))))
+    scores = scores or [3]
+    scores.sort()
+    median = scores[len(scores) // 2]
+
+    # Any low-confidence revise vote dominates.
+    low_revise = any(
+        (r.get("verdict") == "revise"
+         and isinstance(r.get("score"), (int, float))
+         and float(r["score"]) < 3)
+        for r in panel
+    )
+    if low_revise:
+        verdict = "revise"
+    else:
+        n_revise = sum(1 for v in verdicts if v == "revise")
+        n_accept = sum(1 for v in verdicts if v == "accept")
+        if n_revise > n_accept:
+            verdict = "revise"
+        elif n_accept > n_revise:
+            verdict = "accept"
+        else:
+            verdict = "revise"  # ties favor revision (conservative)
+
+    n = len(panel)
+    if all(v == verdicts[0] for v in verdicts):
+        agreement = "unanimous"
+    elif n - max(verdicts.count("accept"), verdicts.count("revise")) <= 1:
+        agreement = "split"
+    else:
+        agreement = "controversial"
+
+    # Strengths: intersection across panel.
+    strength_sets = [set(r.get("strengths") or []) for r in panel]
+    intersected: set[str] = strength_sets[0] if strength_sets else set()
+    for s in strength_sets[1:]:
+        intersected &= s
+    strengths = sorted(intersected)
+
+    # Weaknesses: deduped union.
+    weaknesses: list[str] = []
+    seen_w: set[str] = set()
+    for r in panel:
+        for w in (r.get("weaknesses") or []):
+            key = str(w).strip().lower()
+            if key and key not in seen_w:
+                seen_w.add(key)
+                weaknesses.append(str(w))
+
+    # Suggestions: deduped union with persona attribution.
+    suggestions: list[str] = []
+    seen_s: set[str] = set()
+    for r in panel:
+        persona = r.get("persona", "?")
+        for sug in (r.get("suggestions") or []):
+            key = str(sug).strip().lower()
+            if key and key not in seen_s:
+                seen_s.add(key)
+                suggestions.append(f"[{persona}] {sug}")
+
+    # Blocking: first non-empty blocking note across the panel.
+    blocking = ""
+    for r in panel:
+        b = (r.get("blocking") or "").strip()
+        if b:
+            blocking = b
+            break
+
+    return {
+        "verdict": verdict, "score": median, "agreement": agreement,
+        "strengths": strengths, "weaknesses": weaknesses,
+        "suggestions": suggestions, "blocking": blocking,
+    }
+
+
+def _format_cross_check(state: QuestState) -> str:
+    """Phase L: render the per-finding cross-paper-check results as a
+    bulleted block for the write prompt's `$cross_check_block`."""
+    checks = state.get("cross_check") or []
+    if not checks:
+        return "(none — cross-check disabled or no key findings)"
+    lines: list[str] = []
+    for c in checks:
+        lines.append(f"### Finding: {c.get('finding', '(?)')}")
+        for bucket in ("supporting", "conflicting"):
+            items = c.get(bucket) or []
+            if not items:
+                continue
+            lines.append(f"  {bucket} ({len(items)}):")
+            for it in items[:5]:
+                idx = it.get("index")
+                why = (it.get("why") or "").strip()
+                ref = "(?)"
+                if isinstance(idx, int) and 0 < idx <= len(c.get("candidates") or []):
+                    cand = c["candidates"][idx - 1]
+                    bits = [cand.get("title") or "(untitled)"]
+                    if cand.get("doi"):
+                        bits.append(f"DOI:{cand['doi']}")
+                    elif cand.get("url"):
+                        bits.append(cand["url"])
+                    ref = " · ".join(bits)
+                lines.append(f"    - [{idx}] {ref} — {why}")
+        if c.get("summary"):
+            lines.append(f"  summary: {c['summary'][:300]}")
+        lines.append("")
+    return "\n".join(lines).strip() or "(no classifiable hits)"
 
 
 _FENCE_RE = re.compile(r"^```(?:\w+)?\n(.*)\n```$", re.DOTALL)
@@ -669,6 +1456,70 @@ def _deps_to_warmup_modules(deps: list[str]) -> str:
             continue
         out.append(module)
     return ", ".join(out)
+
+
+_UNSANCTIONED_PROXY_PROVIDERS = frozenset({
+    "github_copilot_cli",
+    "github_copilot_vscode",
+})
+
+_PROXY_WARN_SHOWN: set[str] = set()
+
+
+def _warn_if_unsanctioned_provider(name: str) -> None:
+    """Print a one-time warning (per process) when the user picks a
+    provider that talks to GitHub Copilot via the third-party
+    `copilot-api` reverse-engineered proxy.
+
+    The proxy's own README warns: "Excessive automated or scripted use
+    of Copilot ... may trigger GitHub's abuse-detection systems. You
+    may receive a warning from GitHub Security, and further anomalous
+    activity could result in temporary suspension of your Copilot
+    access." Premium-request volume from an automated research loop
+    is exactly the pattern that trips that detector. The sanctioned
+    alternatives for headless / VSCode usage are wired into FI:
+
+      - `copilot_cli`       — GitHub's own `@github/copilot-cli` binary.
+                              Headless, uses your normal Copilot
+                              subscription via `gh auth login`.
+      - `vscode_extension`  — Phase P: routes calls through VSCode's
+                              `vscode.lm.*` Language Model API via the
+                              FI VSCode extension. The user explicitly
+                              consents; calls show up in their Copilot
+                              usage dashboard like any chat turn.
+
+    Suppression: this only prints once per provider per process to
+    keep fleet logs from being spammy. Set the FI_SUPPRESS_PROXY_WARN
+    environment variable to silence it entirely (you've been warned).
+    """
+    if name not in _UNSANCTIONED_PROXY_PROVIDERS:
+        return
+    import os
+    if os.environ.get("FI_SUPPRESS_PROXY_WARN"):
+        return
+    if name in _PROXY_WARN_SHOWN:
+        return
+    _PROXY_WARN_SHOWN.add(name)
+    logging.getLogger("frontier_insight").warning(
+        "\n%s\n"
+        "  provider=%r uses the third-party `copilot-api` proxy, which is\n"
+        "  NOT officially supported by GitHub and may violate the GitHub\n"
+        "  Copilot acceptable-use policy under heavy automation. From\n"
+        "  copilot-api's own README:\n"
+        "    \"Excessive automated or scripted use of Copilot ... may\n"
+        "     trigger GitHub's abuse-detection systems. You may receive\n"
+        "     a warning from GitHub Security, and further anomalous\n"
+        "     activity could result in temporary suspension of your\n"
+        "     Copilot access.\"\n"
+        "\n"
+        "  Sanctioned alternatives for Copilot in FI:\n"
+        "    - provider.name: copilot_cli       (headless, uses gh auth)\n"
+        "    - provider.name: vscode_extension  (in-VSCode via vscode.lm.*)\n"
+        "\n"
+        "  Set FI_SUPPRESS_PROXY_WARN=1 to silence this warning.\n"
+        "%s",
+        "─" * 72, "─" * 72, name,
+    )
 
 
 def _new_quest_id(seed: str) -> str:

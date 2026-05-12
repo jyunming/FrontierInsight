@@ -12,6 +12,9 @@ $literature_block
 # Prior review feedback (if iteration > 0)
 $review_feedback
 
+# Pre-flight clarifications (user-supplied or auto-derived)
+$clarify_block
+
 # Your task
 Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under $timeout_s seconds on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`.
 

@@ -286,25 +286,36 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     g = engine._build_graph()
 
     expected_nodes = {
-        "ideate", "literature", "design", "implement",
+        "clarify", "ideate", "literature", "design", "implement",
         "execute", "analyze", "write", "review",
     }
     assert expected_nodes.issubset(set(g.nodes))
 
-    # Linear edges that must be present.
+    # Linear edges that must be present. Phase I inserted `clarify`
+    # between START and `ideate`; the rest of the chain is unchanged.
     plain_edges = set(g.edges)
-    assert (START, "ideate") in plain_edges
+    assert (START, "clarify") in plain_edges
+    assert ("clarify", "ideate") in plain_edges
     assert ("ideate", "literature") in plain_edges
     assert ("literature", "design") in plain_edges
     assert ("design", "implement") in plain_edges
     assert ("implement", "execute") in plain_edges
-    assert ("execute", "analyze") in plain_edges
-    assert ("analyze", "write") in plain_edges
+    # Phase K replaced `execute → analyze` with `execute → execute_reflect`
+    # plus a conditional `execute_reflect → execute | analyze` edge.
+    assert ("execute", "execute_reflect") in plain_edges
+    # Phase L replaced `analyze → write` with `analyze → cross_check` plus
+    # a conditional `cross_check → write | design` edge.
+    assert ("analyze", "cross_check") in plain_edges
     assert ("write", "review") in plain_edges
 
-    # Conditional edge mapping: route output -> next node.
-    branches = g.branches.get("review") or {}
-    assert branches, "expected at least one conditional branch on `review`"
-    branch = next(iter(branches.values()))
-    # path_map is the {"revise": "design", "done": END} dict.
-    assert branch.ends == {"revise": "design", "done": END}
+    # Conditional branches required by Phase K, L, and the review loop.
+    assert "review" in g.branches
+    assert "execute_reflect" in g.branches
+    assert "cross_check" in g.branches
+
+    review_branch = next(iter(g.branches["review"].values()))
+    assert review_branch.ends == {"revise": "design", "done": END}
+    reflect_branch = next(iter(g.branches["execute_reflect"].values()))
+    assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
+    cross_branch = next(iter(g.branches["cross_check"].values()))
+    assert cross_branch.ends == {"write": "write", "redesign": "design"}

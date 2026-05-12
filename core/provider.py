@@ -197,7 +197,7 @@ class ResolvedEndpoint:
     base_url: str
     model: str
     api_key: str
-    transport: str = "http"          # "http" | "cli"
+    transport: str = "http"          # "http" | "cli" | "vscode_bridge"
     cli_spec: _CliSpec | None = None  # set when transport == "cli"
     # Only set (non-empty) when the user explicitly chose a CLI model via
     # YAML `provider.model`. `_run_cli` injects `[spec.model_flag, value]`
@@ -205,6 +205,19 @@ class ResolvedEndpoint:
     # a human-readable display string for the Engine's startup log line
     # (e.g. "claude_cli (CLI default)") rather than going blank.
     cli_model_override: str = ""
+    # Phase P — VSCode-extension bridge. When transport == "vscode_bridge",
+    # this is the localhost TCP port the FI extension is listening on;
+    # the bridge client connects there for every chat call.
+    vscode_bridge_port: int = 0
+    # As with `cli_model_override`: the user's explicit YAML
+    # `provider.model` (empty when unset). Sent as the wire-level
+    # `model_hint` to the extension; an empty string is the documented
+    # signal for "use the model selected in the Chat picker." We keep
+    # this separate from `model` because the latter carries a
+    # human-readable display string (e.g. "(VSCode chat default)")
+    # for the Engine's startup log, and that string is NOT a valid
+    # selectChatModels family filter.
+    vscode_model_override: str = ""
 
 
 @dataclass
@@ -338,6 +351,40 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+_TRANSIENT_BRIDGE_MARKERS = (
+    "net::err_http2",
+    "net::err_connection",
+    "net::err_network",
+    "err_http2_protocol_error",
+    "econnreset",
+    "etimedout",
+    "socket hang up",
+    "503",
+    "504",
+    "502",
+    "network connection",
+    "firewall rules and network",
+    "temporarily unavailable",
+    "rate limit",
+    "request failed",
+    "bridge connection dropped",
+    "bridge write failed",
+)
+
+
+def _is_bridge_error_transient(msg: str) -> bool:
+    """Classify whether a BridgeError message looks worth retrying.
+
+    Pattern-matches against well-known transient markers Copilot's
+    backend emits via `vscode.lm.sendRequest` failures (HTTP/2
+    protocol errors, connection resets, 5xx, rate limits) AND against
+    bridge-side connection failures. Auth errors and "no model
+    available for hint" are NOT considered transient.
+    """
+    m = (msg or "").lower()
+    return any(marker in m for marker in _TRANSIENT_BRIDGE_MARKERS)
 
 
 def _extract_gemini_response(raw: str) -> str:
@@ -567,6 +614,30 @@ def resolve_endpoint(
         raise RuntimeError(
             f"provider {name!r} requires async resolution via resolve_endpoint_async"
         )
+    if name == "vscode_extension":
+        # Phase P — the FI VSCode extension is the parent process;
+        # it spawned us with `--vscode-bridge-port N` and the port
+        # lives in provider.extra["bridge_port"] (the launch.py flag
+        # writes it there at config-load time).
+        port = int(provider.extra.get("bridge_port", 0))
+        if port <= 0:
+            raise RuntimeError(
+                "vscode_extension provider requires extra['bridge_port'] "
+                "to be set (the FI VSCode extension passes this via "
+                "--vscode-bridge-port). Are you launching FI from outside "
+                "the extension? Use copilot_cli for headless Copilot runs."
+            )
+        return ResolvedEndpoint(
+            base_url="",
+            model=provider.model or "(VSCode chat default)",
+            api_key=_NO_KEY_SENTINEL,
+            transport="vscode_bridge",
+            vscode_bridge_port=port,
+            # The display string above is for logs only — it would be
+            # an invalid family filter for selectChatModels. The real
+            # override is empty unless the YAML pinned a model.
+            vscode_model_override=provider.model or "",
+        )
     if name in _CLI_PROVIDERS:
         # CLI providers exec a local binary per chat call. No URL, no key
         # (the CLI uses its own OAuth keychain). `cli_model_override` is
@@ -633,8 +704,18 @@ class LLMClient:
         # than the typical 10–90 s per call but bounded so concurrent
         # fleet contention can't hang the whole quest indefinitely.
         self._cli_timeout_s = cli_timeout_s
+        # Phase P — lazily-built VSCode-extension bridge client. The
+        # bridge connection is shared across every chat call from this
+        # LLMClient instance.
+        self._bridge: Any | None = None
 
     async def aclose(self) -> None:
+        if self._bridge is not None:
+            try:
+                await self._bridge.aclose()
+            except Exception:
+                pass
+            self._bridge = None
         if self._owns_http:
             await self._http.aclose()
 
@@ -645,11 +726,23 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
+        model: str | None = None,
     ) -> str:
+        """Run one chat completion. ``model`` is an optional per-call
+        override (Phase O: per-node model routing). When provided and
+        non-empty, it replaces the endpoint's default model for THIS
+        call only — useful for sending different nodes through different
+        models on the same provider (most relevant on Copilot, where
+        all the model variants share one CLI and one premium-request
+        budget). Falls back to ``self.endpoint.model`` when omitted."""
         if self.endpoint.transport == "cli":
-            return await self._chat_cli(messages)
+            return await self._chat_cli(messages, model_override=model)
+        if self.endpoint.transport == "vscode_bridge":
+            return await self._chat_vscode_bridge(
+                messages, model_override=model, temperature=temperature,
+            )
         body: dict[str, Any] = {
-            "model": self.endpoint.model,
+            "model": (model or self.endpoint.model),
             "messages": messages,
             "temperature": temperature,
         }
@@ -684,7 +777,72 @@ class LLMClient:
         data = r.json()
         return data["choices"][0]["message"]["content"]
 
-    async def _chat_cli(self, messages: list[dict[str, str]]) -> str:
+    async def _chat_vscode_bridge(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model_override: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        """Phase P: route the chat call through the FI VSCode extension
+        via the localhost TCP bridge. The extension makes the actual
+        ``vscode.lm`` call on the authenticated user's behalf so we
+        never touch the Copilot HTTP API directly — that's the whole
+        point of the sanctioned path. ``model_override`` becomes the
+        ``model_hint`` the extension passes to ``selectChatModels``."""
+        # Lazy-import so non-VSCode runs don't pay for the module load.
+        from .vscode_bridge import VSCodeBridgeClient
+        if self._bridge is None:
+            self._bridge = VSCodeBridgeClient(
+                host="127.0.0.1", port=self.endpoint.vscode_bridge_port,
+            )
+            await self._bridge.connect()
+        # Phase O per-call override wins; otherwise use the user's
+        # YAML-pinned model (`vscode_model_override`). DO NOT fall
+        # through to `self.endpoint.model` — that field carries a
+        # human-readable display string ("(VSCode chat default)")
+        # for logging, and selectChatModels would reject it as an
+        # invalid family filter. Empty hint = "use whatever the user
+        # picked in the Chat model picker", which the extension
+        # handles by calling selectChatModels({vendor: "copilot"}).
+        if model_override is not None:
+            hint = model_override
+        else:
+            hint = self.endpoint.vscode_model_override
+        # Retry transient bridge errors with exponential backoff. The
+        # extension's own sendRequest retries inside the TS bridge,
+        # but a user on an older .vsix won't have that — and even on
+        # the latest, the bridge surfaces `lm_error` after its own
+        # retry exhausts. This is the second-chance layer.
+        from .vscode_bridge import BridgeError
+
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=20),
+            retry=retry_if_exception_type(BridgeError),
+            reraise=True,
+        ):
+            with attempt:
+                try:
+                    return await self._bridge.chat(
+                        messages, model_hint=hint or "", temperature=temperature,
+                    )
+                except BridgeError as e:
+                    # Only retry transient-looking errors; auth /
+                    # "no model available" / user-cancelled errors
+                    # are non-transient and should surface immediately.
+                    if not _is_bridge_error_transient(str(e)):
+                        raise
+                    raise
+        # Unreachable — tenacity reraise=True always raises on exhaustion.
+        raise RuntimeError("vscode-bridge retry exhausted without raising")
+
+    async def _chat_cli(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model_override: str | None = None,
+    ) -> str:
         """Exec a local CLI binary with the prompt and return its output.
 
         Flattens the OpenAI-style `messages` list into a single text prompt
@@ -710,9 +868,17 @@ class LLMClient:
             reraise=True,
         ):
             with attempt:
+                # Per-call override (Phase O) takes precedence over the
+                # endpoint-level override set at resolve time. Empty
+                # string means "use the CLI's own default" — which is
+                # also what cli_model_override="" means, so consistent.
+                effective_model = (
+                    model_override if model_override is not None
+                    else self.endpoint.cli_model_override
+                )
                 return await _run_cli(
                     spec, prompt,
-                    model=self.endpoint.cli_model_override,
+                    model=effective_model,
                     timeout_s=self._cli_timeout_s,
                 )
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
