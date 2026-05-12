@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-Frontier Insight (FI) is a Windows + Linux native automated research pipeline. **FI owns the research loop itself**: an async LangGraph DAG (`ideate → literature → design → implement → execute → analyze → write → review`) drives an LLM through experimentation; agent-generated code runs in a per-quest venv (default) or Docker container (opt-in). Knowledge is delegated to [`jyunming/Axon`](https://github.com/jyunming/Axon) — do not reimplement vector search, literature retrieval, or cross-quest memory inside FI.
+Frontier Insight (FI) is a Windows + Linux native automated research pipeline. **FI owns the research loop itself**: an async LangGraph DAG (`clarify → ideate → literature → design → implement → execute → execute_reflect → analyze → cross_check → write → review`) drives an LLM through experimentation; agent-generated code runs in a per-quest venv (default) or Docker container (opt-in). Knowledge is delegated to [`jyunming/Axon`](https://github.com/jyunming/Axon) — do not reimplement vector search, literature retrieval, or cross-quest memory inside FI. The graph has three feedback loops: (a) `execute_reflect → execute` (Phase K — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`); (b) `cross_check → design` (Phase L — `analyze.next_step ∈ {re_experiment, broaden_lit}` re-routes to design); (c) `review → design` (the classic revise loop). The Phase L and Phase review loops share `engine.max_iterations` as the budget; Phase K has its own counter so a broken script doesn't eat the design-iteration budget.
 
 The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. The historical section of `TEST_RESULTS.md` retains DS-era results for context only — links to `test_runs/` artifacts inside that file are historical and the directory is no longer in the repo.
 
@@ -13,7 +13,7 @@ The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. The 
 ```bash
 pip install -r requirements.txt
 pip install pytest pytest-asyncio          # dev
-python -m pytest -v                         # 217 tests, ~3 minutes (real venv creates)
+python -m pytest -v                         # 295 tests, ~8 minutes (real venv creates)
 python launch.py --config examples/integrator_bakeoff/config.yaml
 python launch.py --fleet a.yaml b.yaml --max-concurrent 4 --memory-cap-mb 4096
 python launch.py --ingest paper1.pdf paper2.md   # permanent ingest into Axon (no quest)
@@ -33,7 +33,7 @@ External prerequisites are all optional and feature-gated:
 
 **The engine** (`core/engine.py::Engine`) is stateless w.r.t. process globals — N parallel Engines must coexist in one process for `--fleet`. The graph is async LangGraph compiled with `AsyncSqliteSaver` at `<quest_root>/.fi/state.sqlite`; the LangGraph `thread_id` is the quest_id, so a killed run can be resumed by re-running with the same quest output dir.
 
-**`QuestState`** (TypedDict in `core/engine.py`) is the contract between every node and the prompts in `agents/*.md`. Field names are stable; any Phase-G alternate graph must keep them backwards-compatible. `QuestArtifacts` is the contract between the engine and the generators.
+**`QuestState`** (TypedDict in `core/engine.py`) is the contract between every node and the prompts in `agents/*.md`. Field names are stable; any Phase-G alternate graph must keep them backwards-compatible. `QuestArtifacts` is the contract between the engine and the generators. Self-correction state lives on `QuestState` too: `clarify_*` (Phase I), `ideate_critique` (Phase M), `exec_reflect_iter`/`exec_reflect_history`/`exec_give_up_reason` (Phase K), `cross_check` (Phase L).
 
 **Provider layer** (`core/provider.py`): three transports, one `LLMClient.chat(messages) -> str` surface.
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
@@ -61,3 +61,5 @@ External prerequisites are all optional and feature-gated:
 `tests/test_config.py` covers the YAML schema and tilde expansion. `tests/test_execution.py` covers `VenvExecutor` (creates a real venv — slow). `tests/test_engine_smoke.py` runs the full 8-node DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge.py` (50 tests) covers source adapters, dedup, router-LLM happy/failure paths, local-paper load + pin, Phase-2 PDF magic-bytes check + login-wall rejection, structured-ingest helpers (spine / header / topic event), external-ref spine writes. `tests/test_knowledge_writeback.py` verifies the cross-quest memory write-back call shape and the accept-gate. **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.
 
 `pytest.ini` redirects `tmp_path` to `./.pytest_tmp/` because the default Windows `%TEMP%` path was inaccessible to the harness sandbox. If a test fails on a fresh checkout, that path is the first thing to check.
+
+**Don't claim Phase P (VSCode extension) is done without running BOTH `npm run compile` AND `npm run package`.** Two distinct steps; one silently missing the other has bitten this codebase twice already. `tests/test_vscode_extension_typescript.py` runs both from pytest as a structural check (4 tests). The tests are gated on `node`+`npm`+`vscode-frontier-insight/node_modules` being present and skip silently otherwise, so any "Phase P shipping" message must explicitly state both were run and pin the resulting `.vsix` path. Background: a prior session committed TypeScript with two `tsc --strict` errors and called it done; another session shipped a "ready" extension without a `package` script, so there was no `.vsix` to install.

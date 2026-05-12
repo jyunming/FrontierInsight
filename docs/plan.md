@@ -161,10 +161,221 @@ graph is shipped today — the hook is structural.
   + a Rust kernel via maturin) is the right reach if Phase H profiling
   surfaces a hot spot. Today there is no such hot spot.
 
+### Phase I — Pre-flight clarification (`clarify` node) ✅ landed
+
+A new node inserted **before** `ideate`. The agent reads the topic and
+produces a short structured questionnaire; the user answers; answers
+feed into every downstream prompt as additional constraints. Closes
+the gap between "topic in YAML" and "agent decides everything."
+
+Static-shape survey (5 fixed slots, agent fills the per-topic specifics):
+
+1. **Comparative baseline** — what existing method / dataset / regime
+   should this be compared against?
+2. **Empirical vs theoretical** — does this study run code and measure,
+   or derive results analytically?
+3. **Success metric** — what number changing in what direction would
+   count as the headline result?
+4. **Time / compute budget** — a soft cap so the `design` node knows
+   whether to propose a 30-second sweep or a multi-hour experiment.
+5. **Output kinds** — which generators to run (paper / slides / poster
+   / speech); paper-only by default.
+
+**Backwards-compatible.** When `engine.clarify_mode = "off"` (default
+for tests and fleet quests), the node skips entirely. When `"auto"`,
+the agent self-answers from the topic alone — no human in the loop.
+When `"interactive"` and `launch.py --interactive` is set, the CLI or
+GUI handler reads answers from the user. The node uses LangGraph's
+`interrupt()` so the SqliteSaver already gives us pause/resume for free.
+
+`QuestState` gains three fields (additive — Phase G subclasses keep
+working): `clarify_questions: dict`, `clarify_answers: dict`,
+`clarify_done: bool`.
+
+### Phase J — Status GUI + interactive runner ✅ landed
+
+Single-process FastAPI server with an HTMX frontend. Read paths
+mostly exist on disk already (the SqliteSaver, `.fi/run.log`, the
+per-quest `frontier_insight_summary.json`); the server is a glorified
+file/SQLite browser plus an SSE log stream and a clarify-resume hook.
+
+**Server** (`web/server.py`):
+- `GET /` — single-page HTMX shell.
+- `GET /api/quests` — every quest dir under the configured root, with
+  current node + verdict + age.
+- `GET /api/quests/{id}` — detail (state JSON, figures, paper preview).
+- `GET /api/quests/{id}/log/stream` — SSE log tail.
+- `GET /api/quests/{id}/clarify` — pending questions, if any.
+- `POST /api/quests/{id}/clarify` — submit answers; resumes the graph.
+- `POST /api/quests/start` — start a new quest from a posted YAML.
+
+**Frontend** (`web/static/`):
+- One `index.html` with HTMX + vanilla JS (no build step, no SPA
+  framework). Fleet view → quest detail → live log → clarify panel.
+
+**Run as**: `python launch.py --serve [--host 127.0.0.1] [--port 8765]
+[--output-dir ./outputs]`. The server reuses the same `Engine`
+machinery — starting a quest from the UI is identical to running
+`launch.py --config quest.yaml` plus the optional clarify pause.
+
+FastAPI is loaded lazily — `--serve` is the only entry point that
+requires it; existing CLI usage is unaffected.
+
+### Phase K — Execute-repair loop (`execute_reflect` node) ✅ landed
+
+Real research is not one-shot — the agent-written experiment script is
+the #1 failure surface. Before Phase K, a typo or wrong import in
+`experiment.py` made `_node_execute` return `rc != 0`, analyze saw
+empty `RESULT_JSON`, write produced a thin paper, and `review → revise`
+would re-design from scratch on iteration 2. That's a full quest
+restart for a one-line bug.
+
+Phase K inserts a new node **between `execute` and `analyze`**. It
+reads `exec_result` and decides:
+
+* **success** (rc==0 AND parseable `RESULT_JSON`) → proceed to analyze.
+* **broken** (rc!=0 OR no `RESULT_JSON`) AND iterations left →
+  generate a patched `code` from the traceback + previous code +
+  prior reflect history. Route back to `execute`.
+* **broken** AND iterations exhausted, OR the LLM emits a
+  `give_up_reason` sentinel → proceed to analyze anyway (with the
+  broken state so analyze can surface the failure in the paper).
+
+Bounded by `engine.exec_reflect_max_iterations` (default 3). Each
+iteration costs one LLM call + one venv execution. `QuestState` gains
+`exec_reflect_history: list[{iter, returncode, stderr_tail, patch_summary}]`
+so analyze and write can describe what was fixed (and review can mark
+down a paper that needed many repairs).
+
+The reflect prompt explicitly forbids "fixes that lower the bar"
+(swallowing exceptions, skipping assertions, randomizing the success
+metric). If the experiment is genuinely impossible the LLM is
+instructed to return `{"give_up_reason": "..."}` and we stop.
+
+### Phase L — Analyze-driven re-route + cross-paper check ✅ landed
+
+Two coupled additions, sharing a new `cross_check` node and a
+conditional edge after `analyze`:
+
+**Cross-check** (`_node_cross_check`, new). After analyze produces
+`key_findings`, we run a literature search **keyed on each finding
+text** (not just the original topic), then ask the LLM to classify
+each retrieved doc as **supporting**, **conflicting**, or **neutral**
+relative to that finding. Results land as
+`state["cross_check"]: list[{finding, supporting, conflicting, neutral}]`
+and flow into the write prompt's new `$cross_check_block`. This is
+the "search for new resources again when there's a new finding"
+loop — the literature query uses the *discovered* claim, not the
+*starting* topic.
+
+**Analyze-driven re-route**. `_node_analyze` now emits an optional
+`next_step` field with three values:
+
+| value | meaning | edge |
+|---|---|---|
+| `publish` | results stand on their own | → cross_check → write |
+| `re_experiment` | data was inconclusive (noise, no signal, effect too small) | → cross_check → design (re-design with the cross-check evidence in hand) |
+| `broaden_lit` | new finding raises questions the original literature didn't cover | → cross_check → design (cross_check already broadened the lit) |
+
+`re_experiment` and `broaden_lit` share the existing
+`engine.max_iterations` budget — they DON'T double-count against the
+review-loop's `revise` path, but they consume the same counter so the
+whole quest is bounded.
+
+### Phase M — Ideate self-reflection ✅ landed
+
+The cheapest win. After `ideate` returns its 3–5 ideas and a
+`chosen`, a single extra LLM call critiques the choice — "given the
+clarify answers and the chosen direction, what's the strongest
+objection? would you pick differently?" — and may swap `chosen_idea`
+to a different entry from the list (or refine its rationale).
+Implemented inline in `_node_ideate`, not as a new node, so the graph
+topology stays simple. Adds one LLM call per quest.
+
+Gated by `engine.ideate_reflect: bool = True`. Test-friendly to flip off.
+
+### Phase O — Per-node model routing ✅ landed
+
+`provider.node_models` maps engine node names (and `review_panel.<persona>`
+sub-keys) to model strings. `LLMClient.chat(model=...)` accepts a
+per-call override that flows through all three transports (HTTP, CLI
+exec, and the new VSCode bridge). Each `Engine._chat(prompt, *, node=N)`
+call site is tagged; `_model_for_node` resolves N against `node_models`.
+Lets the user pick a cheap model for low-value nodes (clarify,
+cross_check) and a strong model for the demanding ones (write, review,
+each reviewer-panel persona).
+
+### Phase N — Multi-persona reviewer panel ✅ landed
+
+When `engine.review_panel = []` (default), review behaves as a single
+LLM call as before. When non-empty (e.g. `[methodologist, statistician,
+devil_advocate]`), each persona runs in parallel via `asyncio.gather`
+with a persona-specific prefix prepended to `agents/review.md`. The
+results aggregate deterministically:
+
+- verdict: any persona votes `revise` with `score < 3` → revise;
+  otherwise majority verdict; ties → revise (conservative).
+- score: median of panel scores.
+- weaknesses: deduped union.
+- strengths: intersection.
+- suggestions: deduped union with persona-attribution prefix.
+
+A moderator LLM call then writes the prose `rationale` while the
+numeric fields stay locked to the deterministic aggregator. The
+GUI's quest-detail panel renders one card per persona with verdict +
+strengths + weaknesses + suggestions, plus the moderator's synthesis.
+
+### Phase P — Sanctioned VSCode-extension provider ✅ landed
+
+The `github_copilot_cli` / `github_copilot_vscode` proxies in earlier
+phases worked but used the third-party `copilot-api` package, which is
+explicit about abuse-detection risk in its own README. Phase P
+introduces a sanctioned path: a TypeScript VSCode extension
+(`vscode-frontier-insight/`) that hosts the Python engine and routes
+every LLM call through `vscode.lm.selectChatModels` /
+`model.sendRequest`. No reverse-engineering, user-consented, calls
+count against the user's normal Copilot subscription.
+
+Architecture:
+
+```
+VSCode (user opens Copilot Chat, types `@fi /start config.yaml`)
+   │
+   ├─ FI extension binds free TCP port, spawns Python:
+   │     python launch.py --vscode-bridge-port <N> --config config.yaml
+   │
+   ├─ Python engine sets provider.name = vscode_extension automatically
+   │  (provider.node_models from YAML still honored)
+   │
+   └─ Per LLM call:
+        Python → {"type":"lm_request", id, node, messages, model_hint}
+        Extension → vscode.lm.selectChatModels + model.sendRequest
+        Extension → streams back as {"type":"lm_chunk", id, delta} ×N
+                                  + {"type":"lm_done", id, content}
+```
+
+Wire protocol is newline-delimited JSON over `127.0.0.1:<port>`. The
+bridge protocol is documented in `core/vscode_bridge.py`. Python-side
+tests use an in-process mock TCP server (`tests/test_vscode_bridge.py`)
+to cover the wire protocol without VSCode. Live-validation of the
+TypeScript extension is manual (install via "Install from VSIX" or
+F5 from the extension folder).
+
+Alongside Phase P, the older `github_copilot_*` proxy providers now
+emit a one-time warning at engine init pointing at the sanctioned
+alternatives (`copilot_cli` for headless, `vscode_extension` for
+in-VSCode). Set `FI_SUPPRESS_PROXY_WARN=1` to silence (use at your
+own risk).
+
 ## What we are explicitly *not* building
 
 - A new research engine that re-implements LangGraph or wraps
   DeepScientist/AI-Scientist as a hard dependency.
 - A new vector store, embedding service, or literature-search adapter
   — Axon owns those concerns.
-- A web UI / Docker-deploy / one-click wrapper — Phase ≥7 if ever.
+- An SPA framework (React/Vue) for the UI — HTMX is sufficient and
+  has no build step.
+- A custom GitHub Copilot HTTP wrapper. We use the sanctioned paths
+  only (`copilot_cli` for headless, `vscode_extension` for in-VSCode).
+  The pre-existing `github_copilot_*` proxy providers stay in the
+  codebase for backwards compatibility but emit a runtime warning.
