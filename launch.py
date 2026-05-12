@@ -55,6 +55,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "installed; optionally pass --axon-config to point at a "
              "non-default Axon corpus. PDF support requires `pypdf` installed.",
     )
+    mode.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start the Phase J status GUI (FastAPI server + HTMX frontend). "
+             "Use --output-root to point at the quest output directory, "
+             "and --host / --port to bind elsewhere than 127.0.0.1:8765. "
+             "Requires FastAPI + uvicorn installed.",
+    )
+    p.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("./outputs"),
+        help="Quest output root for --serve mode. The server scans this "
+             "directory for existing quests and writes new ones here.",
+    )
+    p.add_argument(
+        "--host", type=str, default="127.0.0.1",
+        help="Bind host for --serve. Default 127.0.0.1.",
+    )
+    p.add_argument(
+        "--port", type=int, default=8765,
+        help="Bind port for --serve. Default 8765.",
+    )
     p.add_argument(
         "--axon-config",
         type=Path,
@@ -85,6 +108,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override config.output.output_dir (single-quest mode only).",
     )
+    p.add_argument(
+        "--interactive",
+        action="store_true",
+        help="When `engine.clarify_mode: interactive` is set in the YAML, "
+             "pause at the clarify node and read answers from stdin. "
+             "Single-quest mode only — fleet runs are headless.",
+    )
+    p.add_argument(
+        "--vscode-bridge-port",
+        type=int,
+        default=0,
+        help="Phase P — TCP port the FI VSCode extension is listening on for "
+             "the LLM bridge. The extension passes this when it spawns FI; "
+             "setting it forces provider.name=vscode_extension regardless of "
+             "what the YAML says. Do not pass this from a regular terminal "
+             "run — use copilot_cli or similar for headless Copilot usage.",
+    )
     args = p.parse_args(argv)
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
@@ -96,12 +136,118 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # ---- single-quest path ----------------------------------------------------
 
 
+def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
+    """Phase P — when launched with ``--vscode-bridge-port N``, force
+    every quest's provider to route through the FI VSCode extension's
+    ``vscode.lm.*`` bridge on that port. Overrides whatever ``provider``
+    block the YAML carried (the YAML can still set ``provider.model``,
+    ``provider.node_models``, etc. — those flow through unchanged so
+    per-node model routing still works inside the chat session)."""
+    if port <= 0:
+        return
+    cfg.provider.name = "vscode_extension"
+    cfg.provider.extra = {**(cfg.provider.extra or {}), "bridge_port": port}
+
+
+def _pick_clarify_callback(
+    cfg: Config, engine: Engine, interactive: bool,
+) -> object:
+    """Select the right clarify-callback for this run.
+
+    * Terminal `--interactive`: collect answers from stdin via
+      ``_cli_clarify_callback``.
+    * `provider.name == "vscode_extension"`: route the questions
+      through the same bridge the LLM calls use, so the FI VSCode
+      extension can present them as modals and post answers back.
+    * Otherwise: no callback. If the YAML has
+      ``engine.clarify_mode = "interactive"`` and we return None, the
+      engine raises a clear RuntimeError at the clarify pause —
+      that's the surface we want users to hit, not a silent hang.
+    """
+    if interactive:
+        return _cli_clarify_callback
+    if cfg.provider.name == "vscode_extension":
+        # IMPORTANT: route the clarify call through the SAME bridge
+        # the LLMClient already uses. The extension-side TCP server
+        # only tracks one active socket (every new connection
+        # overwrites it), so two clients on the same port would have
+        # their responses cross-routed. Reading `engine._client._bridge`
+        # works because by the time clarify_callback fires, the
+        # clarify NODE has already made one LLM call (to generate the
+        # questions), which lazy-initialized the bridge.
+        port = int(cfg.provider.extra.get("bridge_port", 0))
+        if port <= 0:
+            return None
+
+        async def callback(questions: dict[str, object]) -> dict[str, object]:
+            assert engine._client is not None, (
+                "_pick_clarify_callback was called before Engine.run() "
+                "created the LLMClient"
+            )
+            bridge = engine._client._bridge
+            if bridge is None:
+                # Defensive: shouldn't happen (clarify-node LLM call
+                # creates the bridge first), but if the engine ever
+                # routes around the LLMClient we'd hit this. Build a
+                # fresh client — it'll still go to the same port.
+                from core.vscode_bridge import VSCodeBridgeClient
+                bridge = VSCodeBridgeClient(host="127.0.0.1", port=port)
+                await bridge.connect()
+                engine._client._bridge = bridge
+            return await bridge.clarify(dict(questions))
+
+        return callback
+    return None
+
+
+async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, object]:
+    """Terminal-based clarify-question collector. Prints each question
+    with its agent-suggested default, reads one line of stdin per slot,
+    accepts the default on blank input. Used by `launch.py --interactive`."""
+    print()
+    print("=" * 72)
+    print("Pre-flight clarification — agent has 5 questions to sharpen the run.")
+    print("Press Enter to accept the default in parentheses.")
+    print("=" * 72)
+    answers: dict[str, object] = {}
+    for key, value in questions.items():
+        if not isinstance(value, dict):
+            continue
+        question = value.get("question", key)
+        default = value.get("default", "")
+        # Pretty-print the default — lists get joined.
+        default_str = (
+            ", ".join(str(x) for x in default) if isinstance(default, list)
+            else str(default)
+        )
+        print()
+        print(f"  [{key}] {question}")
+        try:
+            user_input = input(f"    answer ({default_str}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            user_input = ""
+        # Preserve list-typed defaults by parsing comma-separated input.
+        if isinstance(default, list):
+            answers[key] = (
+                [s.strip() for s in user_input.split(",") if s.strip()]
+                if user_input else default
+            )
+        else:
+            answers[key] = user_input or default
+    print()
+    print("Thanks — proceeding with the autonomous loop.")
+    print("=" * 72)
+    print()
+    return answers
+
+
 async def run_one(
     cfg: Config,
     *,
     supervisor: ProxySupervisor,
     profile: bool = False,
     engine: Engine | None = None,
+    interactive: bool = False,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -110,7 +256,17 @@ async def run_one(
     if engine is None:
         engine = Engine(cfg, supervisor=supervisor)
     print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
-    art: QuestArtifacts = await _maybe_profiled(engine, profile=profile)
+    # Pick the right clarify handler:
+    #   --interactive          → terminal Q&A
+    #   provider=vscode_extension → route through the bridge so the
+    #                            extension shows VSCode modals
+    #   otherwise              → None; clarify_mode=interactive crashes
+    #                            (the engine catches this and produces
+    #                            a clear RuntimeError).
+    callback = _pick_clarify_callback(cfg, engine, interactive)
+    art: QuestArtifacts = await _maybe_profiled(
+        engine, profile=profile, clarify_callback=callback,
+    )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
     written = await _run_generators(cfg, art, supervisor=supervisor)
     summary = {
@@ -166,18 +322,23 @@ async def _run_generators(
     return written
 
 
-async def _maybe_profiled(engine: Engine, *, profile: bool) -> QuestArtifacts:
+async def _maybe_profiled(
+    engine: Engine,
+    *,
+    profile: bool,
+    clarify_callback: object = None,
+) -> QuestArtifacts:
     if not profile:
-        return await engine.run()
+        return await engine.run(clarify_callback=clarify_callback)
     try:
         from viztracer import VizTracer  # type: ignore[import-not-found]
     except ImportError:
         print("[FI] --profile requested but viztracer is not installed; skipping")
-        return await engine.run()
+        return await engine.run(clarify_callback=clarify_callback)
     trace_path = engine.fi_dir / "profile.json"
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
     with VizTracer(output_file=str(trace_path)):
-        art = await engine.run()
+        art = await engine.run(clarify_callback=clarify_callback)
     print(f"[FI] {art.quest_id} profile -> {trace_path}")
     return art
 
@@ -268,6 +429,15 @@ async def run_fleet(
 async def main_async(args: argparse.Namespace) -> int:
     supervisor = ProxySupervisor()
     try:
+        if args.serve:
+            # We're already inside an event loop (main_async), so use
+            # the async helper rather than the blocking uvicorn.run.
+            from web.server import serve_async
+            await serve_async(
+                output_root=args.output_root, host=args.host, port=args.port,
+            )
+            return 0
+
         if args.ingest:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
 
@@ -275,10 +445,16 @@ async def main_async(args: argparse.Namespace) -> int:
             cfg = Config.from_yaml(args.config)
             if args.output is not None:
                 cfg.output.output_dir = args.output
-            await run_one(cfg, supervisor=supervisor, profile=args.profile)
+            _apply_vscode_bridge_override(cfg, args.vscode_bridge_port)
+            await run_one(
+                cfg, supervisor=supervisor, profile=args.profile,
+                interactive=args.interactive,
+            )
             return 0
 
         configs = [Config.from_yaml(p) for p in args.fleet]
+        for c in configs:
+            _apply_vscode_bridge_override(c, args.vscode_bridge_port)
         return await run_fleet(
             configs,
             supervisor=supervisor,

@@ -26,6 +26,12 @@ ProviderName = Literal[
     "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude login`)
     "copilot_cli",    # local GitHub Copilot CLI (uses `gh auth login` Copilot Pro/Business)
     "gemini_cli",     # local @google/gemini-cli (uses `gemini` OAuth / Google AI Studio key)
+    # Phase P — the FI VSCode extension spawns Python with --vscode-bridge-port N
+    # and routes every LLM call through VSCode's vscode.lm.* Language Model
+    # API. Sanctioned by GitHub; calls show up in your normal Copilot usage.
+    # Not selectable from a stand-alone YAML — the extension launches FI
+    # with this provider preset.
+    "vscode_extension",
 ]
 EngineFramework = Literal["langgraph"]
 SandboxKind = Literal["venv", "docker"]
@@ -47,12 +53,81 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+    # Phase O — per-node model routing. Maps an engine node name (or a
+    # qualified subkey like `review_panel.methodologist`) to the model
+    # string this provider should use when that node fires a chat call.
+    # When None or the lookup misses, falls back to `model` above.
+    #
+    # Works for all three transport types:
+    #   - CLI exec (claude_cli/codex_cli/copilot_cli/gemini_cli):
+    #     overrides the value `_run_cli` injects after `_CliSpec.model_flag`.
+    #   - HTTP proxy (claude_code/github_copilot_cli/github_copilot_vscode):
+    #     overrides the `model` field in the OpenAI-compatible POST body.
+    #   - HTTP direct (openai/codex/gemini/ollama/vllm):
+    #     same — overrides the request body's `model`.
+    #
+    # Useful for picking a cheap model for low-value nodes (clarify,
+    # cross_check) and a strong one for the demanding ones (write,
+    # review). On `copilot_cli` and its proxy siblings, all three
+    # models share one OAuth and one premium-request budget — see
+    # docs/plan.md Phase O for the design rationale.
+    node_models: dict[str, str] | None = None
+
+
+ClarifyMode = Literal["off", "auto", "interactive"]
 
 
 class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = 2
     review_loop: bool = True
+    # Phase I — pre-flight clarification (`clarify` node before `ideate`).
+    #
+    #   "off"         — skip the node entirely. Default for tests and fleet.
+    #   "auto"        — agent generates the questionnaire AND auto-answers
+    #                   it from the topic alone (no human loop). Useful
+    #                   when you want stronger framing than the bare topic
+    #                   gives, without an interactive pause.
+    #   "interactive" — agent generates the questionnaire; the engine
+    #                   raises a LangGraph `interrupt()` so a CLI prompt
+    #                   (`launch.py --interactive`) or the web UI's
+    #                   clarify panel can collect answers from the user.
+    clarify_mode: ClarifyMode = "off"
+    # Phase K — execute-repair loop (`execute_reflect` node between
+    # `execute` and `analyze`). When the experiment script returns
+    # rc!=0 or no RESULT_JSON, the reflect node generates a patched
+    # `code` from the traceback and routes back to `execute`, up to
+    # this many times. Default 3 — covers typo / import-error / shape
+    # mismatch / NaN bugs without runaway looping.
+    exec_reflect_max_iterations: int = Field(default=3, ge=0)
+    # Phase L — cross-paper check after analyze. When a finding lands,
+    # we run a literature search keyed on the finding text (not just
+    # the original topic) and classify hits as supporting / conflicting
+    # / neutral. Per-finding top-K passed to the knowledge layer.
+    cross_check_per_finding_k: int = Field(default=3, ge=0)
+    # Phase L — also enables the `next_step` re-route emitted by analyze:
+    # `publish` (default) / `re_experiment` / `broaden_lit`. Both
+    # non-default values route back to `design` (via cross_check first)
+    # and consume from `max_iterations` like the review-loop `revise`.
+    enable_analyze_reroute: bool = True
+    # Phase M — extra LLM call after `ideate` to self-critique the
+    # chosen idea. May swap `chosen_idea` to a different entry from
+    # the brainstormed list. Cheap (one extra LLM call per quest).
+    ideate_reflect: bool = True
+    # Phase N — multi-persona reviewer panel on the `review` node.
+    # When empty (default), the review node behaves as before: one LLM
+    # call producing one verdict. When non-empty, each entry runs in
+    # parallel with a persona-specific system prefix prepended to
+    # `agents/review.md`; a moderator LLM call then synthesizes a
+    # single verdict (median score, union of weaknesses, intersection
+    # of strengths, conservative verdict). Per-persona model selection
+    # uses `provider.node_models["review_panel.<name>"]` (Phase O).
+    #
+    # Built-in persona names: "methodologist", "statistician",
+    # "devil_advocate", "reproducibility". Users can pass custom names
+    # — the engine falls back to a generic persona prefix when the
+    # specific persona prompt file is missing.
+    review_panel: list[str] = Field(default_factory=list)
 
 
 class ExecutionConfig(BaseModel):
