@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,19 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXT_DIR = REPO_ROOT / "vscode-frontier-insight"
+
+
+def _resolve_npm() -> str:
+    """Find the absolute path of `npm`. On Windows, `npm` is a `.cmd`
+    shim — `shutil.which` returns the full path including the `.cmd`
+    extension, which `subprocess.run` can invoke directly without
+    `shell=True`. That keeps argv-as-list semantics correct on POSIX
+    (where `shell=True` + list silently drops everything after argv[0])."""
+    return shutil.which("npm") or "npm"
+
+
+def _resolve_node() -> str:
+    return shutil.which("node") or "node"
 
 
 def _have_npm() -> bool:
@@ -51,12 +65,11 @@ def test_vscode_extension_typescript_compiles() -> None:
     edit that passes flake-style inspection but fails `tsc --strict`.
     """
     proc = subprocess.run(
-        ["npm", "run", "compile"],
+        [_resolve_npm(), "run", "compile"],
         cwd=str(EXT_DIR),
         capture_output=True,
         text=True,
         timeout=120,
-        shell=True,  # Windows: npm is a .cmd shim
     )
     assert proc.returncode == 0, (
         f"`npm run compile` failed (rc={proc.returncode}).\n"
@@ -157,8 +170,8 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
     compiled = EXT_DIR / "out" / "interview-core.js"
     if not compiled.exists():
         sub = subprocess.run(
-            ["npm", "run", "compile"], cwd=str(EXT_DIR),
-            capture_output=True, text=True, timeout=120, shell=True,
+            [_resolve_npm(), "run", "compile"], cwd=str(EXT_DIR),
+            capture_output=True, text=True, timeout=120,
         )
         assert sub.returncode == 0, sub.stderr
 
@@ -191,8 +204,8 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         driver_path = f.name
     try:
         proc = subprocess.run(
-            ["node", driver_path],
-            capture_output=True, text=True, timeout=30, shell=True,
+            [_resolve_node(), driver_path],
+            capture_output=True, text=True, timeout=30,
         )
     finally:
         Path(driver_path).unlink(missing_ok=True)
@@ -284,8 +297,8 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
     compiled = EXT_DIR / "out" / "interview-core.js"
     if not compiled.exists():
         subprocess.run(
-            ["npm", "run", "compile"], cwd=str(EXT_DIR),
-            capture_output=True, text=True, timeout=120, shell=True, check=True,
+            [_resolve_npm(), "run", "compile"], cwd=str(EXT_DIR),
+            capture_output=True, text=True, timeout=120, check=True,
         )
 
     answers = {
@@ -312,8 +325,8 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
         driver_path = f.name
     try:
         proc = subprocess.run(
-            ["node", driver_path],
-            capture_output=True, text=True, timeout=30, shell=True,
+            [_resolve_node(), driver_path],
+            capture_output=True, text=True, timeout=30,
         )
     finally:
         Path(driver_path).unlink(missing_ok=True)
@@ -362,12 +375,11 @@ def test_vscode_extension_package_produces_vsix() -> None:
         # asserts on what THIS run actually produces.
         vsix_path.unlink()
     proc = subprocess.run(
-        ["npm", "run", "package"],
+        [_resolve_npm(), "run", "package"],
         cwd=str(EXT_DIR),
         capture_output=True,
         text=True,
         timeout=180,
-        shell=True,
     )
     assert proc.returncode == 0, (
         f"`npm run package` failed (rc={proc.returncode}).\n"

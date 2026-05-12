@@ -60,6 +60,7 @@ from typing import Any, Callable
 import httpx
 from tenacity import (
     AsyncRetrying,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -814,26 +815,29 @@ class LLMClient:
         # but a user on an older .vsix won't have that — and even on
         # the latest, the bridge surfaces `lm_error` after its own
         # retry exhausts. This is the second-chance layer.
+        #
+        # The retry predicate is a callable, NOT `retry_if_exception_type(BridgeError)`
+        # — the latter would retry every BridgeError (including auth /
+        # no-model-available / user-cancelled), which is wrong. We
+        # specifically only want to retry transient-looking ones.
         from .vscode_bridge import BridgeError
+
+        def _retry_transient_bridge(exc: BaseException) -> bool:
+            return (
+                isinstance(exc, BridgeError)
+                and _is_bridge_error_transient(str(exc))
+            )
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=20),
-            retry=retry_if_exception_type(BridgeError),
+            retry=retry_if_exception(_retry_transient_bridge),
             reraise=True,
         ):
             with attempt:
-                try:
-                    return await self._bridge.chat(
-                        messages, model_hint=hint or "", temperature=temperature,
-                    )
-                except BridgeError as e:
-                    # Only retry transient-looking errors; auth /
-                    # "no model available" / user-cancelled errors
-                    # are non-transient and should surface immediately.
-                    if not _is_bridge_error_transient(str(e)):
-                        raise
-                    raise
+                return await self._bridge.chat(
+                    messages, model_hint=hint or "", temperature=temperature,
+                )
         # Unreachable — tenacity reraise=True always raises on exhaustion.
         raise RuntimeError("vscode-bridge retry exhausted without raising")
 

@@ -200,22 +200,52 @@ output:
       root.innerHTML = '<div class="empty">no quests yet</div>';
       return;
     }
-    root.innerHTML = quests.map(q => {
-      const badgeCls = q.verdict === "complete" ? "complete" : "running";
-      const active = q.quest_id === state.activeQuestId ? "active" : "";
-      const age = q.age_s < 60 ? `${q.age_s}s` :
-                  q.age_s < 3600 ? `${Math.floor(q.age_s/60)}m` :
-                  `${Math.floor(q.age_s/3600)}h`;
-      return `
-        <div class="quest-row ${active}" onclick="selectQuest('${q.quest_id}')">
-          <div class="row between">
-            <span class="badge ${badgeCls}">${q.verdict}</span>
-            <span class="muted" style="font-size:11px;">${age} ago</span>
-          </div>
-          <div class="title">${q.quest_id.split('-').slice(1, -1).join('-') || q.quest_id}</div>
-          <div class="meta">${q.provider || "—"}${q.has_paper ? " · paper.md" : ""}</div>
-        </div>`;
-    }).join("");
+    // Build the list as DOM nodes rather than `innerHTML +
+    // string-interpolated user data` — this is the defense against
+    // a maliciously-named quest directory (e.g. an attacker who can
+    // create folders on the host) injecting markup or script via the
+    // `quest_id` / `verdict` / `provider` fields. Inline `onclick`
+    // also goes away; we use `addEventListener` with a `data-quest-id`
+    // attribute (HTML-attribute encoding is automatic via .dataset).
+    root.replaceChildren();
+    for (const q of quests) {
+      const row = document.createElement("div");
+      row.className = "quest-row" + (q.quest_id === state.activeQuestId ? " active" : "");
+      row.dataset.questId = q.quest_id;
+      row.addEventListener("click", () => selectQuest(row.dataset.questId));
+
+      const head = document.createElement("div");
+      head.className = "row between";
+      const badge = document.createElement("span");
+      badge.className = "badge " + (q.verdict === "complete" ? "complete" : "running");
+      badge.textContent = q.verdict ?? "";
+      const ageEl = document.createElement("span");
+      ageEl.className = "muted";
+      ageEl.style.fontSize = "11px";
+      const age_s = Number(q.age_s) || 0;
+      const age = age_s < 60 ? `${age_s}s` :
+                  age_s < 3600 ? `${Math.floor(age_s / 60)}m` :
+                  `${Math.floor(age_s / 3600)}h`;
+      ageEl.textContent = `${age} ago`;
+      head.append(badge, ageEl);
+
+      const title = document.createElement("div");
+      title.className = "title";
+      // Strip the timestamp prefix and trailing hash from the slug
+      // when present, but fall back to the raw id otherwise. Always
+      // assigned via `textContent` so HTML never gets interpreted.
+      const parts = String(q.quest_id ?? "").split("-");
+      title.textContent = parts.length > 2
+        ? parts.slice(1, -1).join("-")
+        : String(q.quest_id ?? "");
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = (q.provider || "—") + (q.has_paper ? " · paper.md" : "");
+
+      row.append(head, title, meta);
+      root.appendChild(row);
+    }
   }
 
   async function selectQuest(qid) {
@@ -335,11 +365,15 @@ output:
 
   function renderClarifyPanel(qid, questions) {
     const rows = Object.entries(questions).map(([key, val]) => {
-      const def = Array.isArray(val.default) ? val.default.join(", ") : (val.default || "");
+      // Use `??` not `||` so that legitimately-falsy defaults (0,
+      // false, "") are preserved verbatim instead of being replaced
+      // with the empty-string fallback.
+      const raw = val.default ?? "";
+      const def = Array.isArray(raw) ? raw.join(", ") : String(raw);
       return `
         <div class="clarify-question">
-          <div class="q-text"><b>[${key}]</b> ${escapeHtml(val.question || key)}</div>
-          <input type="text" data-key="${key}" data-islist="${Array.isArray(val.default)}" value="${escapeHtml(def)}"/>
+          <div class="q-text"><b>[${escapeHtml(key)}]</b> ${escapeHtml(val.question || key)}</div>
+          <input type="text" data-key="${escapeHtml(key)}" data-islist="${Array.isArray(raw)}" value="${escapeHtml(def)}"/>
           <div class="default-hint">default: ${escapeHtml(def)}</div>
         </div>`;
     }).join("");

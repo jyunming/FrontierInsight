@@ -2,7 +2,8 @@
 
 Endpoints
 ---------
-* ``GET  /``                              — single-page HTMX shell.
+* ``GET  /``                              — vanilla-JS single-page app
+  served from ``static/index.html``.
 * ``GET  /api/quests``                    — every quest dir under
   the configured root, current node + verdict + age.
 * ``GET  /api/quests/{id}``               — quest detail (state JSON,
@@ -78,7 +79,17 @@ class _QuestRegistry:
     def register_clarify(
         self, quest_id: str, questions: dict[str, Any],
     ) -> asyncio.Future[dict[str, Any]]:
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        # Production callers always invoke this from within an async
+        # handler, where `get_running_loop()` is the correct call
+        # (`get_event_loop()` is deprecated in 3.12+ for non-running
+        # fetches). Tests that call this synchronously fall through
+        # to `new_event_loop()` so the registry still works without
+        # asyncio.run() ceremony around every test fixture.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._clarify_questions[quest_id] = questions
         self._clarify_futures[quest_id] = fut
         return fut
@@ -154,10 +165,43 @@ def _read_log_tail(log_path: Path, n: int = 200) -> list[str]:
     return lines[-n:]
 
 
+_QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
+
+
+def _resolve_quest_root(output_root: Path, quest_id: str) -> Path:
+    """Sanitize the user-supplied `quest_id` before composing a
+    filesystem path with it. We:
+
+    1. Reject anything outside the strict identifier alphabet
+       (digits, letters, ``_``, ``-``, ``.``). This is enough to block
+       path-separator-based traversal (``..``, ``/``, ``\\``).
+    2. Resolve the composed path and verify it stays inside
+       ``output_root.resolve()`` — defense in depth against unexpected
+       OS-level path normalization quirks (symlinks, UNC names, etc.).
+
+    Raises ``HTTPException(400)`` on either failure so the endpoint
+    code can just call this and trust the result.
+    """
+    if not _QUEST_ID_RE.match(quest_id):
+        raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+    root = output_root.resolve()
+    candidate = (root / quest_id).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise HTTPException(400, f"quest_id escapes output root: {quest_id!r}") from None
+    return candidate
+
+
 _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
+# Every node in the DAG. Must match `_build_graph` in core/engine.py.
+# Missing entries here cause the GUI's "current node" indicator to show
+# `(unknown)` during the affected node's run, even though it's logging
+# normally — `_current_node_from_log` filters on this set.
 _KNOWN_NODES = frozenset({
     "clarify", "ideate", "literature", "design", "implement",
-    "execute", "analyze", "write", "review",
+    "execute", "execute_reflect", "analyze", "cross_check",
+    "write", "review",
 })
 
 
@@ -208,7 +252,7 @@ def make_app(output_root: Path) -> FastAPI:
 
     @app.get("/api/quests/{quest_id}")
     async def get_quest(quest_id: str) -> JSONResponse:
-        quest_root = app.state.output_root / quest_id
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         if not (quest_root / ".fi").is_dir():
             raise HTTPException(404, f"quest {quest_id} not found")
         log_lines = _read_log_tail(quest_root / ".fi" / "run.log", n=20)
@@ -246,12 +290,12 @@ def make_app(output_root: Path) -> FastAPI:
 
     @app.get("/api/quests/{quest_id}/log")
     async def get_log(quest_id: str, n: int = 200) -> JSONResponse:
-        log_path = app.state.output_root / quest_id / ".fi" / "run.log"
+        log_path = _resolve_quest_root(app.state.output_root, quest_id) / ".fi" / "run.log"
         return JSONResponse({"lines": _read_log_tail(log_path, n=n)})
 
     @app.get("/api/quests/{quest_id}/log/stream")
     async def stream_log(quest_id: str) -> StreamingResponse:
-        log_path = app.state.output_root / quest_id / ".fi" / "run.log"
+        log_path = _resolve_quest_root(app.state.output_root, quest_id) / ".fi" / "run.log"
 
         async def gen():
             offset = 0
@@ -308,17 +352,21 @@ def make_app(output_root: Path) -> FastAPI:
 
     @app.get("/api/quests/{quest_id}/paper")
     async def get_paper(quest_id: str) -> FileResponse:
-        paper = app.state.output_root / quest_id / "paper" / "paper.md"
+        paper = _resolve_quest_root(app.state.output_root, quest_id) / "paper" / "paper.md"
         if not paper.exists():
             raise HTTPException(404, "paper.md not yet written")
         return FileResponse(str(paper), media_type="text/markdown")
 
     @app.get("/api/quests/{quest_id}/figure/{name}")
     async def get_figure(quest_id: str, name: str) -> FileResponse:
-        # Defend against path traversal.
+        # Defend against path traversal on both segments — quest_id
+        # goes through the strict-allowlist validator; name gets the
+        # legacy character check (it can have hyphens / dots that the
+        # regex would reject but are fine for figure filenames).
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         if "/" in name or "\\" in name or ".." in name:
             raise HTTPException(400, "bad figure name")
-        path = app.state.output_root / quest_id / "figures" / name
+        path = quest_root / "figures" / name
         if not path.exists() or not path.is_file():
             raise HTTPException(404, "figure not found")
         return FileResponse(str(path))
