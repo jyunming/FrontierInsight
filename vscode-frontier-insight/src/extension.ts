@@ -16,6 +16,7 @@
  * which means: sanctioned API, user-consented, normal Copilot quota.
  */
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
 import { spawn } from "child_process";
 import { Bridge } from "./bridge";
@@ -68,6 +69,10 @@ async function handleRequest(
         await runInterviewAndQuest(stream, token, userPickedModel);
         return;
     }
+    if (cmd === "resume") {
+        await runResume(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -85,12 +90,161 @@ function helpText(): string {
         "- `@fi` or `@fi /new` — interactive setup (recommended for first-time users).",
         "- `@fi /start <path-to-config.yaml>` — run one quest from an existing YAML.",
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
+        "- `@fi /resume` — pick a crashed quest and pick up where it died.",
+        "- `@fi /resume <quest_id>` — resume that specific quest directly.",
         "",
         "All LLM calls go through your Copilot subscription via the",
         "`vscode.lm` Language Model API. Each quest's `provider.node_models`",
         "is honored, so different nodes (and different reviewer-panel",
         "personas) can use different Copilot models within one run.",
     ].join("\n");
+}
+
+
+/**
+ * Implementation of `@fi /resume`. Two modes:
+ *
+ * 1. `@fi /resume` (no args) — scan `<repoPath>/outputs/` for quest
+ *    dirs that have a `.fi/state.sqlite` (i.e., at least one node
+ *    completed and was checkpointed) and show a QuickPick. The most
+ *    recently-modified quest sits at the top.
+ *
+ * 2. `@fi /resume <quest_id>` — resume that specific quest.
+ *
+ * For each resume we auto-discover the YAML by title-slug match
+ * against `outputs/_drafts/`. The interview writer names YAMLs as
+ * `<timestamp>-<slug>.yaml` where the slug also appears in the
+ * quest_id (`<unix>-<slug>-<nonce>`). If no YAML matches, we fall
+ * back to a file picker.
+ *
+ * The actual graph state lives in the per-quest `state.sqlite`; the
+ * YAML only contributes provider/execution/output settings — so a
+ * slug-match miss isn't fatal, the user can pick any YAML with a
+ * compatible provider block.
+ */
+async function runResume(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+
+    const outputsDir = path.join(repoPath, "outputs");
+    if (!fs.existsSync(outputsDir)) {
+        stream.markdown(
+            `❌ No \`outputs/\` directory under \`${repoPath}\` — nothing to resume.`,
+        );
+        return;
+    }
+
+    // Find all quest dirs with a checkpoint.
+    type Candidate = { questId: string; questDir: string; mtimeMs: number };
+    const candidates: Candidate[] = [];
+    for (const entry of fs.readdirSync(outputsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+        const questDir = path.join(outputsDir, entry.name);
+        const checkpoint = path.join(questDir, ".fi", "state.sqlite");
+        if (!fs.existsSync(checkpoint)) continue;
+        const stat = fs.statSync(checkpoint);
+        candidates.push({
+            questId: entry.name,
+            questDir,
+            mtimeMs: stat.mtimeMs,
+        });
+    }
+    if (candidates.length === 0) {
+        stream.markdown(
+            `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Run \`@fi /new\` to start one.`,
+        );
+        return;
+    }
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    let chosenId = promptArgs.trim();
+    if (!chosenId) {
+        const picks = candidates.map((c) => ({
+            label: `$(beaker) ${c.questId}`,
+            description: new Date(c.mtimeMs).toLocaleString(),
+            questId: c.questId,
+        }));
+        const picked = await vscode.window.showQuickPick(picks, {
+            placeHolder: "Pick a quest to resume (most recent first)",
+            matchOnDescription: true,
+        });
+        if (!picked) return;   // user hit Esc
+        chosenId = picked.questId;
+    } else {
+        // User passed an id directly — validate it has a checkpoint.
+        if (!candidates.find((c) => c.questId === chosenId)) {
+            stream.markdown(
+                `❌ No quest dir with id \`${chosenId}\` under \`${outputsDir}\`, ` +
+                `or it has no \`.fi/state.sqlite\` checkpoint.`,
+            );
+            return;
+        }
+    }
+
+    // Auto-discover the YAML by slug match. The quest_id shape is
+    // `<unix>-<slug>-<6char_nonce>` (see core.engine._new_quest_id).
+    // Strip the leading unix timestamp and the trailing nonce.
+    const slug = chosenId.replace(/^\d+-/, "").replace(/-[0-9a-f]{6}$/i, "");
+    const draftsDir = path.join(outputsDir, "_drafts");
+    let yamlPath: string | undefined;
+    if (fs.existsSync(draftsDir)) {
+        const drafts = fs
+            .readdirSync(draftsDir)
+            .filter((f) => f.endsWith(".yaml") && f.includes(slug))
+            .map((f) => {
+                const fp = path.join(draftsDir, f);
+                return { f, mtime: fs.statSync(fp).mtimeMs };
+            })
+            .sort((a, b) => b.mtime - a.mtime);
+        if (drafts.length > 0) {
+            yamlPath = path.join(draftsDir, drafts[0].f);
+        }
+    }
+    if (!yamlPath) {
+        // Fall back to a file picker.
+        const picked = await vscode.window.showOpenDialog({
+            canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+            filters: { YAML: ["yaml", "yml"] },
+            defaultUri: vscode.Uri.file(outputsDir),
+            openLabel: `Pick a YAML for ${chosenId}`,
+            title: `No draft YAML matched slug "${slug}". Pick one manually.`,
+        });
+        if (!picked || picked.length === 0) return;
+        yamlPath = picked[0].fsPath;
+    }
+
+    const relYaml = path.relative(repoPath, yamlPath).split(path.sep).join("/");
+    stream.markdown(
+        `🔁 Resuming quest \`${chosenId}\`\n\n` +
+        `📝 Using config: \`${relYaml}\`\n\n` +
+        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+        `▶️ Re-entering the LangGraph from the last checkpointed node…\n\n`,
+    );
+    await runQuest(
+        relYaml,
+        /*fleet*/ false,
+        stream,
+        token,
+        userPickedModel,
+        /*resumeQuestId*/ chosenId,
+    );
 }
 
 async function runInterviewAndQuest(
@@ -138,6 +292,7 @@ async function runQuest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
     userPickedModel: vscode.LanguageModelChat,
+    resumeQuestId?: string,
 ): Promise<void> {
     const paths = promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
@@ -194,6 +349,9 @@ async function runQuest(
         argv.push("--fleet", ...paths);
     } else {
         argv.push("--config", paths[0]);
+        if (resumeQuestId) {
+            argv.push("--resume", resumeQuestId);
+        }
     }
 
     // 3. Spawn Python.
