@@ -5,7 +5,7 @@ Thanks for your interest. FI is a Windows + Linux native automated research pipe
 ## Ways to contribute
 
 - **Code** — improve any node body, generator, executor, or provider in `core/` and `generation/`. New paper templates (`templates/paper/<format>/template.tex`), slide themes, or poster layouts.
-- **Tests** — expand the pytest suite in `tests/` (currently ~379 tests). Any test that touches an LLM mocks the call via `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` so the suite has zero real API spend.
+- **Tests** — expand the pytest suite in `tests/`. The suite covers config validation, paper generation, the folder summarizer, launch.py / CLI argument parsing, per-PM-command modules (digest, portfolio, critique, proposal), and engine-level integration. Any test that touches an LLM mocks the call via `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` so the suite has zero real API spend. Run `python -m pytest -q` to see the current count.
 - **Examples** — add a config under `examples/<topic>/config.yaml` that demonstrates a new use case.
 - **Bug reports / feature requests** — open an issue with a clear description and reproduction steps.
 

@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Frontier Insight (FI) is a Windows + Linux native automated research pipeline. **FI owns the research loop itself**: an async LangGraph DAG (`clarify → ideate → literature → design → implement → execute → execute_reflect → analyze → cross_check → write → review`) drives an LLM through experimentation; agent-generated code runs in a per-quest venv (default) or Docker container (opt-in). Knowledge is delegated to [`jyunming/Axon`](https://github.com/jyunming/Axon) — do not reimplement vector search, literature retrieval, or cross-quest memory inside FI. The graph has three feedback loops: (a) `execute_reflect → execute` (Phase K — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`); (b) `cross_check → design` (Phase L — `analyze.next_step ∈ {re_experiment, broaden_lit}` re-routes to design); (c) `review → design` (the classic revise loop). The Phase L and Phase review loops share `engine.max_iterations` as the budget; Phase K has its own counter so a broken script doesn't eat the design-iteration budget.
 
-The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. The historical section of `TEST_RESULTS.md` retains DS-era results for context only — links to `test_runs/` artifacts inside that file are historical and the directory is no longer in the repo.
+The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. DS-era results and the `test_runs/` directory are no longer in the repo — git history is the canonical record.
 
 ## Run / develop
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -v                                         # ~380 tests, ~9 minutes (real venv creates)
+python -m pytest -v                                         # full suite, ~9 minutes (real venv creates)
 python launch.py --config examples/integrator_bakeoff/config.yaml
 python launch.py --fleet a.yaml b.yaml --max-concurrent 4 --memory-cap-mb 4096
 python launch.py --config my.yaml --resume <quest_id>       # re-enter a crashed quest from its sqlite checkpoint
@@ -25,7 +25,7 @@ External prerequisites are all optional and feature-gated:
 - **pandoc + LaTeX** for `paper_pdf` — generator skips with a warning if missing.
 - **Marp CLI** (`@marp-team/marp-cli`) for `slides.html` / `slides.pdf` — `slides.md` is still produced.
 - **Docker Desktop** for `execution.sandbox: docker`.
-- **Provider proxies** (`claude_code`, `github_copilot_*`) only when those providers are selected. See `docs/plan.md` Phase C for verbatim install commands.
+- **Provider proxies** (`claude_code`, `github_copilot_*`) only when those providers are selected. See `docs/PROVIDERS.md` for verbatim install commands.
 
 ## Architecture (the parts that span files)
 
@@ -39,7 +39,7 @@ External prerequisites are all optional and feature-gated:
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
 - **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`. The two `github_copilot_*` providers emit a one-time warning at engine init (third-party `copilot-api` proxy, abuse-detection risk).
 - **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli` and `codex_cli` and `gemini_cli` are chat-style. **`copilot_cli` is agentic**: it interprets FI's node prompts as user coding tasks and replies conversationally; the engine emits a loud warning when it's selected. For Copilot use `vscode_extension` instead.
-- **VSCode bridge** (`vscode_extension`) — Phase P. `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
+- **VSCode bridge** (`vscode_extension`). `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled.
 
@@ -59,8 +59,8 @@ External prerequisites are all optional and feature-gated:
 
 ## Tests
 
-`tests/test_config.py` covers the YAML schema and tilde expansion. `tests/test_execution.py` covers `VenvExecutor` (creates a real venv — slow). `tests/test_engine_smoke.py` runs the full 8-node DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge.py` (50 tests) covers source adapters, dedup, router-LLM happy/failure paths, local-paper load + pin, Phase-2 PDF magic-bytes check + login-wall rejection, structured-ingest helpers (spine / header / topic event), external-ref spine writes. `tests/test_knowledge_writeback.py` verifies the cross-quest memory write-back call shape and the accept-gate. **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.
+`tests/test_config.py` covers the YAML schema and tilde expansion. `tests/test_execution.py` covers `VenvExecutor` (creates a real venv — slow). `tests/test_engine_smoke.py` runs the full DAG with a fake LLM, real venv, real matplotlib install, real subprocess — a regression detector for the engine plumbing. `tests/test_fleet.py` runs two engines concurrently. `tests/test_knowledge.py` covers source adapters, dedup, router-LLM happy/failure paths, local-paper load + pin, PDF magic-bytes check + login-wall rejection, structured-ingest helpers (spine / header / topic event), external-ref spine writes. `tests/test_knowledge_writeback.py` verifies the cross-quest memory write-back call shape and the accept-gate. Per-PM-command modules have their own files (`tests/test_{digest,portfolio,critique,proposal}.py`). **Tests do not call real LLM APIs**; introduce new tests with `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or `Knowledge.asearch`) to keep that property.
 
 `pytest.ini` redirects `tmp_path` to `./.pytest_tmp/` because the default Windows `%TEMP%` path was inaccessible to the harness sandbox. If a test fails on a fresh checkout, that path is the first thing to check.
 
-**Don't claim Phase P (VSCode extension) is done without running BOTH `npm run compile` AND `npm run package`.** Two distinct steps; one silently missing the other has bitten this codebase twice already. `tests/test_vscode_extension_typescript.py` runs both from pytest as a structural check (4 tests). The tests are gated on `node`+`npm`+`vscode-frontier-insight/node_modules` being present and skip silently otherwise, so any "Phase P shipping" message must explicitly state both were run and pin the resulting `.vsix` path. Background: a prior session committed TypeScript with two `tsc --strict` errors and called it done; another session shipped a "ready" extension without a `package` script, so there was no `.vsix` to install.
+**Don't claim the VSCode extension is done without running BOTH `npm run compile` AND `npm run package`.** Two distinct steps; one silently missing the other has bitten this codebase twice already. `tests/test_vscode_extension_typescript.py` runs both from pytest as a structural check. The tests are gated on `node`+`npm`+`vscode-frontier-insight/node_modules` being present and skip silently otherwise, so any "extension shipping" message must explicitly state both were run and pin the resulting `.vsix` path. Background: a prior session committed TypeScript with two `tsc --strict` errors and called it done; another session shipped a "ready" extension without a `package` script, so there was no `.vsix` to install.
