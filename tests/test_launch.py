@@ -54,6 +54,46 @@ def test_parse_args_profile_and_memory_cap() -> None:
     assert args.memory_cap_mb == 2048
 
 
+def test_parse_args_resume_requires_config() -> None:
+    """--resume without --config is rejected (fleet/serve/ingest can't resume)."""
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--fleet", "a.yaml", "--resume", "some-quest-id"])
+
+
+def test_parse_args_resume_with_config_ok() -> None:
+    args = launch.parse_args(["--config", "x.yaml", "--resume", "q-123"])
+    assert args.resume == "q-123"
+
+
+# ---- _validate_resume_quest_id ------------------------------------------
+
+
+def test_validate_resume_quest_id_rejects_path_separators(tmp_path: Path) -> None:
+    """Path-traversal hardening: the bot review on PR #26 flagged that any
+    string was accepted. Reject anything outside the strict alphabet."""
+    for bad in ("../etc/passwd", "..\\windows", "a/b", "a\\b", "../sibling"):
+        err = launch._validate_resume_quest_id(bad, tmp_path)
+        assert err is not None, f"should reject {bad!r}"
+        assert "invalid quest id" in err or "outside" in err
+
+
+def test_validate_resume_quest_id_rejects_missing_checkpoint(tmp_path: Path) -> None:
+    """Well-formed id but no prior run → return a clear error rather than
+    silently creating an empty quest dir under that name."""
+    err = launch._validate_resume_quest_id("nonexistent-quest-id", tmp_path)
+    assert err is not None
+    assert "no checkpoint" in err
+
+
+def test_validate_resume_quest_id_accepts_real_checkpoint(tmp_path: Path) -> None:
+    """A valid id + an existing .fi/state.sqlite returns None (accept)."""
+    qid = "1700000000-resume-good-cafe11"
+    fi_dir = tmp_path / qid / ".fi"
+    fi_dir.mkdir(parents=True)
+    (fi_dir / "state.sqlite").write_bytes(b"")
+    assert launch._validate_resume_quest_id(qid, tmp_path) is None
+
+
 # ---- _run_generators -----------------------------------------------------
 
 
