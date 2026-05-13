@@ -246,6 +246,25 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
+### Plan a quest before you commit compute
+
+```
+@fi /proposal Compare RK4 vs Verlet on the Kepler problem with eccentric orbits
+```
+
+Or:
+
+```bash
+python launch.py --proposal "Compare RK4 vs Verlet on the Kepler problem"
+```
+
+Inverts the usual flow. Instead of running a full quest and discovering the question was poorly scoped, get a 1-page LLM-written proposal *first* — background, hypothesis, plan, success criteria, risks, recommended next step. The user reviews the plan; if it looks good, runs the auto-generated companion YAML. Writes two files under `outputs/_drafts/`:
+
+- `<id>-proposal.md` — the planning doc (read this, edit if needed).
+- `<id>.yaml` — minimal config.yaml with the user's original topic. Run `python launch.py --config outputs/_drafts/<id>.yaml` to start the actual quest.
+
+Ingested into Axon as `kind=fi_proposal` so future quests can retrieve "have I considered this before?"
+
 ### Get an adversarial second opinion on a completed quest
 
 ```

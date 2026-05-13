@@ -113,6 +113,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "family from the one that wrote the paper.",
     )
     mode.add_argument(
+        "--proposal",
+        type=str,
+        help="Pre-quest planning doc. Pass a topic string (1-3 "
+             "paragraphs). The LLM produces a structured proposal "
+             "(background, hypothesis, plan, success criteria, "
+             "risks, scope limits, recommended next step) for the "
+             "user to review BEFORE committing compute to the full "
+             "quest. Writes outputs/_drafts/<id>-proposal.md plus a "
+             "companion outputs/_drafts/<id>.yaml ready to feed into "
+             "--config. Ingests as kind=fi_proposal.",
+    )
+    mode.add_argument(
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
@@ -172,6 +184,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "explicitly set to a DIFFERENT provider from the quest's "
              "original (e.g. claude_cli for an openai-written paper) "
              "to get the strongest adversarial second-pass effect.",
+    )
+    p.add_argument(
+        "--proposal-provider",
+        type=str,
+        default="vscode_extension",
+        help="Provider for --proposal. Same conventions as the other "
+             "PM-command providers — vscode_extension when launched "
+             "from chat, headless CLI providers otherwise.",
     )
     p.add_argument(
         "--output-root",
@@ -706,6 +726,16 @@ async def main_async(args: argparse.Namespace) -> int:
                 supervisor=supervisor,
             )
 
+        if args.proposal:
+            return await _run_proposal(
+                topic=args.proposal,
+                output_root=args.output_root,
+                provider_name=args.proposal_provider,
+                axon_config_path=args.axon_config,
+                vscode_bridge_port=args.vscode_bridge_port,
+                supervisor=supervisor,
+            )
+
         if args.summarize:
             return await _run_summarize(
                 folder=args.summarize.resolve(),
@@ -1000,6 +1030,65 @@ async def _run_critique(
     print(
         f"[FI] critique_provider={art.critique_provider}; "
         f"ingested_to_axon={art.ingested_to_axon}",
+    )
+    return 0
+
+
+async def _run_proposal(
+    *,
+    topic: str,
+    output_root: Path,
+    provider_name: str,
+    axon_config_path: Path | None,
+    vscode_bridge_port: int,
+    supervisor: ProxySupervisor,
+) -> int:
+    """Top-level wiring for ``python launch.py --proposal "<topic>"``.
+
+    Returns 0 on success, 1 on validation or LLM failure.
+    """
+    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
+    from core.proposal import generate_proposal
+
+    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    if vscode_bridge_port > 0:
+        provider.name = "vscode_extension"
+        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+
+    knowledge = None
+    try:
+        from core.knowledge import Knowledge
+        knowledge = Knowledge(KnowledgeConfig(
+            enabled=True,
+            axon_config=axon_config_path if axon_config_path else None,
+            seed_source_catalog=False,
+        ))
+    except Exception as e:  # pragma: no cover
+        print(
+            f"[FI] --proposal: Axon unavailable ({e!r}); proposal will still "
+            f"be written but not ingested.",
+            file=sys.stderr,
+        )
+
+    print(f"[FI] proposal (provider={provider.name})")
+    try:
+        art = await generate_proposal(
+            topic, output_root, provider=provider,
+            supervisor=supervisor, knowledge=knowledge,
+        )
+    except ValueError as e:
+        print(f"[FI] --proposal: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"[FI] --proposal failed: {e!r}", file=sys.stderr)
+        return 1
+
+    print(f"[FI] proposal -> {art.proposal_path}")
+    print(f"[FI] companion YAML -> {art.yaml_path}")
+    print(f"[FI] ingested_to_axon={art.ingested_to_axon}")
+    print(
+        f"[FI] To run the quest: python launch.py --config "
+        f"{art.yaml_path}",
     )
     return 0
 

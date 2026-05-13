@@ -64,6 +64,10 @@
             "description": "Adversarial second-pass review of a completed quest. Pass the quest_id. Reads paper.md + code + prior in-quest review, then asks a (different) model to find what the in-quest reviewer missed. Lands at outputs/<quest_id>/critique.md."
           },
           {
+            "name": "proposal",
+            "description": "Pre-quest planning doc: background, hypothesis, plan, success criteria, risks. Writes a markdown proposal + companion YAML to outputs/_drafts/. Use to scope a quest BEFORE committing compute. Example: @fi /proposal Compare RK4 vs Verlet on the Kepler problem"
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }
