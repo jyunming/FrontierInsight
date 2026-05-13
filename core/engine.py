@@ -1714,6 +1714,13 @@ def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
     fi_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"frontier_insight.{quest_id}")
     logger.setLevel(logging.INFO)
+    # Don't propagate to the root logger. Some libs FI imports (httpx,
+    # langgraph, etc.) configure their own root-logger StreamHandlers,
+    # and propagation duplicates every quest log line on stderr —
+    # which the VSCode extension's chat panel then shows TWICE.
+    # The file handler below + the per-process stream handler are
+    # the only two sinks we want.
+    logger.propagate = False
     if logger.handlers:
         return logger
     fh = logging.FileHandler(fi_dir / "run.log", encoding="utf-8")

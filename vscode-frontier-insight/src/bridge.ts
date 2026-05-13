@@ -127,24 +127,32 @@ export class Bridge {
             return;
         }
         // Stream Python stderr (where FI's logging goes) into the chat
-        // pane. We don't render every line — that would drown the user.
-        // Instead, surface lines starting with a recognized node tag
-        // (e.g. "[ideate]"), which are the user-meaningful progress
-        // markers from the engine.
+        // pane. Filter to user-meaningful node-tagged lines (e.g.
+        // "[ideate] topic=…") and reformat them so the chat doesn't
+        // look like raw CLI output. A small de-dupe guard catches the
+        // occasional double-print from upstream lib loggers.
         child.stderr.setEncoding("utf-8");
         let pending = "";
+        let lastShown = "";
+        const NODE_PATTERN = /\[(clarify|ideate|literature|design|implement|execute|execute_reflect|analyze|cross_check|write|review)\]\s*(.*)$/;
         child.stderr.on("data", (chunk: string) => {
             pending += chunk;
             const lines = pending.split(/\r?\n/);
             pending = lines.pop() || "";
             for (const line of lines) {
                 if (rawLineSink) rawLineSink(line);
-                if (/\[(clarify|ideate|literature|design|implement|execute|execute_reflect|analyze|cross_check|write|review)\]/.test(line)) {
-                    // Strip the timestamp + log-level prefix to keep
-                    // the chat clean.
-                    const m = line.match(/(\[[a-z_]+\].*)$/);
-                    if (m) this.opts.progress.markdown(`  ${m[1]}\n\n`);
-                }
+                const m = line.match(NODE_PATTERN);
+                if (!m) continue;
+                const node = m[1];
+                const msg = m[2].trim();
+                // Render a clean node arrow: `→ **implement**: generating…`
+                // Drop the leading `[<quest-id>]` log prefix entirely.
+                const rendered = msg
+                    ? `→ **${node}** · ${msg}`
+                    : `→ **${node}**`;
+                if (rendered === lastShown) continue;   // dedupe consecutive identical lines
+                lastShown = rendered;
+                this.opts.progress.markdown(`  ${rendered}\n\n`);
             }
         });
     }
@@ -335,16 +343,44 @@ export class Bridge {
             // because older VSCode versions may not export ThinkingPart.
             const INACTIVITY_MS = 180_000;
             const HEARTBEAT_MS = 10_000;
-            const MAX_THINKING_CHARS_PER_CHUNK = 200;
+            const THINKING_PREVIEW_CHARS = 240;
             let accumulated = "";
             let chunkCount = 0;
             let chars = 0;
             let thinkingChars = 0;
+            // Buffer thinking fragments and flush at most once per
+            // heartbeat — bot review on PR #31 noted that emitting a
+            // markdown entry per ThinkingPart can flood the chat and
+            // slow VSCode when models stream many small fragments.
+            let thinkingBuf = "";
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
             const nodeLabel = req.node || "(unnamed-node)";
 
+            // Sanitize a free-text fragment so it renders as plain prose
+            // in the chat panel — strip / escape markdown that would
+            // otherwise be interpreted (headings, fences, links, bold,
+            // backticks, blockquote markers). Bot review on PR #31
+            // flagged this as a real risk: reasoning content can include
+            // arbitrary content the model is processing.
+            const escapeMd = (s: string): string => s
+                .replace(/[`*_~|<>\[\]]/g, (c) => `\\${c}`)
+                .replace(/\r/g, "")
+                .split(/\n+/).map((l) => l.trim()).filter(Boolean).join(" / ");
+
+            const flushThinking = (): void => {
+                if (!thinkingBuf) return;
+                const preview = thinkingBuf.length > THINKING_PREVIEW_CHARS
+                    ? thinkingBuf.slice(0, THINKING_PREVIEW_CHARS) + "…"
+                    : thinkingBuf;
+                this.opts.progress.markdown(
+                    `  💭 ${escapeMd(preview)}\n\n`,
+                );
+                thinkingBuf = "";
+            };
+
             const heartbeatTimer = setInterval(() => {
+                flushThinking();   // emit any accumulated reasoning
                 const elapsed = Math.round((Date.now() - startMs) / 1000);
                 let label: string;
                 if (chunkCount === 0 && thinkingChars === 0) {
@@ -410,9 +446,13 @@ export class Bridge {
                         // pattern-matches strings; "bridge stalled" must be
                         // in its transient-marker list so the Python side
                         // retries instead of dying on the first stall.
+                        // Include thinking-char count too so the user can
+                        // tell if the model was reasoning (thinking >0,
+                        // no output chunks) vs truly silent.
                         throw new Error(
-                            `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
-                            `(received ${chunkCount} chunks / ${chars} chars before stall)`,
+                            `bridge stalled: no part for ${INACTIVITY_MS / 1000} s ` +
+                            `(received ${chunkCount} chunks / ${chars} chars / ` +
+                            `${thinkingChars} thinking chars before stall)`,
                         );
                     }
                     if (result.done) break;
@@ -430,17 +470,11 @@ export class Bridge {
                         });
                     } else if (kind === "thinking" && typeof value === "string") {
                         thinkingChars += value.length;
-                        // Surface reasoning to the chat panel but DON'T
-                        // send to Python — it's not the answer. Truncate
-                        // per fragment so we don't flood the panel; the
-                        // running thinking-chars counter in the heartbeat
-                        // gives the user the full size at a glance.
-                        const preview = value.length > MAX_THINKING_CHARS_PER_CHUNK
-                            ? value.slice(0, MAX_THINKING_CHARS_PER_CHUNK) + "…"
-                            : value;
-                        this.opts.progress.markdown(
-                            `  💭 ${preview}\n\n`,
-                        );
+                        // Buffer thinking fragments; the heartbeat
+                        // flushes them at most once per HEARTBEAT_MS.
+                        // We DON'T send to Python — reasoning isn't
+                        // the answer.
+                        thinkingBuf += value;
                     } else if (kind === "tool") {
                         // FI doesn't request tool calls; the model
                         // shouldn't emit any. Log if it happens so we
@@ -453,6 +487,7 @@ export class Bridge {
                 }
             } finally {
                 clearInterval(heartbeatTimer);
+                flushThinking();
             }
             const totalElapsed = Math.round((Date.now() - startMs) / 1000);
             this.opts.progress.markdown(
