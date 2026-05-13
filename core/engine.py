@@ -883,7 +883,12 @@ class Engine:
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
-            paper_md=paper_md[:8000],
+            # 16 KB ≈ ~4 K tokens — fits a comprehensive-review-length
+            # paper plus an abstract + references block. The 8 KB cap
+            # was truncating mid-Discussion on journal-length papers
+            # so the reviewer was grading on an incomplete read, which
+            # made the depth axis unreliable.
+            paper_md=paper_md[:16000],
         )
 
         panel_names = list(self.config.engine.review_panel or [])
@@ -1194,6 +1199,7 @@ _CLARIFY_LABELS = {
     "budget": "Time / compute budget",
     "output_kinds": "Desired output kinds",
     "study_depth": "Study depth",
+    "paper_venue": "Paper venue / template",
 }
 
 
@@ -1243,6 +1249,10 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
         "study_depth": {
             "question": "How deep should this study go? (brief preprint / journal-length / comprehensive review)",
             "default": "journal-length",
+        },
+        "paper_venue": {
+            "question": "Which paper template should we use? (generic / neurips / iclr / ieee_access / nature_mi)",
+            "default": "generic",
         },
     }
 

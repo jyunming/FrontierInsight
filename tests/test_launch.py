@@ -356,3 +356,51 @@ async def test_run_one_skips_copy_when_dest_already_exists(
 
     preserved = (quest_root / "config.yaml").read_text(encoding="utf-8")
     assert preserved == "topic: original\n", "must not clobber existing config.yaml"
+
+
+# ---- _apply_paper_venue_override ----------------------------------------
+
+
+def _art_with_venue(tmp_path: Path, venue: object) -> "launch.QuestArtifacts":
+    from core.engine import QuestArtifacts
+    return QuestArtifacts(
+        quest_id="q-x", quest_root=tmp_path,
+        raw_state={"clarify_answers": {"paper_venue": venue}},
+    )
+
+
+def test_paper_venue_override_applies_when_yaml_is_default(tmp_path: Path) -> None:
+    """User wrote `paper_format: generic` (or left default) AND clarify
+    picked `neurips` — override applies."""
+    cfg = _make_cfg(tmp_path)
+    assert cfg.output.paper_format == "generic"
+    launch._apply_paper_venue_override(cfg, _art_with_venue(tmp_path, "neurips"))
+    assert cfg.output.paper_format == "neurips"
+
+
+def test_paper_venue_override_respects_explicit_yaml(tmp_path: Path) -> None:
+    """User explicitly set `paper_format: ieee_access` in YAML — clarify
+    must NOT silently override that."""
+    cfg = _make_cfg(tmp_path)
+    cfg.output.paper_format = "ieee_access"
+    launch._apply_paper_venue_override(cfg, _art_with_venue(tmp_path, "neurips"))
+    assert cfg.output.paper_format == "ieee_access"
+
+
+def test_paper_venue_override_ignores_unknown_venue(tmp_path: Path) -> None:
+    """A clarify answer like `paper_venue: 'some-future-template'` must
+    be silently dropped — pydantic would otherwise reject it."""
+    cfg = _make_cfg(tmp_path)
+    launch._apply_paper_venue_override(
+        cfg, _art_with_venue(tmp_path, "made-up-venue"),
+    )
+    assert cfg.output.paper_format == "generic"
+
+
+def test_paper_venue_override_handles_missing_clarify_answers(tmp_path: Path) -> None:
+    """clarify_mode=off → no clarify_answers → must not raise."""
+    from core.engine import QuestArtifacts
+    cfg = _make_cfg(tmp_path)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, raw_state={})
+    launch._apply_paper_venue_override(cfg, art)
+    assert cfg.output.paper_format == "generic"
