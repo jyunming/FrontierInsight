@@ -59,7 +59,7 @@ Three feedback loops:
 | VSCode extension (Phase P) — sanctioned `vscode.lm.*` Copilot integration, with `@fi /new`, `@fi /start`, `@fi /fleet`, `@fi /resume` | ✅ |
 | Resumable quests — `python launch.py --resume <quest_id>` / `@fi /resume` re-enter the LangGraph from the last checkpointed node when a prior run died mid-pipeline | ✅ |
 | Paper PDF via pandoc + LaTeX (`generic` and `neurips` templates ship; others stub) | ✅ |
-| Slides via Marp; poster via `beamerposter`; speech script via single LLM call | ✅ |
+| Slides (when `output.kinds` includes `slides`) — `slides.md` always, plus `slides.html`/`slides.pdf` (when `marp` CLI is on PATH) and `slides.pptx` (when pandoc is on PATH); poster via `beamerposter`; speech script via single LLM call | ✅ |
 | SQLite-checkpointed state for resumability (`<quest_root>/.fi/state.sqlite`) | ✅ |
 | `--fleet` runner with bounded concurrency, ref-counted proxies, `--memory-cap-mb`, optional `viztracer --profile` | ✅ |
 
