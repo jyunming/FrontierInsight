@@ -62,6 +62,8 @@ Three feedback loops:
 | Slides (when `output.kinds` includes `slides`) — `slides.md` always, plus `slides.html`/`slides.pdf` (when `marp` CLI is on PATH) and `slides.pptx` (when pandoc is on PATH); poster via `beamerposter`; speech script via single LLM call | ✅ |
 | SQLite-checkpointed state for resumability (`<quest_root>/.fi/state.sqlite`) | ✅ |
 | `--fleet` runner with bounded concurrency, ref-counted proxies, `--memory-cap-mb`, optional `viztracer --profile` | ✅ |
+| Folder summarizer — `@fi /summarize <folder>` / `python launch.py --summarize` walks mixed content (papers, code, study notes, logs), classifies each file, calls LLM once, writes `outputs/<summary_id>/summary.md`; full input set ingested into Axon. Caps prompt size by file count + total content chars so a 31K-file folder doesn't blow the token budget. | ✅ |
+| Weekly PM digest — `@fi /digest [N days]` / `python launch.py --digest --days N` walks `outputs/` for quests touched in window, classifies each by LangGraph terminal-node state, computes a deterministic WeekDiff vs the most-recent prior digest (✅ promoted / 🆕 new / ⚠️ still-in-progress / 🛑 stalled / ❓ dropped), and asks the LLM to produce a markdown report under `outputs/_digests/<YYYY-Www>.md`. Ingests into Axon as `fi_digest` so future quests retrieve prior-week context. | ✅ |
 
 ## Provider matrix
 

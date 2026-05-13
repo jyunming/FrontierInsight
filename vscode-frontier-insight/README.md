@@ -160,6 +160,25 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+## Weekly project-manager digest
+
+```
+@fi /digest          ← rolling 7-day digest
+@fi /digest 14       ← last fortnight
+@fi /digest 30       ← last month
+```
+
+The digest walks `outputs/` for quests touched in the window, reads each one's `state.sqlite` to decide whether it completed or is still in progress, and produces a markdown report under `outputs/_digests/<YYYY-Www>.md` with these sections:
+
+- **Completed this week** — 1-line synthesis per finished quest.
+- **In progress** — quests with checkpoints but no terminal review.
+- **What changed since last digest** — a *structured* diff (✅ promoted, 🆕 new, ⚠️ still-in-progress, 🛑 stalled 3+ digests, ❓ dropped). Computed in code from the prior digest's markdown, not by the LLM — the model can't hallucinate that you finished something.
+- **Themes** — topic clusters spanning multiple quests.
+- **Suggested next quests** — concrete topic strings grounded in each quest's future-work section.
+- **Velocity** — quest counts and stall flags.
+
+Lands in Axon as `kind=fi_digest` so future quests can retrieve "what we were working on last week."
+
 ## Per-node model routing
 
 Each quest YAML defines which Copilot model to use per engine node.

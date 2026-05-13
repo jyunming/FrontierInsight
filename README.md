@@ -246,6 +246,31 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
+### Get a weekly project-manager digest of your quests
+
+```
+@fi /digest          ← rolling 7-day digest
+@fi /digest 14       ← last fortnight
+@fi /digest 30       ← last month
+```
+
+Or from the terminal:
+
+```bash
+python launch.py --digest --days 7
+```
+
+FI walks `outputs/` for quests touched in the window, classifies each by LangGraph terminal-node state (read from `state.sqlite`), and asks the LLM to produce a markdown report under `outputs/_digests/<YYYY-Www>.md` with:
+
+- **Completed this week** — 1-line synthesis per finished quest, grounded in the abstract.
+- **In progress** — quests with checkpoints but no terminal `review`.
+- **What changed since last digest** — a *structured* diff (✅ promoted from in-progress to complete, 🆕 newly started, ⚠️ still in progress, 🛑 stalled for 3+ digests, ❓ dropped). The diff is computed in code, not by the LLM, so the model can't hallucinate that you finished something.
+- **Themes** — topic clusters spanning 2+ quests this week.
+- **Suggested next quests** — concrete topic strings ready to paste into a new YAML, each grounded in a prior quest's future-work section.
+- **Velocity** — quest counts and stall flags.
+
+The digest also lands in Axon (kind `fi_digest`) so future quests can retrieve "what we were doing last week."
+
 ### Drop a paywalled PDF you downloaded yourself
 
 ```yaml

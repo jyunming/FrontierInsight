@@ -89,6 +89,10 @@ async function handleRequest(
         await runSummarize(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "digest") {
+        await runDigest(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -109,6 +113,7 @@ function helpText(): string {
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly.",
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
+        "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
         "",
         "All LLM calls go through your Copilot subscription via the",
         "`vscode.lm` Language Model API. Each quest's `provider.node_models`",
@@ -671,6 +676,145 @@ async function runSummarize(
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Summary done.\n");
+    } else {
+        const tail = stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
+            (tail.trim()
+                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
+                : "stderr was empty.\n"),
+        );
+    }
+}
+
+
+/**
+ * Implementation of `@fi /digest [days]`. Spawns
+ * `python launch.py --digest --days <N> --vscode-bridge-port <P>` and
+ * streams progress / errors back to chat.
+ *
+ * The optional `days` argument is the only parameter we accept from
+ * chat — defaults to 7 (rolling week). Pass `@fi /digest 14` for the
+ * last fortnight or `@fi /digest 30` for a monthly view.
+ *
+ * Output lands at `<outputDir>/_digests/<YYYY-Www>.md` (or the dated
+ * form for non-7-day windows). The function surfaces the
+ * `[FI] digest -> <path>` line so the user can click straight to it.
+ */
+async function runDigest(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+
+    // Parse the optional days argument. Accept bare integers only —
+    // anything fancier (date ranges, weeks) goes through the launch.py
+    // flags directly, not through the chat command.
+    const raw = promptArgs.trim();
+    let days = 7;
+    if (raw) {
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n > 0 && String(n) === raw) {
+            days = n;
+        } else {
+            stream.markdown(
+                `\`/digest\` expected an optional positive integer (days) or nothing. Got \`${raw}\`.\n\n` +
+                `Examples: \`@fi /digest\` (rolling 7-day digest), \`@fi /digest 14\`, \`@fi /digest 30\`.\n`,
+            );
+            return;
+        }
+    }
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    const launchScript = path.join(repoPath, "launch.py");
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+
+    stream.markdown(
+        `📅 Generating digest for the last **${days} days** of quests under ` +
+        `\`${outputsDir}\`.\n\n` +
+        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+        `▶️ Walking quests…\n\n`,
+    );
+
+    const bridge = new Bridge({
+        progress: stream,
+        cancellationToken: token,
+        defaultModel: userPickedModel,
+    });
+    const port = await bridge.listen();
+
+    const argv: string[] = [
+        "-u", launchScript,
+        "--vscode-bridge-port", String(port),
+        "--digest",
+        "--days", String(days),
+        "--output-root", outputsDir,
+    ];
+
+    const child = spawn(pythonPath, argv, {
+        cwd: repoPath,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderrTail: string[] = [];
+    const STDERR_TAIL_LINES = 80;
+    bridge.attachChild(child, (line) => {
+        stderrTail.push(line);
+        if (stderrTail.length > STDERR_TAIL_LINES) {
+            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
+        }
+    });
+    token.onCancellationRequested(() => {
+        try { child.kill("SIGTERM"); } catch { /* noop */ }
+    });
+
+    child.stdout.setEncoding("utf-8");
+    let stdoutBuf = "";
+    child.stdout.on("data", (chunk: string) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/\r?\n/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) {
+            const m = line.match(/^\[FI\] digest -> (.+)$/);
+            if (m) {
+                stream.markdown(`  ✅ digest written → \`${m[1]}\`\n\n`);
+                continue;
+            }
+            if (line.startsWith("[FI] vs ")) {
+                stream.markdown(`  📊 ${line.slice(5)}\n\n`);
+                continue;
+            }
+            if (line.match(/^\[FI\] \d+ quests touched/)) {
+                stream.markdown(`  📈 ${line.slice(5)}\n\n`);
+            }
+        }
+    });
+
+    const exitCode: number | null = await new Promise((resolve) => {
+        child.on("close", (code) => resolve(code));
+    });
+    await bridge.close();
+
+    if (exitCode === 0) {
+        stream.markdown("\n✅ Digest done.\n");
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
