@@ -205,18 +205,28 @@ output:
 
 ## Tests
 
-**323 tests pass** on Windows-native Python 3.11.9 in ~9 minutes (2
-skipped — Docker daemon + Marp CLI not on PATH). Suite organization:
+**379 tests** collected on Windows-native Python 3.11.9 (`pytest --collect-only`); the full suite runs in ~9 minutes. A few tests skip
+gracefully when their external tool isn't on PATH (Docker daemon for
+`test_docker_executor.py`; Marp CLI for the slides render gate; etc.).
+Suite organization:
 
 - `test_config.py` — YAML schema, tilde expansion, validators.
 - `test_execution.py` / `test_docker_executor.py` — venv + Docker executors.
 - `test_engine_smoke.py` — full DAG end-to-end with fake LLM (the regression detector).
+- `test_engine_helpers.py` — direct unit tests for `_parse_json_lenient`, `_extract_result_json`, `_strip_outer_fence`, `_slugify`, `_new_quest_id`, `_parse_implement_response`, `_format_lit`, plus the review/analyze/write prompt-shape pins.
+- `test_engine_resume.py` — `--resume` checkpoint reuse, `Engine(resume_quest_id=...)`, copilot_cli agentic warning.
 - `test_clarify.py`, `test_ideate_reflect.py`, `test_execute_reflect.py`, `test_cross_check.py`, `test_review_panel.py` — Phases I, M, K, L, N respectively.
 - `test_per_node_model_routing.py` — Phase O.
-- `test_vscode_bridge.py` — Phase P (bridge protocol + provider integration; mock VSCode).
-- `test_knowledge.py` — 50 tests covering source adapters, dedup, source-router LLM, local-paper load + pin, full-text fetch, structured-ingest helpers, external-ref spines.
+- `test_vscode_bridge.py` / `test_vscode_extension_typescript.py` — Phase P (bridge protocol + provider integration; mock VSCode; plus TS compile + .vsix package gates).
+- `test_knowledge.py` (50 tests) — source adapters, dedup, source-router LLM, local-paper load + pin, full-text fetch, structured-ingest helpers, external-ref spines.
+- `test_knowledge_writeback.py` — accept-gated cross-quest memory bundle.
 - `test_web_server.py` / `test_web_e2e.py` — Phase J GUI.
 - `test_self_correction_e2e.py` — end-to-end Phase K + L proofs.
+- `test_launch.py` — `parse_args`, `_run_generators`, `_await_under_cap`, fleet counters, `--resume` traversal validation, `source_yaml_path` quest-dir copy.
+- `test_paper_gen.py` / `test_slides_speech.py` / `test_poster.py` — generators.
+- `test_provider.py` / `test_provider_cli.py` — HTTP-direct, CLI-exec, and proxy transports.
+- `test_fleet.py` — two engines concurrent under one process.
+- `test_platform.py` — `detect_system()`.
 
 ## Architecture
 

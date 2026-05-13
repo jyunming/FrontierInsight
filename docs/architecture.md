@@ -70,12 +70,26 @@ Top-level fields: `topic`, `title`, `provider`, `engine`, `execution`,
 
 ### `QuestState` (TypedDict)
 
-Fields: `topic`, `title`, `iteration`, `ideas`, `chosen_idea`,
-`literature`, `design`, `code`, `deps`, `exec_result`, `figures`,
-`result_json`, `analysis`, `paper_md`, `review`. JSON-serializable so
-`AsyncSqliteSaver` can checkpoint after every node. **Field names are
-the contract** between the engine, the prompts, and any future Phase-G
-alternate graph.
+Defined at `core/engine.py` (just under the `Engine` import block).
+`total=False` so every field is optional — nodes patch in what they
+produce, LangGraph merges the patches.
+
+Core path (every quest produces these):
+`topic`, `title`, `iteration`, `ideas`, `chosen_idea`, `literature`,
+`design`, `code`, `deps`, `exec_result`, `figures`, `result_json`,
+`analysis`, `paper_md`, `review`.
+
+Phase-specific extras:
+- Phase I (clarify): `clarify_questions`, `clarify_answers`, `clarify_done`.
+- Phase K (execute-repair loop): `exec_reflect_iter`, `exec_reflect_history`, `exec_give_up_reason`.
+- Phase L (analyze re-route + cross-paper check): `cross_check` (per-finding classification list).
+- Phase M (ideate self-reflection): `ideate_critique`.
+- Phase N (reviewer panel): `review_panel` (per-persona reviews + moderator synthesis).
+
+JSON-serializable so `AsyncSqliteSaver` can checkpoint after every
+node. **Field names are the contract** between the engine, the
+prompts, and any future Phase-G alternate graph — keep them
+backwards-compatible.
 
 ### `QuestArtifacts`
 
@@ -111,12 +125,17 @@ abort the rest (see `_run_generators` in `launch.py`).
 
 ## Provider abstraction
 
-`core.provider.resolve_endpoint_async(provider, supervisor)` returns
-`ResolvedEndpoint(base_url, model, api_key)` for any provider. Direct
-providers point straight at a `base_url`; proxy providers go through
+`core.provider.resolve_endpoint_async(provider, supervisor)` returns a
+`ResolvedEndpoint` carrying `base_url`, `model`, `api_key`, `transport`
+(`"http"` / `"cli"` / `"vscode_bridge"`), and transport-specific
+fields (`cli_spec`, `cli_model_override`, `vscode_bridge_port`, etc.).
+HTTP-direct providers point straight at a `base_url`; CLI-exec
+providers spawn the local CLI per call; proxy providers go through
 `ProxySupervisor`, which spawns the child process on a free port and
-reference-counts so concurrent quests share one proxy. See
-`docs/plan.md` Phase C for the verbatim spawn commands.
+reference-counts so concurrent quests share one proxy. The
+`vscode_extension` transport routes calls through the FI VSCode
+extension's `vscode.lm.*` bridge. See `docs/plan.md` Phase C and
+Phase P for transport-specific spawn details.
 
 ## Concurrency model
 
@@ -125,10 +144,15 @@ reference-counts so concurrent quests share one proxy. See
   Engines if profiling justifies it.)
 - `ProxySupervisor` is shared across Engines in a process; ref-counts
   proxy subprocesses.
-- Per-quest filesystem isolation: `<quest_root>/{paper,figures,code,.fi}`.
+- Per-quest filesystem isolation: `<quest_root>/{paper,figures,code,.fi}`,
+  plus `<quest_root>/config.yaml` (a copy of the source YAML so
+  `--resume` / `@fi /resume` need nothing else from the filesystem).
 - Checkpoints: `<quest_root>/.fi/state.sqlite`. A killed quest can be
-  resumed by re-running with the same `quest_id` (LangGraph's
-  `thread_id` mechanism).
+  resumed by re-running with `python launch.py --config <yaml>
+  --resume <quest_id>` or via `@fi /resume` in VSCode. The engine
+  detects existing state via `graph.aget_state()` and passes `None`
+  to `ainvoke` so LangGraph continues from the last completed node
+  instead of replaying from `ideate`.
 - Memory ceiling: `--memory-cap-mb` on `launch.py --fleet` defers new
   starts when RSS approaches the cap (psutil-based).
 

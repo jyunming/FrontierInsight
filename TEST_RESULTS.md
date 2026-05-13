@@ -3,6 +3,20 @@
 > Latest results live at the top; Phase-0 (DS-wrapper era) results are
 > retained below for historical reference.
 
+## Current suite size (post-#34, 2026-05-13)
+
+**379 tests collected** by `python -m pytest --collect-only`. The full
+suite runs in ~9 minutes on Windows-native Python 3.11.9. A handful of
+tests skip gracefully when their external tool isn't on PATH (Docker
+daemon, Marp `.cmd` shim on systems where only `.ps1` is wired, etc.).
+The 2026-05-13 PR batch (#25–#34) added the resume mechanism, the
+VSCode-bridge stall detection + reasoning-content visibility, the
+quest-local `config.yaml` convenience, the .pptx slide target, and the
+paper-depth prompt refinements (lit window 600→2000 chars, `study_depth`
+clarify slot, depth-aware write target, title-authoring, `rigor_score`
++ `depth_score` review axes). Test coverage grew with each PR; full
+suite organization is documented in `docs/capabilities.md`.
+
 ## CLI-exec providers — live probe (claude_cli, codex_cli, copilot_cli, gemini_cli)
 
 **4 / 4 providers respond** against their real local CLIs on Windows

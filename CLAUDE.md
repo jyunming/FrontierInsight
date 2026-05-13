@@ -12,11 +12,11 @@ The Phase-0 prototype wrapped DeepScientist; that wrapper has been removed. The 
 
 ```bash
 pip install -r requirements.txt
-pip install pytest pytest-asyncio          # dev
-python -m pytest -v                         # 295 tests, ~8 minutes (real venv creates)
+python -m pytest -v                                         # ~380 tests, ~9 minutes (real venv creates)
 python launch.py --config examples/integrator_bakeoff/config.yaml
 python launch.py --fleet a.yaml b.yaml --max-concurrent 4 --memory-cap-mb 4096
-python launch.py --ingest paper1.pdf paper2.md   # permanent ingest into Axon (no quest)
+python launch.py --config my.yaml --resume <quest_id>       # re-enter a crashed quest from its sqlite checkpoint
+python launch.py --ingest paper1.pdf paper2.md              # permanent ingest into Axon (no quest)
 ```
 
 External prerequisites are all optional and feature-gated:
@@ -31,14 +31,15 @@ External prerequisites are all optional and feature-gated:
 
 **Entry point**: `launch.py` is async. It parses args, builds one or more `Config` objects, constructs an `Engine(cfg)` per quest, runs them under a bounded `asyncio.Semaphore` if `--fleet`, then runs each `generation/*` generator on the resulting `QuestArtifacts`. One generator failure does not abort the rest.
 
-**The engine** (`core/engine.py::Engine`) is stateless w.r.t. process globals — N parallel Engines must coexist in one process for `--fleet`. The graph is async LangGraph compiled with `AsyncSqliteSaver` at `<quest_root>/.fi/state.sqlite`; the LangGraph `thread_id` is the quest_id, so a killed run can be resumed by re-running with the same quest output dir.
+**The engine** (`core/engine.py::Engine`) is stateless w.r.t. process globals — N parallel Engines must coexist in one process for `--fleet`. The graph is async LangGraph compiled with `AsyncSqliteSaver` at `<quest_root>/.fi/state.sqlite`; the LangGraph `thread_id` is the quest_id. A killed run is resumed via `python launch.py --config <yaml> --resume <quest_id>` (or `@fi /resume <quest_id>` in VSCode). On resume `Engine.run()` calls `graph.aget_state()` first; if prior state exists, it passes `None` to `ainvoke` so LangGraph continues from the last completed node instead of replaying from `ideate`. The source YAML is auto-copied to `<quest_root>/config.yaml` at startup so `/resume` is a one-step lookup.
 
 **`QuestState`** (TypedDict in `core/engine.py`) is the contract between every node and the prompts in `agents/*.md`. Field names are stable; any Phase-G alternate graph must keep them backwards-compatible. `QuestArtifacts` is the contract between the engine and the generators. Self-correction state lives on `QuestState` too: `clarify_*` (Phase I), `ideate_critique` (Phase M), `exec_reflect_iter`/`exec_reflect_history`/`exec_give_up_reason` (Phase K), `cross_check` (Phase L).
 
-**Provider layer** (`core/provider.py`): three transports, one `LLMClient.chat(messages) -> str` surface.
+**Provider layer** (`core/provider.py`): four transports, one `LLMClient.chat(messages) -> str` surface.
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
-- **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`.
-- **CLI exec** (`claude_cli`/`codex_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth (`claude login`, `codex login`). Spawn details are in `_CLI_SPECS`; `claude_cli` passes the prompt via stdin and reads stdout; `codex_cli` passes via argv and reads `--output-last-message <tmpfile>`. Retries on `_CliTransientError` (non-zero exit) with the same exponential backoff as the HTTP path.
+- **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`. The two `github_copilot_*` providers emit a one-time warning at engine init (third-party `copilot-api` proxy, abuse-detection risk).
+- **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli` and `codex_cli` and `gemini_cli` are chat-style. **`copilot_cli` is agentic**: it interprets FI's node prompts as user coding tasks and replies conversationally; the engine emits a loud warning when it's selected. For Copilot use `vscode_extension` instead.
+- **VSCode bridge** (`vscode_extension`) — Phase P. `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled.
 
