@@ -190,14 +190,39 @@ knowledge:
     - ~/papers/foundational-paper.pdf
     - ~/papers/local-note.md
 
-  try_fetch_full_text: false        # opportunistic publisher-PDF fetch
-  full_text_fetch_timeout_s: 15.0
+  try_fetch_full_text: false        # opportunistic publisher-PDF fetch (host-network only)
+  full_text_fetch_timeout_s: 15.0   # per-URL fetch timeout in seconds
+  full_text_fetch_total_s: 90.0     # wall-clock cap across all URLs in one query
+  full_text_max_kb: 64              # accepted-PDF size cap, KB; larger PDFs are dropped
 
 output:
   kinds: [paper_md, paper_pdf]
   paper_format: generic             # generic | neurips | iclr | ieee_access | nature_mi
   output_dir: ./outputs
 ```
+
+### `execution.sandbox: docker` — what it actually does
+
+When you set `sandbox: docker`, FI runs the generated experiment inside a Docker container instead of a fresh Python venv. The defaults:
+
+- **Image**: `python:3.11-slim` (override via `execution.docker_image`).
+- **Network**: disabled (`--network none`) — the experiment can't reach the internet, which prevents accidental literature scraping or data exfiltration from generated code.
+- **Mount**: the quest output directory is bind-mounted at `/work` inside the container; the experiment's working directory is `/work`. Code reads/writes there.
+- **Lifetime**: a fresh container per execute step. State doesn't persist between retries — the execute-repair loop sees a clean environment each iteration.
+
+Requires the `docker` Python package (`pip install docker`) and a running Docker daemon. On Windows that means Docker Desktop or WSL2. If you don't have those, leave the default `sandbox: venv` — the per-quest venv is faster anyway.
+
+### `output.paper_format` — which templates ship fully styled
+
+| Format | Status |
+|---|---|
+| `generic` | ✅ Fully styled — IMRAD with default LaTeX article geometry. The default; pick this when you don't have a target venue. |
+| `neurips` | ✅ Fully styled — uses the NeurIPS 2024 style sheet. |
+| `iclr`, `ieee_access`, `nature_mi` | ⚠️ Minimal stubs — they compile, but the style sheets are placeholders. Treat as starting points; copy the real venue's `.sty` file into `templates/paper/<format>/` to customize. |
+
+### `--fleet` concurrency model
+
+`--fleet` runs each YAML in its own asyncio task. The cap is `--max-concurrent N` (defaults to `min(4, cpu_count)`). When RSS exceeds `--memory-cap-mb`, new quest starts pause until memory drops below the cap. Each quest has its own venv, its own `state.sqlite` checkpoint, and its own provider proxy — failure in one quest doesn't affect the others. Provider proxies are reference-counted across the fleet, so 4 concurrent quests all using `vscode_extension` share one bridge connection rather than spawning four.
 
 ## Output artifacts
 
