@@ -231,32 +231,41 @@ async function runResume(
         }
     }
 
-    // Auto-discover the YAML by slug match. The quest_id shape is
-    // `<unix>-<slug>-<6char_nonce>` (see core.engine._new_quest_id).
-    // Strip the leading unix timestamp and the trailing nonce.
-    const slug = chosenId.replace(/^\d+-/, "").replace(/-[0-9a-f]{6}$/i, "");
-    const draftsDir = path.join(outputsDir, "_drafts");
+    // YAML discovery has three tiers:
+    //   1. `<quest_dir>/config.yaml` — the canonical location. launch.py
+    //      copies the source YAML here at quest startup so resume is
+    //      a one-step lookup. This is the new default path.
+    //   2. `<outputs>/_drafts/<ts>-<slug>.yaml` — legacy fallback for
+    //      quests that ran before the config-copy feature shipped. The
+    //      quest_id shape is `<unix>-<slug>-<6hex>` so we strip the
+    //      leading timestamp and trailing nonce and anchor on
+    //      `-${slug}.yaml` to avoid substring collisions
+    //      (e.g. "cat" matching "caterpillar...").
+    //   3. Manual file picker — only used when neither (1) nor (2) hits.
     let yamlPath: string | undefined;
-    if (await fsExists(draftsDir)) {
-        // The interview writer names YAMLs as `<timestamp>-<slug>.yaml`,
-        // so a precise match is `f === <ts>-<slug>.yaml`. A naive
-        // `f.includes(slug)` would let slug "cat" match both
-        // "dog-and-cat-..." AND "caterpillar-..." — anchor with the
-        // dash-before / dot-after delimiters that the writer guarantees.
-        const exactSuffix = `-${slug}.yaml`;
-        const draftNames = await fsPromises.readdir(draftsDir);
-        const matched = await Promise.all(
-            draftNames
-                .filter((f) => f.endsWith(exactSuffix))
-                .map(async (f) => {
-                    const fp = path.join(draftsDir, f);
-                    const st = await fsPromises.stat(fp);
-                    return { f, mtime: st.mtimeMs };
-                }),
-        );
-        matched.sort((a, b) => b.mtime - a.mtime);
-        if (matched.length > 0) {
-            yamlPath = path.join(draftsDir, matched[0].f);
+    const inQuestYaml = path.join(outputsDir, chosenId, "config.yaml");
+    if (await fsExists(inQuestYaml)) {
+        yamlPath = inQuestYaml;
+    }
+    if (!yamlPath) {
+        const slug = chosenId.replace(/^\d+-/, "").replace(/-[0-9a-f]{6}$/i, "");
+        const draftsDir = path.join(outputsDir, "_drafts");
+        if (await fsExists(draftsDir)) {
+            const exactSuffix = `-${slug}.yaml`;
+            const draftNames = await fsPromises.readdir(draftsDir);
+            const matched = await Promise.all(
+                draftNames
+                    .filter((f) => f.endsWith(exactSuffix))
+                    .map(async (f) => {
+                        const fp = path.join(draftsDir, f);
+                        const st = await fsPromises.stat(fp);
+                        return { f, mtime: st.mtimeMs };
+                    }),
+            );
+            matched.sort((a, b) => b.mtime - a.mtime);
+            if (matched.length > 0) {
+                yamlPath = path.join(draftsDir, matched[0].f);
+            }
         }
     }
     if (!yamlPath) {
@@ -266,7 +275,7 @@ async function runResume(
             filters: { YAML: ["yaml", "yml"] },
             defaultUri: vscode.Uri.file(outputsDir),
             openLabel: `Pick a YAML for ${chosenId}`,
-            title: `No draft YAML matched slug "${slug}". Pick one manually.`,
+            title: `No config.yaml in quest dir and no draft match. Pick one manually.`,
         });
         if (!picked || picked.length === 0) return;
         yamlPath = picked[0].fsPath;
