@@ -146,6 +146,27 @@ def test_stats_block_provider_breakdown_sorted_by_count() -> None:
     assert openai_pos < claude_pos
 
 
+def test_stats_block_provider_breakdown_tiebreaks_by_name() -> None:
+    """Regression: when two providers tie on count, sort order must
+    be stable (alphabetical by name) — otherwise the rendered stats
+    block reshuffles run-to-run depending on filesystem traversal
+    order and breaks deterministic-output expectations."""
+    # claude_cli and openai BOTH appear twice — tied on count. The
+    # secondary sort by name (ascending) puts claude_cli first.
+    snaps = [
+        _snap("1700000001-a-aabbcc", provider="openai"),
+        _snap("1700000002-b-aabbcc", provider="claude_cli"),
+        _snap("1700000003-c-aabbcc", provider="openai"),
+        _snap("1700000004-d-aabbcc", provider="claude_cli"),
+    ]
+    block = _stats_block(snaps)
+    claude_pos = block.index("claude_cli: 2")
+    openai_pos = block.index("openai: 2")
+    assert claude_pos < openai_pos, (
+        "tied counts must fall back to name-ascending for stable output"
+    )
+
+
 def test_stats_block_cadence_is_na_with_lt_2_completions() -> None:
     snaps = [_snap("1700000001-only-aabbcc", terminal="review")]
     block = _stats_block(snaps)
@@ -230,6 +251,15 @@ async def test_generate_portfolio_writes_file_and_returns_artifacts(
     # Both quest IDs appear in the rendered prompt.
     assert "1700000700-finished-aabbcc" in captured["prompt"]
     assert "1700001700-running-001122" in captured["prompt"]
+    # raw_state now exposes the quest_id list in prompt order (most-
+    # recent first) so callers can re-resolve without re-walking.
+    assert "quest_ids" in art.raw_state
+    assert set(art.raw_state["quest_ids"]) == {
+        "1700000700-finished-aabbcc",
+        "1700001700-running-001122",
+    }
+    # And the count matches.
+    assert art.raw_state["quest_count"] == 2
 
 
 @pytest.mark.asyncio

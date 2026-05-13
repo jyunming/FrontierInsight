@@ -1,11 +1,14 @@
 """Cross-quest portfolio synthesis.
 
-All-time view across every completed quest under ``outputs/``. The
-companion to ``core.digest``: where the digest is a weekly snapshot,
-the portfolio is the unbounded "what have I built up over months?"
-question. Surfaces topic clusters, near-duplicate quests (the same
-question asked twice with slightly different wording), themes that
-span multiple quests, and proposes meta-papers / gap-filling quests.
+All-time view across every quest under ``outputs/`` (completed AND
+in-progress — the prompt instructs the LLM to weight completed
+quests more heavily but in-progress ones still surface ongoing
+themes). Companion to ``core.digest``: where the digest is a weekly
+snapshot, the portfolio is the unbounded "what have I built up over
+months?" question. Surfaces topic clusters, near-duplicate quests
+(the same question asked twice with slightly different wording),
+themes that span multiple quests, and proposes meta-papers / gap-
+filling quests.
 
 CLI:    ``python launch.py --portfolio``
 VSCode: ``@fi /portfolio``
@@ -73,8 +76,11 @@ _ABSTRACT_CHARS = 400
 @dataclass
 class PortfolioArtifacts:
     """What :func:`generate_portfolio` returns. ``portfolio_path`` is
-    the headline markdown; ``raw_state`` retains the snapshot list for
-    callers that want to render their own view."""
+    the headline markdown; ``raw_state`` carries enough structured
+    metadata (window timestamps, quest counts, and the ordered list
+    of quest_ids that went into the prompt) for callers — e.g. the
+    Phase-J web GUI or a future ``/portfolio --json`` mode — to
+    render their own view without re-walking the outputs tree."""
 
     portfolio_id: str
     portfolio_path: Path
@@ -160,9 +166,14 @@ def _stats_block(snapshots: list[QuestSnapshot]) -> str:
         gaps.sort()
         mid = gaps[len(gaps) // 2]
         cadence = f"~{mid:.1f} days between completions (median)"
+    # Count-descending, then name-ascending. Without the secondary
+    # key, two providers tied on count would reshuffle randomly across
+    # runs depending on dict insertion order (which depends on
+    # filesystem traversal order). The secondary sort by name keeps
+    # the stats block stable run-to-run.
     provider_line = ", ".join(
         f"{name}: {n}" for name, n in sorted(
-            providers.items(), key=lambda kv: -kv[1],
+            providers.items(), key=lambda kv: (-kv[1], kv[0]),
         )
     ) or "n/a"
     earliest = (
@@ -329,5 +340,15 @@ async def generate_portfolio(
         raw_state={
             "generated_at": now.isoformat(),
             "quest_count": len(snapshots),
+            # Most-recent-first order, mirroring what
+            # _render_quest_corpus puts into the prompt. Callers can
+            # use this to re-resolve quest dirs without re-walking
+            # outputs/. Kept as plain strings (not Snapshot objects)
+            # so raw_state stays JSON-serializable.
+            "quest_ids": [
+                q.quest_id for q in sorted(
+                    snapshots, key=lambda x: x.last_modified, reverse=True,
+                )
+            ],
         },
     )
