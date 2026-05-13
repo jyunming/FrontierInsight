@@ -72,16 +72,25 @@ Three feedback loops:
 | `ollama`, `vllm` | HTTP direct (local) | none | ✅ Self-hosted |
 | `claude_cli` | CLI exec | `claude login` (Claude Pro/Max OAuth) | ✅ Sanctioned |
 | `codex_cli` | CLI exec | `codex login` (ChatGPT Plus/Pro OAuth) | ✅ Sanctioned |
-| `copilot_cli` | CLI exec | `gh auth login` (Copilot subscription) | ✅ Sanctioned |
+| `copilot_cli` | CLI exec | `gh auth login` (Copilot subscription) | ⚠️ Agentic — replies conversationally to FI's prompts; use `vscode_extension` for Copilot instead. |
 | `gemini_cli` | CLI exec | `gemini` OAuth / Google AI Studio key | ✅ Sanctioned |
 | **`vscode_extension`** | **VSCode bridge** | **VSCode Copilot Chat sign-in** | **✅ Sanctioned via `vscode.lm`** |
 | `claude_code` | HTTP via proxy | `claude login` + spawned wrapper | ⚠️ Third-party wrapper |
 | `github_copilot_cli` | HTTP via proxy | `gh auth login` + spawned `copilot-api` | ⚠️ Against ToS spirit (use `copilot_cli` instead) |
 | `github_copilot_vscode` | HTTP via proxy | VSCode Copilot extension + spawned `copilot-api` | ⚠️ Against ToS spirit (use `vscode_extension` instead) |
 
-The two `github_copilot_*` providers emit a one-time warning at engine
-init pointing at the sanctioned alternatives. Set
-`FI_SUPPRESS_PROXY_WARN=1` to silence (use at your own risk).
+The two `github_copilot_*` providers AND `copilot_cli` emit a one-time
+warning at engine init:
+
+- `github_copilot_*` — risk warning about the third-party proxy and
+  GitHub's abuse-detection systems.
+- `copilot_cli` — broken-as-chat-backend warning (the CLI is agentic
+  and replies conversationally instead of producing structured node
+  output). Recommended replacement for Copilot users is
+  `vscode_extension`.
+
+Set `FI_SUPPRESS_PROXY_WARN=1` to silence either warning (use at your
+own risk).
 
 ## Knowledge layer — three-layer retrieval
 
