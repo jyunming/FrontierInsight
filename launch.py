@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -313,6 +314,7 @@ async def run_one(
     engine: Engine | None = None,
     interactive: bool = False,
     resume_quest_id: str | None = None,
+    source_yaml_path: Path | None = None,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -324,6 +326,20 @@ async def run_one(
         print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name}")
     else:
         print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
+    # Drop a copy of the source YAML into the quest dir so future
+    # `--resume`s (and the VSCode `/resume` command) can find the
+    # config trivially at `<quest_root>/config.yaml` instead of
+    # slug-matching the drafts dir or asking the user to pick.
+    if source_yaml_path is not None and source_yaml_path.is_file():
+        engine.quest_root.mkdir(parents=True, exist_ok=True)
+        dest = engine.quest_root / "config.yaml"
+        if not dest.exists():
+            try:
+                shutil.copy2(source_yaml_path, dest)
+            except OSError as e:
+                # Non-fatal: the quest can still run. We just lose the
+                # auto-resume convenience for THIS quest.
+                print(f"[FI] couldn't copy config.yaml into quest dir: {e!r}", file=sys.stderr)
     # Pick the right clarify handler:
     #   --interactive          → terminal Q&A
     #   provider=vscode_extension → route through the bridge so the
@@ -433,15 +449,22 @@ async def _await_under_cap(cap_mb: int, *, poll_s: float = 2.0) -> None:
 
 
 async def run_fleet(
-    configs: list[Config],
+    configs: list[Config] | list[tuple[Path, Config]],
     *,
     supervisor: ProxySupervisor,
     max_concurrent: int,
     memory_cap_mb: int | None,
     profile: bool,
 ) -> int:
+    # Accept either bare configs (test-friendly) OR (yaml_path, config)
+    # tuples (production: lets us drop config.yaml into each quest dir).
+    # Normalize to the tuple form.
+    norm: list[tuple[Path | None, Config]] = [
+        (None, c) if isinstance(c, Config) else (c[0], c[1])  # type: ignore[arg-type]
+        for c in configs
+    ]
     sem = asyncio.Semaphore(max_concurrent)
-    total = len(configs)
+    total = len(norm)
     state = {"done": 0, "failed": 0, "running": 0}
     started_at = time.monotonic()
 
@@ -455,7 +478,7 @@ async def run_fleet(
             f"failed={state['failed']} elapsed={elapsed}s{rss_str}"
         )
 
-    async def gated(cfg: Config) -> dict[str, object] | Exception:
+    async def gated(yaml_path: Path | None, cfg: Config) -> dict[str, object] | Exception:
         async with sem:
             # Memory cap is checked at actual start (after semaphore admit),
             # not at entry — otherwise queued tasks could pass the early
@@ -473,6 +496,7 @@ async def run_fleet(
             try:
                 summary = await run_one(
                     cfg, supervisor=supervisor, profile=profile, engine=engine,
+                    source_yaml_path=yaml_path,
                 )
                 state["running"] -= 1
                 state["done"] += 1
@@ -484,7 +508,7 @@ async def run_fleet(
                 _status_line(engine.quest_id, "FAIL ")
                 return e
 
-    results = await asyncio.gather(*(gated(c) for c in configs))
+    results = await asyncio.gather(*(gated(p, c) for p, c in norm))
     failed = [r for r in results if isinstance(r, Exception)]
     for r in failed:
         print(f"[FI fleet] FAILURE: {r!r}", file=sys.stderr)
@@ -525,11 +549,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 cfg, supervisor=supervisor, profile=args.profile,
                 interactive=args.interactive,
                 resume_quest_id=args.resume,
+                source_yaml_path=args.config.resolve(),
             )
             return 0
 
-        configs = [Config.from_yaml(p) for p in args.fleet]
-        for c in configs:
+        configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
+        for _, c in configs:
             _apply_vscode_bridge_override(c, args.vscode_bridge_port)
         return await run_fleet(
             configs,

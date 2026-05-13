@@ -217,7 +217,7 @@ async def test_run_fleet_counters_at_end_state(
     cfg_a = _make_cfg(tmp_path)
     cfg_b = _make_cfg(tmp_path)
 
-    async def fake_run_one(cfg, *, supervisor, profile, engine=None):  # noqa: ANN001
+    async def fake_run_one(cfg, *, supervisor, profile, engine=None, **_kw):  # noqa: ANN001
         # Engine is now constructed in gated() and passed through — accept it.
         qid = engine.quest_id if engine is not None else "q-" + cfg.title
         return {"quest_id": qid, "ok": True}
@@ -254,7 +254,7 @@ async def test_run_fleet_failure_isolation(
     # serializes the gather so order is deterministic.
     state = {"first": True}
 
-    async def fake_run_one(cfg, *, supervisor, profile, engine=None):  # noqa: ANN001
+    async def fake_run_one(cfg, *, supervisor, profile, engine=None, **_kw):  # noqa: ANN001
         if state["first"]:
             state["first"] = False
             raise RuntimeError("first quest exploded")
@@ -272,3 +272,87 @@ async def test_run_fleet_failure_isolation(
         profile=False,
     )
     assert rc == 1
+
+
+# ---- source_yaml_path → <quest_root>/config.yaml -------------------------
+
+
+async def test_run_one_copies_source_yaml_into_quest_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User complaint: `/resume` had to slug-match YAMLs in `_drafts/`.
+    The fix drops a copy of the source YAML at `<quest_root>/config.yaml`
+    on quest startup so future resumes can find the config trivially.
+    Pin that behavior."""
+    cfg = _make_cfg(tmp_path)
+    src_yaml = tmp_path / "my_quest.yaml"
+    src_yaml.write_text("topic: copied yaml\n", encoding="utf-8")
+
+    # Stub engine so we don't actually run the LangGraph.
+    fake_engine = MagicMock()
+    fake_engine.quest_id = "qid-copy-test"
+    fake_engine.quest_root = tmp_path / "outputs" / "qid-copy-test"
+
+    # Stub Engine() so run_one's no-engine path uses our stub.
+    monkeypatch.setattr(launch, "Engine", lambda *_a, **_kw: fake_engine)
+
+    # Stub _maybe_profiled to skip the whole engine.run path.
+    fake_art = MagicMock()
+    fake_art.quest_id = fake_engine.quest_id
+    fake_art.quest_root = fake_engine.quest_root
+    fake_art.paper_md = None
+
+    async def fake_maybe(*_a, **_kw):  # noqa: ANN001
+        fake_art.quest_root.mkdir(parents=True, exist_ok=True)
+        return fake_art
+
+    monkeypatch.setattr(launch, "_maybe_profiled", fake_maybe)
+    monkeypatch.setattr(launch, "_pick_clarify_callback", lambda *a, **kw: None)
+    monkeypatch.setattr(launch, "_run_generators", AsyncMock(return_value={}))
+
+    await launch.run_one(
+        cfg, supervisor=MagicMock(), source_yaml_path=src_yaml,
+    )
+
+    copied = fake_engine.quest_root / "config.yaml"
+    assert copied.is_file(), "expected config.yaml dropped into quest_root"
+    assert copied.read_text(encoding="utf-8") == "topic: copied yaml\n"
+
+
+async def test_run_one_skips_copy_when_dest_already_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On --resume the destination already exists from the original run;
+    we must NOT clobber it (preserves the user's edits if they tweaked
+    the YAML between runs)."""
+    cfg = _make_cfg(tmp_path)
+    src_yaml = tmp_path / "new.yaml"
+    src_yaml.write_text("topic: new\n", encoding="utf-8")
+
+    quest_root = tmp_path / "outputs" / "qid-preserve"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text("topic: original\n", encoding="utf-8")
+
+    fake_engine = MagicMock()
+    fake_engine.quest_id = "qid-preserve"
+    fake_engine.quest_root = quest_root
+
+    monkeypatch.setattr(launch, "Engine", lambda *_a, **_kw: fake_engine)
+    fake_art = MagicMock()
+    fake_art.quest_id = fake_engine.quest_id
+    fake_art.quest_root = fake_engine.quest_root
+    fake_art.paper_md = None
+
+    async def fake_maybe(*_a, **_kw):  # noqa: ANN001
+        return fake_art
+
+    monkeypatch.setattr(launch, "_maybe_profiled", fake_maybe)
+    monkeypatch.setattr(launch, "_pick_clarify_callback", lambda *a, **kw: None)
+    monkeypatch.setattr(launch, "_run_generators", AsyncMock(return_value={}))
+
+    await launch.run_one(
+        cfg, supervisor=MagicMock(), source_yaml_path=src_yaml,
+    )
+
+    preserved = (quest_root / "config.yaml").read_text(encoding="utf-8")
+    assert preserved == "topic: original\n", "must not clobber existing config.yaml"
