@@ -16,11 +16,23 @@
  * which means: sanctioned API, user-consented, normal Copilot quota.
  */
 import * as vscode from "vscode";
-import * as fs from "fs";
+import * as fsPromises from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
 import { Bridge } from "./bridge";
 import { runInterview, writeInterviewYaml } from "./interview";
+
+
+/** Async existence check — avoids the sync fs.existsSync call that
+ *  blocks the extension host event loop on slow filesystems. */
+async function fsExists(p: string): Promise<boolean> {
+    try {
+        await fsPromises.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
     const participant = vscode.chat.createChatParticipant(
@@ -143,29 +155,41 @@ async function runResume(
         repoPath = ws;
     }
 
-    const outputsDir = path.join(repoPath, "outputs");
-    if (!fs.existsSync(outputsDir)) {
+    // Resolve the outputs dir from settings. The `frontierInsight.outputDir`
+    // setting may be a relative path (joined with repoPath) or absolute.
+    // Defaults to "outputs". This must match where quests actually land —
+    // otherwise the picker shows nothing for users who customized it.
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+    if (!(await fsExists(outputsDir))) {
         stream.markdown(
-            `❌ No \`outputs/\` directory under \`${repoPath}\` — nothing to resume.`,
+            `❌ No outputs directory at \`${outputsDir}\` — nothing to resume. ` +
+            `(Override via the \`frontierInsight.outputDir\` setting.)`,
         );
         return;
     }
 
-    // Find all quest dirs with a checkpoint.
+    // Find all quest dirs with a checkpoint. Async I/O so the extension
+    // host event loop stays responsive on slow filesystems / large dirs.
     type Candidate = { questId: string; questDir: string; mtimeMs: number };
+    const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
     const candidates: Candidate[] = [];
-    for (const entry of fs.readdirSync(outputsDir, { withFileTypes: true })) {
-        if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+    await Promise.all(entries.map(async (entry) => {
+        if (!entry.isDirectory() || entry.name.startsWith("_")) return;
         const questDir = path.join(outputsDir, entry.name);
         const checkpoint = path.join(questDir, ".fi", "state.sqlite");
-        if (!fs.existsSync(checkpoint)) continue;
-        const stat = fs.statSync(checkpoint);
-        candidates.push({
-            questId: entry.name,
-            questDir,
-            mtimeMs: stat.mtimeMs,
-        });
-    }
+        try {
+            const stat = await fsPromises.stat(checkpoint);
+            if (!stat.isFile()) return;
+            candidates.push({
+                questId: entry.name, questDir, mtimeMs: stat.mtimeMs,
+            });
+        } catch {
+            // Missing checkpoint or unreadable file — skip silently.
+        }
+    }));
     if (candidates.length === 0) {
         stream.markdown(
             `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Run \`@fi /new\` to start one.`,
@@ -174,7 +198,16 @@ async function runResume(
     }
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-    let chosenId = promptArgs.trim();
+    // Handle multi-token / typo-quoted args. The chat surface can pass
+    // through copy/paste artifacts like `/resume "1778…-x" extra` —
+    // pick just the first whitespace-separated token so the lookup is
+    // deterministic instead of silently failing with a confusing
+    // "no quest with id '"178…-x" extra'" message.
+    const rawArg = promptArgs.trim();
+    const firstToken = rawArg.split(/\s+/)[0] || "";
+    // Also strip surrounding quotes a user might paste from a log line.
+    const sanitized = firstToken.replace(/^["']+|["']+$/g, "");
+    let chosenId = sanitized;
     if (!chosenId) {
         const picks = candidates.map((c) => ({
             label: `$(beaker) ${c.questId}`,
@@ -204,17 +237,26 @@ async function runResume(
     const slug = chosenId.replace(/^\d+-/, "").replace(/-[0-9a-f]{6}$/i, "");
     const draftsDir = path.join(outputsDir, "_drafts");
     let yamlPath: string | undefined;
-    if (fs.existsSync(draftsDir)) {
-        const drafts = fs
-            .readdirSync(draftsDir)
-            .filter((f) => f.endsWith(".yaml") && f.includes(slug))
-            .map((f) => {
-                const fp = path.join(draftsDir, f);
-                return { f, mtime: fs.statSync(fp).mtimeMs };
-            })
-            .sort((a, b) => b.mtime - a.mtime);
-        if (drafts.length > 0) {
-            yamlPath = path.join(draftsDir, drafts[0].f);
+    if (await fsExists(draftsDir)) {
+        // The interview writer names YAMLs as `<timestamp>-<slug>.yaml`,
+        // so a precise match is `f === <ts>-<slug>.yaml`. A naive
+        // `f.includes(slug)` would let slug "cat" match both
+        // "dog-and-cat-..." AND "caterpillar-..." — anchor with the
+        // dash-before / dot-after delimiters that the writer guarantees.
+        const exactSuffix = `-${slug}.yaml`;
+        const draftNames = await fsPromises.readdir(draftsDir);
+        const matched = await Promise.all(
+            draftNames
+                .filter((f) => f.endsWith(exactSuffix))
+                .map(async (f) => {
+                    const fp = path.join(draftsDir, f);
+                    const st = await fsPromises.stat(fp);
+                    return { f, mtime: st.mtimeMs };
+                }),
+        );
+        matched.sort((a, b) => b.mtime - a.mtime);
+        if (matched.length > 0) {
+            yamlPath = path.join(draftsDir, matched[0].f);
         }
     }
     if (!yamlPath) {
