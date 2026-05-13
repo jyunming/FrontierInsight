@@ -20,6 +20,7 @@ from core.engine import (
     Engine,
     _extract_result_json,
     _new_quest_id,
+    _parse_implement_response,
     _parse_json_lenient,
     _slugify,
     _strip_outer_fence,
@@ -319,3 +320,140 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
     assert cross_branch.ends == {"write": "write", "redesign": "design"}
+
+
+# ---- _parse_implement_response ------------------------------------------
+
+
+def test_parse_implement_response_fenced_block_plus_deps_line() -> None:
+    """Happy path for the new fenced-block format (the whole reason this
+    parser exists — kills the JSON-escape overhead that was hanging
+    implement on long streams)."""
+    text = (
+        "```python\n"
+        "import numpy as np\n"
+        "print('RESULT_JSON: {}')\n"
+        "```\n"
+        "DEPS: numpy, matplotlib\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "import numpy as np" in code
+    assert "print('RESULT_JSON: {}')" in code
+    assert deps == ["numpy", "matplotlib"]
+
+
+def test_parse_implement_response_fenced_no_language_tag() -> None:
+    """Some models emit ``` instead of ```python. Still parse."""
+    text = "```\nprint('ok')\n```\nDEPS: numpy"
+    code, deps = _parse_implement_response(text)
+    assert code == "print('ok')"
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_deps_with_brackets_and_quotes() -> None:
+    """Tolerate ``DEPS: ['numpy', 'scipy']`` even though we asked for
+    bare names — models often regress to list syntax."""
+    text = "```python\npass\n```\nDEPS: ['numpy', 'scipy']"
+    code, deps = _parse_implement_response(text)
+    assert code == "pass"
+    assert deps == ["numpy", "scipy"]
+
+
+def test_parse_implement_response_no_deps_line_returns_empty_list() -> None:
+    """Missing DEPS line is fine — design_deps union covers most cases.
+    Empty list means 'I declare nothing', not 'parser broke'."""
+    text = "```python\nimport sys\nprint('ok')\n```"
+    code, deps = _parse_implement_response(text)
+    assert code == "import sys\nprint('ok')"
+    assert deps == []
+
+
+def test_parse_implement_response_falls_back_to_legacy_json() -> None:
+    """Models occasionally regress to the old ``{"code": "...", "deps": [...]}``
+    shape; don't punish them — fall through to _parse_json_lenient."""
+    text = '{"code": "print(42)", "deps": ["numpy"]}'
+    code, deps = _parse_implement_response(text)
+    assert code == "print(42)"
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_empty_and_garbage_return_empty() -> None:
+    assert _parse_implement_response("") == ("", [])
+    assert _parse_implement_response("no code here, sorry") == ("", [])
+
+
+def test_parse_implement_response_picks_first_fenced_block() -> None:
+    """``_PY_FENCE_RE`` uses ``.search()`` with a non-greedy ``(.*?)``,
+    so it always returns the FIRST fenced block — that is the contract.
+    The prompt explicitly asks for exactly one fence; if a model emits
+    a tiny prose-example fence before the real one, the contract is
+    violated and the small fence wins (caller can log/retry)."""
+    text = (
+        "```python\nimport numpy\nprint(1)\n```\n"
+        "DEPS: numpy\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "import numpy" in code
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_pep508_extras_are_preserved() -> None:
+    """Regression for PR #27 review: a naive ``raw.strip("[](){}")`` would
+    chew the trailing ``]`` off ``pandas[performance]``, producing the
+    broken spec ``pandas[performance`` that pip can't install. Only one
+    matched OUTER pair should be peeled."""
+    text = (
+        "```python\nimport pandas\n```\n"
+        "DEPS: pandas[performance], numpy\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "pandas[performance]" in deps
+    assert "numpy" in deps
+
+
+def test_parse_implement_response_pep508_extras_inside_brackets() -> None:
+    """Same as above but with the outer list-syntax brackets too:
+    ``DEPS: [pandas[performance], scipy]``. Strip exactly one outer
+    matched pair; preserve the inner ``[performance]`` extras."""
+    text = (
+        "```python\npass\n```\n"
+        "DEPS: [pandas[performance], scipy]\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "pandas[performance]" in deps
+    assert "scipy" in deps
+
+
+def test_parse_implement_response_ignores_deps_assignment_inside_fence() -> None:
+    """Regression for PR #27 review: a Python statement like
+    ``deps = ["numpy"]`` inside the fenced experiment code must NOT be
+    misread as the metadata DEPS line. The parser only searches the
+    post-fence tail for DEPS."""
+    text = (
+        "```python\n"
+        "deps = ['fake_inside_fence']\n"
+        "import scipy\n"
+        "```\n"
+        "DEPS: scipy\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "import scipy" in code
+    assert deps == ["scipy"]
+    assert "fake_inside_fence" not in deps
+
+
+def test_parse_implement_response_legacy_deps_as_string() -> None:
+    """Regression for PR #27 review: legacy JSON shape with deps as a
+    string (``"deps": "numpy"``) — coerce to a single-element list, NOT
+    a per-character list."""
+    text = '{"code": "print(1)", "deps": "numpy"}'
+    code, deps = _parse_implement_response(text)
+    assert code == "print(1)"
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_legacy_deps_as_comma_string() -> None:
+    """And a comma-separated single string splits correctly."""
+    text = '{"code": "print(1)", "deps": "numpy, scipy"}'
+    code, deps = _parse_implement_response(text)
+    assert sorted(deps) == ["numpy", "scipy"]

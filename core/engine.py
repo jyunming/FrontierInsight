@@ -478,11 +478,24 @@ class Engine:
             timeout_s=str(self.config.execution.timeout_s),
         )
         text = await self._chat(prompt, node="implement")
-        parsed = _parse_json_lenient(text) or {}
-        code = parsed.get("code") or 'print("RESULT_JSON: {}")'
-        deps = parsed.get("deps") or []
+        code, deps = _parse_implement_response(text)
+        if not code:
+            # Empty-code path: log the LLM head so the user can see WHAT
+            # came back rather than silently shipping a stub experiment
+            # that crashes downstream with no signal.
+            self._log.warning(
+                "[implement] no code extracted; LLM head: %r",
+                text[:400] if text else "<empty>",
+            )
+            code = 'print("RESULT_JSON: {}")'
         # Defensive: if the design listed deps and the impl skipped them, union.
-        design_deps = (state.get("design") or {}).get("dependencies") or []
+        # design_deps comes from a JSON-leniently-parsed LLM response — it
+        # MAY be a list[str], a comma-separated string, or something weirder.
+        # Coerce to a list[str] before set-union; otherwise unpacking a bare
+        # string into the set produces per-character entries ("numpy" -> {"n","u",...}).
+        design_deps = _coerce_dep_list(
+            (state.get("design") or {}).get("dependencies")
+        )
         deps = sorted({*deps, *design_deps})
 
         code_path = self.quest_root / "code" / "experiment.py"
@@ -1409,6 +1422,104 @@ def _parse_json_lenient(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             return None
     return None
+
+
+# Implement-node response parsing.
+#
+# Why a dedicated parser: the prior `{"code": "...", "deps": [...]}`
+# JSON-wrapped format was the worst possible shape for an LLM stream —
+# a 150-line script became a 6-10 KB single JSON string with every
+# newline / quote / backslash escaped, costing ~30% more output tokens
+# AND forcing the whole response to be well-formed (any truncation
+# silently fell back to `print("RESULT_JSON: {}")` and crashed execute).
+# Long streams are exactly where Copilot's HTTP/2 drops happen, so the
+# `implement` node accounted for most of the bridge retry-exhaustions
+# users saw in real quests. The new format is a fenced Python block
+# plus a `DEPS:` line — partial truncation still yields recoverable code.
+_PY_FENCE_RE = re.compile(
+    r"```(?:python|py)?\s*\n(.*?)\n```",
+    re.DOTALL | re.IGNORECASE,
+)
+_DEPS_LINE_RE = re.compile(
+    r"^[ \t]*deps\s*[:=]\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _coerce_dep_list(value: Any) -> list[str]:
+    """Normalize a deps value from various LLM-output shapes to ``list[str]``.
+
+    Accepts ``list[str]`` (canonical), a comma-separated string
+    (``"numpy, scipy"``), a single bare name (``"numpy"``), or
+    anything else (returns ``[]``). Filters out empty / whitespace-only
+    entries and stringifies non-str elements as a last resort.
+
+    Returning a real ``list[str]`` is important because the caller
+    set-unions with ``{*deps, *design_deps}`` — unpacking a bare string
+    into a set yields per-character entries ({"n","u","m","p","y"}).
+    """
+    if isinstance(value, list):
+        return [str(d).strip() for d in value if str(d).strip()]
+    if isinstance(value, str):
+        return [d.strip() for d in value.split(",") if d.strip()]
+    return []
+
+
+def _parse_implement_response(text: str) -> tuple[str, list[str]]:
+    """Extract ``(code, deps)`` from the implement-node LLM response.
+
+    Format expected (the new shape after agents/implement.md was rewritten):
+
+        ```python
+        <code>
+        ```
+        DEPS: numpy, matplotlib
+
+    Falls back to the legacy ``{"code": ..., "deps": [...]}`` JSON shape
+    if no fenced code block is found, so a model that drifts back to the
+    old format still works.
+
+    Returns ``("", [])`` if neither shape parses — caller is expected to
+    handle the empty-code path (it writes a stub experiment and lets the
+    execute node fail loudly rather than silently swallow the breakage).
+    """
+    if not text:
+        return "", []
+
+    # Primary: fenced Python block + `DEPS:` line.
+    fence = _PY_FENCE_RE.search(text)
+    if fence:
+        code = fence.group(1).strip("\n")
+        deps: list[str] = []
+        # Search the DEPS line only in the AFTER-fence tail. Searching
+        # the whole text would falsely match Python statements like
+        # `deps = [...]` INSIDE the fenced experiment code itself (the
+        # prompt explicitly puts DEPS after the closing ```).
+        deps_match = _DEPS_LINE_RE.search(text[fence.end():])
+        if deps_match:
+            raw = deps_match.group(1).strip()
+            # Tolerate "numpy, matplotlib" / "[numpy, matplotlib]" /
+            # "['numpy', 'matplotlib']" — peel exactly ONE matched pair
+            # of outer brackets, not every leading/trailing bracket.
+            # The naive `.strip("[](){}")` would chew the trailing `]`
+            # off PEP 508 extras like `pandas[performance]`, leaving a
+            # broken spec `pandas[performance` that pip can't install.
+            for opener, closer in (("[", "]"), ("(", ")"), ("{", "}")):
+                if raw.startswith(opener) and raw.endswith(closer):
+                    raw = raw[1:-1].strip()
+                    break
+            deps = [
+                d.strip().strip("'\"")
+                for d in raw.split(",")
+                if d.strip().strip("'\"")
+            ]
+        return code, deps
+
+    # Fallback: legacy JSON-wrapped shape.
+    legacy = _parse_json_lenient(text) or {}
+    code = legacy.get("code") or ""
+    deps = _coerce_dep_list(legacy.get("deps"))
+    return code, deps
 
 
 _RESULT_LINE_RE = re.compile(r"RESULT_JSON:\s*(\{.*\})\s*$", re.MULTILINE)
