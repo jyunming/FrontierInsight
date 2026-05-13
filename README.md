@@ -246,6 +246,20 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
+### Get an adversarial second opinion on a completed quest
+
+```
+@fi /critique <quest_id>
+```
+
+Or:
+
+```bash
+python launch.py --critique <quest_id> --critique-provider claude_cli
+```
+
+The in-quest review is biased — the same model wrote the paper AND reviewed it. `/critique` runs a fresh adversarial pass that has "never seen this paper before." For maximum effect, pick a different model family in your Copilot Chat picker (or pass `--critique-provider`) from the one that wrote the paper. Writes `outputs/<quest_id>/critique.md` with: a Verdict (accept / revise / reject / inconclusive), Methodology challenges (with quoted objections), Statistical issues (effect sizes, missing baselines, cherry-picked metrics), Reproducibility gaps, Alternative explanations the experiment doesn't rule out, an explicit "What the in-quest review missed" comparison, and Recommended follow-up experiments. Ingested into Axon as `kind=fi_critique`.
+
 ### See your whole research portfolio at a glance
 
 ```

@@ -97,6 +97,10 @@ async function handleRequest(
         await runPortfolio(stream, token, userPickedModel);
         return;
     }
+    if (cmd === "critique") {
+        await runCritique(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -119,6 +123,7 @@ function helpText(): string {
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
         "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
+        "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "",
         "All LLM calls go through your Copilot subscription via the",
         "`vscode.lm` Language Model API. Each quest's `provider.node_models`",
@@ -927,6 +932,140 @@ async function runPortfolio(
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Portfolio done.\n");
+    } else {
+        const tail = stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
+            (tail.trim()
+                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
+                : "stderr was empty.\n"),
+        );
+    }
+}
+
+
+/**
+ * Implementation of `@fi /critique <quest_id>`. Spawns
+ * `python launch.py --critique <quest_id> --vscode-bridge-port <P>`
+ * and streams the result back to the chat panel.
+ *
+ * For the strongest adversarial effect the user should pick a Copilot
+ * model in the chat picker DIFFERENT from the one that wrote the
+ * paper. The extension can't enforce that — the picker is the user's
+ * choice — but the produced critique.md records both providers so
+ * the user can see post-hoc which was which.
+ */
+async function runCritique(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+
+    const questId = promptArgs.trim();
+    // Validate the quest_id shape client-side so we can give a clear
+    // chat error rather than letting the Python side reject it.
+    // <10-digit-epoch>-<lowercase-slug>-<6-hex-nonce>.
+    const questIdPattern = /^\d{10}-[a-z0-9-]+-[0-9a-f]{6}$/;
+    if (!questId) {
+        stream.markdown(
+            "Need a quest_id. Example: `@fi /critique 1778452404-euv-mor-photon-shot-noise-ler-e6bfe5`.\n\n" +
+            "To find a quest_id, look under your `outputs/` directory or run `@fi /resume` to see the picker.\n",
+        );
+        return;
+    }
+    if (!questIdPattern.test(questId)) {
+        stream.markdown(
+            `\`${questId}\` doesn't look like a valid quest_id. Expected the \`<epoch>-<slug>-<6hex>\` form ` +
+            "(e.g. `1778452404-euv-mor-photon-shot-noise-ler-e6bfe5`).\n",
+        );
+        return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    const launchScript = path.join(repoPath, "launch.py");
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+
+    stream.markdown(
+        `🔍 Running adversarial critique of quest \`${questId}\`.\n\n` +
+        `🤖 Critique model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+        `💡 _For the strongest second-opinion effect, pick a different model family in the chat picker from the one that wrote the paper. The critique.md will record both._\n\n` +
+        `▶️ Loading paper / code / prior review…\n\n`,
+    );
+
+    const bridge = new Bridge({
+        progress: stream,
+        cancellationToken: token,
+        defaultModel: userPickedModel,
+    });
+    const port = await bridge.listen();
+
+    const argv: string[] = [
+        "-u", launchScript,
+        "--vscode-bridge-port", String(port),
+        "--critique", questId,
+        "--output-root", outputsDir,
+    ];
+
+    const child = spawn(pythonPath, argv, {
+        cwd: repoPath,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderrTail: string[] = [];
+    const STDERR_TAIL_LINES = 80;
+    bridge.attachChild(child, (line) => {
+        stderrTail.push(line);
+        if (stderrTail.length > STDERR_TAIL_LINES) {
+            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
+        }
+    });
+    token.onCancellationRequested(() => {
+        try { child.kill("SIGTERM"); } catch { /* noop */ }
+    });
+
+    child.stdout.setEncoding("utf-8");
+    let stdoutBuf = "";
+    child.stdout.on("data", (chunk: string) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/\r?\n/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) {
+            const m = line.match(/^\[FI\] critique -> (.+)$/);
+            if (m) {
+                stream.markdown(`  ✅ critique written → \`${m[1]}\`\n\n`);
+                continue;
+            }
+            if (line.startsWith("[FI] critique_provider=")) {
+                stream.markdown(`  📊 ${line.slice(5)}\n\n`);
+            }
+        }
+    });
+
+    const exitCode: number | null = await new Promise((resolve) => {
+        child.on("close", (code) => resolve(code));
+    });
+    await bridge.close();
+
+    if (exitCode === 0) {
+        stream.markdown("\n✅ Critique done.\n");
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
