@@ -304,15 +304,95 @@ export class Bridge {
 
             // Stream the response text back as `lm_chunk` events,
             // then a final `lm_done`.
+            //
+            // Two reasons we don't just `for await (... of response.text)`:
+            //
+            //  1. **Per-chunk visibility.** Without surfacing fragments to
+            //     the chat panel, the user sees only VSCode's generic
+            //     "Reasoning" indicator and can't tell whether the model
+            //     is mid-stream, stalled, or wedged. We render a single
+            //     heartbeat line that updates as chunks land.
+            //
+            //  2. **Inactivity timeout.** `model.sendRequest` has no
+            //     built-in deadline; if Copilot's HTTP/2 silently stalls
+            //     mid-stream the iteration hangs forever. We race each
+            //     `next()` against a 180 s timer and treat a no-chunk
+            //     gap that long as a stall — surface as `lm_error` with
+            //     a marker Python's retry classifier recognizes so the
+            //     Python side will try the request again.
+            const INACTIVITY_MS = 180_000;
+            const HEARTBEAT_MS = 10_000;
             let accumulated = "";
-            for await (const fragment of response.text) {
-                accumulated += fragment;
-                this.send({
-                    type: "lm_chunk",
-                    id: req.id,
-                    delta: fragment,
-                });
+            let chunkCount = 0;
+            let chars = 0;
+            const startMs = Date.now();
+            const iter = response.text[Symbol.asyncIterator]();
+            // Use a non-empty fallback so an upstream caller that didn't
+            // set `node` (e.g. older Python that hasn't been updated to
+            // thread node through `LLMClient.chat`) doesn't render as
+            // empty backticks like `` ``.
+            const nodeLabel = req.node || "(unnamed-node)";
+
+            // The bot review on PR #30 caught a real flaw in v1: a
+            // heartbeat that only fires on chunk arrival is silent
+            // during pre-first-token reasoning, which is exactly the
+            // window the user is most anxious about ("is anything
+            // happening?"). Run a wall-clock interval that fires
+            // every HEARTBEAT_MS regardless of stream state.
+            const heartbeatTimer = setInterval(() => {
+                const elapsed = Math.round((Date.now() - startMs) / 1000);
+                const label = chunkCount === 0 ? "reasoning (no chunks yet)" : "streaming";
+                this.opts.progress.markdown(
+                    `  📥 \`${nodeLabel}\` ${label} — ` +
+                    `${chunkCount} chunks, ${chars} chars, ${elapsed} s\n\n`,
+                );
+            }, HEARTBEAT_MS);
+            this.opts.progress.markdown(
+                `  ⏳ \`${nodeLabel}\` streaming…\n\n`,
+            );
+            try {
+                while (true) {
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const stallSignal: Promise<{ stalled: true }> = new Promise((resolve) => {
+                        timer = setTimeout(
+                            () => resolve({ stalled: true }),
+                            INACTIVITY_MS,
+                        );
+                    });
+                    let result: IteratorResult<string> | { stalled: true };
+                    try {
+                        result = await Promise.race([iter.next(), stallSignal]);
+                    } finally {
+                        if (timer) clearTimeout(timer);
+                    }
+                    if ("stalled" in result) {
+                        // Phrasing matters: Python's _is_bridge_error_transient
+                        // pattern-matches strings; "bridge stalled" must be
+                        // in its transient-marker list so the Python side
+                        // retries instead of dying on the first stall.
+                        throw new Error(
+                            `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
+                            `(received ${chunkCount} chunks / ${chars} chars before stall)`,
+                        );
+                    }
+                    if (result.done) break;
+                    const fragment = result.value;
+                    accumulated += fragment;
+                    chars += fragment.length;
+                    chunkCount++;
+                    this.send({
+                        type: "lm_chunk",
+                        id: req.id,
+                        delta: fragment,
+                    });
+                }
+            } finally {
+                clearInterval(heartbeatTimer);
             }
+            const totalElapsed = Math.round((Date.now() - startMs) / 1000);
+            this.opts.progress.markdown(
+                `  ✅ \`${nodeLabel}\` done — ${chunkCount} chunks, ${chars} chars, ${totalElapsed} s\n\n`,
+            );
             this.send({
                 type: "lm_done",
                 id: req.id,

@@ -985,6 +985,7 @@ class Engine:
         messages = [{"role": "user", "content": prompt}]
         return await self._client.chat(
             messages, temperature=0.2, model=self._model_for_node(node),
+            node=node or "",
         )
 
     async def _chat_messages(
@@ -1000,6 +1001,7 @@ class Engine:
         assert self._client is not None
         return await self._client.chat(
             messages, temperature=temperature, model=self._model_for_node(node),
+            node=node or "",
         )
 
     def _model_for_node(self, node: str | None) -> str | None:
