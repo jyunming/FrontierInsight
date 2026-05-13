@@ -77,6 +77,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "retrieve them. Pair with --summarize-kind to override "
              "content-type auto-detection.",
     )
+    mode.add_argument(
+        "--install-tectonic",
+        action="store_true",
+        help="Download the tectonic LaTeX binary (~70 MB) into "
+             "tools/tectonic.exe so paper_pdf works without an admin "
+             "install of MiKTeX. Tectonic is self-bootstrapping — on "
+             "first compile it downloads required CTAN packages into "
+             "the user's home dir (~30 s, no GUI prompts). Picks the "
+             "right asset for your OS+arch from GitHub Releases and "
+             "verifies SHA-256.",
+    )
     p.add_argument(
         "--summarize-kind",
         type=str,
@@ -594,6 +605,9 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.ingest:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
 
+        if args.install_tectonic:
+            return _install_tectonic()
+
         if args.summarize:
             return await _run_summarize(
                 folder=args.summarize.resolve(),
@@ -700,6 +714,166 @@ async def _run_summarize(
     print(
         f"[FI] {art.file_count} files; detected_kind={art.detected_kind}; "
         f"ingested_to_axon={art.ingested_to_axon}",
+    )
+    return 0
+
+
+# Tectonic LaTeX engine — single self-bootstrapping binary used as a
+# fallback to MiKTeX/TeX Live for users who can't install LaTeX
+# without admin rights. The release tag is the only version pin we
+# carry; the SHA-256 of each platform archive is fetched from the
+# official `SHA256SUMS` file in the same release. That removes the
+# staleness problem of baking per-asset hashes into source: upgrading
+# tectonic is a one-line `_TECTONIC_VERSION` bump.
+_TECTONIC_VERSION = "0.15.0"
+# Map (sys.platform, normalized_machine_arch) → tectonic release-asset
+# filename. Used by `_install_tectonic` to pick the right download.
+_TECTONIC_ASSET_NAMES: dict[tuple[str, str], str] = {
+    ("win32", "AMD64"): f"tectonic-{_TECTONIC_VERSION}-x86_64-pc-windows-msvc.zip",
+    ("darwin", "arm64"): f"tectonic-{_TECTONIC_VERSION}-aarch64-apple-darwin.tar.gz",
+    ("darwin", "x86_64"): f"tectonic-{_TECTONIC_VERSION}-x86_64-apple-darwin.tar.gz",
+    ("linux", "x86_64"): f"tectonic-{_TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz",
+}
+
+
+def _install_tectonic() -> int:
+    """Download the tectonic LaTeX binary for the current OS+arch into
+    ``<repo_root>/tools/`` so paper_pdf works without an admin install
+    of MiKTeX.
+
+    Verification: fetches the release's official ``SHA256SUMS`` file
+    over HTTPS and compares against the archive. Two pieces have to
+    line up — the archive AND the checksum file — and both arrive
+    over HTTPS, so a MITM would have to break TLS in both. Removes
+    the need to bake per-asset hashes into source.
+
+    Tectonic is a single Rust binary (~70 MB) that downloads required
+    CTAN packages on first run into
+    ``%LOCALAPPDATA%/TectonicProject/Tectonic/``. No GUI, no admin,
+    no install step. The ``_find_pdf_engine`` helper in
+    ``generation/paper.py`` picks it up automatically when pdflatex
+    isn't on PATH.
+
+    Returns 0 on success, 1 on any failure (network, checksum
+    mismatch, write error, unsupported platform).
+    """
+    import hashlib
+    import platform
+    import tarfile
+    import tempfile
+    import urllib.error
+    import urllib.request
+    import zipfile
+
+    repo_root = Path(__file__).resolve().parent
+    tools_dir = repo_root / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    exe_name = "tectonic.exe" if sys.platform == "win32" else "tectonic"
+    dest = tools_dir / exe_name
+    if dest.is_file():
+        print(f"[FI] tectonic already installed at {dest}")
+        return 0
+
+    arch = platform.machine()
+    # Normalize the few common machine-arch spellings to the keys our
+    # asset table uses.
+    arch_norm = {
+        "aarch64": "arm64",
+        "AMD64": "AMD64",
+        "x86_64": "x86_64",
+        "arm64": "arm64",
+    }.get(arch, arch)
+    key = (sys.platform, arch_norm)
+    if key not in _TECTONIC_ASSET_NAMES:
+        print(
+            f"[FI] --install-tectonic: unsupported platform "
+            f"({sys.platform}/{arch}). Manual download from "
+            f"github.com/tectonic-typesetting/tectonic/releases.",
+            file=sys.stderr,
+        )
+        return 1
+    asset_name = _TECTONIC_ASSET_NAMES[key]
+    base_url = (
+        f"https://github.com/tectonic-typesetting/tectonic/releases/"
+        f"download/tectonic@{_TECTONIC_VERSION}"
+    )
+    archive_url = f"{base_url}/{asset_name}"
+    sums_url = f"{base_url}/SHA256SUMS"
+
+    print(f"[FI] downloading {archive_url}")
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive = Path(tmpdir) / asset_name
+            with urllib.request.urlopen(archive_url, timeout=180) as r:
+                archive.write_bytes(r.read())
+
+            # Fetch and parse the official SHA256SUMS file.
+            with urllib.request.urlopen(sums_url, timeout=30) as r:
+                sums_text = r.read().decode("utf-8", errors="replace")
+            expected: str | None = None
+            for line in sums_text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Format: `<hex>  <filename>` (two spaces between, per
+                # `sha256sum -b` output).
+                parts = line.split()
+                if len(parts) >= 2 and parts[-1].endswith(asset_name):
+                    expected = parts[0]
+                    break
+            if expected is None:
+                print(
+                    f"[FI] --install-tectonic: {asset_name} not listed in "
+                    f"SHA256SUMS; aborting rather than skip verification.",
+                    file=sys.stderr,
+                )
+                return 1
+            actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+            if actual.lower() != expected.lower():
+                print(
+                    f"[FI] --install-tectonic: SHA-256 mismatch.\n"
+                    f"  expected: {expected}\n"
+                    f"  got:      {actual}\n"
+                    f"  Aborting — possible network corruption or MITM.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            # Extract just the `tectonic` / `tectonic.exe` binary; the
+            # archives also contain LICENSE and a README we don't need.
+            if asset_name.endswith(".zip"):
+                with zipfile.ZipFile(archive) as zf:
+                    for member in zf.namelist():
+                        if member.endswith(exe_name):
+                            with zf.open(member) as src, open(dest, "wb") as dst:
+                                dst.write(src.read())
+                            break
+                    else:
+                        print("[FI] --install-tectonic: archive missing tectonic binary", file=sys.stderr)
+                        return 1
+            elif asset_name.endswith((".tar.gz", ".tgz")):
+                with tarfile.open(archive, "r:gz") as tf:
+                    for member in tf.getmembers():
+                        if member.name.endswith(exe_name):
+                            extracted = tf.extractfile(member)
+                            if extracted is None:
+                                continue
+                            dest.write_bytes(extracted.read())
+                            break
+                    else:
+                        print("[FI] --install-tectonic: archive missing tectonic binary", file=sys.stderr)
+                        return 1
+            if sys.platform != "win32":
+                dest.chmod(0o755)
+    except (urllib.error.URLError, OSError) as e:
+        print(f"[FI] --install-tectonic: download failed: {e!r}", file=sys.stderr)
+        return 1
+
+    print(f"[FI] tectonic installed at {dest}")
+    print(
+        "[FI] On next paper_pdf run, FI will auto-detect tectonic when "
+        "pdflatex isn't on PATH. First compile downloads CTAN packages "
+        "(~30 s, one-time)."
     )
     return 0
 
