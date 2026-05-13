@@ -481,3 +481,55 @@ async def test_summarize_folder_raises_on_missing_dir(tmp_path: Path) -> None:
             provider=ProviderConfig(name="openai"),
             output_dir=tmp_path / "out",
         )
+
+
+@pytest.mark.asyncio
+async def test_summarize_folder_caps_files_in_prompt_but_ingests_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a folder exceeds _MAX_PROMPT_FILES, only the first N
+    appear in the manifest (with an explicit note about the omitted
+    tail) but every file still gets ingested into Axon. This is the
+    fix for the 31151-file BridgeError repro."""
+    import core.summarizer as sm
+
+    # Shrink the cap so the test stays cheap.
+    monkeypatch.setattr(sm, "_MAX_PROMPT_FILES", 5)
+
+    folder = tmp_path / "huge"
+    folder.mkdir()
+    for i in range(12):
+        (folder / f"file_{i:03d}.py").write_text(f"x = {i}\n")
+    output_dir = tmp_path / "out"
+
+    captured: dict[str, str] = {}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        captured["prompt"] = messages[-1]["content"]
+        return "# Capped Summary\n"
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+
+    knowledge = MagicMock()
+    knowledge.enabled = True
+    knowledge.add_text = MagicMock(return_value=True)
+
+    art = await sm.summarize_folder(
+        folder,
+        provider=ProviderConfig(name="openai"),
+        output_dir=output_dir,
+        knowledge=knowledge,
+    )
+
+    # file_count reflects the full walk, not the truncated prompt set.
+    assert art.file_count == 12
+
+    # Prompt manifest lists only the first 5 IDs, plus the truncation note.
+    prompt = captured["prompt"]
+    assert "[1]" in prompt and "[5]" in prompt
+    assert "[6]" not in prompt and "[12]" not in prompt
+    assert "7 additional files past file [5] were omitted" in prompt
+
+    # Axon ingest still received the full set (12 input files + 1 summary
+    # = 13 calls). The cap is prompt-only.
+    assert knowledge.add_text.call_count == 13

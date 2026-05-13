@@ -55,6 +55,30 @@ _PER_FILE_PROMPT_CHARS = 4_000
 # prompt was ~209 × 4 KB = ~800 KB → ~200K tokens → BridgeError.
 _TOTAL_PROMPT_CHARS = 60_000
 
+# Hard cap on the number of files included in the LLM prompt itself
+# (both manifest table rows AND content blocks). The manifest alone
+# is one ~80-char row per file, so 31K files → ~2.5M chars in the
+# manifest before any content block — way past any model's token
+# budget regardless of the _TOTAL_PROMPT_CHARS cap (which only covers
+# the content-block section).
+#
+# When the walk surfaces more than this many files, we keep the first
+# N in walk order — which is path-sorted (see ``_walk_sorted``), so
+# the truncation is deterministic across runs. There is intentionally
+# NO content-kind prioritization here: ordering by kind would force a
+# stable secondary sort, change ID assignment between runs that add
+# or remove a single file, and break the manifest's stability
+# guarantee. All files are still INGESTED into Axon (when knowledge
+# is enabled) — only the in-prompt presentation is capped — so
+# future quests can still retrieve from the full set via the
+# knowledge layer.
+#
+# Real-world failure that motivated this: a user pointed /summarize
+# at C:\dev\turboquantDB (31151 files after standard skip-dir pruning,
+# likely a checked-in mix of source + generated artifacts). The
+# manifest alone exceeded the bridge's token limit.
+_MAX_PROMPT_FILES = 500
+
 # Per-file cap for the Axon ingest path. Larger than the prompt
 # preview so future retrieval can surface body content beyond the
 # first ~4 KB. Bounded so a single huge file doesn't dominate the
@@ -67,9 +91,19 @@ _PER_FILE_AXON_CHARS = 50_000
 # user-meaningful files.
 _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".hg", ".svn",
-    "node_modules", ".venv", "venv", "__pycache__",
+    "node_modules", ".venv", "venv", "env", "__pycache__",
     ".pytest_cache", ".pytest_tmp", ".mypy_cache", ".ruff_cache",
-    "dist", "build", ".next", ".turbo",
+    ".tox", ".eggs", "site-packages",
+    # Build outputs across ecosystems. Even when checked in (some
+    # users do), these are generated artifacts that drown out the
+    # source. Better dropped from the summary inventory.
+    "dist", "build", "out", "target",                # python/js/rust
+    "bin", "obj", "Debug", "Release",                # .NET / CMake
+    ".gradle", ".m2",                                 # JVM
+    ".cargo", ".rustup",                              # rust toolchain caches
+    "vendor", ".cache",                               # go/php/general cache
+    ".next", ".turbo", ".nuxt", ".svelte-kit",        # web frameworks
+    # IDE / FI scratch.
     ".idea", ".vscode",
     "outputs",         # FI's own quest output dir — don't recurse into it
     ".fi",
@@ -388,12 +422,40 @@ async def summarize_folder(
         len(entries), folder, detected_kind,
     )
 
+    # Cap the file count that goes into the LLM prompt. The walk
+    # still considers the full set for the Axon ingest path below
+    # (which, when knowledge is enabled, embeds each file with
+    # readable content as its own document — no token cost there).
+    # The manifest + content blocks have to fit a single LLM call,
+    # though. See ``_MAX_PROMPT_FILES`` for the rationale.
+    prompt_entries = entries
+    truncated_for_prompt = 0
+    if len(entries) > _MAX_PROMPT_FILES:
+        prompt_entries = entries[:_MAX_PROMPT_FILES]
+        truncated_for_prompt = len(entries) - _MAX_PROMPT_FILES
+        _log.warning(
+            "summarize: %d files exceeds prompt cap; showing first %d "
+            "in the manifest. Files with readable content will be "
+            "ingested into Axon if knowledge is enabled.",
+            len(entries), _MAX_PROMPT_FILES,
+        )
+
+    file_manifest = _render_file_manifest(prompt_entries)
+    if truncated_for_prompt > 0:
+        file_manifest += (
+            f"\n\n_(Note: {truncated_for_prompt} additional files past "
+            f"file [{_MAX_PROMPT_FILES}] were omitted from this manifest "
+            f"to fit the prompt budget. They were still ingested into "
+            f"Axon — retrieve them via the knowledge layer if a future "
+            f"quest needs them.)_"
+        )
+
     prompt_template = string.Template(PROMPT_PATH.read_text(encoding="utf-8"))
     prompt = prompt_template.substitute(
         folder_path=str(folder),
         content_kind=detected_kind,
-        file_manifest=_render_file_manifest(entries),
-        content_blocks=_render_content_blocks(entries),
+        file_manifest=file_manifest,
+        content_blocks=_render_content_blocks(prompt_entries),
     )
 
     own_supervisor = supervisor is None
