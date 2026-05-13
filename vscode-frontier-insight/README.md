@@ -204,7 +204,7 @@ The Frontier Insight repo ships **three** Copilot integration paths:
 | Provider | ToS standing | When to use |
 |---|---|---|
 | `vscode_extension` (this) | ✅ Sanctioned — `vscode.lm` API | Interactive use, you have VSCode open |
-| `copilot_cli` | ✅ Sanctioned — GitHub's own CLI | Headless runs (overnight fleets, CI) |
+| `copilot_cli` | ⚠️ Agentic — replies conversationally to FI's prompts instead of running stateless inference; FI emits a loud warning at engine init. Use `claude_cli`, `codex_cli`, `gemini_cli`, or `openai` for headless runs instead. | n/a — broken as a chat backend |
 | `github_copilot_cli` / `github_copilot_vscode` | ⚠️ Third-party proxy, against ToS spirit | Don't use these for anything you care about |
 
 If you're inside VSCode anyway, **this is the right path**. The Python

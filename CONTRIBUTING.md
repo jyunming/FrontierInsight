@@ -5,7 +5,7 @@ Thanks for your interest. FI is a Windows + Linux native automated research pipe
 ## Ways to contribute
 
 - **Code** — improve any node body, generator, executor, or provider in `core/` and `generation/`. New paper templates (`templates/paper/<format>/template.tex`), slide themes, or poster layouts.
-- **Tests** — expand the pytest suite in `tests/` (currently ~155 tests, all using fake LLMs via `monkeypatch`).
+- **Tests** — expand the pytest suite in `tests/` (currently ~379 tests, all using fake LLMs via `monkeypatch`).
 - **Examples** — add a config under `examples/<topic>/config.yaml` that demonstrates a new use case.
 - **Bug reports / feature requests** — open an issue with a clear description and reproduction steps.
 
@@ -18,7 +18,6 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Linux/macOS
 pip install -r requirements.txt
-pip install pytest pytest-asyncio
 python -m pytest -v
 ```
 

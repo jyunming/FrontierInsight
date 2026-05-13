@@ -75,17 +75,20 @@ npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
 
 In Copilot Chat, just type `@fi` — the extension walks you through 6 quick questions (topic, outputs, clarify mode, reviewer panel, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. **See [`vscode-frontier-insight/README.md`](vscode-frontier-insight/README.md) for details.**
 
-#### Option B — GitHub Copilot via terminal (headless)
+#### Option B — Headless CLI (no VSCode running)
 
-If you want to run quests without VSCode open:
+If you want to run quests overnight or in CI, use one of the chat-style CLI providers. FI shells out to the local binary per call and reuses the CLI's own OAuth:
 
 ```bash
-# One-time: install GitHub's official Copilot CLI
-gh extension install github/gh-copilot
-gh auth login   # if you haven't already
+# Pick whichever you already have signed in:
+claude login                                # → provider.name: claude_cli
+codex login                                 # → provider.name: codex_cli
+gemini   # one-time interactive sign-in     # → provider.name: gemini_cli
 ```
 
-Then change `provider.name` in your YAML to `copilot_cli`.
+Then change `provider.name` in your YAML accordingly.
+
+**Note:** the `copilot_cli` provider is also wired in the codebase but **does not work** as an FI backend — GitHub's standalone Copilot CLI is an *agentic* tool that interprets node prompts as user coding tasks and replies conversationally instead of running stateless LLM inference. FI emits a loud warning at engine init when you select it. For headless Copilot, there isn't currently a clean path; use `vscode_extension` (Option A) when you can, or switch to one of the other CLIs / Option C above.
 
 #### Option C — OpenAI / Anthropic / Gemini API
 
@@ -166,23 +169,23 @@ Run it: `python launch.py --config my_quest.yaml`
 
 ### Resume a crashed quest
 
-If a Copilot HTTP/2 outage or any other transient failure crashes a quest mid-run, FI checkpoints every node to `outputs/<quest_id>/.fi/state.sqlite`. You can pick up at the failed node without redoing the prior work:
+If a Copilot HTTP/2 outage or any other transient failure crashes a quest mid-run, FI checkpoints every node to `outputs/<quest_id>/.fi/state.sqlite`. The engine also drops a copy of the source YAML at `outputs/<quest_id>/config.yaml` at startup, so resume is a one-step lookup — no slug match, no picker rummaging.
 
 **From VSCode chat:**
 ```
 @fi /resume
 ```
-Shows a picker of all quests with a checkpoint, most recent first. Pick one and it auto-finds the matching draft YAML and re-enters the LangGraph.
+Shows a picker of all quests with a checkpoint, most recent first. Picking one reads `<quest_id>/config.yaml` directly and re-enters the LangGraph from the last completed node (legacy quests without that file fall back to a slug match in `outputs/_drafts/`; you'll be prompted only when both fail).
 
 You can also pass the quest_id directly: `@fi /resume 1778650105-mammal-evolution-69ef80`.
 
 **From the terminal:**
 ```bash
-python launch.py --config outputs/_drafts/<your-quest>.yaml \
-                 --resume 1778650105-mammal-evolution-69ef80
+python launch.py --config outputs/<quest_id>/config.yaml \
+                 --resume <quest_id>
 ```
 
-The YAML's `provider` block is honored on resume, but the original quest topic / design / literature come from the checkpoint — don't worry if you point at a different YAML, the state is correct as long as the quest_id matches.
+The YAML's `provider` block is honored on resume; everything else (topic, design, literature, analysis) is loaded from the sqlite checkpoint, so you can edit the YAML between runs to change which model handles which node.
 
 ### Watch progress in a browser instead of the terminal
 
@@ -286,8 +289,8 @@ The repo ships **three** Copilot integration points. They are NOT equivalent:
 
 | Provider | ToS standing |
 |---|---|
-| `vscode_extension` (Option A above) | ✅ Sanctioned — uses VSCode's `vscode.lm.*` Language Model API |
-| `copilot_cli` (Option B above) | ✅ Sanctioned — GitHub's own CLI |
+| `vscode_extension` | ✅ Sanctioned — uses VSCode's `vscode.lm.*` Language Model API |
+| `copilot_cli` | ⚠️ Agentic CLI — replies conversationally to FI's prompts instead of running stateless inference. Loud warning at engine init. Not usable as an FI backend. |
 | `github_copilot_cli`, `github_copilot_vscode` | ⚠️ Third-party reverse-engineered proxy, against Copilot's acceptable-use policy in spirit. The engine prints a warning when you select them. Use only at your own risk. |
 
-If you want Copilot integration, use one of the first two.
+For Copilot integration, only `vscode_extension` works today. For headless runs, use `claude_cli` / `codex_cli` / `gemini_cli` or HTTP-direct (`openai` / `gemini` / `ollama` / `vllm`).

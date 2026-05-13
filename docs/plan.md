@@ -363,9 +363,29 @@ F5 from the extension folder).
 
 Alongside Phase P, the older `github_copilot_*` proxy providers now
 emit a one-time warning at engine init pointing at the sanctioned
-alternatives (`copilot_cli` for headless, `vscode_extension` for
-in-VSCode). Set `FI_SUPPRESS_PROXY_WARN=1` to silence (use at your
-own risk).
+alternatives (`vscode_extension` for in-VSCode; for headless, the
+chat-style CLIs `claude_cli` / `codex_cli` / `gemini_cli` or an
+HTTP-direct provider like `openai`). Set `FI_SUPPRESS_PROXY_WARN=1`
+to silence (use at your own risk).
+
+### Post-Phase-P enhancements (2026-05-13 batch)
+
+The Phase P bridge proved usable end-to-end but exposed several
+real-world failure modes when a researcher actually ran a long-running
+quest. The following PRs landed together to harden it:
+
+| PR | What it ships |
+|---|---|
+| #25 | Bumps the bridge transient-error retry budget to 6 attempts (~2 min cumulative backoff). Replaces the prior 3-attempt budget that failed to outlast sustained Copilot HTTP/2 outages. |
+| #26 | Adds `python launch.py --resume <quest_id>` and the in-engine `Engine(resume_quest_id=...)` parameter. |
+| #27 | Drops the JSON-wrapped code format in the `implement` node. The model now emits a fenced Python block + a `DEPS:` line — ~30% fewer output tokens, no escape-sequence brittleness on long streams. |
+| #28 | Makes `--resume` actually resume from the LangGraph checkpoint (previously it reused the quest_id but still re-ran from `ideate`). Also adds a loud `_AGENTIC_CLI_PROVIDERS` warning for `copilot_cli`, which is an agent loop, not a chat API, and replies conversationally to FI's prompts. |
+| #29 | Adds `@fi /resume` chat command to the VSCode extension — picker of every quest dir under `outputs/` that has a checkpoint, sorted most-recent first. |
+| #30 | Per-chunk progress heartbeat in the chat panel; 180 s inactivity timeout on the bridge stream so a wedged Copilot call surfaces as `bridge stalled` and Python retries instead of hanging forever. |
+| #31 | Switches the bridge stream from `response.text` to `response.stream` so reasoning-model thinking content (`LanguageModelThinkingPart`) renders as `💭` lines in the chat panel. |
+| #32 | The engine now copies the source YAML to `<quest_root>/config.yaml` at startup, so `/resume` is a one-step lookup (no slug match against `_drafts/`). |
+| #33 | Slides now also produces `slides.pptx` via pandoc when pandoc is on PATH. Real editable PowerPoint deck. Render targets are independent — a failing pdf/html doesn't block pptx. |
+| #34 | Paper-depth prompt refinements: literature-context window 600→2000 chars, new `study_depth` clarify slot, depth-aware target in `write.md`, model authors a proper Title-Case title instead of echoing the YAML slug, reviewer grades on new `rigor_score` + `depth_score` axes. |
 
 ## What we are explicitly *not* building
 
