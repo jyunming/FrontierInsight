@@ -457,3 +457,72 @@ def test_parse_implement_response_legacy_deps_as_comma_string() -> None:
     text = '{"code": "print(1)", "deps": "numpy, scipy"}'
     code, deps = _parse_implement_response(text)
     assert sorted(deps) == ["numpy", "scipy"]
+
+
+# ---- _format_lit / _format_lit_from_state: literature context window ----
+
+
+def test_format_lit_uses_2000_char_window() -> None:
+    """Regression for the paper-depth fix: the per-paper excerpt fed to
+    write.md was 600 chars — too thin to discuss prior work by content.
+    Bumped to 2000 chars. Pin both helpers (in-memory + state-loaded)."""
+    from core.engine import (
+        _LIT_EXCERPT_CHARS, _format_lit, _format_lit_from_state,
+    )
+
+    assert _LIT_EXCERPT_CHARS == 2000
+
+    long_body = "A" * 5000
+    from core.knowledge import RetrievedDoc
+    docs = [RetrievedDoc(
+        content=long_body, metadata={"title": "huge paper"},
+    )]
+    rendered = _format_lit(docs)
+    # We render `[i] title\n<2000 chars of content>`; the content slice
+    # is exactly _LIT_EXCERPT_CHARS, not the full body.
+    assert "A" * _LIT_EXCERPT_CHARS in rendered
+    assert "A" * (_LIT_EXCERPT_CHARS + 1) not in rendered
+
+    # Same invariant on the from-state path used during checkpoint resume.
+    state = {"literature": [{
+        "content": long_body, "metadata": {"title": "huge paper"},
+    }]}
+    rendered_state = _format_lit_from_state(state)  # type: ignore[arg-type]
+    assert "A" * _LIT_EXCERPT_CHARS in rendered_state
+    assert "A" * (_LIT_EXCERPT_CHARS + 1) not in rendered_state
+
+
+# ---- Prompt-template shape: review + analyze receive $clarify_block ----
+
+
+def test_review_prompt_advertises_rigor_and_depth_axes() -> None:
+    """Pin the contract: the review prompt asks the model to return
+    rigor_score and depth_score keys. If these are removed the revise
+    loop loses its depth signal (the whole point of this change)."""
+    from pathlib import Path
+    review_md = (Path(__file__).resolve().parent.parent
+                 / "agents" / "review.md").read_text(encoding="utf-8")
+    assert "rigor_score" in review_md
+    assert "depth_score" in review_md
+    # Must also accept the clarify block so it can read study_depth.
+    assert "$clarify_block" in review_md
+
+
+def test_analyze_prompt_accepts_clarify_block() -> None:
+    """Wired up so analyze respects the study_depth setting end-to-end."""
+    from pathlib import Path
+    analyze_md = (Path(__file__).resolve().parent.parent
+                  / "agents" / "analyze.md").read_text(encoding="utf-8")
+    assert "$clarify_block" in analyze_md
+
+
+def test_write_prompt_authors_title_not_slug() -> None:
+    """write.md must instruct the model to AUTHOR a Title-Case title
+    instead of just echoing `# $title` (the YAML slug)."""
+    from pathlib import Path
+    write_md = (Path(__file__).resolve().parent.parent
+                / "agents" / "write.md").read_text(encoding="utf-8")
+    # Old contract:  "Begin with `# $title`"     (model echoed the slug)
+    # New contract:  "MUST be a proper Title-Case academic title"
+    assert "Title-Case" in write_md or "Title Case" in write_md
+    assert "Do NOT use the raw slug" in write_md

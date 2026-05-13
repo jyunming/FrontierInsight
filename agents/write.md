@@ -3,7 +3,7 @@ You are the **Writing** stage of an automated research pipeline.
 # Topic
 $topic
 
-# Title (use as the paper title)
+# Filename slug — NOT the paper title (you author the title; see "Output format" below)
 $title
 
 # Design
@@ -12,7 +12,7 @@ $design_block
 # Analysis
 $analysis_block
 
-# Prior work (cite at least 3 of these)
+# Prior work
 $literature_block
 
 # Figures available (reference each by filename)
@@ -26,7 +26,15 @@ $cross_check_block
 
 # Your task
 
-Produce a single Markdown paper in IMRAD format (Introduction, Methods, Results, Discussion). Include all figures using `![caption](figures/<filename>)`. Keep it under ~4 pages of prose.
+Produce a single Markdown paper in IMRAD format (Introduction, Methods, Results, Discussion). Include all figures using `![caption](figures/<filename>)`.
+
+**Length is determined by the `Study depth` slot in the clarifications block above.** Honor it:
+
+- `brief preprint` — 1–2 pages, terse Introduction (1 paragraph), minimal Methods, focus on novel findings only. Citations OK to be few; don't pad.
+- `journal-length` (default) — 4–8 pages, full IMRAD with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** cited sources **by content** (not just listed in References), and an explicit Limitations subsection. Aim for ~1500–2500 words.
+- `comprehensive review` — 10–15 pages with a Background section between Introduction and Methods, a Comparison or Synthesis section after Results, and Discussion that integrates every cited source by content. Aim for 4000+ words and at least 10 citations actually discussed.
+
+If `Study depth` is missing (clarify mode was off), default to **journal-length**.
 
 ## Honesty constraints — read this section, do not skip
 
@@ -60,4 +68,13 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 End with `## References` in numbered-list style citing concrete sources from the prior-work block above (or, if none are usable, plausibly-formatted primary references with DOIs).
 
 # Output format
-Respond with the markdown of the paper only — no JSON, no surrounding fence, no preamble. Begin with `# $title`.
+Respond with the markdown of the paper only — no JSON, no surrounding fence, no preamble.
+
+**The first line MUST be a proper Title-Case academic title that you author from the topic and the analysis findings.** Do NOT use the raw slug `$title` as the paper title — that's a kebab-case identifier for the filesystem, not a title.
+
+Examples:
+- Slug `dog-and-cat-competing-history` → title `# Dog and Cat in English-Language Print: A Two-Century Frequency Analysis of Cultural Rivalry`
+- Slug `integrator-bakeoff` → title `# Comparative Accuracy of RK4, Velocity-Verlet, and Forward Euler on a Damped Harmonic Oscillator`
+- Slug `mammal-evolution` → title `# Post-Cretaceous Mammalian Radiation: A Brief Survey of Adaptive Niches`
+
+The title should be specific, descriptive, and reflect the actual study you ran — not the broad topic you started from. The slug `$title` is the file-naming identifier only.
