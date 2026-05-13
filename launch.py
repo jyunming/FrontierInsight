@@ -78,6 +78,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "content-type auto-detection.",
     )
     mode.add_argument(
+        "--digest",
+        action="store_true",
+        help="Generate a weekly PM-style digest across the quests in "
+             "--output-root. Writes outputs/_digests/<YYYY-Www>.md with "
+             "a structured diff against the most-recent prior digest "
+             "(promoted / new / still-in-progress / stalled / dropped). "
+             "Pair with --days N to widen or narrow the window "
+             "(default 7). Ingests into Axon as kind=fi_digest so "
+             "future quests can retrieve prior-week context.",
+    )
+    mode.add_argument(
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
@@ -104,6 +115,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Provider for --summarize (when not launched from the VSCode "
              "extension). Defaults to vscode_extension; use openai / "
              "claude_cli / codex_cli / gemini_cli for headless runs.",
+    )
+    p.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        help="Window size in days for --digest. Default 7 (rolling "
+             "week). Use a non-7 value to get a custom-window digest "
+             "filename (YYYY-MM-DD-to-YYYY-MM-DD.md) instead of the "
+             "ISO-week canonical form (YYYY-Www.md).",
+    )
+    p.add_argument(
+        "--digest-provider",
+        type=str,
+        default="vscode_extension",
+        help="Provider for --digest. Same conventions as "
+             "--summarize-provider — vscode_extension when launched "
+             "from chat, headless CLI providers otherwise.",
     )
     p.add_argument(
         "--output-root",
@@ -609,6 +637,16 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.install_tectonic:
             return _install_tectonic()
 
+        if args.digest:
+            return await _run_digest(
+                output_root=args.output_root,
+                days=args.days,
+                provider_name=args.digest_provider,
+                axon_config_path=args.axon_config,
+                vscode_bridge_port=args.vscode_bridge_port,
+                supervisor=supervisor,
+            )
+
         if args.summarize:
             return await _run_summarize(
                 folder=args.summarize.resolve(),
@@ -716,6 +754,78 @@ async def _run_summarize(
         f"[FI] {art.file_count} files; detected_kind={art.detected_kind}; "
         f"ingested_to_axon={art.ingested_to_axon}",
     )
+    return 0
+
+
+async def _run_digest(
+    *,
+    output_root: Path,
+    days: int,
+    provider_name: str,
+    axon_config_path: Path | None,
+    vscode_bridge_port: int,
+    supervisor: ProxySupervisor,
+) -> int:
+    """Top-level wiring for ``python launch.py --digest``.
+
+    Mirrors ``_run_summarize`` — builds the provider config the same
+    way a quest would, opens a best-effort Axon handle for ingest,
+    and dispatches to :func:`core.digest.generate_digest`. Returns 0
+    on success, 1 if the digest call raises.
+    """
+    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
+    from core.digest import generate_digest
+
+    if days <= 0:
+        print(f"[FI] --digest: --days must be positive (got {days})", file=sys.stderr)
+        return 1
+
+    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    if vscode_bridge_port > 0:
+        provider.name = "vscode_extension"
+        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+
+    knowledge = None
+    try:
+        from core.knowledge import Knowledge
+        knowledge = Knowledge(KnowledgeConfig(
+            enabled=True,
+            axon_config=axon_config_path if axon_config_path else None,
+            seed_source_catalog=False,
+        ))
+    except Exception as e:  # pragma: no cover
+        print(
+            f"[FI] --digest: Axon unavailable ({e!r}); digest will still be "
+            f"written but not ingested.",
+            file=sys.stderr,
+        )
+
+    print(f"[FI] digest window=last {days} days (provider={provider.name})")
+    try:
+        art = await generate_digest(
+            output_root, days=days, provider=provider,
+            supervisor=supervisor, knowledge=knowledge,
+        )
+    except Exception as e:
+        print(f"[FI] --digest failed: {e!r}", file=sys.stderr)
+        return 1
+
+    print(f"[FI] digest -> {art.digest_path}")
+    print(
+        f"[FI] {art.quest_count} quests touched "
+        f"({art.completed_count} completed, "
+        f"{art.in_progress_count} in-progress); "
+        f"ingested_to_axon={art.ingested_to_axon}",
+    )
+    if art.diff.prev_digest_id:
+        print(
+            f"[FI] vs {art.diff.prev_digest_id}: "
+            f"{len(art.diff.promoted)} promoted, "
+            f"{len(art.diff.new_in_progress)} new, "
+            f"{len(art.diff.still_in_progress)} still-in-progress, "
+            f"{len(art.diff.stalled)} stalled, "
+            f"{len(art.diff.dropped)} dropped",
+        )
     return 0
 
 

@@ -52,6 +52,10 @@
             "description": "Walk a folder of mixed content (papers / code / study notes / logs) and produce a structured markdown summary. Input files plus the summary are ingested into Axon. Example: @fi /summarize ./papers literature"
           },
           {
+            "name": "digest",
+            "description": "Weekly project-manager digest across your quests: completed, in-progress, themes, diff vs prior digest, suggested next quests. Optional integer arg = window in days (default 7). Example: @fi /digest 14"
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }
