@@ -596,11 +596,12 @@ async def test_llmclient_chat_retries_transient_bridge_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llmclient_chat_retries_up_to_five_then_friendly_error() -> None:
+async def test_llmclient_chat_retries_up_to_six_then_friendly_error() -> None:
     """Regression: the prior 3-attempt budget was too tight for
     sustained Copilot HTTP/2 outages (observed 30-90s). Budget is now
-    5 attempts; on full exhaustion, the surfaced error must clearly
-    say the issue is upstream so users don't chase phantom config bugs."""
+    6 attempts (~2 min cumulative backoff); on full exhaustion, the
+    surfaced error must clearly say the issue is upstream so users
+    don't chase phantom config bugs."""
     from core.vscode_bridge import BridgeError
 
     server = _MockBridgeServer()
@@ -629,9 +630,9 @@ async def test_llmclient_chat_retries_up_to_five_then_friendly_error() -> None:
                    return_value=lambda *a, **kw: 0):
             with pytest.raises(BridgeError) as excinfo:
                 await client.chat([{"role": "user", "content": "hi"}])
-        # 5 attempts, all failing transient.
-        assert call_count["n"] == 5, (
-            f"expected 5 attempts before exhaustion; got {call_count['n']}"
+        # 6 attempts, all failing transient.
+        assert call_count["n"] == 6, (
+            f"expected 6 attempts before exhaustion; got {call_count['n']}"
         )
         msg = str(excinfo.value).lower()
         assert "upstream" in msg, f"final error must name upstream: {excinfo.value!r}"
