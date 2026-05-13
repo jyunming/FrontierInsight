@@ -56,6 +56,10 @@
             "description": "Weekly project-manager digest across your quests: completed, in-progress, themes, diff vs prior digest, suggested next quests. Optional integer arg = window in days (default 7). Example: @fi /digest 14"
           },
           {
+            "name": "portfolio",
+            "description": "All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at outputs/_portfolio/<YYYY-MM-DD>.md."
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }

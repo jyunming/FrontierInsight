@@ -160,6 +160,14 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+## Cross-quest portfolio synthesis
+
+```
+@fi /portfolio
+```
+
+Walks every quest under `outputs/` (no time window) and writes `outputs/_portfolio/<YYYY-MM-DD>.md`. Unlike `/digest`, this is the all-time view — run it monthly or when scoping the next research push. The LLM gets the full corpus plus deterministic stats (total / completed / cadence / provider breakdown) and produces topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, and prioritized next-quest suggestions. Ingested as `kind=fi_portfolio`.
+
 ## Weekly project-manager digest
 
 ```
