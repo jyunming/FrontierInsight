@@ -92,12 +92,23 @@ def test_pandoc_rc_nonzero_no_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 def test_pandoc_happy_path_emits_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: "/fake/pandoc")
+    # Return per-binary mocks so the test can assert that BOTH the
+    # pandoc and the pdflatex paths flow into the subprocess command
+    # (regression for: pandoc + MiKTeX both installed but pdflatex
+    # missing from the child process's PATH).
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        if name == "pandoc":
+            return "/fake/pandoc.exe"
+        if name == "pdflatex":
+            return "/fake/pdflatex.exe"
+        return None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
 
     out_dir = tmp_path / "out"
+    captured_cmd: list[str] = []
 
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        # Simulate pandoc creating the output PDF.
+        captured_cmd[:] = list(cmd)
         out_idx = cmd.index("-o") + 1
         Path(cmd[out_idx]).write_bytes(b"%PDF-1.4 fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -111,6 +122,10 @@ def test_pandoc_happy_path_emits_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "paper_pdf" in result
     assert result["paper_pdf"].name == "paper.pdf"
     assert result["paper_pdf"].exists()
+    # Resolved binary paths flow into argv (no bare names that would
+    # rely on the child process's PATH inheriting MiKTeX / pandoc dirs).
+    assert captured_cmd[0] == "/fake/pandoc.exe"
+    assert "--pdf-engine=/fake/pdflatex.exe" in captured_cmd
 
 
 def test_missing_template_falls_back_to_pandoc_default(
@@ -322,3 +337,41 @@ def test_paper_pdf_not_in_kinds_skips_compile(
     result = PaperGenerator(cfg).generate(art, out_dir)
     assert "paper_pdf" not in result
     assert called["n"] == 0  # which() never invoked because compile path skipped
+
+
+def test_pandoc_present_but_pdflatex_missing_falls_back_to_bare_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the real-world failure: pandoc IS on PATH but
+    pdflatex (MiKTeX) is NOT discoverable via shutil.which. The
+    generator should still attempt pandoc — pandoc itself may find
+    pdflatex (or fail with a clear pandoc-rc≠0 message we already
+    handle)."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        if name == "pandoc":
+            return "/fake/pandoc.exe"
+        if name == "pdflatex":
+            return None    # missing — exact symptom from the user run
+        return None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured_cmd[:] = list(cmd)
+        # Simulate the success path so we can verify the cmd shape.
+        out_idx = cmd.index("-o") + 1
+        Path(cmd[out_idx]).write_bytes(b"%PDF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    PaperGenerator(cfg).generate(art, out_dir)
+    # Pandoc still attempted; pdflatex passed as bare name so pandoc's
+    # own PATH lookup gets a chance.
+    assert captured_cmd[0] == "/fake/pandoc.exe"
+    assert "--pdf-engine=pdflatex" in captured_cmd
