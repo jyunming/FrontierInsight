@@ -33,6 +33,10 @@ $topic
   "study_depth": {
     "question": "<one sentence asking how mature the resulting paper should be — brief preprint vs journal-length vs comprehensive review>",
     "default": "journal-length"
+  },
+  "paper_venue": {
+    "question": "<one sentence asking which paper template / venue style this study fits — generic, neurips, iclr, ieee_access, or nature_mi>",
+    "default": "<your best guess; see venue rules below>"
   }
 }
 ```
@@ -51,4 +55,9 @@ $topic
   `comprehensive review` (10–15 pages, synthesis with extensive prior-work discussion).
   Pick the level that matches the topic's natural scope — narrow benchmarks → brief, established
   research questions → journal-length, broad survey/comparative topics → comprehensive review.
+- The `paper_venue` default is one of `{generic, neurips, iclr, ieee_access, nature_mi}` — pick by topic + study_depth + empirical_vs_theoretical:
+  * `neurips` / `iclr` — ML benchmarks, learning algorithms, neural-network experiments (empirical + journal-length).
+  * `ieee_access` — engineering systems, hardware/software architectures, measurement studies (empirical + journal-length).
+  * `nature_mi` — physics / chemistry / materials simulation, scientific-method experiments (empirical + journal-length).
+  * `generic` — surveys, comparative reviews, theoretical derivations, brief preprints, anything that doesn't fit a specific venue. **DEFAULT to `generic` when uncertain.**
 - No prose outside the JSON object. No code fences. No commentary.

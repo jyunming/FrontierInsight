@@ -75,30 +75,30 @@ export async function runInterview(
     const outputChoice = await vscode.window.showQuickPick(
         [
             {
-                label: "$(file-text) paper only (Markdown)",
-                description: "fastest",
-                value: ["paper_md"],
-            },
-            {
-                label: "$(book) paper + PDF",
-                description: "requires pandoc + LaTeX on PATH",
+                label: "$(book) paper + PDF (recommended)",
+                description: "MD + PDF; needs pandoc + LaTeX on PATH",
                 value: ["paper_md", "paper_pdf"],
-            },
-            {
-                label: "$(layout) paper + slides",
-                description: "slides via Marp",
-                value: ["paper_md", "slides"],
             },
             {
                 label: "$(symbol-class) everything",
                 description: "paper, PDF, slides, poster, talk script",
                 value: ["paper_md", "paper_pdf", "slides", "poster", "speech"],
             },
+            {
+                label: "$(layout) paper + PDF + slides",
+                description: "PDF via pandoc+LaTeX; slides via Marp + .pptx via pandoc",
+                value: ["paper_md", "paper_pdf", "slides"],
+            },
+            {
+                label: "$(file-text) paper only (Markdown)",
+                description: "fastest; no extra system tools needed",
+                value: ["paper_md"],
+            },
         ],
         {
             title: "Frontier Insight — which deliverables?",
             placeHolder:
-                "Most users start with 'paper only' — you can always re-run with more.",
+                "Default is paper + PDF — most users want the rendered file. PDF gracefully degrades to MD if pandoc isn't installed.",
             ignoreFocusOut: true,
         },
     );
@@ -144,19 +144,19 @@ export async function runInterview(
     const clarifyChoice = await vscode.window.showQuickPick(
         [
             {
-                label: "$(rocket) Just run it",
-                description: "Agent picks everything from the topic alone",
-                value: "off" as const,
-            },
-            {
-                label: "$(zap) Agent self-clarifies",
-                description: "Agent generates 5 questions AND answers them itself before starting",
+                label: "$(zap) Agent self-clarifies (recommended)",
+                description: "Agent generates 7 questions AND answers them itself — study_depth/paper_venue flow through to write+review",
                 value: "auto" as const,
             },
             {
-                label: "$(question) Ask me 5 questions",
-                description: "Pauses after generating questions; you fill in answers",
+                label: "$(question) Ask me 7 questions",
+                description: "Pauses after generating questions; you fill in answers — highest quality, most interruption",
                 value: "interactive" as const,
+            },
+            {
+                label: "$(rocket) Just run it",
+                description: "Agent picks everything from the topic alone (no clarify; paper may be shallower)",
+                value: "off" as const,
             },
         ],
         {

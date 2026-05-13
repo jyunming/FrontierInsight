@@ -367,6 +367,38 @@ async def run_one(
     return summary
 
 
+# Derive the allowed values from `core.config.PaperFormat` so adding a
+# new template stays a one-place change. `typing.get_args` returns the
+# Literal members as a tuple of strings.
+from typing import get_args as _get_args
+from core.config import PaperFormat as _PaperFormat
+_VALID_PAPER_FORMATS: frozenset[str] = frozenset(_get_args(_PaperFormat))
+
+
+def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
+    """Honor the `paper_venue` clarify slot: if the user's YAML left
+    `output.paper_format` at the default `"generic"` AND clarify picked
+    a specific venue, apply the venue choice. We DON'T override an
+    explicit YAML setting (the user's hand-written value wins) and
+    we silently ignore unknown venue strings to avoid pydantic
+    rejecting them on a Config validator."""
+    venue = (
+        (art.raw_state or {}).get("clarify_answers", {}).get("paper_venue", "")
+    )
+    if not isinstance(venue, str) or venue not in _VALID_PAPER_FORMATS:
+        return
+    if cfg.output.paper_format != "generic":
+        # User set an explicit format in YAML; honor that.
+        return
+    if venue == "generic":
+        return  # nothing to do
+    print(
+        f"[FI] paper_venue from clarify -> overriding paper_format: "
+        f"generic -> {venue}",
+    )
+    cfg.output.paper_format = venue  # type: ignore[assignment]
+
+
 async def _run_generators(
     cfg: Config,
     art: QuestArtifacts,
@@ -375,6 +407,7 @@ async def _run_generators(
 ) -> dict[str, Path]:
     """Run each generator in turn; one failure does not abort the rest."""
     written: dict[str, Path] = {}
+    _apply_paper_venue_override(cfg, art)
     # 1) Paper (sync — pandoc shell-out is fine without async).
     try:
         written.update(PaperGenerator(cfg).generate(art, art.quest_root))
