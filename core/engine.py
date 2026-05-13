@@ -103,10 +103,21 @@ class QuestState(TypedDict, total=False):
 class Engine:
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
-    def __init__(self, config: Config, *, supervisor: ProxySupervisor | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        supervisor: ProxySupervisor | None = None,
+        resume_quest_id: str | None = None,
+    ) -> None:
         self.config = config
         _warn_if_unsanctioned_provider(config.provider.name)
-        self.quest_id = _new_quest_id(config.title or config.topic)
+        # `resume_quest_id` lets a caller re-enter an existing quest
+        # (LangGraph's AsyncSqliteSaver keys checkpoints by thread_id,
+        # which we set to quest_id below — so reusing the id auto-
+        # resumes from the last completed node when a prior run died
+        # mid-pipeline, e.g. on a sustained upstream Copilot outage).
+        self.quest_id = resume_quest_id or _new_quest_id(config.title or config.topic)
         # quest_root MUST be absolute. When the config sets a relative
         # `output_dir` (e.g. `./outputs`) and the executor later runs a
         # subprocess with `cwd=quest_root`, an absolute argv path is

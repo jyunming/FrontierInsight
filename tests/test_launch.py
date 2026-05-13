@@ -54,6 +54,17 @@ def test_parse_args_profile_and_memory_cap() -> None:
     assert args.memory_cap_mb == 2048
 
 
+def test_parse_args_resume_requires_config() -> None:
+    """--resume without --config is rejected (fleet/serve/ingest can't resume)."""
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--fleet", "a.yaml", "--resume", "some-quest-id"])
+
+
+def test_parse_args_resume_with_config_ok() -> None:
+    args = launch.parse_args(["--config", "x.yaml", "--resume", "q-123"])
+    assert args.resume == "q-123"
+
+
 # ---- _run_generators -----------------------------------------------------
 
 

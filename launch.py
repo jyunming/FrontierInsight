@@ -116,6 +116,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "Single-quest mode only — fleet runs are headless.",
     )
     p.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume a previously-failed quest. Pass the quest_id of an "
+             "existing quest directory under config.output.output_dir. "
+             "The LangGraph SqliteSaver checkpoint at "
+             "<output_dir>/<quest_id>/.fi/state.sqlite is reused so the "
+             "run picks up at the last completed node instead of starting "
+             "over. Single-quest mode only (use --config). Useful when a "
+             "long Copilot outage exhausts the bridge retry budget mid-quest.",
+    )
+    p.add_argument(
         "--vscode-bridge-port",
         type=int,
         default=0,
@@ -130,6 +142,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
     if args.ingest and args.output is not None:
         p.error("--output is irrelevant in --ingest mode.")
+    if args.resume and not args.config:
+        p.error("--resume requires --config (the YAML for the original quest).")
     return args
 
 
@@ -248,14 +262,18 @@ async def run_one(
     profile: bool = False,
     engine: Engine | None = None,
     interactive: bool = False,
+    resume_quest_id: str | None = None,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
     # runs — instead of creating a second Engine here with a fresh
     # quest_id and stranding the status-line one). When omitted, build.
     if engine is None:
-        engine = Engine(cfg, supervisor=supervisor)
-    print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
+        engine = Engine(cfg, supervisor=supervisor, resume_quest_id=resume_quest_id)
+    if resume_quest_id is not None:
+        print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name}")
+    else:
+        print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
     # Pick the right clarify handler:
     #   --interactive          → terminal Q&A
     #   provider=vscode_extension → route through the bridge so the
@@ -446,9 +464,24 @@ async def main_async(args: argparse.Namespace) -> int:
             if args.output is not None:
                 cfg.output.output_dir = args.output
             _apply_vscode_bridge_override(cfg, args.vscode_bridge_port)
+            if args.resume:
+                # Validate the resume target exists before spawning the
+                # engine so we fail loud + early rather than silently
+                # creating an empty quest dir with that id.
+                resume_root = (cfg.output.output_dir / args.resume).resolve()
+                checkpoint = resume_root / ".fi" / "state.sqlite"
+                if not checkpoint.is_file():
+                    print(
+                        f"[FI] --resume {args.resume!r}: no checkpoint at "
+                        f"{checkpoint}. The quest dir must exist and contain "
+                        f"a .fi/state.sqlite from a prior run.",
+                        file=sys.stderr,
+                    )
+                    return 1
             await run_one(
                 cfg, supervisor=supervisor, profile=args.profile,
                 interactive=args.interactive,
+                resume_quest_id=args.resume,
             )
             return 0
 
