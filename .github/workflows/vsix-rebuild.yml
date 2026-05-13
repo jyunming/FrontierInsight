@@ -16,8 +16,11 @@ on:
     paths:
       - "vscode-frontier-insight/src/**"
       - "vscode-frontier-insight/package.json"
+      - "vscode-frontier-insight/package-lock.json"
       - "vscode-frontier-insight/tsconfig.json"
+      - "vscode-frontier-insight/.vscodeignore"
       - "vscode-frontier-insight/README.md"
+      - "vscode-frontier-insight/LICENSE.txt"
   workflow_dispatch: {}
 
 permissions:

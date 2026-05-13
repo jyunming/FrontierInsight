@@ -1,6 +1,7 @@
-# sdist (source distribution) inclusions. The wheel package-data is
-# configured separately in pyproject.toml; this file handles the
-# `python -m build --sdist` path.
+# sdist (source distribution) inclusions ONLY. The wheel layout is
+# controlled separately by `[tool.setuptools.packages.find]` and
+# `[tool.setuptools.package-data]` in pyproject.toml; entries here
+# affect `python -m build --sdist`, not `--wheel`.
 
 include README.md
 include LICENSE
@@ -8,22 +9,22 @@ include CONTRIBUTING.md
 include requirements.txt
 include pyproject.toml
 
-# Public docs that ship with both wheel and sdist.
+# Public docs — sdist only (wheel does not redistribute Markdown docs).
 recursive-include docs *.md
 
-# Agent prompt templates: needed at runtime by core/engine.py's
-# `_load_prompts()`. The wheel includes these via package-data;
-# this entry covers the sdist case.
+# Agent prompt templates + LaTeX templates: shipped in the WHEEL via
+# the `agents*` / `templates*` packages declared in pyproject.toml.
+# The recursive-include entries below mirror them into the sdist so
+# `python -m build --sdist` produces a tarball that's also runnable
+# (some users still `pip install <tarball>` directly).
 recursive-include agents *.md
-
-# LaTeX paper templates + poster template, used by generation/.
 recursive-include templates *
 
-# Examples that demonstrate the config schema. Lightweight (YAML
-# only), useful as reference.
+# Examples — sdist only. Lightweight (YAML + the example READMEs).
 recursive-include examples *.yaml *.md
 
-# Web GUI static assets.
+# Web GUI static assets — sdist only (the wheel ships them via the
+# `web*` package).
 recursive-include web/static *
 
 # ---- explicit exclusions ----

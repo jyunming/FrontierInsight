@@ -60,8 +60,14 @@ dev = [
   "pytest-cov>=6.0",
   "pytest-testmon>=2.2",
 ]
+# Expanded to the concrete deps rather than a self-reference
+# (`frontier-insight[pdf,docker,knowledge]`) — some pip resolver
+# versions choke on the self-referential form during sdist builds
+# where the package metadata isn't fully resolved yet.
 all = [
-  "frontier-insight[pdf,docker,knowledge]",
+  "pypdf>=4.0",
+  "docker>=7.1",
+  "axon-rag>=0.4",
 ]
 
 [project.urls]
@@ -78,15 +84,20 @@ fi = "launch:main"
 frontier-insight = "launch:main"
 
 # Setuptools package discovery. The runtime code lives in top-level
-# packages (`core`, `generation`, `web`); the agent prompts and paper
-# templates are package data shipped under those packages OR at top
-# level via MANIFEST.in include rules.
+# packages (`core`, `generation`, `web`). The `agents/` and
+# `templates/` directories are ALSO declared as packages (each has an
+# `__init__.py`) because the engine resolves prompts via
+# `Path(__file__).parent.parent / "agents"` and the paper generator
+# resolves LaTeX templates via `.../templates/paper/<venue>/`. For
+# those relative-path lookups to work in a wheel install, the
+# directories must end up alongside `core/` in `<site-packages>/`,
+# which only happens when setuptools treats them as packages.
 [tool.setuptools]
 py-modules = ["launch"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "generation*", "web*"]
+include = ["core*", "generation*", "web*", "agents*", "templates*"]
 exclude = [
   "tests*",
   "dev*",
@@ -96,15 +107,14 @@ exclude = [
   "tools*",
   "vscode-frontier-insight*",
   "scripts*",
-  "templates*",
-  "agents*",
   ".pytest_tmp*",
 ]
 
-# Non-Python assets included alongside the wheel. The `agents/*.md`
-# prompt templates and `templates/paper/**` LaTeX templates are
-# needed at runtime by the engine and generators — listing them
-# here AND in MANIFEST.in ensures both source and binary
-# distributions carry them.
+# Non-Python assets that ship inside the wheel. The `*` key applies
+# the glob to every discovered package, so `agents/*.md` (prompt
+# templates loaded by core/engine.py) and `templates/paper/<venue>/
+# *.tex` (LaTeX templates used by generation/paper.py) land in the
+# wheel and are reachable via the same relative paths the runtime
+# uses in the source tree.
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.tex", "*.css", "*.html", "*.js"]
