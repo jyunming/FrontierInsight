@@ -135,6 +135,31 @@ All quests share the same VSCode bridge, but each carries its own
 the same subscription. The chat panel multiplexes — each line is tagged
 with the quest's node + iteration so you can follow along.
 
+### Resume a crashed quest
+
+If a quest dies mid-pipeline (Copilot HTTP/2 outage, a kernel panic,
+your laptop suspends, etc.), the LangGraph checkpoint at
+`outputs/<quest_id>/.fi/state.sqlite` still holds every node that
+completed before the crash. Re-enter from the failed node with:
+
+```
+@fi /resume
+```
+
+With no argument, that shows a QuickPick of every quest under
+`outputs/` that has a checkpoint, sorted most-recent first. Pick one
+and the extension auto-finds the matching draft YAML by title slug
+(falling back to a file picker if no match exists), then spawns FI
+with `--resume <quest_id>` so LangGraph continues from the last
+completed node instead of redoing `ideate`/`literature`/`design`
+from scratch.
+
+You can also pass the quest_id directly:
+
+```
+@fi /resume 1778650105-mammal-evolution-69ef80
+```
+
 ## Per-node model routing
 
 Each quest YAML defines which Copilot model to use per engine node.

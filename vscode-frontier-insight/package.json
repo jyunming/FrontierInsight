@@ -44,6 +44,10 @@
             "description": "Start a fleet of quests (space-separated YAML paths). Each YAML's provider.node_models is honored independently."
           },
           {
+            "name": "resume",
+            "description": "Resume a previously-crashed quest from its checkpoint. With no arg, shows a picker. With a quest_id, resumes that quest."
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }

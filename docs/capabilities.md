@@ -56,7 +56,8 @@ Three feedback loops:
 | Opportunistic full-text fetch — host-network publisher PDFs with login-wall rejection | ✅ |
 | Structured ingest — title-searchable spine docs + citation-header'd body + topic rollups | ✅ |
 | Status GUI (Phase J) — FastAPI + HTMX server: fleet list, SSE log stream, clarify panel, paper preview, panel-review cards | ✅ |
-| VSCode extension (Phase P) — sanctioned `vscode.lm.*` Copilot integration | ✅ |
+| VSCode extension (Phase P) — sanctioned `vscode.lm.*` Copilot integration, with `@fi /new`, `@fi /start`, `@fi /fleet`, `@fi /resume` | ✅ |
+| Resumable quests — `python launch.py --resume <quest_id>` / `@fi /resume` re-enter the LangGraph from the last checkpointed node when a prior run died mid-pipeline | ✅ |
 | Paper PDF via pandoc + LaTeX (`generic` and `neurips` templates ship; others stub) | ✅ |
 | Slides via Marp; poster via `beamerposter`; speech script via single LLM call | ✅ |
 | SQLite-checkpointed state for resumability (`<quest_root>/.fi/state.sqlite`) | ✅ |
