@@ -421,9 +421,14 @@ async function runQuest(
         try { child.kill("SIGTERM"); } catch { /* noop */ }
     });
 
-    // Surface any Python crash (couldn't import, syntax error, etc.)
-    // by reading stdout. The engine itself logs to stderr; stdout is
-    // typically empty during a healthy run.
+    // Surface only the user-meaningful end-of-run lines from Python's
+    // stdout. The `[FI] start/resume quest_id=...` echo is already
+    // shown via the extension's own header lines, so dropping it
+    // avoids the duplicate-print problem the user reported. Generator-
+    // output lines like `[FI] wrote paper_md -> <abs path>` ARE useful
+    // (they're the final artifact pointers) so we keep those but
+    // re-render with just a basename + a checkmark instead of the
+    // raw `[FI]` prefix.
     child.stdout.setEncoding("utf-8");
     let stdoutBuf = "";
     child.stdout.on("data", (chunk: string) => {
@@ -431,9 +436,18 @@ async function runQuest(
         const lines = stdoutBuf.split(/\r?\n/);
         stdoutBuf = lines.pop() || "";
         for (const line of lines) {
-            if (line.startsWith("[FI]")) {
-                stream.markdown(`  ${line}\n\n`);
+            const wrote = line.match(/^\[FI\] wrote (\w+) -> (.+)$/);
+            if (wrote) {
+                stream.markdown(`  ✅ wrote ${wrote[1]} → \`${path.basename(wrote[2])}\`\n\n`);
+                continue;
             }
+            const summary = line.match(/^\[FI\] summary -> (.+)$/);
+            if (summary) {
+                stream.markdown(`  📋 summary → \`${path.basename(summary[1])}\`\n\n`);
+                continue;
+            }
+            // Drop other [FI] lines (start/resume quest_id=, paths the
+            // user already saw in our header, etc.) — they're noise here.
         }
     });
 

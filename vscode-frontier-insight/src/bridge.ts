@@ -127,24 +127,32 @@ export class Bridge {
             return;
         }
         // Stream Python stderr (where FI's logging goes) into the chat
-        // pane. We don't render every line — that would drown the user.
-        // Instead, surface lines starting with a recognized node tag
-        // (e.g. "[ideate]"), which are the user-meaningful progress
-        // markers from the engine.
+        // pane. Filter to user-meaningful node-tagged lines (e.g.
+        // "[ideate] topic=…") and reformat them so the chat doesn't
+        // look like raw CLI output. A small de-dupe guard catches the
+        // occasional double-print from upstream lib loggers.
         child.stderr.setEncoding("utf-8");
         let pending = "";
+        let lastShown = "";
+        const NODE_PATTERN = /\[(clarify|ideate|literature|design|implement|execute|execute_reflect|analyze|cross_check|write|review)\]\s*(.*)$/;
         child.stderr.on("data", (chunk: string) => {
             pending += chunk;
             const lines = pending.split(/\r?\n/);
             pending = lines.pop() || "";
             for (const line of lines) {
                 if (rawLineSink) rawLineSink(line);
-                if (/\[(clarify|ideate|literature|design|implement|execute|execute_reflect|analyze|cross_check|write|review)\]/.test(line)) {
-                    // Strip the timestamp + log-level prefix to keep
-                    // the chat clean.
-                    const m = line.match(/(\[[a-z_]+\].*)$/);
-                    if (m) this.opts.progress.markdown(`  ${m[1]}\n\n`);
-                }
+                const m = line.match(NODE_PATTERN);
+                if (!m) continue;
+                const node = m[1];
+                const msg = m[2].trim();
+                // Render a clean node arrow: `→ **implement**: generating…`
+                // Drop the leading `[<quest-id>]` log prefix entirely.
+                const rendered = msg
+                    ? `→ **${node}** · ${msg}`
+                    : `→ **${node}**`;
+                if (rendered === lastShown) continue;   // dedupe consecutive identical lines
+                lastShown = rendered;
+                this.opts.progress.markdown(`  ${rendered}\n\n`);
             }
         });
     }
@@ -320,36 +328,104 @@ export class Bridge {
             //     gap that long as a stall — surface as `lm_error` with
             //     a marker Python's retry classifier recognizes so the
             //     Python side will try the request again.
+            // Use `response.stream` (not `response.text`) so we receive
+            // every part type the model emits — including reasoning /
+            // thinking content from models like gpt-5.4-mini and o1.
+            // `response.text` only yields the final answer text; the
+            // reasoning is invisible there, which is exactly what the
+            // user reported: "I don't see reasoning content."
+            //
+            // Each part is one of:
+            //   - LanguageModelTextPart            (the answer; goes to Python AND chat)
+            //   - LanguageModelThinkingPart        (reasoning; chat-only)
+            //   - LanguageModelToolCallPart        (we don't request tools; chat-only)
+            // The `instanceof` checks are gated on the class existing
+            // because older VSCode versions may not export ThinkingPart.
             const INACTIVITY_MS = 180_000;
             const HEARTBEAT_MS = 10_000;
+            const THINKING_PREVIEW_CHARS = 240;
             let accumulated = "";
             let chunkCount = 0;
             let chars = 0;
+            let thinkingChars = 0;
+            // Buffer thinking fragments and flush at most once per
+            // heartbeat — bot review on PR #31 noted that emitting a
+            // markdown entry per ThinkingPart can flood the chat and
+            // slow VSCode when models stream many small fragments.
+            let thinkingBuf = "";
             const startMs = Date.now();
-            const iter = response.text[Symbol.asyncIterator]();
-            // Use a non-empty fallback so an upstream caller that didn't
-            // set `node` (e.g. older Python that hasn't been updated to
-            // thread node through `LLMClient.chat`) doesn't render as
-            // empty backticks like `` ``.
+            const iter = response.stream[Symbol.asyncIterator]();
             const nodeLabel = req.node || "(unnamed-node)";
 
-            // The bot review on PR #30 caught a real flaw in v1: a
-            // heartbeat that only fires on chunk arrival is silent
-            // during pre-first-token reasoning, which is exactly the
-            // window the user is most anxious about ("is anything
-            // happening?"). Run a wall-clock interval that fires
-            // every HEARTBEAT_MS regardless of stream state.
+            // Sanitize a free-text fragment so it renders as plain prose
+            // in the chat panel — strip / escape markdown that would
+            // otherwise be interpreted (headings, fences, links, bold,
+            // backticks, blockquote markers). Bot review on PR #31
+            // flagged this as a real risk: reasoning content can include
+            // arbitrary content the model is processing.
+            const escapeMd = (s: string): string => s
+                .replace(/[`*_~|<>\[\]]/g, (c) => `\\${c}`)
+                .replace(/\r/g, "")
+                .split(/\n+/).map((l) => l.trim()).filter(Boolean).join(" / ");
+
+            const flushThinking = (): void => {
+                if (!thinkingBuf) return;
+                const preview = thinkingBuf.length > THINKING_PREVIEW_CHARS
+                    ? thinkingBuf.slice(0, THINKING_PREVIEW_CHARS) + "…"
+                    : thinkingBuf;
+                this.opts.progress.markdown(
+                    `  💭 ${escapeMd(preview)}\n\n`,
+                );
+                thinkingBuf = "";
+            };
+
             const heartbeatTimer = setInterval(() => {
+                flushThinking();   // emit any accumulated reasoning
                 const elapsed = Math.round((Date.now() - startMs) / 1000);
-                const label = chunkCount === 0 ? "reasoning (no chunks yet)" : "streaming";
+                let label: string;
+                if (chunkCount === 0 && thinkingChars === 0) {
+                    label = "no chunks yet";
+                } else if (chunkCount === 0) {
+                    label = `reasoning (${thinkingChars} thinking chars)`;
+                } else {
+                    label = "streaming";
+                }
                 this.opts.progress.markdown(
                     `  📥 \`${nodeLabel}\` ${label} — ` +
-                    `${chunkCount} chunks, ${chars} chars, ${elapsed} s\n\n`,
+                    `${chunkCount} chunks, ${chars} chars, ` +
+                    `${thinkingChars} thinking, ${elapsed} s\n\n`,
                 );
             }, HEARTBEAT_MS);
             this.opts.progress.markdown(
                 `  ⏳ \`${nodeLabel}\` streaming…\n\n`,
             );
+
+            // Defensive type checks — VSCode versions vary. Read class
+            // refs lazily so a missing class on older builds doesn't
+            // crash the extension; fall back to duck-typing on .value.
+            const LM = vscode as any;
+            const TextPart = LM.LanguageModelTextPart;
+            const ThinkingPart = LM.LanguageModelThinkingPart;
+            const ToolCallPart = LM.LanguageModelToolCallPart;
+            const partKind = (p: unknown): "text" | "thinking" | "tool" | "unknown" => {
+                if (TextPart && p instanceof TextPart) return "text";
+                if (ThinkingPart && p instanceof ThinkingPart) return "thinking";
+                if (ToolCallPart && p instanceof ToolCallPart) return "tool";
+                // Duck-typing fallback for versions where the classes
+                // aren't exported but the parts still have a usable
+                // shape.
+                const obj = p as any;
+                if (obj && typeof obj.value === "string") {
+                    if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
+                    if (obj.constructor?.name === "LanguageModelTextPart") return "text";
+                    // Heuristic: assume text. Worst case: reasoning leaks
+                    // into the answer; Python's lenient JSON parsers
+                    // and our fenced-block parser tolerate prose.
+                    return "text";
+                }
+                return "unknown";
+            };
+
             try {
                 while (true) {
                     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -359,7 +435,7 @@ export class Bridge {
                             INACTIVITY_MS,
                         );
                     });
-                    let result: IteratorResult<string> | { stalled: true };
+                    let result: IteratorResult<unknown> | { stalled: true };
                     try {
                         result = await Promise.race([iter.next(), stallSignal]);
                     } finally {
@@ -370,28 +446,53 @@ export class Bridge {
                         // pattern-matches strings; "bridge stalled" must be
                         // in its transient-marker list so the Python side
                         // retries instead of dying on the first stall.
+                        // Include thinking-char count too so the user can
+                        // tell if the model was reasoning (thinking >0,
+                        // no output chunks) vs truly silent.
                         throw new Error(
-                            `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
-                            `(received ${chunkCount} chunks / ${chars} chars before stall)`,
+                            `bridge stalled: no part for ${INACTIVITY_MS / 1000} s ` +
+                            `(received ${chunkCount} chunks / ${chars} chars / ` +
+                            `${thinkingChars} thinking chars before stall)`,
                         );
                     }
                     if (result.done) break;
-                    const fragment = result.value;
-                    accumulated += fragment;
-                    chars += fragment.length;
-                    chunkCount++;
-                    this.send({
-                        type: "lm_chunk",
-                        id: req.id,
-                        delta: fragment,
-                    });
+                    const part = result.value;
+                    const kind = partKind(part);
+                    const value = (part as any)?.value;
+                    if (kind === "text" && typeof value === "string") {
+                        accumulated += value;
+                        chars += value.length;
+                        chunkCount++;
+                        this.send({
+                            type: "lm_chunk",
+                            id: req.id,
+                            delta: value,
+                        });
+                    } else if (kind === "thinking" && typeof value === "string") {
+                        thinkingChars += value.length;
+                        // Buffer thinking fragments; the heartbeat
+                        // flushes them at most once per HEARTBEAT_MS.
+                        // We DON'T send to Python — reasoning isn't
+                        // the answer.
+                        thinkingBuf += value;
+                    } else if (kind === "tool") {
+                        // FI doesn't request tool calls; the model
+                        // shouldn't emit any. Log if it happens so we
+                        // can diagnose model-side surprises.
+                        this.opts.progress.markdown(
+                            `  🔧 unexpected tool-call part on \`${nodeLabel}\`\n\n`,
+                        );
+                    }
+                    // unknown parts: ignore silently.
                 }
             } finally {
                 clearInterval(heartbeatTimer);
+                flushThinking();
             }
             const totalElapsed = Math.round((Date.now() - startMs) / 1000);
             this.opts.progress.markdown(
-                `  ✅ \`${nodeLabel}\` done — ${chunkCount} chunks, ${chars} chars, ${totalElapsed} s\n\n`,
+                `  ✅ \`${nodeLabel}\` done — ${chunkCount} chunks, ${chars} chars, ` +
+                `${thinkingChars} thinking, ${totalElapsed} s\n\n`,
             );
             this.send({
                 type: "lm_done",
