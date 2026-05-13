@@ -828,16 +828,34 @@ class LLMClient:
                 and _is_bridge_error_transient(str(exc))
             )
 
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=20),
-            retry=retry_if_exception(_retry_transient_bridge),
-            reraise=True,
-        ):
-            with attempt:
-                return await self._bridge.chat(
-                    messages, model_hint=hint or "", temperature=temperature,
-                )
+        # Budget: 6 attempts with 5 inter-attempt waits of
+        # 4/8/16/32/60s = ~2 minutes of cumulative backoff. Sustained
+        # Copilot HTTP/2 outages have been observed lasting 30-90s;
+        # the prior 3-attempt / ~14s budget was too tight and crashed
+        # quests on transient upstream issues. The TS-side bridge
+        # also retries 4x, so total wall time before a real failure
+        # exceeds 2 min.
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(6),
+                wait=wait_exponential(multiplier=2, min=4, max=60),
+                retry=retry_if_exception(_retry_transient_bridge),
+                reraise=True,
+            ):
+                with attempt:
+                    return await self._bridge.chat(
+                        messages, model_hint=hint or "", temperature=temperature,
+                    )
+        except BridgeError as exc:
+            if _is_bridge_error_transient(str(exc)):
+                raise BridgeError(
+                    "Copilot backend was unavailable across 6 retry "
+                    "attempts (~2 min of cumulative backoff). This is "
+                    "an upstream Copilot/HTTP issue, not a problem "
+                    "with your config or network — please retry the "
+                    f"quest in a few minutes. Last error: {exc}"
+                ) from exc
+            raise
         # Unreachable — tenacity reraise=True always raises on exhaustion.
         raise RuntimeError("vscode-bridge retry exhausted without raising")
 
