@@ -160,6 +160,14 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+## Pre-quest proposal
+
+```
+@fi /proposal Compare RK4 vs Verlet on the Kepler problem with eccentric orbits
+```
+
+Inverts the flow: get a 1-page LLM-written proposal *first* (TL;DR, background, hypothesis, plan, success criteria, risks, scope limits, recommended next step) before committing compute to a full quest. Writes `outputs/_drafts/<id>-proposal.md` (the planning doc) plus `outputs/_drafts/<id>.yaml` (a minimal config you can feed to `/start` once the plan looks right). Ingested as `kind=fi_proposal`.
+
 ## Adversarial critique
 
 ```

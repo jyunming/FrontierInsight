@@ -101,6 +101,10 @@ async function handleRequest(
         await runCritique(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "proposal") {
+        await runProposal(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -124,6 +128,7 @@ function helpText(): string {
         "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
+        "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
         "",
         "All LLM calls go through your Copilot subscription via the",
         "`vscode.lm` Language Model API. Each quest's `provider.node_models`",
@@ -1066,6 +1071,135 @@ async function runCritique(
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Critique done.\n");
+    } else {
+        const tail = stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
+            (tail.trim()
+                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
+                : "stderr was empty.\n"),
+        );
+    }
+}
+
+
+/**
+ * Implementation of `@fi /proposal <topic>`. Spawns
+ * `python launch.py --proposal "<topic>"` and streams the result
+ * back. The Python side writes BOTH a planning markdown and a
+ * companion YAML under outputs/_drafts/; the chat panel surfaces
+ * both paths so the user can read the .md and (if they like the plan)
+ * launch the quest via `/start <yaml>`.
+ *
+ * Argument parsing: the entire prompt after `/proposal ` is the topic
+ * — we don't split on whitespace. This matches `/start` semantics
+ * for path-like arguments and accepts free-form topic strings with
+ * spaces, punctuation, newlines pasted from chat.
+ */
+async function runProposal(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+
+    const topic = promptArgs.trim();
+    if (!topic) {
+        stream.markdown(
+            "Need a topic. Example: `@fi /proposal Bell inequality violations under quantum-classical coupling`.\n\n" +
+            "The proposal will be saved to `outputs/_drafts/` along with a companion YAML you can feed to `/start` once the plan looks good.\n",
+        );
+        return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    const launchScript = path.join(repoPath, "launch.py");
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+
+    stream.markdown(
+        `📝 Drafting proposal for topic:\n> ${topic.split("\n").slice(0, 3).join("\n> ")}\n\n` +
+        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+        `▶️ Asking the LLM for a planning doc…\n\n`,
+    );
+
+    const bridge = new Bridge({
+        progress: stream,
+        cancellationToken: token,
+        defaultModel: userPickedModel,
+    });
+    const port = await bridge.listen();
+
+    const argv: string[] = [
+        "-u", launchScript,
+        "--vscode-bridge-port", String(port),
+        "--proposal", topic,
+        "--output-root", outputsDir,
+    ];
+
+    const child = spawn(pythonPath, argv, {
+        cwd: repoPath,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderrTail: string[] = [];
+    const STDERR_TAIL_LINES = 80;
+    bridge.attachChild(child, (line) => {
+        stderrTail.push(line);
+        if (stderrTail.length > STDERR_TAIL_LINES) {
+            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
+        }
+    });
+    token.onCancellationRequested(() => {
+        try { child.kill("SIGTERM"); } catch { /* noop */ }
+    });
+
+    child.stdout.setEncoding("utf-8");
+    let stdoutBuf = "";
+    child.stdout.on("data", (chunk: string) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/\r?\n/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) {
+            const m = line.match(/^\[FI\] proposal -> (.+)$/);
+            if (m) {
+                stream.markdown(`  ✅ proposal written → \`${m[1]}\`\n\n`);
+                continue;
+            }
+            const ym = line.match(/^\[FI\] companion YAML -> (.+)$/);
+            if (ym) {
+                stream.markdown(`  📄 companion YAML → \`${ym[1]}\`\n\n`);
+                continue;
+            }
+            if (line.startsWith("[FI] To run the quest: ")) {
+                stream.markdown(`  ▶️ ${line.slice(5)}\n\n`);
+            }
+        }
+    });
+
+    const exitCode: number | null = await new Promise((resolve) => {
+        child.on("close", (code) => resolve(code));
+    });
+    await bridge.close();
+
+    if (exitCode === 0) {
+        stream.markdown("\n✅ Proposal done. Read the markdown, edit either file if needed, then `/start` the YAML when ready.\n");
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
