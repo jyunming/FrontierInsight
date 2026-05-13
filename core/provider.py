@@ -154,13 +154,21 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         model_flag="-m",        # provider.model = "gpt-5.5"; default reads ~/.codex/config.toml
     ),
     "copilot_cli": _CliSpec(
-        # GitHub Copilot CLI (`copilot --prompt`). `-s/--silent` strips
-        # the trailing "Changes/Requests/Tokens" stats block so stdout
-        # contains only the agent response. `--allow-all-tools` is
-        # required for non-interactive mode (the CLI otherwise prompts
-        # for tool-permission confirmations). The prompt is passed on
-        # argv because the CLI doesn't document a stdin path — be aware
-        # that the prompt is visible in local process listings.
+        # GitHub Copilot CLI (`copilot --prompt`). WARNING — this is an
+        # AGENTIC CLI: it interprets prompts as user coding tasks and
+        # may reply conversationally instead of running stateless LLM
+        # inference. Empirically broken as a chat backend for FI's
+        # pipeline (paper.md fills with "Are you trying to X?", code
+        # node returns the empty stub). engine._warn_if_unsanctioned_provider
+        # prints a loud warning when this provider is selected. Kept
+        # in _CLI_SPECS so the configuration shape remains stable for
+        # users who set it via the interview before reading docs.
+        #
+        # `-s/--silent` strips the trailing stats block. `--allow-all-tools`
+        # is needed to avoid interactive permission prompts; removing it
+        # would make the CLI hang on confirmation. The fundamental issue
+        # is the agent loop, not this flag — switch to vscode_extension /
+        # claude_cli / codex_cli / gemini_cli / openai for FI use.
         argv=("copilot", "-s", "--allow-all-tools", "-p"),
         pass_prompt_via="arg",
         output_via="stdout",

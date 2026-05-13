@@ -72,7 +72,7 @@ Three feedback loops:
 | `ollama`, `vllm` | HTTP direct (local) | none | ✅ Self-hosted |
 | `claude_cli` | CLI exec | `claude login` (Claude Pro/Max OAuth) | ✅ Sanctioned |
 | `codex_cli` | CLI exec | `codex login` (ChatGPT Plus/Pro OAuth) | ✅ Sanctioned |
-| `copilot_cli` | CLI exec | `gh auth login` (Copilot subscription) | ✅ Sanctioned |
+| `copilot_cli` | CLI exec | `gh auth login` (Copilot subscription) | ⚠️ Agentic — replies conversationally to FI's prompts; use `vscode_extension` for Copilot instead. |
 | `gemini_cli` | CLI exec | `gemini` OAuth / Google AI Studio key | ✅ Sanctioned |
 | **`vscode_extension`** | **VSCode bridge** | **VSCode Copilot Chat sign-in** | **✅ Sanctioned via `vscode.lm`** |
 | `claude_code` | HTTP via proxy | `claude login` + spawned wrapper | ⚠️ Third-party wrapper |
