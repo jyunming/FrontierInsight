@@ -69,19 +69,36 @@ class PaperGenerator:
         return result
 
     def _compile_pdf(self, paper_md: Path, out_dir: Path) -> Path | None:
-        if shutil.which("pandoc") is None:
+        # The real fix here is pdflatex resolution. `subprocess.run` on
+        # Windows DOES find `pandoc.exe` from a bare `"pandoc"` argv —
+        # CreateProcess auto-appends `.exe` to executable names with no
+        # extension. So resolving pandoc via `shutil.which` is mostly
+        # defensive (it'd matter only if pandoc ever shipped as a .cmd
+        # shim like marp does). We still do it for symmetry + so the
+        # absolute path lands in stderr logs when pandoc errors.
+        #
+        # The CRITICAL part is `--pdf-engine=<resolved-pdflatex>`.
+        # pandoc itself does a PATH lookup for the engine binary. If
+        # the Python child inherited a PATH that omitted MiKTeX's bin
+        # dir (`~/AppData/Local/Programs/MiKTeX/miktex/bin/x64/` after
+        # a per-user winget install), pandoc fails with "pdflatex not
+        # found" and exits non-zero. Resolving pdflatex up-front and
+        # passing the full path bypasses pandoc's PATH lookup.
+        pandoc_exe = shutil.which("pandoc")
+        if pandoc_exe is None:
             _log.warning("pandoc not on PATH; paper.pdf skipped (paper.md only)")
             return None
+        pdflatex_exe = shutil.which("pdflatex") or "pdflatex"
 
         fmt = self.config.output.paper_format
         template = TEMPLATES_DIR / fmt / "template.tex"
         out_pdf = out_dir / "paper.pdf"
 
         cmd: list[str] = [
-            "pandoc",
+            pandoc_exe,
             str(paper_md),
             "-o", str(out_pdf),
-            "--pdf-engine=pdflatex",
+            f"--pdf-engine={pdflatex_exe}",
             "--standalone",
         ]
         if template.exists():
@@ -92,15 +109,20 @@ class PaperGenerator:
                 template, fmt,
             )
 
+        # 300 s headroom: the first quest after a fresh MiKTeX install
+        # spends time downloading LaTeX packages on the fly (upquote,
+        # microtype, xcolor, hyperref, …). 120 s was sometimes too
+        # tight for that warm-up. Subsequent quests reuse the cache
+        # and complete in seconds.
         try:
             r = subprocess.run(
-                cmd, capture_output=True, text=True, cwd=str(out_dir), timeout=120
+                cmd, capture_output=True, text=True, cwd=str(out_dir), timeout=300
             )
         except FileNotFoundError:
             _log.warning("pandoc invocation failed; paper.pdf skipped")
             return None
         except subprocess.TimeoutExpired:
-            _log.warning("pandoc timeout (>120s); paper.pdf skipped")
+            _log.warning("pandoc timeout (>300s); paper.pdf skipped")
             return None
 
         if r.returncode != 0:
