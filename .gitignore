@@ -28,3 +28,4 @@ outputs/
 .pytest_tmp/
 .pytest_cache/
 .testmondata*
+tstex_modules/
