@@ -44,6 +44,8 @@ A single \`/start\` or \`/new\` quest fires roughly **8–18 LLM calls** dependi
 Floor (~8): clarify off, every loop hits its happy path, single reviewer.  
 Ceiling (~18): full clarify + reflect + 1 design retry + 1 implement retry + 1 execute_reflect retry + 3 cross-check findings + 3-persona reviewer panel + 1 revise loop.
 
+For dollar-cost estimates against specific providers (Copilot, OpenAI, Anthropic, Gemini, Ollama), see [`PROVIDERS.md#cost-expectations`](PROVIDERS.md#cost-expectations).
+
 All LLM calls route through `vscode.lm.selectChatModels` — whatever
 model is selected in your Copilot Chat picker is the model FI uses.
 See [`PROVIDERS.md`](PROVIDERS.md).
@@ -87,6 +89,8 @@ fi --serve --output-root ./outputs
 # One-time tectonic install for corporate envs:
 fi --install-tectonic
 ```
+
+> **First paper_pdf run takes ~30 s longer** when using tectonic (or a fresh MiKTeX install) because the LaTeX engine downloads required CTAN packages on the first compile. Subsequent runs are instant. Tectonic caches under `%LOCALAPPDATA%\TectonicProject\Tectonic\` on Windows; MiKTeX under its own package cache. No additional intervention needed — FI just waits.
 
 ### All `fi` flags
 
