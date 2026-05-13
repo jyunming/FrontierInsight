@@ -145,6 +145,16 @@ prerequisites.
   Engines if profiling justifies it.)
 - `ProxySupervisor` is shared across Engines in a process; ref-counts
   proxy subprocesses.
+- **Fleet runner** (`launch.py:run_fleet`): schedules N Engines under
+  an `asyncio.Semaphore(max_concurrent)`. The cap defaults to
+  `min(4, os.cpu_count())` and is overridable via `--max-concurrent`.
+  Quests run as independent asyncio tasks; an exception in one quest
+  doesn't cascade (each task's `try/except` is local). The shared
+  `ProxySupervisor` means 4 concurrent quests using the same provider
+  share one proxy subprocess (one bridge port, one HTTP client) —
+  ref-counting releases the subprocess only when the last quest
+  using it finishes. See [`launch.py`](../launch.py) `_run_one_quest`
+  + `run_fleet` for the exact scheduling code.
 - Per-quest filesystem isolation: `<quest_root>/{paper,figures,code,.fi}`,
   plus `<quest_root>/config.yaml` (a copy of the source YAML so
   `--resume` / `@fi /resume` need nothing else from the filesystem).

@@ -250,12 +250,17 @@ Cheap model for clarify/cross_check, strong model for write/review:
 ```yaml
 provider:
   name: vscode_extension
-  model: gpt-5                  # global default
+  model: gpt-5                                 # global default
   node_models:
-    clarify: gpt-4o-mini
+    clarify:     gpt-4o-mini
     cross_check: gpt-4o-mini
-    write: claude-3-5-sonnet
-    review: gpt-5
+    write:       claude-3-5-sonnet
+    review:      gpt-5
+    # Per-persona overrides for the reviewer panel:
+    review_panel.statistician:   claude-opus-4-7
+    review_panel.devil_advocate: gpt-5
+    review_panel.methodologist:  gpt-5
+    review_moderator:            gpt-4o-mini    # cheap synthesis
 ```
 
 ### Have a panel of reviewers debate the paper
