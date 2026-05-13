@@ -478,9 +478,16 @@ class Engine:
             timeout_s=str(self.config.execution.timeout_s),
         )
         text = await self._chat(prompt, node="implement")
-        parsed = _parse_json_lenient(text) or {}
-        code = parsed.get("code") or 'print("RESULT_JSON: {}")'
-        deps = parsed.get("deps") or []
+        code, deps = _parse_implement_response(text)
+        if not code:
+            # Empty-code path: log the LLM head so the user can see WHAT
+            # came back rather than silently shipping a stub experiment
+            # that crashes downstream with no signal.
+            self._log.warning(
+                "[implement] no code extracted; LLM head: %r",
+                text[:400] if text else "<empty>",
+            )
+            code = 'print("RESULT_JSON: {}")'
         # Defensive: if the design listed deps and the impl skipped them, union.
         design_deps = (state.get("design") or {}).get("dependencies") or []
         deps = sorted({*deps, *design_deps})
@@ -1409,6 +1416,75 @@ def _parse_json_lenient(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             return None
     return None
+
+
+# Implement-node response parsing.
+#
+# Why a dedicated parser: the prior `{"code": "...", "deps": [...]}`
+# JSON-wrapped format was the worst possible shape for an LLM stream —
+# a 150-line script became a 6-10 KB single JSON string with every
+# newline / quote / backslash escaped, costing ~30% more output tokens
+# AND forcing the whole response to be well-formed (any truncation
+# silently fell back to `print("RESULT_JSON: {}")` and crashed execute).
+# Long streams are exactly where Copilot's HTTP/2 drops happen, so the
+# `implement` node accounted for most of the bridge retry-exhaustions
+# users saw in real quests. The new format is a fenced Python block
+# plus a `DEPS:` line — partial truncation still yields recoverable code.
+_PY_FENCE_RE = re.compile(
+    r"```(?:python|py)?\s*\n(.*?)\n```",
+    re.DOTALL | re.IGNORECASE,
+)
+_DEPS_LINE_RE = re.compile(
+    r"^[ \t]*deps\s*[:=]\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_implement_response(text: str) -> tuple[str, list[str]]:
+    """Extract ``(code, deps)`` from the implement-node LLM response.
+
+    Format expected (the new shape after agents/implement.md was rewritten):
+
+        ```python
+        <code>
+        ```
+        DEPS: numpy, matplotlib
+
+    Falls back to the legacy ``{"code": ..., "deps": [...]}`` JSON shape
+    if no fenced code block is found, so a model that drifts back to the
+    old format still works.
+
+    Returns ``("", [])`` if neither shape parses — caller is expected to
+    handle the empty-code path (it writes a stub experiment and lets the
+    execute node fail loudly rather than silently swallow the breakage).
+    """
+    if not text:
+        return "", []
+
+    # Primary: fenced Python block + `DEPS:` line.
+    fence = _PY_FENCE_RE.search(text)
+    if fence:
+        code = fence.group(1).strip("\n")
+        deps: list[str] = []
+        deps_match = _DEPS_LINE_RE.search(text)
+        if deps_match:
+            raw = deps_match.group(1).strip()
+            # Tolerate "numpy, matplotlib" / "[numpy, matplotlib]" /
+            # "['numpy', 'matplotlib']" — strip brackets/quotes and split.
+            raw = raw.strip("[](){}")
+            deps = [
+                d.strip().strip("'\"")
+                for d in raw.split(",")
+                if d.strip().strip("'\"")
+            ]
+        return code, deps
+
+    # Fallback: legacy JSON-wrapped shape.
+    legacy = _parse_json_lenient(text) or {}
+    code = legacy.get("code") or ""
+    deps_raw = legacy.get("deps") or []
+    deps = [d for d in deps_raw if isinstance(d, str) and d.strip()]
+    return code, deps
 
 
 _RESULT_LINE_RE = re.compile(r"RESULT_JSON:\s*(\{.*\})\s*$", re.MULTILINE)

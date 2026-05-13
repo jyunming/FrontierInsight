@@ -12,9 +12,26 @@ $design_block
 - No network access. No reading from outside the working directory.
 
 # Output format
-Respond with a JSON object containing exactly two fields. No prose outside the JSON.
+Respond with EXACTLY two sections, in this order, and nothing else:
 
-{
-  "code": "<the entire Python script as a single string>",
-  "deps": ["numpy", ...]
-}
+1. A single fenced Python code block containing the entire script.
+2. A single line `DEPS:` followed by a comma-separated list of pip-installable package names.
+
+Example:
+
+```python
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# ... experiment body ...
+
+print(f"RESULT_JSON: {{'rmse': {rmse:.6f}}}")
+```
+
+DEPS: numpy, matplotlib
+
+Do NOT wrap the script in JSON. Do NOT escape newlines. Do NOT add commentary
+before or after these two sections. The fenced block is the only place code
+appears; the `DEPS:` line is the only place dependencies appear.

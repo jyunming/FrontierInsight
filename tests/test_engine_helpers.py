@@ -20,6 +20,7 @@ from core.engine import (
     Engine,
     _extract_result_json,
     _new_quest_id,
+    _parse_implement_response,
     _parse_json_lenient,
     _slugify,
     _strip_outer_fence,
@@ -319,3 +320,78 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
     assert cross_branch.ends == {"write": "write", "redesign": "design"}
+
+
+# ---- _parse_implement_response ------------------------------------------
+
+
+def test_parse_implement_response_fenced_block_plus_deps_line() -> None:
+    """Happy path for the new fenced-block format (the whole reason this
+    parser exists — kills the JSON-escape overhead that was hanging
+    implement on long streams)."""
+    text = (
+        "```python\n"
+        "import numpy as np\n"
+        "print('RESULT_JSON: {}')\n"
+        "```\n"
+        "DEPS: numpy, matplotlib\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "import numpy as np" in code
+    assert "print('RESULT_JSON: {}')" in code
+    assert deps == ["numpy", "matplotlib"]
+
+
+def test_parse_implement_response_fenced_no_language_tag() -> None:
+    """Some models emit ``` instead of ```python. Still parse."""
+    text = "```\nprint('ok')\n```\nDEPS: numpy"
+    code, deps = _parse_implement_response(text)
+    assert code == "print('ok')"
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_deps_with_brackets_and_quotes() -> None:
+    """Tolerate ``DEPS: ['numpy', 'scipy']`` even though we asked for
+    bare names — models often regress to list syntax."""
+    text = "```python\npass\n```\nDEPS: ['numpy', 'scipy']"
+    code, deps = _parse_implement_response(text)
+    assert code == "pass"
+    assert deps == ["numpy", "scipy"]
+
+
+def test_parse_implement_response_no_deps_line_returns_empty_list() -> None:
+    """Missing DEPS line is fine — design_deps union covers most cases.
+    Empty list means 'I declare nothing', not 'parser broke'."""
+    text = "```python\nimport sys\nprint('ok')\n```"
+    code, deps = _parse_implement_response(text)
+    assert code == "import sys\nprint('ok')"
+    assert deps == []
+
+
+def test_parse_implement_response_falls_back_to_legacy_json() -> None:
+    """Models occasionally regress to the old ``{"code": "...", "deps": [...]}``
+    shape; don't punish them — fall through to _parse_json_lenient."""
+    text = '{"code": "print(42)", "deps": ["numpy"]}'
+    code, deps = _parse_implement_response(text)
+    assert code == "print(42)"
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_empty_and_garbage_return_empty() -> None:
+    assert _parse_implement_response("") == ("", [])
+    assert _parse_implement_response("no code here, sorry") == ("", [])
+
+
+def test_parse_implement_response_skips_inline_fenced_examples_in_prose() -> None:
+    """The model sometimes includes a tiny ```python fence in commentary
+    BEFORE the real one. The regex is greedy across the FIRST match —
+    if the first fence is the real one this works. We accept that the
+    parser picks the first fenced block; the prompt explicitly asks for
+    exactly one fence, so this is the contract."""
+    text = (
+        "```python\nimport numpy\nprint(1)\n```\n"
+        "DEPS: numpy\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "import numpy" in code
+    assert deps == ["numpy"]
