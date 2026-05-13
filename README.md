@@ -20,6 +20,28 @@ Everything runs locally on your machine. The only external dependency is an LLM 
 
 ---
 
+## Why Frontier Insight?
+
+FI is opinionated about the *whole research workflow*, not just the LLM call. If you're already using one of these, here's why FI might still fit:
+
+| If you're already using… | …FI gives you |
+|---|---|
+| **Vanilla Copilot Chat / Cursor / Cline** | The full research loop end-to-end — ideate → literature → code → execute → analyze → write → review — without you driving each step. Chat tools wait for you; FI doesn't. |
+| **A general-purpose AI agent for science** | **Persistent cross-quest memory.** `@fi /digest /portfolio /critique /proposal` accumulate over weeks via the Axon knowledge layer, so FI remembers what you tried last month. Plus a reviewer panel with per-persona model routing (statistician, methodologist, devil's advocate, …) — most agents start fresh each session and use a single reviewer. |
+| **Hand-rolled LangGraph + OpenAI scripts** | The *output layer*: venue paper templates (NeurIPS / ICLR / IEEE Access / Nature MI / generic), slides, posters, speech scripts. Plus resumable quests (`--resume` re-enters from the last LangGraph checkpoint), the sanctioned `vscode.lm` Copilot integration (no reverse-engineered proxies), and a corporate-laptop install path (tectonic LaTeX, no admin needed). |
+
+Concretely: **per-node model routing** lets you spend cheap on `clarify` and expensive on `write`. **Adversarial `/critique`** runs a second-pass review with a different model family than the one that wrote the paper. **`--fleet`** runs many quests in parallel with bounded concurrency. **`--install-tectonic`** drops a 70 MB self-bootstrapping LaTeX into `tools/` so corporate locked-down envs can still compile PDFs.
+
+---
+
+## Requirements
+
+- **Python 3.11+** (Windows / macOS / Linux — no WSL needed).
+- An LLM provider: a Copilot subscription via VSCode, OpenAI / Anthropic / Gemini API key, or local Ollama. Pick one in the quickstart below.
+- *Optional:* `pandoc` + a LaTeX engine for `paper.pdf` output. If you can't install MiKTeX / TeX Live (no admin, corporate laptop), run `python launch.py --install-tectonic` after install — it drops a 70 MB self-contained LaTeX binary into `tools/` and FI picks it up automatically.
+
+---
+
 ## What you'll have after one quest
 
 Inside `outputs/<quest_id>/`:
@@ -52,7 +74,7 @@ cd FrontierInsight
 pip install -r requirements.txt
 ```
 
-Needs Python 3.11+.
+(See [Requirements](#requirements) above if you haven't checked Python version yet.)
 
 ### 2. Pick an LLM provider (one-time)
 
@@ -61,6 +83,8 @@ Choose **one** of these — whichever you already have access to:
 #### Option A — GitHub Copilot via VSCode (recommended if you have Copilot)
 
 This is the safest and cleanest path. You already have the VSCode Copilot Chat extension installed and signed in.
+
+**First-time setup needs Node.js + npm** (~5 min total to build the .vsix). After that, CI auto-rebuilds the .vsix on every push to main when extension sources change — so if you're not modifying the extension yourself, this is a one-time cost.
 
 ```bash
 # Build the FI VSCode extension into a .vsix (one-time):
@@ -246,6 +270,19 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
+### Project-manager commands — when to reach for each
+
+FI ships four commands that live *outside* the per-quest loop. They turn FI from a single-quest tool into a portfolio assistant. One LLM call each (cheap; cap'd content); each ingests its output into Axon so future quests can retrieve it.
+
+| Command | Use it when |
+|---|---|
+| `@fi /proposal <topic>` | About to run a quest. Want to sanity-check the plan first before committing 8–18 LLM calls of a full run. |
+| `@fi /critique <quest_id>` | Quest finished. Want a second opinion that didn't already write the paper — pick a different model family in the picker. |
+| `@fi /digest [days]` | End of week. Want a 1-pager "what I shipped + what's stuck", with a structured diff vs last week. |
+| `@fi /portfolio` | End of month, or scoping the next push. Want a synthesis of themes + gaps + meta-paper candidates across *every* quest. |
+
+The next four sections walk through each in detail.
+
 ### Plan a quest before you commit compute
 
 ```
@@ -341,20 +378,24 @@ The agent will read it and cite it. Requires `pip install pypdf` for PDF support
 
 ## Three example quests that already work
 
-| Example | What it does |
-|---|---|
-| [`examples/integrator_bakeoff/`](examples/integrator_bakeoff/config.yaml) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. ~3 minutes. |
-| [`examples/euv_mor_shot_noise/`](examples/euv_mor_shot_noise/config.yaml) | Theoretical LER floor in metal-oxide EUV resists. Uses the literature router. ~15 minutes. |
-| [`examples/bernstein_vazirani_noise/`](examples/bernstein_vazirani_noise/config.yaml) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. ~20 minutes. |
+| Example | What it does | Wall time |
+|---|---|---|
+| [`examples/integrator_bakeoff/`](examples/integrator_bakeoff/config.yaml) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
+| [`examples/euv_mor_shot_noise/`](examples/euv_mor_shot_noise/config.yaml) | Theoretical LER floor in metal-oxide EUV resists. Uses the literature router. | ~15 min |
+| [`examples/bernstein_vazirani_noise/`](examples/bernstein_vazirani_noise/config.yaml) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
 
 ---
 
 ## Going deeper
 
-- **Full capability inventory** with every YAML field, every provider, every loop: [`docs/capabilities.md`](docs/capabilities.md).
-- **Architecture diagram and contracts** (`Config`, `QuestState`, `QuestArtifacts`, `Executor`, generator protocol): [`docs/architecture.md`](docs/architecture.md).
-- **Phased development history**: [`docs/plan.md`](docs/plan.md).
-- **For Claude Code agents working on this repo**: [`CLAUDE.md`](CLAUDE.md).
+Read in this order — each builds on the previous:
+
+1. **Pick your LLM provider strategically**: [`docs/PROVIDERS.md`](docs/PROVIDERS.md) — cost expectations, ToS standing per provider, when to use per-node model routing to spend cheap on `clarify` and expensive on `write`.
+2. **Day-to-day reference**: [`docs/USAGE.md`](docs/USAGE.md) — every chat command, every `fi` flag, the YAML config schema, output artifact layout, common workflows.
+3. **Full capability reference**: [`docs/capabilities.md`](docs/capabilities.md) — the 11-node DAG, every YAML field with defaults, knowledge layer internals, output kinds.
+4. **Architecture & extension points**: [`docs/architecture.md`](docs/architecture.md) — `Config` / `QuestState` / `QuestArtifacts` contracts, the generator protocol, fleet runner internals.
+5. **Hit a snag installing?** [`docs/INSTALL.md`](docs/INSTALL.md) — three install paths (standard / no-admin / locked-down) and the troubleshooting section.
+6. **For contributors / AI coding assistants**: [`CONTRIBUTING.md`](CONTRIBUTING.md) for PR conventions; [`dev/CLAUDE.md`](dev/CLAUDE.md) for repo-specific guidance that Claude Code agents load automatically.
 
 ---
 
