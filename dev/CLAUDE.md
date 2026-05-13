@@ -25,7 +25,7 @@ External prerequisites are all optional and feature-gated:
 - **pandoc + LaTeX** for `paper_pdf` — generator skips with a warning if missing.
 - **Marp CLI** (`@marp-team/marp-cli`) for `slides.html` / `slides.pdf` — `slides.md` is still produced.
 - **Docker Desktop** for `execution.sandbox: docker`.
-- **Provider proxies** (`claude_code`, `github_copilot_*`) only when those providers are selected. See `docs/plan.md` Phase C for verbatim install commands.
+- **Provider proxies** (`claude_code`, `github_copilot_*`) only when those providers are selected. See `docs/PROVIDERS.md` for verbatim install commands.
 
 ## Architecture (the parts that span files)
 
@@ -39,7 +39,7 @@ External prerequisites are all optional and feature-gated:
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
 - **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`. The two `github_copilot_*` providers emit a one-time warning at engine init (third-party `copilot-api` proxy, abuse-detection risk).
 - **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli` and `codex_cli` and `gemini_cli` are chat-style. **`copilot_cli` is agentic**: it interprets FI's node prompts as user coding tasks and replies conversationally; the engine emits a loud warning when it's selected. For Copilot use `vscode_extension` instead.
-- **VSCode bridge** (`vscode_extension`) — Phase P. `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
+- **VSCode bridge** (`vscode_extension`). `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled.
 
