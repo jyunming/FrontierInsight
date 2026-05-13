@@ -65,6 +65,33 @@ def test_parse_args_resume_with_config_ok() -> None:
     assert args.resume == "q-123"
 
 
+def test_parse_args_summarize_mode() -> None:
+    """--summarize is its own top-level mode; takes a folder Path."""
+    args = launch.parse_args(["--summarize", "./papers"])
+    assert args.summarize == Path("./papers")
+    assert args.summarize_kind == "auto"
+
+
+def test_parse_args_summarize_with_kind() -> None:
+    args = launch.parse_args(["--summarize", ".", "--summarize-kind", "literature"])
+    assert args.summarize_kind == "literature"
+
+
+def test_parse_args_summarize_rejects_invalid_kind() -> None:
+    """Unknown kinds rejected at the parser level (argparse `choices=`
+    does the work) so we never reach the summarizer with a string
+    that can't drive the prompt."""
+    with pytest.raises(SystemExit):
+        launch.parse_args([
+            "--summarize", ".", "--summarize-kind", "not-a-real-kind",
+        ])
+
+
+def test_parse_args_summarize_mutually_exclusive_with_config() -> None:
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--config", "x.yaml", "--summarize", "./papers"])
+
+
 # ---- _validate_resume_quest_id ------------------------------------------
 
 

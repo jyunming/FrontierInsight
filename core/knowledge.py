@@ -1463,6 +1463,40 @@ class Knowledge:
             _log.warning("axon ingest failed for %s: %s", source, e)
             return False
 
+    def add_text(
+        self, *, text: str, kind: str, metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Ingest a pre-formatted text document into Axon. Handles the
+        Axon API drift between ``add_text`` and ``ingest_text`` so
+        callers don't have to. Returns True iff the call succeeded.
+
+        Used by the post-quest write-back path and by the folder
+        summarizer (`core/summarizer.py`) to land `fi_summary_input`
+        and `fi_summary` documents. Tolerates a disabled or missing
+        Axon brain — returns False silently in those cases."""
+        if not self.enabled or self._brain is None:
+            return False
+        add_fn = getattr(self._brain, "add_text", None) or getattr(
+            self._brain, "ingest_text", None,
+        )
+        if add_fn is None:
+            _log.warning("axon brain exposes no add_text/ingest_text; skipping")
+            return False
+        try:
+            add_fn(text=text, kind=kind, metadata=metadata or {})
+            return True
+        except TypeError:
+            # Older Axon shapes — try positional / no-kind variants.
+            try:
+                add_fn(text, metadata=metadata or {})
+                return True
+            except Exception as e:
+                _log.warning("axon add_text fallback failed: %s", e)
+                return False
+        except Exception as e:
+            _log.warning("axon add_text failed: %s", e)
+            return False
+
     def add_quest_artifacts(
         self,
         *,
