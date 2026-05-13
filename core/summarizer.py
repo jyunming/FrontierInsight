@@ -37,14 +37,29 @@ _log = logging.getLogger("frontier_insight.summarizer")
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "summarize.md"
 
 # Per-file content cap fed into the prompt. Anything larger gets
-# truncated. Sized so a folder with ~20 files fits inside a 100 KB
-# prompt budget (~25K tokens).
+# truncated. Sized so a single file can carry a meaningful preview
+# (~1K tokens) without one outsized file swallowing the whole budget.
 _PER_FILE_PROMPT_CHARS = 4_000
+
+# **Total** prompt-content cap, across ALL per-file blocks combined.
+# This is the budget the LLM has to receive content previews; the
+# manifest table is rendered separately and isn't subject to this cap.
+# Sized so the produced prompt fits inside a generous-context model
+# (~15K tokens of content + the manifest table) without blowing the
+# token limit on folders with hundreds of files. Files past the
+# budget appear in the manifest only — no content block — and a
+# trailing note tells the model that N files were elided.
+#
+# Real-world failure that motivated this: a user pointed `/summarize`
+# at a folder with 209 files. With only the per-file cap, the total
+# prompt was ~209 × 4 KB = ~800 KB → ~200K tokens → BridgeError.
+_TOTAL_PROMPT_CHARS = 60_000
 
 # Per-file cap for the Axon ingest path. Larger than the prompt
 # preview so future retrieval can surface body content beyond the
 # first ~4 KB. Bounded so a single huge file doesn't dominate the
-# corpus or blow up Axon's chunking.
+# corpus or blow up Axon's chunking. Axon ingest is NOT subject to
+# the total cap — every file is its own document there.
 _PER_FILE_AXON_CHARS = 50_000
 
 # Directories we always skip during recursion. These tend to be noise
@@ -244,18 +259,66 @@ def _render_file_manifest(entries: list[FileEntry]) -> str:
     return "\n".join(lines)
 
 
-def _render_content_blocks(entries: list[FileEntry]) -> str:
+def _render_content_blocks(
+    entries: list[FileEntry],
+    *,
+    total_budget_chars: int = _TOTAL_PROMPT_CHARS,
+) -> str:
     """The per-file previews, header-tagged so the LLM can map citations
-    back to inventory IDs."""
+    back to inventory IDs. Caps total content size at
+    ``total_budget_chars`` (default ``_TOTAL_PROMPT_CHARS``) so a folder
+    with hundreds of files doesn't blow the model's token budget.
+
+    Greedy packing: walk entries in their natural (deterministic-by-
+    path) order; include each file's preview if the running byte count
+    plus this block fits, else skip the content block (the file is
+    still listed in the manifest). A trailing note tells the model how
+    many files were elided.
+
+    Entries with no readable preview (binary, unknown extension) are
+    always skipped here — they're listed in the manifest only.
+    """
     blocks: list[str] = []
+    used = 0
+    elided = 0
+    elided_idents: list[int] = []
     for e in entries:
         if not e.preview:
-            continue  # binary / unknown — skip the block (still in manifest)
+            continue
         truncated = e.preview.strip()
+        block = f"## [{e.ident}] `{e.rel_path}` ({e.kind})\n\n{truncated}\n"
+        # +1 for the join separator we'll add later.
+        if used + len(block) + 1 > total_budget_chars and blocks:
+            # Out of budget. Don't include this content block; record
+            # it as elided so the model knows to fall back to the
+            # manifest entry instead of hallucinating content.
+            elided += 1
+            elided_idents.append(e.ident)
+            continue
+        blocks.append(block)
+        used += len(block) + 1
+
+    if not blocks:
+        return "(no readable content found)"
+
+    if elided > 0:
+        # Show up to 20 IDs explicitly so the model can cite them by
+        # ID from the manifest even though their content blocks aren't
+        # included. Past 20 we just summarize the count.
+        if len(elided_idents) <= 20:
+            id_list = ", ".join(f"[{i}]" for i in elided_idents)
+        else:
+            id_list = (
+                ", ".join(f"[{i}]" for i in elided_idents[:20])
+                + f", … and {len(elided_idents) - 20} more"
+            )
         blocks.append(
-            f"## [{e.ident}] `{e.rel_path}` ({e.kind})\n\n{truncated}\n"
+            f"\n_({elided} additional files in the manifest above had their "
+            f"content elided to stay within the prompt budget: {id_list}. "
+            f"Cite them by ID from the manifest only — do NOT invent their "
+            f"content.)_\n"
         )
-    return "\n".join(blocks) if blocks else "(no readable content found)"
+    return "\n".join(blocks)
 
 
 def _slugify_folder(folder: Path) -> str:
