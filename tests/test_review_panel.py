@@ -381,3 +381,35 @@ async def test_review_panel_uses_per_persona_model_routing(
     assert by_persona["methodologist"] == "gpt-5"
     assert by_persona["devil_advocate"] == "claude-opus-4-7"
     assert by_persona["moderator"] == "gpt-5-mini"
+
+
+def test_aggregate_carries_rigor_and_depth_medians_when_present() -> None:
+    """Regression for PR #34 review: the aggregator was returning a
+    fixed dict without rigor_score / depth_score, silently dropping
+    the per-persona depth signal that motivates a revise. Pin that
+    medians of both axes flow through."""
+    panel = [
+        {**_r("m", "accept", 4), "rigor_score": 5, "depth_score": 3},
+        {**_r("s", "accept", 4), "rigor_score": 4, "depth_score": 2},
+        {**_r("d", "accept", 5), "rigor_score": 4, "depth_score": 4},
+    ]
+    agg = _aggregate_panel_reviews(panel)
+    assert agg["verdict"] == "accept"
+    # rigor: sorted [4,4,5] → median 4. depth: sorted [2,3,4] → median 3.
+    assert agg["rigor_score"] == 4
+    assert agg["depth_score"] == 3
+
+
+def test_aggregate_falls_back_to_3_when_personas_omit_rigor_depth() -> None:
+    """Personas that don't return the new axes (older prompts, parse
+    failures) should fall back to 3, not crash the aggregator."""
+    panel = [_r("m", "accept", 4), _r("s", "accept", 5)]
+    agg = _aggregate_panel_reviews(panel)
+    assert agg["rigor_score"] == 3
+    assert agg["depth_score"] == 3
+
+
+def test_aggregate_empty_panel_provides_rigor_and_depth_defaults() -> None:
+    agg = _aggregate_panel_reviews([])
+    assert agg["rigor_score"] == 3
+    assert agg["depth_score"] == 3

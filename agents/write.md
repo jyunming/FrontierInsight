@@ -3,7 +3,7 @@ You are the **Writing** stage of an automated research pipeline.
 # Topic
 $topic
 
-# Title (use as the paper title)
+# Filename slug — NOT the paper title (you author the title; see "Output format" below)
 $title
 
 # Design
@@ -12,7 +12,7 @@ $design_block
 # Analysis
 $analysis_block
 
-# Prior work (cite at least 3 of these)
+# Prior work
 $literature_block
 
 # Figures available (reference each by filename)

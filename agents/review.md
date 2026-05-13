@@ -24,9 +24,15 @@ Grade on three axes (each 1–5) and combine into the overall `score`:
 
 1. **Honesty** — does the paper reflect the analysis truthfully (no fabricated numbers, no glossing over a broken experiment, claims are supported by results)? A dishonest paper cannot score above 2 overall regardless of polish.
 2. **Rigor** — `rigor_score`: are Methods sufficient for a reader to understand what was done, are limitations clearly stated, are design constraints (sample size, compute budget, baseline choice) explained?
-3. **Depth** — `depth_score`: does the paper engage with prior work substantively? **At least 3 cited sources must be discussed by content** (what they showed, how this study relates) — not merely listed in References. Does the Discussion synthesize across sources, or is it a thin summary of this study only?
+3. **Depth** — `depth_score`: does the paper engage with prior work substantively? Specifically, does the Discussion synthesize across cited sources rather than read like a thin summary of this study only?
 
-Use the `Pre-flight clarifications` Study-depth slot if available — a `brief preprint` is allowed to be shallower than a `journal-length` paper. Calibrate accordingly.
+**Calibrate depth against the `Study depth` slot** from the Pre-flight clarifications block above. Apply the right citation-discussion floor for the requested depth:
+
+- `brief preprint` — citations can be few; depth=5 is awarded when the Discussion engages meaningfully with at least 1 cited source by content.
+- `journal-length` (default if absent) — depth=5 requires the Discussion to engage with **at least 3** cited sources by content (what each showed, how this study relates) — not merely list them in References.
+- `comprehensive review` — depth=5 requires the Discussion to integrate every cited source by content; aim for ≥10 citations actually discussed.
+
+A `brief preprint` is allowed to be shallower than a `journal-length` paper. Do NOT request "more citations" as a revise suggestion if the depth floor for the requested level is already met.
 
 # Output format
 Respond with a single JSON object, no prose, no markdown fence:

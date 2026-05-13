@@ -1307,18 +1307,29 @@ def _aggregate_panel_reviews(
     """
     if not panel:
         return {"verdict": fallback_verdict, "score": 3,
+                "rigor_score": 3, "depth_score": 3,
                 "agreement": "unanimous", "strengths": [],
                 "weaknesses": [], "suggestions": [], "blocking": ""}
 
     verdicts = [(r.get("verdict") or "accept") for r in panel]
-    scores: list[int] = []
-    for r in panel:
-        s = r.get("score")
-        if isinstance(s, (int, float)):
-            scores.append(int(round(float(s))))
-    scores = scores or [3]
-    scores.sort()
-    median = scores[len(scores) // 2]
+
+    def _median_score(key: str) -> int:
+        """Median of a numeric per-persona score, or 3 if no persona
+        returned one. Used for `score` plus the new `rigor_score`/
+        `depth_score` axes so the aggregated verdict carries them
+        through to the revise-loop signal."""
+        vals: list[int] = []
+        for r in panel:
+            s = r.get(key)
+            if isinstance(s, (int, float)):
+                vals.append(int(round(float(s))))
+        vals = vals or [3]
+        vals.sort()
+        return vals[len(vals) // 2]
+
+    median = _median_score("score")
+    rigor_median = _median_score("rigor_score")
+    depth_median = _median_score("depth_score")
 
     # Any low-confidence revise vote dominates.
     low_revise = any(
@@ -1384,7 +1395,9 @@ def _aggregate_panel_reviews(
             break
 
     return {
-        "verdict": verdict, "score": median, "agreement": agreement,
+        "verdict": verdict, "score": median,
+        "rigor_score": rigor_median, "depth_score": depth_median,
+        "agreement": agreement,
         "strengths": strengths, "weaknesses": weaknesses,
         "suggestions": suggestions, "blocking": blocking,
     }
