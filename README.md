@@ -161,6 +161,26 @@ Run it: `python launch.py --config my_quest.yaml`
 
 ## Common things you might want next
 
+### Resume a crashed quest
+
+If a Copilot HTTP/2 outage or any other transient failure crashes a quest mid-run, FI checkpoints every node to `outputs/<quest_id>/.fi/state.sqlite`. You can pick up at the failed node without redoing the prior work:
+
+**From VSCode chat:**
+```
+@fi /resume
+```
+Shows a picker of all quests with a checkpoint, most recent first. Pick one and it auto-finds the matching draft YAML and re-enters the LangGraph.
+
+You can also pass the quest_id directly: `@fi /resume 1778650105-mammal-evolution-69ef80`.
+
+**From the terminal:**
+```bash
+python launch.py --config outputs/_drafts/<your-quest>.yaml \
+                 --resume 1778650105-mammal-evolution-69ef80
+```
+
+The YAML's `provider` block is honored on resume, but the original quest topic / design / literature come from the checkpoint — don't worry if you point at a different YAML, the state is correct as long as the quest_id matches.
+
 ### Watch progress in a browser instead of the terminal
 
 ```bash
