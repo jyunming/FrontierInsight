@@ -1,0 +1,56 @@
+# sdist (source distribution) inclusions ONLY. The wheel layout is
+# controlled separately by `[tool.setuptools.packages.find]` and
+# `[tool.setuptools.package-data]` in pyproject.toml; entries here
+# affect `python -m build --sdist`, not `--wheel`.
+
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+include requirements.txt
+include pyproject.toml
+
+# Public docs — sdist only (wheel does not redistribute Markdown docs).
+recursive-include docs *.md
+
+# Agent prompt templates + LaTeX templates: shipped in the WHEEL via
+# the `agents*` / `templates*` packages declared in pyproject.toml.
+# The recursive-include entries below mirror them into the sdist so
+# `python -m build --sdist` produces a tarball that's also runnable
+# (some users still `pip install <tarball>` directly).
+recursive-include agents *.md
+recursive-include templates *
+
+# Examples — sdist only. Lightweight (YAML + the example READMEs).
+recursive-include examples *.yaml *.md
+
+# Web GUI static assets — sdist only (the wheel ships them via the
+# `web*` package).
+recursive-include web/static *
+
+# ---- explicit exclusions ----
+# `dev/` carries internal documentation (Claude Code agent guidance,
+# historical test logs, the review rubric, etc.) that's not for
+# end-users. Excluded from both wheel and sdist.
+prune dev
+
+# Build artifacts and ignored directories.
+prune tests
+prune outputs
+prune tools
+prune .pytest_tmp
+prune .pytest_cache
+prune __pycache__
+prune .testmondata*
+
+# VSCode extension is a SEPARATE distributable, published to the
+# VSCode Marketplace. The source files don't belong in the Python
+# wheel; the .vsix is distributed alongside the wheel via the GitHub
+# Releases page until the marketplace publication lands.
+prune vscode-frontier-insight
+
+# Scripts/ holds ad-hoc tooling not part of the user-facing surface.
+prune scripts
+
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store

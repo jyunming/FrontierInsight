@@ -5,4 +5,11 @@ out/
 node_modules/
 
 # Packaged extension binary — produced by `npm run package`.
+# Tracked in the repo so users can install without a Node toolchain:
+#   code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
+# Rebuilt by .github/workflows/vsix-rebuild.yml when extension sources change.
+# Intentionally NOT ignored:
+#   !vscode-frontier-insight.vsix
+# (Other .vsix files from local dev or manual rebuilds remain ignored.)
 *.vsix
+!vscode-frontier-insight.vsix
