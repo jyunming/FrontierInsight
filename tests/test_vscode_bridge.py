@@ -540,6 +540,12 @@ def test_is_bridge_error_transient_classification() -> None:
     assert _is_bridge_error_transient("rate limit exceeded")
     assert _is_bridge_error_transient("bridge connection dropped")
     assert _is_bridge_error_transient("ECONNRESET on chunked body")
+    # New: TS-side stall-detection (no chunk for 180 s) surfaces this
+    # error and must be retried, not propagated immediately. The user's
+    # 12-minute hang on 2026-05-13 motivated adding this path.
+    assert _is_bridge_error_transient(
+        "bridge stalled: no chunk for 180 s (received 0 chunks / 0 chars before stall)"
+    )
 
     # Non-transient — should propagate immediately, no retry.
     assert not _is_bridge_error_transient(

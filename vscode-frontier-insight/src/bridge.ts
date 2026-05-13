@@ -304,15 +304,81 @@ export class Bridge {
 
             // Stream the response text back as `lm_chunk` events,
             // then a final `lm_done`.
+            //
+            // Two reasons we don't just `for await (... of response.text)`:
+            //
+            //  1. **Per-chunk visibility.** Without surfacing fragments to
+            //     the chat panel, the user sees only VSCode's generic
+            //     "Reasoning" indicator and can't tell whether the model
+            //     is mid-stream, stalled, or wedged. We render a single
+            //     heartbeat line that updates as chunks land.
+            //
+            //  2. **Inactivity timeout.** `model.sendRequest` has no
+            //     built-in deadline; if Copilot's HTTP/2 silently stalls
+            //     mid-stream the iteration hangs forever. We race each
+            //     `next()` against a 180 s timer and treat a no-chunk
+            //     gap that long as a stall — surface as `lm_error` with
+            //     a marker Python's retry classifier recognizes so the
+            //     Python side will try the request again.
+            const INACTIVITY_MS = 180_000;
             let accumulated = "";
-            for await (const fragment of response.text) {
+            let chunkCount = 0;
+            let chars = 0;
+            const startMs = Date.now();
+            const iter = response.text[Symbol.asyncIterator]();
+            // Heartbeat to chat panel: an initial "streaming…" message,
+            // then a single periodic refresh every ~5 s so the user knows
+            // tokens are arriving (or not).
+            let lastHeartbeatMs = 0;
+            const heartbeat = (label: string) => {
+                this.opts.progress.markdown(
+                    `  📥 \`${req.node}\` ${label} — ${chunkCount} chunks, ` +
+                    `${chars} chars, ${Math.round((Date.now() - startMs) / 1000)} s\n\n`,
+                );
+                lastHeartbeatMs = Date.now();
+            };
+            this.opts.progress.markdown(
+                `  ⏳ \`${req.node}\` streaming…\n\n`,
+            );
+            while (true) {
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const stallSignal: Promise<{ stalled: true }> = new Promise((resolve) => {
+                    timer = setTimeout(
+                        () => resolve({ stalled: true }),
+                        INACTIVITY_MS,
+                    );
+                });
+                let result: IteratorResult<string> | { stalled: true };
+                try {
+                    result = await Promise.race([iter.next(), stallSignal]);
+                } finally {
+                    if (timer) clearTimeout(timer);
+                }
+                if ("stalled" in result) {
+                    // Phrasing matters: Python's _is_bridge_error_transient
+                    // pattern-matches strings; "bridge stalled" must be
+                    // in its transient-marker list so the Python side
+                    // retries instead of dying on the first stall.
+                    throw new Error(
+                        `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
+                        `(received ${chunkCount} chunks / ${chars} chars before stall)`,
+                    );
+                }
+                if (result.done) break;
+                const fragment = result.value;
                 accumulated += fragment;
+                chars += fragment.length;
+                chunkCount++;
+                if (Date.now() - lastHeartbeatMs > 5_000) {
+                    heartbeat("streaming");
+                }
                 this.send({
                     type: "lm_chunk",
                     id: req.id,
                     delta: fragment,
                 });
             }
+            heartbeat("done");
             this.send({
                 type: "lm_done",
                 id: req.id,

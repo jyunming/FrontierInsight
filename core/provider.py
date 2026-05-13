@@ -380,6 +380,13 @@ _TRANSIENT_BRIDGE_MARKERS = (
     "request failed",
     "bridge connection dropped",
     "bridge write failed",
+    # The TS-side bridge fires this when it sees no streaming chunks
+    # for 180 s; treat as transient so Python's 6-attempt budget
+    # retries the request. A real upstream wedge will exhaust both
+    # the TS retry and the Python retry and end up as a user-facing
+    # "upstream Copilot unavailable" error after ~5-10 min total —
+    # NOT an indefinite hang.
+    "bridge stalled",
 )
 
 
