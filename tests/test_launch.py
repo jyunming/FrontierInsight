@@ -92,6 +92,97 @@ def test_parse_args_summarize_mutually_exclusive_with_config() -> None:
         launch.parse_args(["--config", "x.yaml", "--summarize", "./papers"])
 
 
+def test_parse_args_install_tectonic() -> None:
+    """--install-tectonic is its own mode, no config/fleet needed."""
+    args = launch.parse_args(["--install-tectonic"])
+    assert args.install_tectonic is True
+
+
+def test_parse_args_install_tectonic_mutually_exclusive() -> None:
+    """Like --ingest/--serve, --install-tectonic is in the mode group."""
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--install-tectonic", "--config", "x.yaml"])
+
+
+def test_install_tectonic_unsupported_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If sys.platform / arch isn't in _TECTONIC_ASSET_NAMES, abort
+    with a clear message rather than try a garbage URL."""
+    monkeypatch.setattr(launch.sys, "platform", "freebsd14")
+    import platform
+    monkeypatch.setattr(platform, "machine", lambda: "powerpc64")
+    rc = launch._install_tectonic()
+    assert rc == 1
+
+
+def test_install_tectonic_skips_when_already_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `tools/tectonic.exe` already exists, the function returns 0
+    immediately without re-downloading."""
+    # Pin REPO_ROOT to tmp_path; create the tools/ marker file.
+    fake_exe = "tectonic.exe" if launch.sys.platform == "win32" else "tectonic"
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / fake_exe).write_bytes(b"already-installed")
+
+    # Pretend launch.py lives at tmp_path/launch.py so repo_root resolves
+    # to tmp_path. The function reads `Path(__file__).resolve().parent`,
+    # which we'd have to patch via a module-level shim; simpler: monkey-
+    # patch the inner Path call by overriding sys.modules entry. The
+    # cleanest patch is to set launch's `__file__` indirectly via
+    # `Path(launch.__file__).resolve().parent` — we shim the module's
+    # path attribute.
+    monkeypatch.setattr(
+        launch, "__file__", str(tmp_path / "launch.py"),
+    )
+
+    rc = launch._install_tectonic()
+    assert rc == 0
+
+
+def test_install_tectonic_rejects_sha_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mocked download where the archive content doesn't match the
+    SHA-256 listed in the fake SHA256SUMS file → return 1, leave no
+    binary on disk."""
+    monkeypatch.setattr(launch, "__file__", str(tmp_path / "launch.py"))
+    monkeypatch.setattr(launch.sys, "platform", "win32")
+    import platform
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+
+    asset_name = launch._TECTONIC_ASSET_NAMES[("win32", "AMD64")]
+    # SHA256SUMS lists a fixed hash; the archive bytes hash differently.
+    sums_body = f"deadbeef{'0' * 56}  {asset_name}\n".encode("utf-8")
+
+    class _FakeResp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+        def __enter__(self):  # noqa: ANN101
+            return self
+        def __exit__(self, *_a):  # noqa: ANN001
+            return False
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(url, **_kw):  # noqa: ANN001
+        if url.endswith("SHA256SUMS"):
+            return _FakeResp(sums_body)
+        # The archive itself — return body whose SHA doesn't match.
+        return _FakeResp(b"WRONG-BODY-WONT-MATCH-HASH")
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", fake_urlopen,
+    )
+
+    rc = launch._install_tectonic()
+    assert rc == 1
+    tectonic_exe = tmp_path / "tools" / (
+        "tectonic.exe" if launch.sys.platform == "win32" else "tectonic"
+    )
+    assert not tectonic_exe.exists(), "binary should NOT land on disk after checksum failure"
+
+
 # ---- _validate_resume_quest_id ------------------------------------------
 
 

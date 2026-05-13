@@ -339,19 +339,47 @@ def test_paper_pdf_not_in_kinds_skips_compile(
     assert called["n"] == 0  # which() never invoked because compile path skipped
 
 
-def test_pandoc_present_but_pdflatex_missing_falls_back_to_bare_name(
+def test_no_pdf_engine_skips_pdf_with_clear_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for the real-world failure: pandoc IS on PATH but
-    pdflatex (MiKTeX) is NOT discoverable via shutil.which. The
-    generator should still attempt pandoc — pandoc itself may find
-    pdflatex (or fail with a clear pandoc-rc≠0 message we already
-    handle)."""
+    """Pandoc present but NEITHER pdflatex NOR tectonic available:
+    skip the PDF cleanly (no subprocess invocation, no traceback)."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc.exe" if name == "pandoc" else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+    # Repoint REPO_ROOT to an empty dir so no tools/tectonic.exe is found.
+    monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)
+
+    fake_run_called = {"n": 0}
+
+    def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        fake_run_called["n"] += 1
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    result = PaperGenerator(cfg).generate(art, tmp_path / "out")
+    assert "paper_pdf" not in result
+    # No engine = no pandoc spawn at all (vs. spawning and failing
+    # mid-run, which would waste time on a bigger paper).
+    assert fake_run_called["n"] == 0
+
+
+def test_tectonic_fallback_when_pdflatex_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The corporate-laptop case: pdflatex isn't on PATH, but tectonic
+    is. The generator picks tectonic and passes its full path to
+    pandoc via `--pdf-engine`."""
     def fake_which(name):  # type: ignore[no-untyped-def]
         if name == "pandoc":
             return "/fake/pandoc.exe"
         if name == "pdflatex":
-            return None    # missing — exact symptom from the user run
+            return None
+        if name == "tectonic":
+            return "/fake/tectonic.exe"
         return None
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
 
@@ -359,7 +387,6 @@ def test_pandoc_present_but_pdflatex_missing_falls_back_to_bare_name(
 
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
         captured_cmd[:] = list(cmd)
-        # Simulate the success path so we can verify the cmd shape.
         out_idx = cmd.index("-o") + 1
         Path(cmd[out_idx]).write_bytes(b"%PDF\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -368,10 +395,71 @@ def test_pandoc_present_but_pdflatex_missing_falls_back_to_bare_name(
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
-    out_dir = tmp_path / "out"
+    result = PaperGenerator(cfg).generate(art, tmp_path / "out")
+    assert "paper_pdf" in result
+    assert "--pdf-engine=/fake/tectonic.exe" in captured_cmd
 
-    PaperGenerator(cfg).generate(art, out_dir)
-    # Pandoc still attempted; pdflatex passed as bare name so pandoc's
-    # own PATH lookup gets a chance.
-    assert captured_cmd[0] == "/fake/pandoc.exe"
-    assert "--pdf-engine=pdflatex" in captured_cmd
+
+def test_pdflatex_preferred_over_tectonic_when_both_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordering contract: pdflatex wins when both are on PATH.
+    Warm MiKTeX caches compile in 1-3 s; tectonic's first-run
+    package fetch is slower. Flipping the order would penalize the
+    common case to help the corporate-laptop minority."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        if name == "pandoc":
+            return "/fake/pandoc.exe"
+        if name == "pdflatex":
+            return "/fake/pdflatex.exe"
+        if name == "tectonic":
+            return "/fake/tectonic.exe"
+        return None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured_cmd[:] = list(cmd)
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    PaperGenerator(
+        _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    ).generate(_make_artifacts(tmp_path), tmp_path / "out")
+    assert "--pdf-engine=/fake/pdflatex.exe" in captured_cmd
+    assert "--pdf-engine=/fake/tectonic.exe" not in captured_cmd
+
+
+def test_repo_local_tectonic_picked_when_nothing_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User ran `python launch.py --install-tectonic` — the binary
+    lives at `<repo_root>/tools/tectonic.exe` (or `/tectonic` on
+    POSIX) and PATH is bare. Generator must find the repo-local copy."""
+    monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    repo_tectonic = tools / "tectonic.exe"  # search order checks .exe first
+    repo_tectonic.write_bytes(b"#!/bin/sh\necho fake\n")
+
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc.exe" if name == "pandoc" else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured_cmd[:] = list(cmd)
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    PaperGenerator(
+        _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    ).generate(_make_artifacts(tmp_path), tmp_path / "out")
+    # The repo-local path got picked.
+    assert f"--pdf-engine={repo_tectonic}" in captured_cmd

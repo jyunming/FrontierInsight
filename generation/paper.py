@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from core.config import Config
@@ -68,27 +69,73 @@ class PaperGenerator:
 
         return result
 
+    def _find_pdf_engine(self) -> tuple[str, str] | None:
+        """Locate a LaTeX engine for pandoc's ``--pdf-engine`` flag.
+
+        Search order (stop at first match):
+          1. ``shutil.which("pdflatex")`` — the canonical MiKTeX / TeX Live
+             install. Preferred when present because a warm cache compiles
+             in ~1-3 s.
+          2. ``shutil.which("tectonic")`` — a single-binary self-bootstrapping
+             LaTeX. Works on corporate laptops without admin (downloads
+             packages on first run, no install step, no GUI prompts).
+          3. ``<repo_root>/tools/tectonic.exe`` (or ``./tools/tectonic``
+             on POSIX) — the opt-in install location populated by
+             ``python launch.py --install-tectonic``. Most-isolated path,
+             used when neither system install is present.
+
+        Returns ``(engine_name, full_path)`` or ``None`` when no engine
+        is reachable. Tectonic is intentionally the fallback — flipping
+        the order would penalize the dominant case (existing MiKTeX
+        users with a warm cache) to help the corporate-laptop minority.
+        """
+        pdflatex = shutil.which("pdflatex")
+        if pdflatex:
+            return ("pdflatex", pdflatex)
+        tectonic = shutil.which("tectonic")
+        if tectonic:
+            return ("tectonic", tectonic)
+        # Repo-local opt-in install. Check ONLY the platform-appropriate
+        # filename — checking the wrong extension first (e.g.
+        # `tectonic.exe` on POSIX) risks picking up a stray Windows
+        # binary in a shared / WSL-mounted repo and crashing the pandoc
+        # call with an exec-format error. `--install-tectonic` writes
+        # under the same platform-appropriate name.
+        repo_tectonic = REPO_ROOT / "tools" / (
+            "tectonic.exe" if sys.platform == "win32" else "tectonic"
+        )
+        if repo_tectonic.is_file():
+            return ("tectonic", str(repo_tectonic))
+        return None
+
     def _compile_pdf(self, paper_md: Path, out_dir: Path) -> Path | None:
-        # The real fix here is pdflatex resolution. `subprocess.run` on
-        # Windows DOES find `pandoc.exe` from a bare `"pandoc"` argv —
-        # CreateProcess auto-appends `.exe` to executable names with no
-        # extension. So resolving pandoc via `shutil.which` is mostly
-        # defensive (it'd matter only if pandoc ever shipped as a .cmd
-        # shim like marp does). We still do it for symmetry + so the
-        # absolute path lands in stderr logs when pandoc errors.
-        #
-        # The CRITICAL part is `--pdf-engine=<resolved-pdflatex>`.
-        # pandoc itself does a PATH lookup for the engine binary. If
-        # the Python child inherited a PATH that omitted MiKTeX's bin
-        # dir (`~/AppData/Local/Programs/MiKTeX/miktex/bin/x64/` after
-        # a per-user winget install), pandoc fails with "pdflatex not
-        # found" and exits non-zero. Resolving pdflatex up-front and
-        # passing the full path bypasses pandoc's PATH lookup.
+        # Pandoc itself: `subprocess.run` on Windows auto-appends `.exe`
+        # to bare executable names via CreateProcess, so resolving via
+        # `shutil.which` is mostly defensive (would matter if pandoc
+        # ever shipped as a .cmd shim like marp does). We do it for
+        # symmetry + so the absolute path lands in any stderr logs.
         pandoc_exe = shutil.which("pandoc")
         if pandoc_exe is None:
             _log.warning("pandoc not on PATH; paper.pdf skipped (paper.md only)")
             return None
-        pdflatex_exe = shutil.which("pdflatex") or "pdflatex"
+
+        # CRITICAL: pandoc does its OWN PATH lookup for the
+        # `--pdf-engine` binary. On corporate Windows boxes the
+        # MiKTeX bin dir (`~/AppData/Local/Programs/MiKTeX/miktex/bin/x64/`)
+        # often isn't on the Python child's PATH even though MiKTeX
+        # is installed. Resolving the engine up-front and passing the
+        # full path bypasses pandoc's lookup. Falls back to tectonic
+        # (no-admin LaTeX) when pdflatex isn't reachable.
+        engine = self._find_pdf_engine()
+        if engine is None:
+            _log.warning(
+                "no LaTeX engine found (pdflatex or tectonic); paper.pdf "
+                "skipped. Run `python launch.py --install-tectonic` for "
+                "a no-admin LaTeX install."
+            )
+            return None
+        engine_name, engine_path = engine
+        _log.info("paper.pdf: using pdf-engine=%s at %s", engine_name, engine_path)
 
         fmt = self.config.output.paper_format
         template = TEMPLATES_DIR / fmt / "template.tex"
@@ -98,7 +145,7 @@ class PaperGenerator:
             pandoc_exe,
             str(paper_md),
             "-o", str(out_pdf),
-            f"--pdf-engine={pdflatex_exe}",
+            f"--pdf-engine={engine_path}",
             "--standalone",
         ]
         if template.exists():
@@ -109,26 +156,33 @@ class PaperGenerator:
                 template, fmt,
             )
 
-        # 300 s headroom: the first quest after a fresh MiKTeX install
-        # spends time downloading LaTeX packages on the fly (upquote,
-        # microtype, xcolor, hyperref, …). 120 s was sometimes too
-        # tight for that warm-up. Subsequent quests reuse the cache
-        # and complete in seconds.
+        # Headroom for the first-run package-fetch warm-up. Tectonic's
+        # first invocation downloads CTAN packages into
+        # `%LOCALAPPDATA%/TectonicProject/Tectonic/` (~30 s); MiKTeX's
+        # first compile after a fresh install does the same. 300 s
+        # comfortably covers both; bumped to 360 s when tectonic is
+        # the picked engine in case the user is on a slow corporate
+        # network.
+        timeout_s = 360 if engine_name == "tectonic" else 300
         try:
             r = subprocess.run(
-                cmd, capture_output=True, text=True, cwd=str(out_dir), timeout=300
+                cmd, capture_output=True, text=True, cwd=str(out_dir),
+                timeout=timeout_s,
             )
         except FileNotFoundError:
             _log.warning("pandoc invocation failed; paper.pdf skipped")
             return None
         except subprocess.TimeoutExpired:
-            _log.warning("pandoc timeout (>300s); paper.pdf skipped")
+            _log.warning(
+                "%s timeout (>%ds); paper.pdf skipped",
+                engine_name, timeout_s,
+            )
             return None
 
         if r.returncode != 0:
             _log.warning(
-                "pandoc rc=%d format=%s; paper.pdf skipped. stderr_tail=%s",
-                r.returncode, fmt, r.stderr[-500:],
+                "%s rc=%d format=%s; paper.pdf skipped. stderr_tail=%s",
+                engine_name, r.returncode, fmt, r.stderr[-500:],
             )
             return None
         if not out_pdf.exists():
