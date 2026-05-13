@@ -85,6 +85,10 @@ async function handleRequest(
         await runResume(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "summarize") {
+        await runSummarize(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -104,6 +108,7 @@ function helpText(): string {
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly.",
+        "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
         "",
         "All LLM calls go through your Copilot subscription via the",
         "`vscode.lm` Language Model API. Each quest's `provider.node_models`",
@@ -478,6 +483,153 @@ async function runQuest(
                 ? "Last lines of stderr (the actual error usually lives here, **not** in `run.log` — unhandled exceptions skip the logger):\n\n" +
                   "```\n" + tail + "\n```\n"
                 : "stderr was empty. Check `outputs/<quest_id>/.fi/run.log` for whatever made it to the logger before the crash.\n"),
+        );
+    }
+}
+
+
+/**
+ * Implementation of `@fi /summarize <folder> [kind]`. Spawns
+ * `python launch.py --summarize <abs-folder> [--summarize-kind <kind>]
+ * --vscode-bridge-port <N>` and streams progress / errors back to the
+ * chat panel, mirroring `runQuest`'s shape.
+ *
+ * Argument parsing: split on whitespace; the first token is the folder
+ * path (relative paths resolve against the workspace folder), the
+ * optional second token is the kind override (one of: auto, literature,
+ * code, study, execution, mixed).
+ */
+async function runSummarize(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    const tokens = promptArgs.split(/\s+/).filter((s) => s.length > 0);
+    if (tokens.length === 0) {
+        stream.markdown(
+            "Need a folder path. Example: `@fi /summarize ./papers` or " +
+            "`@fi /summarize C:/work/my-project literature`.\n",
+        );
+        return;
+    }
+    const folderArg = tokens[0];
+    const kindArg = tokens[1] || "auto";
+    const validKinds = new Set([
+        "auto", "literature", "code", "study", "execution", "mixed",
+    ]);
+    if (!validKinds.has(kindArg)) {
+        stream.markdown(
+            `Invalid kind \`${kindArg}\`. Valid options: ${
+                Array.from(validKinds).join(", ")}.\n`,
+        );
+        return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    const launchScript = path.join(repoPath, "launch.py");
+
+    // Resolve the folder argument: absolute paths are honored as-is;
+    // relative paths resolve against the workspace folder. This lets
+    // a user type `@fi /summarize ./papers` from the chat panel.
+    const folderAbs = path.isAbsolute(folderArg)
+        ? folderArg
+        : path.resolve(repoPath, folderArg);
+    if (!(await fsExists(folderAbs))) {
+        stream.markdown(
+            `❌ Folder not found: \`${folderAbs}\`. ` +
+            `(Resolved from \`${folderArg}\` against \`${repoPath}\`.)\n`,
+        );
+        return;
+    }
+
+    stream.markdown(
+        `🗂️ Summarizing folder \`${folderAbs}\` (kind: \`${kindArg}\`)\n\n` +
+        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+        `▶️ Walking files…\n\n`,
+    );
+
+    const bridge = new Bridge({
+        progress: stream,
+        cancellationToken: token,
+        defaultModel: userPickedModel,
+    });
+    const port = await bridge.listen();
+
+    const argv: string[] = [
+        "-u", launchScript,
+        "--vscode-bridge-port", String(port),
+        "--summarize", folderAbs,
+        "--summarize-kind", kindArg,
+    ];
+
+    const child = spawn(pythonPath, argv, {
+        cwd: repoPath,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderrTail: string[] = [];
+    const STDERR_TAIL_LINES = 80;
+    bridge.attachChild(child, (line) => {
+        stderrTail.push(line);
+        if (stderrTail.length > STDERR_TAIL_LINES) {
+            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
+        }
+    });
+    token.onCancellationRequested(() => {
+        try { child.kill("SIGTERM"); } catch { /* noop */ }
+    });
+
+    // Surface the [FI] summary -> <path> line so the user knows where
+    // to open the result.
+    child.stdout.setEncoding("utf-8");
+    let stdoutBuf = "";
+    child.stdout.on("data", (chunk: string) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/\r?\n/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) {
+            const m = line.match(/^\[FI\] summary -> (.+)$/);
+            if (m) {
+                stream.markdown(`  ✅ summary written → \`${m[1]}\`\n\n`);
+                continue;
+            }
+            const km = line.match(/^\[FI\] (\d+) files; detected_kind=(\S+); ingested_to_axon=(\S+)$/);
+            if (km) {
+                stream.markdown(
+                    `  📊 ${km[1]} files; detected kind: \`${km[2]}\`; Axon ingest: \`${km[3]}\`\n\n`,
+                );
+            }
+        }
+    });
+
+    const exitCode: number | null = await new Promise((resolve) => {
+        child.on("close", (code) => resolve(code));
+    });
+    await bridge.close();
+
+    if (exitCode === 0) {
+        stream.markdown("\n✅ Summary done.\n");
+    } else {
+        const tail = stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
+            (tail.trim()
+                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
+                : "stderr was empty.\n"),
         );
     }
 }

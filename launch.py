@@ -65,6 +65,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "and --host / --port to bind elsewhere than 127.0.0.1:8765. "
              "Requires FastAPI + uvicorn installed.",
     )
+    mode.add_argument(
+        "--summarize",
+        type=Path,
+        help="Summarize a folder of mixed content (papers, source code, "
+             "study notes, experiment logs, prior quest outputs). Walks "
+             "the folder, classifies each file, calls the LLM once, and "
+             "writes outputs/<summary_id>/summary.md. Input files plus "
+             "the produced summary are ingested into Axon as "
+             "fi_summary_input / fi_summary so future quests can "
+             "retrieve them. Pair with --summarize-kind to override "
+             "content-type auto-detection.",
+    )
+    p.add_argument(
+        "--summarize-kind",
+        type=str,
+        choices=["auto", "literature", "code", "study", "execution", "mixed"],
+        default="auto",
+        help="Content-type hint for --summarize. Default 'auto' detects "
+             "from the file mix. Override when you know better.",
+    )
+    p.add_argument(
+        "--summarize-provider",
+        type=str,
+        default="vscode_extension",
+        help="Provider for --summarize (when not launched from the VSCode "
+             "extension). Defaults to vscode_extension; use openai / "
+             "claude_cli / codex_cli / gemini_cli for headless runs.",
+    )
     p.add_argument(
         "--output-root",
         type=Path,
@@ -566,6 +594,17 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.ingest:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
 
+        if args.summarize:
+            return await _run_summarize(
+                folder=args.summarize.resolve(),
+                kind=args.summarize_kind,
+                provider_name=args.summarize_provider,
+                output_root=args.output_root,
+                axon_config_path=args.axon_config,
+                vscode_bridge_port=args.vscode_bridge_port,
+                supervisor=supervisor,
+            )
+
         if args.config:
             cfg = Config.from_yaml(args.config)
             if args.output is not None:
@@ -598,6 +637,72 @@ async def main_async(args: argparse.Namespace) -> int:
         )
     finally:
         await supervisor.shutdown()
+
+
+async def _run_summarize(
+    *,
+    folder: Path,
+    kind: str,
+    provider_name: str,
+    output_root: Path,
+    axon_config_path: Path | None,
+    vscode_bridge_port: int,
+    supervisor: ProxySupervisor,
+) -> int:
+    """Top-level wiring for ``python launch.py --summarize <folder>``.
+
+    Two responsibilities: (1) build the provider config the same way
+    a quest would (so the user gets the same VSCode-bridge / CLI /
+    HTTP plumbing), and (2) open an Axon brain so the summarizer can
+    ingest input docs + the produced summary. Returns 0 on success,
+    1 on any failure that prevented writing the summary file.
+    """
+    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
+    from core.summarizer import summarize_folder
+
+    if not folder.is_dir():
+        print(f"[FI] --summarize: not a directory: {folder}", file=sys.stderr)
+        return 1
+
+    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    # When launched from the VSCode extension the bridge port is set;
+    # honor it the same way quests do.
+    if vscode_bridge_port > 0:
+        provider.name = "vscode_extension"
+        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+
+    # Best-effort Axon brain. The summarizer tolerates `axon=None` so
+    # an Axon-less environment still produces summary.md; only the
+    # ingest step is skipped.
+    axon_brain = None
+    try:
+        from core.knowledge import Knowledge
+        k = Knowledge(KnowledgeConfig(
+            enabled=True,
+            axon_config=axon_config_path if axon_config_path else None,
+            seed_source_catalog=False,
+        ))
+        if k.enabled and getattr(k, "_brain", None) is not None:
+            axon_brain = k._brain
+    except Exception as e:  # pragma: no cover — Axon may not be installed
+        print(f"[FI] --summarize: Axon unavailable ({e!r}); summary will still be written.", file=sys.stderr)
+
+    print(f"[FI] summarize {folder} (kind={kind}, provider={provider.name})")
+    try:
+        art = await summarize_folder(
+            folder, provider=provider, output_dir=output_root,
+            supervisor=supervisor, kind=kind, axon=axon_brain,
+        )
+    except Exception as e:
+        print(f"[FI] --summarize failed: {e!r}", file=sys.stderr)
+        return 1
+
+    print(f"[FI] summary -> {art.summary_path}")
+    print(
+        f"[FI] {art.file_count} files; detected_kind={art.detected_kind}; "
+        f"ingested_to_axon={art.ingested_to_axon}",
+    )
+    return 0
 
 
 def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
