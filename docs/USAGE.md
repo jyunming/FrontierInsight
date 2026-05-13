@@ -8,16 +8,41 @@ YAML config schema.
 Open Copilot Chat, type `@fi`. The chat participant exposes these
 commands:
 
-| Command | What it does |
-|---|---|
-| `@fi` *(no command)* | Starts the interactive interview — 7 quick questions, produces a config, runs the quest. Best first-time path. |
-| `@fi /new` | Same as bare `@fi`. |
-| `@fi /start <path-to-yaml>` | Runs a quest from an existing YAML config. |
-| `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. |
-| `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. |
-| `@fi /resume <quest_id>` | Resumes that specific quest directly. |
-| `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. |
-| `@fi /help` | Lists the commands. |
+| Command | What it does | LLM calls |
+|---|---|---|
+| `@fi` *(no command)* | Starts the interactive interview — 7 quick questions, produces a config, runs the quest. Best first-time path. | ~8–18 (one full quest, see below) |
+| `@fi /new` | Same as bare `@fi`. | ~8–18 |
+| `@fi /start <path-to-yaml>` | Runs a quest from an existing YAML config. | ~8–18 |
+| `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~8–18 × N quests |
+| `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
+| `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
+| `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
+| `@fi /proposal <topic>` | Pre-quest planning doc. Writes both a markdown proposal and a companion YAML under `outputs/_drafts/`. Use to scope a research question BEFORE committing compute to a full quest. | **1** |
+| `@fi /digest [days]` | Weekly project-manager digest across your quests: completed, in-progress, themes, ✅/🆕/⚠️/🛑/❓ diff vs prior digest, suggested next quests. Default window: 7 days. | **1** (or 0 if window is empty) |
+| `@fi /portfolio` | All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next quests. | **1** (or 0 if no quests on disk) |
+| `@fi /critique <quest_id>` | Adversarial second-pass review of a completed quest. For maximum effect, pick a different Copilot model in the picker from the one that wrote the paper. | **1** |
+| `@fi /help` | Lists the commands. | **0** |
+
+### Per-quest LLM call breakdown
+
+A single \`/start\` or \`/new\` quest fires roughly **8–18 LLM calls** depending on which engine features are enabled:
+
+| Node | Calls | Notes |
+|---|---|---|
+| `clarify` | 0–1 | Only when `engine.clarify_mode != off`. |
+| `ideate` | 1 | |
+| `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. |
+| `literature` | 1 | One synthesis call (literature *retrieval* uses Axon embeddings, not LLMs). |
+| `design` | 1–3 | Hits up to 3× if the cross-check loop sends it back. |
+| `implement` | 1–3 | Hits 2-3× if the execute-repair loop fires. |
+| `execute_reflect` | 0–3 | Only on a `rc != 0` execution; same retry cap. |
+| `analyze` | 1 | |
+| `cross_check` | 1–3 | One per finding, up to 3 findings typical. |
+| `write` | 1–2 | Possibly twice if `review` returns `revise`. |
+| `review` | 1 *or* N+1 | 1 for the single-reviewer flow; with a reviewer panel of N personas → N + 1 moderator. |
+
+Floor (~8): clarify off, every loop hits its happy path, single reviewer.  
+Ceiling (~18): full clarify + reflect + 1 design retry + 1 implement retry + 1 execute_reflect retry + 3 cross-check findings + 3-persona reviewer panel + 1 revise loop.
 
 All LLM calls route through `vscode.lm.selectChatModels` — whatever
 model is selected in your Copilot Chat picker is the model FI uses.
@@ -40,6 +65,19 @@ fi --config outputs/<quest_id>/config.yaml --resume <quest_id>
 # Summarize a folder:
 fi --summarize ./papers --summarize-kind literature
 
+# Pre-quest planning doc (writes both <id>-proposal.md + <id>.yaml):
+fi --proposal "Compare RK4 vs Verlet on the Kepler problem with eccentric orbits"
+
+# Weekly PM digest across your quests:
+fi --digest --days 7
+
+# All-time portfolio synthesis (no time window):
+fi --portfolio
+
+# Adversarial second-pass review of a finished quest:
+fi --critique 1778452404-euv-mor-photon-shot-noise-ler-e6bfe5 \
+   --critique-provider claude_cli
+
 # Permanent paper ingest into Axon (no quest):
 fi --ingest paper1.pdf paper2.md
 
@@ -52,14 +90,18 @@ fi --install-tectonic
 
 ### All `fi` flags
 
-| Mode | Args | Notes |
-|---|---|---|
-| `--config <yaml>` | one YAML path | single-quest run |
-| `--fleet <yaml> <yaml> ...` | one or more YAMLs | parallel quests, `--max-concurrent N` controls cap |
-| `--ingest <file> <file> ...` | one or more PDFs / MDs / TXTs | one-shot Axon ingest, no quest |
-| `--serve` | none | starts the FastAPI status GUI at 127.0.0.1:8765 |
-| `--summarize <folder>` | one folder | folder summarizer, pairs with `--summarize-kind` |
-| `--install-tectonic` | none | downloads tectonic to `tools/` for no-admin LaTeX |
+| Mode | Args | Notes | LLM calls |
+|---|---|---|---|
+| `--config <yaml>` | one YAML path | single-quest run | ~8–18 (see chat-command section above for the per-node breakdown) |
+| `--fleet <yaml> <yaml> ...` | one or more YAMLs | parallel quests, `--max-concurrent N` controls cap | ~8–18 × N quests |
+| `--ingest <file> <file> ...` | one or more PDFs / MDs / TXTs | one-shot Axon ingest, no quest | **0** (embeddings only; no LLM) |
+| `--serve` | none | starts the FastAPI status GUI at 127.0.0.1:8765 | **0** (GUI is read-only over existing outputs) |
+| `--summarize <folder>` | one folder | folder summarizer, pairs with `--summarize-kind` | **1** |
+| `--proposal <topic>` | one topic string | pre-quest planning doc + companion YAML under `outputs/_drafts/` | **1** |
+| `--digest` | none | weekly PM digest, pairs with `--days N` (default 7) | **1** (or 0 if window is empty) |
+| `--portfolio` | none | all-time cross-quest synthesis (no time window) | **1** (or 0 if no quests on disk) |
+| `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
+| `--install-tectonic` | none | downloads tectonic to `tools/` for no-admin LaTeX | **0** (network download only) |
 
 | Flag | Mode | What it does |
 |---|---|---|
@@ -71,8 +113,13 @@ fi --install-tectonic
 | `--resume <quest_id>` | quest | re-enter a checkpoint, requires `--config` |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
-| `--axon-config <yaml>` | ingest, summarize | optional AxonConfig path |
-| `--output-root <dir>` | serve, summarize | quest output dir for the GUI / summarizer |
+| `--days N` | digest | digest window in days, default 7 |
+| `--digest-provider <name>` | digest | LLM provider for the digest |
+| `--portfolio-provider <name>` | portfolio | LLM provider for the portfolio synthesis |
+| `--critique-provider <name>` | critique | LLM provider; set DIFFERENT from quest's original for max adversarial effect |
+| `--proposal-provider <name>` | proposal | LLM provider for the proposal |
+| `--axon-config <yaml>` | ingest, summarize, digest, portfolio, critique, proposal | optional AxonConfig path |
+| `--output-root <dir>` | serve, summarize, digest, portfolio, critique, proposal | quest output dir / scan root |
 | `--host`, `--port` | serve | bind elsewhere than 127.0.0.1:8765 |
 
 ## YAML config schema
