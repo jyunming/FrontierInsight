@@ -321,64 +321,78 @@ export class Bridge {
             //     a marker Python's retry classifier recognizes so the
             //     Python side will try the request again.
             const INACTIVITY_MS = 180_000;
+            const HEARTBEAT_MS = 10_000;
             let accumulated = "";
             let chunkCount = 0;
             let chars = 0;
             const startMs = Date.now();
             const iter = response.text[Symbol.asyncIterator]();
-            // Heartbeat to chat panel: an initial "streaming…" message,
-            // then a single periodic refresh every ~5 s so the user knows
-            // tokens are arriving (or not).
-            let lastHeartbeatMs = 0;
-            const heartbeat = (label: string) => {
+            // Use a non-empty fallback so an upstream caller that didn't
+            // set `node` (e.g. older Python that hasn't been updated to
+            // thread node through `LLMClient.chat`) doesn't render as
+            // empty backticks like `` ``.
+            const nodeLabel = req.node || "(unnamed-node)";
+
+            // The bot review on PR #30 caught a real flaw in v1: a
+            // heartbeat that only fires on chunk arrival is silent
+            // during pre-first-token reasoning, which is exactly the
+            // window the user is most anxious about ("is anything
+            // happening?"). Run a wall-clock interval that fires
+            // every HEARTBEAT_MS regardless of stream state.
+            const heartbeatTimer = setInterval(() => {
+                const elapsed = Math.round((Date.now() - startMs) / 1000);
+                const label = chunkCount === 0 ? "reasoning (no chunks yet)" : "streaming";
                 this.opts.progress.markdown(
-                    `  📥 \`${req.node}\` ${label} — ${chunkCount} chunks, ` +
-                    `${chars} chars, ${Math.round((Date.now() - startMs) / 1000)} s\n\n`,
+                    `  📥 \`${nodeLabel}\` ${label} — ` +
+                    `${chunkCount} chunks, ${chars} chars, ${elapsed} s\n\n`,
                 );
-                lastHeartbeatMs = Date.now();
-            };
+            }, HEARTBEAT_MS);
             this.opts.progress.markdown(
-                `  ⏳ \`${req.node}\` streaming…\n\n`,
+                `  ⏳ \`${nodeLabel}\` streaming…\n\n`,
             );
-            while (true) {
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                const stallSignal: Promise<{ stalled: true }> = new Promise((resolve) => {
-                    timer = setTimeout(
-                        () => resolve({ stalled: true }),
-                        INACTIVITY_MS,
-                    );
-                });
-                let result: IteratorResult<string> | { stalled: true };
-                try {
-                    result = await Promise.race([iter.next(), stallSignal]);
-                } finally {
-                    if (timer) clearTimeout(timer);
+            try {
+                while (true) {
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const stallSignal: Promise<{ stalled: true }> = new Promise((resolve) => {
+                        timer = setTimeout(
+                            () => resolve({ stalled: true }),
+                            INACTIVITY_MS,
+                        );
+                    });
+                    let result: IteratorResult<string> | { stalled: true };
+                    try {
+                        result = await Promise.race([iter.next(), stallSignal]);
+                    } finally {
+                        if (timer) clearTimeout(timer);
+                    }
+                    if ("stalled" in result) {
+                        // Phrasing matters: Python's _is_bridge_error_transient
+                        // pattern-matches strings; "bridge stalled" must be
+                        // in its transient-marker list so the Python side
+                        // retries instead of dying on the first stall.
+                        throw new Error(
+                            `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
+                            `(received ${chunkCount} chunks / ${chars} chars before stall)`,
+                        );
+                    }
+                    if (result.done) break;
+                    const fragment = result.value;
+                    accumulated += fragment;
+                    chars += fragment.length;
+                    chunkCount++;
+                    this.send({
+                        type: "lm_chunk",
+                        id: req.id,
+                        delta: fragment,
+                    });
                 }
-                if ("stalled" in result) {
-                    // Phrasing matters: Python's _is_bridge_error_transient
-                    // pattern-matches strings; "bridge stalled" must be
-                    // in its transient-marker list so the Python side
-                    // retries instead of dying on the first stall.
-                    throw new Error(
-                        `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
-                        `(received ${chunkCount} chunks / ${chars} chars before stall)`,
-                    );
-                }
-                if (result.done) break;
-                const fragment = result.value;
-                accumulated += fragment;
-                chars += fragment.length;
-                chunkCount++;
-                if (Date.now() - lastHeartbeatMs > 5_000) {
-                    heartbeat("streaming");
-                }
-                this.send({
-                    type: "lm_chunk",
-                    id: req.id,
-                    delta: fragment,
-                });
+            } finally {
+                clearInterval(heartbeatTimer);
             }
-            heartbeat("done");
+            const totalElapsed = Math.round((Date.now() - startMs) / 1000);
+            this.opts.progress.markdown(
+                `  ✅ \`${nodeLabel}\` done — ${chunkCount} chunks, ${chars} chars, ${totalElapsed} s\n\n`,
+            );
             this.send({
                 type: "lm_done",
                 id: req.id,

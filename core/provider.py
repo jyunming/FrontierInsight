@@ -382,10 +382,14 @@ _TRANSIENT_BRIDGE_MARKERS = (
     "bridge write failed",
     # The TS-side bridge fires this when it sees no streaming chunks
     # for 180 s; treat as transient so Python's 6-attempt budget
-    # retries the request. A real upstream wedge will exhaust both
-    # the TS retry and the Python retry and end up as a user-facing
-    # "upstream Copilot unavailable" error after ~5-10 min total —
-    # NOT an indefinite hang.
+    # retries the request. Wall-time math: each Python attempt invokes
+    # the TS bridge (which itself does up to 4 retries with 2/4/8 s
+    # backoff = ~14 s) + the 180 s stall budget = up to ~3 min per
+    # attempt. Python then waits its own exponential backoff (4/8/16/
+    # 32/60 s, capped at 60 s) between attempts. Worst-case wall time
+    # before a clean "upstream Copilot unavailable" error: ~18-20 min,
+    # not the indefinite hang the old code allowed. Most quests
+    # converge on a successful retry well before that.
     "bridge stalled",
 )
 
@@ -743,6 +747,7 @@ class LLMClient:
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
         model: str | None = None,
+        node: str = "",
     ) -> str:
         """Run one chat completion. ``model`` is an optional per-call
         override (Phase O: per-node model routing). When provided and
@@ -750,12 +755,19 @@ class LLMClient:
         call only — useful for sending different nodes through different
         models on the same provider (most relevant on Copilot, where
         all the model variants share one CLI and one premium-request
-        budget). Falls back to ``self.endpoint.model`` when omitted."""
+        budget). Falls back to ``self.endpoint.model`` when omitted.
+
+        ``node`` is the FI engine node name (``"ideate"``, ``"implement"``,
+        …); only used by the vscode_bridge transport so the extension
+        can tag chat-panel progress messages with the right node name.
+        Other transports ignore it.
+        """
         if self.endpoint.transport == "cli":
             return await self._chat_cli(messages, model_override=model)
         if self.endpoint.transport == "vscode_bridge":
             return await self._chat_vscode_bridge(
                 messages, model_override=model, temperature=temperature,
+                node=node,
             )
         body: dict[str, Any] = {
             "model": (model or self.endpoint.model),
@@ -799,6 +811,7 @@ class LLMClient:
         *,
         model_override: str | None = None,
         temperature: float = 0.2,
+        node: str = "",
     ) -> str:
         """Phase P: route the chat call through the FI VSCode extension
         via the localhost TCP bridge. The extension makes the actual
@@ -860,6 +873,7 @@ class LLMClient:
                 with attempt:
                     return await self._bridge.chat(
                         messages, model_hint=hint or "", temperature=temperature,
+                        node=node,
                     )
         except BridgeError as exc:
             if _is_bridge_error_transient(str(exc)):
