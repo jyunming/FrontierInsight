@@ -85,8 +85,8 @@ export async function runInterview(
                 value: ["paper_md", "paper_pdf", "slides", "poster", "speech"],
             },
             {
-                label: "$(layout) paper + slides",
-                description: "slides via Marp; .pptx via pandoc",
+                label: "$(layout) paper + PDF + slides",
+                description: "PDF via pandoc+LaTeX; slides via Marp + .pptx via pandoc",
                 value: ["paper_md", "paper_pdf", "slides"],
             },
             {
@@ -145,11 +145,11 @@ export async function runInterview(
         [
             {
                 label: "$(zap) Agent self-clarifies (recommended)",
-                description: "Agent generates 6 questions AND answers them itself — study_depth/paper_venue flow through to write+review",
+                description: "Agent generates 7 questions AND answers them itself — study_depth/paper_venue flow through to write+review",
                 value: "auto" as const,
             },
             {
-                label: "$(question) Ask me 6 questions",
+                label: "$(question) Ask me 7 questions",
                 description: "Pauses after generating questions; you fill in answers — highest quality, most interruption",
                 value: "interactive" as const,
             },

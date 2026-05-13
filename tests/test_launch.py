@@ -361,8 +361,7 @@ async def test_run_one_skips_copy_when_dest_already_exists(
 # ---- _apply_paper_venue_override ----------------------------------------
 
 
-def _art_with_venue(tmp_path: Path, venue: object) -> "launch.QuestArtifacts":
-    from core.engine import QuestArtifacts
+def _art_with_venue(tmp_path: Path, venue: object) -> QuestArtifacts:
     return QuestArtifacts(
         quest_id="q-x", quest_root=tmp_path,
         raw_state={"clarify_answers": {"paper_venue": venue}},
@@ -399,7 +398,6 @@ def test_paper_venue_override_ignores_unknown_venue(tmp_path: Path) -> None:
 
 def test_paper_venue_override_handles_missing_clarify_answers(tmp_path: Path) -> None:
     """clarify_mode=off → no clarify_answers → must not raise."""
-    from core.engine import QuestArtifacts
     cfg = _make_cfg(tmp_path)
     art = QuestArtifacts(quest_id="q", quest_root=tmp_path, raw_state={})
     launch._apply_paper_venue_override(cfg, art)

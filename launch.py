@@ -367,9 +367,12 @@ async def run_one(
     return summary
 
 
-_VALID_PAPER_FORMATS: frozenset[str] = frozenset(
-    {"generic", "neurips", "iclr", "ieee_access", "nature_mi"}
-)
+# Derive the allowed values from `core.config.PaperFormat` so adding a
+# new template stays a one-place change. `typing.get_args` returns the
+# Literal members as a tuple of strings.
+from typing import get_args as _get_args
+from core.config import PaperFormat as _PaperFormat
+_VALID_PAPER_FORMATS: frozenset[str] = frozenset(_get_args(_PaperFormat))
 
 
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
