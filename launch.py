@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -148,6 +149,55 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 # ---- single-quest path ----------------------------------------------------
+
+
+# Same alphabet as `_new_quest_id` produces: timestamp + slug + 6-char nonce,
+# joined by `-`. We don't enforce the full structural shape (digit+slug+hex)
+# because users may have manually renamed a quest dir; we only enforce that
+# the string is filesystem-safe (no separators, no traversal, no dot-files).
+_RESUME_QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
+
+
+def _validate_resume_quest_id(quest_id: str, output_dir: Path) -> str | None:
+    """Validate `--resume <quest_id>` against path-traversal and existence.
+
+    Returns `None` if the quest is safe to resume, or a human-readable error
+    string if it isn't. Returning a string rather than raising keeps the
+    caller in control of the exit code / error sink.
+
+    Three checks, in order:
+      1. The id matches the strict identifier alphabet (digits, letters,
+         ``_``, ``-``, ``.``). This rejects ``..``, ``/``, ``\\``, and
+         any other separator the OS might interpret.
+      2. The resolved path ``output_dir / quest_id`` stays inside the
+         resolved ``output_dir``. Defense-in-depth against unusual OS
+         path-normalization (symlinks, UNC, 8.3 names, etc.) — the regex
+         in (1) already catches the obvious cases.
+      3. The checkpoint sqlite from the prior run actually exists. Without
+         this, we'd silently create an empty quest dir under the supplied
+         name and "resume" from a fresh state — confusing for the user.
+    """
+    if not _RESUME_QUEST_ID_RE.match(quest_id):
+        return (
+            f"--resume {quest_id!r}: invalid quest id. Only letters, digits, "
+            f"`_`, `-`, and `.` are allowed (no path separators, no `..`)."
+        )
+    root = output_dir.resolve()
+    candidate = (root / quest_id).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return (
+            f"--resume {quest_id!r}: resolved path {candidate} is outside "
+            f"the configured output_dir {root}."
+        )
+    checkpoint = candidate / ".fi" / "state.sqlite"
+    if not checkpoint.is_file():
+        return (
+            f"--resume {quest_id!r}: no checkpoint at {checkpoint}. The quest "
+            f"dir must exist and contain a .fi/state.sqlite from a prior run."
+        )
+    return None
 
 
 def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
@@ -465,18 +515,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 cfg.output.output_dir = args.output
             _apply_vscode_bridge_override(cfg, args.vscode_bridge_port)
             if args.resume:
-                # Validate the resume target exists before spawning the
-                # engine so we fail loud + early rather than silently
-                # creating an empty quest dir with that id.
-                resume_root = (cfg.output.output_dir / args.resume).resolve()
-                checkpoint = resume_root / ".fi" / "state.sqlite"
-                if not checkpoint.is_file():
-                    print(
-                        f"[FI] --resume {args.resume!r}: no checkpoint at "
-                        f"{checkpoint}. The quest dir must exist and contain "
-                        f"a .fi/state.sqlite from a prior run.",
-                        file=sys.stderr,
-                    )
+                resume_err = _validate_resume_quest_id(
+                    args.resume, cfg.output.output_dir,
+                )
+                if resume_err is not None:
+                    print(f"[FI] {resume_err}", file=sys.stderr)
                     return 1
             await run_one(
                 cfg, supervisor=supervisor, profile=args.profile,
