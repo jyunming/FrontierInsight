@@ -69,20 +69,21 @@ class PaperGenerator:
         return result
 
     def _compile_pdf(self, paper_md: Path, out_dir: Path) -> Path | None:
-        # Resolve both binaries via shutil.which so we pass full paths
-        # to subprocess.run. Two reasons:
-        #   1. Windows `subprocess.run` doesn't apply PATHEXT, so bare
-        #      `"pandoc"` can fail to find `pandoc.exe` depending on
-        #      how PATH was set. Passing the resolved absolute path
-        #      sidesteps that.
-        #   2. pandoc's `--pdf-engine` argument is forwarded to
-        #      pandoc which then PATH-searches for the engine. If the
-        #      Python child's PATH was inherited from a context that
-        #      didn't include MiKTeX (`pdflatex` lives at
-        #      `~/AppData/Local/Programs/MiKTeX/miktex/bin/x64/` after
-        #      a winget install), pandoc says "pdflatex not found"
-        #      and exits non-zero. Pass the full resolved path so
-        #      pandoc skips its own PATH search.
+        # The real fix here is pdflatex resolution. `subprocess.run` on
+        # Windows DOES find `pandoc.exe` from a bare `"pandoc"` argv —
+        # CreateProcess auto-appends `.exe` to executable names with no
+        # extension. So resolving pandoc via `shutil.which` is mostly
+        # defensive (it'd matter only if pandoc ever shipped as a .cmd
+        # shim like marp does). We still do it for symmetry + so the
+        # absolute path lands in stderr logs when pandoc errors.
+        #
+        # The CRITICAL part is `--pdf-engine=<resolved-pdflatex>`.
+        # pandoc itself does a PATH lookup for the engine binary. If
+        # the Python child inherited a PATH that omitted MiKTeX's bin
+        # dir (`~/AppData/Local/Programs/MiKTeX/miktex/bin/x64/` after
+        # a per-user winget install), pandoc fails with "pdflatex not
+        # found" and exits non-zero. Resolving pdflatex up-front and
+        # passing the full path bypasses pandoc's PATH lookup.
         pandoc_exe = shutil.which("pandoc")
         if pandoc_exe is None:
             _log.warning("pandoc not on PATH; paper.pdf skipped (paper.md only)")
