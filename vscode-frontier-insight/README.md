@@ -222,7 +222,11 @@ abuse-detection risk from scraped tokens.
 - **Per-extension rate limits exist** on `vscode.lm`. VSCode docs say
   these "will be expanded as we learn more." Very long quests (e.g.
   full panel + cross_check + many literature hits) can theoretically
-  hit them. Use `copilot_cli` for fleet runs that need to be robust.
+  hit them. For fleet runs that need to be robust, use a chat-style
+  CLI provider (`claude_cli` / `codex_cli` / `gemini_cli`) or an
+  HTTP-direct provider (`openai` / `gemini` with API keys).
+  `copilot_cli` is NOT a good fallback — it's agentic and replies
+  conversationally to FI's node prompts.
 - **Model availability depends on your subscription.** Run
   `vscode.lm.selectChatModels({vendor: 'copilot'})` to see what you
   have access to; copy model names from there into your `node_models`.

@@ -395,7 +395,11 @@ quest. The following PRs landed together to harden it:
   — Axon owns those concerns.
 - An SPA framework (React/Vue) for the UI — HTMX is sufficient and
   has no build step.
-- A custom GitHub Copilot HTTP wrapper. We use the sanctioned paths
-  only (`copilot_cli` for headless, `vscode_extension` for in-VSCode).
-  The pre-existing `github_copilot_*` proxy providers stay in the
-  codebase for backwards compatibility but emit a runtime warning.
+- A custom GitHub Copilot HTTP wrapper. For in-VSCode use the
+  sanctioned `vscode_extension` path (Phase P). For headless use any
+  of the chat-style CLIs (`claude_cli` / `codex_cli` / `gemini_cli`)
+  or the HTTP-direct providers (`openai` / `gemini` / `ollama` / `vllm`).
+  `copilot_cli` and the `github_copilot_*` proxy providers stay in
+  the codebase but emit a runtime warning (`copilot_cli` is agentic
+  and replies conversationally to FI's prompts; the proxy providers
+  use a third-party reverse-engineered wrapper).

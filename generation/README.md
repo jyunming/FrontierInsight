@@ -13,5 +13,6 @@ does not abort the others (see `launch.py::_run_generators`).
 | `speech.py` | `talk.md` — a spoken-form script for the paper. Single LLM call, no rendering. | none |
 
 Each generator gets a `Config` plus the `QuestArtifacts` and writes
-into `quest_root`. The shared `_strip_outer_fence` / `_run_cli` helpers
-in `slides.py` are reused by the others.
+into `quest_root`. The `_strip_outer_fence` and `_run_cli` helpers
+defined in `slides.py` are module-local — the other generators
+implement their own equivalents where needed.
