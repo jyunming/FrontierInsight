@@ -29,7 +29,10 @@ paper/paper.md                        ← the finished IMRAD paper
 paper/paper.pdf                       ← (if pandoc + LaTeX installed)
 figures/*.png                         ← every plot the experiment produced
 code/experiment.py                    ← the exact code that ran
-slides.md, poster.tex, talk.md        ← optional deliverables
+slides.md                             ← always; Marp markdown source
+slides.pptx                           ← real PowerPoint (if pandoc installed)
+slides.html / slides.pdf              ← (if marp CLI installed)
+poster.tex, talk.md                   ← optional deliverables
 .fi/run.log                           ← full run log
 .fi/state.sqlite                      ← resumable checkpoint
 frontier_insight_summary.json        ← machine-readable index

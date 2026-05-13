@@ -130,6 +130,12 @@ async def test_slides_writes_md_with_fence_stripped(
         return _FENCED_MARP
 
     monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    # Pin "neither render CLI on PATH" so this test stays focused on
+    # slides.md production. On dev boxes where marp / pandoc are
+    # installed, omitting this lets the generator spawn the real
+    # binaries — which on Windows fails for marp.ps1 (can't exec a
+    # PowerShell script directly via create_subprocess_exec).
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
 
     result = await SlideGenerator(cfg).generate(art, out_dir)
     slides_md = out_dir / "slides.md"
@@ -176,6 +182,10 @@ async def test_slides_no_figures_dir_uses_none_marker(
         return "---\nmarp: true\n---\n\n# Hi\n"
 
     monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    # Same rationale as test_slides_writes_md_with_fence_stripped above:
+    # pin "no render CLIs" so this test isolates the prompt-substitution
+    # path.
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
     await SlideGenerator(cfg).generate(art, out_dir)
     assert "(none)" in captured["prompt"]
 
@@ -299,3 +309,83 @@ async def test_speech_skipped_when_kind_missing(
     monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
     result = await SpeechGenerator(cfg).generate(art, art.quest_root)
     assert result == {}
+
+
+# ---------- pandoc → pptx ----------
+
+
+@pytest.mark.asyncio
+async def test_slides_invokes_pandoc_for_pptx_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User feedback: 'the generated slide is not really a slide yet,
+    it's a md file. can we make it really a pptx?' — pin the new
+    pandoc invocation: argv includes pandoc + slides.md + --slide-level=2
+    + an output path ending in .pptx."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _FENCED_MARP
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    # Pretend marp is NOT on PATH (we're isolating the pandoc branch)
+    # and pandoc IS available.
+    def fake_which(name: str) -> str | None:
+        return "/fake/pandoc" if name == "pandoc" else None
+    monkeypatch.setattr("generation.slides.shutil.which", fake_which)
+
+    captured_argv: list[list[str]] = []
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def fake_exec(*argv: str, **_kw):  # noqa: ANN001
+        captured_argv.append(list(argv))
+        # Create the destination so the result-dict assertion below holds.
+        try:
+            o_idx = argv.index("-o")
+            Path(argv[o_idx + 1]).touch()
+        except ValueError:
+            pass
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "generation.slides.asyncio.create_subprocess_exec", fake_exec,
+    )
+
+    result = await SlideGenerator(cfg).generate(art, out_dir)
+
+    assert any(
+        a[0].endswith("pandoc") and "--slide-level=2" in a and a[-1].endswith("slides.pptx")
+        for a in captured_argv
+    ), f"expected pandoc invocation; got {captured_argv!r}"
+    assert "slides_pptx" in result
+    assert result["slides_pptx"] == out_dir / "slides.pptx"
+
+
+@pytest.mark.asyncio
+async def test_slides_skips_pptx_when_pandoc_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pandoc absent: the pptx branch must skip cleanly without erroring;
+    slides.md is still produced."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _FENCED_MARP
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+
+    result = await SlideGenerator(cfg).generate(art, out_dir)
+    assert "slides_md" in result
+    assert "slides_pptx" not in result
