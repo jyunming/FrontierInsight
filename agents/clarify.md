@@ -29,6 +29,10 @@ $topic
   "output_kinds": {
     "question": "<one sentence asking which deliverables matter (paper, slides, poster, speech)>",
     "default": ["paper_md"]
+  },
+  "study_depth": {
+    "question": "<one sentence asking how mature the resulting paper should be — brief preprint vs journal-length vs comprehensive review>",
+    "default": "journal-length"
   }
 }
 ```
@@ -41,4 +45,10 @@ $topic
   "what is your goal?" — the topic should make the question concrete.
 - The `output_kinds` default is a list whose entries are drawn from
   `paper_md`, `paper_pdf`, `slides`, `poster`, `speech`.
+- The `study_depth` default is one of:
+  `brief preprint` (1–2 pages, terse, novel findings only) /
+  `journal-length` (4–8 pages, full IMRAD, ~15 citations) /
+  `comprehensive review` (10–15 pages, synthesis with extensive prior-work discussion).
+  Pick the level that matches the topic's natural scope — narrow benchmarks → brief, established
+  research questions → journal-length, broad survey/comparative topics → comprehensive review.
 - No prose outside the JSON object. No code fences. No commentary.

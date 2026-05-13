@@ -735,6 +735,7 @@ class Engine:
         self._log.info("[analyze] interpreting results")
         exec_result = state.get("exec_result") or {}
         prompt = self._prompts["analyze"].substitute(
+            clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             returncode=str(exec_result.get("returncode")),
             duration_s=f"{exec_result.get('duration_s', 0):.1f}",
@@ -879,6 +880,7 @@ class Engine:
                 paper_md = ""
         base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
+            clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             paper_md=paper_md[:8000],
@@ -1155,13 +1157,21 @@ def _load_prompts() -> dict[str, string.Template]:
     return out
 
 
+# Per-paper excerpt size when rendering retrieved literature into the
+# write / ideate / design prompts. Was 600 chars — too short for the
+# model to extract specific findings or methods, so citations stayed
+# generic. 2000 chars is roughly an abstract + intro, which is enough
+# to discuss prior work by content rather than by title alone.
+_LIT_EXCERPT_CHARS = 2000
+
+
 def _format_lit(docs: list[RetrievedDoc]) -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
     for i, d in enumerate(docs, start=1):
         title = d.metadata.get("title") or d.metadata.get("source") or f"item-{i}"
-        lines.append(f"[{i}] {title}\n{d.content[:600]}")
+        lines.append(f"[{i}] {title}\n{d.content[:_LIT_EXCERPT_CHARS]}")
     return "\n\n".join(lines)
 
 
@@ -1173,7 +1183,7 @@ def _format_lit_from_state(state: QuestState) -> str:
     for i, item in enumerate(items, start=1):
         meta = item.get("metadata") or {}
         title = meta.get("title") or meta.get("source") or f"item-{i}"
-        lines.append(f"[{i}] {title}\n{item.get('content', '')[:600]}")
+        lines.append(f"[{i}] {title}\n{item.get('content', '')[:_LIT_EXCERPT_CHARS]}")
     return "\n\n".join(lines)
 
 
@@ -1183,6 +1193,7 @@ _CLARIFY_LABELS = {
     "success_metric": "Success metric",
     "budget": "Time / compute budget",
     "output_kinds": "Desired output kinds",
+    "study_depth": "Study depth",
 }
 
 
@@ -1228,6 +1239,10 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
         "output_kinds": {
             "question": "Which deliverables matter for this study?",
             "default": ["paper_md"],
+        },
+        "study_depth": {
+            "question": "How deep should this study go? (brief preprint / journal-length / comprehensive review)",
+            "default": "journal-length",
         },
     }
 

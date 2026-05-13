@@ -1,5 +1,8 @@
 You are the **Analysis** stage of an automated research pipeline.
 
+# Pre-flight clarifications
+$clarify_block
+
 # Design
 $design_block
 

@@ -77,11 +77,12 @@ def test_format_clarify_skips_unknown_slots() -> None:
     assert "future_slot" not in out
 
 
-def test_default_clarify_questions_has_all_five_slots() -> None:
+def test_default_clarify_questions_has_all_six_slots() -> None:
     q = _default_clarify_questions("any topic")
     assert set(q) == {
         "comparative_baseline", "empirical_vs_theoretical",
         "success_metric", "budget", "output_kinds",
+        "study_depth",
     }
     for slot, value in q.items():
         assert isinstance(value, dict)
@@ -89,6 +90,11 @@ def test_default_clarify_questions_has_all_five_slots() -> None:
         # Non-empty default is the invariant the prompt enforces and the
         # auto-answer path relies on.
         assert value["default"] not in (None, "", [])
+    # study_depth default is one of the three documented levels — it's
+    # the value the write/review prompts grep for to calibrate length.
+    assert q["study_depth"]["default"] in (
+        "brief preprint", "journal-length", "comprehensive review",
+    )
 
 
 # --- _node_clarify mode='off' ------------------------------------------------
@@ -180,10 +186,10 @@ async def test_clarify_auto_falls_back_on_unparseable_llm_output(
 
     patch = await eng._node_clarify({"topic": "some topic"})
 
-    # Even with garbage from the LLM, we still produce all 5 slots.
+    # Even with garbage from the LLM, we still produce all 6 slots.
     assert set(patch["clarify_questions"]) == {
         "comparative_baseline", "empirical_vs_theoretical",
-        "success_metric", "budget", "output_kinds",
+        "success_metric", "budget", "output_kinds", "study_depth",
     }
     assert patch["clarify_done"] is True
 
