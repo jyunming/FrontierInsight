@@ -20,6 +20,7 @@ Respond with EXACTLY two sections, in this order, and nothing else:
 Example:
 
 ```python
+import json
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -27,7 +28,9 @@ import matplotlib.pyplot as plt
 
 # ... experiment body ...
 
-print(f"RESULT_JSON: {{'rmse': {rmse:.6f}}}")
+# RESULT_JSON must be valid JSON (double-quoted keys/strings), not a
+# Python dict literal — use json.dumps to be safe.
+print("RESULT_JSON: " + json.dumps({"rmse": rmse}))
 ```
 
 DEPS: numpy, matplotlib

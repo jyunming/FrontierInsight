@@ -382,12 +382,12 @@ def test_parse_implement_response_empty_and_garbage_return_empty() -> None:
     assert _parse_implement_response("no code here, sorry") == ("", [])
 
 
-def test_parse_implement_response_skips_inline_fenced_examples_in_prose() -> None:
-    """The model sometimes includes a tiny ```python fence in commentary
-    BEFORE the real one. The regex is greedy across the FIRST match —
-    if the first fence is the real one this works. We accept that the
-    parser picks the first fenced block; the prompt explicitly asks for
-    exactly one fence, so this is the contract."""
+def test_parse_implement_response_picks_first_fenced_block() -> None:
+    """``_PY_FENCE_RE`` uses ``.search()`` with a non-greedy ``(.*?)``,
+    so it always returns the FIRST fenced block — that is the contract.
+    The prompt explicitly asks for exactly one fence; if a model emits
+    a tiny prose-example fence before the real one, the contract is
+    violated and the small fence wins (caller can log/retry)."""
     text = (
         "```python\nimport numpy\nprint(1)\n```\n"
         "DEPS: numpy\n"
@@ -395,3 +395,65 @@ def test_parse_implement_response_skips_inline_fenced_examples_in_prose() -> Non
     code, deps = _parse_implement_response(text)
     assert "import numpy" in code
     assert deps == ["numpy"]
+
+
+def test_parse_implement_response_pep508_extras_are_preserved() -> None:
+    """Regression for PR #27 review: a naive ``raw.strip("[](){}")`` would
+    chew the trailing ``]`` off ``pandas[performance]``, producing the
+    broken spec ``pandas[performance`` that pip can't install. Only one
+    matched OUTER pair should be peeled."""
+    text = (
+        "```python\nimport pandas\n```\n"
+        "DEPS: pandas[performance], numpy\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "pandas[performance]" in deps
+    assert "numpy" in deps
+
+
+def test_parse_implement_response_pep508_extras_inside_brackets() -> None:
+    """Same as above but with the outer list-syntax brackets too:
+    ``DEPS: [pandas[performance], scipy]``. Strip exactly one outer
+    matched pair; preserve the inner ``[performance]`` extras."""
+    text = (
+        "```python\npass\n```\n"
+        "DEPS: [pandas[performance], scipy]\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "pandas[performance]" in deps
+    assert "scipy" in deps
+
+
+def test_parse_implement_response_ignores_deps_assignment_inside_fence() -> None:
+    """Regression for PR #27 review: a Python statement like
+    ``deps = ["numpy"]`` inside the fenced experiment code must NOT be
+    misread as the metadata DEPS line. The parser only searches the
+    post-fence tail for DEPS."""
+    text = (
+        "```python\n"
+        "deps = ['fake_inside_fence']\n"
+        "import scipy\n"
+        "```\n"
+        "DEPS: scipy\n"
+    )
+    code, deps = _parse_implement_response(text)
+    assert "import scipy" in code
+    assert deps == ["scipy"]
+    assert "fake_inside_fence" not in deps
+
+
+def test_parse_implement_response_legacy_deps_as_string() -> None:
+    """Regression for PR #27 review: legacy JSON shape with deps as a
+    string (``"deps": "numpy"``) — coerce to a single-element list, NOT
+    a per-character list."""
+    text = '{"code": "print(1)", "deps": "numpy"}'
+    code, deps = _parse_implement_response(text)
+    assert code == "print(1)"
+    assert deps == ["numpy"]
+
+
+def test_parse_implement_response_legacy_deps_as_comma_string() -> None:
+    """And a comma-separated single string splits correctly."""
+    text = '{"code": "print(1)", "deps": "numpy, scipy"}'
+    code, deps = _parse_implement_response(text)
+    assert sorted(deps) == ["numpy", "scipy"]

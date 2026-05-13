@@ -489,7 +489,13 @@ class Engine:
             )
             code = 'print("RESULT_JSON: {}")'
         # Defensive: if the design listed deps and the impl skipped them, union.
-        design_deps = (state.get("design") or {}).get("dependencies") or []
+        # design_deps comes from a JSON-leniently-parsed LLM response — it
+        # MAY be a list[str], a comma-separated string, or something weirder.
+        # Coerce to a list[str] before set-union; otherwise unpacking a bare
+        # string into the set produces per-character entries ("numpy" -> {"n","u",...}).
+        design_deps = _coerce_dep_list(
+            (state.get("design") or {}).get("dependencies")
+        )
         deps = sorted({*deps, *design_deps})
 
         code_path = self.quest_root / "code" / "experiment.py"
@@ -1440,6 +1446,25 @@ _DEPS_LINE_RE = re.compile(
 )
 
 
+def _coerce_dep_list(value: Any) -> list[str]:
+    """Normalize a deps value from various LLM-output shapes to ``list[str]``.
+
+    Accepts ``list[str]`` (canonical), a comma-separated string
+    (``"numpy, scipy"``), a single bare name (``"numpy"``), or
+    anything else (returns ``[]``). Filters out empty / whitespace-only
+    entries and stringifies non-str elements as a last resort.
+
+    Returning a real ``list[str]`` is important because the caller
+    set-unions with ``{*deps, *design_deps}`` — unpacking a bare string
+    into a set yields per-character entries ({"n","u","m","p","y"}).
+    """
+    if isinstance(value, list):
+        return [str(d).strip() for d in value if str(d).strip()]
+    if isinstance(value, str):
+        return [d.strip() for d in value.split(",") if d.strip()]
+    return []
+
+
 def _parse_implement_response(text: str) -> tuple[str, list[str]]:
     """Extract ``(code, deps)`` from the implement-node LLM response.
 
@@ -1466,12 +1491,23 @@ def _parse_implement_response(text: str) -> tuple[str, list[str]]:
     if fence:
         code = fence.group(1).strip("\n")
         deps: list[str] = []
-        deps_match = _DEPS_LINE_RE.search(text)
+        # Search the DEPS line only in the AFTER-fence tail. Searching
+        # the whole text would falsely match Python statements like
+        # `deps = [...]` INSIDE the fenced experiment code itself (the
+        # prompt explicitly puts DEPS after the closing ```).
+        deps_match = _DEPS_LINE_RE.search(text[fence.end():])
         if deps_match:
             raw = deps_match.group(1).strip()
             # Tolerate "numpy, matplotlib" / "[numpy, matplotlib]" /
-            # "['numpy', 'matplotlib']" — strip brackets/quotes and split.
-            raw = raw.strip("[](){}")
+            # "['numpy', 'matplotlib']" — peel exactly ONE matched pair
+            # of outer brackets, not every leading/trailing bracket.
+            # The naive `.strip("[](){}")` would chew the trailing `]`
+            # off PEP 508 extras like `pandas[performance]`, leaving a
+            # broken spec `pandas[performance` that pip can't install.
+            for opener, closer in (("[", "]"), ("(", ")"), ("{", "}")):
+                if raw.startswith(opener) and raw.endswith(closer):
+                    raw = raw[1:-1].strip()
+                    break
             deps = [
                 d.strip().strip("'\"")
                 for d in raw.split(",")
@@ -1482,8 +1518,7 @@ def _parse_implement_response(text: str) -> tuple[str, list[str]]:
     # Fallback: legacy JSON-wrapped shape.
     legacy = _parse_json_lenient(text) or {}
     code = legacy.get("code") or ""
-    deps_raw = legacy.get("deps") or []
-    deps = [d for d in deps_raw if isinstance(d, str) and d.strip()]
+    deps = _coerce_dep_list(legacy.get("deps"))
     return code, deps
 
 
