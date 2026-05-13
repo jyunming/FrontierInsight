@@ -99,6 +99,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "into Axon as kind=fi_portfolio.",
     )
     mode.add_argument(
+        "--critique",
+        type=str,
+        help="Adversarial second-pass review of a completed quest. "
+             "Pass the quest_id (e.g. "
+             "1778452404-euv-mor-photon-shot-noise-ler-e6bfe5). "
+             "Reads the quest's paper.md + experiment code + the "
+             "original in-quest review, then asks the LLM — ideally "
+             "via a different provider — to find what the in-quest "
+             "reviewer missed. Writes outputs/<quest_id>/critique.md "
+             "and ingests as kind=fi_critique. Pair with "
+             "--critique-provider to route through a different model "
+             "family from the one that wrote the paper.",
+    )
+    mode.add_argument(
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
@@ -149,6 +163,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="vscode_extension",
         help="Provider for --portfolio. Same conventions as "
              "--digest-provider.",
+    )
+    p.add_argument(
+        "--critique-provider",
+        type=str,
+        default="vscode_extension",
+        help="Provider for --critique. Defaults to vscode_extension; "
+             "explicitly set to a DIFFERENT provider from the quest's "
+             "original (e.g. claude_cli for an openai-written paper) "
+             "to get the strongest adversarial second-pass effect.",
     )
     p.add_argument(
         "--output-root",
@@ -673,6 +696,16 @@ async def main_async(args: argparse.Namespace) -> int:
                 supervisor=supervisor,
             )
 
+        if args.critique:
+            return await _run_critique(
+                quest_id=args.critique,
+                output_root=args.output_root,
+                provider_name=args.critique_provider,
+                axon_config_path=args.axon_config,
+                vscode_bridge_port=args.vscode_bridge_port,
+                supervisor=supervisor,
+            )
+
         if args.summarize:
             return await _run_summarize(
                 folder=args.summarize.resolve(),
@@ -907,6 +940,65 @@ async def _run_portfolio(
         f"[FI] {art.completed_count + art.in_progress_count} quests; "
         f"{art.completed_count} completed, "
         f"{art.in_progress_count} in-progress; "
+        f"ingested_to_axon={art.ingested_to_axon}",
+    )
+    return 0
+
+
+async def _run_critique(
+    *,
+    quest_id: str,
+    output_root: Path,
+    provider_name: str,
+    axon_config_path: Path | None,
+    vscode_bridge_port: int,
+    supervisor: ProxySupervisor,
+) -> int:
+    """Top-level wiring for ``python launch.py --critique <quest_id>``.
+
+    Same provider + Axon plumbing as the other PM commands; dispatches
+    to :func:`core.critique.generate_critique`. Returns 0 on success,
+    1 on any failure that prevented writing the critique file.
+    """
+    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
+    from core.critique import generate_critique
+
+    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    if vscode_bridge_port > 0:
+        provider.name = "vscode_extension"
+        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+
+    knowledge = None
+    try:
+        from core.knowledge import Knowledge
+        knowledge = Knowledge(KnowledgeConfig(
+            enabled=True,
+            axon_config=axon_config_path if axon_config_path else None,
+            seed_source_catalog=False,
+        ))
+    except Exception as e:  # pragma: no cover
+        print(
+            f"[FI] --critique: Axon unavailable ({e!r}); critique will still "
+            f"be written but not ingested.",
+            file=sys.stderr,
+        )
+
+    print(f"[FI] critique {quest_id} (provider={provider.name})")
+    try:
+        art = await generate_critique(
+            quest_id, output_root, provider=provider,
+            supervisor=supervisor, knowledge=knowledge,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[FI] --critique: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"[FI] --critique failed: {e!r}", file=sys.stderr)
+        return 1
+
+    print(f"[FI] critique -> {art.critique_path}")
+    print(
+        f"[FI] critique_provider={art.critique_provider}; "
         f"ingested_to_axon={art.ingested_to_axon}",
     )
     return 0

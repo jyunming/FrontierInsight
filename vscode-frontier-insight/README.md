@@ -160,6 +160,14 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+## Adversarial critique
+
+```
+@fi /critique <quest_id>
+```
+
+The in-quest review is biased — same model wrote the paper and reviewed it. `/critique` runs a fresh adversarial pass with "you have never seen this paper before" framing. For maximum effect, pick a different model family in your Copilot Chat picker from the one that wrote the paper — the produced `critique.md` records both providers so you can see post-hoc which was which. Lands at `outputs/<quest_id>/critique.md` with Verdict / Methodology challenges (quoted objections) / Statistical issues / Reproducibility gaps / Alternative explanations / "What the in-quest review missed" / Recommended follow-up experiments. Ingested as `kind=fi_critique`.
+
 ## Cross-quest portfolio synthesis
 
 ```
