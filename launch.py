@@ -89,6 +89,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "future quests can retrieve prior-week context.",
     )
     mode.add_argument(
+        "--portfolio",
+        action="store_true",
+        help="Generate a cross-quest portfolio synthesis across every "
+             "quest under --output-root (no time window). Writes "
+             "outputs/_portfolio/<YYYY-MM-DD>.md with topic clusters, "
+             "near-duplicate detection, meta-paper candidates, coverage "
+             "gaps, and prioritized next-quest suggestions. Ingests "
+             "into Axon as kind=fi_portfolio.",
+    )
+    mode.add_argument(
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
@@ -132,6 +142,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Provider for --digest. Same conventions as "
              "--summarize-provider — vscode_extension when launched "
              "from chat, headless CLI providers otherwise.",
+    )
+    p.add_argument(
+        "--portfolio-provider",
+        type=str,
+        default="vscode_extension",
+        help="Provider for --portfolio. Same conventions as "
+             "--digest-provider.",
     )
     p.add_argument(
         "--output-root",
@@ -647,6 +664,15 @@ async def main_async(args: argparse.Namespace) -> int:
                 supervisor=supervisor,
             )
 
+        if args.portfolio:
+            return await _run_portfolio(
+                output_root=args.output_root,
+                provider_name=args.portfolio_provider,
+                axon_config_path=args.axon_config,
+                vscode_bridge_port=args.vscode_bridge_port,
+                supervisor=supervisor,
+            )
+
         if args.summarize:
             return await _run_summarize(
                 folder=args.summarize.resolve(),
@@ -826,6 +852,63 @@ async def _run_digest(
             f"{len(art.diff.stalled)} stalled, "
             f"{len(art.diff.dropped)} dropped",
         )
+    return 0
+
+
+async def _run_portfolio(
+    *,
+    output_root: Path,
+    provider_name: str,
+    axon_config_path: Path | None,
+    vscode_bridge_port: int,
+    supervisor: ProxySupervisor,
+) -> int:
+    """Top-level wiring for ``python launch.py --portfolio``.
+
+    Same provider + Axon plumbing as ``_run_digest``; dispatches to
+    :func:`core.portfolio.generate_portfolio`. Returns 0 on success,
+    1 on any failure that prevented writing the portfolio file.
+    """
+    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
+    from core.portfolio import generate_portfolio
+
+    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    if vscode_bridge_port > 0:
+        provider.name = "vscode_extension"
+        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+
+    knowledge = None
+    try:
+        from core.knowledge import Knowledge
+        knowledge = Knowledge(KnowledgeConfig(
+            enabled=True,
+            axon_config=axon_config_path if axon_config_path else None,
+            seed_source_catalog=False,
+        ))
+    except Exception as e:  # pragma: no cover
+        print(
+            f"[FI] --portfolio: Axon unavailable ({e!r}); portfolio will "
+            f"still be written but not ingested.",
+            file=sys.stderr,
+        )
+
+    print(f"[FI] portfolio synthesis (provider={provider.name})")
+    try:
+        art = await generate_portfolio(
+            output_root, provider=provider,
+            supervisor=supervisor, knowledge=knowledge,
+        )
+    except Exception as e:
+        print(f"[FI] --portfolio failed: {e!r}", file=sys.stderr)
+        return 1
+
+    print(f"[FI] portfolio -> {art.portfolio_path}")
+    print(
+        f"[FI] {art.completed_count + art.in_progress_count} quests; "
+        f"{art.completed_count} completed, "
+        f"{art.in_progress_count} in-progress; "
+        f"ingested_to_axon={art.ingested_to_axon}",
+    )
     return 0
 
 

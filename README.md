@@ -246,6 +246,29 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
+### See your whole research portfolio at a glance
+
+```
+@fi /portfolio
+```
+
+Or from the terminal:
+
+```bash
+python launch.py --portfolio
+```
+
+Walks every quest under `outputs/` (no time window) and produces `outputs/_portfolio/<YYYY-MM-DD>.md` with:
+
+- **Topic clusters** — 2-6 thematic groupings; for each, the convergent finding (if any) and an open question the cluster surfaces.
+- **Near-duplicate detection** — pairs of quests asking substantially the same question with different wording. Recommendation: merge / keep both / retire.
+- **Meta-paper candidates** — places where ≥3 quests could be combined into a review/synthesis paper, with an effort estimate.
+- **Coverage gaps** — specific research directions the existing themes *should* but *do not* cover, each grounded in a future-work section of a real quest.
+- **Suggested next quests** — top 3 most-actionable topic strings ranked, each citing the prior quest it builds on.
+- **Portfolio statistics** — total quests, completion split, time span, completion cadence (median days between completions), provider breakdown.
+
+The portfolio also lands in Axon as `kind=fi_portfolio`. Use it monthly or when you're scoping the next research push.
+
 ### Get a weekly project-manager digest of your quests
 
 ```
