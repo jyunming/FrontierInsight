@@ -270,10 +270,12 @@ def _render_content_blocks(
     with hundreds of files doesn't blow the model's token budget.
 
     Greedy packing: walk entries in their natural (deterministic-by-
-    path) order; include each file's preview if the running byte count
-    plus this block fits, else skip the content block (the file is
-    still listed in the manifest). A trailing note tells the model how
-    many files were elided.
+    path) order; include each file's preview if the running character
+    count plus this block fits, else skip the content block (the file
+    is still listed in the manifest). A trailing note tells the model
+    how many files were elided. The budget is approximate — char count,
+    not token count or UTF-8 byte count — and is sized so a sane prompt
+    fits even on a model with a tight token limit.
 
     Entries with no readable preview (binary, unknown extension) are
     always skipped here — they're listed in the manifest only.
@@ -287,18 +289,18 @@ def _render_content_blocks(
             continue
         truncated = e.preview.strip()
         block = f"## [{e.ident}] `{e.rel_path}` ({e.kind})\n\n{truncated}\n"
-        # +1 for the join separator we'll add later.
-        if used + len(block) + 1 > total_budget_chars and blocks:
-            # Out of budget. Don't include this content block; record
-            # it as elided so the model knows to fall back to the
-            # manifest entry instead of hallucinating content.
+        # +1 for the join separator we'll add later. Enforced from the
+        # first block onward — a budget smaller than a single block
+        # elides everything, which is the safe behavior (the model still
+        # has the manifest and gets a clear elision note).
+        if used + len(block) + 1 > total_budget_chars:
             elided += 1
             elided_idents.append(e.ident)
             continue
         blocks.append(block)
         used += len(block) + 1
 
-    if not blocks:
+    if not blocks and elided == 0:
         return "(no readable content found)"
 
     if elided > 0:
@@ -312,12 +314,22 @@ def _render_content_blocks(
                 ", ".join(f"[{i}]" for i in elided_idents[:20])
                 + f", … and {len(elided_idents) - 20} more"
             )
-        blocks.append(
-            f"\n_({elided} additional files in the manifest above had their "
-            f"content elided to stay within the prompt budget: {id_list}. "
-            f"Cite them by ID from the manifest only — do NOT invent their "
-            f"content.)_\n"
-        )
+        if blocks:
+            note = (
+                f"\n_({elided} additional files in the manifest above had "
+                f"their content elided to stay within the prompt budget: "
+                f"{id_list}. Cite them by ID from the manifest only — do "
+                f"NOT invent their content.)_\n"
+            )
+        else:
+            # Degenerate case: the budget was too small for any single
+            # block. Manifest is still usable; content previews aren't.
+            note = (
+                f"_(All {elided} file previews were omitted due to the "
+                f"prompt budget: {id_list}. Cite them by ID from the "
+                f"manifest only — do NOT invent their content.)_\n"
+            )
+        blocks.append(note)
     return "\n".join(blocks)
 
 
