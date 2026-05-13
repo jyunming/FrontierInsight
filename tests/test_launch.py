@@ -146,8 +146,6 @@ def test_install_tectonic_rejects_sha_mismatch(
     """Mocked download where the archive content doesn't match the
     SHA-256 listed in the fake SHA256SUMS file → return 1, leave no
     binary on disk."""
-    import io
-
     monkeypatch.setattr(launch, "__file__", str(tmp_path / "launch.py"))
     monkeypatch.setattr(launch.sys, "platform", "win32")
     import platform

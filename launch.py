@@ -81,12 +81,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
-             "tools/tectonic.exe so paper_pdf works without an admin "
+             "tools/ (tools/tectonic.exe on Windows, tools/tectonic "
+             "on macOS/Linux) so paper_pdf works without an admin "
              "install of MiKTeX. Tectonic is self-bootstrapping — on "
              "first compile it downloads required CTAN packages into "
              "the user's home dir (~30 s, no GUI prompts). Picks the "
              "right asset for your OS+arch from GitHub Releases and "
-             "verifies SHA-256.",
+             "verifies the SHA-256 from the release's SHA256SUMS file.",
     )
     p.add_argument(
         "--summarize-kind",
@@ -841,30 +842,50 @@ def _install_tectonic() -> int:
 
             # Extract just the `tectonic` / `tectonic.exe` binary; the
             # archives also contain LICENSE and a README we don't need.
-            if asset_name.endswith(".zip"):
-                with zipfile.ZipFile(archive) as zf:
-                    for member in zf.namelist():
-                        if member.endswith(exe_name):
-                            with zf.open(member) as src, open(dest, "wb") as dst:
-                                dst.write(src.read())
-                            break
-                    else:
-                        print("[FI] --install-tectonic: archive missing tectonic binary", file=sys.stderr)
-                        return 1
-            elif asset_name.endswith((".tar.gz", ".tgz")):
-                with tarfile.open(archive, "r:gz") as tf:
-                    for member in tf.getmembers():
-                        if member.name.endswith(exe_name):
-                            extracted = tf.extractfile(member)
-                            if extracted is None:
-                                continue
-                            dest.write_bytes(extracted.read())
-                            break
-                    else:
-                        print("[FI] --install-tectonic: archive missing tectonic binary", file=sys.stderr)
-                        return 1
-            if sys.platform != "win32":
-                dest.chmod(0o755)
+            # Write to a sibling temp file in tools/ first, then
+            # ``os.replace`` it to the final dest. ``os.replace`` is
+            # atomic on a single filesystem on both Windows and POSIX,
+            # so a Ctrl-C / disk-full during extraction can't leave a
+            # half-written ``tectonic`` that future runs would happily
+            # exec. Sibling-not-tmpdir because cross-device replace
+            # falls back to copy on some setups and breaks atomicity.
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{exe_name}.partial-", dir=tools_dir,
+            )
+            os.close(tmp_fd)
+            tmp_dest = Path(tmp_path)
+            try:
+                if asset_name.endswith(".zip"):
+                    with zipfile.ZipFile(archive) as zf:
+                        for member in zf.namelist():
+                            if member.endswith(exe_name):
+                                with zf.open(member) as src, open(tmp_dest, "wb") as dst:
+                                    dst.write(src.read())
+                                break
+                        else:
+                            print("[FI] --install-tectonic: archive missing tectonic binary", file=sys.stderr)
+                            return 1
+                elif asset_name.endswith((".tar.gz", ".tgz")):
+                    with tarfile.open(archive, "r:gz") as tf:
+                        for member in tf.getmembers():
+                            if member.name.endswith(exe_name):
+                                extracted = tf.extractfile(member)
+                                if extracted is None:
+                                    continue
+                                tmp_dest.write_bytes(extracted.read())
+                                break
+                        else:
+                            print("[FI] --install-tectonic: archive missing tectonic binary", file=sys.stderr)
+                            return 1
+                if sys.platform != "win32":
+                    tmp_dest.chmod(0o755)
+                os.replace(tmp_dest, dest)
+            finally:
+                if tmp_dest.exists():
+                    try:
+                        tmp_dest.unlink()
+                    except OSError:
+                        pass
     except (urllib.error.URLError, OSError) as e:
         print(f"[FI] --install-tectonic: download failed: {e!r}", file=sys.stderr)
         return 1

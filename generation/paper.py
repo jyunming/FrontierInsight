@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from core.config import Config
@@ -94,15 +95,17 @@ class PaperGenerator:
         tectonic = shutil.which("tectonic")
         if tectonic:
             return ("tectonic", tectonic)
-        # Repo-local opt-in install. Both extensions covered so the
-        # same path works whether launch.py --install-tectonic put a
-        # `.exe` (Windows) or a bare binary (macOS/Linux) there.
-        for candidate in (
-            REPO_ROOT / "tools" / "tectonic.exe",
-            REPO_ROOT / "tools" / "tectonic",
-        ):
-            if candidate.is_file():
-                return ("tectonic", str(candidate))
+        # Repo-local opt-in install. Check ONLY the platform-appropriate
+        # filename — checking the wrong extension first (e.g.
+        # `tectonic.exe` on POSIX) risks picking up a stray Windows
+        # binary in a shared / WSL-mounted repo and crashing the pandoc
+        # call with an exec-format error. `--install-tectonic` writes
+        # under the same platform-appropriate name.
+        repo_tectonic = REPO_ROOT / "tools" / (
+            "tectonic.exe" if sys.platform == "win32" else "tectonic"
+        )
+        if repo_tectonic.is_file():
+            return ("tectonic", str(repo_tectonic))
         return None
 
     def _compile_pdf(self, paper_md: Path, out_dir: Path) -> Path | None:
