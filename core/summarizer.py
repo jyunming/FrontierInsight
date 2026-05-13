@@ -63,11 +63,15 @@ _TOTAL_PROMPT_CHARS = 60_000
 # the content-block section).
 #
 # When the walk surfaces more than this many files, we keep the first
-# N in walk order (deterministic, paper > code > notebook > config >
-# log because the walk is sorted by path) and tell the LLM how many
-# were dropped. All files are still INGESTED into Axon — only the
-# in-prompt presentation is capped — so future quests can still
-# retrieve from the full set via the knowledge layer.
+# N in walk order — which is path-sorted (see ``_walk_sorted``), so
+# the truncation is deterministic across runs. There is intentionally
+# NO content-kind prioritization here: ordering by kind would force a
+# stable secondary sort, change ID assignment between runs that add
+# or remove a single file, and break the manifest's stability
+# guarantee. All files are still INGESTED into Axon (when knowledge
+# is enabled) — only the in-prompt presentation is capped — so
+# future quests can still retrieve from the full set via the
+# knowledge layer.
 #
 # Real-world failure that motivated this: a user pointed /summarize
 # at C:\dev\turboquantDB (31151 files after standard skip-dir pruning,
@@ -419,10 +423,11 @@ async def summarize_folder(
     )
 
     # Cap the file count that goes into the LLM prompt. The walk
-    # ingests the full set into Axon below (no token cost there —
-    # each file is its own embedded document), but the manifest +
-    # content blocks need to fit a single LLM call. See
-    # ``_MAX_PROMPT_FILES`` for the rationale.
+    # still considers the full set for the Axon ingest path below
+    # (which, when knowledge is enabled, embeds each file with
+    # readable content as its own document — no token cost there).
+    # The manifest + content blocks have to fit a single LLM call,
+    # though. See ``_MAX_PROMPT_FILES`` for the rationale.
     prompt_entries = entries
     truncated_for_prompt = 0
     if len(entries) > _MAX_PROMPT_FILES:
@@ -430,8 +435,9 @@ async def summarize_folder(
         truncated_for_prompt = len(entries) - _MAX_PROMPT_FILES
         _log.warning(
             "summarize: %d files exceeds prompt cap; showing first %d "
-            "in the manifest. All %d files still ingested into Axon.",
-            len(entries), _MAX_PROMPT_FILES, len(entries),
+            "in the manifest. Files with readable content will be "
+            "ingested into Axon if knowledge is enabled.",
+            len(entries), _MAX_PROMPT_FILES,
         )
 
     file_manifest = _render_file_manifest(prompt_entries)
