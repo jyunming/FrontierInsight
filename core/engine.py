@@ -1616,29 +1616,27 @@ _PROXY_WARN_SHOWN: set[str] = set()
 
 def _warn_if_unsanctioned_provider(name: str) -> None:
     """Print a one-time warning (per process) when the user picks a
-    provider that talks to GitHub Copilot via the third-party
-    `copilot-api` reverse-engineered proxy.
+    provider that's known-broken or risky for FI's pipeline. Two
+    categories trigger:
 
-    The proxy's own README warns: "Excessive automated or scripted use
-    of Copilot ... may trigger GitHub's abuse-detection systems. You
-    may receive a warning from GitHub Security, and further anomalous
-    activity could result in temporary suspension of your Copilot
-    access." Premium-request volume from an automated research loop
-    is exactly the pattern that trips that detector. The sanctioned
-    alternatives for headless / VSCode usage are wired into FI:
+    1. **`_UNSANCTIONED_PROXY_PROVIDERS`** — `github_copilot_cli` and
+       `github_copilot_vscode` route through a third-party
+       reverse-engineered `copilot-api` proxy. The proxy's own README
+       warns: "Excessive automated or scripted use of Copilot ... may
+       trigger GitHub's abuse-detection systems." Premium-request
+       volume from an automated research loop is exactly the pattern
+       that trips that detector.
 
-      - `copilot_cli`       — GitHub's own `@github/copilot-cli` binary.
-                              Headless, uses your normal Copilot
-                              subscription via `gh auth login`.
-      - `vscode_extension`  — Phase P: routes calls through VSCode's
-                              `vscode.lm.*` Language Model API via the
-                              FI VSCode extension. The user explicitly
-                              consents; calls show up in their Copilot
-                              usage dashboard like any chat turn.
+    2. **`_AGENTIC_CLI_PROVIDERS`** — `copilot_cli`. The standalone
+       Copilot CLI is an agentic tool: it interprets FI's node prompts
+       as user coding tasks and replies conversationally (real symptom
+       seen: paper.md filled with "Are you trying to debug X?",
+       experiment.py reduced to the empty stub). Use `vscode_extension`,
+       `claude_cli`, `codex_cli`, `gemini_cli`, or an HTTP-direct
+       provider (`openai`, `gemini`, `ollama`, `vllm`) instead.
 
-    Suppression: this only prints once per provider per process to
-    keep fleet logs from being spammy. Set the FI_SUPPRESS_PROXY_WARN
-    environment variable to silence it entirely (you've been warned).
+    Suppression: each category warns once per process; set the
+    ``FI_SUPPRESS_PROXY_WARN`` env var to silence entirely.
     """
     import os
     if os.environ.get("FI_SUPPRESS_PROXY_WARN"):
@@ -1666,7 +1664,7 @@ def _warn_if_unsanctioned_provider(name: str) -> None:
             "\n"
             "  Set FI_SUPPRESS_PROXY_WARN=1 to silence this warning.\n"
             "%s",
-            "─" * 72, "─" * 72, name,
+            "─" * 72, name, "─" * 72,
         )
         return
 
@@ -1680,7 +1678,7 @@ def _warn_if_unsanctioned_provider(name: str) -> None:
             "  conversationally — e.g. asking which file you want edited,\n"
             "  or outputting a chat-style answer instead of the structured\n"
             "  payload FI's nodes need. Real symptoms observed in the wild:\n"
-            "  paper.md filled with \"Are you trying to debug X?\", \n"
+            "  paper.md filled with \"Are you trying to debug X?\",\n"
             "  experiment.py reduced to the empty stub.\n"
             "\n"
             "  Recommended provider for Copilot users:\n"
@@ -1694,7 +1692,7 @@ def _warn_if_unsanctioned_provider(name: str) -> None:
             "\n"
             "  Set FI_SUPPRESS_PROXY_WARN=1 to silence this warning.\n"
             "%s",
-            "─" * 72, "─" * 72, name,
+            "─" * 72, name, "─" * 72,
         )
         return
 

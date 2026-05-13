@@ -79,9 +79,18 @@ Three feedback loops:
 | `github_copilot_cli` | HTTP via proxy | `gh auth login` + spawned `copilot-api` | ⚠️ Against ToS spirit (use `copilot_cli` instead) |
 | `github_copilot_vscode` | HTTP via proxy | VSCode Copilot extension + spawned `copilot-api` | ⚠️ Against ToS spirit (use `vscode_extension` instead) |
 
-The two `github_copilot_*` providers emit a one-time warning at engine
-init pointing at the sanctioned alternatives. Set
-`FI_SUPPRESS_PROXY_WARN=1` to silence (use at your own risk).
+The two `github_copilot_*` providers AND `copilot_cli` emit a one-time
+warning at engine init:
+
+- `github_copilot_*` — risk warning about the third-party proxy and
+  GitHub's abuse-detection systems.
+- `copilot_cli` — broken-as-chat-backend warning (the CLI is agentic
+  and replies conversationally instead of producing structured node
+  output). Recommended replacement for Copilot users is
+  `vscode_extension`.
+
+Set `FI_SUPPRESS_PROXY_WARN=1` to silence either warning (use at your
+own risk).
 
 ## Knowledge layer — three-layer retrieval
 
