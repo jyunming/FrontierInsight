@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frontier-insight"
+version = "0.1.0"
+description = "Autonomous research assistant: give it a topic, get back a paper, the experiment code, and figures. Integrates with VSCode Copilot Chat."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "jyunming" }]
+keywords = [
+  "research",
+  "agent",
+  "langgraph",
+  "vscode",
+  "copilot",
+  "llm",
+  "automation",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
+
+# Core runtime dependencies. Optional features that require heavy or
+# environment-specific deps (PDF, Docker, knowledge layer) are in
+# `[project.optional-dependencies]` below so a `pip install
+# frontier-insight` doesn't pull GBs of unrelated wheels.
+dependencies = [
+  "pydantic>=2.5",
+  "pyyaml>=6.0",
+  "requests>=2.31",
+  "httpx>=0.27",
+  "tenacity>=8.2",
+  "openai>=1.40",
+  "langgraph>=0.2",
+  "langchain-core>=0.3",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4.0"]
+docker = ["docker>=7.1"]
+knowledge = ["axon-rag>=0.4"]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "pytest-mock>=3.14",
+  "pytest-cov>=6.0",
+  "pytest-testmon>=2.2",
+]
+all = [
+  "frontier-insight[pdf,docker,knowledge]",
+]
+
+[project.urls]
+Homepage = "https://github.com/jyunming/FrontierInsight"
+Documentation = "https://github.com/jyunming/FrontierInsight/tree/main/docs"
+Repository = "https://github.com/jyunming/FrontierInsight"
+Issues = "https://github.com/jyunming/FrontierInsight/issues"
+
+# The `fi` console script: `pip install frontier-insight` exposes
+# `fi --config my.yaml` as a globally-callable command. Points at
+# `launch:main` which is the existing top-level entry function.
+[project.scripts]
+fi = "launch:main"
+frontier-insight = "launch:main"
+
+# Setuptools package discovery. The runtime code lives in top-level
+# packages (`core`, `generation`, `web`); the agent prompts and paper
+# templates are package data shipped under those packages OR at top
+# level via MANIFEST.in include rules.
+[tool.setuptools]
+py-modules = ["launch"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "generation*", "web*"]
+exclude = [
+  "tests*",
+  "dev*",
+  "docs*",
+  "examples*",
+  "outputs*",
+  "tools*",
+  "vscode-frontier-insight*",
+  "scripts*",
+  "templates*",
+  "agents*",
+  ".pytest_tmp*",
+]
+
+# Non-Python assets included alongside the wheel. The `agents/*.md`
+# prompt templates and `templates/paper/**` LaTeX templates are
+# needed at runtime by the engine and generators — listing them
+# here AND in MANIFEST.in ensures both source and binary
+# distributions carry them.
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.tex", "*.css", "*.html", "*.js"]

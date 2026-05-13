@@ -1,0 +1,65 @@
+name: Rebuild VSCode extension .vsix
+
+# Auto-rebuilds vscode-frontier-insight.vsix and commits it back to
+# the branch whenever extension sources change on `main`. This keeps
+# the tracked .vsix in lockstep with its source — manual contributors
+# don't have to remember to rebuild, and end-users always get a
+# .vsix that matches the latest README + bridge code.
+#
+# Triggers on `main` only (post-merge); PRs run `compile` + `package`
+# in `ci.yml` for verification but do NOT commit a .vsix to the PR
+# branch. That avoids merge-conflict-cascade noise on the binary.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vscode-frontier-insight/src/**"
+      - "vscode-frontier-insight/package.json"
+      - "vscode-frontier-insight/tsconfig.json"
+      - "vscode-frontier-insight/README.md"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild-vsix:
+    # Skip on the auto-commit this workflow itself makes — the marker
+    # in the commit message prevents an infinite rebuild loop.
+    if: "!contains(github.event.head_commit.message, '[skip vsix]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need write history for the auto-commit step.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: vscode-frontier-insight
+        run: npm ci
+
+      - name: Compile TypeScript
+        working-directory: vscode-frontier-insight
+        run: npm run compile
+
+      - name: Package .vsix
+        working-directory: vscode-frontier-insight
+        run: npm run package
+
+      - name: Commit rebuilt .vsix if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- vscode-frontier-insight/vscode-frontier-insight.vsix; then
+            echo "No change in .vsix — skipping commit."
+          else
+            git add vscode-frontier-insight/vscode-frontier-insight.vsix
+            git commit -m "chore(vsix): auto-rebuild after extension source change [skip vsix]"
+            git push
+          fi

@@ -42,21 +42,23 @@ Three feedback loops:
 | Per-quest venv; agent-generated Python is installed and run in isolation | ✅ |
 | Docker sandbox via `execution.sandbox: docker` (network disabled, mounted at `/work`) | ✅ |
 | Provider matrix — direct HTTP, proxy, CLI exec, and VSCode-extension transports | ✅ |
-| Per-node model routing (Phase O) — different model per node via `provider.node_models` | ✅ |
-| Pre-flight `clarify` node (Phase I) — 5-slot survey before `ideate`, off / auto / interactive modes | ✅ |
-| Self-correction — execute-repair loop (Phase K) — agent reads traceback, patches code, retries | ✅ |
-| Self-correction — analyze-driven re-route (Phase L) — `re_experiment` / `broaden_lit` routes back to design | ✅ |
-| Cross-paper check (Phase L) — per-finding literature search + supporting/conflicting/neutral classification | ✅ |
-| Ideate self-reflection (Phase M) — extra LLM call may swap chosen idea | ✅ |
-| Reviewer panel (Phase N) — N personas in parallel + moderator synthesis | ✅ |
+| Per-node model routing — different model per node via `provider.node_models` | ✅ |
+| Pre-flight `clarify` node — 7-slot survey before `ideate`, off / auto / interactive modes | ✅ |
+| Self-correction — execute-repair loop — agent reads traceback, patches code, retries | ✅ |
+| Self-correction — analyze-driven re-route — `re_experiment` / `broaden_lit` routes back to design | ✅ |
+| Cross-paper check — per-finding literature search + supporting/conflicting/neutral classification | ✅ |
+| Ideate self-reflection — extra LLM call may swap chosen idea | ✅ |
+| Reviewer panel — N personas in parallel + moderator synthesis (`rigor_score` + `depth_score` axes) | ✅ |
 | Axon-backed knowledge layer: literature retrieval + cross-quest memory write-back | ✅ |
 | Multi-source literature router when Axon is empty: arXiv / OpenAlex / Crossref / Semantic Scholar / PubMed / CORE / Google Scholar in parallel, DOI-dedup | ✅ |
 | Topic-aware LLM source routing — agent picks which venues to query from a 12-entry catalog | ✅ |
 | Local paper feed — drop paywalled PDFs / MD into `knowledge.local_papers`, pinned to retrieval head | ✅ |
 | Opportunistic full-text fetch — host-network publisher PDFs with login-wall rejection | ✅ |
 | Structured ingest — title-searchable spine docs + citation-header'd body + topic rollups | ✅ |
-| Status GUI (Phase J) — FastAPI + HTMX server: fleet list, SSE log stream, clarify panel, paper preview, panel-review cards | ✅ |
-| VSCode extension (Phase P) — sanctioned `vscode.lm.*` Copilot integration, with `@fi /new`, `@fi /start`, `@fi /fleet`, `@fi /resume` | ✅ |
+| Status GUI — FastAPI + HTMX server: fleet list, SSE log stream, clarify panel, paper preview, panel-review cards | ✅ |
+| VSCode extension — sanctioned `vscode.lm.*` integration with `@fi /new`, `/start`, `/fleet`, `/resume`, `/summarize` | ✅ |
+| Folder summarizer — `python launch.py --summarize <folder>` and `@fi /summarize`; auto-detects content kind (literature / code / study / execution / mixed); always ingests input + summary into Axon | ✅ |
+| No-admin LaTeX install — `python launch.py --install-tectonic` drops a self-bootstrapping LaTeX binary into `tools/` for corporate environments where MiKTeX install is blocked | ✅ |
 | Resumable quests — `python launch.py --resume <quest_id>` / `@fi /resume` re-enter the LangGraph from the last checkpointed node when a prior run died mid-pipeline | ✅ |
 | Paper PDF via pandoc + LaTeX (`generic` and `neurips` templates ship; others stub) | ✅ |
 | Slides (when `output.kinds` includes `slides`) — `slides.md` always, plus `slides.html`/`slides.pdf` (when `marp` CLI is on PATH) and `slides.pptx` (when pandoc is on PATH); poster via `beamerposter`; speech script via single LLM call | ✅ |
@@ -134,7 +136,7 @@ provider:
   base_url: ...                   # only for HTTP-direct overrides
   api_key_env: ...                # env var name; defaults to provider's standard
   extra: {}                       # bag for transport-specific fields
-  node_models:                    # Phase O — per-node override
+  node_models:                    # Per-node override
     clarify:       gpt-4o-mini
     ideate:        claude-3-5-sonnet
     cross_check:   gpt-4o-mini
@@ -150,11 +152,11 @@ engine:
   max_iterations: 2               # bounds the design-level revise/re-experiment loop
   review_loop: true
   clarify_mode: off               # off | auto | interactive
-  ideate_reflect: true            # Phase M
-  exec_reflect_max_iterations: 3  # Phase K bound
-  cross_check_per_finding_k: 3    # Phase L per-finding hits
-  enable_analyze_reroute: true    # Phase L
-  review_panel: []                # Phase N personas: [methodologist, statistician, devil_advocate, reproducibility]
+  ideate_reflect: true            # extra ideate self-critique pass
+  exec_reflect_max_iterations: 3  # execute-repair loop bound
+  cross_check_per_finding_k: 3    # per-finding literature hits
+  enable_analyze_reroute: true    # analyze-driven re_experiment / broaden_lit
+  review_panel: []                # personas: [methodologist, statistician, devil_advocate, reproducibility]
 
 execution:
   sandbox: venv                   # or docker
@@ -210,23 +212,25 @@ output:
 
 ## Tests
 
-**379 tests** collected on Windows-native Python 3.11.9 (`pytest --collect-only`); the full suite runs in ~9 minutes. A few tests skip
-gracefully when their external tool isn't on PATH (Docker daemon for
-`test_docker_executor.py`; Marp CLI for the slides render gate; etc.).
-Suite organization:
+The test suite is pytest-based, runs on Windows-native Python 3.11+,
+and uses fake LLMs everywhere (`monkeypatch.setattr` on `LLMClient.chat`)
+so there is zero real API spend in CI. A few tests skip gracefully
+when their external tool isn't on PATH (Docker daemon for
+`test_docker_executor.py`; Marp CLI for the slides render gate; pdflatex
+for the paper-PDF gate). Suite organization:
 
 - `test_config.py` — YAML schema, tilde expansion, validators.
 - `test_execution.py` / `test_docker_executor.py` — venv + Docker executors.
 - `test_engine_smoke.py` — full DAG end-to-end with fake LLM (the regression detector).
 - `test_engine_helpers.py` — direct unit tests for `_parse_json_lenient`, `_extract_result_json`, `_strip_outer_fence`, `_slugify`, `_new_quest_id`, `_parse_implement_response`, `_format_lit`, plus the review/analyze/write prompt-shape pins.
 - `test_engine_resume.py` — `--resume` checkpoint reuse, `Engine(resume_quest_id=...)`, copilot_cli agentic warning.
-- `test_clarify.py`, `test_ideate_reflect.py`, `test_execute_reflect.py`, `test_cross_check.py`, `test_review_panel.py` — Phases I, M, K, L, N respectively.
-- `test_per_node_model_routing.py` — Phase O.
-- `test_vscode_bridge.py` / `test_vscode_extension_typescript.py` — Phase P (bridge protocol + provider integration; mock VSCode; plus TS compile + .vsix package gates).
-- `test_knowledge.py` (50 tests) — source adapters, dedup, source-router LLM, local-paper load + pin, full-text fetch, structured-ingest helpers, external-ref spines.
+- `test_clarify.py`, `test_ideate_reflect.py`, `test_execute_reflect.py`, `test_cross_check.py`, `test_review_panel.py` — clarify, ideate-reflection, execute-repair, cross-paper-check, and reviewer-panel feature tests.
+- `test_per_node_model_routing.py` — per-node model selection.
+- `test_vscode_bridge.py` / `test_vscode_extension_typescript.py` — VSCode bridge protocol + provider integration (mock VSCode), plus TS compile + .vsix package gates.
+- `test_knowledge.py` — source adapters, dedup, source-router LLM, local-paper load + pin, full-text fetch, structured-ingest helpers, external-ref spines.
 - `test_knowledge_writeback.py` — accept-gated cross-quest memory bundle.
-- `test_web_server.py` / `test_web_e2e.py` — Phase J GUI.
-- `test_self_correction_e2e.py` — end-to-end Phase K + L proofs.
+- `test_web_server.py` / `test_web_e2e.py` — status GUI.
+- `test_self_correction_e2e.py` — end-to-end self-correction proofs.
 - `test_launch.py` — `parse_args`, `_run_generators`, `_await_under_cap`, fleet counters, `--resume` traversal validation, `source_yaml_path` quest-dir copy.
 - `test_paper_gen.py` / `test_slides_speech.py` / `test_poster.py` — generators.
 - `test_provider.py` / `test_provider_cli.py` — HTTP-direct, CLI-exec, and proxy transports.

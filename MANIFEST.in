@@ -1,0 +1,55 @@
+# sdist (source distribution) inclusions. The wheel package-data is
+# configured separately in pyproject.toml; this file handles the
+# `python -m build --sdist` path.
+
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+include requirements.txt
+include pyproject.toml
+
+# Public docs that ship with both wheel and sdist.
+recursive-include docs *.md
+
+# Agent prompt templates: needed at runtime by core/engine.py's
+# `_load_prompts()`. The wheel includes these via package-data;
+# this entry covers the sdist case.
+recursive-include agents *.md
+
+# LaTeX paper templates + poster template, used by generation/.
+recursive-include templates *
+
+# Examples that demonstrate the config schema. Lightweight (YAML
+# only), useful as reference.
+recursive-include examples *.yaml *.md
+
+# Web GUI static assets.
+recursive-include web/static *
+
+# ---- explicit exclusions ----
+# `dev/` carries internal documentation (Claude Code agent guidance,
+# historical test logs, the review rubric, etc.) that's not for
+# end-users. Excluded from both wheel and sdist.
+prune dev
+
+# Build artifacts and ignored directories.
+prune tests
+prune outputs
+prune tools
+prune .pytest_tmp
+prune .pytest_cache
+prune __pycache__
+prune .testmondata*
+
+# VSCode extension is a SEPARATE distributable, published to the
+# VSCode Marketplace. The source files don't belong in the Python
+# wheel; the .vsix is distributed alongside the wheel via the GitHub
+# Releases page until the marketplace publication lands.
+prune vscode-frontier-insight
+
+# Scripts/ holds ad-hoc tooling not part of the user-facing surface.
+prune scripts
+
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store

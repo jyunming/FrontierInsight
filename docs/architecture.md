@@ -79,16 +79,16 @@ Core path (every quest produces these):
 `design`, `code`, `deps`, `exec_result`, `figures`, `result_json`,
 `analysis`, `paper_md`, `review`.
 
-Phase-specific extras:
-- Phase I (clarify): `clarify_questions`, `clarify_answers`, `clarify_done`.
-- Phase K (execute-repair loop): `exec_reflect_iter`, `exec_reflect_history`, `exec_give_up_reason`.
-- Phase L (analyze re-route + cross-paper check): `cross_check` (per-finding classification list).
-- Phase M (ideate self-reflection): `ideate_critique`.
-- Phase N (reviewer panel): `review_panel` (per-persona reviews + moderator synthesis).
+Feature-specific extras:
+- Clarify: `clarify_questions`, `clarify_answers`, `clarify_done`.
+- Execute-repair loop: `exec_reflect_iter`, `exec_reflect_history`, `exec_give_up_reason`.
+- Analyze re-route + cross-paper check: `cross_check` (per-finding classification list).
+- Ideate self-reflection: `ideate_critique`.
+- Reviewer panel: `review_panel` (per-persona reviews + moderator synthesis).
 
 JSON-serializable so `AsyncSqliteSaver` can checkpoint after every
 node. **Field names are the contract** between the engine, the
-prompts, and any future Phase-G alternate graph — keep them
+prompts, and any alternate graph subclass — keep them
 backwards-compatible.
 
 ### `QuestArtifacts`
@@ -134,8 +134,9 @@ providers spawn the local CLI per call; proxy providers go through
 `ProxySupervisor`, which spawns the child process on a free port and
 reference-counts so concurrent quests share one proxy. The
 `vscode_extension` transport routes calls through the FI VSCode
-extension's `vscode.lm.*` bridge. See `docs/plan.md` Phase C and
-Phase P for transport-specific spawn details.
+extension's `vscode.lm.*` bridge. See [`plan.md`](plan.md) for the
+shipped-capability list and [`INSTALL.md`](INSTALL.md) for transport
+prerequisites.
 
 ## Concurrency model
 

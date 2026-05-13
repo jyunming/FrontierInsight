@@ -219,7 +219,7 @@ python launch.py --fleet quests/a.yaml quests/b.yaml quests/c.yaml \
 
 Each YAML is independent; the runner just bounds how many run at once.
 
-### Use a different model per node (Phase O)
+### Use a different model per node
 
 Cheap model for clarify/cross_check, strong model for write/review:
 
@@ -234,7 +234,7 @@ provider:
     review: gpt-5
 ```
 
-### Have a panel of reviewers debate the paper (Phase N)
+### Have a panel of reviewers debate the paper
 
 ```yaml
 engine:
