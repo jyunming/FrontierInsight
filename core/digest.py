@@ -1,10 +1,15 @@
 """Weekly project-manager digest.
 
-Walks ``outputs/`` for quests created or touched inside a date window,
-classifies each by terminal-node state (read from LangGraph's
-``state.sqlite`` checkpoint store), diffs against the most-recent prior
-digest in ``outputs/_digests/`` to surface what *changed* since last
-week, then asks the LLM to produce a markdown report.
+Walks ``outputs/`` for quests whose *last-modified mtime* falls inside
+a date window (so a quest started weeks ago but resumed yesterday
+shows up in this week's digest), classifies each by terminal-node
+state (read from LangGraph's ``state.sqlite`` checkpoint store),
+diffs against the most-recent prior digest in ``outputs/_digests/``
+to surface what *changed* since last week, then asks the LLM to
+produce a markdown report. Legacy quest directories without a
+parseable ``<epoch>-<slug>-<6hex>`` quest_id prefix are skipped — we
+have no reliable creation timestamp for them and don't want to
+misattribute very old quests to the current week.
 
 CLI:    ``python launch.py --digest [--days N]``
 VSCode: ``@fi /digest [--days N]``
@@ -68,10 +73,19 @@ _ABSTRACT_CHARS = 800
 # Mirrors the cap pattern in core/summarizer.py.
 _MAX_PROMPT_QUESTS = 300
 
-# Stalled threshold: a quest that's appeared as still_in_progress in
-# this many consecutive prior digests gets a stronger flag in the
-# output. 3 weeks of no progress is the call-to-action point.
-_STALLED_DIGEST_COUNT = 3
+# NOTE: there's intentionally no _STALLED_THRESHOLD constant. The
+# carry-over algorithm (see _compute_diff below) naturally yields
+# "3+ digests in flight" without a tunable count:
+#
+#   - a quest in this digest's still_in_progress section was
+#     in_progress in BOTH this and prev → ≥2 digests in flight
+#   - if that same quest was ALSO listed in prev's
+#     "Still in progress from last digest" carry-over → it was
+#     in_progress in prev-prev too → ≥3 digests in flight → STALLED
+#
+# Making the threshold configurable would require buffering N digests
+# back, which adds state without a clear product win. The 3-digest
+# trigger is hard-coded into the algorithm shape.
 
 # Quest_id pattern: <epoch>-<slug>-<6 hex>. Parsing the leading epoch
 # is cheaper and more accurate than os.stat (works for quests on
@@ -466,8 +480,14 @@ def _compute_diff(
     # New in progress: in this week's in_progress set, didn't appear
     # in prev at all.
     new_in_prog = sorted(this_in_progress - prev_all_ids)
-    # Dropped: was in prev digest, hasn't been touched this window.
-    dropped = sorted(prev_all_ids - set(this_by_id.keys()))
+    # Dropped: was IN-PROGRESS in prev but hasn't been touched this
+    # window. We narrow to prev_in_progress (not prev_all_ids) on
+    # purpose — quests that were *completed* in prev are expected to
+    # not reappear, and theme/suggestion citations of older quests
+    # would otherwise spam the dropped section. Only in-progress
+    # quests that went silent are interesting "did we abandon this?"
+    # signal.
+    dropped = sorted(prev_in_progress - set(this_by_id.keys()))
     # Stalled: still_in_progress AND was already in prev's
     # still-in-progress carry-over → ≥3 consecutive digests stuck.
     stalled = sorted(set(still) & prev_still_in_progress)
@@ -544,8 +564,18 @@ def _render_diff_section(diff: WeekDiff) -> str:
         return "(no prior digest — this is the first run)"
     lines = [f"_Comparing against `{diff.prev_digest_id}`._\n"]
     if diff.promoted:
+        # Quests that were in_progress in the prior digest and reached
+        # the review node this window.
         lines.append("**✅ Promoted to complete this week:**")
         lines.extend(f"- [{q.quest_id}] {q.title}" for q in diff.promoted)
+    if diff.newly_completed:
+        # Quests that completed this window without ever appearing as
+        # in_progress in the prior digest — typically short quests
+        # started and finished within the same window. Distinguished
+        # from "promoted" so the reader can see at a glance whether
+        # this week's completions were carryover-flow or fresh-flow.
+        lines.append("\n**🎉 Newly completed (not seen in prior digest):**")
+        lines.extend(f"- [{q.quest_id}] {q.title}" for q in diff.newly_completed)
     if diff.new_in_progress:
         lines.append("\n**🆕 Newly started:**")
         lines.extend(f"- [{q.quest_id}] {q.title}" for q in diff.new_in_progress)
@@ -555,10 +585,14 @@ def _render_diff_section(diff: WeekDiff) -> str:
             marker = " 🛑 STALLED (3+ digests)" if q.quest_id in diff.stalled else ""
             lines.append(f"- [{q.quest_id}] {q.title}{marker}")
     if diff.dropped:
-        lines.append("\n**❓ Quests in last digest but not touched this window:**")
+        # See _compute_diff: dropped now narrowed to prev-in-progress
+        # quests that went silent. The label below reflects that — we
+        # no longer flag prior completions as "abandoned."
+        lines.append("\n**❓ In-progress quests from last digest that went silent:**")
         lines.extend(f"- [{qid}]" for qid in diff.dropped)
-    if (not diff.promoted and not diff.new_in_progress
-            and not diff.still_in_progress and not diff.dropped):
+    if (not diff.promoted and not diff.newly_completed
+            and not diff.new_in_progress and not diff.still_in_progress
+            and not diff.dropped):
         lines.append("(nothing changed since the prior digest)")
     return "\n".join(lines)
 
@@ -606,7 +640,12 @@ def _build_digest_prompt(
         )
     abstracts = _render_abstracts(prompt_snapshots)
     diff_section = _render_diff_section(diff)
-    velocity = _render_velocity(prompt_snapshots, diff)
+    # Velocity numbers come from the FULL snapshot list, not the
+    # truncated prompt slice. Otherwise the "Quests touched this window"
+    # count would silently drop down to _MAX_PROMPT_QUESTS, contradicting
+    # the manifest-truncation note and producing misleading
+    # deterministic numbers in the prompt.
+    velocity = _render_velocity(snapshots, diff)
     prev_block = (
         f"## Prior digest ({diff.prev_digest_id}) for reference\n\n"
         f"```markdown\n{prev_digest_md[:8000]}\n```\n"

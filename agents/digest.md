@@ -53,4 +53,4 @@ Copy the pre-computed velocity block above verbatim under this heading.
 - Markdown only — no HTML, no images, no tables wider than 80 cols.
 - No filler ("It is worth noting that…"). Be specific or skip the sentence.
 - If the pre-computed diff says "(nothing changed since the prior digest)", the "What changed" section says exactly that and nothing more.
-- Never fabricate quest IDs. The IDs you cite must all appear in the manifest above.
+- Never fabricate quest IDs. Every ID you cite must appear either in the **quest manifest** above OR in the **pre-computed diff section** above. The pre-computed diff is the only place where IDs not in this window's manifest may legitimately appear — e.g. the "❓ In-progress quests from last digest that went silent" bullets cite prior-digest IDs by design. Copy those through verbatim; do not omit them just because they're not in the manifest.

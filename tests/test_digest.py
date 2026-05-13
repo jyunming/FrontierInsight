@@ -338,6 +338,86 @@ def test_compute_diff_dropped_quests_from_prior_not_in_this(tmp_path: Path) -> N
     assert diff.dropped == ["1700000001-vanished-aabbcc"]
 
 
+def test_compute_diff_dropped_excludes_prior_completions_and_citations(
+    tmp_path: Path,
+) -> None:
+    """Regression: ``dropped`` is narrowed to quests that were
+    in-progress in the prior digest and went silent. Prior-week
+    completions, theme citations, and suggested-next-quest citations
+    should NOT appear as dropped — those quests aren't expected to
+    reappear in subsequent digests."""
+    prev_md = (
+        "## Completed this week\n"
+        "- [1700000001-completed-aabbcc] **Finished quest**\n\n"
+        "## In progress\n"
+        "- [1700000002-stuck-aabbcc] **Stuck quest**\n\n"
+        "## Themes\n"
+        "- A theme that cites [1700000003-themed-aabbcc]\n\n"
+        "## Suggested next quests\n"
+        "- Idea referencing [1700000004-suggested-aabbcc]\n"
+    )
+    snaps: list[QuestSnapshot] = []
+    diff = _compute_diff(snaps, prev_md=prev_md, prev_path=tmp_path / "2026-W18.md")
+    assert diff.dropped == ["1700000002-stuck-aabbcc"]
+    assert "1700000001-completed-aabbcc" not in diff.dropped
+    assert "1700000003-themed-aabbcc" not in diff.dropped
+    assert "1700000004-suggested-aabbcc" not in diff.dropped
+
+
+def test_render_diff_section_includes_newly_completed_subsection() -> None:
+    """A quest that completed this window but was NOT in the prior
+    digest at all (e.g. started + finished in the same week) must
+    appear under the '🎉 Newly completed' bullet."""
+    from core.digest import _render_diff_section
+
+    diff = WeekDiff(
+        prev_digest_id="2026-W18",
+        newly_completed=[_snap("1700000001-fresh-aabbcc", "review")],
+    )
+    rendered = _render_diff_section(diff)
+    assert "🎉 Newly completed" in rendered
+    assert "1700000001-fresh-aabbcc" in rendered
+
+
+def test_render_diff_section_dropped_label_reflects_narrowed_semantics() -> None:
+    """The label under the dropped bullet must reflect the narrowed
+    'in-progress quests that went silent' semantics so users aren't
+    misled into thinking prior completions were abandoned."""
+    from core.digest import _render_diff_section
+
+    diff = WeekDiff(
+        prev_digest_id="2026-W18",
+        dropped=["1700000002-stuck-aabbcc"],
+    )
+    rendered = _render_diff_section(diff)
+    assert "went silent" in rendered.lower()
+    assert "1700000002-stuck-aabbcc" in rendered
+
+
+def test_build_prompt_velocity_uses_full_snapshots_not_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when the manifest is truncated for prompt budget,
+    the velocity numbers must still come from the FULL snapshot count
+    — otherwise the 'deterministic numbers' the prompt asks the LLM
+    to quote disagree with the manifest's own truncation note."""
+    import core.digest as dm
+    monkeypatch.setattr(dm, "_MAX_PROMPT_QUESTS", 3)
+
+    snaps = [_snap(f"170000000{i}-q-aabbcc", "review") for i in range(7)]
+    diff = WeekDiff(prev_digest_id=None)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 8, tzinfo=timezone.utc)
+    prompt = dm._build_digest_prompt(
+        snapshots=snaps, diff=diff, prev_digest_md=None,
+        since=since, until=until,
+    )
+    # Velocity should report 7 (full set), not 3 (truncated slice).
+    assert "Quests touched this window: 7" in prompt
+    # The manifest itself is truncated, with a note that 4 more exist.
+    assert "4 additional quests" in prompt
+
+
 def test_quest_ids_in_digest_finds_ids_regardless_of_layout() -> None:
     md = (
         "Random text. [1700000001-foo-aabbcc] in a bullet.\n"
