@@ -185,14 +185,20 @@ def test_render_file_manifest_empty(tmp_path: Path) -> None:
 def test_render_file_manifest_table_shape(tmp_path: Path) -> None:
     entries = [
         FileEntry(ident=1, path=Path("/fake/a.py"), rel_path="a.py",
-                  kind="code", size_bytes=2048),
+                  kind="code", size_bytes=2048),       # exactly 2 KB
         FileEntry(ident=2, path=Path("/fake/b.md"), rel_path="b.md",
-                  kind="paper", size_bytes=512),
+                  kind="paper", size_bytes=512),        # ceil → 1 KB
+        FileEntry(ident=3, path=Path("/fake/c.md"), rel_path="c.md",
+                  kind="paper", size_bytes=1536),       # ceil → 2 KB (PR #37 bot)
+        FileEntry(ident=4, path=Path("/fake/d.md"), rel_path="d.md",
+                  kind="paper", size_bytes=0),          # empty → 0 KB
     ]
     out = _render_file_manifest(entries)
     assert "| ID | path | kind | size_kb |" in out
     assert "| [1] | `a.py` | code | 2 |" in out
-    assert "| [2] | `b.md` | paper | 1 |" in out  # 512B rounds up to 1KB
+    assert "| [2] | `b.md` | paper | 1 |" in out
+    assert "| [3] | `c.md` | paper | 2 |" in out   # ceil math, not floor
+    assert "| [4] | `d.md` | paper | 0 |" in out
 
 
 def test_render_content_blocks_skips_empty_previews() -> None:
@@ -241,44 +247,69 @@ def test_new_summary_id_unique() -> None:
 
 
 def test_ingest_to_axon_calls_add_text_per_file_and_summary() -> None:
-    """Each input file with non-empty preview → one fi_summary_input
+    """Each input file with non-empty axon_content → one fi_summary_input
     call; the summary itself → one fi_summary call. Total = N+1."""
-    axon = MagicMock()
-    axon.add_text = MagicMock()
+    k = MagicMock()
+    k.add_text = MagicMock(return_value=True)
     entries = [
         FileEntry(ident=1, path=Path("/x.py"), rel_path="x.py", kind="code",
-                  size_bytes=10, preview="print(1)"),
+                  size_bytes=10, preview="print(1)", axon_content="print(1)"),
         FileEntry(ident=2, path=Path("/y.md"), rel_path="y.md", kind="paper",
-                  size_bytes=20, preview="hello"),
+                  size_bytes=20, preview="hello", axon_content="hello full body"),
         FileEntry(ident=3, path=Path("/z.bin"), rel_path="z.bin", kind="other",
-                  size_bytes=30, preview=""),    # skipped — empty preview
+                  size_bytes=30, preview="", axon_content=""),  # skipped
     ]
     ok = _ingest_to_axon(
-        axon, summary_id="sum-1", folder=Path("/work"),
+        k, summary_id="sum-1", folder=Path("/work"),
         detected_kind="study", entries=entries,
         summary_markdown="# summary\n",
     )
     assert ok is True
     # 2 fi_summary_input + 1 fi_summary = 3 calls.
-    assert axon.add_text.call_count == 3
+    assert k.add_text.call_count == 3
     kinds_seen = [
-        call.kwargs.get("kind") for call in axon.add_text.call_args_list
+        call.kwargs.get("kind") for call in k.add_text.call_args_list
     ]
     assert kinds_seen.count("fi_summary_input") == 2
     assert kinds_seen.count("fi_summary") == 1
 
 
-def test_ingest_to_axon_returns_false_when_axon_raises() -> None:
-    """A partial ingest is still better than nothing — we return False
-    so the caller can report it, but we don't crash the summary call."""
-    axon = MagicMock()
-    axon.add_text = MagicMock(side_effect=RuntimeError("axon down"))
+def test_ingest_to_axon_uses_full_axon_content_not_prompt_preview() -> None:
+    """Regression for PR #37 review: ingest must use the larger
+    ``axon_content`` field so Axon receives more than the 4 KB the
+    prompt saw. The preview / axon_content split is the whole point
+    of the two caps."""
+    k = MagicMock()
+    captured: list[str] = []
+    k.add_text = MagicMock(
+        side_effect=lambda **kw: (captured.append(kw["text"]) or True),
+    )
+    big = "X" * 40_000
+    entries = [
+        FileEntry(ident=1, path=Path("/big.md"), rel_path="big.md", kind="paper",
+                  size_bytes=40_000, preview=big[:4_000], axon_content=big),
+    ]
+    _ingest_to_axon(
+        k, summary_id="sum-1", folder=Path("/work"),
+        detected_kind="literature", entries=entries,
+        summary_markdown="# s\n",
+    )
+    # The first call (fi_summary_input) carried the FULL axon_content,
+    # not the truncated preview.
+    assert len(captured[0]) == 40_000
+
+
+def test_ingest_to_axon_returns_false_when_knowledge_returns_false() -> None:
+    """`Knowledge.add_text` returns False on failure — propagate that
+    so the caller can surface 'partial ingest' to the user."""
+    k = MagicMock()
+    k.add_text = MagicMock(return_value=False)
     entries = [
         FileEntry(ident=1, path=Path("/x.py"), rel_path="x.py", kind="code",
-                  size_bytes=10, preview="hi"),
+                  size_bytes=10, preview="hi", axon_content="hi"),
     ]
     ok = _ingest_to_axon(
-        axon, summary_id="sum-2", folder=Path("/work"),
+        k, summary_id="sum-2", folder=Path("/work"),
         detected_kind="code", entries=entries,
         summary_markdown="# x\n",
     )
@@ -310,15 +341,18 @@ async def test_summarize_folder_writes_summary_md_and_returns_artifacts(
 
     monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
 
-    axon = MagicMock()
-    axon.add_text = MagicMock()
+    # Mock the Knowledge handle: enabled + add_text returns True so
+    # the summarizer reports `ingested_to_axon=True`.
+    knowledge = MagicMock()
+    knowledge.enabled = True
+    knowledge.add_text = MagicMock(return_value=True)
 
     art = await summarize_folder(
         folder,
         provider=ProviderConfig(name="openai"),
         output_dir=output_dir,
         kind="auto",
-        axon=axon,
+        knowledge=knowledge,
     )
 
     # The summary file exists and has our canned body.
@@ -357,10 +391,10 @@ async def test_summarize_folder_explicit_kind_overrides_detection(
         provider=ProviderConfig(name="openai"),
         output_dir=output_dir,
         kind="execution",       # explicit override
-        axon=None,
+        knowledge=None,
     )
     assert art.detected_kind == "execution"
-    assert art.ingested_to_axon is False  # no axon supplied
+    assert art.ingested_to_axon is False  # no Knowledge supplied
 
 
 @pytest.mark.asyncio

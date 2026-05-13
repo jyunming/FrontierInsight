@@ -505,24 +505,62 @@ async function runSummarize(
     token: vscode.CancellationToken,
     userPickedModel: vscode.LanguageModelChat,
 ): Promise<void> {
-    const tokens = promptArgs.split(/\s+/).filter((s) => s.length > 0);
-    if (tokens.length === 0) {
-        stream.markdown(
-            "Need a folder path. Example: `@fi /summarize ./papers` or " +
-            "`@fi /summarize C:/work/my-project literature`.\n",
-        );
-        return;
-    }
-    const folderArg = tokens[0];
-    const kindArg = tokens[1] || "auto";
+    // Parse "<folder> [kind]" without breaking on Windows paths that
+    // contain spaces (`C:\My Papers\thesis`). Strategy:
+    //   1. If the user wrapped the path in quotes, honor them.
+    //   2. Otherwise, the LAST whitespace-separated token MIGHT be the
+    //      optional kind enum. If it matches a known kind, peel it off
+    //      and treat the prefix as the path. Otherwise the entire
+    //      prompt is the path.
     const validKinds = new Set([
         "auto", "literature", "code", "study", "execution", "mixed",
     ]);
-    if (!validKinds.has(kindArg)) {
+    const raw = promptArgs.trim();
+    if (!raw) {
         stream.markdown(
-            `Invalid kind \`${kindArg}\`. Valid options: ${
-                Array.from(validKinds).join(", ")}.\n`,
+            "Need a folder path. Example: `@fi /summarize ./papers` or " +
+            "`@fi /summarize \"C:/My Papers\" literature`.\n",
         );
+        return;
+    }
+
+    let folderArg: string;
+    let kindArg: string = "auto";
+
+    // 1. Quoted path: `"C:/My Papers"` or `"C:/My Papers" literature`.
+    const quoted = raw.match(/^"([^"]+)"\s*(\S*)\s*$/);
+    if (quoted) {
+        folderArg = quoted[1];
+        if (quoted[2]) {
+            if (!validKinds.has(quoted[2])) {
+                stream.markdown(
+                    `Invalid kind \`${quoted[2]}\`. Valid: ${
+                        Array.from(validKinds).join(", ")}.\n`,
+                );
+                return;
+            }
+            kindArg = quoted[2];
+        }
+    } else {
+        // 2. Unquoted: check last token for a kind enum.
+        const lastSpace = raw.lastIndexOf(" ");
+        if (lastSpace > 0) {
+            const tail = raw.slice(lastSpace + 1);
+            if (validKinds.has(tail)) {
+                folderArg = raw.slice(0, lastSpace).trim();
+                kindArg = tail;
+            } else {
+                // Last token isn't a known kind — treat the whole
+                // input as the folder path (preserves spaces in
+                // unquoted Windows-style paths).
+                folderArg = raw;
+            }
+        } else {
+            folderArg = raw;
+        }
+    }
+    if (!folderArg) {
+        stream.markdown("Empty folder path after parsing. Use quotes for paths with spaces.\n");
         return;
     }
 
@@ -548,10 +586,20 @@ async function runSummarize(
     const folderAbs = path.isAbsolute(folderArg)
         ? folderArg
         : path.resolve(repoPath, folderArg);
-    if (!(await fsExists(folderAbs))) {
+    let folderStat: import("fs").Stats;
+    try {
+        folderStat = await fsPromises.stat(folderAbs);
+    } catch {
         stream.markdown(
-            `❌ Folder not found: \`${folderAbs}\`. ` +
+            `❌ Path not found: \`${folderAbs}\`. ` +
             `(Resolved from \`${folderArg}\` against \`${repoPath}\`.)\n`,
+        );
+        return;
+    }
+    if (!folderStat.isDirectory()) {
+        stream.markdown(
+            `❌ Path exists but is a file, not a directory: \`${folderAbs}\`. ` +
+            `\`/summarize\` expects a folder.\n`,
         );
         return;
     }

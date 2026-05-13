@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ProviderConfig
-from .knowledge import _load_local_paper
+from .knowledge import Knowledge, _load_local_paper
 from .provider import (
     LLMClient,
     PROXY_PROVIDERS,
@@ -37,10 +37,15 @@ _log = logging.getLogger("frontier_insight.summarizer")
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "summarize.md"
 
 # Per-file content cap fed into the prompt. Anything larger gets
-# truncated; the full text still gets ingested into Axon for future
-# retrieval. Sized so a folder with ~20 files fits inside a 100 KB
+# truncated. Sized so a folder with ~20 files fits inside a 100 KB
 # prompt budget (~25K tokens).
 _PER_FILE_PROMPT_CHARS = 4_000
+
+# Per-file cap for the Axon ingest path. Larger than the prompt
+# preview so future retrieval can surface body content beyond the
+# first ~4 KB. Bounded so a single huge file doesn't dominate the
+# corpus or blow up Axon's chunking.
+_PER_FILE_AXON_CHARS = 50_000
 
 # Directories we always skip during recursion. These tend to be noise
 # (caches, build outputs, version-control metadata) that drown out the
@@ -93,7 +98,8 @@ class FileEntry:
     rel_path: str            # forward-slashed relative-to-folder path
     kind: str                # one of: paper, code, notebook, config, log, other
     size_bytes: int
-    preview: str = ""        # up to _PER_FILE_PROMPT_CHARS of text content
+    preview: str = ""        # up to _PER_FILE_PROMPT_CHARS — fed into the LLM prompt
+    axon_content: str = ""   # up to _PER_FILE_AXON_CHARS — fed into Axon ingest
 
 
 @dataclass
@@ -158,21 +164,21 @@ def _detect_folder_kind(entries: list[FileEntry]) -> str:
     return "mixed"
 
 
-def _read_preview(path: Path, kind: str) -> str:
-    """Best-effort text load for the prompt preview. Reuses the
-    knowledge layer's PDF / md / txt loader where applicable; falls
-    back to plain UTF-8 read for code / config / log files."""
+def _read_text(path: Path, kind: str) -> str:
+    """Best-effort full-text load. Reuses the knowledge layer's PDF /
+    md / txt loader where applicable; falls back to plain UTF-8 read
+    for code / config / log files. The caller slices this for the
+    prompt preview AND for Axon ingestion at different caps."""
     suffix = path.suffix.lower()
     if suffix in (".pdf", ".md", ".txt", ".rst"):
         # The knowledge loader handles encoding + pypdf gracefully.
         doc = _load_local_paper(path)
         if doc is None:
             return ""
-        return doc.content[:_PER_FILE_PROMPT_CHARS]
+        return doc.content
     if kind in ("code", "config", "log", "notebook"):
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            return text[:_PER_FILE_PROMPT_CHARS]
+            return path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             _log.warning("could not read %s: %s", path, e)
             return ""
@@ -204,10 +210,11 @@ def _walk_folder(folder: Path) -> list[FileEntry]:
         except OSError:
             size = 0
         rel = p.relative_to(folder).as_posix()
-        preview = _read_preview(p, kind) if kind != "other" else ""
+        full = _read_text(p, kind) if kind != "other" else ""
         entries.append(FileEntry(
-            ident=i, path=p, rel_path=rel, kind=kind,
-            size_bytes=size, preview=preview,
+            ident=i, path=p, rel_path=rel, kind=kind, size_bytes=size,
+            preview=full[:_PER_FILE_PROMPT_CHARS],
+            axon_content=full[:_PER_FILE_AXON_CHARS],
         ))
     return entries
 
@@ -229,7 +236,10 @@ def _render_file_manifest(entries: list[FileEntry]) -> str:
         return "(empty — no files found)"
     lines = ["| ID | path | kind | size_kb |", "|---|---|---|---|"]
     for e in entries:
-        kb = max(1, e.size_bytes // 1024)
+        # Ceil-style conversion so e.g. 1536 bytes shows as 2 KB
+        # (rounding down to 1 KB would be misleading for files just
+        # over the 1 KB boundary). Empty files show as 0.
+        kb = (e.size_bytes + 1023) // 1024 if e.size_bytes > 0 else 0
         lines.append(f"| [{e.ident}] | `{e.rel_path}` | {e.kind} | {kb} |")
     return "\n".join(lines)
 
@@ -276,12 +286,12 @@ async def summarize_folder(
     output_dir: Path,
     supervisor: ProxySupervisor | None = None,
     kind: str = "auto",
-    axon: Any = None,
+    knowledge: Knowledge | None = None,
 ) -> SummaryArtifacts:
     """Top-level entry point. Walks ``folder``, builds a prompt,
-    invokes one LLM call, writes the produced markdown, and (if an
-    axon brain is supplied) ingests both the input files and the
-    final summary into Axon.
+    invokes one LLM call, writes the produced markdown, and (if a
+    ``Knowledge`` handle is supplied) ingests both the input files
+    and the final summary into Axon via ``Knowledge.add_text``.
 
     ``kind`` is the detected-or-supplied content kind. ``"auto"``
     means infer from the file mix; an explicit value (e.g.
@@ -338,9 +348,9 @@ async def summarize_folder(
     summary_path.write_text(markdown.strip() + "\n", encoding="utf-8")
 
     ingested = False
-    if axon is not None:
+    if knowledge is not None and knowledge.enabled:
         ingested = _ingest_to_axon(
-            axon, summary_id=summary_id, folder=folder,
+            knowledge, summary_id=summary_id, folder=folder,
             detected_kind=detected_kind, entries=entries,
             summary_markdown=markdown,
         )
@@ -365,48 +375,52 @@ async def summarize_folder(
 
 
 def _ingest_to_axon(
-    axon: Any, *, summary_id: str, folder: Path,
+    knowledge: Knowledge, *, summary_id: str, folder: Path,
     detected_kind: str, entries: list[FileEntry], summary_markdown: str,
 ) -> bool:
     """Best-effort ingest of the input files (as ``fi_summary_input``)
     and the final summary (as ``fi_summary``) into Axon. Returns True
     iff every call succeeded; logs and continues on individual
-    failures so a partial ingest is preferable to all-or-nothing."""
+    failures so a partial ingest is preferable to all-or-nothing.
+
+    Goes through ``Knowledge.add_text`` (the public wrapper) so we
+    don't duplicate the Axon API-drift fallback chain that the
+    knowledge layer already implements (`add_text` vs `ingest_text`).
+    Ingests the LARGER ``axon_content`` field (up to
+    ``_PER_FILE_AXON_CHARS`` per file) rather than the prompt preview,
+    so future retrieval can surface body content beyond the first
+    ~4 KB the LLM saw during summarization."""
     ok = True
-    # 1. Each input file with non-empty preview goes in as fi_summary_input.
+    # 1. Each input file with readable content goes in as fi_summary_input.
     for e in entries:
-        if not e.preview:
+        if not e.axon_content:
             continue
-        try:
-            axon.add_text(
-                text=e.preview,
-                kind="fi_summary_input",
-                metadata={
-                    "summary_id": summary_id,
-                    "rel_path": e.rel_path,
-                    "ident": e.ident,
-                    "file_kind": e.kind,
-                    "size_bytes": e.size_bytes,
-                },
-            )
-        except Exception as err:  # pragma: no cover — Axon API drift
-            _log.warning("axon ingest failed for %s: %r", e.rel_path, err)
+        success = knowledge.add_text(
+            text=e.axon_content,
+            kind="fi_summary_input",
+            metadata={
+                "summary_id": summary_id,
+                "rel_path": e.rel_path,
+                "ident": e.ident,
+                "file_kind": e.kind,
+                "size_bytes": e.size_bytes,
+            },
+        )
+        if not success:
             ok = False
 
     # 2. The summary itself.
-    try:
-        axon.add_text(
-            text=summary_markdown,
-            kind="fi_summary",
-            metadata={
-                "summary_id": summary_id,
-                "folder": str(folder),
-                "detected_kind": detected_kind,
-                "file_count": len(entries),
-                "generated_at": int(time.time()),
-            },
-        )
-    except Exception as err:  # pragma: no cover
-        _log.warning("axon ingest failed for summary doc: %r", err)
+    success = knowledge.add_text(
+        text=summary_markdown,
+        kind="fi_summary",
+        metadata={
+            "summary_id": summary_id,
+            "folder": str(folder),
+            "detected_kind": detected_kind,
+            "file_count": len(entries),
+            "generated_at": int(time.time()),
+        },
+    )
+    if not success:
         ok = False
     return ok

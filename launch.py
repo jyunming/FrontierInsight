@@ -671,19 +671,18 @@ async def _run_summarize(
         provider.name = "vscode_extension"
         provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
 
-    # Best-effort Axon brain. The summarizer tolerates `axon=None` so
-    # an Axon-less environment still produces summary.md; only the
-    # ingest step is skipped.
-    axon_brain = None
+    # Best-effort Knowledge handle. The summarizer tolerates
+    # `knowledge=None` (or a disabled Knowledge) so an Axon-less
+    # environment still produces summary.md; only the ingest step
+    # is skipped.
+    knowledge = None
     try:
         from core.knowledge import Knowledge
-        k = Knowledge(KnowledgeConfig(
+        knowledge = Knowledge(KnowledgeConfig(
             enabled=True,
             axon_config=axon_config_path if axon_config_path else None,
             seed_source_catalog=False,
         ))
-        if k.enabled and getattr(k, "_brain", None) is not None:
-            axon_brain = k._brain
     except Exception as e:  # pragma: no cover — Axon may not be installed
         print(f"[FI] --summarize: Axon unavailable ({e!r}); summary will still be written.", file=sys.stderr)
 
@@ -691,7 +690,7 @@ async def _run_summarize(
     try:
         art = await summarize_folder(
             folder, provider=provider, output_dir=output_root,
-            supervisor=supervisor, kind=kind, axon=axon_brain,
+            supervisor=supervisor, kind=kind, knowledge=knowledge,
         )
     except Exception as e:
         print(f"[FI] --summarize failed: {e!r}", file=sys.stderr)

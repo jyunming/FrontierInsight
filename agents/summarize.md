@@ -13,7 +13,7 @@ $content_kind
 # File inventory (auto-classified)
 $file_manifest
 
-# Content (per-file truncated previews — full text lives in Axon)
+# Content (per-file truncated previews; do NOT assume the rest of each file is available to you)
 $content_blocks
 
 # Your task
