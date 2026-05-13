@@ -370,6 +370,43 @@ async def test_slides_invokes_pandoc_for_pptx_when_available(
 
 
 @pytest.mark.asyncio
+async def test_slides_spawn_failure_does_not_abort_other_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PR #33 review: a `create_subprocess_exec` raise
+    (FileNotFoundError, PermissionError, OSError — possible when the
+    resolved path becomes invalid between `shutil.which` and spawn)
+    must NOT propagate out of `_run_cli`. The slide generator is
+    contractually best-effort across its 3 targets."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _FENCED_MARP
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    # Both render CLIs "available" so both branches try to spawn.
+    monkeypatch.setattr("generation.slides.shutil.which",
+                        lambda name: f"/fake/{name}")
+
+    async def fake_exec(*_argv, **_kw):  # noqa: ANN001
+        raise FileNotFoundError("path vanished between which() and spawn()")
+
+    monkeypatch.setattr(
+        "generation.slides.asyncio.create_subprocess_exec", fake_exec,
+    )
+
+    # Must NOT raise. result contains slides_md but no rendered targets.
+    result = await SlideGenerator(cfg).generate(art, out_dir)
+    assert "slides_md" in result
+    assert "slides_html" not in result
+    assert "slides_pdf" not in result
+    assert "slides_pptx" not in result
+
+
+@pytest.mark.asyncio
 async def test_slides_skips_pptx_when_pandoc_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,10 +1,13 @@
 """Slide deck generator (Phase E-2).
 
-Three render targets, each best-effort and independently skipped if
-its CLI isn't installed:
+Runs only when ``config.output.kinds`` contains ``"slides"`` AND the
+quest produced a ``paper.md``. When those gates pass, three render
+targets are attempted, each best-effort and independently skipped
+if its CLI isn't installed:
 
-1. LLM call: compress `paper.md` into Marp markdown (8-12 slides) →
-   ``slides.md``. Always produced as the source of truth.
+1. LLM call: compress ``paper.md`` into Marp markdown (8-12 slides) →
+   ``slides.md``. Produced whenever the slides kind is enabled — the
+   source of truth for the other two targets.
 2. ``marp slides.md -o slides.{html,pdf}`` — produced when the Marp
    CLI is on PATH.
 3. ``pandoc slides.md -o slides.pptx`` — produced when pandoc is on
@@ -135,7 +138,10 @@ async def _run_cli(
     """Run a render CLI and log+swallow any failure. Returns True iff
     the process exited 0. The slide generator wants all three target
     formats to be independent — a failing `marp pdf` should not stop
-    `pandoc pptx` from running."""
+    `pandoc pptx` from running, and a spawn-time exception (the path
+    became invalid between `shutil.which` and `create_subprocess_exec`,
+    permission denied, exec-format error, etc.) must NOT abort the
+    whole generator either."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -143,11 +149,19 @@ async def _run_cli(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        _log.warning("%s spawn failed: %r; skipped", label, e)
+        return False
+    try:
         _stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout_s,
         )
     except asyncio.TimeoutError:
         _log.warning("%s timeout (%.0fs); skipped", label, timeout_s)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
         return False
     if proc.returncode != 0:
         _log.warning(
