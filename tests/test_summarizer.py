@@ -221,6 +221,70 @@ def test_render_content_blocks_empty_returns_marker() -> None:
     assert _render_content_blocks(entries) == "(no readable content found)"
 
 
+def test_render_content_blocks_caps_total_size_with_elision_note() -> None:
+    """Regression: a user pointed `/summarize` at a 209-file folder and
+    the LLM call failed with BridgeError('Message exceeds token limit')
+    because the per-file cap × file-count blew past any model's budget.
+    The total cap caps the sum across all blocks; over-budget files
+    fall through to manifest-only with a trailing elision note."""
+    # Each preview is ~500 chars; with a 1500-char budget only ~2-3
+    # blocks fit + the elision note.
+    entries = [
+        FileEntry(
+            ident=i, path=Path(f"/f{i}.md"), rel_path=f"f{i}.md", kind="paper",
+            size_bytes=500, preview="A" * 500,
+        )
+        for i in range(1, 11)
+    ]
+    out = _render_content_blocks(entries, total_budget_chars=1500)
+    # At least one block was included.
+    assert "[1]" in out
+    # Some blocks were elided — the trailing note must show how many
+    # and list at least the first few IDs.
+    assert "elided" in out
+    assert "additional files" in out
+    # The total size must respect the budget (with a small margin for
+    # the elision note itself).
+    assert len(out) <= 1500 + 600, (
+        f"output {len(out)} chars; budget=1500+note"
+    )
+
+
+def test_render_content_blocks_lists_first_20_elided_ids_then_summarizes() -> None:
+    """When more than 20 files are elided, list 20 IDs + 'and N more'
+    so the prompt stays compact but the model can still cite the most
+    recent ones by ID."""
+    # 30 files, all with previews larger than the tiny budget so only
+    # the first one fits.
+    entries = [
+        FileEntry(
+            ident=i, path=Path(f"/f{i}.md"), rel_path=f"f{i}.md", kind="paper",
+            size_bytes=200, preview="X" * 200,
+        )
+        for i in range(1, 31)
+    ]
+    out = _render_content_blocks(entries, total_budget_chars=300)
+    # Should mention "and N more" because >20 IDs were elided.
+    assert "and " in out and " more" in out
+    # First 20 IDs explicit; 21st should appear as part of "more".
+    assert "[2]" in out  # in the elided list (second file)
+    assert "[20]" in out  # 20th file
+    # The note should mention 29 elided (only the first fit).
+    assert "29 additional" in out
+
+
+def test_render_content_blocks_under_budget_includes_no_elision_note() -> None:
+    """The whole point: small folders should produce a clean output with
+    no elision note. Verifies we don't accidentally insert it always."""
+    entries = [
+        FileEntry(ident=1, path=Path("/a.md"), rel_path="a.md", kind="paper",
+                  size_bytes=100, preview="short"),
+    ]
+    out = _render_content_blocks(entries, total_budget_chars=60_000)
+    assert "elided" not in out
+    assert "additional files" not in out
+
+
 # ---- ID + slug ----------------------------------------------------------
 
 
