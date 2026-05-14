@@ -81,6 +81,126 @@ def test_parse_json_lenient_nested_object() -> None:
     assert _parse_json_lenient(text) == {"outer": {"inner": [1, 2, {"deep": True}]}}
 
 
+# ---- _parse_json_lenient logging contract --------------------------------
+
+
+def test_parse_json_lenient_logs_warning_on_parse_failure(caplog) -> None:
+    """When JSON parsing definitively fails, a single WARNING line
+    must fire with the raw LLM text (truncated). Without this,
+    callers using the ``parsed or {"foo": "(parse failed)"}`` idiom
+    silently inject dummy values into QuestState and a developer
+    debugging a prompt change has no way to see what the model
+    actually returned. Audit regression guard."""
+    import logging
+
+    bad_text = "I'm sorry, I can't generate JSON. Here is some prose instead."
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+        result = _parse_json_lenient(bad_text)
+
+    assert result is None
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.message for r in warnings]
+    msg = warnings[0].getMessage()
+    assert "JSON parse failed" in msg
+    # Raw text snippet must appear so the dev can see what broke.
+    assert "I'm sorry" in msg
+    assert "prose instead" in msg
+
+
+def test_parse_json_lenient_logs_truncated_raw_text(caplog) -> None:
+    """Very long bad outputs must be truncated in the log to keep
+    run.log readable; the truncation marker must be present so the
+    reader knows there's more."""
+    import logging
+
+    huge = "garbage " * 1000  # ~8 KB, well over default 500-char cap
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+        _parse_json_lenient(huge)
+
+    msg = caplog.records[-1].getMessage()
+    # Should show "chars truncated" marker, not the full 8 KB.
+    assert "chars truncated" in msg
+    assert len(msg) < 2000, f"log msg should not contain full 8KB payload"
+
+
+def test_parse_json_lenient_includes_node_tag_when_passed(caplog) -> None:
+    """Callers may pass ``node="design"`` (or any node name) and the
+    log line includes ``node=design`` for quick grep. Empty node
+    (the default) must NOT inject a dangling ``node=`` substring."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+        _parse_json_lenient("nope", node="design")
+    msg = caplog.records[-1].getMessage()
+    assert "node=design" in msg
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+        _parse_json_lenient("nope")  # no node= kwarg
+    msg = caplog.records[-1].getMessage()
+    assert "node=" not in msg
+
+
+def test_parse_json_lenient_empty_input_does_not_log(caplog) -> None:
+    """Empty input is not a parse failure — there was nothing to parse.
+    Don't spam WARNING for every node that happens to get an empty
+    response (which is itself a different problem, surfaced elsewhere)."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+        result = _parse_json_lenient("")
+    assert result is None
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [], [r.message for r in warnings]
+
+
+def test_parse_json_lenient_array_does_not_log(caplog) -> None:
+    """When the LLM returns valid JSON but the wrong shape (a list,
+    not an object), the JSON itself parsed fine — the contract is
+    upstream of this function. Don't WARN."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+        result = _parse_json_lenient("[1, 2, 3]")
+    assert result is None
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [], [r.message for r in warnings]
+
+
+def test_parse_json_lenient_whitespace_only_does_not_log(caplog) -> None:
+    """Whitespace-only and empty-fence-only inputs collapse to empty
+    after ``_strip_outer_fence(...).strip()``. Both must be treated as
+    silent no-ops, NOT as parse failures — otherwise a model that
+    happens to emit trailing whitespace would log WARNING noise on
+    every node. Regression for PR #54 bot comment."""
+    import logging
+
+    # Cases that genuinely collapse to "" after _strip_outer_fence + strip:
+    #   - pure whitespace at top level
+    #   - well-formed empty fenced block (requires content-newline pair
+    #     inside, so "```\n\n```" matches the regex with empty content)
+    #   - same but with a language tag
+    # NOT tested here: malformed fences like "```\n```" (single \n between
+    # open and close) don't match the regex, fall through to the no-braces
+    # path, and DO log a WARNING — which is correct behavior (the LLM
+    # emitted something syntactically weird and the user should know).
+    cases = [
+        "   ",                   # pure whitespace
+        "\n\n\t",                # whitespace newlines/tabs
+        "```\n\n```",            # empty fenced block (regex matches, content="")
+        "```python\n\n```",      # empty fenced block with language
+    ]
+    for text in cases:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+            assert _parse_json_lenient(text) is None, text
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [], (
+            f"{text!r} produced a spurious WARNING: "
+            f"{[r.message for r in warnings]!r}"
+        )
+
+
 # ---- _extract_result_json ------------------------------------------------
 
 
