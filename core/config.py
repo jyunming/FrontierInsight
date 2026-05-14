@@ -145,6 +145,32 @@ class EngineConfig(BaseModel):
     # ``empirical_vs_theoretical`` answer — auto-detection from
     # clarify is the second entry point. YAML flag wins when set.
     no_simulation: bool = False
+    # Phase D1 — when the engine enters no-simulation mode, an
+    # ``auto_collect_data`` node runs BEFORE ``wait_for_data`` and
+    # tries to pull relevant docs from the Knowledge layer (Axon).
+    # Successful hits land under ``<quest_root>/data/auto_collected/``
+    # as one ``.md`` file per doc (content + a YAML metadata header).
+    # ``wait_for_data`` then sees those files via its existing rglob
+    # walk and proceeds without pausing — so a no-simulation quest
+    # that COULD be answered from Axon never blocks for user input.
+    #
+    # When False, the auto_collect_data node is a passthrough — the
+    # engine pauses for user-supplied data exactly like before. Also
+    # passes through if ``knowledge.enabled`` is False (no Axon to
+    # query) — no need to set this False just to silence the node.
+    #
+    # The fallback to the manual pause is preserved: if Axon returns
+    # zero hits, ``wait_for_data`` still writes the README and pauses
+    # for the user just like the no-Axon case.
+    auto_collect_data: bool = True
+    # Top-K passed to ``Knowledge.asearch`` from the auto_collect_data
+    # node. 5 is a deliberate ceiling — the data_load LLM call has a
+    # finite content budget, and N=5 with one ~1k-token file each
+    # comfortably fits a 16k-context prompt. Bump only when running on
+    # a long-context model AND when the topic genuinely benefits from
+    # more breadth (most don't — the top 5 from a good retriever
+    # cover the space already).
+    auto_collect_top_k: int = 5
 
 
 class ExecutionConfig(BaseModel):

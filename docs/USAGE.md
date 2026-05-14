@@ -165,6 +165,8 @@ engine:
     - devil_advocate
     # available: methodologist, statistician, devil_advocate, reproducibility
   no_simulation: false              # see "Topics that need real data" section below
+  auto_collect_data: true           # try Axon for evidence before pausing for user data (no_simulation mode)
+  auto_collect_top_k: 5             # Axon top_k for auto_collect_data
 
 execution:
   sandbox: venv                     # venv (default) | docker
@@ -316,22 +318,48 @@ precedence — first match wins, decision is logged to `run.log` as
    (`source=clarify_empirical_legacy`).
 4. Otherwise: simulate (`source=default`).
 
-The engine then runs `clarify → ideate → literature → design`, pauses
-cleanly (rc=0) with an instruction file at
-`outputs/<quest_id>/data/README.md`. You go off and collect data —
-survey responses, transcripts, downloaded papers, notes, CSVs,
-whatever — and drop the files into that folder. Then:
+The engine then runs `clarify → ideate → literature → design →
+auto_collect_data → wait_for_data → data_load → analyze → ...`. The
+two no-simulation-specific stops:
+
+**`auto_collect_data`** — Phase D1 agent-side data collection.
+Before pausing for user input, the engine asks the Knowledge layer
+(Axon) for relevant docs using `topic + design.hypothesis` as the
+query and writes the top hits into `<quest_root>/data/auto_collected/`
+as one Markdown file per doc (with YAML provenance front matter so
+the paper can cite back to specific sources). Controlled by:
+
+* `engine.auto_collect_data: true` (default) — try Axon first.
+  Set to `false` for "user-only" data flow when you don't trust
+  the corpus or want a manual pause every time.
+* `engine.auto_collect_top_k: 5` (default) — Axon hits requested.
+  5 fits comfortably in a 16k-context data_load prompt; raise
+  only on long-context models with topics that genuinely need
+  more breadth.
+
+Auto-collect is a logged passthrough (no Axon call, no files
+written) when `engine.auto_collect_data: false`, `knowledge.enabled:
+false`, or Axon raises / returns zero hits — in those cases the
+flow falls through to the user-data pause as before.
+
+**`wait_for_data`** — the user-data pause. With files already in
+`data/` (either auto-collected or user-supplied), this node
+passes through immediately. If the dir is empty (Axon returned
+nothing AND no manual drops), the engine exits cleanly (rc=0)
+with an instruction file at `outputs/<quest_id>/data/README.md`
+telling you what to drop. Then:
 
 ```bash
 fi --resume <quest_id>
 ```
 
 The engine picks up at the `data_load` node: walks every file in
-`data/`, classifies them (csv / json / pdf / md / xlsx / png),
-synthesizes a `result_json` via one LLM call grounded in the
-designed measurement plan, and then continues normally through
-`analyze → cross_check → write → review`. The paper cites the
-*specific files you dropped* as primary sources, not invented data.
+`data/` (including `auto_collected/`), classifies them (csv / json
+/ pdf / md / xlsx / png), synthesizes a `result_json` via one LLM
+call grounded in the designed measurement plan, and then continues
+normally through `analyze → cross_check → write → review`. The
+paper cites the *specific files dropped or auto-collected* as
+primary sources, not invented data.
 
 Permissive about format — drop whatever's natural. The walker
 deduplicates and budget-caps the prompt the same way `/summarize`
