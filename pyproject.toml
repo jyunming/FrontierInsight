@@ -6,7 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "frontier-insight"
 version = "0.1.0"
 description = "Autonomous research assistant: give it a topic, get back a paper, the experiment code, and figures. Integrates with VSCode Copilot Chat."
-readme = "README.md"
+# Explicit content-type so PyPI renders the long_description as
+# CommonMark/GFM (setuptools infers this from the .md suffix today,
+# but the dict form removes any doubt for older builders and makes
+# the contract obvious to readers).
+#
+# Tag-drift note: links inside README.md target `blob/main` and
+# `tree/main`, which means an old PyPI release page (e.g. v0.1.0 a
+# year from now) will surface CURRENT docs rather than docs frozen
+# to that release. We accept this for the alpha/early-stage phase:
+# the docs improve over time, and pinning to release tags
+# (`blob/v0.1.0`, `blob/v0.2.0`, …) requires release tooling that
+# rewrites the README before each `twine upload` — not worth the
+# complexity until the project is past 1.0 and old releases get
+# meaningfully different docs. When that happens, add a pre-publish
+# step under `scripts/` that sed-replaces `blob/main` and
+# `tree/main` with the current release tag.
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "jyunming" }]

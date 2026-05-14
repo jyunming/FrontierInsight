@@ -97,7 +97,7 @@ npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
 #   CLI:  code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through 6 quick questions (topic, outputs, clarify mode, reviewer panel, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. **See [`vscode-frontier-insight/README.md`](vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, just type `@fi` — the extension walks you through 6 quick questions (topic, outputs, clarify mode, reviewer panel, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 
@@ -385,9 +385,9 @@ The agent will read it and cite it. Requires `pip install pypdf` for PDF support
 
 | Example | What it does | Wall time |
 |---|---|---|
-| [`examples/integrator_bakeoff/`](examples/integrator_bakeoff/config.yaml) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
-| [`examples/euv_mor_shot_noise/`](examples/euv_mor_shot_noise/config.yaml) | Theoretical LER floor in metal-oxide EUV resists. Uses the literature router. | ~15 min |
-| [`examples/bernstein_vazirani_noise/`](examples/bernstein_vazirani_noise/config.yaml) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
+| [`examples/integrator_bakeoff/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/integrator_bakeoff) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
+| [`examples/euv_mor_shot_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/euv_mor_shot_noise) | Theoretical LER floor in metal-oxide EUV resists. Uses the literature router. | ~15 min |
+| [`examples/bernstein_vazirani_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bernstein_vazirani_noise) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
 
 ---
 
@@ -395,18 +395,18 @@ The agent will read it and cite it. Requires `pip install pypdf` for PDF support
 
 Read in this order — each builds on the previous:
 
-1. **Pick your LLM provider strategically**: [`docs/PROVIDERS.md`](docs/PROVIDERS.md) — cost expectations, ToS standing per provider, when to use per-node model routing to spend cheap on `clarify` and expensive on `write`.
-2. **Day-to-day reference**: [`docs/USAGE.md`](docs/USAGE.md) — every chat command, every `fi` flag, the YAML config schema, output artifact layout, common workflows.
-3. **Full capability reference**: [`docs/capabilities.md`](docs/capabilities.md) — the 11-node DAG, every YAML field with defaults, knowledge layer internals, output kinds.
-4. **Architecture & extension points**: [`docs/architecture.md`](docs/architecture.md) — `Config` / `QuestState` / `QuestArtifacts` contracts, the generator protocol, fleet runner internals.
-5. **Hit a snag installing?** [`docs/INSTALL.md`](docs/INSTALL.md) — three install paths (standard / no-admin / locked-down) and the troubleshooting section.
-6. **For contributors / AI coding assistants**: [`CONTRIBUTING.md`](CONTRIBUTING.md) for PR conventions; [`dev/CLAUDE.md`](dev/CLAUDE.md) for repo-specific guidance that Claude Code agents load automatically.
+1. **Pick your LLM provider strategically**: [`docs/PROVIDERS.md`](https://github.com/jyunming/FrontierInsight/blob/main/docs/PROVIDERS.md) — cost expectations, ToS standing per provider, when to use per-node model routing to spend cheap on `clarify` and expensive on `write`.
+2. **Day-to-day reference**: [`docs/USAGE.md`](https://github.com/jyunming/FrontierInsight/blob/main/docs/USAGE.md) — every chat command, every `fi` flag, the YAML config schema, output artifact layout, common workflows.
+3. **Full capability reference**: [`docs/capabilities.md`](https://github.com/jyunming/FrontierInsight/blob/main/docs/capabilities.md) — the 11-node DAG, every YAML field with defaults, knowledge layer internals, output kinds.
+4. **Architecture & extension points**: [`docs/architecture.md`](https://github.com/jyunming/FrontierInsight/blob/main/docs/architecture.md) — `Config` / `QuestState` / `QuestArtifacts` contracts, the generator protocol, fleet runner internals.
+5. **Hit a snag installing?** [`docs/INSTALL.md`](https://github.com/jyunming/FrontierInsight/blob/main/docs/INSTALL.md) — three install paths (standard / no-admin / locked-down) and the troubleshooting section.
+6. **For contributors / AI coding assistants**: [`CONTRIBUTING.md`](https://github.com/jyunming/FrontierInsight/blob/main/CONTRIBUTING.md) for PR conventions; [`dev/CLAUDE.md`](https://github.com/jyunming/FrontierInsight/blob/main/dev/CLAUDE.md) for repo-specific guidance that Claude Code agents load automatically.
 
 ---
 
 ## License & contributing
 
-Apache 2.0 — see [`LICENSE`](LICENSE). Contributions welcome via PR; see [`CONTRIBUTING.md`](CONTRIBUTING.md) if present, otherwise open an issue first.
+Apache 2.0 — see [`LICENSE`](https://github.com/jyunming/FrontierInsight/blob/main/LICENSE). Contributions welcome via PR; see [`CONTRIBUTING.md`](https://github.com/jyunming/FrontierInsight/blob/main/CONTRIBUTING.md) if present, otherwise open an issue first.
 
 ---
 
