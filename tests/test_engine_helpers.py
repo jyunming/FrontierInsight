@@ -415,26 +415,35 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert expected_nodes.issubset(set(g.nodes))
 
     # Linear edges that must be present. Phase I inserted `clarify`
-    # between START and `ideate`; the rest of the chain is unchanged.
+    # between START and `ideate`. The no-simulation mode turned
+    # ``design → implement`` into a conditional edge (implement vs
+    # wait_for_data) — see the branches check below.
     plain_edges = set(g.edges)
     assert (START, "clarify") in plain_edges
     assert ("clarify", "ideate") in plain_edges
     assert ("ideate", "literature") in plain_edges
     assert ("literature", "design") in plain_edges
-    assert ("design", "implement") in plain_edges
     assert ("implement", "execute") in plain_edges
     # Phase K replaced `execute → analyze` with `execute → execute_reflect`
     # plus a conditional `execute_reflect → execute | analyze` edge.
     assert ("execute", "execute_reflect") in plain_edges
+    # no-simulation chain: wait_for_data → data_load → analyze. Both
+    # new nodes feed analyze on the no-sim path.
+    assert ("wait_for_data", "data_load") in plain_edges
+    assert ("data_load", "analyze") in plain_edges
     # Phase L replaced `analyze → write` with `analyze → cross_check` plus
     # a conditional `cross_check → write | design` edge.
     assert ("analyze", "cross_check") in plain_edges
     assert ("write", "review") in plain_edges
 
-    # Conditional branches required by Phase K, L, and the review loop.
+    # Conditional branches: review-revise, execute-reflect-retry,
+    # cross-check-redesign, AND the new design → implement | wait_for_data.
     assert "review" in g.branches
     assert "execute_reflect" in g.branches
     assert "cross_check" in g.branches
+    assert "design" in g.branches, (
+        "design must have a conditional edge for no-simulation routing"
+    )
 
     review_branch = next(iter(g.branches["review"].values()))
     assert review_branch.ends == {"revise": "design", "done": END}
@@ -442,6 +451,10 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
     assert cross_branch.ends == {"write": "write", "redesign": "design"}
+    design_branch = next(iter(g.branches["design"].values()))
+    assert design_branch.ends == {
+        "implement": "implement", "wait_for_data": "wait_for_data",
+    }
 
 
 # ---- _parse_implement_response ------------------------------------------
@@ -766,6 +779,300 @@ def test_close_quest_logger_logger_with_no_handlers_is_safe() -> None:
     assert logger.handlers == []
     _close_quest_logger(qid)
     assert logger.handlers == []
+
+
+# ---- no-simulation mode helpers ------------------------------------------
+
+
+def test_list_user_data_files_skips_readme_and_dotfiles(tmp_path: Path) -> None:
+    """The data_load node walks <quest_root>/data/ on every resume.
+    The engine-authored README.md and any dot-prefixed files must be
+    excluded so they don't pollute the prompt corpus."""
+    from core.engine import _list_user_data_files
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "README.md").write_text("auto-written by FI\n")
+    (data_dir / "survey.csv").write_text("a,b,c\n1,2,3\n")
+    (data_dir / "notes.md").write_text("# field notes\n")
+    (data_dir / ".DS_Store").write_bytes(b"\x00\x01")
+    (data_dir / ".hidden.txt").write_text("ignored\n")
+
+    files = _list_user_data_files(data_dir)
+    names = [p.name for p in files]
+    assert "survey.csv" in names
+    assert "notes.md" in names
+    assert "README.md" not in names, (
+        "README.md is the FI-authored instruction file; must not be "
+        "treated as user data"
+    )
+    assert ".DS_Store" not in names
+    assert ".hidden.txt" not in names
+
+
+def test_list_user_data_files_returns_empty_when_dir_missing(
+    tmp_path: Path,
+) -> None:
+    from core.engine import _list_user_data_files
+    assert _list_user_data_files(tmp_path / "does-not-exist") == []
+
+
+def test_list_user_data_files_is_deterministic(tmp_path: Path) -> None:
+    """Stable sort by path so the data_load prompt is reproducible
+    across resumes — the LLM sees the same file IDs each time."""
+    from core.engine import _list_user_data_files
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for name in ["z.csv", "a.csv", "m.csv"]:
+        (data_dir / name).write_text("x\n")
+
+    first = [p.name for p in _list_user_data_files(data_dir)]
+    second = [p.name for p in _list_user_data_files(data_dir)]
+    assert first == second == ["a.csv", "m.csv", "z.csv"]
+
+
+def test_render_data_readme_includes_topic_and_resume_command(
+    tmp_path: Path,
+) -> None:
+    """The README dropped into <quest_root>/data/ must tell the user
+    (a) the topic so they remember what they were collecting data for,
+    (b) the hypothesis from the design node,
+    (c) the resume command with the right quest_id pasted in."""
+    from core.engine import _render_data_readme
+
+    state = {
+        "topic": "Belgium vs Taiwan culture comparison",
+        "design": {
+            "hypothesis": "Trust in institutions correlates with X.",
+            "method": "Survey 100 respondents per country.",
+            "variables": {"trust_score": "Likert 1-7"},
+        },
+    }
+    md = _render_data_readme(state, "1778751621-test-aabbcc")
+
+    assert "Belgium vs Taiwan culture comparison" in md
+    assert "Trust in institutions" in md
+    assert "fi --resume 1778751621-test-aabbcc" in md
+    # Format hints the user actually needs.
+    assert ".csv" in md
+    assert ".md" in md
+    assert ".pdf" in md
+    # The variables block should make it through.
+    assert "trust_score" in md
+
+
+def test_render_data_readme_handles_missing_design(tmp_path: Path) -> None:
+    """If the design node failed or its output is sparse, the README
+    should still be generated — just with fallback text for the
+    missing fields. No KeyError."""
+    from core.engine import _render_data_readme
+
+    state = {"topic": "Some qualitative question"}  # no design key
+    md = _render_data_readme(state, "1700000000-foo-aabbcc")
+    assert "Some qualitative question" in md
+    # The hypothesis fallback should mention the design node may have failed.
+    assert "design node may have failed" in md
+
+
+def test_engine_config_no_simulation_default_false() -> None:
+    """Backward compat: existing YAMLs without an engine.no_simulation
+    field must continue to work. The default must be False so quests
+    keep simulating unless the user opts in."""
+    from core.config import EngineConfig
+    assert EngineConfig().no_simulation is False
+    assert EngineConfig(no_simulation=True).no_simulation is True
+
+
+def test_resolve_no_simulation_from_clarify_yaml_wins(tmp_path: Path) -> None:
+    """When ``engine.no_simulation: true`` is set in YAML, the resolved
+    flag is True regardless of clarify_answers — even if clarify says
+    'theoretical'. The YAML is the explicit user override."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=True, clarify_mode="off"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._resolve_no_simulation_from_clarify(
+        {"empirical_vs_theoretical": "theoretical"},
+    ) is True
+
+
+def test_resolve_no_simulation_from_clarify_empirical_answer_triggers(
+    tmp_path: Path,
+) -> None:
+    """When YAML doesn't set the flag but the clarify answer is
+    'empirical', the resolved flag becomes True. Auto-detect path."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._resolve_no_simulation_from_clarify(
+        {"empirical_vs_theoretical": "empirical"},
+    ) is True
+    # And other answers don't trigger it.
+    assert engine._resolve_no_simulation_from_clarify(
+        {"empirical_vs_theoretical": "theoretical"},
+    ) is False
+    assert engine._resolve_no_simulation_from_clarify(
+        {"empirical_vs_theoretical": "mixed"},
+    ) is False
+    assert engine._resolve_no_simulation_from_clarify({}) is False
+
+
+def test_route_after_design_no_sim_flag_routes_to_wait_for_data(
+    tmp_path: Path,
+) -> None:
+    """The routing function — the heart of the no-sim graph edge.
+    When state carries ``no_simulation_resolved=True``, design must
+    route to ``wait_for_data``. Otherwise to ``implement``."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._route_after_design({"no_simulation_resolved": True}) == "wait_for_data"
+    assert engine._route_after_design({"no_simulation_resolved": False}) == "implement"
+    assert engine._route_after_design({}) == "implement"
+
+
+@pytest.mark.asyncio
+async def test_node_data_load_filters_readme_from_walked_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_walk_folder`` from core.summarizer doesn't know about the
+    FI-authored README. Without filtering, the prompt would include
+    the README's contents (topic + hypothesis + resume command)
+    AS IF IT WERE user-supplied evidence, and the LLM might cite it
+    as a primary source in key_findings.
+
+    Regression for PR #57 bot comment. ``_node_data_load`` must drop
+    the top-level README before rendering manifest / content blocks
+    so the LLM only sees the user's actual data."""
+    from unittest.mock import AsyncMock
+
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    # Build the same data dir layout the engine would have produced:
+    # README.md from FI + the user's actual data files.
+    data_dir = engine.quest_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "README.md").write_text(
+        "# Drop your data here\n\n"
+        "## The hypothesis\n\n"
+        "> Trust correlates with X (this should NOT end up as a 'finding')\n",
+        encoding="utf-8",
+    )
+    (data_dir / "survey.csv").write_text("country,trust\nBE,0.6\nTW,0.7\n", encoding="utf-8")
+    (data_dir / "notes.md").write_text(
+        "# Field notes\n\nObserved that public-trust institutions...\n",
+        encoding="utf-8",
+    )
+
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_chat(prompt, *, node="", **kw):
+        captured_prompt["text"] = prompt
+        return '{"summary": "ok", "key_findings": [], "measurements": {}}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+
+    state = {"topic": "test", "design": {"hypothesis": "h"}}
+    out = await engine._node_data_load(state)
+
+    # README content must NOT appear in the prompt the LLM saw.
+    prompt_text = captured_prompt["text"]
+    assert "Drop your data here" not in prompt_text, (
+        "FI-authored README leaked into the data_load prompt"
+    )
+    assert "this should NOT end up" not in prompt_text
+
+    # The actual user data DOES appear.
+    assert "survey.csv" in prompt_text
+    assert "notes.md" in prompt_text
+    assert "0.6" in prompt_text or "trust" in prompt_text
+
+    # data_files returned should contain ONLY the user's files (2),
+    # not 3 (which would mean the README slipped through).
+    assert len(out["data_files"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_node_data_load_handles_readme_only_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the only file in <quest_root>/data/ is the FI-authored
+    README (user resumed too early without dropping data), the node
+    must return an empty result_json rather than synthesize findings
+    from the README's own instructions."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    data_dir = engine.quest_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "README.md").write_text("# Drop your data here\n", encoding="utf-8")
+
+    # The LLM must not be called in this case.
+    called = {"n": 0}
+
+    async def fake_chat(prompt, *, node="", **kw):  # pragma: no cover
+        called["n"] += 1
+        return "{}"
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    out = await engine._node_data_load({"topic": "t", "design": {}})
+    assert out == {"result_json": {}, "data_files": []}
+    assert called["n"] == 0, "LLM was called despite empty user data"
+
+
+def test_data_load_prompt_is_in_loaded_prompts() -> None:
+    """``_load_prompts`` must include ``data_load.md`` so
+    ``_node_data_load`` can ``self._prompts["data_load"].substitute(...)``
+    without a KeyError. Regression for missed prompt registration."""
+    from core.engine import _load_prompts
+    prompts = _load_prompts()
+    assert "data_load" in prompts
+    # And the template must have the variables the node passes in.
+    src = prompts["data_load"].template
+    # ``string.Template`` accepts both ``$var`` and ``${var}`` syntax;
+    # the prompt uses the ``${var}`` form (less ambiguous near JSON
+    # braces). Check for either spelling.
+    for var in ("topic", "design_block", "file_manifest", "content_blocks"):
+        assert (f"${var}" in src) or ("${" + var + "}" in src), (
+            f"data_load.md missing template var ${var}"
+        )
 
 
 @pytest.mark.asyncio

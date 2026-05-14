@@ -15,9 +15,19 @@ $topic
     "default": "<your best guess answer, derived from the topic alone>"
   },
   "empirical_vs_theoretical": {
-    "question": "<one sentence asking whether this study runs code and measures something, vs. derives results analytically>",
+    "question": "<one sentence asking how this question gets answered: by writing a Python simulation, by closed-form derivation, by mixing both, OR by the user collecting real-world data (surveys, interviews, field notes, archival sources) that a Python script could not invent>",
     "default": "empirical" or "theoretical" or "mixed"
   },
+  // NOTE on `empirical` as a default: pick "empirical" only when the
+  // research question is genuinely answered by REAL-WORLD DATA the
+  // user must collect themselves (qualitative comparisons across
+  // cultures, history, sociological surveys, archival document
+  // analysis, etc.). The engine treats "empirical" as a routing
+  // signal — it skips the simulation half of the pipeline, pauses
+  // after `design`, and asks the user to drop their collected data
+  // into `<quest_root>/data/`. Use "theoretical" for closed-form /
+  // analytic derivations and "mixed" for hybrid simulation + closed-
+  // form work; both keep the simulation path active.
   "success_metric": {
     "question": "<one sentence asking what number changing in what direction would count as the headline result>",
     "default": "<your best guess of the metric + direction>"
