@@ -526,21 +526,74 @@ class Engine:
         """Decide whether the ``no_simulation`` flag should be on for
         this quest, based on the YAML config + the clarify answers.
 
-        Two entry points (YAML wins when set):
+        Decision precedence (first match wins):
 
-        * ``engine.no_simulation: true`` in YAML → always True.
-        * ``empirical_vs_theoretical`` answer in clarify == "empirical"
-          → True. The user picked "empirical" so the engine treats this
-          as a topic where real data must be collected by hand, not
-          simulated. "theoretical" and "mixed" answers leave the flag
-          False — those topics can still run a Python simulation
-          (closed-form derivations, hybrid empirical+theory, etc.).
+        1. ``engine.no_simulation: true`` in YAML → always True. The
+           user's explicit override beats any LLM judgement.
+        2. ``simulatability`` answer in clarify (new slot, see
+           ``agents/clarify.md``):
+            - ``"no"`` → True. The LLM judged that Python can't
+              produce data that answers this question.
+            - ``"yes"`` or ``"uncertain"`` → False. The simulation
+              path runs; ``uncertain`` adds a review-time caveat (not
+              implemented in this method — happens in the review prompt).
+        3. **Legacy fallback** — ``empirical_vs_theoretical == "empirical"``
+           → True. Kept for back-compat with quests started before the
+           ``simulatability`` slot existed (resumes from old
+           checkpoints, hand-written YAML answers, etc.). New quests
+           should always have the simulatability slot populated.
+
+        Every resolution is logged at INFO level with the reason
+        (when available) so the user can see exactly why the engine
+        took whichever path it took — log line format:
+        ``[clarify] simulatability resolved: NO_SIMULATION
+        (source=yaml|clarify_simulatability|clarify_empirical,
+        reason='<quote>')``.
         """
+        answers = answers or {}
         if self.config.engine.no_simulation:
+            self._log.info(
+                "[clarify] simulatability resolved: NO_SIMULATION "
+                "(source=yaml, reason='engine.no_simulation: true')",
+            )
             return True
-        evt = (answers or {}).get("empirical_vs_theoretical")
+
+        sim = answers.get("simulatability")
+        if isinstance(sim, dict):
+            decision = str(sim.get("default", "")).strip().lower()
+            reason = str(sim.get("reason", "")).strip()
+            if decision == "no":
+                self._log.info(
+                    "[clarify] simulatability resolved: NO_SIMULATION "
+                    "(source=clarify_simulatability, reason=%r)",
+                    reason or "(no reason provided)",
+                )
+                return True
+            if decision in ("yes", "uncertain"):
+                self._log.info(
+                    "[clarify] simulatability resolved: SIMULATE "
+                    "(source=clarify_simulatability, decision=%s, reason=%r)",
+                    decision, reason or "(no reason provided)",
+                )
+                return False
+            # Unknown / empty decision — fall through to legacy fallback.
+
+        # Legacy fallback for quests scoped before the simulatability
+        # slot was added.
+        evt = answers.get("empirical_vs_theoretical")
         if isinstance(evt, str) and evt.strip().lower() == "empirical":
+            self._log.info(
+                "[clarify] simulatability resolved: NO_SIMULATION "
+                "(source=clarify_empirical_legacy, "
+                "reason='empirical_vs_theoretical=empirical, "
+                "simulatability slot missing')",
+            )
             return True
+
+        self._log.info(
+            "[clarify] simulatability resolved: SIMULATE "
+            "(source=default, no signal from YAML or clarify)",
+        )
         return False
 
     async def _node_ideate(self, state: QuestState) -> QuestState:

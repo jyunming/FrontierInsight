@@ -18,16 +18,47 @@ $topic
     "question": "<one sentence asking how this question gets answered: by writing a Python simulation, by closed-form derivation, by mixing both, OR by the user collecting real-world data (surveys, interviews, field notes, archival sources) that a Python script could not invent>",
     "default": "empirical" or "theoretical" or "mixed"
   },
-  // NOTE on `empirical` as a default: pick "empirical" only when the
-  // research question is genuinely answered by REAL-WORLD DATA the
-  // user must collect themselves (qualitative comparisons across
-  // cultures, history, sociological surveys, archival document
-  // analysis, etc.). The engine treats "empirical" as a routing
-  // signal — it skips the simulation half of the pipeline, pauses
-  // after `design`, and asks the user to drop their collected data
-  // into `<quest_root>/data/`. Use "theoretical" for closed-form /
-  // analytic derivations and "mixed" for hybrid simulation + closed-
-  // form work; both keep the simulation path active.
+  "simulatability": {
+    "question": "Could a self-contained Python script (numpy/scipy/matplotlib, ~100 lines, no internet) produce data that genuinely answers this research question? Or does the question require real-world observation that cannot be simulated without inventing values?",
+    "default": "yes" or "no" or "uncertain",
+    "reason": "<one-sentence justification for the chosen default. If 'no', name what kind of real-world data would be needed.>"
+  },
+  // CRITICAL — the engine uses `simulatability` as the ROUTING SIGNAL
+  // for the no-simulation flow. This slot is NEW and supersedes the
+  // older "empirical_vs_theoretical → empirical" coupling, which
+  // conflated two different questions (methodology type AND Python's
+  // reach). Decision logic:
+  //
+  //   simulatability == "no"        → engine routes to wait_for_data
+  //                                    (no Python script can answer this;
+  //                                     pause for the user / agent to
+  //                                     collect real data).
+  //   simulatability == "yes"       → engine runs the normal
+  //                                    implement → execute pipeline.
+  //   simulatability == "uncertain" → engine runs the normal pipeline
+  //                                    BUT also includes a "this may
+  //                                    have produced invented data"
+  //                                    caveat in the review prompt.
+  //
+  // Pick "no" when the question is about: cultural attitudes, history,
+  // social phenomena, biographies, archival document analysis, current
+  // events, qualitative comparisons across populations. The user is
+  // running an empirical study; a Python script would have to make up
+  // numbers.
+  //
+  // Pick "yes" when the question can be answered with: physics
+  // simulation, closed-form math, algorithmic experiments,
+  // statistical bootstrapping, synthetic-data experiments with known
+  // generators, computational benchmarks. The user is running a
+  // computational study; Python can produce real evidence.
+  //
+  // Pick "uncertain" when the topic could plausibly be either; the
+  // engine will run the simulation path but flag the result for
+  // extra review scrutiny.
+  //
+  // The `reason` field is REQUIRED — it gets logged at routing time
+  // ("[run] simulatability: no — '<reason>'") so the user can see
+  // exactly why the engine took the path it did.
   "success_metric": {
     "question": "<one sentence asking what number changing in what direction would count as the headline result>",
     "default": "<your best guess of the metric + direction>"
