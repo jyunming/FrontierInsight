@@ -405,6 +405,127 @@ async def test_chat_propagates_cancellation_promptly():
         await real_http.aclose()
 
 
+async def test_chat_error_includes_provider_and_node_in_note():
+    """When an LLM call fails, the exception should carry an
+    ``add_note`` line tagging the provider, transport, model, and
+    engine node so a user reading the traceback knows what was running
+    when it blew up — instead of seeing a bare httpx stack trace."""
+    import httpx
+
+    ep = ResolvedEndpoint(
+        base_url="https://api.openai.com/v1", model="gpt-5",
+        api_key="sk-test", provider_name="openai",
+    )
+    bad = MagicMock()
+    bad.status_code = 502
+    bad.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            "502 Bad Gateway", request=MagicMock(), response=MagicMock(),
+        )
+    )
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(return_value=bad)
+    client = LLMClient(ep, http=fake_http)
+
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        await client.chat(
+            [{"role": "user", "content": "x"}], node="implement",
+        )
+
+    # ``add_note`` is a Python 3.11+ feature; the project floor is 3.11
+    # so the note must be present.
+    notes = getattr(ei.value, "__notes__", [])
+    assert notes, "exception should have at least one FI note attached"
+    full = " ".join(notes)
+    assert "[FI]" in full
+    assert "provider=openai" in full
+    assert "transport=http" in full
+    assert "model=gpt-5" in full
+    assert "node=implement" in full
+
+
+async def test_chat_error_note_uses_model_override_when_passed():
+    """When the caller passes per-call ``model=...`` (Phase O: per-node
+    model routing), the error note should reflect the EFFECTIVE model
+    used for the call, not the endpoint default."""
+    import httpx
+
+    ep = ResolvedEndpoint(
+        base_url="https://api.openai.com/v1", model="gpt-5",
+        api_key="sk-test", provider_name="openai",
+    )
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(side_effect=httpx.TransportError("boom"))
+    client = LLMClient(ep, http=fake_http)
+
+    with pytest.raises(httpx.TransportError) as ei:
+        await client.chat(
+            [{"role": "user", "content": "x"}],
+            node="write", model="claude-3-5-sonnet",
+        )
+    notes = " ".join(getattr(ei.value, "__notes__", []))
+    assert "model=claude-3-5-sonnet" in notes, notes
+    assert "node=write" in notes
+
+
+async def test_chat_error_note_omits_node_when_unset():
+    """``node`` defaults to ``""``. Empty node shouldn't appear in the
+    note as ``node=`` — it should just be omitted."""
+    import httpx
+
+    ep = ResolvedEndpoint(
+        base_url="https://api.openai.com/v1", model="gpt-5",
+        api_key="sk-test", provider_name="openai",
+    )
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(side_effect=httpx.TransportError("boom"))
+    client = LLMClient(ep, http=fake_http)
+
+    with pytest.raises(httpx.TransportError) as ei:
+        await client.chat([{"role": "user", "content": "x"}])
+    notes = " ".join(getattr(ei.value, "__notes__", []))
+    assert "node=" not in notes, f"node= snuck into note: {notes!r}"
+    assert "provider=openai" in notes
+
+
+async def test_chat_cancellation_does_not_get_a_note():
+    """The error-context wrapper uses ``except Exception``, NOT
+    ``except BaseException``, specifically so ``CancelledError``
+    propagates clean and un-noted. This is required for the
+    cancellation contract to hold (see comment in
+    LLMClient._chat_impl). Regression guard."""
+    post_entered = asyncio.Event()
+
+    async def hang(*a, **kw):
+        post_entered.set()
+        await asyncio.sleep(60.0)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(side_effect=hang)
+    ep = ResolvedEndpoint(
+        base_url="http://x/v1", model="m", api_key="k", provider_name="openai",
+    )
+    client = LLMClient(ep, http=fake_http)
+
+    task = asyncio.create_task(
+        client.chat([{"role": "user", "content": "hi"}], node="ideate"),
+    )
+    await asyncio.wait_for(post_entered.wait(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as ei:
+        await asyncio.wait_for(task, timeout=2.0)
+    # CancelledError must NOT have been augmented with an FI note —
+    # the wrapper only catches Exception, and CancelledError is a
+    # BaseException.
+    notes = getattr(ei.value, "__notes__", [])
+    fi_notes = [n for n in notes if "[FI]" in n]
+    assert not fi_notes, (
+        f"CancelledError was given an FI note ({fi_notes!r}) — the "
+        f"chat() try/except must NOT catch BaseException, only Exception."
+    )
+
+
 async def test_chat_does_not_retry_on_cancellation():
     """Tenacity is configured with ``retry_if_exception_type((HTTPStatusError,
     TransportError, ReadTimeout))``. ``asyncio.CancelledError`` is a
