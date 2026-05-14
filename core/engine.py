@@ -1483,6 +1483,14 @@ def _parse_json_lenient(
     if not text:
         return None
     candidate = _strip_outer_fence(text).strip()
+    # Treat "whitespace-only" and "empty-fence-only" inputs the same
+    # as truly empty input — return silently, don't fire a WARNING.
+    # Without this guard, ``text = "   "`` or ``text = "```\n```"``
+    # passes the ``not text`` check above, collapses to "" here, then
+    # falls through to the "no braces found" warning path with an
+    # empty raw-output snippet — pure log spam, no signal.
+    if not candidate:
+        return None
     try:
         result = json.loads(candidate)
         # Successful parse but wrong shape: return None without a

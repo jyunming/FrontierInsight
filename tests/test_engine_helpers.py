@@ -167,6 +167,40 @@ def test_parse_json_lenient_array_does_not_log(caplog) -> None:
     assert warnings == [], [r.message for r in warnings]
 
 
+def test_parse_json_lenient_whitespace_only_does_not_log(caplog) -> None:
+    """Whitespace-only and empty-fence-only inputs collapse to empty
+    after ``_strip_outer_fence(...).strip()``. Both must be treated as
+    silent no-ops, NOT as parse failures — otherwise a model that
+    happens to emit trailing whitespace would log WARNING noise on
+    every node. Regression for PR #54 bot comment."""
+    import logging
+
+    # Cases that genuinely collapse to "" after _strip_outer_fence + strip:
+    #   - pure whitespace at top level
+    #   - well-formed empty fenced block (requires content-newline pair
+    #     inside, so "```\n\n```" matches the regex with empty content)
+    #   - same but with a language tag
+    # NOT tested here: malformed fences like "```\n```" (single \n between
+    # open and close) don't match the regex, fall through to the no-braces
+    # path, and DO log a WARNING — which is correct behavior (the LLM
+    # emitted something syntactically weird and the user should know).
+    cases = [
+        "   ",                   # pure whitespace
+        "\n\n\t",                # whitespace newlines/tabs
+        "```\n\n```",            # empty fenced block (regex matches, content="")
+        "```python\n\n```",      # empty fenced block with language
+    ]
+    for text in cases:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="frontier_insight.engine"):
+            assert _parse_json_lenient(text) is None, text
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [], (
+            f"{text!r} produced a spurious WARNING: "
+            f"{[r.message for r in warnings]!r}"
+        )
+
+
 # ---- _extract_result_json ------------------------------------------------
 
 
