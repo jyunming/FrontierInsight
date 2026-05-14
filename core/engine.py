@@ -155,102 +155,101 @@ class Engine:
         with ``Command(resume=answers)``. When the callback is None and
         clarify is interactive, the engine raises — set the mode to
         ``"auto"`` or ``"off"`` for headless runs.
+
+        The entire body is wrapped in a try/finally that calls
+        ``_close_quest_logger(self.quest_id)`` on every exit path —
+        success, error, cancellation, or future pause-exit points. On
+        Windows the FileHandler holds an exclusive lock on
+        ``run.log``; leaking it broke test cleanup (``shutil.rmtree``
+        with ``PermissionError [WinError 32]``) and prevented reusing
+        the same ``quest_id`` later in the same process. See
+        ``_close_quest_logger`` for the full rationale.
         """
-        self.fi_dir.mkdir(parents=True, exist_ok=True)
-        (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
-        (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
-        (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
-        self._log.info("starting quest %s", self.quest_id)
-        await self.executor.setup(self.quest_root)
-
-        endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
-        self._log.info(
-            "provider %s -> %s (%s)",
-            self.config.provider.name, endpoint.base_url, endpoint.model,
-        )
-        self._client = LLMClient(endpoint)
-
-        checkpoint_path = self.fi_dir / "state.sqlite"
         try:
-            async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
-                graph = self._build_graph().compile(checkpointer=saver)
-                initial: QuestState = {
-                    "topic": self.config.topic,
-                    "title": self.config.title or _slugify(self.config.topic)[:60],
-                    "iteration": 0,
-                }
-                run_config = {"configurable": {"thread_id": self.quest_id}}
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
+            (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
+            (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
+            self._log.info("starting quest %s", self.quest_id)
+            await self.executor.setup(self.quest_root)
 
-                # Resume detection: if the thread already has checkpointed
-                # state (a prior run died mid-pipeline), pass `None` to
-                # ainvoke so LangGraph continues from the last-completed
-                # node instead of replaying from `ideate` with the
-                # current YAML's topic. Without this, --resume only
-                # reused the quest_id; LangGraph still treated the
-                # `initial` payload as a fresh START.
-                prior_snapshot = await graph.aget_state(run_config)
-                # `values` is empty dict for never-run threads.
-                payload: Any
-                if prior_snapshot and prior_snapshot.values:
-                    self._log.info(
-                        "[run] found checkpoint with keys=%s next=%s — resuming",
-                        sorted((prior_snapshot.values or {}).keys()),
-                        prior_snapshot.next,
-                    )
-                    payload = None
-                else:
-                    payload = initial
+            endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
+            self._log.info(
+                "provider %s -> %s (%s)",
+                self.config.provider.name, endpoint.base_url, endpoint.model,
+            )
+            self._client = LLMClient(endpoint)
 
-                # Run, handling clarify interrupts via the callback.
-                while True:
-                    final_state = await graph.ainvoke(payload, config=run_config)
-                    interrupts = (final_state or {}).get("__interrupt__")
-                    if not interrupts:
-                        break
-                    # Clarify node raised `interrupt(...)`. Hand the
-                    # questions to the caller's callback for answers.
-                    questions = interrupts[0].value.get("clarify_questions", {})
-                    if clarify_callback is None:
-                        raise RuntimeError(
-                            f"quest {self.quest_id} paused at clarify node but no "
-                            f"clarify_callback was supplied; set clarify_mode to "
-                            f"'auto' or 'off' for headless runs."
+            checkpoint_path = self.fi_dir / "state.sqlite"
+            try:
+                async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+                    graph = self._build_graph().compile(checkpointer=saver)
+                    initial: QuestState = {
+                        "topic": self.config.topic,
+                        "title": self.config.title or _slugify(self.config.topic)[:60],
+                        "iteration": 0,
+                    }
+                    run_config = {"configurable": {"thread_id": self.quest_id}}
+
+                    # Resume detection: if the thread already has checkpointed
+                    # state (a prior run died mid-pipeline), pass `None` to
+                    # ainvoke so LangGraph continues from the last-completed
+                    # node instead of replaying from `ideate` with the
+                    # current YAML's topic. Without this, --resume only
+                    # reused the quest_id; LangGraph still treated the
+                    # `initial` payload as a fresh START.
+                    prior_snapshot = await graph.aget_state(run_config)
+                    # `values` is empty dict for never-run threads.
+                    payload: Any
+                    if prior_snapshot and prior_snapshot.values:
+                        self._log.info(
+                            "[run] found checkpoint with keys=%s next=%s — resuming",
+                            sorted((prior_snapshot.values or {}).keys()),
+                            prior_snapshot.next,
                         )
-                    self._log.info(
-                        "[run] clarify interrupt fired with %d questions; "
-                        "invoking callback", len(questions),
-                    )
-                    answers = await clarify_callback(questions)
-                    payload = Command(resume=answers)
-        finally:
-            await self._client.aclose()
-            if self.config.provider.name in PROXY_PROVIDERS:
-                await self.supervisor.release(self.config.provider.name)
+                        payload = None
+                    else:
+                        payload = initial
 
-        # Collect artifacts + write-back inside an outer try/finally so
-        # the per-quest run.log FileHandler is released regardless of
-        # whether the run succeeded, ``_collect_artifacts`` raised, or
-        # ``_write_back_knowledge`` raised. Without this, the
-        # FileHandler stayed open for the lifetime of the Python
-        # process — on Windows that locked ``run.log`` and caused
-        # ``shutil.rmtree`` of the quest dir to fail with
-        # ``PermissionError [WinError 32]`` in tests.
-        #
-        # Trade-off: if the inner try (LangGraph invoke) raised, the
-        # exception propagates out of the inner finally and we never
-        # reach this block — so a LangGraph-side exception still leaks
-        # the logger. That's accepted: in production those exceptions
-        # surface up to launch.py and the process exits soon after, so
-        # the leak is bounded by process lifetime. In tests, the
-        # LangGraph invoke is mocked and almost never raises; tests
-        # that DO want to test the exception path can call
-        # _close_quest_logger themselves.
-        try:
+                    # Run, handling clarify interrupts via the callback.
+                    while True:
+                        final_state = await graph.ainvoke(payload, config=run_config)
+                        interrupts = (final_state or {}).get("__interrupt__")
+                        if not interrupts:
+                            break
+                        # Clarify node raised `interrupt(...)`. Hand the
+                        # questions to the caller's callback for answers.
+                        questions = interrupts[0].value.get("clarify_questions", {})
+                        if clarify_callback is None:
+                            raise RuntimeError(
+                                f"quest {self.quest_id} paused at clarify node but no "
+                                f"clarify_callback was supplied; set clarify_mode to "
+                                f"'auto' or 'off' for headless runs."
+                            )
+                        self._log.info(
+                            "[run] clarify interrupt fired with %d questions; "
+                            "invoking callback", len(questions),
+                        )
+                        answers = await clarify_callback(questions)
+                        payload = Command(resume=answers)
+            finally:
+                await self._client.aclose()
+                if self.config.provider.name in PROXY_PROVIDERS:
+                    await self.supervisor.release(self.config.provider.name)
+
             artifacts = self._collect_artifacts(final_state)
             self._write_back_knowledge(artifacts, final_state)
             self._log.info("quest %s reached terminal state", self.quest_id)
             return artifacts
         finally:
+            # Outer cleanup: releases the per-quest run.log FileHandler
+            # on EVERY exit path — normal completion, exception from
+            # ``graph.ainvoke``, missing-callback RuntimeError, errors
+            # in ``_collect_artifacts`` / ``_write_back_knowledge``,
+            # and the not-yet-landed Phase-B no-simulation pause-exit.
+            # Without this, Windows test cleanup would intermittently
+            # fail with PermissionError as soon as ANY of those paths
+            # fired. ``_close_quest_logger`` is idempotent.
             _close_quest_logger(self.quest_id)
 
     # ---- graph topology --------------------------------------------------
@@ -1848,9 +1847,12 @@ def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
     without the second Engine inheriting a broken handler.
 
     Pair this with ``_close_quest_logger`` (below) in
-    ``Engine.run``'s ``finally:`` block so the file lock is released
-    on any return path — success, error, OR the no-simulation
-    pause-exit added in Phase B.
+    ``Engine.run``'s outer ``try/finally`` so the file lock is released
+    on every exit path — normal completion, exception from any node,
+    artifact-collection failure, OR the no-simulation pause-exit
+    added in Phase B. (Earlier revisions of this fix only closed the
+    handler on the success path; the outer try/finally is the version
+    that actually delivers the cleanup invariant.)
     """
     fi_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"frontier_insight.{quest_id}")

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.config import (
     Config,
     EngineConfig,
@@ -673,8 +675,10 @@ def test_quest_logger_releases_file_handler_on_close(tmp_path: Path) -> None:
     ]
     assert len(file_handlers) == 1
     handler = file_handlers[0]
-    # File is open (the FileHandler opens lazily, but the stream is
-    # held once any message is emitted — force that by logging).
+    # ``logging.FileHandler`` opens the file eagerly at construction
+    # (delay=False by default), so handler.stream is already an open
+    # file object here. Log a line for good measure so the test also
+    # exercises the write path.
     logger.info("smoke")
     assert handler.stream is not None
     assert not handler.stream.closed
@@ -762,3 +766,56 @@ def test_close_quest_logger_logger_with_no_handlers_is_safe() -> None:
     assert logger.handlers == []
     _close_quest_logger(qid)
     assert logger.handlers == []
+
+
+@pytest.mark.asyncio
+async def test_engine_run_closes_logger_on_exception_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer ``try/finally`` in ``Engine.run`` must close the
+    per-quest run.log FileHandler even when the graph invoke (or any
+    inner code) raises. The earlier version of this fix only closed
+    on the success path — exceptions leaked the file lock and broke
+    Windows test cleanup.
+
+    Regression for PR #56 bot comment + the docstring claim of
+    'every exit path'."""
+    import logging
+    import shutil
+    from core.engine import Engine
+
+    cfg = Config(
+        topic="exception path test",
+        title="exception-path-test",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(clarify_mode="off"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    # Force ``executor.setup`` to raise; this fires BEFORE the
+    # inner try/finally for LLM cleanup, so without the outer
+    # try/finally fix, the logger would leak.
+    async def boom(*a, **kw):
+        raise RuntimeError("executor setup intentionally failed")
+    monkeypatch.setattr(engine.executor, "setup", boom)
+
+    with pytest.raises(RuntimeError, match="executor setup intentionally failed"):
+        await engine.run()
+
+    # Logger handlers must be gone. If they aren't, the FileHandler
+    # is still holding the file lock — confirm by deleting the dir.
+    quest_logger = logging.getLogger(f"frontier_insight.{engine.quest_id}")
+    file_handlers = [
+        h for h in quest_logger.handlers if isinstance(h, logging.FileHandler)
+    ]
+    assert file_handlers == [], (
+        f"FileHandler leaked on exception path: {file_handlers!r}"
+    )
+    # And actually rmtree the quest dir to verify the file lock is
+    # released. On Windows this would fail with PermissionError if the
+    # leak regressed.
+    shutil.rmtree(engine.quest_root)
+    assert not engine.quest_root.exists()
