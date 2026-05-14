@@ -263,6 +263,17 @@ class OutputConfig(BaseModel):
     kinds: list[OutputKind] = Field(default_factory=lambda: ["paper_md", "paper_pdf"])
     paper_format: PaperFormat = "generic"
     output_dir: Path = Path("./outputs")
+    # When True AND ``paper_pdf`` is in ``kinds``, treat a failed PDF
+    # compile as a hard quest failure rather than a graceful skip.
+    # Pairs with the engine's pre-flight check: at ``Engine.run``
+    # startup the engine verifies pandoc + a LaTeX engine are
+    # reachable BEFORE running any LLM calls. If a prerequisite is
+    # missing and require_pdf is True, the run errors out
+    # immediately (~saves ~15 min of LLM cost on a doomed quest); if
+    # require_pdf is False the engine logs a warning and continues
+    # so the user still gets paper.md + the
+    # ``paper_pdf_skipped.md`` diagnostic from #55.
+    require_pdf: bool = False
 
     @field_validator("output_dir", mode="before")
     @classmethod

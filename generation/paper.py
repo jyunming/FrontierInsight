@@ -104,6 +104,23 @@ class PaperGenerator:
                     encoding="utf-8",
                 )
                 result["paper_pdf_skipped"] = diag_path
+                # Strict mode: ``output.require_pdf=True`` means "don't
+                # silently skip the PDF on this quest." The pre-flight
+                # check in ``core/engine.py`` catches missing
+                # prerequisites BEFORE LLM calls, but it can't predict
+                # timeouts, nonzero LaTeX exits, or a missing output
+                # file after the pandoc subprocess returns rc=0. Those
+                # failures land here, post-LLM. Raise so the caller
+                # surfaces a hard error instead of completing the
+                # quest with a paper_pdf_skipped.md file — which is
+                # the same contract the pre-flight already enforces.
+                if self.config.output.require_pdf:
+                    raise RuntimeError(
+                        f"[paper] output.require_pdf=True but paper.pdf "
+                        f"could not be produced. reason={skip_reason.code}: "
+                        f"{skip_reason.summary} See {diag_path} for the "
+                        f"how-to-fix breakdown."
+                    )
         elif "paper_pdf" not in kinds:
             # ``paper_pdf`` was not requested — clean up any stale
             # diagnostic from a previous run that did request it. Keeps

@@ -541,6 +541,17 @@ async def _run_generators(
         written.update(PaperGenerator(cfg).generate(art, art.quest_root))
     except Exception as e:  # pragma: no cover — defensive
         print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
+        # Strict mode escape hatch: ``output.require_pdf=True`` is the
+        # user's signal that a missing PDF is a hard failure for this
+        # quest, not a soft-degrade. The default catch-all above
+        # exists so a flaky pandoc / LaTeX engine doesn't lose the
+        # slides+poster+speech outputs — that policy stays for the
+        # default ``require_pdf=False`` case. When the user opted into
+        # strict mode, re-raise so the quest exits non-zero and the
+        # caller sees the failure instead of a "completed quest with
+        # missing PDF".
+        if cfg.output.require_pdf:
+            raise
     # 2) Slides (LLM + Marp).
     try:
         written.update(

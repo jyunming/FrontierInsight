@@ -15,6 +15,7 @@ import functools
 import json
 import logging
 import re
+import shutil
 import string
 import time
 import uuid
@@ -184,6 +185,14 @@ class Engine:
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
+            # Pre-flight: if the user asked for paper_pdf, verify the
+            # host can produce one BEFORE spending 15 minutes on LLM
+            # calls only to discover at the end that pandoc / LaTeX are
+            # missing. Always warn on missing prereqs; raise only when
+            # ``output.require_pdf`` is True. See #55 for the
+            # silent-skip incident that motivated both this check and
+            # the ``paper_pdf_skipped.md`` diagnostic.
+            self._preflight_paper_pdf()
             await self.executor.setup(self.quest_root)
 
             endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
@@ -1297,6 +1306,87 @@ class Engine:
             if base in node_models:
                 return node_models[base]
         return None
+
+    def _preflight_paper_pdf(self) -> None:
+        """Verify the host can produce ``paper.pdf`` BEFORE the quest
+        runs any LLM calls.
+
+        Skipped entirely when:
+        * ``paper_pdf`` is not in ``output.kinds`` — nothing to check.
+        * The check passes — pandoc on PATH AND at least one LaTeX
+          engine reachable (pdflatex / tectonic on PATH, or a repo-
+          local ``tools/tectonic[.exe]``).
+
+        Warns vs raises based on ``output.require_pdf``:
+        * ``require_pdf: false`` (default) — emit a WARNING with the
+          install recipe and continue. The user still gets paper.md
+          and the ``paper_pdf_skipped.md`` diagnostic that the paper
+          generator writes at the end (see #55).
+        * ``require_pdf: true`` — raise ``RuntimeError`` immediately,
+          aborting the quest before any LLM cost is incurred. The
+          error message carries the exact same install recipe the
+          warning version would have logged.
+
+        The check uses the same engine-discovery logic that
+        ``generation/paper.py:_find_pdf_engine`` uses at compile time,
+        so a pre-flight pass is a strong predictor of a post-LLM-call
+        compile success.
+        """
+        if "paper_pdf" not in self.config.output.kinds:
+            return
+        # Lazy import to avoid pulling generation/* into the engine
+        # module just for a pre-flight; engine imports stay small.
+        from generation.paper import PaperGenerator
+        pandoc_exe = shutil.which("pandoc")
+        # ``PaperGenerator._find_pdf_engine`` is an instance method but
+        # doesn't touch ``self.config`` for its lookup. Instantiate a
+        # cheap one for the engine discovery.
+        engine_lookup = PaperGenerator(self.config)._find_pdf_engine()
+
+        missing: list[str] = []
+        if pandoc_exe is None:
+            missing.append("pandoc")
+        if engine_lookup is None:
+            missing.append("a LaTeX engine (pdflatex or tectonic)")
+        if not missing:
+            self._log.info(
+                "[preflight] paper.pdf prereqs OK: pandoc=%s pdf_engine=%s",
+                pandoc_exe, engine_lookup[1] if engine_lookup else None,
+            )
+            return
+
+        recipe = (
+            "Install pandoc: Windows `winget install --id JohnMacFarlane.Pandoc`, "
+            "macOS `brew install pandoc`, Linux via package manager. "
+            "For the LaTeX engine, the no-admin path is "
+            "`python launch.py --install-tectonic` (drops a 70 MB binary "
+            "into `tools/`); standard alternative is MiKTeX/TeX Live."
+        )
+        what_missing = " AND ".join(missing)
+        # Wording note: pandoc lookup is just ``shutil.which`` (PATH only),
+        # but the LaTeX engine lookup is broader — it also accepts the
+        # repo-local ``tools/tectonic[.exe]`` written by
+        # ``python launch.py --install-tectonic``. So "not found" is the
+        # honest description across both; "not on PATH" alone would send
+        # users looking in the wrong place when their tools/tectonic was
+        # removed or never installed.
+        if self.config.output.require_pdf:
+            raise RuntimeError(
+                f"[preflight] paper_pdf requested with "
+                f"output.require_pdf=True but {what_missing} not found "
+                f"on this host (pandoc is searched on PATH; the LaTeX "
+                f"engine also accepts a repo-local tools/tectonic). "
+                f"Aborting before LLM calls. {recipe}"
+            )
+        self._log.warning(
+            "[preflight] paper_pdf requested but %s not found "
+            "(pandoc is searched on PATH; LaTeX engine also accepts "
+            "repo-local tools/tectonic). Quest will continue "
+            "(paper.md will still be produced) but paper.pdf will be "
+            "skipped with a diagnostic file. Set output.require_pdf=True "
+            "in YAML to abort early on this condition instead. %s",
+            what_missing, recipe,
+        )
 
     def _collect_artifacts(self, state: QuestState) -> QuestArtifacts:
         paper_md = self.quest_root / "paper" / "paper.md"

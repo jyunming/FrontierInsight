@@ -664,3 +664,135 @@ def test_paper_pdf_skipped_md_overwritten_on_subsequent_failure(
     body = (out_dir / "paper_pdf_skipped.md").read_text(encoding="utf-8")
     assert "no_latex_engine" in body
     assert "no_pandoc" not in body, "prior skip reason was not overwritten"
+
+
+# ---- output.require_pdf strict mode (compile-path enforcement) -----------
+#
+# These tests cover the SECOND half of the require_pdf contract: the
+# pre-flight in core/engine.py catches missing prerequisites BEFORE the
+# LLM runs (test_engine_helpers.py owns that). PaperGenerator.generate
+# is responsible for the AFTER-LLM half: when require_pdf=True and the
+# PDF still can't be compiled (timeout, nonzero LaTeX rc, missing
+# output despite rc=0), raise RuntimeError instead of silently writing
+# only paper_pdf_skipped.md. Bot comment on PR #58.
+
+
+def _make_config_strict(tmp_path: Path) -> Config:
+    """Same as _make_config but with require_pdf=True."""
+    return Config.model_validate(
+        {
+            "topic": "t",
+            "title": "test-title",
+            "output": {
+                "kinds": ["paper_md", "paper_pdf"],
+                "paper_format": "generic",
+                "output_dir": str(tmp_path / "outputs"),
+                "require_pdf": True,
+            },
+        }
+    )
+
+
+def test_require_pdf_raises_when_pandoc_invocation_fails_post_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``shutil.which`` resolved pandoc (preflight would pass), but
+    ``subprocess.run`` raises ``FileNotFoundError`` at compile time
+    (e.g. PATH disagreement between resolver and child process). With
+    require_pdf=True the generator must raise — it must NOT silently
+    write paper_pdf_skipped.md and let the quest report success."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex"
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise FileNotFoundError("pandoc")
+    monkeypatch.setattr(paper_mod.subprocess, "run", boom)
+
+    cfg = _make_config_strict(tmp_path)
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    with pytest.raises(RuntimeError) as ei:
+        PaperGenerator(cfg).generate(art, out_dir)
+    assert "output.require_pdf=True" in str(ei.value)
+    assert "pandoc_invocation_failed" in str(ei.value)
+    # Diagnostic file must still be written for the user to read after
+    # the exception is caught upstream — the RuntimeError points at it.
+    assert (out_dir / "paper_pdf_skipped.md").exists()
+
+
+def test_require_pdf_raises_on_compile_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tectonic / pdflatex compile exceeded the timeout. With strict
+    mode, the user gets a hard failure — not a "completed" quest
+    pointing at a paper_pdf_skipped.md."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex"
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise subprocess.TimeoutExpired(cmd="pandoc", timeout=300)
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config_strict(tmp_path)
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    with pytest.raises(RuntimeError) as ei:
+        PaperGenerator(cfg).generate(art, out_dir)
+    assert "output.require_pdf=True" in str(ei.value)
+    assert "timeout" in str(ei.value).lower()
+
+
+def test_require_pdf_raises_on_nonzero_latex_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LaTeX compile failed with rc=1 (e.g. malformed template, missing
+    CTAN package). Strict mode surfaces it as a quest-level failure."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex"
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        paper_mod.subprocess, "run",
+        lambda *_a, **_kw: SimpleNamespace(
+            returncode=1, stdout="", stderr="! Undefined control sequence.",
+        ),
+    )
+
+    cfg = _make_config_strict(tmp_path)
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    with pytest.raises(RuntimeError) as ei:
+        PaperGenerator(cfg).generate(art, out_dir)
+    assert "output.require_pdf=True" in str(ei.value)
+    assert "rc_1" in str(ei.value) or "rc=1" in str(ei.value)
+
+
+def test_require_pdf_false_keeps_silent_skip_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default mode (require_pdf=False) MUST keep the existing
+    graceful-skip-with-diagnostic behavior. Regression guard for the
+    contract: strict mode is OPT-IN, not the new default."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex"
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        paper_mod.subprocess, "run",
+        lambda *_a, **_kw: SimpleNamespace(
+            returncode=1, stdout="", stderr="! LaTeX error.",
+        ),
+    )
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])  # require_pdf default False
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    # No raise — graceful skip with diagnostic. Quest can finish.
+    result = PaperGenerator(cfg).generate(art, out_dir)
+    assert "paper_pdf" not in result
+    assert "paper_pdf_skipped" in result
+    assert (out_dir / "paper_pdf_skipped.md").exists()
