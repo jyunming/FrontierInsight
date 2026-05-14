@@ -207,6 +207,14 @@ class ResolvedEndpoint:
     model: str
     api_key: str
     transport: str = "http"          # "http" | "cli" | "vscode_bridge"
+    # The YAML `provider.name` (e.g. "openai", "claude_cli",
+    # "vscode_extension") that this endpoint was resolved from. Carried
+    # through to ``LLMClient._error_note`` so a failed LLM call's
+    # traceback says ``provider=openai`` rather than just
+    # ``transport=http`` — same transport class can come from openai,
+    # gemini, ollama, vllm, … and the user wants to know which one.
+    # Empty when an endpoint was hand-constructed in a test.
+    provider_name: str = ""
     cli_spec: _CliSpec | None = None  # set when transport == "cli"
     # Only set (non-empty) when the user explicitly chose a CLI model via
     # YAML `provider.model`. `_run_cli` injects `[spec.model_flag, value]`
@@ -652,6 +660,7 @@ def resolve_endpoint(
             model=provider.model or "(VSCode chat default)",
             api_key=_NO_KEY_SENTINEL,
             transport="vscode_bridge",
+            provider_name=name,
             vscode_bridge_port=port,
             # The display string above is for logs only — it would be
             # an invalid family filter for selectChatModels. The real
@@ -669,6 +678,7 @@ def resolve_endpoint(
             model=provider.model or f"{name} (CLI default)",
             api_key=_NO_KEY_SENTINEL,
             transport="cli",
+            provider_name=name,
             cli_spec=_CLI_SPECS[name],
             cli_model_override=provider.model or "",
         )
@@ -681,6 +691,7 @@ def resolve_endpoint(
         base_url=provider.base_url or defaults["base_url"],
         model=provider.model or defaults["model"],
         api_key=api_key or _NO_KEY_SENTINEL,
+        provider_name=name,
     )
 
 
@@ -696,6 +707,7 @@ async def resolve_endpoint_async(
         base_url=f"http://127.0.0.1:{handle.port}/v1",
         model=provider.model or "default",
         api_key=api_key,
+        provider_name=provider.name,
     )
 
 
@@ -760,8 +772,66 @@ class LLMClient:
         ``node`` is the FI engine node name (``"ideate"``, ``"implement"``,
         …); only used by the vscode_bridge transport so the extension
         can tag chat-panel progress messages with the right node name.
-        Other transports ignore it.
+        Other transports ignore it for routing but DO attach it to any
+        exception via ``Exception.add_note`` so error tracebacks show
+        which node + which provider failed instead of just a raw
+        httpx / CLI stderr stack.
         """
+        try:
+            return await self._chat_impl(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra=extra,
+                model=model,
+                node=node,
+            )
+        except Exception as e:
+            # ``except Exception`` excludes ``asyncio.CancelledError``
+            # (a BaseException subclass since Python 3.8) — see the
+            # cancellation-contract comment in _chat_impl below for why
+            # that matters. CancelledError must propagate clean and
+            # un-noted; everything else gets a "[FI] provider=…, node=…,
+            # model=…" note so the user knows what was running when it
+            # blew up. ``add_note`` is non-invasive (no exception
+            # wrapping, no type change), keeps the original traceback
+            # intact, and appears in standard `traceback.print_exc`
+            # output on Python >=3.11 (our minimum).
+            try:
+                e.add_note(self._error_note(node=node, model=model))
+            except AttributeError:  # pragma: no cover — needs Py<3.11
+                pass
+            raise
+
+    def _error_note(self, *, node: str, model: str | None) -> str:
+        """Format the FI-context note attached to LLM call exceptions.
+
+        Includes the provider name, transport class, effective model,
+        and (when set) the engine node name. Single line, prefixed
+        ``[FI]`` so it's grep-able in error reports."""
+        provider = self.endpoint.provider_name or self.endpoint.transport
+        effective_model = model or self.endpoint.model
+        parts = [
+            f"provider={provider}",
+            f"transport={self.endpoint.transport}",
+            f"model={effective_model}",
+        ]
+        if node:
+            parts.append(f"node={node}")
+        return "[FI] " + ", ".join(parts)
+
+    async def _chat_impl(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int | None,
+        extra: dict[str, Any] | None,
+        model: str | None,
+        node: str,
+    ) -> str:
+        """The actual chat dispatch, split out from ``chat`` so the
+        error-context note in ``chat`` wraps a single call site."""
         if self.endpoint.transport == "cli":
             return await self._chat_cli(messages, model_override=model)
         if self.endpoint.transport == "vscode_bridge":
@@ -804,7 +874,9 @@ class LLMClient:
         #
         # The two dangerous patterns that would silently break this:
         #   1. Wrapping the retry block in ``except BaseException``
-        #      (``except Exception`` is fine — that's the rule above).
+        #      (``except Exception`` is fine — that's the rule above;
+        #      it's also what the outer ``chat`` wrapper above uses
+        #      for its error-context note attach).
         #   2. Adding ``asyncio.CancelledError`` to the
         #      ``retry_if_exception_type`` tuple.
         # Either would let tenacity catch the cancel and retry the
