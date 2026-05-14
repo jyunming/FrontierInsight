@@ -112,9 +112,18 @@ def _http_get_json_sync(url: str, *, timeout_s: float = 8.0) -> Any:
 async def _fetch_indicators() -> list[dict[str, Any]]:
     """Fetch the full indicator catalog (~3 MB JSON, ~1500 rows).
 
-    Cached in-process; the lock prevents a thundering-herd of
-    concurrent fetches on first call when multiple quests fire
-    at once."""
+    Cached in-process on SUCCESS only; the lock prevents a
+    thundering-herd of concurrent fetches on first call when
+    multiple quests fire at once.
+
+    Critical: failures are NOT cached. A single transient DNS /
+    network blip at the start of a long-running Python process
+    (e.g. a VSCode extension session) would otherwise permanently
+    disable the adapter for that process. Returning ``[]`` on
+    failure without setting the cache means the next quest tries
+    again — which is the right policy for an opt-in adapter where
+    transient unavailability shouldn't be sticky.
+    """
     global _indicator_cache
     if _indicator_cache is not None:
         return _indicator_cache
@@ -124,13 +133,23 @@ async def _fetch_indicators() -> list[dict[str, Any]]:
         try:
             data = await asyncio.to_thread(_http_get_json_sync, _INDICATOR_LIST_URL)
         except Exception as e:  # noqa: BLE001 — defensive
-            _log.warning("worldbank indicator fetch failed: %s", e)
-            _indicator_cache = []
-            return _indicator_cache
+            _log.warning(
+                "worldbank indicator fetch failed: %s — NOT cached, "
+                "next call will retry", e,
+            )
+            return []
         # WorldBank's response format is ``[header, [rows...]]``.
         rows: list[dict[str, Any]] = []
         if isinstance(data, list) and len(data) >= 2 and isinstance(data[1], list):
             rows = [r for r in data[1] if isinstance(r, dict)]
+        if not rows:
+            # Empty response is suspicious (API drift?) — log and
+            # also DO NOT cache, so the next quest re-fetches.
+            _log.warning(
+                "worldbank indicator response had zero rows — NOT "
+                "cached; next call will retry",
+            )
+            return []
         _indicator_cache = rows
         _log.info("worldbank: cached %d indicators", len(rows))
         return rows
@@ -277,29 +296,46 @@ class WorldBankAdapter(DatasetAdapter):
 
         current_year = date.today().year
         start_year = current_year - self._YEAR_WINDOW
-        rows: list[DatasetRow] = []
         country_path = ";".join(countries)
 
-        for score, ind in top:
+        # Parallel per-indicator fetches. Each call is an independent
+        # HTTP round-trip; serializing them would push the worst-case
+        # latency to ``top_k × per-call-timeout`` (e.g. 3 × 8 s = 24 s
+        # for top_k=3) and blow the "<5 s budget" documented in the
+        # module header. ``asyncio.gather(return_exceptions=True)``
+        # lets a single failing indicator NOT take down the whole
+        # search — its slot just produces an exception we log+skip.
+        async def fetch_one(score_ind: tuple[int, dict[str, Any]]):
+            score, ind = score_ind
             ind_id = str(ind.get("id", ""))
-            ind_name = str(ind.get("name", ""))
             if not ind_id:
-                continue
+                return None
             url = _DATAPOINT_URL.format(
                 country=urllib.parse.quote(country_path, safe=";"),
                 indicator=urllib.parse.quote(ind_id),
                 start=start_year, end=current_year,
             )
-            try:
-                data = await asyncio.to_thread(_http_get_json_sync, url)
-            except Exception as e:  # noqa: BLE001
+            data = await asyncio.to_thread(_http_get_json_sync, url)
+            return (score, ind, data)
+
+        results = await asyncio.gather(
+            *(fetch_one(t) for t in top), return_exceptions=True,
+        )
+
+        rows: list[DatasetRow] = []
+        for r, (orig_score, orig_ind) in zip(results, top):
+            ind_id = str(orig_ind.get("id", ""))
+            ind_name = str(orig_ind.get("name", ""))
+            if isinstance(r, Exception):
                 _log.warning(
                     "worldbank: fetch failed for %s × %s: %s",
-                    ind_id, country_path, e,
+                    ind_id, country_path, r,
                 )
                 continue
+            if r is None:
+                continue
+            score, ind, data = r
             rows.append(self._render_row(score, ind_id, ind_name, countries, data))
-
         return rows
 
     def _render_row(

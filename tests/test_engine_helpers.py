@@ -1803,6 +1803,131 @@ async def test_dataset_adapters_exception_is_caught_and_logged(
     assert not (engine.quest_root / "data" / "auto_collected" / "flaky").exists()
 
 
+@pytest.mark.asyncio
+async def test_dataset_adapters_run_even_when_axon_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #61 bot fix: ``knowledge.enabled=False`` must NOT skip the
+    dataset adapter step. A user who opts in to ``dataset_adapters:
+    [worldbank]`` with no Axon configured still expects the adapter
+    to fire. Regression for the bug where the Axon short-circuit
+    returned early before adapters could run."""
+    from core.datasets import ADAPTER_REGISTRY
+    from core.datasets.base import DatasetAdapter, DatasetRow
+
+    class AlwaysReturnsAdapter(DatasetAdapter):
+        name = "always"
+        async def search(self, query: str, *, top_k: int):
+            return [DatasetRow(
+                content="adapter still fired",
+                metadata={"source": "always", "title": "Adapter ran"},
+            )]
+
+    monkeypatch.setitem(ADAPTER_REGISTRY, "always", AlwaysReturnsAdapter)
+
+    engine = _make_no_sim_engine(tmp_path, knowledge_enabled=False)
+    engine.config.engine.dataset_adapters = ["always"]  # type: ignore[misc]
+    # Don't even need to mock asearch — Axon path short-circuits.
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 1}, (
+        "dataset adapter must run regardless of Axon's state"
+    )
+    assert (engine.quest_root / "data" / "auto_collected" / "always").exists()
+
+
+@pytest.mark.asyncio
+async def test_dataset_adapters_run_even_when_axon_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression as above for the Axon-raises path."""
+    from unittest.mock import AsyncMock
+    from core.datasets import ADAPTER_REGISTRY
+    from core.datasets.base import DatasetAdapter, DatasetRow
+
+    class AlwaysReturnsAdapter(DatasetAdapter):
+        name = "always"
+        async def search(self, query: str, *, top_k: int):
+            return [DatasetRow(content="row", metadata={"source": "always"})]
+
+    monkeypatch.setitem(ADAPTER_REGISTRY, "always", AlwaysReturnsAdapter)
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.config.engine.dataset_adapters = ["always"]  # type: ignore[misc]
+    engine.knowledge.asearch = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("axon down"),
+    )
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    # 1 adapter row, 0 from Axon.
+    assert result == {"auto_collected_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_dataset_adapters_run_when_axon_returns_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Axon legitimately returned nothing; dataset adapters should
+    still run. Regression for PR #61 bot comment."""
+    from unittest.mock import AsyncMock
+    from core.datasets import ADAPTER_REGISTRY
+    from core.datasets.base import DatasetAdapter, DatasetRow
+
+    class AlwaysReturnsAdapter(DatasetAdapter):
+        name = "always"
+        async def search(self, query: str, *, top_k: int):
+            return [DatasetRow(content="row", metadata={"source": "always"})]
+
+    monkeypatch.setitem(ADAPTER_REGISTRY, "always", AlwaysReturnsAdapter)
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.config.engine.dataset_adapters = ["always"]  # type: ignore[misc]
+    engine.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_render_auto_collected_md_coerces_non_scalar_metadata(
+    tmp_path: Path,
+) -> None:
+    """PR #61 bot fix: ``_render_auto_collected_md`` must coerce
+    list / dict values to YAML scalars (strings) so the front
+    matter stays flat. Without this, an adapter passing
+    ``metadata={"tags": ["a", "b"]}`` would emit nested YAML
+    that changes the file head shape downstream consumers expect."""
+    from core.engine import _render_auto_collected_md
+    import yaml as _yaml
+
+    body = _render_auto_collected_md(
+        idx=1,
+        meta={
+            "source": "test",
+            "tags": ["culture", "trust"],  # list → coerce to str
+            "extra": {"nested": "dict"},   # dict → coerce to str
+            "count": 42,                    # int → preserve
+            "ratio": 3.14,                  # float → preserve
+            "verified": True,               # bool → preserve
+        },
+        content="body",
+    )
+    _, fm, _ = body.split("---\n", 2)
+    parsed = _yaml.safe_load(fm)
+    # Scalars preserved.
+    assert parsed["count"] == 42
+    assert parsed["ratio"] == 3.14
+    assert parsed["verified"] is True
+    # Non-scalars rendered as strings (flat front matter shape).
+    assert isinstance(parsed["tags"], str)
+    assert "culture" in parsed["tags"]
+    assert isinstance(parsed["extra"], str)
+    assert "nested" in parsed["extra"]
+
+
 def test_dataset_adapter_top_k_rejects_zero_and_negative() -> None:
     """Pydantic ``ge=1`` validation on ``dataset_adapter_top_k``.
     Same rationale as ``auto_collect_top_k``: top_k=0 is useless."""

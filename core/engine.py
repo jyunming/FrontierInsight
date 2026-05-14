@@ -766,22 +766,62 @@ class Engine:
                 "skipping; will pause for user data",
             )
             return {"auto_collected_count": 0}
-        if not self.knowledge.enabled:
-            self._log.info(
-                "[auto_collect] knowledge.enabled=False — skipping "
-                "(no Axon to query); will pause for user data",
-            )
-            return {"auto_collected_count": 0}
 
-        # Build a query from topic + the design hypothesis (when
-        # design has run). Topic alone is enough for first-pass
-        # retrieval; hypothesis sharpens it on later iterations.
+        # Build the query once and reuse for BOTH Axon and dataset
+        # adapters. Topic alone is enough for first-pass retrieval;
+        # hypothesis sharpens it on later iterations.
         topic = state.get("topic", "")
         design = state.get("design") or {}
         hypothesis = ""
         if isinstance(design, dict):
             hypothesis = str(design.get("hypothesis", "")).strip()
         query = f"{topic} {hypothesis}".strip() or topic
+        auto_dir = self.quest_root / "data" / "auto_collected"
+
+        # ---- Axon retrieval (Phase D1) -----------------------------
+        # Independent failure mode from dataset adapters — when Axon
+        # is disabled / raises / returns nothing, we still want
+        # dataset adapters to run (a user who configured
+        # ``dataset_adapters: [worldbank]`` would otherwise get
+        # nothing whenever the corpus is empty/broken). All three
+        # short-circuits here only skip the AXON branch.
+        axon_written = await self._axon_collect_step(query, auto_dir)
+
+        # ---- Dataset adapters (Phase D2+D3) ------------------------
+        adapter_written = await self._run_dataset_adapters(query, auto_dir)
+
+        written = axon_written + adapter_written
+        # If neither side wrote anything, clean up any empty top-level
+        # auto_collected/ dir that might have been created mid-flight.
+        if written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
+            try:
+                auto_dir.rmdir()
+            except OSError as e:
+                self._log.warning(
+                    "[auto_collect] zero writes AND could not rmdir "
+                    "leftover %s: %s", auto_dir, e,
+                )
+        self._log.info(
+            "[auto_collect] wrote %d total file(s) under %s "
+            "(axon=%d, adapters=%d)",
+            written, auto_dir, axon_written, adapter_written,
+        )
+        return {"auto_collected_count": written}
+
+    async def _axon_collect_step(self, query: str, auto_dir: Path) -> int:
+        """Phase D1 retrieval against the Axon corpus. Returns the
+        count of files written under ``auto_dir`` (not in a
+        sub-directory). Returns 0 on any of: knowledge disabled,
+        asearch raised, zero hits, or every write failed. The
+        caller is responsible for combining this with the dataset-
+        adapter count and for the final empty-dir cleanup.
+        """
+        if not self.knowledge.enabled:
+            self._log.info(
+                "[auto_collect] knowledge.enabled=False — skipping "
+                "Axon retrieval (dataset adapters may still run)",
+            )
+            return 0
         top_k = self.config.engine.auto_collect_top_k
         self._log.info(
             "[auto_collect] querying Axon: top_k=%d query=%r",
@@ -791,38 +831,26 @@ class Engine:
             docs = await self.knowledge.asearch(query, top_k=top_k)
         except Exception as e:
             self._log.warning(
-                "[auto_collect] Axon search raised — falling through to "
-                "user-data pause (no files written): %s", e,
+                "[auto_collect] Axon search raised: %s — dataset "
+                "adapters may still run", e,
             )
-            return {"auto_collected_count": 0}
-
+            return 0
         if not docs:
             self._log.info(
-                "[auto_collect] Axon returned 0 docs — falling through "
-                "to user-data pause",
+                "[auto_collect] Axon returned 0 docs — dataset "
+                "adapters may still run",
             )
-            return {"auto_collected_count": 0}
+            return 0
 
-        # Lazy mkdir: defer creating ``auto_collected/`` until at least
-        # one write succeeds. Without this, a permissions / disk-full
-        # failure where ALL writes raise OSError would still leave an
-        # empty directory behind, misleading the user about whether
-        # auto-collection produced anything.
-        auto_dir = self.quest_root / "data" / "auto_collected"
         written_targets: list[Path] = []
         for idx, doc in enumerate(docs, start=1):
-            # Build a slug from the source filename (when known) so
-            # the file is greppable from the user's side later.
             meta = doc.metadata or {}
             source = str(meta.get("source") or meta.get("path") or "")
             slug_basis = Path(source).stem if source else f"doc{idx}"
             slug = _slugify(slug_basis)[:40] or f"doc{idx}"
-            fname = f"{idx:03d}_{slug}.md"
-            target = auto_dir / fname
+            target = auto_dir / f"{idx:03d}_{slug}.md"
             body = _render_auto_collected_md(idx, meta, doc.content or "")
             try:
-                # mkdir(exist_ok=True) is idempotent — safe to call
-                # once per doc; this is the "lazy on first write" hook.
                 auto_dir.mkdir(parents=True, exist_ok=True)
                 target.write_text(body, encoding="utf-8")
                 written_targets.append(target)
@@ -831,38 +859,7 @@ class Engine:
                     "[auto_collect] failed to write %s: %s — skipping doc",
                     target, e,
                 )
-
-        written = len(written_targets)
-        # Hard guarantee: when ZERO writes succeeded, there must be no
-        # empty ``auto_collected/`` directory left behind (could happen
-        # if the first mkdir succeeded then every write failed — rare
-        # but possible on a near-full disk). Try to remove; if the
-        # rmdir fails (e.g. concurrent file appeared), log and move on.
-        if written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
-            try:
-                auto_dir.rmdir()
-            except OSError as e:
-                self._log.warning(
-                    "[auto_collect] all writes failed AND could not "
-                    "rmdir leftover %s: %s — directory may appear "
-                    "incorrectly as a partial-success artifact",
-                    auto_dir, e,
-                )
-
-        # Phase D2 — also invoke any enabled dataset adapters. The
-        # Axon search above gave us free-form retrieval over the
-        # corpus; dataset adapters add STRUCTURED data sources
-        # (WorldBank macros, eventually OECD/Eurostat) for topics
-        # where numeric comparisons matter.
-        adapter_written = await self._run_dataset_adapters(query, auto_dir)
-        written += adapter_written
-
-        self._log.info(
-            "[auto_collect] wrote %d total file(s) under %s "
-            "(axon=%d, adapters=%d)",
-            written, auto_dir, written - adapter_written, adapter_written,
-        )
-        return {"auto_collected_count": written}
+        return len(written_targets)
 
     async def _run_dataset_adapters(
         self, query: str, auto_dir: Path,
@@ -2487,6 +2484,16 @@ def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> s
     # title/url/kind/year; dataset adapters add adapter/indicator_id/
     # countries/score/etc.). Dropping unknown keys here would silently
     # eat dataset-adapter provenance.
+    #
+    # ALL values are coerced to YAML scalars (str/int/float/bool):
+    # this is a front-matter renderer, not a deep-config dump. A
+    # ``list`` or ``dict`` in metadata would otherwise produce
+    # nested YAML that changes the shape downstream consumers
+    # (data_load, paper.md cite-back) expect to read. Coerce by
+    # ``str(value)`` for anything non-scalar so the file head stays
+    # flat. Caller's responsibility if they want richer types — they
+    # can pre-format into a JSON string.
+    _YAML_SCALARS = (str, int, float, bool)
     for key, value in meta.items():
         if value is None or value == "":
             continue
@@ -2495,13 +2502,17 @@ def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> s
         # engine-set, not metadata-source-set.
         if key in ("auto_collected", "rank"):
             continue
-        # Normalize: strip newlines that would break YAML's scalar
-        # rules (multi-line provenance fields would otherwise need
-        # quoted block style which clutters the file head).
-        if isinstance(value, str):
+        if isinstance(value, bool):
+            front[key] = value
+        elif isinstance(value, (int, float)):
+            front[key] = value
+        elif isinstance(value, str):
+            # Strip newlines that would break YAML's scalar rules.
             front[key] = value.replace("\n", " ").strip()
         else:
-            front[key] = value
+            # list/dict/anything else → coerce to a flat string so
+            # the front matter shape stays predictable.
+            front[key] = str(value).replace("\n", " ").strip()
     yaml_block = yaml.safe_dump(front, default_flow_style=False, sort_keys=False)
     return f"---\n{yaml_block}---\n{content.strip()}\n"
 

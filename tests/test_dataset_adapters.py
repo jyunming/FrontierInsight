@@ -268,6 +268,117 @@ async def test_worldbank_render_row_shows_no_data_message_when_empty(
 # ---- DatasetRow shape ----------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_worldbank_does_not_cache_failed_indicator_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #61 bot fix: a failed catalog fetch MUST NOT poison the
+    in-process cache. Previously a single network blip cached
+    ``[]`` forever, permanently disabling the adapter for the rest
+    of the process (a long-running VSCode session would never
+    recover until restart). Now the failure is logged and the next
+    call retries."""
+    # Reset cache so the test starts clean.
+    monkeypatch.setattr(wb_mod, "_indicator_cache", None)
+
+    call_count = {"n": 0}
+    def fake_fetch(url: str, *, timeout_s: float = 8.0) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ConnectionError("transient blip")
+        # Second call succeeds.
+        return [
+            {"page": 1, "pages": 1, "total": 1},
+            [{"id": "X.Y.Z", "name": "Test indicator"}],
+        ]
+    monkeypatch.setattr(wb_mod, "_http_get_json_sync", fake_fetch)
+
+    # First call: catalog fetch raises → empty result, NO cache set.
+    rows1 = await WorldBankAdapter().search("test", top_k=1)
+    assert rows1 == []
+    assert wb_mod._indicator_cache is None, (
+        "FAILED catalog fetch must NOT populate the cache — "
+        "otherwise a transient blip permanently disables the adapter"
+    )
+
+    # Second call: same Python process → tries again, succeeds.
+    rows2 = await WorldBankAdapter().search("test indicator", top_k=1)
+    assert len(rows2) == 1 or rows2 == []  # depends on score match
+    assert call_count["n"] >= 2, "second call should have retried the catalog"
+
+
+@pytest.mark.asyncio
+async def test_worldbank_does_not_cache_empty_indicator_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rationale: if the catalog endpoint comes back 200 but
+    with an empty body (API drift, regional outage returning a stub),
+    the adapter should NOT cache the zero-row state. Retry on next
+    quest."""
+    monkeypatch.setattr(wb_mod, "_indicator_cache", None)
+    call_count = {"n": 0}
+    def fake_fetch(url: str, *, timeout_s: float = 8.0) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [{}, []]  # zero rows
+        return [{}, [{"id": "X.Y.Z", "name": "Test indicator"}]]
+    monkeypatch.setattr(wb_mod, "_http_get_json_sync", fake_fetch)
+
+    rows1 = await WorldBankAdapter().search("test", top_k=1)
+    assert rows1 == []
+    assert wb_mod._indicator_cache is None, (
+        "empty-response state must NOT be cached"
+    )
+
+
+@pytest.mark.asyncio
+async def test_worldbank_fetches_indicators_in_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #61 bot fix: per-indicator data fetches must dispatch
+    concurrently via ``asyncio.gather``, not serially. With
+    top_k=3 and an 8 s per-call timeout, serial worst case is 24 s
+    — way over the documented <5 s budget.
+
+    We verify concurrency by having each mocked fetch sleep for
+    ~50 ms; if dispatched in parallel, total wall-clock is roughly
+    50 ms; serial would be 150 ms for 3 indicators. The threshold
+    is generous (100 ms) to avoid CI flakiness, but still well
+    below the serial-execution floor."""
+    import asyncio as _asyncio
+    import time as _time
+
+    indicators = [
+        {"id": "ID1", "name": "Indicator one"},
+        {"id": "ID2", "name": "Indicator two"},
+        {"id": "ID3", "name": "Indicator three"},
+    ]
+    monkeypatch.setattr(wb_mod, "_indicator_cache", indicators)
+
+    def slow_fetch(url: str, *, timeout_s: float = 8.0) -> Any:
+        if "/indicator/" in url:
+            _time.sleep(0.05)  # 50 ms per call
+        return [
+            {"page": 1, "pages": 1, "total": 1},
+            [{"country": {"id": "WLD"}, "date": "2022", "value": 100}],
+        ]
+    monkeypatch.setattr(wb_mod, "_http_get_json_sync", slow_fetch)
+
+    start = _time.monotonic()
+    rows = await WorldBankAdapter().search(
+        "indicator one two three", top_k=3,
+    )
+    elapsed = _time.monotonic() - start
+
+    assert len(rows) == 3
+    # Serial would be ~150 ms; parallel ~50 ms + overhead. 130 ms
+    # threshold is below the serial floor with margin for CI jitter.
+    assert elapsed < 0.13, (
+        f"per-indicator fetches must run in parallel; wall-clock "
+        f"{elapsed:.3f}s suggests serial execution"
+    )
+
+
 def test_dataset_row_defaults_to_empty_metadata() -> None:
     """``DatasetRow.metadata`` defaults to ``{}`` (not None) so
     callers can always ``.get(key)`` without a None-check."""
