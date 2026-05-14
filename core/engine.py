@@ -1454,7 +1454,9 @@ def _strip_outer_fence(text: str) -> str:
     return m.group(1) if m else text
 
 
-def _parse_json_lenient(text: str) -> dict[str, Any] | None:
+def _parse_json_lenient(
+    text: str, *, node: str = "", _log_truncate_chars: int = 500,
+) -> dict[str, Any] | None:
     """Find and parse a JSON object inside arbitrary LLM output.
 
     LLMs frequently wrap JSON in markdown fences, prose, or trailing
@@ -1462,12 +1464,31 @@ def _parse_json_lenient(text: str) -> dict[str, Any] | None:
     the first `{` to the last `}` and parses that. The slice is NOT
     balance-aware — if the LLM emits two top-level objects in one
     response, the slice will span both and parsing will fail.
+
+    When parsing definitively fails (both the strict parse AND the
+    fence-slice fallback give up, AND the input had content to parse),
+    we log a WARNING with the raw text truncated to
+    ``_log_truncate_chars`` characters. Callers typically use the
+    ``parsed or {fallback}`` idiom to keep the quest running, but the
+    fallback values are dummies (``"(parse failed)"``) — without this
+    log line, a developer debugging a prompt change has no way to see
+    what the model actually emitted. The optional ``node`` kwarg is
+    included verbatim in the log line so the message identifies which
+    engine node's JSON broke.
+
+    Empty input and non-dict JSON (case where ``json.loads`` returns a
+    list/string/number) return None silently — those are edge cases,
+    not bugs in the model's output.
     """
     if not text:
         return None
     candidate = _strip_outer_fence(text).strip()
     try:
         result = json.loads(candidate)
+        # Successful parse but wrong shape: return None without a
+        # WARNING — the JSON itself was valid, the prompt told the
+        # model to return an object, the contract is upstream of
+        # this function.
         return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
         pass
@@ -1479,8 +1500,37 @@ def _parse_json_lenient(text: str) -> dict[str, Any] | None:
             result = json.loads(candidate[start : end + 1])
             return result if isinstance(result, dict) else None
         except json.JSONDecodeError:
+            _log_parse_failure(candidate, node, _log_truncate_chars)
             return None
+    # No braces found at all — the model didn't return JSON-ish output.
+    # That's just as much a parse failure as the slice-attempt-failed
+    # case above, and worth logging at the same WARNING level.
+    _log_parse_failure(candidate, node, _log_truncate_chars)
     return None
+
+
+def _log_parse_failure(text: str, node: str, max_chars: int) -> None:
+    """Emit one WARNING line when JSON parsing of an LLM response
+    definitively fails. Truncated raw text helps a developer compare
+    the model's output against the prompt schema without scrolling
+    through gigabytes of run.log.
+
+    Uses the package-level ``frontier_insight.engine`` logger rather
+    than a per-quest logger because ``_parse_json_lenient`` is a
+    free function called from many places — threading a logger handle
+    through every call site would touch 12+ lines and isn't worth the
+    surface area. The per-quest run.log file inherits from this
+    logger via ``logging.basicConfig``-style propagation, so the
+    warning still lands in the right run.log."""
+    snippet = text[:max_chars]
+    if len(text) > max_chars:
+        snippet += f"… [+{len(text) - max_chars} chars truncated]"
+    node_tag = f" node={node}" if node else ""
+    logging.getLogger("frontier_insight.engine").warning(
+        "JSON parse failed in _parse_json_lenient%s; falling back to "
+        "the caller's default. Raw LLM output (%d chars): %r",
+        node_tag, len(text), snippet,
+    )
 
 
 # Implement-node response parsing.
