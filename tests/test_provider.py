@@ -339,6 +339,92 @@ async def test_chat_propagates_http_error():
         await client.chat([{"role": "user", "content": "x"}])
 
 
+async def test_chat_propagates_cancellation_promptly():
+    """When the user Ctrl-C's a quest mid-LLM-call, asyncio cancellation
+    must reach the in-flight httpx POST and abort it promptly — NOT get
+    swallowed by tenacity's retry wrapper.
+
+    Contract this test locks in:
+      - ``asyncio.CancelledError`` (BaseException, not Exception) is NOT
+        caught by ``retry_if_exception_type((HTTPStatusError, ...))``.
+      - ``httpx.AsyncClient`` propagates the cancel into its anyio
+        transport, which closes the underlying socket.
+
+    Regression marker: if a future change wraps the retry block in
+    ``except Exception`` or upgrades httpx to a version that swallows
+    CancelledError internally, this test will time out (>1 s) and fail
+    loudly."""
+    import time
+    import httpx
+
+    async def hanging_handler(request: httpx.Request) -> httpx.Response:
+        # Simulate a slow upstream holding the connection open. If
+        # cancellation works, this sleep is aborted before it returns.
+        await asyncio.sleep(60.0)
+        return httpx.Response(  # pragma: no cover — should never reach here
+            200, json={"choices": [{"message": {"content": "x"}}]},
+        )
+
+    transport = httpx.MockTransport(hanging_handler)
+    real_http = httpx.AsyncClient(transport=transport, timeout=120.0)
+    try:
+        ep = ResolvedEndpoint(base_url="http://example.invalid/v1", model="m", api_key="x")
+        client = LLMClient(ep, http=real_http)
+
+        task = asyncio.create_task(
+            client.chat([{"role": "user", "content": "hi"}]),
+        )
+        # Yield once so the task actually enters the post() await.
+        await asyncio.sleep(0.05)
+
+        t0 = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        # Cancellation should propagate in well under a second. The
+        # 1000 ms ceiling is generous for slow CI; in practice this
+        # finishes in <10 ms on a developer laptop.
+        assert elapsed_ms < 1000, (
+            f"cancellation took {elapsed_ms:.0f} ms — Ctrl-C is no "
+            f"longer aborting in-flight HTTP requests promptly"
+        )
+    finally:
+        await real_http.aclose()
+
+
+async def test_chat_does_not_retry_on_cancellation():
+    """Tenacity is configured with ``retry_if_exception_type((HTTPStatusError,
+    TransportError, ReadTimeout))``. ``asyncio.CancelledError`` is a
+    BaseException and intentionally not in that set — so on cancel we
+    must hit the underlying ``post`` exactly ONCE, never multiple
+    retry attempts. Regression test."""
+
+    call_count = {"n": 0}
+
+    async def hang_then_count(*a, **kw):
+        call_count["n"] += 1
+        await asyncio.sleep(60.0)
+        raise AssertionError("unreachable")
+
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(side_effect=hang_then_count)
+
+    ep = ResolvedEndpoint(base_url="http://x/v1", model="m", api_key="k")
+    client = LLMClient(ep, http=fake_http)
+
+    task = asyncio.create_task(client.chat([{"role": "user", "content": "hi"}]))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert call_count["n"] == 1, (
+        f"post was called {call_count['n']} times — tenacity is "
+        f"retrying CancelledError, which it must not"
+    )
+
+
 async def test_llm_client_does_not_close_external_http():
     """When the caller passes in an `httpx.AsyncClient`, the client owns
     its lifecycle — `LLMClient.aclose` must NOT close it. This is what lets

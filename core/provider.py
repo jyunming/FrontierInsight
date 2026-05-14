@@ -788,6 +788,17 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
         # Retry on transient upstream failures (5xx from cloud-routed Ollama
         # models, brief network blips). 4xx errors are not retried.
+        #
+        # Cancellation contract: ``asyncio.CancelledError`` is a
+        # BaseException subclass, NOT Exception, so tenacity's
+        # ``retry_if_exception_type(...)`` predicate cannot match it —
+        # cancellation propagates straight through the retry wrapper.
+        # httpx >= 0.27 then propagates that cancellation into its anyio
+        # transport, which aborts the in-flight socket promptly (verified
+        # by ``test_chat_propagates_cancellation_promptly`` in tests/).
+        # If you change the retry predicate or wrap this block in
+        # ``except Exception``, re-run that test — a regression here means
+        # Ctrl-C during a quest stops aborting the upstream POST.
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=1, min=2, max=20),
