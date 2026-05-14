@@ -23,10 +23,18 @@ Out of scope for D2:
 from __future__ import annotations
 
 from .base import DatasetAdapter, DatasetRow
+from .wikipedia import WikipediaAdapter
 from .worldbank import WorldBankAdapter
 
 ADAPTER_REGISTRY: dict[str, type[DatasetAdapter]] = {
     "worldbank": WorldBankAdapter,
+    "wikipedia": WikipediaAdapter,
 }
 
-__all__ = ["DatasetAdapter", "DatasetRow", "ADAPTER_REGISTRY", "WorldBankAdapter"]
+__all__ = [
+    "DatasetAdapter",
+    "DatasetRow",
+    "ADAPTER_REGISTRY",
+    "WorldBankAdapter",
+    "WikipediaAdapter",
+]
