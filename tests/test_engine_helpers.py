@@ -1071,6 +1071,67 @@ def test_resolve_no_simulation_logs_resolution_with_source_and_reason(
     assert any("Cultural data needs surveys" in m for m in info_lines)
 
 
+def test_resolve_no_simulation_warns_on_unknown_simulatability_value(
+    tmp_path: Path,
+) -> None:
+    """When the LLM returns a simulatability.default outside the
+    documented {yes, no, uncertain} set (e.g. ``"maybe"``, a typo, or
+    free-form prose), the engine falls through to the legacy
+    empirical_vs_theoretical check. That fallthrough must be VISIBLE —
+    a WARNING with the offending value lands in run.log so the user
+    can spot the LLM drift without diffing clarify answers against
+    the engine source. Empty / missing decision strings DO NOT warn
+    (they're the legitimate "slot was omitted" case)."""
+    import logging as _logging
+
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    captured: list[_logging.LogRecord] = []
+    sink = _logging.Handler()
+    sink.emit = captured.append  # type: ignore[assignment]
+    engine._log.addHandler(sink)
+    try:
+        # Unrecognized value — must WARN and fall through to legacy.
+        result = engine._resolve_no_simulation_from_clarify({
+            "simulatability": {"default": "maybe", "reason": "unclear"}
+        })
+    finally:
+        engine._log.removeHandler(sink)
+    assert result is False, "unknown value should NOT trigger no-simulation"
+    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
+    assert warnings, "expected a WARNING about the unrecognized value"
+    assert any("'maybe'" in m or "maybe" in m for m in warnings), (
+        "WARNING must include the offending value so the user can grep for it"
+    )
+    assert any("yes, no, uncertain" in m for m in warnings), (
+        "WARNING must name the documented allowed set"
+    )
+
+    # Empty / missing default — silent fallthrough (no WARNING).
+    captured.clear()
+    engine._log.addHandler(sink)
+    try:
+        engine._resolve_no_simulation_from_clarify({
+            "simulatability": {"default": "", "reason": ""}
+        })
+    finally:
+        engine._log.removeHandler(sink)
+    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
+    assert not warnings, (
+        f"empty/missing simulatability.default must NOT warn — the slot "
+        f"being omitted is a legitimate legacy-prompt case. Got: {warnings}"
+    )
+
+
 def test_clarify_prompt_has_simulatability_slot() -> None:
     """``agents/clarify.md`` must request the new ``simulatability``
     slot from the LLM. Regression guard so a future prompt rewrite
@@ -1081,9 +1142,19 @@ def test_clarify_prompt_has_simulatability_slot() -> None:
         "agents/clarify.md must declare a 'simulatability' slot — "
         "it's the routing signal for no_simulation mode."
     )
-    # The prompt must spell out the three allowed answers.
-    for kw in ("yes", "no", "uncertain"):
-        assert kw in clarify_md, f"clarify prompt missing {kw!r} option"
+    # The prompt must spell out the three allowed answers in the
+    # slot's declared `default` line. Substring matches against the
+    # whole file would trivially pass on prose like "yes, the topic..."
+    # — pin to the exact declaration so a future rewrite that drops
+    # any of the three options fails the guard.
+    expected_default = '"yes" or "no" or "uncertain"'
+    assert expected_default in clarify_md, (
+        f"agents/clarify.md must declare the simulatability default as "
+        f"{expected_default!r} so the LLM emits one of those tokens "
+        f"(the engine matches case-insensitively but expects one of "
+        f"the three). A looser substring guard would miss a future "
+        f"prompt rewrite that drops one of the options."
+    )
 
 
 def test_route_after_design_no_sim_flag_routes_to_wait_for_data(

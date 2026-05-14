@@ -18,6 +18,16 @@ $topic
     "question": "<one sentence asking how this question gets answered: by writing a Python simulation, by closed-form derivation, by mixing both, OR by the user collecting real-world data (surveys, interviews, field notes, archival sources) that a Python script could not invent>",
     "default": "empirical" or "theoretical" or "mixed"
   },
+  // NOTE — this slot is now METHODOLOGY-ONLY. It is no longer the
+  // primary routing signal for no-simulation mode: that responsibility
+  // moved to `simulatability` below. The engine still falls back on
+  // `empirical_vs_theoretical == "empirical"` ONLY when the new
+  // `simulatability` slot is missing entirely (legacy back-compat).
+  // When BOTH slots are present, `simulatability` wins. So if you
+  // pick `empirical` here, you should normally also pick `no` on
+  // `simulatability` — otherwise the engine will simulate (because
+  // simulatability=yes/uncertain beats empirical_vs_theoretical=empirical),
+  // and your two answers will read as contradictory in run.log.
   "simulatability": {
     "question": "Could a self-contained Python script (numpy/scipy/matplotlib, ~100 lines, no internet) produce data that genuinely answers this research question? Or does the question require real-world observation that cannot be simulated without inventing values?",
     "default": "yes" or "no" or "uncertain",
@@ -57,8 +67,13 @@ $topic
   // extra review scrutiny.
   //
   // The `reason` field is REQUIRED — it gets logged at routing time
-  // ("[run] simulatability: no — '<reason>'") so the user can see
-  // exactly why the engine took the path it did.
+  // so the user can see exactly why the engine took the path it did.
+  // Actual run.log format:
+  //   [clarify] simulatability resolved: NO_SIMULATION
+  //   (source=clarify_simulatability, reason='<your one-liner here>')
+  // (or SIMULATE / source=yaml / source=clarify_empirical_legacy /
+  // source=default depending on the resolved branch — see
+  // core/engine.py:_resolve_no_simulation_from_clarify).
   "success_metric": {
     "question": "<one sentence asking what number changing in what direction would count as the headline result>",
     "default": "<your best guess of the metric + direction>"

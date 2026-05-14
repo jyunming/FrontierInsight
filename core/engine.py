@@ -546,8 +546,8 @@ class Engine:
         Every resolution is logged at INFO level with the reason
         (when available) so the user can see exactly why the engine
         took whichever path it took — log line format:
-        ``[clarify] simulatability resolved: NO_SIMULATION
-        (source=yaml|clarify_simulatability|clarify_empirical,
+        ``[clarify] simulatability resolved: NO_SIMULATION|SIMULATE
+        (source=yaml|clarify_simulatability|clarify_empirical_legacy|default,
         reason='<quote>')``.
         """
         answers = answers or {}
@@ -577,6 +577,22 @@ class Engine:
                 )
                 return False
             # Unknown / empty decision — fall through to legacy fallback.
+            # Surface it though: a misformed LLM response (typo, "maybe",
+            # blank, anything outside the documented {yes, no, uncertain}
+            # set) silently downgrading to the legacy path is a routing
+            # bug waiting to bite. Logging a WARNING here keeps the
+            # decision visible in run.log so the user can see "the LLM
+            # returned X which we didn't recognize, so we fell through
+            # to the empirical_vs_theoretical fallback" without having
+            # to diff the clarify answers against the engine source.
+            if decision:
+                self._log.warning(
+                    "[clarify] simulatability.default=%r is not in the "
+                    "documented set {yes, no, uncertain}; falling through "
+                    "to the empirical_vs_theoretical legacy check. "
+                    "Check agents/clarify.md and the LLM's clarify output "
+                    "for drift.", decision,
+                )
 
         # Legacy fallback for quests scoped before the simulatability
         # slot was added.
