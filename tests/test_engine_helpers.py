@@ -1039,8 +1039,12 @@ def test_preflight_pdf_warns_when_pandoc_missing_and_not_required(
     )
     # Per-quest logger has propagate=False (per _quest_logger), so
     # pytest's caplog at the root logger never receives records from
-    # it. Attach our own MemoryHandler directly so we can inspect the
-    # records this specific logger emitted.
+    # it. Attach a plain ``logging.Handler`` whose ``emit`` is swapped
+    # for a list ``append`` — the simplest way to capture records
+    # emitted by THIS logger without going through pytest's
+    # propagation-based capture machinery. (Not
+    # ``logging.handlers.MemoryHandler``, which buffers + flushes to a
+    # target handler and is overkill for this assertion.)
     captured_records: list[_logging.LogRecord] = []
     sink = _logging.Handler()
     sink.setLevel(_logging.WARNING)
@@ -1101,6 +1105,71 @@ def test_preflight_pdf_raises_on_missing_latex_only(
     )
     with pytest.raises(RuntimeError, match="LaTeX engine"):
         engine._preflight_paper_pdf()
+
+
+@pytest.mark.asyncio
+async def test_engine_run_invokes_preflight_before_executor_setup_and_llm_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: ``Engine.run`` MUST call ``_preflight_paper_pdf``
+    before ``executor.setup`` and before ``resolve_endpoint_async``.
+
+    The contract the pre-flight exists to enforce is "abort BEFORE
+    spending LLM money on a quest that can't produce its requested
+    PDF." If a future refactor moved the preflight call below
+    ``executor.setup`` (which does venv creation, a few-second op)
+    or below ``resolve_endpoint_async`` (which talks to the provider
+    socket and starts metering), strict mode would silently turn
+    into "abort AFTER setup costs" — exactly the failure mode the
+    pre-flight is supposed to prevent.
+
+    This test mocks the three downstream surfaces and proves they
+    aren't reached when require_pdf=True and prereqs are missing.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from core import engine as engine_mod
+    from generation import paper as paper_mod
+
+    # Both pandoc and pdflatex absent — preflight should raise.
+    monkeypatch.setattr(engine_mod.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _n: None)
+
+    engine = _make_engine_for_preflight(
+        tmp_path, kinds=["paper_md", "paper_pdf"], require_pdf=True,
+    )
+
+    # Replace ALL three "after preflight" surfaces with stubs that
+    # record whether they ran. The assertion below is "no stub was
+    # called" — i.e. preflight aborted before any of them.
+    executor_setup = AsyncMock()
+    engine.executor.setup = executor_setup  # type: ignore[method-assign]
+
+    resolve_called = MagicMock()
+    async def fake_resolve(*args, **kwargs):
+        resolve_called(*args, **kwargs)
+        return MagicMock(base_url="http://x", model="m")
+    monkeypatch.setattr(engine_mod, "resolve_endpoint_async", fake_resolve)
+
+    llm_client_called = MagicMock()
+    monkeypatch.setattr(engine_mod, "LLMClient", llm_client_called)
+
+    with pytest.raises(RuntimeError) as ei:
+        await engine.run()
+
+    # The error must come from the preflight (not from a downstream
+    # mock raising), so check the marker string.
+    assert "Aborting before LLM calls" in str(ei.value)
+    assert executor_setup.await_count == 0, (
+        "executor.setup must not run when preflight aborts the quest"
+    )
+    assert resolve_called.call_count == 0, (
+        "resolve_endpoint_async must not be called when preflight "
+        "aborts the quest"
+    )
+    assert llm_client_called.call_count == 0, (
+        "LLMClient must not be constructed when preflight aborts the "
+        "quest (constructing it implies an endpoint was already resolved)"
+    )
 
 
 @pytest.mark.asyncio

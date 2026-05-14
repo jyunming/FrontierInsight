@@ -203,7 +203,7 @@ output:
   require_pdf: false                # strict mode for paper_pdf — see below
 ```
 
-### `output.require_pdf` — strict-mode pre-flight check
+### `output.require_pdf` — strict-mode PDF enforcement
 
 By default, if `paper_pdf` is in `output.kinds` but the host lacks
 pandoc or a LaTeX engine, the engine emits a WARNING and continues —
@@ -212,11 +212,25 @@ the quest runs to completion, writes `paper.md`, and drops a
 still pay the LLM cost (~15 minutes) but get no PDF.
 
 Set `output.require_pdf: true` to upgrade that warning to a hard
-failure **before any LLM calls happen**. The engine pre-flight-checks
-`pandoc` + a LaTeX engine (`pdflatex` or `tectonic`) at startup; if
-either is missing, the quest aborts immediately with the install
-recipe. Recommended for unattended / CI runs where a missing PDF
-means the output is unusable anyway.
+failure in **both** of these moments:
+
+1. **Pre-flight (before any LLM calls)** — the engine checks
+   `pandoc` + a LaTeX engine (`pdflatex` on PATH, `tectonic` on PATH,
+   or a repo-local `tools/tectonic[.exe]` written by
+   `python launch.py --install-tectonic`). If any prerequisite is
+   missing, the quest aborts immediately with the install recipe — no
+   LLM cost incurred.
+2. **Post-LLM compile** — even when prerequisites are present at
+   pre-flight, the actual pandoc/LaTeX compile can still fail at the
+   end (timeout, nonzero LaTeX exit, output file missing despite
+   rc=0). In strict mode these surface as a `RuntimeError` that fails
+   the quest, instead of a "completed" quest that silently lacks a
+   PDF.
+
+Recommended for unattended / CI runs where a missing PDF means the
+output is unusable anyway. Leave at the default `false` for
+interactive use where you'd rather have `paper.md` + a diagnostic
+than no output at all.
 
 ### `execution.sandbox: docker` — what it actually does
 

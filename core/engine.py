@@ -1363,18 +1363,29 @@ class Engine:
             "into `tools/`); standard alternative is MiKTeX/TeX Live."
         )
         what_missing = " AND ".join(missing)
+        # Wording note: pandoc lookup is just ``shutil.which`` (PATH only),
+        # but the LaTeX engine lookup is broader — it also accepts the
+        # repo-local ``tools/tectonic[.exe]`` written by
+        # ``python launch.py --install-tectonic``. So "not found" is the
+        # honest description across both; "not on PATH" alone would send
+        # users looking in the wrong place when their tools/tectonic was
+        # removed or never installed.
         if self.config.output.require_pdf:
             raise RuntimeError(
                 f"[preflight] paper_pdf requested with "
                 f"output.require_pdf=True but {what_missing} not found "
-                f"on this host. Aborting before LLM calls. {recipe}"
+                f"on this host (pandoc is searched on PATH; the LaTeX "
+                f"engine also accepts a repo-local tools/tectonic). "
+                f"Aborting before LLM calls. {recipe}"
             )
         self._log.warning(
-            "[preflight] paper_pdf requested but %s missing on PATH. "
-            "Quest will continue (paper.md will still be produced) but "
-            "paper.pdf will be skipped with a diagnostic file. Set "
-            "output.require_pdf=True in YAML to abort early on this "
-            "condition instead. %s", what_missing, recipe,
+            "[preflight] paper_pdf requested but %s not found "
+            "(pandoc is searched on PATH; LaTeX engine also accepts "
+            "repo-local tools/tectonic). Quest will continue "
+            "(paper.md will still be produced) but paper.pdf will be "
+            "skipped with a diagnostic file. Set output.require_pdf=True "
+            "in YAML to abort early on this condition instead. %s",
+            what_missing, recipe,
         )
 
     def _collect_artifacts(self, state: QuestState) -> QuestArtifacts:
