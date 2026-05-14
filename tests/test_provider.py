@@ -434,7 +434,14 @@ async def test_chat_error_includes_provider_and_node_in_note():
 
     # ``add_note`` is a Python 3.11+ feature; the project floor is 3.11
     # so the note must be present.
-    notes = getattr(ei.value, "__notes__", [])
+    #
+    # ``BaseException.__notes__`` may be (a) absent entirely → getattr
+    # default fires, or (b) set to ``None`` on some 3.11 code paths
+    # when no note was ever added. ``or []`` coerces both into a
+    # uniform empty list so downstream iteration / ``" ".join`` /
+    # truthiness checks all behave consistently. Same pattern used
+    # below in the other three note-asserting tests.
+    notes = getattr(ei.value, "__notes__", None) or []
     assert notes, "exception should have at least one FI note attached"
     full = " ".join(notes)
     assert "[FI]" in full
@@ -463,7 +470,7 @@ async def test_chat_error_note_uses_model_override_when_passed():
             [{"role": "user", "content": "x"}],
             node="write", model="claude-3-5-sonnet",
         )
-    notes = " ".join(getattr(ei.value, "__notes__", []))
+    notes = " ".join(getattr(ei.value, "__notes__", None) or [])
     assert "model=claude-3-5-sonnet" in notes, notes
     assert "node=write" in notes
 
@@ -483,7 +490,7 @@ async def test_chat_error_note_omits_node_when_unset():
 
     with pytest.raises(httpx.TransportError) as ei:
         await client.chat([{"role": "user", "content": "x"}])
-    notes = " ".join(getattr(ei.value, "__notes__", []))
+    notes = " ".join(getattr(ei.value, "__notes__", None) or [])
     assert "node=" not in notes, f"node= snuck into note: {notes!r}"
     assert "provider=openai" in notes
 
@@ -517,8 +524,9 @@ async def test_chat_cancellation_does_not_get_a_note():
         await asyncio.wait_for(task, timeout=2.0)
     # CancelledError must NOT have been augmented with an FI note —
     # the wrapper only catches Exception, and CancelledError is a
-    # BaseException.
-    notes = getattr(ei.value, "__notes__", [])
+    # BaseException. ``__notes__`` may be absent OR None when no
+    # note was ever attached; ``or []`` handles both.
+    notes = getattr(ei.value, "__notes__", None) or []
     fi_notes = [n for n in notes if "[FI]" in n]
     assert not fi_notes, (
         f"CancelledError was given an FI note ({fi_notes!r}) — the "
