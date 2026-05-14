@@ -903,11 +903,14 @@ def test_resolve_no_simulation_from_clarify_yaml_wins(tmp_path: Path) -> None:
     ) is True
 
 
-def test_resolve_no_simulation_from_clarify_empirical_answer_triggers(
+def test_resolve_no_simulation_from_clarify_empirical_answer_triggers_legacy(
     tmp_path: Path,
 ) -> None:
-    """When YAML doesn't set the flag but the clarify answer is
-    'empirical', the resolved flag becomes True. Auto-detect path."""
+    """Legacy fallback path: when no ``simulatability`` slot is
+    present (older clarify schema / quests resumed from old
+    checkpoints), an ``empirical_vs_theoretical: empirical`` still
+    triggers no_simulation. New quests should populate the
+    ``simulatability`` slot directly instead."""
     cfg = Config(
         topic="t",
         title="t",
@@ -929,6 +932,229 @@ def test_resolve_no_simulation_from_clarify_empirical_answer_triggers(
         {"empirical_vs_theoretical": "mixed"},
     ) is False
     assert engine._resolve_no_simulation_from_clarify({}) is False
+
+
+def test_resolve_no_simulation_from_clarify_simulatability_no_triggers(
+    tmp_path: Path,
+) -> None:
+    """The NEW preferred decision path: when clarify produces a
+    ``simulatability`` slot with default ``"no"``, the engine routes
+    to the no-simulation flow."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._resolve_no_simulation_from_clarify({
+        "simulatability": {
+            "default": "no",
+            "reason": "Belgium/Taiwan cultural attitudes require survey data.",
+        }
+    }) is True
+
+
+def test_resolve_no_simulation_from_clarify_simulatability_yes_does_not_trigger(
+    tmp_path: Path,
+) -> None:
+    """``simulatability: yes`` keeps the simulation path. Same for
+    ``uncertain`` (the review prompt may add scrutiny later, but the
+    routing stays simulate-first)."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._resolve_no_simulation_from_clarify({
+        "simulatability": {"default": "yes", "reason": "ODE simulation."},
+    }) is False
+    assert engine._resolve_no_simulation_from_clarify({
+        "simulatability": {"default": "uncertain", "reason": "marginal."},
+    }) is False
+
+
+def test_resolve_no_simulation_simulatability_beats_empirical_when_both_set(
+    tmp_path: Path,
+) -> None:
+    """When BOTH slots are present, the new ``simulatability`` slot
+    wins. The legacy ``empirical_vs_theoretical`` fallback only fires
+    when ``simulatability`` is missing.
+
+    Real-world case: a topic the LLM judged 'empirical' methodology
+    BUT also 'yes' on simulatability — e.g. an empirical-style study
+    of an algorithm's behavior that's still pure Python. Should NOT
+    route to no_simulation."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._resolve_no_simulation_from_clarify({
+        "empirical_vs_theoretical": "empirical",
+        "simulatability": {"default": "yes", "reason": "Pure Python."},
+    }) is False, "simulatability=yes must override empirical_vs_theoretical=empirical"
+
+
+def test_resolve_no_simulation_yaml_still_wins_over_simulatability(
+    tmp_path: Path,
+) -> None:
+    """YAML's ``engine.no_simulation: true`` is the explicit user
+    override and beats any LLM judgement, including a
+    ``simulatability: yes`` from clarify."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=True, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    assert engine._resolve_no_simulation_from_clarify({
+        "simulatability": {"default": "yes", "reason": "looks simulatable"},
+    }) is True
+
+
+def test_resolve_no_simulation_logs_resolution_with_source_and_reason(
+    tmp_path: Path,
+) -> None:
+    """Every resolution path logs an INFO line naming the source
+    (yaml / clarify_simulatability / clarify_empirical_legacy /
+    default) and the reason (when available). This is the
+    transparency contract — a user reading run.log can see WHY
+    the engine routed the way it did."""
+    import logging as _logging
+
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    captured: list[_logging.LogRecord] = []
+    sink = _logging.Handler()
+    sink.emit = captured.append  # type: ignore[assignment]
+    engine._log.addHandler(sink)
+    try:
+        engine._resolve_no_simulation_from_clarify({
+            "simulatability": {
+                "default": "no",
+                "reason": "Cultural data needs surveys.",
+            }
+        })
+    finally:
+        engine._log.removeHandler(sink)
+
+    info_lines = [r.getMessage() for r in captured if r.levelno == _logging.INFO]
+    assert any("simulatability resolved: NO_SIMULATION" in m for m in info_lines)
+    assert any("source=clarify_simulatability" in m for m in info_lines)
+    assert any("Cultural data needs surveys" in m for m in info_lines)
+
+
+def test_resolve_no_simulation_warns_on_unknown_simulatability_value(
+    tmp_path: Path,
+) -> None:
+    """When the LLM returns a simulatability.default outside the
+    documented {yes, no, uncertain} set (e.g. ``"maybe"``, a typo, or
+    free-form prose), the engine falls through to the legacy
+    empirical_vs_theoretical check. That fallthrough must be VISIBLE —
+    a WARNING with the offending value lands in run.log so the user
+    can spot the LLM drift without diffing clarify answers against
+    the engine source. Empty / missing decision strings DO NOT warn
+    (they're the legitimate "slot was omitted" case)."""
+    import logging as _logging
+
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    captured: list[_logging.LogRecord] = []
+    sink = _logging.Handler()
+    sink.emit = captured.append  # type: ignore[assignment]
+    engine._log.addHandler(sink)
+    try:
+        # Unrecognized value — must WARN and fall through to legacy.
+        result = engine._resolve_no_simulation_from_clarify({
+            "simulatability": {"default": "maybe", "reason": "unclear"}
+        })
+    finally:
+        engine._log.removeHandler(sink)
+    assert result is False, "unknown value should NOT trigger no-simulation"
+    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
+    assert warnings, "expected a WARNING about the unrecognized value"
+    assert any("'maybe'" in m or "maybe" in m for m in warnings), (
+        "WARNING must include the offending value so the user can grep for it"
+    )
+    assert any("yes, no, uncertain" in m for m in warnings), (
+        "WARNING must name the documented allowed set"
+    )
+
+    # Empty / missing default — silent fallthrough (no WARNING).
+    captured.clear()
+    engine._log.addHandler(sink)
+    try:
+        engine._resolve_no_simulation_from_clarify({
+            "simulatability": {"default": "", "reason": ""}
+        })
+    finally:
+        engine._log.removeHandler(sink)
+    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
+    assert not warnings, (
+        f"empty/missing simulatability.default must NOT warn — the slot "
+        f"being omitted is a legitimate legacy-prompt case. Got: {warnings}"
+    )
+
+
+def test_clarify_prompt_has_simulatability_slot() -> None:
+    """``agents/clarify.md`` must request the new ``simulatability``
+    slot from the LLM. Regression guard so a future prompt rewrite
+    doesn't silently lose the routing signal."""
+    clarify_md = (Path(__file__).resolve().parent.parent
+                  / "agents" / "clarify.md").read_text(encoding="utf-8")
+    assert "\"simulatability\"" in clarify_md, (
+        "agents/clarify.md must declare a 'simulatability' slot — "
+        "it's the routing signal for no_simulation mode."
+    )
+    # The prompt must spell out the three allowed answers in the
+    # slot's declared `default` line. Substring matches against the
+    # whole file would trivially pass on prose like "yes, the topic..."
+    # — pin to the exact declaration so a future rewrite that drops
+    # any of the three options fails the guard.
+    expected_default = '"yes" or "no" or "uncertain"'
+    assert expected_default in clarify_md, (
+        f"agents/clarify.md must declare the simulatability default as "
+        f"{expected_default!r} so the LLM emits one of those tokens "
+        f"(the engine matches case-insensitively but expects one of "
+        f"the three). A looser substring guard would miss a future "
+        f"prompt rewrite that drops one of the options."
+    )
 
 
 def test_route_after_design_no_sim_flag_routes_to_wait_for_data(

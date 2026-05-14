@@ -294,9 +294,27 @@ flows through as if the original run never crashed.
 Some research questions can't be answered with a Python script —
 *"Compare Belgium and Taiwan culture: collectivism, work-life
 balance, public-trust dynamics"* needs real surveys and observations,
-not invented numbers. For these, set `engine.no_simulation: true` in
-the YAML (or answer `empirical` to the clarify question
-`empirical_vs_theoretical` — same effect; YAML wins when set).
+not invented numbers.
+
+**How the engine decides to enter no-simulation mode** (in this
+precedence — first match wins, decision is logged to `run.log` as
+`[clarify] simulatability resolved: ... source=<...>`):
+
+1. `engine.no_simulation: true` in YAML — explicit user override.
+   `source=yaml`.
+2. The clarify question `simulatability` — the agent asks
+   *"can a Python script meaningfully simulate this, or does it
+   need real-world data?"* with `default: yes | no | uncertain`
+   plus a one-line `reason`. `no` triggers no-simulation
+   (`source=clarify_simulatability`); `yes`/`uncertain` keeps the
+   simulation path. In `clarify_mode: interactive` you see the
+   agent's default + reason and can override; in `clarify_mode:
+   auto` the default is accepted but the reason is still logged.
+3. Legacy fallback: when the new `simulatability` slot is absent
+   (older clarify prompts) the existing `empirical_vs_theoretical:
+   empirical` answer still triggers no-simulation
+   (`source=clarify_empirical_legacy`).
+4. Otherwise: simulate (`source=default`).
 
 The engine then runs `clarify → ideate → literature → design`, pauses
 cleanly (rc=0) with an instruction file at
