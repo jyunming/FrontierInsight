@@ -167,7 +167,7 @@ engine:
   no_simulation: false              # see "Topics that need real data" section below
   auto_collect_data: true           # try Axon for evidence before pausing for user data (no_simulation mode)
   auto_collect_top_k: 5             # Axon top_k for auto_collect_data
-  dataset_adapters: []              # structured-data adapters (Phase D2). Available: "worldbank"
+  dataset_adapters: []              # structured-data + web-fetch adapters. Available: "worldbank", "wikipedia"
   dataset_adapter_top_k: 3          # rows per adapter
 
 execution:
