@@ -118,6 +118,58 @@ def test_render_quest_corpus_empty_returns_marker() -> None:
     assert n_trunc == 0
 
 
+def test_render_quest_corpus_logs_warning_when_truncating(
+    monkeypatch, caplog,
+) -> None:
+    """When the corpus exceeds ``_MAX_PROMPT_QUESTS``, a single WARNING
+    log line must fire so a user running ``/portfolio`` on a mature 150+
+    quest corpus discovers the cap rather than silently losing tail
+    quests. Regression guard for the audit finding."""
+    import logging
+    import core.portfolio as pm
+
+    monkeypatch.setattr(pm, "_MAX_PROMPT_QUESTS", 3)
+    snaps = [
+        _snap(f"170000000{i}-q-aabbcc", created_offset_days=i)
+        for i in range(6)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.portfolio"):
+        rendered, n_trunc = pm._render_quest_corpus(snaps)
+
+    assert n_trunc == 3
+    # Exactly one WARNING line, mentioning both the on-disk total and
+    # the dropped count so the user knows what to do.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.message for r in warnings]
+    msg = warnings[0].getMessage()
+    assert "portfolio prompt cap hit" in msg.lower(), msg
+    assert "6 quests on disk" in msg
+    assert "3 older quests omitted" in msg
+    assert "raw_state['quest_ids']" in msg
+
+
+def test_render_quest_corpus_below_cap_does_not_warn(
+    monkeypatch, caplog,
+) -> None:
+    """When the corpus fits under the cap, no warning is emitted —
+    the truncation log should NOT spam every /portfolio invocation."""
+    import logging
+    import core.portfolio as pm
+
+    monkeypatch.setattr(pm, "_MAX_PROMPT_QUESTS", 10)
+    snaps = [
+        _snap(f"170000000{i}-q-aabbcc", created_offset_days=i)
+        for i in range(3)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.portfolio"):
+        _ = pm._render_quest_corpus(snaps)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [], [r.message for r in warnings]
+
+
 # ---------- stats block -----------------------------------------------------
 
 

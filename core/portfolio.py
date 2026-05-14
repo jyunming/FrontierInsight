@@ -126,6 +126,13 @@ def _render_quest_corpus(snapshots: list[QuestSnapshot]) -> tuple[str, int]:
     Ordering: most-recent first (by ``last_modified``). The cap drops
     the oldest tail because recent quests are more likely to be the
     relevant context for "what should I do next."
+
+    When truncation kicks in, emits a single ``WARNING`` log line so a
+    user running ``/portfolio`` on a mature 150+ quest corpus discovers
+    the cap rather than silently losing tail quests. The full
+    ``snapshots`` list (including the dropped tail) is still surfaced
+    via ``PortfolioArtifacts.raw_state["quest_ids"]`` for callers that
+    want to enumerate everything.
     """
     by_recent = sorted(
         snapshots, key=lambda q: q.last_modified, reverse=True,
@@ -133,6 +140,18 @@ def _render_quest_corpus(snapshots: list[QuestSnapshot]) -> tuple[str, int]:
     truncated = 0
     if len(by_recent) > _MAX_PROMPT_QUESTS:
         truncated = len(by_recent) - _MAX_PROMPT_QUESTS
+        dropped = by_recent[_MAX_PROMPT_QUESTS:]
+        oldest_kept = by_recent[_MAX_PROMPT_QUESTS - 1].last_modified.date()
+        newest_dropped = dropped[0].last_modified.date()
+        _log.warning(
+            "portfolio prompt cap hit: %d quests on disk, %d included in "
+            "the LLM corpus (most-recent first), %d older quests omitted "
+            "(oldest kept: %s, newest dropped: %s). The dropped tail is "
+            "still in raw_state['quest_ids']; raise _MAX_PROMPT_QUESTS in "
+            "core/portfolio.py if you need them in the corpus too.",
+            len(by_recent), _MAX_PROMPT_QUESTS, truncated,
+            oldest_kept, newest_dropped,
+        )
         by_recent = by_recent[:_MAX_PROMPT_QUESTS]
     if not by_recent:
         return "(no quests yet)", 0
