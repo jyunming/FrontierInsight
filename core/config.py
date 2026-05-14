@@ -128,6 +128,23 @@ class EngineConfig(BaseModel):
     # — the engine falls back to a generic persona prefix when the
     # specific persona prompt file is missing.
     review_panel: list[str] = Field(default_factory=list)
+    # When True, the engine treats the topic as one that needs
+    # real-world data the user will collect themselves — not one the
+    # LLM should simulate via a Python experiment. The flow becomes:
+    # clarify → ideate → literature → design → wait_for_data, at which
+    # point the engine writes ``<quest_root>/data/README.md``
+    # explaining what to drop into the dir and exits cleanly (rc=0).
+    # The user collects data, drops it into ``<quest_root>/data/``,
+    # then re-runs with ``fi --resume <quest_id>``. The engine picks
+    # up at the ``data_load`` node which walks the dir (reusing
+    # ``core/summarizer.py`` patterns), synthesizes a result_json,
+    # and hands off to analyze → cross_check → write → review.
+    #
+    # When unset (default False), the clarify node may STILL set the
+    # in-state ``no_simulation_resolved`` flag from its
+    # ``empirical_vs_theoretical`` answer — auto-detection from
+    # clarify is the second entry point. YAML flag wins when set.
+    no_simulation: bool = False
 
 
 class ExecutionConfig(BaseModel):

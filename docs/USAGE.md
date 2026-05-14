@@ -164,6 +164,7 @@ engine:
     - statistician
     - devil_advocate
     # available: methodologist, statistician, devil_advocate, reproducibility
+  no_simulation: false              # see "Topics that need real data" section below
 
 execution:
   sandbox: venv                     # venv (default) | docker
@@ -257,6 +258,39 @@ The engine reads the `state.sqlite` checkpoint, detects what node
 last completed, and continues from there. No state is lost — the
 `paper.pdf` engine, the YAML's `provider` block, every clarify answer
 flows through as if the original run never crashed.
+
+## Topics that need real data (not simulation)
+
+Some research questions can't be answered with a Python script —
+*"Compare Belgium and Taiwan culture: collectivism, work-life
+balance, public-trust dynamics"* needs real surveys and observations,
+not invented numbers. For these, set `engine.no_simulation: true` in
+the YAML (or answer `empirical` to the clarify question
+`empirical_vs_theoretical` — same effect; YAML wins when set).
+
+The engine then runs `clarify → ideate → literature → design`, pauses
+cleanly (rc=0) with an instruction file at
+`outputs/<quest_id>/data/README.md`. You go off and collect data —
+survey responses, transcripts, downloaded papers, notes, CSVs,
+whatever — and drop the files into that folder. Then:
+
+```bash
+fi --resume <quest_id>
+```
+
+The engine picks up at the `data_load` node: walks every file in
+`data/`, classifies them (csv / json / pdf / md / xlsx / png),
+synthesizes a `result_json` via one LLM call grounded in the
+designed measurement plan, and then continues normally through
+`analyze → cross_check → write → review`. The paper cites the
+*specific files you dropped* as primary sources, not invented data.
+
+Permissive about format — drop whatever's natural. The walker
+deduplicates and budget-caps the prompt the same way `/summarize`
+does (see `core/summarizer.py`). If a file format isn't text-readable
+(images, binaries), the engine lists it in the manifest but doesn't
+include its contents in the prompt — caption it in an accompanying
+`.md` for the model to see.
 
 ## Common workflows
 

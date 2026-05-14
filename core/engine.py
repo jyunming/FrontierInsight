@@ -98,6 +98,19 @@ class QuestState(TypedDict, total=False):
     # One entry per `engine.review_panel` member, each with the same
     # JSON shape the single reviewer produces plus a `persona` field.
     review_panel: list[dict[str, Any]]
+    # no-simulation mode — the engine doesn't write/run experiment
+    # Python; instead it pauses after `design`, asks the user to drop
+    # real-world data into `<quest_root>/data/`, then resumes with
+    # `data_load` synthesizing the result_json from those files.
+    # Resolved at the clarify node: True if `engine.no_simulation: true`
+    # in YAML OR the clarify answer for `empirical_vs_theoretical` is
+    # "empirical". See `_resolve_no_simulation_from_clarify`.
+    no_simulation_resolved: bool
+    # Populated by the wait_for_data node's interrupt-resume payload.
+    # List of absolute paths the user dropped into `<quest_root>/data/`.
+    # The data_load node walks them, classifies, and synthesizes a
+    # result_json compatible with downstream nodes (analyze, write).
+    data_files: list[str]
 
 
 class Engine:
@@ -211,15 +224,39 @@ class Engine:
                     else:
                         payload = initial
 
-                    # Run, handling clarify interrupts via the callback.
+                    # Run, handling interrupts as they fire. Two kinds:
+                    #   (a) clarify-interactive — pause to collect answers
+                    #       via clarify_callback, then resume the graph.
+                    #   (b) wait_for_data (no-simulation mode) — pause and
+                    #       EXIT cleanly with rc=0. User drops files
+                    #       into <quest_root>/data/, then re-runs
+                    #       `fi --resume <quest_id>` which lands here
+                    #       again — at which point _node_wait_for_data
+                    #       sees the files and proceeds without pausing.
+                    data_paused = False
                     while True:
                         final_state = await graph.ainvoke(payload, config=run_config)
                         interrupts = (final_state or {}).get("__interrupt__")
                         if not interrupts:
                             break
+                        intr_value = interrupts[0].value or {}
+                        if intr_value.get("data_required"):
+                            # no-simulation pause-exit. State is already
+                            # checkpointed; the next `fi --resume` will
+                            # re-enter wait_for_data and proceed.
+                            data_paused = True
+                            data_dir = intr_value.get(
+                                "data_dir", str(self.quest_root / "data"),
+                            )
+                            self._log.info(
+                                "[FI] paused for user data: drop files "
+                                "into %s then run `fi --resume %s`",
+                                data_dir, self.quest_id,
+                            )
+                            break
                         # Clarify node raised `interrupt(...)`. Hand the
                         # questions to the caller's callback for answers.
-                        questions = interrupts[0].value.get("clarify_questions", {})
+                        questions = intr_value.get("clarify_questions", {})
                         if clarify_callback is None:
                             raise RuntimeError(
                                 f"quest {self.quest_id} paused at clarify node but no "
@@ -236,6 +273,21 @@ class Engine:
                 await self._client.aclose()
                 if self.config.provider.name in PROXY_PROVIDERS:
                     await self.supervisor.release(self.config.provider.name)
+
+            if data_paused:
+                # no-simulation pause-exit. The graph is checkpointed
+                # at the wait_for_data interrupt; return early with a
+                # partial QuestArtifacts so callers (launch.py / the
+                # VSCode bridge) can surface the "drop files here"
+                # message but don't try to compile a paper that doesn't
+                # exist yet. Skip _write_back_knowledge — we have
+                # nothing to write back; the quest hasn't been
+                # reviewed and accepted.
+                self._log.info(
+                    "quest %s paused for user data — exiting clean (rc=0)",
+                    self.quest_id,
+                )
+                return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
             self._write_back_knowledge(artifacts, final_state)
@@ -274,12 +326,23 @@ class Engine:
         g.add_node("cross_check", self._node_cross_check)
         g.add_node("write", self._node_write)
         g.add_node("review", self._node_review)
+        # no-simulation mode: design → wait_for_data → (pause + resume) →
+        # data_load → analyze. Both new nodes are conditional and only
+        # fire when ``state.no_simulation_resolved`` is True.
+        g.add_node("wait_for_data", self._node_wait_for_data)
+        g.add_node("data_load", self._node_data_load)
 
         g.add_edge(START, "clarify")
         g.add_edge("clarify", "ideate")
         g.add_edge("ideate", "literature")
         g.add_edge("literature", "design")
-        g.add_edge("design", "implement")
+        # design → implement (normal sim path) OR wait_for_data
+        # (no-simulation, user supplies data).
+        g.add_conditional_edges(
+            "design",
+            self._route_after_design,
+            {"implement": "implement", "wait_for_data": "wait_for_data"},
+        )
         g.add_edge("implement", "execute")
         g.add_edge("execute", "execute_reflect")
         g.add_conditional_edges(
@@ -287,6 +350,13 @@ class Engine:
             self._route_after_execute_reflect,
             {"retry": "execute", "proceed": "analyze"},
         )
+        # wait_for_data uses LangGraph's ``interrupt()`` to pause when
+        # the user hasn't dropped any files yet. On resume (with files
+        # present), the node returns and we proceed to data_load. The
+        # node itself decides whether to pause or proceed based on the
+        # data dir contents at call time.
+        g.add_edge("wait_for_data", "data_load")
+        g.add_edge("data_load", "analyze")
         g.add_edge("analyze", "cross_check")
         g.add_conditional_edges(
             "cross_check",
@@ -302,6 +372,27 @@ class Engine:
         return g
 
     # ---- conditional edges --------------------------------------------------
+
+    def _route_after_design(self, state: QuestState) -> str:
+        """When ``no_simulation_resolved`` is set, skip the
+        implement → execute → execute_reflect chain entirely. Instead
+        route to ``wait_for_data`` which pauses for user-supplied data
+        and then hands off to ``data_load`` → ``analyze``.
+
+        ``no_simulation_resolved`` is set by the clarify node from
+        either the ``engine.no_simulation`` YAML flag (wins) or the
+        ``empirical_vs_theoretical == 'empirical'`` clarify answer.
+        See ``_resolve_no_simulation_from_clarify``.
+
+        Note: this routing decision is made AFTER design runs, so the
+        no-simulation flow still benefits from the LLM's experimental
+        design (variables, hypotheses, measurement plan) — it just
+        skips the simulate-and-execute half and treats the user's
+        real-world data as the experimental result instead.
+        """
+        if state.get("no_simulation_resolved"):
+            return "wait_for_data"
+        return "implement"
 
     def _route_after_execute_reflect(self, state: QuestState) -> str:
         """Phase K: route based on whether the reflect node patched the
@@ -370,7 +461,12 @@ class Engine:
             return {}
         if mode == "off":
             self._log.info("[clarify] mode=off; skipping")
-            return {"clarify_done": True}
+            # When clarify is skipped, only the YAML flag can switch on
+            # no_simulation — there's no clarify answer to inspect.
+            return {
+                "clarify_done": True,
+                "no_simulation_resolved": self.config.engine.no_simulation,
+            }
 
         prompt = self._prompts["clarify"].substitute(topic=state["topic"])
         text = await self._chat(prompt, node="clarify")
@@ -389,6 +485,7 @@ class Engine:
                 "clarify_questions": questions,
                 "clarify_answers": answers,
                 "clarify_done": True,
+                "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
             }
 
         # Interactive: pause the graph until the caller resumes with answers.
@@ -411,7 +508,31 @@ class Engine:
             "clarify_questions": questions,
             "clarify_answers": answers,
             "clarify_done": True,
+            "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
         }
+
+    def _resolve_no_simulation_from_clarify(
+        self, answers: dict[str, Any],
+    ) -> bool:
+        """Decide whether the ``no_simulation`` flag should be on for
+        this quest, based on the YAML config + the clarify answers.
+
+        Two entry points (YAML wins when set):
+
+        * ``engine.no_simulation: true`` in YAML → always True.
+        * ``empirical_vs_theoretical`` answer in clarify == "empirical"
+          → True. The user picked "empirical" so the engine treats this
+          as a topic where real data must be collected by hand, not
+          simulated. "theoretical" and "mixed" answers leave the flag
+          False — those topics can still run a Python simulation
+          (closed-form derivations, hybrid empirical+theory, etc.).
+        """
+        if self.config.engine.no_simulation:
+            return True
+        evt = (answers or {}).get("empirical_vs_theoretical")
+        if isinstance(evt, str) and evt.strip().lower() == "empirical":
+            return True
+        return False
 
     async def _node_ideate(self, state: QuestState) -> QuestState:
         self._log.info("[ideate] topic=%s", state["topic"][:80].replace("\n", " "))
@@ -509,6 +630,112 @@ class Engine:
         text = await self._chat(prompt, node="design")
         design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
         return {"design": design}
+
+    async def _node_wait_for_data(self, state: QuestState) -> QuestState:
+        """no-simulation pause point. Creates ``<quest_root>/data/``,
+        writes a README explaining what to drop into it, then either:
+
+        * If the dir is empty (apart from the README we just wrote) —
+          fire ``interrupt(...)`` so ``Engine.run`` can exit cleanly
+          with rc=0 and tell the user to drop files and re-run.
+
+        * If files are already present — return state with
+          ``data_files`` populated, letting the graph proceed to
+          ``data_load`` → ``analyze``.
+
+        On resume after the user dropped files, LangGraph re-enters
+        this node from the checkpoint. The dir now has files, so we
+        proceed without pausing.
+        """
+        data_dir = self.quest_root / "data"
+        data_dir.mkdir(exist_ok=True)
+        readme = data_dir / "README.md"
+        if not readme.exists():
+            readme.write_text(
+                _render_data_readme(state, self.quest_id), encoding="utf-8",
+            )
+        user_files = _list_user_data_files(data_dir)
+        if not user_files:
+            self._log.info(
+                "[wait_for_data] no user data yet in %s — pausing for "
+                "user to drop files and re-run", data_dir,
+            )
+            # Pause via LangGraph's interrupt mechanism. Engine.run
+            # catches this and exits rc=0 cleanly. On resume the
+            # interrupt re-fires; if the user has dropped files by
+            # then, the resume payload carries them. (We don't trust
+            # the payload — we re-walk the dir on every resume.)
+            interrupt({
+                "data_required": True,
+                "quest_id": self.quest_id,
+                "data_dir": str(data_dir),
+            })
+            # Unreachable in practice: interrupt() raises GraphInterrupt
+            # which Engine.run catches above; on resume, the node is
+            # re-invoked from the checkpoint and the early-return below
+            # fires because user_files is now non-empty.
+            return {}
+        self._log.info(
+            "[wait_for_data] found %d user file(s) under %s — proceeding "
+            "to data_load", len(user_files), data_dir,
+        )
+        return {"data_files": [str(p) for p in user_files]}
+
+    async def _node_data_load(self, state: QuestState) -> QuestState:
+        """no-simulation mode: synthesize a ``result_json`` from the
+        files the user dropped into ``<quest_root>/data/``. Reuses
+        the ``core/summarizer.py`` patterns (file walk + classify +
+        content-budget-aware prompt assembly) so we don't duplicate
+        the mixed-format walker.
+
+        The LLM call produces a JSON object with the same shape an
+        analyze-node prompt expects: a top-level dict of findings
+        + supporting evidence cited back to the user's source files.
+        """
+        from .summarizer import (
+            _walk_folder, _render_file_manifest, _render_content_blocks,
+        )
+
+        data_dir = self.quest_root / "data"
+        # Re-walk the dir on every invocation rather than trusting
+        # ``state["data_files"]`` — the user may have edited / added
+        # files between pause and resume.
+        entries = _walk_folder(data_dir)
+        if not entries:
+            self._log.warning(
+                "[data_load] %s is empty on resume — analyze will run "
+                "with an empty result_json", data_dir,
+            )
+            return {"result_json": {}, "data_files": []}
+
+        manifest = _render_file_manifest(entries)
+        content_blocks = _render_content_blocks(entries)
+        prompt = self._prompts["data_load"].substitute(
+            topic=state["topic"],
+            design_block=json.dumps(state.get("design") or {}, indent=2),
+            file_manifest=manifest,
+            content_blocks=content_blocks,
+        )
+        text = await self._chat(prompt, node="data_load")
+        result_json = _parse_json_lenient(text, node="data_load") or {}
+        self._log.info(
+            "[data_load] synthesized result_json with %d keys from %d files",
+            len(result_json), len(entries),
+        )
+        return {
+            "result_json": result_json,
+            "data_files": [str(e.path) for e in entries],
+            # Mark the no-sim path explicitly so analyze can flavor its
+            # interpretation ("the user collected this; treat citations
+            # as primary sources, not simulation outputs").
+            "exec_result": {
+                "returncode": 0,
+                "source": "no_simulation_user_data",
+                "n_files": len(entries),
+            },
+            # No figures from a simulation — leave the list empty.
+            "figures": [],
+        }
 
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._log.info("[implement] generating experiment code")
@@ -1174,6 +1401,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "clarify", "ideate", "ideate_reflect", "design", "implement",
         "execute_reflect", "analyze", "cross_check", "write", "review",
         "review_moderate",  # Phase N — panel-moderator prompt
+        "data_load",        # no-simulation mode — synthesize result_json
+                            # from user-supplied data
     )
     out: dict[str, string.Template] = {}
     for n in names:
@@ -1824,6 +2053,85 @@ def _slugify(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-") or "untitled"
+
+
+def _list_user_data_files(data_dir: Path) -> list[Path]:
+    """Files the user has dropped into ``<quest_root>/data/``. Excludes
+    the README.md we auto-write and any dot-prefixed files. Order is
+    deterministic (sorted by path) so re-walks across resumes return
+    the same list and the data_load prompt is stable."""
+    if not data_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(data_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.name == "README.md" and p.parent == data_dir:
+            continue
+        if p.name.startswith("."):
+            continue
+        out.append(p)
+    return out
+
+
+def _render_data_readme(state: QuestState, quest_id: str) -> str:
+    """The README.md FI writes into ``<quest_root>/data/`` to instruct
+    the user what to drop. Includes the topic + the LLM-designed
+    measurement plan so the user knows which data points actually
+    answer the research question.
+
+    Permissive about formats: csv / json / md notes / pdf / xlsx /
+    txt / images — the ``data_load`` node walks whatever's there and
+    synthesizes a result_json via one LLM call."""
+    topic = state.get("topic", "(no topic recorded)").strip()
+    design = state.get("design") or {}
+    hypothesis = design.get("hypothesis", "(not recorded — design node may have failed)")
+    plan = design.get("method", design.get("plan", "(see design.md)"))
+    variables = design.get("variables", {})
+    return (
+        f"# Drop your data here\n\n"
+        f"This quest is running in **no-simulation mode** "
+        f"(`engine.no_simulation: true` OR clarify answered "
+        f"`empirical_vs_theoretical: empirical`). The engine has\n"
+        f"finished the planning half (clarify → ideate → literature → "
+        f"design) and is paused waiting for you to supply real-world "
+        f"data.\n\n"
+        f"## What to drop into this folder\n\n"
+        f"Anything that answers the research question. Permissive about "
+        f"format — FI walks the dir and synthesizes a `result_json` "
+        f"from the contents via one LLM call. Common shapes:\n\n"
+        f"- **`.csv` / `.tsv`** — tabular measurements, one row per observation\n"
+        f"- **`.json` / `.jsonl`** — structured data (survey responses, API dumps)\n"
+        f"- **`.md` / `.txt`** — your own field notes, interview transcripts, observations\n"
+        f"- **`.pdf`** — supporting documents (reports, papers, archival sources)\n"
+        f"- **`.xlsx`** — spreadsheets (will be converted via pandas)\n"
+        f"- **`.png` / `.jpg`** — images / charts. Captioned descriptions in "
+        f"  an accompanying `.md` are more useful than raw images alone.\n\n"
+        f"This `README.md` is auto-written by FI; you can delete or "
+        f"overwrite it freely. FI ignores it when scanning the dir.\n\n"
+        f"## The topic\n\n"
+        f"{topic}\n\n"
+        f"## The hypothesis\n\n"
+        f"> {hypothesis}\n\n"
+        f"## What the design asked for\n\n"
+        f"{plan if isinstance(plan, str) else json.dumps(plan, indent=2)}\n\n"
+        + (
+            f"### Variables the design wants you to measure\n\n"
+            f"```json\n{json.dumps(variables, indent=2)}\n```\n\n"
+            if variables else ""
+        ) +
+        f"## How to resume\n\n"
+        f"Once you've dropped your data into this folder, re-run:\n\n"
+        f"```bash\n"
+        f"fi --resume {quest_id}\n"
+        f"# or:\n"
+        f"python launch.py --config <your_config.yaml> --resume {quest_id}\n"
+        f"```\n\n"
+        f"FI will pick up at the `data_load` node, walk every file in "
+        f"this folder, synthesize a result_json, and then continue "
+        f"through `analyze → cross_check → write → review` exactly like "
+        f"a simulation-driven quest would.\n"
+    )
 
 
 def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
