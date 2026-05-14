@@ -200,7 +200,23 @@ output:
   kinds: [paper_md, paper_pdf]
   paper_format: generic             # generic | neurips | iclr | ieee_access | nature_mi
   output_dir: ./outputs
+  require_pdf: false                # strict mode for paper_pdf — see below
 ```
+
+### `output.require_pdf` — strict-mode pre-flight check
+
+By default, if `paper_pdf` is in `output.kinds` but the host lacks
+pandoc or a LaTeX engine, the engine emits a WARNING and continues —
+the quest runs to completion, writes `paper.md`, and drops a
+`paper_pdf_skipped.md` diagnostic file next to the markdown. You
+still pay the LLM cost (~15 minutes) but get no PDF.
+
+Set `output.require_pdf: true` to upgrade that warning to a hard
+failure **before any LLM calls happen**. The engine pre-flight-checks
+`pandoc` + a LaTeX engine (`pdflatex` or `tectonic`) at startup; if
+either is missing, the quest aborts immediately with the install
+recipe. Recommended for unattended / CI runs where a missing PDF
+means the output is unusable anyway.
 
 ### `execution.sandbox: docker` — what it actually does
 
