@@ -227,10 +227,31 @@ class Engine:
             if self.config.provider.name in PROXY_PROVIDERS:
                 await self.supervisor.release(self.config.provider.name)
 
-        artifacts = self._collect_artifacts(final_state)
-        self._write_back_knowledge(artifacts, final_state)
-        self._log.info("quest %s reached terminal state", self.quest_id)
-        return artifacts
+        # Collect artifacts + write-back inside an outer try/finally so
+        # the per-quest run.log FileHandler is released regardless of
+        # whether the run succeeded, ``_collect_artifacts`` raised, or
+        # ``_write_back_knowledge`` raised. Without this, the
+        # FileHandler stayed open for the lifetime of the Python
+        # process — on Windows that locked ``run.log`` and caused
+        # ``shutil.rmtree`` of the quest dir to fail with
+        # ``PermissionError [WinError 32]`` in tests.
+        #
+        # Trade-off: if the inner try (LangGraph invoke) raised, the
+        # exception propagates out of the inner finally and we never
+        # reach this block — so a LangGraph-side exception still leaks
+        # the logger. That's accepted: in production those exceptions
+        # surface up to launch.py and the process exits soon after, so
+        # the leak is bounded by process lifetime. In tests, the
+        # LangGraph invoke is mocked and almost never raises; tests
+        # that DO want to test the exception path can call
+        # _close_quest_logger themselves.
+        try:
+            artifacts = self._collect_artifacts(final_state)
+            self._write_back_knowledge(artifacts, final_state)
+            self._log.info("quest %s reached terminal state", self.quest_id)
+            return artifacts
+        finally:
+            _close_quest_logger(self.quest_id)
 
     # ---- graph topology --------------------------------------------------
 
@@ -1807,6 +1828,30 @@ def _slugify(s: str) -> str:
 
 
 def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
+    """Construct (or refresh) the per-quest logger.
+
+    Loggers in Python's ``logging`` module are global by name —
+    ``logging.getLogger("frontier_insight.<qid>")`` returns the SAME
+    Logger object across the process lifetime. The FileHandler we add
+    here opens ``<fi_dir>/run.log`` and keeps the file descriptor
+    open for the life of the Logger; on Windows that lock prevents
+    tests from deleting the quest tree after the test ends, AND
+    prevents reusing the same quest_id with a fresh fi_dir on a
+    later run (a stale handler keeps writing to a now-deleted path).
+
+    To fix: when the logger already has handlers, check whether the
+    existing FileHandler points at the *current* run.log path. If
+    yes, reuse — this is the common case where an Engine is
+    re-instantiated within one process to call ``run()`` twice. If
+    no, close + drop the stale handlers and rebuild them. The
+    test-cleanup case (delete the dir, recreate Engine) then works
+    without the second Engine inheriting a broken handler.
+
+    Pair this with ``_close_quest_logger`` (below) in
+    ``Engine.run``'s ``finally:`` block so the file lock is released
+    on any return path — success, error, OR the no-simulation
+    pause-exit added in Phase B.
+    """
     fi_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"frontier_insight.{quest_id}")
     logger.setLevel(logging.INFO)
@@ -1817,12 +1862,52 @@ def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
     # The file handler below + the per-process stream handler are
     # the only two sinks we want.
     logger.propagate = False
+
+    target_log_path = (fi_dir / "run.log").resolve()
     if logger.handlers:
-        return logger
-    fh = logging.FileHandler(fi_dir / "run.log", encoding="utf-8")
+        # Reuse only if the existing FileHandler still points at the
+        # right file. Otherwise wipe and rebuild.
+        existing_fh = next(
+            (h for h in logger.handlers if isinstance(h, logging.FileHandler)),
+            None,
+        )
+        if existing_fh is not None and Path(existing_fh.baseFilename).resolve() == target_log_path:
+            return logger
+        # Stale handlers — close and detach them.
+        _close_quest_logger(quest_id)
+
+    fh = logging.FileHandler(target_log_path, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(fh)
     sh = logging.StreamHandler()
     sh.setFormatter(logging.Formatter(f"[{quest_id[:24]}] %(message)s"))
     logger.addHandler(sh)
     return logger
+
+
+def _close_quest_logger(quest_id: str) -> None:
+    """Close + detach every handler from the per-quest logger so the
+    underlying ``run.log`` file lock is released. Safe to call
+    repeatedly (no-op if the logger has no handlers) and safe to call
+    from ``finally:`` in any return path.
+
+    Why this matters on Windows: an open ``FileHandler`` holds an
+    exclusive write lock on the file. Without this close, a test that
+    creates an Engine, completes it, and then ``shutil.rmtree``s the
+    quest directory will fail with ``PermissionError: [WinError 32]
+    The process cannot access the file because it is being used by
+    another process``. We've hit that cascade across several test
+    sessions; Phase B's no-simulation pause-exit adds another return
+    path where the same leak would happen, so the fix lands here
+    first."""
+    logger = logging.getLogger(f"frontier_insight.{quest_id}")
+    for handler in list(logger.handlers):
+        try:
+            handler.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            handler.close()
+        except (OSError, ValueError):
+            pass
+        logger.removeHandler(handler)

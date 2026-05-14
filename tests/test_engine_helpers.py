@@ -646,3 +646,119 @@ def test_write_prompt_authors_title_not_slug() -> None:
     # New contract:  "MUST be a proper Title-Case academic title"
     assert "Title-Case" in write_md or "Title Case" in write_md
     assert "Do NOT use the raw slug" in write_md
+
+
+# ---- _quest_logger lifecycle ---------------------------------------------
+
+
+def test_quest_logger_releases_file_handler_on_close(tmp_path: Path) -> None:
+    """After ``_close_quest_logger``, the per-quest run.log FileHandler
+    must be closed AND removed from the logger's handler list. On
+    Windows, this is what releases the file lock so a subsequent
+    ``shutil.rmtree`` of the quest directory can succeed.
+
+    Regression for the Windows test-cleanup cascade: prior to the
+    Engine.run finally-block fix, the FileHandler stayed open for the
+    process lifetime and broke .pytest_tmp cleanup across multiple
+    test sessions in this codebase."""
+    import logging
+    from core.engine import _quest_logger, _close_quest_logger
+
+    fi_dir = tmp_path / ".fi"
+    logger = _quest_logger("test-quest-lifecycle-aabbcc", fi_dir)
+
+    # FileHandler was added.
+    file_handlers = [
+        h for h in logger.handlers if isinstance(h, logging.FileHandler)
+    ]
+    assert len(file_handlers) == 1
+    handler = file_handlers[0]
+    # File is open (the FileHandler opens lazily, but the stream is
+    # held once any message is emitted — force that by logging).
+    logger.info("smoke")
+    assert handler.stream is not None
+    assert not handler.stream.closed
+
+    # Close it.
+    _close_quest_logger("test-quest-lifecycle-aabbcc")
+
+    # Handler is gone from the logger.
+    assert not any(
+        isinstance(h, logging.FileHandler) for h in logger.handlers
+    ), f"FileHandler still attached: {logger.handlers!r}"
+    # The handler's stream is closed.
+    assert handler.stream is None or handler.stream.closed
+
+
+def test_quest_logger_can_be_reopened_after_dir_recreate(tmp_path: Path) -> None:
+    """The hard case: a test deletes the quest dir and recreates it
+    with the SAME quest_id. The second ``_quest_logger`` call must
+    NOT inherit the now-stale FileHandler from the first call —
+    otherwise log lines go to a deleted path and the new run.log
+    is never written.
+
+    This is the precise failure mode that broke Windows test cleanup
+    multiple times before the lifecycle fix landed."""
+    import logging
+    import shutil
+    from core.engine import _quest_logger, _close_quest_logger
+
+    qid = "test-recreate-aabbcc"
+    fi_dir_1 = tmp_path / "run1" / ".fi"
+    _quest_logger(qid, fi_dir_1)
+    logging.getLogger(f"frontier_insight.{qid}").info("first run")
+    _close_quest_logger(qid)
+    # Whole tree is removable now.
+    shutil.rmtree(tmp_path / "run1")
+    assert not (tmp_path / "run1").exists()
+
+    # Recreate the SAME quest_id with a different fi_dir.
+    fi_dir_2 = tmp_path / "run2" / ".fi"
+    logger2 = _quest_logger(qid, fi_dir_2)
+    logging.getLogger(f"frontier_insight.{qid}").info("second run")
+
+    # The handler MUST point at the new path, not the deleted one.
+    file_handlers = [
+        h for h in logger2.handlers if isinstance(h, logging.FileHandler)
+    ]
+    assert len(file_handlers) == 1
+    assert Path(file_handlers[0].baseFilename).resolve() == (
+        fi_dir_2 / "run.log"
+    ).resolve(), (
+        f"second _quest_logger call returned a stale handler pointing at "
+        f"{file_handlers[0].baseFilename!r} — should have pointed at "
+        f"{(fi_dir_2 / 'run.log')!r}"
+    )
+
+    # And the second run.log actually got written.
+    assert (fi_dir_2 / "run.log").exists()
+    assert "second run" in (fi_dir_2 / "run.log").read_text(encoding="utf-8")
+
+    _close_quest_logger(qid)
+
+
+def test_close_quest_logger_idempotent() -> None:
+    """``_close_quest_logger`` must be safe to call multiple times —
+    the Engine.run finally-block calls it, and the artifact-collection
+    try/finally calls it again; a second call must not error."""
+    from core.engine import _close_quest_logger
+
+    qid = "test-idempotent-aabbcc"
+    _close_quest_logger(qid)
+    _close_quest_logger(qid)   # no logger exists yet → no-op
+    _close_quest_logger(qid)
+
+
+def test_close_quest_logger_logger_with_no_handlers_is_safe() -> None:
+    """If a logger was never instantiated (no _quest_logger call),
+    closing it must still be a no-op rather than raising."""
+    import logging
+    from core.engine import _close_quest_logger
+
+    qid = "test-never-instantiated-aabbcc"
+    # Forcibly clear any handlers (Python's logging module may have
+    # left an empty Logger object from a prior test run).
+    logger = logging.getLogger(f"frontier_insight.{qid}")
+    assert logger.handlers == []
+    _close_quest_logger(qid)
+    assert logger.handlers == []
