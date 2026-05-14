@@ -19,6 +19,8 @@ import shutil
 import string
 import time
 import uuid
+
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict
@@ -741,19 +743,23 @@ class Engine:
         the downstream nodes (``wait_for_data`` → ``data_load``) see
         them as ordinary user data and proceed without pausing.
 
-        Passthrough (logged, no axon call) when ANY of:
-        * ``engine.auto_collect_data`` is False — user opted out.
-        * ``knowledge.enabled`` is False — there's no Axon to query.
-        * ``Knowledge.asearch`` raises or returns zero docs — the
-          fallback pause in ``wait_for_data`` is the safety net.
+        Passthrough discipline (each case is distinguishable in run.log):
+        * ``engine.auto_collect_data`` is False — user opted out. No
+          Axon call. Logged INFO.
+        * ``knowledge.enabled`` is False — no Axon to query. No Axon
+          call. Logged INFO.
+        * ``Knowledge.asearch`` IS called but raises — the exception
+          is caught, logged WARNING, and the node returns
+          ``auto_collected_count=0`` so ``wait_for_data`` takes over.
+        * ``Knowledge.asearch`` returns zero docs — logged INFO. No
+          files written. Empty ``auto_collected/`` directory is NOT
+          left behind.
 
-        Idempotent on resume: the directory layout is keyed on Axon's
-        retrieval ranks, so a second pass produces the same filenames
-        and is a no-op for the files that match. New retrievals
-        landing on resume would slot in alongside without disturbing
-        the user's manually dropped files.
+        On resume the node re-runs and re-walks Axon — files at the
+        same rank slot get overwritten with the latest retrieval. The
+        user's manually dropped files (anywhere in ``data/`` other
+        than ``auto_collected/``) are untouched on each pass.
         """
-        auto_dir_name = "auto_collected"
         if not self.config.engine.auto_collect_data:
             self._log.info(
                 "[auto_collect] engine.auto_collect_data=False — "
@@ -785,8 +791,8 @@ class Engine:
             docs = await self.knowledge.asearch(query, top_k=top_k)
         except Exception as e:
             self._log.warning(
-                "[auto_collect] Axon search failed: %s — falling through "
-                "to user-data pause", e,
+                "[auto_collect] Axon search raised — falling through to "
+                "user-data pause (no files written): %s", e,
             )
             return {"auto_collected_count": 0}
 
@@ -797,9 +803,13 @@ class Engine:
             )
             return {"auto_collected_count": 0}
 
-        auto_dir = self.quest_root / "data" / auto_dir_name
-        auto_dir.mkdir(parents=True, exist_ok=True)
-        written = 0
+        # Lazy mkdir: defer creating ``auto_collected/`` until at least
+        # one write succeeds. Without this, a permissions / disk-full
+        # failure where ALL writes raise OSError would still leave an
+        # empty directory behind, misleading the user about whether
+        # auto-collection produced anything.
+        auto_dir = self.quest_root / "data" / "auto_collected"
+        written_targets: list[Path] = []
         for idx, doc in enumerate(docs, start=1):
             # Build a slug from the source filename (when known) so
             # the file is greppable from the user's side later.
@@ -809,26 +819,34 @@ class Engine:
             slug = _slugify(slug_basis)[:40] or f"doc{idx}"
             fname = f"{idx:03d}_{slug}.md"
             target = auto_dir / fname
-            # Render: YAML front matter with the metadata so data_load's
-            # mixed-format walker has provenance for cite-back, then the
-            # actual content. Keep front matter conservative — only the
-            # keys most likely to be present, so a metadata-light Axon
-            # corpus doesn't produce noisy "key: None" lines.
-            front_lines: list[str] = ["---", "auto_collected: true", f"rank: {idx}"]
-            for key in ("source", "path", "title", "url", "kind", "year"):
-                value = meta.get(key)
-                if value:
-                    safe_value = str(value).replace("\n", " ").strip()
-                    front_lines.append(f"{key}: {safe_value!r}")
-            front_lines.append("---\n")
-            body = "\n".join(front_lines) + (doc.content or "").strip() + "\n"
+            body = _render_auto_collected_md(idx, meta, doc.content or "")
             try:
+                # mkdir(exist_ok=True) is idempotent — safe to call
+                # once per doc; this is the "lazy on first write" hook.
+                auto_dir.mkdir(parents=True, exist_ok=True)
                 target.write_text(body, encoding="utf-8")
-                written += 1
+                written_targets.append(target)
             except OSError as e:
                 self._log.warning(
                     "[auto_collect] failed to write %s: %s — skipping doc",
                     target, e,
+                )
+
+        written = len(written_targets)
+        # Hard guarantee: when ZERO writes succeeded, there must be no
+        # empty ``auto_collected/`` directory left behind (could happen
+        # if the first mkdir succeeded then every write failed — rare
+        # but possible on a near-full disk). Try to remove; if the
+        # rmdir fails (e.g. concurrent file appeared), log and move on.
+        if written == 0 and auto_dir.is_dir():
+            try:
+                auto_dir.rmdir()
+            except OSError as e:
+                self._log.warning(
+                    "[auto_collect] all writes failed AND could not "
+                    "rmdir leftover %s: %s — directory may appear "
+                    "incorrectly as a partial-success artifact",
+                    auto_dir, e,
                 )
 
         self._log.info(
@@ -2359,6 +2377,31 @@ def _slugify(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-") or "untitled"
+
+
+def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:
+    """Render an Axon retrieval hit as a Markdown file with YAML front
+    matter. Used by ``_node_auto_collect_data`` (Phase D1).
+
+    Why a proper YAML dump (not Python ``repr``): a metadata value
+    containing single quotes (``"O'Brien"``), backslashes, or non-ASCII
+    characters would be backslash-escaped by ``repr`` and the resulting
+    string would be unsafe to round-trip through a YAML parser. The
+    data_load node downstream may decide to parse the front matter for
+    provenance; if it can't, the user loses cite-back fidelity. Using
+    ``yaml.safe_dump`` produces a guaranteed-parseable block regardless
+    of the metadata content.
+    """
+    front: dict[str, Any] = {"auto_collected": True, "rank": idx}
+    for key in ("source", "path", "title", "url", "kind", "year"):
+        value = meta.get(key)
+        if value:
+            # Normalize: strip newlines that would break YAML's scalar
+            # rules (multi-line provenance fields would otherwise need
+            # quoted block style which clutters the file head).
+            front[key] = str(value).replace("\n", " ").strip()
+    yaml_block = yaml.safe_dump(front, default_flow_style=False, sort_keys=False)
+    return f"---\n{yaml_block}---\n{content.strip()}\n"
 
 
 def _list_user_data_files(data_dir: Path) -> list[Path]:

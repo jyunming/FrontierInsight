@@ -337,10 +337,19 @@ the paper can cite back to specific sources). Controlled by:
   only on long-context models with topics that genuinely need
   more breadth.
 
-Auto-collect is a logged passthrough (no Axon call, no files
-written) when `engine.auto_collect_data: false`, `knowledge.enabled:
-false`, or Axon raises / returns zero hits — in those cases the
-flow falls through to the user-data pause as before.
+Auto-collect falls through to the user-data pause (no files
+written, `auto_collected_count: 0` in state) in four cases:
+
+* `engine.auto_collect_data: false` — INFO log, **no Axon call**.
+* `knowledge.enabled: false` — INFO log, **no Axon call**.
+* `Knowledge.asearch` raised — WARNING log; Axon **was called** but
+  the exception is caught so the quest survives.
+* Axon returned zero hits — INFO log; Axon was called and answered
+  legitimately with nothing.
+
+In all four cases `wait_for_data` then makes the final pause-or-
+proceed decision based on `data/` contents (manual drops still
+count if you pre-staged some).
 
 **`wait_for_data`** — the user-data pause. With files already in
 `data/` (either auto-collected or user-supplied), this node

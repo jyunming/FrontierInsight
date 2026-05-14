@@ -169,8 +169,10 @@ class EngineConfig(BaseModel):
     # comfortably fits a 16k-context prompt. Bump only when running on
     # a long-context model AND when the topic genuinely benefits from
     # more breadth (most don't — the top 5 from a good retriever
-    # cover the space already).
-    auto_collect_top_k: int = 5
+    # cover the space already). ``ge=1`` because passing top_k=0 to
+    # Axon would request "zero hits" — a useless config that should
+    # be a YAML error not silent passthrough.
+    auto_collect_top_k: int = Field(default=5, ge=1)
 
 
 class ExecutionConfig(BaseModel):

@@ -1558,6 +1558,115 @@ async def test_node_auto_collect_data_writes_files_on_axon_hits(
 
 
 @pytest.mark.asyncio
+async def test_node_auto_collect_data_front_matter_is_yaml_parseable(
+    tmp_path: Path,
+) -> None:
+    """The YAML front matter must be safely parseable by any standard
+    YAML loader — so downstream tools (or a future data_load that
+    parses provenance) can round-trip metadata values containing
+    quotes, backslashes, colons, and unicode without mangling.
+
+    Regression for PR #60 bot comment: front matter previously used
+    Python ``repr`` which is NOT YAML-safe (a value like ``"O'Brien"``
+    would parse back as ``"O\\'Brien"`` from a YAML reader)."""
+    from unittest.mock import AsyncMock
+    from core.knowledge import RetrievedDoc
+    import yaml as _yaml
+
+    docs = [
+        RetrievedDoc(
+            content="hit body",
+            metadata={
+                # Punctuation that breaks Python repr-vs-YAML round-trip:
+                "source": "O'Brien_2021.pdf",
+                "title": "Trust: A YAML-hostile string (with colons)",
+                "url": "https://example.com/path?q=value&r=2",
+                "kind": "fi_local_paper",
+            },
+        ),
+    ]
+    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=1)
+    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
+
+    await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    files = sorted(
+        (engine.quest_root / "data" / "auto_collected").glob("*.md")
+    )
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    # Extract the front matter block.
+    assert body.startswith("---\n")
+    _, fm_block, _ = body.split("---\n", 2)
+    parsed = _yaml.safe_load(fm_block)
+    assert isinstance(parsed, dict), f"front matter is not a YAML mapping: {fm_block!r}"
+    # Values round-trip cleanly.
+    assert parsed["source"] == "O'Brien_2021.pdf"
+    assert parsed["title"] == "Trust: A YAML-hostile string (with colons)"
+    assert parsed["url"] == "https://example.com/path?q=value&r=2"
+    assert parsed["auto_collected"] is True
+    assert parsed["rank"] == 1
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_cleans_up_dir_when_all_writes_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case from PR #60 bot review: when EVERY write raises OSError
+    (e.g. permissions or full disk after the mkdir succeeded), the
+    node must NOT leave an empty ``auto_collected/`` directory behind
+    — that would mislead the user into thinking auto-collection
+    produced output. Verify cleanup happens."""
+    from unittest.mock import AsyncMock
+    from pathlib import Path as _Path
+    from core.knowledge import RetrievedDoc
+
+    docs = [
+        RetrievedDoc(content=f"body{i}", metadata={"source": f"x{i}.pdf"})
+        for i in range(3)
+    ]
+    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=3)
+    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
+
+    # Force every write_text to fail. mkdir is still allowed (so we
+    # can prove the cleanup path runs).
+    original_write_text = _Path.write_text
+    def fake_write_text(self, *_a, **_kw):  # type: ignore[no-untyped-def]
+        if "auto_collected" in str(self):
+            raise OSError("simulated disk full")
+        return original_write_text(self, *_a, **_kw)
+    monkeypatch.setattr(_Path, "write_text", fake_write_text)
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 0}
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    assert not auto_dir.exists(), (
+        f"empty auto_collected/ must be cleaned up when all writes "
+        f"failed; got dir={auto_dir} children="
+        f"{list(auto_dir.iterdir()) if auto_dir.exists() else 'n/a'}"
+    )
+
+
+def test_auto_collect_top_k_rejects_zero_and_negative() -> None:
+    """``Field(default=5, ge=1)`` on ``auto_collect_top_k``: passing
+    top_k=0 to Axon would mean "request zero hits" which is useless;
+    a typo / negative value should fail at YAML parse time, not
+    silently pass through.
+
+    Regression for PR #60 bot comment."""
+    from core.config import EngineConfig
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        EngineConfig(auto_collect_top_k=0)
+    with pytest.raises(ValidationError):
+        EngineConfig(auto_collect_top_k=-1)
+    # Positive values work — boundary check at 1.
+    assert EngineConfig(auto_collect_top_k=1).auto_collect_top_k == 1
+
+
+@pytest.mark.asyncio
 async def test_node_auto_collect_data_uses_topic_and_hypothesis_in_query(
     tmp_path: Path,
 ) -> None:
