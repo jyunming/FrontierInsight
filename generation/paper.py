@@ -80,8 +80,18 @@ class PaperGenerator:
             # paper_md being in output.kinds.
             pdf_src = result.get("paper_md") or art.paper_md
             pdf, skip_reason = self._compile_pdf(pdf_src, out_dir)
+            diag_path = out_dir / "paper_pdf_skipped.md"
             if pdf is not None:
                 result["paper_pdf"] = pdf
+                # Success on this run — remove any stale skip
+                # diagnostic from a PREVIOUS failed run. Otherwise the
+                # quest dir would report both paper.pdf AND
+                # paper_pdf_skipped.md, which is confusing.
+                if diag_path.is_file():
+                    try:
+                        diag_path.unlink()
+                    except OSError:
+                        pass
             elif skip_reason is not None:
                 # User asked for a PDF, none was produced, AND we know why.
                 # Write a single-paragraph diagnostic file in the same
@@ -89,7 +99,6 @@ class PaperGenerator:
                 # run.log. Stale files from a prior failed run get
                 # overwritten — the LATEST attempt's reason is what
                 # matters to the user.
-                diag_path = out_dir / "paper_pdf_skipped.md"
                 diag_path.write_text(
                     _render_pdf_skip_md(skip_reason, self.config),
                     encoding="utf-8",
@@ -246,9 +255,13 @@ class PaperGenerator:
                 summary=msg,
                 how_to_fix=(
                     "`shutil.which('pandoc')` found pandoc but `subprocess.run` "
-                    "could not invoke it. Likely PATH disagreement between the "
-                    "shell and the Python child process. Re-open the terminal "
-                    "after installing pandoc, or set `PANDOC_PATH` explicitly."
+                    "could not invoke it. Likely a PATH disagreement between "
+                    "the shell that resolved the binary and the Python child "
+                    "process that tried to spawn it. Reopen the terminal "
+                    "after installing pandoc so the Python session inherits "
+                    "the updated PATH. (FI does not consult a separate "
+                    "`PANDOC_PATH` env var; only `shutil.which('pandoc')` is "
+                    "used to locate the binary.)"
                 ),
             )
         except subprocess.TimeoutExpired:
@@ -326,21 +339,29 @@ def _render_pdf_skip_md(reason: _PdfSkipReason, config: Config) -> str:
         f"{reason.how_to_fix}\n\n"
         f"## After fixing\n\n"
         f"To compile just the PDF for this quest (without re-running the "
-        f"whole LLM loop), re-run the generators against the existing "
-        f"`paper/paper.md`:\n\n"
+        f"whole LLM loop), run the following from the repo root. It "
+        f"mirrors how `launch.py` invokes the generator on a successful "
+        f"run (see `launch.py:_run_generators`).\n\n"
         f"```python\n"
         f"from pathlib import Path\n"
         f"from core.config import Config\n"
         f"from core.engine import QuestArtifacts\n"
         f"from generation.paper import PaperGenerator\n"
-        f"quest_root = Path(__file__).parent.parent  # adjust if needed\n"
+        f"\n"
+        f"# Replace with the actual quest dir path:\n"
+        f"quest_root = Path('outputs/<your_quest_id>').resolve()\n"
         f"cfg = Config.from_yaml(quest_root / 'config.yaml')\n"
         f"art = QuestArtifacts(\n"
+        f"    quest_id=quest_root.name,\n"
+        f"    quest_root=quest_root,\n"
         f"    paper_md=quest_root / 'paper' / 'paper.md',\n"
         f"    figures_dir=quest_root / 'figures',\n"
         f"    bundle_manifest=None,\n"
         f")\n"
-        f"PaperGenerator(cfg).generate(art, quest_root / 'paper')\n"
+        f"# `art.quest_root` is the same target launch.py passes — the\n"
+        f"# generator drops `paper/paper.pdf` (and any other output\n"
+        f"# kinds you've configured) under this directory.\n"
+        f"PaperGenerator(cfg).generate(art, art.quest_root)\n"
         f"```\n\n"
-        f"Delete this file once `paper.pdf` lands in this directory.\n"
+        f"This file is auto-deleted on the next successful PDF compile.\n"
     )

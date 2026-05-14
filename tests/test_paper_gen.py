@@ -603,6 +603,43 @@ def test_paper_pdf_skipped_md_cleaned_up_on_subsequent_md_only_run(
     assert not stale.exists(), "stale skip diagnostic was not cleaned up"
 
 
+def test_paper_pdf_skipped_md_removed_when_subsequent_run_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a previous run wrote ``paper_pdf_skipped.md`` (engine
+    missing) and a later run succeeds (engine now installed), the
+    stale diagnostic must be removed so the quest dir doesn't
+    simultaneously report a paper.pdf AND a 'skipped' marker.
+
+    Regression for PR #55 bot comment."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stale = out_dir / "paper_pdf_skipped.md"
+    stale.write_text("(stale from prior failed run)\n", encoding="utf-8")
+
+    # Now: pandoc + pdflatex both available, compile succeeds.
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return f"/fake/{name}" if name in ("pandoc", "pdflatex") else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        out_idx = cmd.index("-o") + 1
+        Path(cmd[out_idx]).write_bytes(b"%PDF-1.4 fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    result = PaperGenerator(cfg).generate(_make_artifacts(tmp_path), out_dir)
+
+    # PDF was produced.
+    assert "paper_pdf" in result
+    assert (out_dir / "paper.pdf").exists()
+    # Stale skip diagnostic from the prior failed run is GONE.
+    assert not stale.exists(), (
+        "stale paper_pdf_skipped.md was not removed after success"
+    )
+
+
 def test_paper_pdf_skipped_md_overwritten_on_subsequent_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
