@@ -167,6 +167,8 @@ engine:
   no_simulation: false              # see "Topics that need real data" section below
   auto_collect_data: true           # try Axon for evidence before pausing for user data (no_simulation mode)
   auto_collect_top_k: 5             # Axon top_k for auto_collect_data
+  dataset_adapters: []              # structured-data adapters (Phase D2). Available: "worldbank"
+  dataset_adapter_top_k: 3          # rows per adapter
 
 execution:
   sandbox: venv                     # venv (default) | docker
@@ -336,6 +338,26 @@ the paper can cite back to specific sources). Controlled by:
   5 fits comfortably in a 16k-context data_load prompt; raise
   only on long-context models with topics that genuinely need
   more breadth.
+
+**Dataset adapters (Phase D2)**: in addition to the corpus-RAG
+retrieval, `auto_collect_data` can invoke structured-data adapters
+that hit public APIs and write tabular evidence into
+`<quest_root>/data/auto_collected/<adapter>/`. Opt in via:
+
+* `engine.dataset_adapters: [worldbank]` — list of registered
+  adapter names. Empty (default) means "Axon only — D1 behavior
+  unchanged". Available adapters: `worldbank`. Unknown names log
+  a WARNING and are skipped (no hard error on typo).
+* `engine.dataset_adapter_top_k: 3` — rows per adapter. Smaller
+  default than the Axon knob because each row hits an external API.
+
+The WorldBank adapter heuristically extracts country names from the
+query (`"Belgium and Taiwan"` → `[BEL, TWN]`, falling back to
+global aggregates `WLD/OED/EUU/HIC/LIC` when no country named),
+scores ~1500 indicator names against the query keywords, and writes
+the top `top_k` matches as Markdown tables with the last 5 years of
+data. Adapter failures (network down, indicator not found, every
+write failing) fall through silently to the safety net.
 
 Auto-collect falls through to the user-data pause (no files
 written, `auto_collected_count: 0` in state) in four cases:

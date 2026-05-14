@@ -173,6 +173,25 @@ class EngineConfig(BaseModel):
     # Axon would request "zero hits" — a useless config that should
     # be a YAML error not silent passthrough.
     auto_collect_top_k: int = Field(default=5, ge=1)
+    # Phase D2 — structured dataset adapters that run alongside the
+    # Axon retrieval in the auto_collect_data node. Each name in the
+    # list is looked up in ``core.datasets.ADAPTER_REGISTRY``;
+    # unrecognized names are logged as a WARNING and skipped. Empty
+    # list (default) means "Axon only" — preserves Phase D1 behavior
+    # exactly. Available names: ``"worldbank"``.
+    #
+    # Adapters write into ``<quest_root>/data/auto_collected/<source>/``
+    # subdirectories so the manifest renders them grouped by origin
+    # (and the user can spot which dataset contributed what to the
+    # paper at a glance). Each adapter is best-effort — errors fall
+    # through silently to the safety net (``wait_for_data`` pause).
+    dataset_adapters: list[str] = Field(default_factory=list)
+    # Per-adapter top_k. The Axon top_k stays at ``auto_collect_top_k``
+    # above; this separate knob is for the dataset adapters because
+    # they tend to hit external APIs and a smaller default is the
+    # right cost trade-off. 3 indicators × a few countries each =
+    # enough comparative baseline for most no-simulation quests.
+    dataset_adapter_top_k: int = Field(default=3, ge=1)
 
 
 class ExecutionConfig(BaseModel):

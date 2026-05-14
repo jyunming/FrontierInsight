@@ -1648,6 +1648,183 @@ async def test_node_auto_collect_data_cleans_up_dir_when_all_writes_fail(
     )
 
 
+# ---- _run_dataset_adapters (Phase D2) ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dataset_adapters_passthrough_when_list_empty(
+    tmp_path: Path,
+) -> None:
+    """Default ``EngineConfig.dataset_adapters: []`` — no adapter
+    runs, no subdirs created. Phase D1 behavior unchanged."""
+    from unittest.mock import AsyncMock
+    from core.knowledge import RetrievedDoc
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
+        RetrievedDoc(content="axon hit", metadata={"source": "p.pdf"}),
+    ])
+
+    await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    # Only top-level Axon files; no per-adapter subdirs.
+    children = sorted(p.name for p in auto_dir.iterdir())
+    assert children == ["001_p.md"], children
+
+
+@pytest.mark.asyncio
+async def test_dataset_adapters_unknown_name_logs_warning_and_skips(
+    tmp_path: Path,
+) -> None:
+    """An unrecognized adapter name (typo in YAML) must NOT crash;
+    log a WARNING listing the known names and skip. The rest of the
+    flow proceeds normally."""
+    import logging as _logging
+    from unittest.mock import AsyncMock
+    from core.knowledge import RetrievedDoc
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.config.engine.dataset_adapters = ["typo_adapter"]  # type: ignore[misc]
+    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
+        RetrievedDoc(content="axon", metadata={"source": "x.pdf"}),
+    ])
+
+    captured: list[_logging.LogRecord] = []
+    sink = _logging.Handler()
+    sink.emit = captured.append  # type: ignore[assignment]
+    engine._log.addHandler(sink)
+    try:
+        result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+    finally:
+        engine._log.removeHandler(sink)
+
+    # Axon write still happened; adapter contributed nothing.
+    assert result == {"auto_collected_count": 1}
+    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
+    assert any("unknown dataset adapter" in m and "typo_adapter" in m for m in warnings), (
+        f"expected unknown-adapter WARNING; got: {warnings}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dataset_adapters_invokes_registered_adapter_and_writes_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: a registered adapter is named in
+    ``engine.dataset_adapters`` → it's instantiated, ``search()`` is
+    awaited with the same query the Axon path used, results are
+    written to ``data/auto_collected/<adapter_name>/``, and the
+    final auto_collected_count includes both Axon + adapter writes."""
+    from unittest.mock import AsyncMock
+    from core.datasets import ADAPTER_REGISTRY
+    from core.datasets.base import DatasetAdapter, DatasetRow
+    from core.knowledge import RetrievedDoc
+
+    class FakeAdapter(DatasetAdapter):
+        name = "fake"
+        last_query: str | None = None
+
+        async def search(self, query: str, *, top_k: int) -> list[DatasetRow]:
+            FakeAdapter.last_query = query
+            return [
+                DatasetRow(
+                    content="# Mocked dataset row\n\n| col | val |\n|-----|-----|\n| x | 1 |",
+                    metadata={"source": "fake", "indicator_id": "ABC", "title": "Mock Row"},
+                ),
+                DatasetRow(
+                    content="another row",
+                    metadata={"source": "fake", "indicator_id": "XYZ"},
+                ),
+            ]
+
+    monkeypatch.setitem(ADAPTER_REGISTRY, "fake", FakeAdapter)
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.config.engine.dataset_adapters = ["fake"]  # type: ignore[misc]
+    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
+        RetrievedDoc(content="axon hit", metadata={"source": "p.pdf"}),
+    ])
+
+    result = await engine._node_auto_collect_data({
+        "topic": "Belgium vs Taiwan trust",
+        "design": {"hypothesis": "IDV gap predicts trust"},
+    })
+
+    # 1 Axon + 2 adapter rows = 3 total.
+    assert result == {"auto_collected_count": 3}
+    # Adapter wrote into a per-adapter subdir.
+    sub_dir = engine.quest_root / "data" / "auto_collected" / "fake"
+    files = sorted(sub_dir.glob("*.md"))
+    assert len(files) == 2
+    assert files[0].name == "001_abc.md"  # slugged from indicator_id
+    assert files[1].name == "002_xyz.md"
+    # Adapter saw a query built from topic + hypothesis.
+    assert FakeAdapter.last_query is not None
+    assert "Belgium" in FakeAdapter.last_query
+    assert "IDV gap" in FakeAdapter.last_query
+    # The rendered file has the adapter name folded into the YAML
+    # front matter so a downstream tool can attribute the row.
+    body = files[0].read_text(encoding="utf-8")
+    assert "adapter: fake" in body
+
+
+@pytest.mark.asyncio
+async def test_dataset_adapters_exception_is_caught_and_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adapter that raises during ``.search()`` MUST NOT abort the
+    no-simulation flow. Log a WARNING, skip the adapter's results,
+    continue."""
+    from unittest.mock import AsyncMock
+    from core.datasets import ADAPTER_REGISTRY
+    from core.datasets.base import DatasetAdapter
+    from core.knowledge import RetrievedDoc
+
+    class FlakyAdapter(DatasetAdapter):
+        name = "flaky"
+        async def search(self, query: str, *, top_k: int):
+            raise RuntimeError("simulated API outage")
+
+    monkeypatch.setitem(ADAPTER_REGISTRY, "flaky", FlakyAdapter)
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.config.engine.dataset_adapters = ["flaky"]  # type: ignore[misc]
+    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
+        RetrievedDoc(content="axon", metadata={"source": "p.pdf"}),
+    ])
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    # Axon write present (1); adapter contributed nothing.
+    assert result == {"auto_collected_count": 1}
+    # The subdir for the flaky adapter must NOT exist (no half-baked
+    # artifact).
+    assert not (engine.quest_root / "data" / "auto_collected" / "flaky").exists()
+
+
+def test_dataset_adapter_top_k_rejects_zero_and_negative() -> None:
+    """Pydantic ``ge=1`` validation on ``dataset_adapter_top_k``.
+    Same rationale as ``auto_collect_top_k``: top_k=0 is useless."""
+    from core.config import EngineConfig
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        EngineConfig(dataset_adapter_top_k=0)
+    with pytest.raises(ValidationError):
+        EngineConfig(dataset_adapter_top_k=-3)
+    assert EngineConfig(dataset_adapter_top_k=1).dataset_adapter_top_k == 1
+
+
+def test_engine_config_dataset_adapters_default_empty() -> None:
+    """Default ``dataset_adapters: []`` preserves Phase D1 behavior
+    exactly. Opt-in only — no surprise external API calls when a
+    user upgrades from D1 to D2 without touching YAML."""
+    from core.config import EngineConfig
+    assert EngineConfig().dataset_adapters == []
+    assert EngineConfig().dataset_adapter_top_k == 3
+
+
 def test_auto_collect_top_k_rejects_zero_and_negative() -> None:
     """``Field(default=5, ge=1)`` on ``auto_collect_top_k``: passing
     top_k=0 to Axon would mean "request zero hits" which is useless;
