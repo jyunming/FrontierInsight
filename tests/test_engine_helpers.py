@@ -427,8 +427,11 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # Phase K replaced `execute → analyze` with `execute → execute_reflect`
     # plus a conditional `execute_reflect → execute | analyze` edge.
     assert ("execute", "execute_reflect") in plain_edges
-    # no-simulation chain: wait_for_data → data_load → analyze. Both
-    # new nodes feed analyze on the no-sim path.
+    # no-simulation chain: auto_collect_data → wait_for_data →
+    # data_load → analyze. All three nodes feed analyze on the no-sim
+    # path. auto_collect_data is Phase D1 — agent-side Axon retrieval
+    # that runs BEFORE the user-data pause.
+    assert ("auto_collect_data", "wait_for_data") in plain_edges
     assert ("wait_for_data", "data_load") in plain_edges
     assert ("data_load", "analyze") in plain_edges
     # Phase L replaced `analyze → write` with `analyze → cross_check` plus
@@ -453,7 +456,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert cross_branch.ends == {"write": "write", "redesign": "design"}
     design_branch = next(iter(g.branches["design"].values()))
     assert design_branch.ends == {
-        "implement": "implement", "wait_for_data": "wait_for_data",
+        "implement": "implement",
+        "auto_collect_data": "auto_collect_data",
     }
 
 
@@ -1157,12 +1161,14 @@ def test_clarify_prompt_has_simulatability_slot() -> None:
     )
 
 
-def test_route_after_design_no_sim_flag_routes_to_wait_for_data(
+def test_route_after_design_no_sim_flag_routes_to_auto_collect_data(
     tmp_path: Path,
 ) -> None:
     """The routing function — the heart of the no-sim graph edge.
     When state carries ``no_simulation_resolved=True``, design must
-    route to ``wait_for_data``. Otherwise to ``implement``."""
+    route to ``auto_collect_data`` (Phase D1 inserted the auto-collect
+    node BEFORE wait_for_data; previously the edge went straight to
+    wait_for_data). Otherwise to ``implement``."""
     cfg = Config(
         topic="t",
         title="t",
@@ -1173,7 +1179,7 @@ def test_route_after_design_no_sim_flag_routes_to_wait_for_data(
         output=OutputConfig(output_dir=tmp_path / "outputs"),
     )
     engine = Engine(cfg)
-    assert engine._route_after_design({"no_simulation_resolved": True}) == "wait_for_data"
+    assert engine._route_after_design({"no_simulation_resolved": True}) == "auto_collect_data"
     assert engine._route_after_design({"no_simulation_resolved": False}) == "implement"
     assert engine._route_after_design({}) == "implement"
 
@@ -1396,6 +1402,366 @@ async def test_engine_run_invokes_preflight_before_executor_setup_and_llm_calls(
         "LLMClient must not be constructed when preflight aborts the "
         "quest (constructing it implies an endpoint was already resolved)"
     )
+
+
+# ---- _node_auto_collect_data (Phase D1) ----------------------------------
+#
+# Tests for the agent-side data collection node that runs BEFORE
+# wait_for_data in no-simulation mode. Mocks ``Knowledge.asearch``
+# directly — no real Axon corpus required.
+
+
+def _make_no_sim_engine(
+    tmp_path: Path,
+    *,
+    auto_collect_data: bool = True,
+    knowledge_enabled: bool = True,
+    auto_collect_top_k: int = 5,
+) -> "Engine":
+    # ALWAYS construct Engine with KnowledgeConfig(enabled=False) so
+    # ``Knowledge.__init__`` skips its slow embedding/retriever bring-
+    # up (15+ s on this machine). Then overwrite ``engine.knowledge``
+    # with a MagicMock whose ``enabled`` matches what the test
+    # actually wants and whose ``asearch`` callers replace with the
+    # per-test return value / side-effect.
+    from unittest.mock import MagicMock, AsyncMock
+    cfg = Config(
+        topic="cross-cultural collectivism in Belgium vs Taiwan",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            auto_collect_data=auto_collect_data,
+            auto_collect_top_k=auto_collect_top_k,
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),  # cheap init
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    mock_knowledge = MagicMock()
+    mock_knowledge.enabled = knowledge_enabled
+    # Default asearch: returns no docs. Per-test code overrides.
+    mock_knowledge.asearch = AsyncMock(return_value=[])
+    engine.knowledge = mock_knowledge  # type: ignore[assignment]
+    return engine
+
+
+def test_auto_collect_top_k_default_is_5() -> None:
+    """Default top_k is 5 — the prompt-budget rationale documented on
+    the field. Regression guard so a future bump doesn't silently
+    blow out the data_load LLM call's content budget."""
+    from core.config import EngineConfig
+    assert EngineConfig().auto_collect_top_k == 5
+    assert EngineConfig().auto_collect_data is True, (
+        "auto_collect_data must default ON — the user explicitly asked "
+        "for agent-side data collection, not user-only"
+    )
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_passthrough_when_flag_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``engine.auto_collect_data: false`` makes the node a logged
+    passthrough — no Axon call, no files written. The downstream
+    pause behavior is untouched."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_no_sim_engine(tmp_path, auto_collect_data=False)
+    spy = AsyncMock(return_value=[])
+    engine.knowledge.asearch = spy  # type: ignore[method-assign]
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 0}
+    spy.assert_not_called()  # critical — no LLM/RAG cost on opt-out
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    assert not auto_dir.exists(), (
+        "passthrough must not create the auto_collected dir — that "
+        "would leak intent into the user's filesystem unnecessarily"
+    )
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_passthrough_when_knowledge_disabled(
+    tmp_path: Path,
+) -> None:
+    """``knowledge.enabled: false`` (no Axon to query) → passthrough.
+    Don't crash, don't try to call asearch on a disabled retriever."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_no_sim_engine(tmp_path, knowledge_enabled=False)
+    spy = AsyncMock(return_value=[])
+    engine.knowledge.asearch = spy  # type: ignore[method-assign]
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 0}
+    spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_writes_files_on_axon_hits(
+    tmp_path: Path,
+) -> None:
+    """Happy path: Axon returns N docs → the node writes N files into
+    ``<quest_root>/data/auto_collected/`` with rank-prefixed names and
+    YAML front matter carrying provenance. wait_for_data will then
+    see those files via its rglob walk and proceed without pausing."""
+    from unittest.mock import AsyncMock
+    from core.knowledge import RetrievedDoc
+
+    docs = [
+        RetrievedDoc(
+            content="Hofstede 2010 cultural dimensions: Belgium has IDV=75.",
+            metadata={"source": "hofstede_belgium.pdf", "kind": "fi_local_paper"},
+        ),
+        RetrievedDoc(
+            content="Taiwan IDV=17 — strongly collectivist per Hofstede.",
+            metadata={"source": "hofstede_taiwan.pdf", "title": "Cultural Dims TW"},
+        ),
+        RetrievedDoc(
+            content="World Values Survey wave 7 — public-trust measures.",
+            metadata={"url": "https://wvs.example/wave7", "year": 2022},
+        ),
+    ]
+    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=3)
+    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
+
+    result = await engine._node_auto_collect_data({
+        "topic": "Belgium vs Taiwan culture",
+        "design": {"hypothesis": "IDV gap predicts trust dynamics"},
+    })
+
+    assert result == {"auto_collected_count": 3}
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    files = sorted(auto_dir.glob("*.md"))
+    assert len(files) == 3, f"expected 3 files, got {[f.name for f in files]}"
+    # Rank-prefixed, zero-padded so a 10+ doc retrieval sorts naturally.
+    assert files[0].name.startswith("001_")
+    assert files[1].name.startswith("002_")
+    assert files[2].name.startswith("003_")
+    # Front matter present + the actual content.
+    body0 = files[0].read_text(encoding="utf-8")
+    assert body0.startswith("---\n")
+    assert "auto_collected: true" in body0
+    assert "rank: 1" in body0
+    assert "Hofstede 2010" in body0
+    # Metadata-rich doc[1] gets its title + source rendered.
+    body1 = files[1].read_text(encoding="utf-8")
+    assert "title:" in body1
+    assert "Cultural Dims TW" in body1
+    # URL-based doc[2] gets the URL rendered, not a None source.
+    body2 = files[2].read_text(encoding="utf-8")
+    assert "url:" in body2
+    assert "wave7" in body2
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_front_matter_is_yaml_parseable(
+    tmp_path: Path,
+) -> None:
+    """The YAML front matter must be safely parseable by any standard
+    YAML loader — so downstream tools (or a future data_load that
+    parses provenance) can round-trip metadata values containing
+    quotes, backslashes, colons, and unicode without mangling.
+
+    Regression for PR #60 bot comment: front matter previously used
+    Python ``repr`` which is NOT YAML-safe (a value like ``"O'Brien"``
+    would parse back as ``"O\\'Brien"`` from a YAML reader)."""
+    from unittest.mock import AsyncMock
+    from core.knowledge import RetrievedDoc
+    import yaml as _yaml
+
+    docs = [
+        RetrievedDoc(
+            content="hit body",
+            metadata={
+                # Punctuation that breaks Python repr-vs-YAML round-trip:
+                "source": "O'Brien_2021.pdf",
+                "title": "Trust: A YAML-hostile string (with colons)",
+                "url": "https://example.com/path?q=value&r=2",
+                "kind": "fi_local_paper",
+            },
+        ),
+    ]
+    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=1)
+    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
+
+    await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    files = sorted(
+        (engine.quest_root / "data" / "auto_collected").glob("*.md")
+    )
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    # Extract the front matter block.
+    assert body.startswith("---\n")
+    _, fm_block, _ = body.split("---\n", 2)
+    parsed = _yaml.safe_load(fm_block)
+    assert isinstance(parsed, dict), f"front matter is not a YAML mapping: {fm_block!r}"
+    # Values round-trip cleanly.
+    assert parsed["source"] == "O'Brien_2021.pdf"
+    assert parsed["title"] == "Trust: A YAML-hostile string (with colons)"
+    assert parsed["url"] == "https://example.com/path?q=value&r=2"
+    assert parsed["auto_collected"] is True
+    assert parsed["rank"] == 1
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_cleans_up_dir_when_all_writes_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case from PR #60 bot review: when EVERY write raises OSError
+    (e.g. permissions or full disk after the mkdir succeeded), the
+    node must NOT leave an empty ``auto_collected/`` directory behind
+    — that would mislead the user into thinking auto-collection
+    produced output. Verify cleanup happens."""
+    from unittest.mock import AsyncMock
+    from pathlib import Path as _Path
+    from core.knowledge import RetrievedDoc
+
+    docs = [
+        RetrievedDoc(content=f"body{i}", metadata={"source": f"x{i}.pdf"})
+        for i in range(3)
+    ]
+    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=3)
+    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
+
+    # Force every write_text to fail. mkdir is still allowed (so we
+    # can prove the cleanup path runs).
+    original_write_text = _Path.write_text
+    def fake_write_text(self, *_a, **_kw):  # type: ignore[no-untyped-def]
+        if "auto_collected" in str(self):
+            raise OSError("simulated disk full")
+        return original_write_text(self, *_a, **_kw)
+    monkeypatch.setattr(_Path, "write_text", fake_write_text)
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 0}
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    assert not auto_dir.exists(), (
+        f"empty auto_collected/ must be cleaned up when all writes "
+        f"failed; got dir={auto_dir} children="
+        f"{list(auto_dir.iterdir()) if auto_dir.exists() else 'n/a'}"
+    )
+
+
+def test_auto_collect_top_k_rejects_zero_and_negative() -> None:
+    """``Field(default=5, ge=1)`` on ``auto_collect_top_k``: passing
+    top_k=0 to Axon would mean "request zero hits" which is useless;
+    a typo / negative value should fail at YAML parse time, not
+    silently pass through.
+
+    Regression for PR #60 bot comment."""
+    from core.config import EngineConfig
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        EngineConfig(auto_collect_top_k=0)
+    with pytest.raises(ValidationError):
+        EngineConfig(auto_collect_top_k=-1)
+    # Positive values work — boundary check at 1.
+    assert EngineConfig(auto_collect_top_k=1).auto_collect_top_k == 1
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_uses_topic_and_hypothesis_in_query(
+    tmp_path: Path,
+) -> None:
+    """The Axon query is built from topic + design.hypothesis — that's
+    a sharper retrieval signal than topic alone once design has run.
+    Regression guard so a refactor doesn't accidentally drop the
+    hypothesis."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_no_sim_engine(tmp_path)
+    spy = AsyncMock(return_value=[])
+    engine.knowledge.asearch = spy  # type: ignore[method-assign]
+
+    await engine._node_auto_collect_data({
+        "topic": "Belgium vs Taiwan culture",
+        "design": {"hypothesis": "IDV gap predicts trust dynamics"},
+    })
+
+    spy.assert_awaited_once()
+    args, kwargs = spy.call_args
+    query = args[0]
+    assert "Belgium" in query
+    assert "IDV gap" in query, "hypothesis must be part of the Axon query"
+    assert kwargs.get("top_k") == 5
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_falls_through_on_axon_exception(
+    tmp_path: Path,
+) -> None:
+    """An exception from Axon must NOT crash the no-sim flow. Log a
+    WARNING and return a zero-count state so wait_for_data takes
+    over and pauses for user-supplied data (the safety net)."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.knowledge.asearch = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("axon down")
+    )
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 0}
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    # An exception during retrieval shouldn't leave a stub dir behind.
+    assert not auto_dir.exists() or not any(auto_dir.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_zero_hits_falls_through(
+    tmp_path: Path,
+) -> None:
+    """Axon returned but found nothing — log INFO, return zero, let
+    wait_for_data pause for the user. Don't create the empty
+    auto_collected dir (would mislead the user into thinking the agent
+    found something)."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    assert result == {"auto_collected_count": 0}
+    auto_dir = engine.quest_root / "data" / "auto_collected"
+    assert not auto_dir.exists(), (
+        "0-hit path must not create an empty auto_collected dir — the "
+        "user would mistake it for a partial success"
+    )
+
+
+@pytest.mark.asyncio
+async def test_node_auto_collect_data_files_pass_wait_for_data_filter(
+    tmp_path: Path,
+) -> None:
+    """Integration check across γ → β boundary: files written by
+    auto_collect_data MUST be picked up by ``_list_user_data_files``
+    (used by ``wait_for_data`` to decide whether to pause). Without
+    this, auto-collect would happily write files and wait_for_data
+    would still pause because of a path-filtering mismatch."""
+    from unittest.mock import AsyncMock
+    from core.knowledge import RetrievedDoc
+    from core.engine import _list_user_data_files
+
+    engine = _make_no_sim_engine(tmp_path)
+    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
+        RetrievedDoc(content="hit", metadata={"source": "p.pdf"}),
+    ])
+
+    await engine._node_auto_collect_data({"topic": "x", "design": {}})
+
+    listed = _list_user_data_files(engine.quest_root / "data")
+    assert len(listed) == 1
+    assert listed[0].parent.name == "auto_collected"
+    assert listed[0].suffix == ".md"
 
 
 @pytest.mark.asyncio

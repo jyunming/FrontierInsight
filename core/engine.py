@@ -19,6 +19,8 @@ import shutil
 import string
 import time
 import uuid
+
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict
@@ -112,6 +114,14 @@ class QuestState(TypedDict, total=False):
     # The data_load node walks them, classifies, and synthesizes a
     # result_json compatible with downstream nodes (analyze, write).
     data_files: list[str]
+    # Phase D1 — number of docs the auto_collect_data node successfully
+    # wrote into `<quest_root>/data/auto_collected/`. 0 means the node
+    # was a passthrough (auto-collect disabled, knowledge disabled, or
+    # Axon returned no hits), in which case wait_for_data falls back
+    # to pausing for user-supplied data. Positive values let the user
+    # see in run.log / state how much of their data load came from
+    # the agent vs from manual drops.
+    auto_collected_count: int
 
 
 class Engine:
@@ -335,9 +345,11 @@ class Engine:
         g.add_node("cross_check", self._node_cross_check)
         g.add_node("write", self._node_write)
         g.add_node("review", self._node_review)
-        # no-simulation mode: design → wait_for_data → (pause + resume) →
-        # data_load → analyze. Both new nodes are conditional and only
-        # fire when ``state.no_simulation_resolved`` is True.
+        # no-simulation mode: design → auto_collect_data → wait_for_data
+        # → (pause + resume) → data_load → analyze. All three new nodes
+        # are conditional and only fire when
+        # ``state.no_simulation_resolved`` is True.
+        g.add_node("auto_collect_data", self._node_auto_collect_data)
         g.add_node("wait_for_data", self._node_wait_for_data)
         g.add_node("data_load", self._node_data_load)
 
@@ -345,12 +357,13 @@ class Engine:
         g.add_edge("clarify", "ideate")
         g.add_edge("ideate", "literature")
         g.add_edge("literature", "design")
-        # design → implement (normal sim path) OR wait_for_data
-        # (no-simulation, user supplies data).
+        # design → implement (normal sim path) OR auto_collect_data
+        # (no-simulation, agent attempts auto-collect via Axon first
+        # then wait_for_data handles the pause-if-still-empty case).
         g.add_conditional_edges(
             "design",
             self._route_after_design,
-            {"implement": "implement", "wait_for_data": "wait_for_data"},
+            {"implement": "implement", "auto_collect_data": "auto_collect_data"},
         )
         g.add_edge("implement", "execute")
         g.add_edge("execute", "execute_reflect")
@@ -359,11 +372,16 @@ class Engine:
             self._route_after_execute_reflect,
             {"retry": "execute", "proceed": "analyze"},
         )
+        # auto_collect_data: Phase D1. Best-effort Axon retrieval that
+        # writes hits into <quest_root>/data/auto_collected/<idx>_<slug>.md
+        # so wait_for_data's rglob walk picks them up. Always proceeds —
+        # if Axon is disabled, returns zero docs, or the feature flag
+        # is off, the node is a logged passthrough.
+        g.add_edge("auto_collect_data", "wait_for_data")
         # wait_for_data uses LangGraph's ``interrupt()`` to pause when
-        # the user hasn't dropped any files yet. On resume (with files
-        # present), the node returns and we proceed to data_load. The
-        # node itself decides whether to pause or proceed based on the
-        # data dir contents at call time.
+        # the user hasn't dropped any files yet AND auto_collect_data
+        # didn't land any either. On resume (with files present), the
+        # node returns and we proceed to data_load.
         g.add_edge("wait_for_data", "data_load")
         g.add_edge("data_load", "analyze")
         g.add_edge("analyze", "cross_check")
@@ -385,8 +403,9 @@ class Engine:
     def _route_after_design(self, state: QuestState) -> str:
         """When ``no_simulation_resolved`` is set, skip the
         implement → execute → execute_reflect chain entirely. Instead
-        route to ``wait_for_data`` which pauses for user-supplied data
-        and then hands off to ``data_load`` → ``analyze``.
+        route to ``auto_collect_data``, which best-effort-pulls
+        relevant docs from Axon into ``<quest_root>/data/auto_collected/``,
+        then hands off to ``wait_for_data`` → ``data_load`` → ``analyze``.
 
         ``no_simulation_resolved`` is set by the clarify node from
         either the ``engine.no_simulation`` YAML flag (wins) or the
@@ -400,7 +419,7 @@ class Engine:
         real-world data as the experimental result instead.
         """
         if state.get("no_simulation_resolved"):
-            return "wait_for_data"
+            return "auto_collect_data"
         return "implement"
 
     def _route_after_execute_reflect(self, state: QuestState) -> str:
@@ -708,6 +727,133 @@ class Engine:
         text = await self._chat(prompt, node="design")
         design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
         return {"design": design}
+
+    async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
+        """Phase D1 — agent-side data collection via Axon, run BEFORE
+        the wait_for_data pause in no-simulation mode.
+
+        Why this exists: the user said *"data can be collected by
+        agent as well, not users only"* — for many no-simulation
+        topics (literature reviews, cross-cultural comparisons,
+        history surveys) Axon already holds enough to answer the
+        question, and there's no reason to interrupt the user when
+        the corpus already covers the topic. This node tries to
+        pull ``top_k`` relevant docs and writes each one as a
+        Markdown file under ``<quest_root>/data/auto_collected/`` so
+        the downstream nodes (``wait_for_data`` → ``data_load``) see
+        them as ordinary user data and proceed without pausing.
+
+        Passthrough discipline (each case is distinguishable in run.log):
+        * ``engine.auto_collect_data`` is False — user opted out. No
+          Axon call. Logged INFO.
+        * ``knowledge.enabled`` is False — no Axon to query. No Axon
+          call. Logged INFO.
+        * ``Knowledge.asearch`` IS called but raises — the exception
+          is caught, logged WARNING, and the node returns
+          ``auto_collected_count=0`` so ``wait_for_data`` takes over.
+        * ``Knowledge.asearch`` returns zero docs — logged INFO. No
+          files written. Empty ``auto_collected/`` directory is NOT
+          left behind.
+
+        On resume the node re-runs and re-walks Axon — files at the
+        same rank slot get overwritten with the latest retrieval. The
+        user's manually dropped files (anywhere in ``data/`` other
+        than ``auto_collected/``) are untouched on each pass.
+        """
+        if not self.config.engine.auto_collect_data:
+            self._log.info(
+                "[auto_collect] engine.auto_collect_data=False — "
+                "skipping; will pause for user data",
+            )
+            return {"auto_collected_count": 0}
+        if not self.knowledge.enabled:
+            self._log.info(
+                "[auto_collect] knowledge.enabled=False — skipping "
+                "(no Axon to query); will pause for user data",
+            )
+            return {"auto_collected_count": 0}
+
+        # Build a query from topic + the design hypothesis (when
+        # design has run). Topic alone is enough for first-pass
+        # retrieval; hypothesis sharpens it on later iterations.
+        topic = state.get("topic", "")
+        design = state.get("design") or {}
+        hypothesis = ""
+        if isinstance(design, dict):
+            hypothesis = str(design.get("hypothesis", "")).strip()
+        query = f"{topic} {hypothesis}".strip() or topic
+        top_k = self.config.engine.auto_collect_top_k
+        self._log.info(
+            "[auto_collect] querying Axon: top_k=%d query=%r",
+            top_k, query[:120],
+        )
+        try:
+            docs = await self.knowledge.asearch(query, top_k=top_k)
+        except Exception as e:
+            self._log.warning(
+                "[auto_collect] Axon search raised — falling through to "
+                "user-data pause (no files written): %s", e,
+            )
+            return {"auto_collected_count": 0}
+
+        if not docs:
+            self._log.info(
+                "[auto_collect] Axon returned 0 docs — falling through "
+                "to user-data pause",
+            )
+            return {"auto_collected_count": 0}
+
+        # Lazy mkdir: defer creating ``auto_collected/`` until at least
+        # one write succeeds. Without this, a permissions / disk-full
+        # failure where ALL writes raise OSError would still leave an
+        # empty directory behind, misleading the user about whether
+        # auto-collection produced anything.
+        auto_dir = self.quest_root / "data" / "auto_collected"
+        written_targets: list[Path] = []
+        for idx, doc in enumerate(docs, start=1):
+            # Build a slug from the source filename (when known) so
+            # the file is greppable from the user's side later.
+            meta = doc.metadata or {}
+            source = str(meta.get("source") or meta.get("path") or "")
+            slug_basis = Path(source).stem if source else f"doc{idx}"
+            slug = _slugify(slug_basis)[:40] or f"doc{idx}"
+            fname = f"{idx:03d}_{slug}.md"
+            target = auto_dir / fname
+            body = _render_auto_collected_md(idx, meta, doc.content or "")
+            try:
+                # mkdir(exist_ok=True) is idempotent — safe to call
+                # once per doc; this is the "lazy on first write" hook.
+                auto_dir.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding="utf-8")
+                written_targets.append(target)
+            except OSError as e:
+                self._log.warning(
+                    "[auto_collect] failed to write %s: %s — skipping doc",
+                    target, e,
+                )
+
+        written = len(written_targets)
+        # Hard guarantee: when ZERO writes succeeded, there must be no
+        # empty ``auto_collected/`` directory left behind (could happen
+        # if the first mkdir succeeded then every write failed — rare
+        # but possible on a near-full disk). Try to remove; if the
+        # rmdir fails (e.g. concurrent file appeared), log and move on.
+        if written == 0 and auto_dir.is_dir():
+            try:
+                auto_dir.rmdir()
+            except OSError as e:
+                self._log.warning(
+                    "[auto_collect] all writes failed AND could not "
+                    "rmdir leftover %s: %s — directory may appear "
+                    "incorrectly as a partial-success artifact",
+                    auto_dir, e,
+                )
+
+        self._log.info(
+            "[auto_collect] wrote %d/%d Axon doc(s) under %s",
+            written, len(docs), auto_dir,
+        )
+        return {"auto_collected_count": written}
 
     async def _node_wait_for_data(self, state: QuestState) -> QuestState:
         """no-simulation pause point. Creates ``<quest_root>/data/``,
@@ -2231,6 +2377,31 @@ def _slugify(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-") or "untitled"
+
+
+def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:
+    """Render an Axon retrieval hit as a Markdown file with YAML front
+    matter. Used by ``_node_auto_collect_data`` (Phase D1).
+
+    Why a proper YAML dump (not Python ``repr``): a metadata value
+    containing single quotes (``"O'Brien"``), backslashes, or non-ASCII
+    characters would be backslash-escaped by ``repr`` and the resulting
+    string would be unsafe to round-trip through a YAML parser. The
+    data_load node downstream may decide to parse the front matter for
+    provenance; if it can't, the user loses cite-back fidelity. Using
+    ``yaml.safe_dump`` produces a guaranteed-parseable block regardless
+    of the metadata content.
+    """
+    front: dict[str, Any] = {"auto_collected": True, "rank": idx}
+    for key in ("source", "path", "title", "url", "kind", "year"):
+        value = meta.get(key)
+        if value:
+            # Normalize: strip newlines that would break YAML's scalar
+            # rules (multi-line provenance fields would otherwise need
+            # quoted block style which clutters the file head).
+            front[key] = str(value).replace("\n", " ").strip()
+    yaml_block = yaml.safe_dump(front, default_flow_style=False, sort_keys=False)
+    return f"---\n{yaml_block}---\n{content.strip()}\n"
 
 
 def _list_user_data_files(data_dir: Path) -> list[Path]:
