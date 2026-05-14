@@ -788,6 +788,29 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
         # Retry on transient upstream failures (5xx from cloud-routed Ollama
         # models, brief network blips). 4xx errors are not retried.
+        #
+        # Cancellation contract: ``asyncio.CancelledError`` is a
+        # BaseException subclass (Python 3.8+), NOT Exception, so
+        # tenacity's ``retry_if_exception_type(...)`` predicate cannot
+        # match it — cancellation propagates straight through the retry
+        # wrapper. httpx >= 0.27 then propagates that cancellation
+        # through its anyio-based transport so the in-flight POST
+        # unwinds promptly. ``test_chat_propagates_cancellation_promptly``
+        # in tests/ verifies the asyncio await-chain unwinds in <1 s on
+        # cancel (the test uses ``httpx.MockTransport``, which is
+        # in-memory and never opens a real socket — socket-level
+        # cancellation is a downstream httpx/anyio contract we trust
+        # the upstream test suites to enforce).
+        #
+        # The two dangerous patterns that would silently break this:
+        #   1. Wrapping the retry block in ``except BaseException``
+        #      (``except Exception`` is fine — that's the rule above).
+        #   2. Adding ``asyncio.CancelledError`` to the
+        #      ``retry_if_exception_type`` tuple.
+        # Either would let tenacity catch the cancel and retry the
+        # POST instead of letting it propagate. Re-run the two
+        # cancellation tests in tests/test_provider.py if you touch
+        # this retry config.
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=1, min=2, max=20),
