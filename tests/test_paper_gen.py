@@ -463,3 +463,167 @@ def test_repo_local_tectonic_picked_when_nothing_on_path(
     ).generate(_make_artifacts(tmp_path), tmp_path / "out")
     # The repo-local path got picked.
     assert f"--pdf-engine={repo_tectonic}" in captured_cmd
+
+
+# ---- paper_pdf_skipped.md diagnostic file -----------------------------------
+
+
+def test_paper_pdf_skipped_md_written_when_pandoc_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the user requested ``paper_pdf`` but pandoc is missing, the
+    generator must write ``paper_pdf_skipped.md`` next to ``paper.md``
+    so the user discovers the failure without grepping ``run.log``.
+
+    Repro: outputs/1778751621-belgium-culture-vs-taiwan-cultur-32f2ff/
+    on 2026-05-14 — host had no pandoc / pdflatex / tectonic, and the
+    skip was completely invisible from the quest output."""
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    result = PaperGenerator(cfg).generate(art, out_dir)
+
+    # PDF wasn't produced.
+    assert "paper_pdf" not in result
+    assert not (out_dir / "paper.pdf").exists()
+
+    # The diagnostic file WAS produced.
+    diag = out_dir / "paper_pdf_skipped.md"
+    assert diag.exists(), "paper_pdf_skipped.md was not written"
+    body = diag.read_text(encoding="utf-8")
+
+    # The user needs to know three things:
+    assert "paper.pdf was requested but not produced" in body
+    assert "no_pandoc" in body                 # reason code
+    assert "pandoc not on PATH" in body        # what happened
+    assert "winget" in body or "brew" in body or "pandoc.org" in body  # how to fix
+
+    # And the result dict surfaces the diagnostic path so callers
+    # (launch.py / the VSCode bridge) can include it in their
+    # "your quest is done" messages.
+    assert "paper_pdf_skipped" in result
+    assert result["paper_pdf_skipped"] == diag
+
+
+def test_paper_pdf_skipped_md_written_when_no_latex_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different skip reason: pandoc is installed but no LaTeX engine
+    is on PATH. The diagnostic should name THAT failure mode and
+    point at ``--install-tectonic`` as the no-admin fix."""
+
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    PaperGenerator(cfg).generate(art, out_dir)
+
+    diag = out_dir / "paper_pdf_skipped.md"
+    assert diag.exists()
+    body = diag.read_text(encoding="utf-8")
+    assert "no_latex_engine" in body
+    assert "--install-tectonic" in body
+
+
+def test_paper_pdf_skipped_md_carries_engine_stderr_on_compile_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When pandoc+engine are present but the compile fails, the
+    diagnostic must include the engine's stderr tail so the user can
+    actually diagnose the LaTeX issue without re-running."""
+
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        if name == "pandoc":
+            return "/fake/pandoc"
+        if name == "pdflatex":
+            return "/fake/pdflatex"
+        return None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="! LaTeX Error: File `missing.sty' not found.\n",
+        )
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    PaperGenerator(cfg).generate(_make_artifacts(tmp_path), tmp_path / "out")
+
+    diag = tmp_path / "out" / "paper_pdf_skipped.md"
+    assert diag.exists()
+    body = diag.read_text(encoding="utf-8")
+    assert "pdflatex_rc_1" in body
+    assert "missing.sty" in body, (
+        "stderr tail must be embedded so the user can fix LaTeX errors"
+    )
+
+
+def test_paper_pdf_skipped_md_not_written_when_pdf_not_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``paper_pdf`` is not in ``output.kinds``, no skip happened —
+    the absence of paper.pdf is intentional. Don't pollute the dir
+    with a misleading diagnostic file."""
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+
+    cfg = _make_config(tmp_path, ["paper_md"])    # no paper_pdf
+    PaperGenerator(cfg).generate(_make_artifacts(tmp_path), tmp_path / "out")
+
+    diag = tmp_path / "out" / "paper_pdf_skipped.md"
+    assert not diag.exists(), (
+        "skip diagnostic was written even though paper_pdf was not requested"
+    )
+
+
+def test_paper_pdf_skipped_md_cleaned_up_on_subsequent_md_only_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a prior run wrote ``paper_pdf_skipped.md`` and the user then
+    edited the config to remove ``paper_pdf`` from kinds, the stale
+    diagnostic should be cleaned up — otherwise the file lingers and
+    confuses readers."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stale = out_dir / "paper_pdf_skipped.md"
+    stale.write_text("(stale from prior run)\n", encoding="utf-8")
+
+    # No pandoc, but also no paper_pdf in kinds — generator should
+    # take the cleanup branch.
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+    cfg = _make_config(tmp_path, ["paper_md"])
+    PaperGenerator(cfg).generate(_make_artifacts(tmp_path), out_dir)
+    assert not stale.exists(), "stale skip diagnostic was not cleaned up"
+
+
+def test_paper_pdf_skipped_md_overwritten_on_subsequent_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second run with a DIFFERENT skip reason must overwrite the
+    diagnostic, not append. The latest attempt is the user-relevant
+    one."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+
+    # Run 1: no pandoc → no_pandoc reason.
+    PaperGenerator(cfg).generate(_make_artifacts(tmp_path), out_dir)
+    assert "no_pandoc" in (out_dir / "paper_pdf_skipped.md").read_text(encoding="utf-8")
+
+    # Run 2: pandoc now found, but no LaTeX engine → no_latex_engine
+    # reason should fully REPLACE the prior file's content.
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+    PaperGenerator(cfg).generate(_make_artifacts(tmp_path), out_dir)
+    body = (out_dir / "paper_pdf_skipped.md").read_text(encoding="utf-8")
+    assert "no_latex_engine" in body
+    assert "no_pandoc" not in body, "prior skip reason was not overwritten"

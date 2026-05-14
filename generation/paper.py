@@ -7,7 +7,12 @@ PDF via pandoc + LaTeX using a format-specific template, and (3) copies
 figures and bundle manifest if they exist.
 
 If pandoc or a LaTeX engine is unavailable, PDF generation is skipped
-with a warning — the markdown is still produced.
+with a warning — the markdown is still produced. The generator also
+writes a ``paper/paper_pdf_skipped.md`` file when a PDF was requested
+(via ``output.kinds``) but couldn't be produced, so the user discovers
+the failure without grepping run logs. Closes the silent-skip gap
+that hit ``outputs/1778751621-belgium-culture-vs-taiwan-cultur-32f2ff/``
+in 2026-05-14 when the host had no pandoc/pdflatex/tectonic installed.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import logging
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.config import Config
@@ -25,6 +31,16 @@ _log = logging.getLogger("frontier_insight.paper")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = REPO_ROOT / "templates" / "paper"
+
+
+@dataclass
+class _PdfSkipReason:
+    """Why ``_compile_pdf`` returned ``None``. Surfaced to the user via
+    ``paper_pdf_skipped.md`` so they don't have to grep run.log."""
+
+    code: str          # short stable identifier, e.g. "no_pandoc"
+    summary: str       # one-line WARNING text already logged
+    how_to_fix: str    # 1-3 sentences pointing at the concrete action
 
 
 class PaperGenerator:
@@ -63,9 +79,32 @@ class PaperGenerator:
             # Compile from art.paper_md directly so the PDF doesn't depend on
             # paper_md being in output.kinds.
             pdf_src = result.get("paper_md") or art.paper_md
-            pdf = self._compile_pdf(pdf_src, out_dir)
+            pdf, skip_reason = self._compile_pdf(pdf_src, out_dir)
             if pdf is not None:
                 result["paper_pdf"] = pdf
+            elif skip_reason is not None:
+                # User asked for a PDF, none was produced, AND we know why.
+                # Write a single-paragraph diagnostic file in the same
+                # directory so the failure is discoverable without grepping
+                # run.log. Stale files from a prior failed run get
+                # overwritten — the LATEST attempt's reason is what
+                # matters to the user.
+                diag_path = out_dir / "paper_pdf_skipped.md"
+                diag_path.write_text(
+                    _render_pdf_skip_md(skip_reason, self.config),
+                    encoding="utf-8",
+                )
+                result["paper_pdf_skipped"] = diag_path
+        elif "paper_pdf" not in kinds:
+            # ``paper_pdf`` was not requested — clean up any stale
+            # diagnostic from a previous run that did request it. Keeps
+            # the quest dir tidy after a config edit.
+            stale = out_dir / "paper_pdf_skipped.md"
+            if stale.is_file():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
 
         return result
 
@@ -108,7 +147,15 @@ class PaperGenerator:
             return ("tectonic", str(repo_tectonic))
         return None
 
-    def _compile_pdf(self, paper_md: Path, out_dir: Path) -> Path | None:
+    def _compile_pdf(
+        self, paper_md: Path, out_dir: Path,
+    ) -> tuple[Path | None, _PdfSkipReason | None]:
+        """Run pandoc + a LaTeX engine over ``paper_md`` to produce
+        ``out_dir/paper.pdf``. Returns ``(path, None)`` on success,
+        ``(None, reason)`` on any kind of skip — the reason carries
+        enough info for ``_render_pdf_skip_md`` to write a useful
+        ``paper_pdf_skipped.md`` for the user.
+        """
         # Pandoc itself: `subprocess.run` on Windows auto-appends `.exe`
         # to bare executable names via CreateProcess, so resolving via
         # `shutil.which` is mostly defensive (would matter if pandoc
@@ -116,8 +163,18 @@ class PaperGenerator:
         # symmetry + so the absolute path lands in any stderr logs.
         pandoc_exe = shutil.which("pandoc")
         if pandoc_exe is None:
-            _log.warning("pandoc not on PATH; paper.pdf skipped (paper.md only)")
-            return None
+            msg = "pandoc not on PATH; paper.pdf skipped (paper.md only)"
+            _log.warning(msg)
+            return None, _PdfSkipReason(
+                code="no_pandoc",
+                summary=msg,
+                how_to_fix=(
+                    "Install pandoc and ensure it's on your PATH. Windows: "
+                    "winget install --id JohnMacFarlane.Pandoc, or download "
+                    "from https://pandoc.org/installing.html. macOS: "
+                    "`brew install pandoc`. Linux: your package manager."
+                ),
+            )
 
         # CRITICAL: pandoc does its OWN PATH lookup for the
         # `--pdf-engine` binary. On corporate Windows boxes the
@@ -128,12 +185,24 @@ class PaperGenerator:
         # (no-admin LaTeX) when pdflatex isn't reachable.
         engine = self._find_pdf_engine()
         if engine is None:
-            _log.warning(
+            msg = (
                 "no LaTeX engine found (pdflatex or tectonic); paper.pdf "
                 "skipped. Run `python launch.py --install-tectonic` for "
                 "a no-admin LaTeX install."
             )
-            return None
+            _log.warning(msg)
+            return None, _PdfSkipReason(
+                code="no_latex_engine",
+                summary=msg,
+                how_to_fix=(
+                    "Easiest no-admin path: run `python launch.py "
+                    "--install-tectonic` from the repo root. That drops a "
+                    "single self-bootstrapping LaTeX binary (~70 MB) into "
+                    "`tools/`; FI auto-detects it on the next quest. "
+                    "Standard alternative: install MiKTeX (Windows) or "
+                    "TeX Live (macOS/Linux) so `pdflatex` lands on PATH."
+                ),
+            )
         engine_name, engine_path = engine
         _log.info("paper.pdf: using pdf-engine=%s at %s", engine_name, engine_path)
 
@@ -170,21 +239,108 @@ class PaperGenerator:
                 timeout=timeout_s,
             )
         except FileNotFoundError:
-            _log.warning("pandoc invocation failed; paper.pdf skipped")
-            return None
-        except subprocess.TimeoutExpired:
-            _log.warning(
-                "%s timeout (>%ds); paper.pdf skipped",
-                engine_name, timeout_s,
+            msg = "pandoc invocation failed; paper.pdf skipped"
+            _log.warning(msg)
+            return None, _PdfSkipReason(
+                code="pandoc_invocation_failed",
+                summary=msg,
+                how_to_fix=(
+                    "`shutil.which('pandoc')` found pandoc but `subprocess.run` "
+                    "could not invoke it. Likely PATH disagreement between the "
+                    "shell and the Python child process. Re-open the terminal "
+                    "after installing pandoc, or set `PANDOC_PATH` explicitly."
+                ),
             )
-            return None
+        except subprocess.TimeoutExpired:
+            msg = f"{engine_name} timeout (>{timeout_s}s); paper.pdf skipped"
+            _log.warning(msg)
+            return None, _PdfSkipReason(
+                code=f"{engine_name}_timeout",
+                summary=msg,
+                how_to_fix=(
+                    f"The {engine_name} compile took longer than "
+                    f"{timeout_s}s. The first-ever compile on a fresh "
+                    f"install can download CTAN packages (~30 s); a slow "
+                    f"corporate VPN amplifies this. Try again — the second "
+                    f"compile is usually fast. If it consistently times "
+                    f"out, raise the timeout in `generation/paper.py:_compile_pdf`."
+                ),
+            )
 
         if r.returncode != 0:
-            _log.warning(
-                "%s rc=%d format=%s; paper.pdf skipped. stderr_tail=%s",
-                engine_name, r.returncode, fmt, r.stderr[-500:],
+            stderr_tail = r.stderr[-500:] if r.stderr else "(empty stderr)"
+            msg = (
+                f"{engine_name} rc={r.returncode} format={fmt}; "
+                f"paper.pdf skipped. stderr_tail={stderr_tail}"
             )
-            return None
+            _log.warning(msg)
+            return None, _PdfSkipReason(
+                code=f"{engine_name}_rc_{r.returncode}",
+                summary=(
+                    f"{engine_name} exited with rc={r.returncode} when "
+                    f"compiling paper.md with paper_format={fmt!r}."
+                ),
+                how_to_fix=(
+                    f"The LaTeX engine errored. Common causes: a malformed "
+                    f"LaTeX template, an unsupported character in paper.md, "
+                    f"or a missing CTAN package on the first-ever compile. "
+                    f"stderr tail:\n\n```\n{stderr_tail}\n```\n\n"
+                    f"Inspect the template at "
+                    f"`templates/paper/{fmt}/template.tex` and verify "
+                    f"paper.md doesn't contain raw LaTeX that conflicts."
+                ),
+            )
         if not out_pdf.exists():
-            return None
-        return out_pdf
+            msg = (
+                f"{engine_name} rc=0 but {out_pdf.name} not on disk; "
+                f"paper.pdf skipped."
+            )
+            _log.warning(msg)
+            return None, _PdfSkipReason(
+                code="output_missing_after_success",
+                summary=msg,
+                how_to_fix=(
+                    f"{engine_name} reported success but didn't write the "
+                    f"output file. This is rare — usually a permissions "
+                    f"issue on the output directory. Check `{out_dir}` is "
+                    f"writable and re-run."
+                ),
+            )
+        return out_pdf, None
+
+
+def _render_pdf_skip_md(reason: _PdfSkipReason, config: Config) -> str:
+    """Render a ``paper_pdf_skipped.md`` diagnostic file. The user sees
+    this file next to ``paper.md`` when the PDF couldn't be produced;
+    it tells them what failed and how to fix it without having to grep
+    ``run.log`` or read the engine source."""
+    return (
+        f"# paper.pdf was requested but not produced\n\n"
+        f"Your `output.kinds` included `paper_pdf` "
+        f"(`paper_format: {config.output.paper_format}`), "
+        f"but the paper generator couldn't compile a PDF.\n\n"
+        f"## What happened\n\n"
+        f"**Reason code:** `{reason.code}`\n\n"
+        f"{reason.summary}\n\n"
+        f"## How to fix it\n\n"
+        f"{reason.how_to_fix}\n\n"
+        f"## After fixing\n\n"
+        f"To compile just the PDF for this quest (without re-running the "
+        f"whole LLM loop), re-run the generators against the existing "
+        f"`paper/paper.md`:\n\n"
+        f"```python\n"
+        f"from pathlib import Path\n"
+        f"from core.config import Config\n"
+        f"from core.engine import QuestArtifacts\n"
+        f"from generation.paper import PaperGenerator\n"
+        f"quest_root = Path(__file__).parent.parent  # adjust if needed\n"
+        f"cfg = Config.from_yaml(quest_root / 'config.yaml')\n"
+        f"art = QuestArtifacts(\n"
+        f"    paper_md=quest_root / 'paper' / 'paper.md',\n"
+        f"    figures_dir=quest_root / 'figures',\n"
+        f"    bundle_manifest=None,\n"
+        f")\n"
+        f"PaperGenerator(cfg).generate(art, quest_root / 'paper')\n"
+        f"```\n\n"
+        f"Delete this file once `paper.pdf` lands in this directory.\n"
+    )
