@@ -700,11 +700,30 @@ class Engine:
         # Re-walk the dir on every invocation rather than trusting
         # ``state["data_files"]`` — the user may have edited / added
         # files between pause and resume.
-        entries = _walk_folder(data_dir)
+        #
+        # Filter out the FI-authored README.md at the top of the data
+        # dir before rendering the prompt. ``_walk_folder`` doesn't
+        # know it's there as instructions, not data; without this
+        # filter the README's "drop your data here" text + the
+        # hypothesis + the resume command would land in the prompt
+        # and the LLM might cite it as a "primary source" in
+        # key_findings. ``_list_user_data_files`` already excludes
+        # the README (used by _node_wait_for_data's pause check);
+        # data_load now matches that contract by re-numbering idents
+        # after the filter so the manifest IDs stay sequential.
+        all_entries = _walk_folder(data_dir)
+        entries = [
+            e for e in all_entries
+            if not (e.rel_path == "README.md" and (data_dir / "README.md").is_file())
+        ]
+        # Re-number ident so the prompt sees [1], [2], … in order;
+        # FileEntry is a dataclass so we mutate the ident field.
+        for new_id, entry in enumerate(entries, start=1):
+            entry.ident = new_id
         if not entries:
             self._log.warning(
-                "[data_load] %s is empty on resume — analyze will run "
-                "with an empty result_json", data_dir,
+                "[data_load] %s has no user data (only README.md) — "
+                "analyze will run with an empty result_json", data_dir,
             )
             return {"result_json": {}, "data_files": []}
 

@@ -952,6 +952,111 @@ def test_route_after_design_no_sim_flag_routes_to_wait_for_data(
     assert engine._route_after_design({}) == "implement"
 
 
+@pytest.mark.asyncio
+async def test_node_data_load_filters_readme_from_walked_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_walk_folder`` from core.summarizer doesn't know about the
+    FI-authored README. Without filtering, the prompt would include
+    the README's contents (topic + hypothesis + resume command)
+    AS IF IT WERE user-supplied evidence, and the LLM might cite it
+    as a primary source in key_findings.
+
+    Regression for PR #57 bot comment. ``_node_data_load`` must drop
+    the top-level README before rendering manifest / content blocks
+    so the LLM only sees the user's actual data."""
+    from unittest.mock import AsyncMock
+
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    # Build the same data dir layout the engine would have produced:
+    # README.md from FI + the user's actual data files.
+    data_dir = engine.quest_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "README.md").write_text(
+        "# Drop your data here\n\n"
+        "## The hypothesis\n\n"
+        "> Trust correlates with X (this should NOT end up as a 'finding')\n",
+        encoding="utf-8",
+    )
+    (data_dir / "survey.csv").write_text("country,trust\nBE,0.6\nTW,0.7\n", encoding="utf-8")
+    (data_dir / "notes.md").write_text(
+        "# Field notes\n\nObserved that public-trust institutions...\n",
+        encoding="utf-8",
+    )
+
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_chat(prompt, *, node="", **kw):
+        captured_prompt["text"] = prompt
+        return '{"summary": "ok", "key_findings": [], "measurements": {}}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+
+    state = {"topic": "test", "design": {"hypothesis": "h"}}
+    out = await engine._node_data_load(state)
+
+    # README content must NOT appear in the prompt the LLM saw.
+    prompt_text = captured_prompt["text"]
+    assert "Drop your data here" not in prompt_text, (
+        "FI-authored README leaked into the data_load prompt"
+    )
+    assert "this should NOT end up" not in prompt_text
+
+    # The actual user data DOES appear.
+    assert "survey.csv" in prompt_text
+    assert "notes.md" in prompt_text
+    assert "0.6" in prompt_text or "trust" in prompt_text
+
+    # data_files returned should contain ONLY the user's files (2),
+    # not 3 (which would mean the README slipped through).
+    assert len(out["data_files"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_node_data_load_handles_readme_only_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the only file in <quest_root>/data/ is the FI-authored
+    README (user resumed too early without dropping data), the node
+    must return an empty result_json rather than synthesize findings
+    from the README's own instructions."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    data_dir = engine.quest_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "README.md").write_text("# Drop your data here\n", encoding="utf-8")
+
+    # The LLM must not be called in this case.
+    called = {"n": 0}
+
+    async def fake_chat(prompt, *, node="", **kw):  # pragma: no cover
+        called["n"] += 1
+        return "{}"
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    out = await engine._node_data_load({"topic": "t", "design": {}})
+    assert out == {"result_json": {}, "data_files": []}
+    assert called["n"] == 0, "LLM was called despite empty user data"
+
+
 def test_data_load_prompt_is_in_loaded_prompts() -> None:
     """``_load_prompts`` must include ``data_load.md`` so
     ``_node_data_load`` can ``self._prompts["data_load"].substitute(...)``
