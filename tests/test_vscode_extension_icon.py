@@ -32,12 +32,14 @@ def test_icon_png_and_svg_both_exist() -> None:
 def test_icon_png_is_128x128_rgba() -> None:
     """VSCode marketplace consumes 128×128 PNG. RGBA so the dark
     navy bg renders cleanly against light marketplace themes."""
-    im = Image.open(ICON_PNG)
-    assert im.size == (128, 128), (
-        f"icon.png must be 128×128 for the VSCode marketplace; got {im.size}"
+    with Image.open(ICON_PNG) as im:
+        size = im.size
+        mode = im.mode
+    assert size == (128, 128), (
+        f"icon.png must be 128×128 for the VSCode marketplace; got {size}"
     )
-    assert im.mode == "RGBA", (
-        f"icon.png must be RGBA so the bg alpha is explicit; got {im.mode}"
+    assert mode == "RGBA", (
+        f"icon.png must be RGBA so the bg alpha is explicit; got {mode}"
     )
 
 
