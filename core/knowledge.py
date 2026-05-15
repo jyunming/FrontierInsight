@@ -1267,11 +1267,9 @@ class Knowledge:
         body chunks can be reconciled later. Idempotent only when Axon
         deduplicates on identical content.
         """
-        add_text = getattr(self._brain, "add_text", None) or getattr(
-            self._brain, "ingest_text", None
-        )
-        if add_text is None:
+        if self._brain is None:
             return
+        docs: list[dict[str, Any]] = []
         for doc in self._local_papers:
             paper_id = _paper_short_id(doc.metadata)
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1290,20 +1288,23 @@ class Knowledge:
                 "tag": f"fi-paper:{paper_id}",
                 "ingested_at": now,
             }
-            try:
-                add_text(
-                    _render_paper_spine(doc.metadata, abstract=doc.content[:1200]),
-                    metadata=spine_meta,
-                )
-                add_text(
-                    _prepend_paper_header(doc.content, doc.metadata),
-                    metadata=body_meta,
-                )
-            except Exception as e:
-                _log.warning(
-                    "local_paper %s: Axon ingest failed: %s",
-                    doc.metadata.get("filename", "?"), e,
-                )
+            docs.append({
+                "id": self._mint_doc_id("fi_paper_spine", spine_meta),
+                "text": _render_paper_spine(doc.metadata, abstract=doc.content[:1200]),
+                "metadata": spine_meta,
+            })
+            docs.append({
+                "id": self._mint_doc_id("fi_local_paper", body_meta),
+                "text": _prepend_paper_header(doc.content, doc.metadata),
+                "metadata": body_meta,
+            })
+        if not docs:
+            return
+        try:
+            self._brain.ingest(docs)
+            self._finalize_ingest_if_supported()
+        except Exception as e:
+            _log.warning("local_papers Axon ingest failed: %s", e)
 
     def _seed_source_catalog(self) -> None:
         """Ingest the built-in source catalog into Axon as one document
@@ -1313,12 +1314,8 @@ class Knowledge:
         config knob if it becomes a problem."""
         if self._brain is None:
             return
-        add_text = getattr(self._brain, "add_text", None) or getattr(
-            self._brain, "ingest_text", None
-        )
-        if add_text is None:
-            return
         try:
+            docs: list[dict[str, Any]] = []
             for entry in _SOURCE_CATALOG:
                 meta = {
                     "kind": "fi_source_catalog",
@@ -1335,7 +1332,13 @@ class Knowledge:
                     f"Access: {entry['access']}\n"
                     f"When to use: {entry['when_to_use']}"
                 )
-                add_text(text, metadata=meta)
+                docs.append({
+                    "id": f"fi_source_catalog:{entry['name']}",
+                    "text": text,
+                    "metadata": meta,
+                })
+            self._brain.ingest(docs)
+            self._finalize_ingest_if_supported()
             _log.info("seeded %d source-catalog entries into Axon", len(_SOURCE_CATALOG))
         except Exception as e:
             _log.warning("source-catalog seed failed: %s", e)
@@ -1447,17 +1450,30 @@ class Knowledge:
     # ---- ingest -----------------------------------------------------------
 
     def ingest(self, source: Path | str) -> bool:
-        """Ingest a file or URL into Axon. Returns True on success."""
+        """Ingest a file (or URL) into Axon. The Axon API is
+        ``brain.ingest(documents: list[dict])`` where each doc has
+        ``id`` / ``text`` / ``metadata``. The previous version of this
+        helper was written against an imagined ``ingest(str)`` /
+        ``add_document(str)`` API that doesn't exist — so calls
+        silently returned False and ``--ingest`` never actually wrote
+        anything. Read the file, build the right shape, call the real
+        API, then ``finalize_ingest`` so embeddings/index are flushed.
+        Returns True on success."""
         if not self.enabled or self._brain is None:
             return False
         try:
-            ingest_fn = getattr(self._brain, "ingest", None) or getattr(
-                self._brain, "add_document", None
-            )
-            if ingest_fn is None:
-                _log.warning("axon brain exposes no ingest/add_document; skipping")
-                return False
-            ingest_fn(str(source))
+            path = Path(source)
+            text = path.read_text(encoding="utf-8") if path.is_file() else str(source)
+            doc_id = path.name if path.is_file() else str(source)
+            self._brain.ingest([{
+                "id": doc_id,
+                "text": text,
+                "metadata": {
+                    "source": str(path) if path.is_file() else str(source),
+                    "kind": "fi_local_paper",
+                },
+            }])
+            self._finalize_ingest_if_supported()
             return True
         except Exception as e:
             _log.warning("axon ingest failed for %s: %s", source, e)
@@ -1466,36 +1482,68 @@ class Knowledge:
     def add_text(
         self, *, text: str, kind: str, metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """Ingest a pre-formatted text document into Axon. Handles the
-        Axon API drift between ``add_text`` and ``ingest_text`` so
-        callers don't have to. Returns True iff the call succeeded.
+        """Ingest a pre-formatted text document into Axon. Returns
+        True iff the call succeeded.
 
-        Used by the post-quest write-back path and by the folder
-        summarizer (`core/summarizer.py`) to land `fi_summary_input`
-        and `fi_summary` documents. Tolerates a disabled or missing
-        Axon brain — returns False silently in those cases."""
+        Used by the post-quest write-back path (``add_quest_artifacts``)
+        and by every PM-command (``/proposal``, ``/digest``,
+        ``/portfolio``, ``/critique``, ``/summarize``) to land their
+        respective ``fi_*`` documents. Tolerates a disabled or missing
+        Axon brain — returns False silently in those cases.
+
+        Calls the real Axon API: ``brain.ingest([{id, text, metadata}])``
+        followed by ``finalize_ingest`` so the embeddings + index are
+        flushed and the document is queryable on the next ``asearch``.
+        ``kind`` is folded into ``metadata['kind']`` so ``fi_*``
+        documents stay filterable downstream."""
         if not self.enabled or self._brain is None:
             return False
-        add_fn = getattr(self._brain, "add_text", None) or getattr(
-            self._brain, "ingest_text", None,
-        )
-        if add_fn is None:
-            _log.warning("axon brain exposes no add_text/ingest_text; skipping")
-            return False
         try:
-            add_fn(text=text, kind=kind, metadata=metadata or {})
+            doc_id = self._mint_doc_id(kind, metadata)
+            doc = {
+                "id": doc_id,
+                "text": text,
+                "metadata": {**(metadata or {}), "kind": kind},
+            }
+            self._brain.ingest([doc])
+            self._finalize_ingest_if_supported()
             return True
-        except TypeError:
-            # Older Axon shapes — try positional / no-kind variants.
-            try:
-                add_fn(text, metadata=metadata or {})
-                return True
-            except Exception as e:
-                _log.warning("axon add_text fallback failed: %s", e)
-                return False
         except Exception as e:
-            _log.warning("axon add_text failed: %s", e)
+            _log.warning("axon add_text(kind=%s) failed: %s", kind, e)
             return False
+
+    @staticmethod
+    def _mint_doc_id(kind: str, metadata: dict[str, Any] | None) -> str:
+        """Stable doc id derived from metadata when possible so
+        re-ingesting the same logical doc updates rather than
+        duplicates. Order of preference: explicit ``id`` in metadata,
+        ``quest_id`` (post-quest writebacks), ``proposal_id`` (from
+        /proposal), ``critique_id``, ``digest_id``, ``summary_id``,
+        ``portfolio_id``. Falls back to ``<kind>-<epoch>-<uuid4[:8]>``
+        when none are present."""
+        md = metadata or {}
+        for key in ("id", "quest_id", "proposal_id", "critique_id",
+                    "digest_id", "summary_id", "portfolio_id"):
+            v = md.get(key)
+            if v:
+                return f"{kind}:{v}"
+        import time
+        import uuid
+        return f"{kind}:{int(time.time())}-{uuid.uuid4().hex[:8]}"
+
+    def _finalize_ingest_if_supported(self) -> None:
+        """Some Axon builds require ``finalize_ingest`` after a batch to
+        actually flush embeddings to the store; older builds do it
+        inside ``ingest``. We call it when present and swallow
+        AttributeError so a downgrade doesn't break the path."""
+        if self._brain is None:
+            return
+        fin = getattr(self._brain, "finalize_ingest", None)
+        if callable(fin):
+            try:
+                fin()
+            except Exception as e:
+                _log.warning("axon finalize_ingest failed: %s", e)
 
     def add_quest_artifacts(
         self,
@@ -1554,12 +1602,6 @@ class Knowledge:
         }
 
         try:
-            add_text = getattr(self._brain, "add_text", None) or getattr(
-                self._brain, "ingest_text", None
-            )
-            if add_text is None:
-                return self.ingest(paper_md_path)
-
             paper_md = (
                 paper_md_path.read_text(encoding="utf-8")
                 if paper_md_path.exists()
@@ -1573,30 +1615,35 @@ class Knowledge:
                 "topic": topic,
             }
 
+            # Batch ALL five docs into a single ``brain.ingest`` call
+            # so the embeddings + index are flushed once at the end —
+            # one ``finalize_ingest`` for the whole bundle. The
+            # previous shape sent five separate ``add_text`` calls
+            # which (a) didn't exist on the Axon API at all and (b)
+            # would have over-flushed if they had.
+            docs: list[dict[str, Any]] = []
+
+            def _enq(kind: str, text: str, extra_meta: dict[str, Any]) -> None:
+                merged = {**extra_meta, "kind": kind}
+                docs.append({
+                    "id": self._mint_doc_id(kind, merged),
+                    "text": text,
+                    "metadata": merged,
+                })
+
             # (1) Spine — title-searchable card-catalog entry.
             spine_text = _render_paper_spine(
                 quest_paper_meta_for_helpers,
                 abstract=summary[:1200],
                 key_claims=list(meta_no_refs.get("key_findings") or []),
             )
-            spine_meta = {
-                **base_meta,
-                "kind": "fi_paper_spine",
-                "origin": "quest_paper",
-            }
-            add_text(spine_text, metadata=spine_meta)
+            _enq("fi_paper_spine", spine_text, {**base_meta, "origin": "quest_paper"})
 
             # (2) Body — full paper with 1-line citation header prepended.
             body_text = _prepend_paper_header(paper_md, quest_paper_meta_for_helpers)
-            body_meta = {**base_meta, "kind": "fi_quest_paper"}
-            add_text(body_text, metadata=body_meta)
+            _enq("fi_quest_paper", body_text, base_meta)
 
             # (3) Summary — backwards-compat kind; gains paper_refs in metadata.
-            summary_meta = {
-                **base_meta,
-                "kind": "fi_quest_summary",
-                "paper_refs": [_paper_short_id(r) for r in external_refs],
-            }
             summary_payload = {
                 "summary": summary,
                 **{k: v for k, v in meta_no_refs.items() if k != "summary"},
@@ -1607,7 +1654,10 @@ class Knowledge:
                 f"---structured-findings---\n"
                 f"{json.dumps(summary_payload, indent=2, default=str)}"
             )
-            add_text(summary_text, metadata=summary_meta)
+            _enq("fi_quest_summary", summary_text, {
+                **base_meta,
+                "paper_refs": [_paper_short_id(r) for r in external_refs],
+            })
 
             # (4) Topic event — pointer doc scoped by topic slug.
             topic_text = _render_topic_event(
@@ -1619,8 +1669,7 @@ class Knowledge:
                 score=meta_no_refs.get("score"),
                 paper_refs=external_refs,
             )
-            topic_meta = {
-                "kind": "fi_topic_event",
+            _enq("fi_topic_event", topic_text, {
                 "tag": f"fi-topic:{topic_id}",
                 "topic_id": topic_id,
                 "topic": topic,
@@ -1629,28 +1678,33 @@ class Knowledge:
                 "score": meta_no_refs.get("score"),
                 "paper_refs": [_paper_short_id(r) for r in external_refs],
                 "ingested_at": now,
-            }
-            add_text(topic_text, metadata=topic_meta)
+            })
 
             # (5) External-ref spines — curated card-catalog entries for
             # papers that actually contributed to an accepted quest.
             for ref in external_refs:
                 ref_paper_id = _paper_short_id(ref)
-                ref_spine_meta = {
+                ref_spine_text = _render_paper_spine(
+                    {**ref, "topic": topic},
+                    abstract=ref.get("abstract", ""),
+                )
+                _enq("fi_external_ref_spine", ref_spine_text, {
                     **{k: v for k, v in ref.items() if k != "abstract"},
-                    "kind": "fi_external_ref_spine",
                     "paper_id": ref_paper_id,
                     "tag": f"fi-paper:{ref_paper_id}",
                     "topic_id": topic_id,
                     "consumed_by_quests": [quest_id],
                     "ingested_at": now,
-                }
-                ref_spine_text = _render_paper_spine(
-                    {**ref, "topic": topic},
-                    abstract=ref.get("abstract", ""),
-                )
-                add_text(ref_spine_text, metadata=ref_spine_meta)
+                })
 
+            self._brain.ingest(docs)
+            self._finalize_ingest_if_supported()
+            _log.info(
+                "axon writeback: %d docs ingested for quest %s "
+                "(kinds: %s)",
+                len(docs), quest_id,
+                ", ".join(sorted({d["metadata"]["kind"] for d in docs})),
+            )
             return True
         except Exception as e:
             _log.warning("axon write-back failed for quest %s: %s", quest_id, e)
