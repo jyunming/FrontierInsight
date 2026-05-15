@@ -55,7 +55,7 @@ Three feedback loops:
 | Local paper feed — drop paywalled PDFs / MD into `knowledge.local_papers`, pinned to retrieval head | ✅ |
 | Opportunistic full-text fetch — host-network publisher PDFs with login-wall rejection | ✅ |
 | Structured ingest — title-searchable spine docs + citation-header'd body + topic rollups | ✅ |
-| Status GUI — FastAPI + HTMX server: fleet list, SSE log stream, clarify panel, paper preview, panel-review cards | ✅ |
+| Status GUI — FastAPI server with a vanilla-JS single-page frontend (`web/static/index.html`): fleet list, SSE log stream, clarify panel, paper preview, panel-review cards | ✅ |
 | VSCode extension — sanctioned `vscode.lm.*` integration with `@fi /new`, `/start`, `/fleet`, `/resume`, `/summarize` | ✅ |
 | Folder summarizer — `python launch.py --summarize <folder>` and `@fi /summarize`; auto-detects content kind (literature / code / study / execution / mixed); always ingests input + summary into Axon | ✅ |
 | No-admin LaTeX install — `python launch.py --install-tectonic` drops a self-bootstrapping LaTeX binary into `tools/` for corporate environments where MiKTeX install is blocked | ✅ |
@@ -137,16 +137,14 @@ provider:
   base_url: ...                   # only for HTTP-direct overrides
   api_key_env: ...                # env var name; defaults to provider's standard
   extra: {}                       # bag for transport-specific fields
-  node_models:                    # Per-node override
-    clarify:       gpt-4o-mini
-    ideate:        claude-3-5-sonnet
-    cross_check:   gpt-4o-mini
-    write:         claude-3-5-sonnet
-    review_panel:                 # default for any persona
-      gpt-5
-    review_panel.statistician:    # per-persona override
-      claude-opus-4-7
-    review_moderator: gpt-4o-mini
+  node_models:                       # Per-node override — flat dict[str, str]
+    clarify:                  gpt-4o-mini
+    ideate:                   claude-3-5-sonnet
+    cross_check:              gpt-4o-mini
+    write:                    claude-3-5-sonnet
+    review_panel:             gpt-5            # default for any persona
+    review_panel.statistician: claude-opus-4-7 # per-persona override (dotted key, flat value)
+    review_moderator:         gpt-4o-mini
 
 engine:
   framework: langgraph

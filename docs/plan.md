@@ -180,8 +180,8 @@ for the layered design see [`architecture.md`](architecture.md).
   DeepScientist / AI-Scientist as a hard dependency.
 - A new vector store, embedding service, or literature-search
   adapter — Axon owns those concerns.
-- An SPA framework (React / Vue) for the UI — vanilla JS with HTMX
-  is sufficient and has no build step.
+- An SPA framework (React / Vue) for the UI — a vanilla-JS
+  single-page frontend (no HTMX, no build step) is sufficient.
 - A custom GitHub Copilot HTTP wrapper. For in-VSCode use, the
   sanctioned `vscode_extension` path covers every model the user's
   Copilot Chat picker exposes. For headless use, the chat-style

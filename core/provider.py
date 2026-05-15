@@ -107,6 +107,25 @@ PROXY_PROVIDERS: frozenset[str] = frozenset(
 # New callers should prefer `PROXY_PROVIDERS`.
 _PROXY_PROVIDERS = PROXY_PROVIDERS
 
+# `github_copilot_cli` and `github_copilot_vscode` are config aliases
+# that BOTH spawn the same `npx copilot-api@latest start` proxy
+# (see ``ProxySupervisor._spawn`` at L313). Without canonicalization
+# the supervisor's ``_handles`` dict would key by raw provider name,
+# so a fleet with one quest on each alias would spawn TWO redundant
+# proxies (and only release one back). Normalize at the supervisor
+# boundary so both aliases share a single handle with a single
+# refcount.
+_PROXY_ALIASES: dict[str, str] = {
+    "github_copilot_vscode": "github_copilot_cli",
+}
+
+
+def _canonical_proxy_name(provider_name: str) -> str:
+    """Return the canonical name for proxy-provider aliases that
+    spawn the same upstream proxy. Used by ``ProxySupervisor`` to
+    key its handle dict so two aliases share one proxy process."""
+    return _PROXY_ALIASES.get(provider_name, provider_name)
+
 
 @dataclass(frozen=True)
 class _CliSpec:
@@ -260,21 +279,25 @@ class ProxySupervisor:
     async def acquire(self, provider_name: str) -> _ProxyHandle:
         if provider_name not in _PROXY_PROVIDERS:
             raise ValueError(f"{provider_name!r} is not a proxy provider")
+        # Canonicalize aliases (e.g. github_copilot_vscode → github_copilot_cli)
+        # so two aliases that spawn the same proxy share a single handle.
+        key = _canonical_proxy_name(provider_name)
         async with self._lock:
-            handle = self._handles.get(provider_name)
+            handle = self._handles.get(key)
             if handle is None:
                 # `_spawn` ends with a blocking poll of `/v1/models` (up to
                 # 60s). Run it in a worker thread so concurrent quests doing
                 # other work don't stall the event loop while one of them
                 # waits for the proxy to come up.
-                handle = await asyncio.to_thread(self._spawn, provider_name)
-                self._handles[provider_name] = handle
+                handle = await asyncio.to_thread(self._spawn, key)
+                self._handles[key] = handle
             handle.refcount += 1
             return handle
 
     async def release(self, provider_name: str) -> None:
+        key = _canonical_proxy_name(provider_name)
         async with self._lock:
-            handle = self._handles.get(provider_name)
+            handle = self._handles.get(key)
             if handle is None:
                 return
             handle.refcount -= 1
@@ -284,7 +307,12 @@ class ProxySupervisor:
                     handle.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     handle.proc.kill()
-                self._handles.pop(provider_name, None)
+                # Use the canonical key so the entry the terminated
+                # handle is actually stored under gets removed.
+                # Without this, releasing via a non-canonical alias
+                # leaves a dead handle in _handles and the next
+                # acquire returns it without respawning.
+                self._handles.pop(key, None)
 
     async def shutdown(self) -> None:
         async with self._lock:

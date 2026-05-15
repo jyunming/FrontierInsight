@@ -207,6 +207,48 @@ async def test_proxy_spawn_uses_correct_cli_for_copilot():
     assert kwargs["cwd"] is None
 
 
+async def test_proxy_alias_canonicalization_shares_handle_and_cleans_up():
+    """`github_copilot_cli` and `github_copilot_vscode` are aliases for
+    the same `npx copilot-api` proxy. Acquiring through one and
+    releasing through the other must (a) share a single spawn,
+    (b) terminate cleanly when the combined refcount hits zero,
+    and (c) actually REMOVE the entry from ``_handles`` (the bug PR
+    #76 caught: ``release`` was popping with the raw alias name
+    instead of the canonical key, so the dead handle stayed in the
+    dict and a subsequent acquire would return it without
+    respawning)."""
+    fake_proc = MagicMock()
+    fake_proc.wait = MagicMock(return_value=0)
+
+    sup = ProxySupervisor()
+    with patch("core.provider.subprocess.Popen", return_value=fake_proc) as popen, \
+         patch("core.provider._wait_for_openai_endpoint"), \
+         patch("core.provider._free_port", return_value=54399):
+
+        # Acquire via one alias, then the other — must share.
+        h1 = await sup.acquire("github_copilot_cli")
+        h2 = await sup.acquire("github_copilot_vscode")
+        assert h2 is h1, "aliases must share one proxy handle"
+        assert popen.call_count == 1
+        assert h1.refcount == 2
+
+        # Release via the alias that was NOT used for the spawn-side
+        # of the handle's canonical key. Refcount drops, handle stays.
+        await sup.release("github_copilot_vscode")
+        assert h1.refcount == 1
+        assert "github_copilot_cli" in sup._handles
+
+        # Final release brings refcount to 0 — the entry MUST be
+        # popped under the canonical key.
+        await sup.release("github_copilot_vscode")
+        assert "github_copilot_cli" not in sup._handles, (
+            "release(alias) must pop the entry stored under the "
+            "canonical key, not the raw alias"
+        )
+        assert sup._handles == {}
+        fake_proc.terminate.assert_called_once()
+
+
 async def test_resolve_endpoint_async_proxy_uses_supervisor_port(tmp_path, monkeypatch):
     """For a proxy provider, the resolved base_url must point at the local
     port the supervisor allocated, not the configured one."""

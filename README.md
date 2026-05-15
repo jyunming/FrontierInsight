@@ -114,13 +114,19 @@ Then change `provider.name` in your YAML accordingly.
 
 **Note:** the `copilot_cli` provider is also wired in the codebase but **does not work** as an FI backend — GitHub's standalone Copilot CLI is an *agentic* tool that interprets node prompts as user coding tasks and replies conversationally instead of running stateless LLM inference. FI emits a loud warning at engine init when you select it. For headless Copilot, there isn't currently a clean path; use `vscode_extension` (Option A) when you can, or switch to one of the other CLIs / Option C above.
 
-#### Option C — OpenAI / Anthropic / Gemini API
+#### Option C — OpenAI / Gemini API key (direct HTTP)
 
 ```bash
-export OPENAI_API_KEY=sk-...        # or ANTHROPIC_API_KEY / GEMINI_API_KEY
+export OPENAI_API_KEY=sk-...        # or GEMINI_API_KEY
 ```
 
-Then change `provider.name` to `openai` / `claude_cli` / `gemini`.
+Then change `provider.name` to `openai` or `gemini`.
+
+> **Why `claude_cli` is NOT in this list:** `claude_cli` is the
+> Option-B path that shells out to the Claude Code CLI and reuses
+> its OAuth — it does NOT read `ANTHROPIC_API_KEY`. For
+> Anthropic API-key usage, use Option B (`claude login` + then set
+> `provider.name: claude_cli`).
 
 #### Option D — Local Ollama (free, no API key)
 
