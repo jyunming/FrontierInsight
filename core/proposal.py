@@ -173,9 +173,18 @@ def _render_companion_yaml(
         ("  " + line) if line else "  " for line in topic.strip().splitlines()
     )
     title_slug = _slugify_topic(topic, max_chars=64)
-    pinned = str(proposal_path).replace("\\", "/") if proposal_path else (
-        f"outputs/_drafts/{proposal_id}-proposal.md"
-    )
+    if proposal_path is not None:
+        # Normalize to absolute via expanduser().resolve() so the YAML
+        # survives any later ``cd`` the user does between ``/proposal``
+        # and ``/start``. A relative path here would silently emit an
+        # ``outputs/_drafts/...`` entry that breaks the moment the
+        # user runs the quest from a different working directory.
+        abs_path = proposal_path.expanduser().resolve()
+        pinned = str(abs_path).replace("\\", "/")
+    else:
+        # Best-effort relative fallback for callers that don't pass
+        # a path (kept for API back-compat).
+        pinned = f"outputs/_drafts/{proposal_id}-proposal.md"
     return string.Template(_DEFAULT_YAML_TEMPLATE).substitute(
         generated_at=generated_at.date().isoformat(),
         proposal_filename=f"{proposal_id}-proposal.md",
