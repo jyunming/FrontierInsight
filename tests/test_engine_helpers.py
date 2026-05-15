@@ -2240,3 +2240,204 @@ async def test_engine_run_closes_logger_on_exception_path(
     # leak regressed.
     shutil.rmtree(engine.quest_root)
     assert not engine.quest_root.exists()
+
+
+# ---- _run_ideate_tournament (Phase O) -----------------------------------
+
+
+def _make_tournament_engine(tmp_path: Path) -> "Engine":
+    cfg = Config(
+        topic="some research topic",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(ideate_tournament=True, ideate_reflect=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    return Engine(cfg)
+
+
+def test_engine_config_ideate_tournament_default_false() -> None:
+    """Tournament must be OPT-IN — it costs 2 extra LLM calls vs.
+    the single-shot critique. Default-off keeps the cost floor at 7-18
+    calls/quest per docs/USAGE.md."""
+    from core.config import EngineConfig
+    assert EngineConfig().ideate_tournament is False
+
+
+def test_ideate_tournament_prompt_loads() -> None:
+    """The ``ideate_tournament`` prompt is added to ``_load_prompts``.
+    Regression guard so a future prompt-list edit doesn't silently
+    drop the tournament prompt and leave the feature unable to run."""
+    from core.engine import _load_prompts
+    prompts = _load_prompts()
+    assert "ideate_tournament" in prompts
+    t = prompts["ideate_tournament"]
+    # The prompt must accept the four variables the engine substitutes.
+    rendered = t.substitute(topic="x", clarify_block="y", idea_a="a", idea_b="b")
+    assert "winner" in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_ideate_tournament_picks_majority_winner(
+    tmp_path: Path,
+) -> None:
+    """3 ideas → 3 pairwise matches. If idea 0 wins both its matches,
+    it has 2 wins; the other two have 1 win and 0 wins. Tournament
+    must pick idea 0."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_tournament_engine(tmp_path)
+    ideas = [
+        {"title": "Alpha", "summary": "first"},
+        {"title": "Beta", "summary": "second"},
+        {"title": "Gamma", "summary": "third"},
+    ]
+    # Match outcomes (a_idx, b_idx) → winner letter
+    outcomes = {
+        (0, 1): "A",  # Alpha beats Beta
+        (0, 2): "A",  # Alpha beats Gamma
+        (1, 2): "B",  # Gamma beats Beta
+    }
+    call_count = {"n": 0}
+
+    async def fake_chat(self, prompt, *, node, **kw):
+        call_count["n"] += 1
+        # Extract a/b indices from the prompt text (each prompt has the
+        # full idea JSON inline, so we match on title to know which pair).
+        is_alpha_in_a = '"Alpha"' in prompt.split('# Idea B')[0]
+        is_beta_in_a = '"Beta"' in prompt.split('# Idea B')[0]
+        is_alpha_in_b = '"Alpha"' in prompt.split('# Idea B')[1]
+        if is_alpha_in_a and '"Beta"' in prompt.split('# Idea B')[1]:
+            w = outcomes[(0, 1)]
+        elif is_alpha_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
+            w = outcomes[(0, 2)]
+        elif is_beta_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
+            w = outcomes[(1, 2)]
+        else:
+            raise AssertionError(f"unexpected pair in prompt: {prompt[:200]}")
+        return f'{{"winner": "{w}", "reason": "tractability", "margin": "decisive"}}'
+
+    import core.engine as engine_mod
+    # _run_ideate_tournament calls self._chat — patch on the Engine class.
+    original_chat = engine_mod.Engine._chat
+    engine_mod.Engine._chat = fake_chat  # type: ignore[assignment]
+    try:
+        winner, record = await engine._run_ideate_tournament(
+            {"topic": "x"}, ideas, initial_chosen=ideas[1],
+        )
+    finally:
+        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+
+    assert winner["title"] == "Alpha"
+    assert record["winner_idx"] == 0
+    # Alpha wins both its matches (vs Beta, vs Gamma) → idx 0: 2 wins.
+    # Beta loses both its matches (vs Alpha, vs Gamma) → idx 1: 0 wins.
+    # Gamma loses to Alpha, beats Beta → idx 2: 1 win.
+    assert record["wins"] == [2, 0, 1]
+    assert record["outcome"] == "swapped"  # initial_chosen was Beta
+    assert call_count["n"] == 3  # C(3, 2)
+
+
+@pytest.mark.asyncio
+async def test_run_ideate_tournament_falls_back_when_inconclusive(
+    tmp_path: Path,
+) -> None:
+    """If every match returns malformed JSON (winner != "A" or "B"),
+    no idea accumulates wins. Tournament must fall back to
+    ``initial_chosen`` rather than crashing or picking arbitrarily."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_tournament_engine(tmp_path)
+    ideas = [{"title": "A", "summary": "x"}, {"title": "B", "summary": "y"}]
+    initial = ideas[1]
+
+    async def fake_chat(self, prompt, *, node, **kw):
+        return '{"winner": "TIE", "reason": "?"}'  # invalid winner
+
+    import core.engine as engine_mod
+    original_chat = engine_mod.Engine._chat
+    engine_mod.Engine._chat = fake_chat  # type: ignore[assignment]
+    try:
+        winner, record = await engine._run_ideate_tournament(
+            {"topic": "x"}, ideas, initial_chosen=initial,
+        )
+    finally:
+        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+
+    assert winner["title"] == "B"  # initial_chosen preserved
+    assert record["outcome"] == "inconclusive_fallback"
+    assert record["winner_idx"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_ideate_tournament_dispatches_matches_in_parallel(
+    tmp_path: Path,
+) -> None:
+    """3 pairwise matches with 50ms simulated latency each. Parallel
+    dispatch → wall-clock ~50ms; serial would be 150ms. Assert <130ms
+    with margin for jitter (same pattern as the WorldBank parallel
+    test)."""
+    import asyncio as _asyncio
+    import time as _time
+
+    engine = _make_tournament_engine(tmp_path)
+    ideas = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
+
+    async def slow_chat(self, prompt, *, node, **kw):
+        await _asyncio.sleep(0.05)
+        return '{"winner": "A", "reason": "x", "margin": "decisive"}'
+
+    import core.engine as engine_mod
+    original_chat = engine_mod.Engine._chat
+    engine_mod.Engine._chat = slow_chat  # type: ignore[assignment]
+    try:
+        start = _time.monotonic()
+        await engine._run_ideate_tournament(
+            {"topic": "x"}, ideas, initial_chosen=ideas[0],
+        )
+        elapsed = _time.monotonic() - start
+    finally:
+        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+
+    assert elapsed < 0.13, (
+        f"3 matches must dispatch concurrently; wall-clock {elapsed:.3f}s "
+        f"suggests serial execution (serial floor is ~0.15s for 3 × 50ms)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
+    tmp_path: Path,
+) -> None:
+    """C(N, 2) is 0 for N=1, so the tournament has nothing to do.
+    ``_node_ideate``'s guard ``len(ideas) >= 2`` keeps the helper
+    from being called in this case — but if it ever IS called with
+    fewer ideas, the helper should also handle it gracefully (no
+    LLM calls, return initial_chosen)."""
+    from unittest.mock import AsyncMock
+
+    engine = _make_tournament_engine(tmp_path)
+    ideas = [{"title": "Solo"}]
+
+    chat_calls = 0
+    async def fake_chat(self, prompt, *, node, **kw):
+        nonlocal chat_calls
+        chat_calls += 1
+        return '{"winner": "A"}'
+
+    import core.engine as engine_mod
+    original_chat = engine_mod.Engine._chat
+    engine_mod.Engine._chat = fake_chat  # type: ignore[assignment]
+    try:
+        winner, record = await engine._run_ideate_tournament(
+            {"topic": "x"}, ideas, initial_chosen=ideas[0],
+        )
+    finally:
+        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+
+    # No matches to play; outcome falls through to inconclusive_fallback.
+    assert chat_calls == 0
+    assert winner["title"] == "Solo"
+    assert record["outcome"] == "inconclusive_fallback"

@@ -114,6 +114,17 @@ class EngineConfig(BaseModel):
     # chosen idea. May swap `chosen_idea` to a different entry from
     # the brainstormed list. Cheap (one extra LLM call per quest).
     ideate_reflect: bool = True
+    # Phase O — pairwise tournament across the brainstormed ideas.
+    # When True, REPLACES the single ``ideate_reflect`` critique call
+    # with ``C(N, 2)`` parallel pairwise comparisons (3 calls for the
+    # default 3 ideas) and picks the highest-win-count idea. Borrowed
+    # from Google Co-Scientist's pairwise+Elo ranking pattern; audit
+    # #09's R2 recommendation. Costs 2 extra LLM calls vs. the single
+    # critique but produces a measurably better-ranked ``chosen_idea``
+    # on topics where the brainstormed alternatives are close in
+    # quality. Off by default to keep the cost floor at 7-18 calls.
+    # When True, ``ideate_reflect`` is ignored (tournament wins).
+    ideate_tournament: bool = False
     # Phase N — multi-persona reviewer panel on the `review` node.
     # When empty (default), the review node behaves as before: one LLM
     # call producing one verdict. When non-empty, each entry runs in

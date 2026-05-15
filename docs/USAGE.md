@@ -31,7 +31,8 @@ A single \`/start\` or \`/new\` quest fires roughly **8–18 LLM calls** dependi
 |---|---|---|
 | `clarify` | 0–1 | Only when `engine.clarify_mode != off`. |
 | `ideate` | 1 | |
-| `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. |
+| `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. Skipped when `ideate_tournament` is on. |
+| `ideate_tournament` | 0 or C(N,2) | Off by default. When on with the default 3 ideas, fires 3 parallel pairwise comparisons (~one round-trip wall-clock) and picks the highest-win-count idea. |
 | `literature` | 1 | One synthesis call (literature *retrieval* uses Axon embeddings, not LLMs). |
 | `design` | 1–3 | Hits up to 3× if the cross-check loop sends it back. |
 | `implement` | 1–3 | Hits 2-3× if the execute-repair loop fires. |
@@ -155,7 +156,8 @@ engine:
   max_iterations: 2                 # design-revise loop budget
   review_loop: true                 # enable review-driven revise
   clarify_mode: auto                # off | auto | interactive
-  ideate_reflect: true              # extra self-critique pass
+  ideate_reflect: true              # extra self-critique pass (1 LLM call)
+  ideate_tournament: false          # pairwise tournament across brainstormed ideas; replaces ideate_reflect; C(N,2) calls in parallel
   exec_reflect_max_iterations: 3    # execute-repair loop bound
   cross_check_per_finding_k: 3      # per-finding lit-check hits, 0 to disable
   enable_analyze_reroute: true      # analyze can request re_experiment / broaden_lit

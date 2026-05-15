@@ -77,6 +77,11 @@ class QuestState(TypedDict, total=False):
     # Phase M — ideate self-reflection result. Optional; describes what
     # the agent considered before locking in `chosen_idea`.
     ideate_critique: dict[str, Any]
+    # Phase O — ideate tournament result. Optional; present only when
+    # `engine.ideate_tournament: true`. Carries the match table, win
+    # counts, and outcome label ("confirmed" / "swapped" /
+    # "inconclusive_fallback") for visibility + future Axon write-back.
+    ideate_tournament: dict[str, Any]
     literature: list[dict[str, Any]]
     design: dict[str, Any]
     code: str
@@ -662,10 +667,27 @@ class Engine:
         ideas = parsed.get("ideas") or []
         chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
 
+        # Phase O — pairwise tournament. When enabled, REPLACES the
+        # single critique call below with C(N, 2) parallel pairwise
+        # comparisons and picks the highest-win-count idea. See
+        # ``_run_ideate_tournament`` for the aggregation policy.
+        critique: dict[str, Any] = {}
+        tournament_result: dict[str, Any] | None = None
+        if self.config.engine.ideate_tournament and len(ideas) >= 2:
+            try:
+                chosen, tournament_result = await self._run_ideate_tournament(
+                    state, ideas, initial_chosen=chosen,
+                )
+            except Exception as e:
+                self._log.warning(
+                    "[ideate] tournament failed: %s — falling back to "
+                    "initial chosen", e,
+                )
         # Phase M — self-reflection. Single extra LLM call that may swap
         # chosen_idea to a different entry from the brainstormed list.
-        critique: dict[str, Any] = {}
-        if self.config.engine.ideate_reflect and ideas:
+        # Skipped when tournament already ran (the tournament's pick
+        # subsumes the critique's purpose).
+        elif self.config.engine.ideate_reflect and ideas:
             try:
                 critique_prompt = self._prompts["ideate_reflect"].substitute(
                     topic=state["topic"],
@@ -703,7 +725,127 @@ class Engine:
         out: QuestState = {"ideas": ideas, "chosen_idea": chosen}
         if critique:
             out["ideate_critique"] = critique
+        if tournament_result:
+            out["ideate_tournament"] = tournament_result
         return out
+
+    async def _run_ideate_tournament(
+        self,
+        state: QuestState,
+        ideas: list[dict[str, Any]],
+        *,
+        initial_chosen: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run C(N, 2) pairwise comparisons across ``ideas`` and return
+        ``(winner_idea, tournament_record)``.
+
+        The record carries the full match table for run.log + Axon
+        write-back so a future quest can see "we already tried these
+        ideas; the tournament picked X over Y because Z."
+
+        Each comparison fires one ``self._chat`` call to the
+        ``ideate_tournament`` prompt, returning ``{winner: A|B,
+        reason: ..., margin: decisive|narrow}``. The N matches run
+        concurrently via ``asyncio.gather`` so total wall-clock is one
+        LLM round-trip (plus parsing) regardless of N. For N=3
+        (FI default), that's 3 calls in parallel vs the prior 1
+        critique call serially.
+
+        Tie-breaking: highest total wins. If multiple ideas tie at
+        the top, prefer the idea that scored more "decisive" margins;
+        if still tied, fall back to ``initial_chosen``. This avoids
+        the failure mode where the tournament refuses to commit and
+        the engine has no `chosen_idea` to feed downstream nodes.
+        """
+        from itertools import combinations
+
+        pairs = list(combinations(range(len(ideas)), 2))
+        self._log.info(
+            "[ideate] tournament: %d ideas, %d pairwise matches",
+            len(ideas), len(pairs),
+        )
+
+        async def play(a_idx: int, b_idx: int) -> dict[str, Any]:
+            prompt = self._prompts["ideate_tournament"].substitute(
+                topic=state["topic"],
+                clarify_block=_format_clarify(state),
+                idea_a=json.dumps(ideas[a_idx], indent=2),
+                idea_b=json.dumps(ideas[b_idx], indent=2),
+            )
+            text = await self._chat(prompt, node="ideate_tournament")
+            parsed = _parse_json_lenient(text) or {}
+            winner_label = str(parsed.get("winner", "")).strip().upper()
+            return {
+                "a_idx": a_idx, "b_idx": b_idx,
+                "winner": winner_label,                  # "A" or "B" or ""
+                "reason": parsed.get("reason", ""),
+                "margin": parsed.get("margin", "narrow"),
+            }
+
+        matches = await asyncio.gather(
+            *(play(a, b) for a, b in pairs), return_exceptions=True,
+        )
+
+        # Tally wins. Skip failed matches (Exception or empty winner).
+        wins = [0] * len(ideas)
+        decisive_wins = [0] * len(ideas)
+        valid_matches: list[dict[str, Any]] = []
+        for m in matches:
+            if isinstance(m, Exception):
+                self._log.warning("[ideate] tournament match raised: %s", m)
+                continue
+            valid_matches.append(m)
+            w = m["winner"]
+            idx = m["a_idx"] if w == "A" else m["b_idx"] if w == "B" else -1
+            if idx >= 0:
+                wins[idx] += 1
+                if m["margin"] == "decisive":
+                    decisive_wins[idx] += 1
+
+        if not any(wins):
+            self._log.info(
+                "[ideate] tournament inconclusive (no valid match outcomes) "
+                "— keeping initial chosen=%r",
+                initial_chosen.get("title", "?"),
+            )
+            return initial_chosen, {
+                "matches": valid_matches, "winner_idx": None,
+                "wins": wins, "decisive_wins": decisive_wins,
+                "outcome": "inconclusive_fallback",
+            }
+
+        # Pick by (wins, decisive_wins, original-order) so ties break
+        # deterministically.
+        winner_idx = max(
+            range(len(ideas)),
+            key=lambda i: (wins[i], decisive_wins[i], -i),
+        )
+        winner = dict(ideas[winner_idx])
+        # Preserve the original rationale; append the tournament reason
+        # for grep-ability in run.log + paper writeback.
+        reasons = [
+            m["reason"]
+            for m in valid_matches
+            if (m["winner"] == "A" and m["a_idx"] == winner_idx)
+            or (m["winner"] == "B" and m["b_idx"] == winner_idx)
+        ]
+        winner["rationale"] = (
+            initial_chosen.get("rationale", "") + " "
+            + " ".join(f"[tournament] {r}" for r in reasons[:2])
+        ).strip()
+        self._log.info(
+            "[ideate] tournament resolved: winner=%r wins=%d (decisive=%d) "
+            "vs initial=%r",
+            winner.get("title", "?"), wins[winner_idx],
+            decisive_wins[winner_idx], initial_chosen.get("title", "?"),
+        )
+        return winner, {
+            "matches": valid_matches, "winner_idx": winner_idx,
+            "wins": wins, "decisive_wins": decisive_wins,
+            "outcome": "swapped"
+                if winner.get("title") != initial_chosen.get("title")
+                else "confirmed",
+        }
 
     async def _node_literature(self, state: QuestState) -> QuestState:
         chosen = state.get("chosen_idea") or {}
@@ -1819,8 +1961,9 @@ class Engine:
 
 def _load_prompts() -> dict[str, string.Template]:
     names = (
-        "clarify", "ideate", "ideate_reflect", "design", "implement",
-        "execute_reflect", "analyze", "cross_check", "write", "review",
+        "clarify", "ideate", "ideate_reflect", "ideate_tournament",
+        "design", "implement", "execute_reflect", "analyze",
+        "cross_check", "write", "review",
         "review_moderate",  # Phase N — panel-moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
