@@ -307,7 +307,12 @@ class ProxySupervisor:
                     handle.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     handle.proc.kill()
-                self._handles.pop(provider_name, None)
+                # Use the canonical key so the entry the terminated
+                # handle is actually stored under gets removed.
+                # Without this, releasing via a non-canonical alias
+                # leaves a dead handle in _handles and the next
+                # acquire returns it without respawning.
+                self._handles.pop(key, None)
 
     async def shutdown(self) -> None:
         async with self._lock:
