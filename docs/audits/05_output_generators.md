@@ -88,6 +88,15 @@ The other three generators have **zero** equivalent. The failure modes:
 - **`generation/poster.py:100-106`** — pdflatex nonzero rc: warning
   logged, returns `poster.tex` only. The user gets a `.tex` file
   they may not know how to compile.
+- **`generation/poster.py` spawn-time failure** (NOT covered by the
+  poster module's own `except TimeoutExpired`): a `FileNotFoundError`,
+  `PermissionError`, or other `OSError` from
+  `subprocess.run(["pdflatex", ...])` propagates out of the generator
+  to `launch.py:563-568`, which catches and prints. Because the
+  generator's exception path bypasses its return, even `poster.tex`
+  (written before pdflatex runs) drops out of the returned manifest —
+  the file exists on disk but `frontier_insight_summary.json` won't
+  list it. Same gap applies to any post-`shutil.which` PATH disagreement.
 - **`generation/speech.py`** — single LLM call, no external tools. Only
   failure mode is the LLM call itself, which propagates as an
   exception caught by `launch.py:574` (logs `[FI] speech generator
@@ -131,7 +140,7 @@ only catch LLM-call failures, which is lower value.
 
 `_find_pdf_engine` (`generation/paper.py:137-174`) walks a fixed
 order: `pdflatex on PATH` → `tectonic on PATH` → `<repo>/tools/tectonic[.exe]`.
-The docstring is excellent — it documents the order, the rationale
+The INFO log line emitted by that lookup is well-phrased — it surfaces the order, the rationale
 (warm pdflatex cache beats tectonic's network round-trip), and the
 platform-aware `tectonic.exe` vs `tectonic` choice.
 
@@ -245,10 +254,12 @@ The two **real** templates:
 The three stub templates (iclr, ieee_access, nature_mi) are
 single-line LaTeX comments. They claim "Stub: pandoc default is used
 until a real template lands here" but in practice pandoc IS handed
-the stub as a template (see Finding #1) and ignores `$body$`. The
-stub strategy is broken — these files should either (a) be deleted
-so the `template.exists()` check returns False and pandoc falls
-back, or (b) be filled in with real placeholders.
+the stub as a template (see Finding #1) and the LaTeX engine
+rejects it — the user gets a `paper_pdf_skipped.md` with an opaque
+engine rc, not a fall-through to pandoc default. The stub strategy
+is broken — these files should either (a) be deleted so the
+`template.exists()` check returns False and pandoc falls back, or
+(b) be filled in with real placeholders.
 
 ### 8. Output bundle — `frontier_insight_summary.json` partial coverage
 
@@ -269,9 +280,16 @@ summary = {
 `paper_md`, `paper_pdf`, `paper_pdf_skipped`, `figures_dir`,
 `bundle_manifest`, `slides_md`, `slides_html`, `slides_pdf`,
 `slides_pptx`, `poster_tex`, `poster_pdf`, `speech_md`. So the
-JSON's `outputs` field IS a comprehensive partial-success manifest —
-the user can read `summary["outputs"]` and see exactly which
-artifacts landed. Good.
+JSON's `outputs` field is a NEAR-comprehensive manifest of WHAT
+EACH GENERATOR RETURNED — but it doesn't cover everything that
+might have landed on disk. Counterexample: `PosterGenerator` writes
+`poster.tex` to disk before invoking pdflatex; if a spawn-time
+`OSError` from `subprocess.run` propagates out of the generator
+(caught in `launch.py` outside the generator), `poster.tex` is on
+disk but absent from the returned manifest — so the JSON
+under-reports. The same applies to any pre-render file written
+before an unhandled exception. So "comprehensive" depends on the
+generator's exception-vs-return contract.
 
 However: the top-level convenience keys `paper_md` and `paper_pdf`
 are paper-only. There are no top-level `slides_pdf`, `poster_pdf`,
@@ -288,8 +306,8 @@ The summary also lacks the `paper_format` value, the `require_pdf`
 flag, and any of the engine identifiers (which pdf-engine produced
 the PDF, which slide renderer succeeded). That telemetry is in the
 run.log but not in the structured artifact. For automation that
-inspects quest outputs (e.g. the VSCode extension, the GUI in
-`gui/`), this is missing.
+inspects quest outputs (e.g. the VSCode extension, the FastAPI
+status GUI under `web/`), this is missing.
 
 ### 9. Marp YAML frontmatter — claimed but not generated
 
@@ -336,11 +354,15 @@ pandoc a template that is just a `%` comment, which the LaTeX engine
 rejects. Strict-mode raises; default mode writes `paper_pdf_skipped.md`
 with an opaque `<engine>_rc_<n>` reason — neither result is what the
 user expected from picking `paper_format: iclr`.
-**Action:** `git rm` all three stub files (keep the directories and
-`__init__.py` so `paper_format: iclr` still validates against the
-Literal). The existing `else: _log.info("no template at ..., using
-pandoc default")` branch then correctly handles these three venues
-with pandoc's default LaTeX template, which contains `$body$`.
+**Action:** `git rm` all three stub `template.tex` files. The Literal
+`paper_format: iclr | ieee_access | nature_mi` continues to validate
+from `PaperFormat` in `core/config.py` regardless of whether the
+filesystem directories exist — config validation is type-driven, not
+filesystem-driven. (If the directories are kept it's for wheel
+packaging discovery, not for validation.) The existing
+`else: _log.info("no template at ..., using pandoc default")` branch
+then correctly handles these three venues with pandoc's default
+LaTeX template, which contains `$body$`.
 
 Add a regression test: `test_iclr_falls_back_to_pandoc_default` mocks
 `subprocess.run` and asserts that the constructed `cmd` does **not**
@@ -365,20 +387,25 @@ requested, an explicit status. Schema:
 }
 ```
 
-The `_PdfSkipReason.code` already exists for paper; propagate it
-through the PaperGenerator return value (e.g.
-`result["paper_pdf_skip_reason"] = skip_reason.code`) and surface in
-`launch.py:484-494`. For the other three generators, introduce a
-parallel skip-reason object — see R3.
+The `_PdfSkipReason.code` already exists for paper. **Don't** push it
+into `PaperGenerator.generate`'s `dict[str, Path]` return value —
+that map is typed as paths and is serialized as artifact paths in
+`launch.py:484-494`; mixing status strings into a path manifest
+breaks the contract. Instead, return a separate status object
+(`tuple[dict[str, Path], OutputsStatus]`) or attach a status field
+on a new `GeneratorResult` dataclass and accumulate them in
+`launch.py:_run_generators`. For the other three generators,
+introduce a parallel skip-reason object — see R3.
 
-### R3. Add `*_skipped.md` diagnostics for slides/poster/speech [impact: high] [effort: 4-6 h]
+### R3. Add `*_skipped.md` diagnostics for slides/poster [impact: high] [effort: 4-6 h]
 
 Mirror the `_PdfSkipReason` + `_render_pdf_skip_md` pattern in
 `generation/slides.py` and `generation/poster.py`. The diagnostic
 files would be `slides_skipped.md` (for the failed render targets —
 html, pdf, pptx) and `poster_pdf_skipped.md`. Speech is excluded
-because its only failure is an LLM exception already surfaced at
-`launch.py:574`.
+from this recommendation because its failure surface is small (only
+an LLM exception) and the `launch.py:570-575` catch already prints
+the error to stderr.
 
 The diagnostic should call out:
 - which render target was requested (html, pdf, pptx, or all);
@@ -398,9 +425,11 @@ launch-layer escape hatch at `launch.py:553-554` extends to slide
 and poster generators. No new code paths — pure copy-paste of the
 paper pattern.
 
-Skip `require_speech` — its only failure mode (LLM exception) is
-already strict by default (no swallowed exception in `speech.py`
-beyond the `launch.py:574` outer catch).
+Skip `require_speech` for now — speech failures are NOT strict by
+default; `launch.py:570-575` catches and prints, then continues. If
+we want speech to be strict-able, R4 would have to extend the
+catch-then-reraise pattern (like the paper path) to that generator.
+For first pass, the asymmetry is acceptable.
 
 ### R5. Expose `output.preferred_engine` YAML knob [impact: low] [effort: 1 h]
 
@@ -431,22 +460,36 @@ convention.
 Restructure `launch.py:_run_generators`:
 
 ```python
+# PosterGenerator wraps pdflatex in a sync subprocess.run; move it
+# off the event loop along with PaperGenerator's pandoc compile.
 paper_task = asyncio.to_thread(PaperGenerator(cfg).generate, art, art.quest_root)
 slides_task = SlideGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-poster_task = PosterGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+poster_task = asyncio.to_thread(_run_poster_sync, cfg, art, supervisor)
 paper_r, slides_r, poster_r = await asyncio.gather(
     paper_task, slides_task, poster_task, return_exceptions=True,
 )
+# Strict-mode for paper must be re-raised explicitly — return_exceptions=True
+# captures the RuntimeError that PaperGenerator raises today when
+# output.require_pdf=True; restore the existing contract:
+if isinstance(paper_r, Exception):
+    if cfg.output.require_pdf:
+        raise paper_r
+    print(f"[FI] paper generator failed: {paper_r!r}", file=sys.stderr)
 # Speech reads slides.md; run after slides completes.
 speech_r = await SpeechGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
 ```
 
 Save 30-60 s of wall-clock per quest. Gate this on a config flag
 `output.parallel_generators: bool = True` so the fleet path can opt
-out (fleet already has its own concurrency axis). Verify the
-`ProxySupervisor` correctly serializes three concurrent
-`resolve_endpoint_async` calls — proxy startup is the one shared
-resource.
+out (fleet already has its own concurrency axis). The `ProxySupervisor`
+already serializes startup via its internal `asyncio.Lock`, so the
+parallel rewrite doesn't have to do anything extra there beyond
+passing the same supervisor instance to all three tasks. **Critical
+detail:** the poster path uses synchronous `subprocess.run` for
+pdflatex (`generation/poster.py`), so wrapping the call in
+`asyncio.to_thread` is necessary — without it the poster compile
+blocks the event loop and the parallel-gather is a no-op for the
+poster slot.
 
 ### R8. Validate Marp frontmatter post-LLM [impact: low] [effort: 1 h]
 
