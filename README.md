@@ -1,5 +1,7 @@
 # Frontier Insight
 
+<img src="vscode-frontier-insight/images/icon.png" alt="Frontier Insight icon" width="96" align="left" style="margin-right: 16px;"/>
+
 **Give it a research topic. Get back a paper, the experiment that produced it, and the figures — all auto-generated, all reproducible.**
 
 Frontier Insight (FI) is an automated research assistant. You write a one-paragraph topic into a YAML file; FI runs an 11-step research loop:

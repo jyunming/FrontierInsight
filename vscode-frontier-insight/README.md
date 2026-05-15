@@ -1,5 +1,7 @@
 # Frontier Insight — VSCode extension
 
+<img src="images/icon.png" alt="Frontier Insight icon" width="96" align="left" style="margin-right: 16px;"/>
+
 Run autonomous research quests inside VSCode using your existing
 GitHub Copilot subscription. **No third-party proxy, no scraped tokens
 — every LLM call goes through VSCode's sanctioned `vscode.lm` Language
