@@ -159,7 +159,7 @@ engine:
   cross_check_per_finding_k: 3    # per-finding literature hits
   enable_analyze_reroute: true    # analyze-driven re_experiment / broaden_lit
   review_panel: []                # personas: [methodologist, statistician, devil_advocate, reproducibility]
-  no_simulation: false            # YAML hard-override: skip implement → execute and route through auto_collect_data → wait_for_data → data_load → analyze. See row "No-simulation / data-required mode" above.
+  no_simulation: false            # YAML hard-override: skip implement → execute and route through auto_collect_data → wait_for_data → data_load → analyze. See row "No-simulation / data-required decision" above.
   auto_collect_data: true         # Try Axon (and any registered dataset_adapters) BEFORE the user-data pause.
   auto_collect_top_k: 5           # Axon ``top_k`` used by auto_collect_data when knowledge.enabled.
   dataset_adapters: []            # Structured-data + web-fetch adapters. Available: "worldbank", "wikipedia".

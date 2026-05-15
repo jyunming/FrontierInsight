@@ -207,7 +207,9 @@ The engine aborts at startup with a recipe for the missing tool
 quest that was always going to fail at the compile step. The
 default (`require_pdf: false`) keeps the graceful skip — quest
 completes, writes `paper.md`, drops a `paper_pdf_skipped.md`
-diagnostic next to it. See `USAGE.md#outputrequire_pdf--strict-mode-pdf-enforcement`.
+diagnostic next to it. See [`docs/USAGE.md`](../docs/USAGE.md) — the
+"strict-mode PDF enforcement" section under the `output.require_pdf`
+schema entry.
 
 ## Pre-quest proposal
 
@@ -323,10 +325,10 @@ abuse-detection risk from scraped tokens.
 - **Model availability depends on your subscription.** Run
   `vscode.lm.selectChatModels({vendor: 'copilot'})` to see what you
   have access to; copy model names from there into your `node_models`.
-- **`engine.dataset_adapters` go through the engine's HTTP client,
-  not `vscode.lm`.** Enabling `worldbank` / `wikipedia` requires
-  outbound HTTPS to `api.worldbank.org` / `en.wikipedia.org` from
-  the machine running the engine, even though all LLM calls still
-  route through Copilot. On a network that blocks those hosts,
-  leave `dataset_adapters` empty and rely on Axon + manual data
-  drops.
+- **`engine.dataset_adapters` make direct outbound HTTPS, not via
+  `vscode.lm`.** Enabling `worldbank` / `wikipedia` issues stdlib
+  `urllib` requests (wrapped in `asyncio.to_thread`) from the
+  engine process to `api.worldbank.org` / `en.wikipedia.org` — no
+  Copilot routing, no `vscode.lm` involvement. On a network that
+  blocks those hosts (corporate proxy, air-gapped VM), leave
+  `dataset_adapters` empty and rely on Axon + manual data drops.
