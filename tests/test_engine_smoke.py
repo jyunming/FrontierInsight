@@ -1,8 +1,11 @@
 """End-to-end engine test with a fake LLM, no real API calls.
 
 Patches the LLMClient.chat method so each node receives canned, valid
-JSON responses. Verifies the full graph runs (including the review loop)
-and produces a paper.md plus a figures/ directory on disk.
+JSON responses. Verifies the full graph runs through every node
+including ``review`` (but NOT the revise→design loop — the test
+config sets ``review_loop=False`` so the review verdict short-
+circuits to ``done`` instead of looping back) and produces a
+paper.md plus a figures/ directory on disk.
 """
 
 from __future__ import annotations

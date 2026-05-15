@@ -289,8 +289,19 @@ class Engine:
                         answers = await clarify_callback(questions)
                         payload = Command(resume=answers)
             finally:
-                await self._client.aclose()
-                if self.config.provider.name in PROXY_PROVIDERS:
+                # Guard against early failure: if ``resolve_endpoint_async``
+                # raised (unknown provider / proxy spawn failure / etc.),
+                # ``self._client`` is still None and the original exception
+                # is what the caller should see. Unconditionally calling
+                # ``aclose()`` on None would raise AttributeError and mask
+                # the real error. Same logic for the proxy release —
+                # only release a handle we actually acquired.
+                if self._client is not None:
+                    await self._client.aclose()
+                if (
+                    self.config.provider.name in PROXY_PROVIDERS
+                    and self._client is not None
+                ):
                     await self.supervisor.release(self.config.provider.name)
 
             if data_paused:
