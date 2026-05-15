@@ -1458,18 +1458,32 @@ class Knowledge:
         silently returned False and ``--ingest`` never actually wrote
         anything. Read the file, build the right shape, call the real
         API, then ``finalize_ingest`` so embeddings/index are flushed.
-        Returns True on success."""
+        Returns True on success.
+
+        Document ``id`` is the absolute path string for files (so two
+        files named ``data.csv`` from different directories don't
+        collide), or the raw source string for URLs."""
         if not self.enabled or self._brain is None:
             return False
         try:
             path = Path(source)
-            text = path.read_text(encoding="utf-8") if path.is_file() else str(source)
-            doc_id = path.name if path.is_file() else str(source)
+            if path.is_file():
+                text = path.read_text(encoding="utf-8")
+                abs_str = str(path.resolve())
+                # Forward slashes so the same id is generated on
+                # Windows + POSIX when the file is reachable through
+                # equivalent paths.
+                doc_id = f"fi_local_paper:{abs_str.replace(chr(92), '/')}"
+                source_str = abs_str
+            else:
+                text = str(source)
+                doc_id = f"fi_local_paper:{source}"
+                source_str = str(source)
             self._brain.ingest([{
                 "id": doc_id,
                 "text": text,
                 "metadata": {
-                    "source": str(path) if path.is_file() else str(source),
+                    "source": source_str,
                     "kind": "fi_local_paper",
                 },
             }])
@@ -1522,11 +1536,45 @@ class Knowledge:
         ``portfolio_id``. Falls back to ``<kind>-<epoch>-<uuid4[:8]>``
         when none are present."""
         md = metadata or {}
-        for key in ("id", "quest_id", "proposal_id", "critique_id",
-                    "digest_id", "summary_id", "portfolio_id"):
+        # Stable-key preference list. For per-quest writebacks the
+        # quest_id is canonical; for local papers + external-ref
+        # spines the paper_id is. ``rel_path`` discriminates
+        # ``fi_summary_input`` docs that share a parent summary_id
+        # but live at different paths. ``tag`` is the wildcard
+        # discriminator the topic-event + external-ref-spine paths
+        # use. Composite keys (kind + most-specific-id + most-
+        # specific-discriminator) prevent the "two docs collide
+        # under one id and the later one overwrites the earlier"
+        # failure mode the bot review on PR #94 flagged.
+        primary_keys = (
+            "id", "quest_id", "proposal_id", "critique_id",
+            "digest_id", "summary_id", "portfolio_id",
+        )
+        primary: str | None = None
+        for key in primary_keys:
             v = md.get(key)
             if v:
-                return f"{kind}:{v}"
+                primary = str(v)
+                break
+        # Discriminators: included even when primary is set, so docs
+        # like ``fi_summary_input`` (shared summary_id, distinct
+        # rel_path) get distinct ids.
+        secondary_keys = ("paper_id", "rel_path", "tag")
+        secondary_parts: list[str] = []
+        for key in secondary_keys:
+            v = md.get(key)
+            if v:
+                secondary_parts.append(str(v))
+        if primary and secondary_parts:
+            return f"{kind}:{primary}:{':'.join(secondary_parts)}"
+        if primary:
+            return f"{kind}:{primary}"
+        if secondary_parts:
+            return f"{kind}:{':'.join(secondary_parts)}"
+        # Last resort — no stable identifier at all. Time + uuid is
+        # the documented fallback; re-ingesting the same logical doc
+        # WILL duplicate here, so callers should pass at least one
+        # of the keys above when they know it.
         import time
         import uuid
         return f"{kind}:{int(time.time())}-{uuid.uuid4().hex[:8]}"

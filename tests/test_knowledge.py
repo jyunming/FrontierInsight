@@ -826,9 +826,11 @@ def test_add_quest_artifacts_handles_missing_paper_with_add_text(tmp_path: Path)
 def test_ingest_reads_file_and_calls_brain_ingest(tmp_path: Path) -> None:
     """``Knowledge.ingest(file_path)`` reads the file and calls the
     real ``brain.ingest([{id, text, metadata}])`` API, then flushes
-    via ``finalize_ingest``. The previous version called a
-    non-existent ``ingest(str)``/``add_document(str)`` path and
-    silently returned False."""
+    via ``finalize_ingest``. Assertion shape is loose — ``id`` must
+    be non-empty and derived from the source path, but the exact
+    format stays implementation-detail (pinning ``doc.txt`` was too
+    coupled and broke when the id strategy tightened against
+    same-basename collisions)."""
     brain = _BrainAddText()
     k = _enabled_knowledge_with(brain)
     f = tmp_path / "doc.txt"
@@ -837,9 +839,57 @@ def test_ingest_reads_file_and_calls_brain_ingest(tmp_path: Path) -> None:
     assert len(brain.batches) == 1
     doc = brain.batches[0][0]
     assert doc["text"] == "hello payload"
-    assert doc["id"] == "doc.txt"
+    assert doc["id"], "doc id must be non-empty"
+    assert "doc.txt" in doc["id"]
+    assert str(tmp_path.resolve()).replace("\\", "/") in doc["id"], (
+        "doc id must carry the resolved parent-path so distinct files "
+        "with the same basename don't collide on ingest"
+    )
     assert doc["metadata"]["kind"] == "fi_local_paper"
     assert brain.finalize_calls == 1
+
+
+def test_ingest_distinct_files_with_same_basename_dont_collide(
+    tmp_path: Path,
+) -> None:
+    """Two files named ``data.csv`` from different subdirs ingest as
+    distinct documents — bare ``path.name`` would have caused the
+    second ingest to overwrite the first."""
+    brain = _BrainAddText()
+    k = _enabled_knowledge_with(brain)
+    a = tmp_path / "a" / "data.csv"
+    b = tmp_path / "b" / "data.csv"
+    a.parent.mkdir()
+    b.parent.mkdir()
+    a.write_text("from a", encoding="utf-8")
+    b.write_text("from b", encoding="utf-8")
+    assert k.ingest(a) is True
+    assert k.ingest(b) is True
+    ids = [doc["id"] for batch in brain.batches for doc in batch]
+    assert len(set(ids)) == 2, f"expected 2 distinct ids; got {ids}"
+
+
+def test_mint_doc_id_uses_paper_id_and_rel_path_for_disambiguation() -> None:
+    """``_mint_doc_id`` previously only checked the top-level
+    quest_id / proposal_id / etc. keys, so ``fi_summary_input`` docs
+    that share a summary_id but live at different paths would all
+    collide to the same id. New behaviour: composite key including
+    ``paper_id``, ``rel_path``, and ``tag`` discriminators."""
+    from core.knowledge import Knowledge
+    # Same summary_id but different rel_path → distinct ids.
+    a = Knowledge._mint_doc_id("fi_summary_input", {
+        "summary_id": "abc", "rel_path": "papers/x.pdf",
+    })
+    b = Knowledge._mint_doc_id("fi_summary_input", {
+        "summary_id": "abc", "rel_path": "papers/y.pdf",
+    })
+    assert a != b, "rel_path must disambiguate fi_summary_input docs"
+    # fi_external_ref_spine carries paper_id, not quest_id —
+    # previously this would have fallen through to time+uuid.
+    c = Knowledge._mint_doc_id("fi_external_ref_spine", {
+        "paper_id": "doi:10.1/x", "tag": "fi-paper:doi:10.1/x",
+    })
+    assert "doi:10.1/x" in c, "paper_id must be the stable id when present"
 
 
 def test_ingest_returns_false_when_brain_has_no_ingest_api(tmp_path: Path) -> None:
