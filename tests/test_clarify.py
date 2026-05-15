@@ -30,7 +30,10 @@ from core.engine import (
 )
 
 
-def _mk_cfg(tmp_path: Path, clarify_mode: str) -> Config:
+def _mk_cfg(
+    tmp_path: Path, clarify_mode: str,
+    *, local_papers: list[Path] | None = None,
+) -> Config:
     return Config(
         topic="EUV-MOR SE-yield study",
         title="se-yield",
@@ -39,7 +42,10 @@ def _mk_cfg(tmp_path: Path, clarify_mode: str) -> Config:
             max_iterations=1, review_loop=False, clarify_mode=clarify_mode,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
+        knowledge=KnowledgeConfig(
+            enabled=False,
+            local_papers=list(local_papers or []),
+        ),
         output=OutputConfig(output_dir=tmp_path / "out"),
     )
 
@@ -183,6 +189,82 @@ async def test_clarify_auto_fills_answers_from_defaults(
     assert answers["empirical_vs_theoretical"] == "empirical"
     assert answers["budget"] == "1 hour on CPU"
     assert answers["output_kinds"] == ["paper_md"]
+
+
+_PROPOSAL_FOR_SEED = """\
+## TL;DR
+A short summary of the planned quest.
+
+## Background and prior work
+RK4 and Verlet are standard integrators.
+
+## Hypothesis
+
+> H: RK4 outperforms Euler on long-horizon energy drift.
+
+## Experimental plan
+
+- Numerical simulation across timesteps (~5-minute simulation on CPU).
+- Monte Carlo over 100 trials.
+
+## Success criteria
+
+The primary metric is relative energy drift ranked monotonically.
+"""
+
+
+@pytest.mark.asyncio
+async def test_clarify_auto_seeded_from_proposal_skips_llm_call(
+    tmp_path: Path,
+) -> None:
+    """When ``knowledge.local_papers`` contains a ``*-proposal.md``,
+    the clarify node parses the proposal directly and skips the LLM
+    call entirely — saving one premium request per quest started
+    from a ``/proposal``-generated YAML."""
+    from unittest.mock import AsyncMock
+
+    proposal = tmp_path / "1778800000-test-aabbcc-proposal.md"
+    proposal.write_text(_PROPOSAL_FOR_SEED, encoding="utf-8")
+
+    cfg = _mk_cfg(tmp_path, "auto", local_papers=[proposal])
+    eng = Engine(cfg)
+    chat_mock = AsyncMock(return_value="{}")
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    patch = await eng._node_clarify({"topic": "anything"})
+
+    chat_mock.assert_not_awaited(), (
+        "the proposal short-circuit must SKIP the clarify LLM call"
+    )
+    assert patch["clarify_done"] is True
+    assert patch["clarify_answers"]["simulatability"] == "yes"
+    # Bonus slot — downstream nodes can read the hypothesis verbatim.
+    assert "RK4" in patch["clarify_answers"]["_proposal_hypothesis"]
+    # The resolver consumed the seeded answers — simulatability=yes
+    # means SIMULATE, not no-simulation.
+    assert patch["no_simulation_resolved"] is False
+
+
+@pytest.mark.asyncio
+async def test_clarify_auto_falls_through_to_llm_when_no_proposal(
+    tmp_path: Path,
+) -> None:
+    """A non-proposal local_paper (or no local_papers at all) leaves
+    the normal LLM clarify path in place — no false short-circuit."""
+    from unittest.mock import AsyncMock
+
+    other = tmp_path / "just-some-paper.md"
+    other.write_text("# Some random paper\n", encoding="utf-8")
+
+    cfg = _mk_cfg(tmp_path, "auto", local_papers=[other])
+    eng = Engine(cfg)
+    chat_mock = AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    await eng._node_clarify({"topic": "some topic"})
+    chat_mock.assert_awaited_once(), (
+        "non-proposal local_papers must NOT short-circuit the LLM call"
+    )
 
 
 @pytest.mark.asyncio

@@ -545,6 +545,29 @@ class Engine:
                 "no_simulation_resolved": self.config.engine.no_simulation,
             }
 
+        # Proposal short-circuit: when this quest was started from a
+        # ``/proposal``-generated YAML (detected by a ``*-proposal.md``
+        # pinned in ``knowledge.local_papers``), parse the proposal's
+        # structured H2 sections directly into ``clarify_answers``
+        # and skip the clarify LLM call entirely. The user already
+        # approved the hypothesis + success criteria when they ran
+        # ``/proposal``; re-asking is wasted compute.
+        if mode in ("auto", "interactive"):
+            seeded = self._maybe_seed_clarify_from_proposal()
+            if seeded is not None:
+                proposal_path, answers = seeded
+                self._log.info(
+                    "[clarify] mode=%s; seeded from proposal %s "
+                    "(skipped LLM call)",
+                    mode, proposal_path.name,
+                )
+                return {
+                    "clarify_questions": {},
+                    "clarify_answers": answers,
+                    "clarify_done": True,
+                    "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
+                }
+
         prompt = self._prompts["clarify"].substitute(topic=state["topic"])
         text = await self._chat(prompt, node="clarify")
         questions = _parse_json_lenient(text) or {}
@@ -587,6 +610,24 @@ class Engine:
             "clarify_done": True,
             "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
         }
+
+    def _maybe_seed_clarify_from_proposal(
+        self,
+    ) -> tuple[Any, dict[str, Any]] | None:
+        """Check ``knowledge.local_papers`` for a ``*-proposal.md`` and
+        parse it into a clarify_answers shape. Returns
+        ``(proposal_path, answers)`` when a proposal is found and
+        parses cleanly; ``None`` otherwise.
+
+        Imported lazily so a quest with no local_papers (the common
+        case) doesn't pay the import cost. The proposal_seed module
+        is pure-Python with no heavy deps so the import is cheap
+        once paid."""
+        local_papers = list(self.config.knowledge.local_papers or [])
+        if not local_papers:
+            return None
+        from core.proposal_seed import seed_clarify_from_local_papers
+        return seed_clarify_from_local_papers(local_papers)
 
     def _resolve_no_simulation_from_clarify(
         self, answers: dict[str, Any],
