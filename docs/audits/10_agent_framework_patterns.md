@@ -5,7 +5,7 @@
 OpenAI Agents SDK, and the `langchain-ai/open_deep_research` LangGraph
 reference app, benchmarked against FrontierInsight's current
 `core/engine.py:332-401` graph topology.
-**Companion audits:** see siblings in `outputs/audit_2026-05-15/`.
+**Companion audits:** see siblings in `docs/audits/`.
 
 FrontierInsight uses a sliver of what LangGraph and peer frameworks
 now offer: a hand-authored `StateGraph` with ~16 nodes

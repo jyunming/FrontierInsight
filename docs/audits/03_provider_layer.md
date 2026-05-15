@@ -283,7 +283,7 @@ not per-provider — every node still goes through the single
 
 The only thing close is the LangGraph checkpointer: a quest that
 exhausts retries dies, the user re-runs with `--resume <quest_id>`
-(`launch.py:251-258`), the saved checkpoint at
+(`launch.py:249-259`), the saved checkpoint at
 `<quest_root>/.fi/state.sqlite` lets it pick up at the last completed
 node. That's a *whole-run* fallback (you can manually change provider
 between runs), not an *in-run* one.
