@@ -7,6 +7,7 @@ mocked via monkeypatch.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -442,7 +443,15 @@ def test_repo_local_tectonic_picked_when_nothing_on_path(
     monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)
     tools = tmp_path / "tools"
     tools.mkdir()
-    repo_tectonic = tools / "tectonic.exe"  # search order checks .exe first
+    # ``_find_pdf_engine`` checks ONLY the platform-appropriate
+    # extension (``.exe`` on Windows, bare on POSIX) — see
+    # generation/paper.py near "platform-appropriate filename". The
+    # test must mirror that so it works on both Linux CI and Windows
+    # CI; checking only ``.exe`` made the assertion silently fail on
+    # the ubuntu-latest matrix leg because the engine returned None
+    # and pandoc never ran.
+    tectonic_name = "tectonic.exe" if sys.platform == "win32" else "tectonic"
+    repo_tectonic = tools / tectonic_name
     repo_tectonic.write_bytes(b"#!/bin/sh\necho fake\n")
 
     def fake_which(name):  # type: ignore[no-untyped-def]

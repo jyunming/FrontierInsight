@@ -46,13 +46,29 @@ def docker_module():
 
 @pytest.fixture(scope="module")
 def docker_available(docker_module) -> bool:
-    """True iff the Docker daemon is reachable. Skips when docker-py missing."""
+    """True iff the Docker daemon is reachable AND can serve the Linux
+    container image these tests need. Skips when docker-py is missing,
+    when the daemon is not reachable, or when the daemon is in
+    Windows-containers mode (GitHub-hosted ``windows-latest`` runners
+    have a Docker daemon, but it defaults to Windows containers and
+    ``python:3.11-slim`` is a Linux image — pulling it 404s with
+    "No such image"). Pinging is necessary but not sufficient: the
+    Windows-CI failure mode was "daemon up + image pull fails", so
+    we additionally require the daemon to report Linux-server OS."""
     try:
         client = docker_module.from_env()
         client.ping()
-        return True
     except Exception:
         return False
+    try:
+        info = client.info()
+    except Exception:
+        return False
+    # Daemon's reported "OSType" — "linux" or "windows". Linux images
+    # are only servable by a Linux-mode daemon. (On Linux hosts this
+    # is always "linux"; on Docker Desktop / Windows it switches
+    # depending on the user's container-mode toggle.)
+    return str(info.get("OSType", "")).lower() == "linux"
 
 
 # ---------------------------------------------------------------------------
