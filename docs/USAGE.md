@@ -143,6 +143,9 @@ title: integrator-bakeoff
 provider:
   name: vscode_extension           # see PROVIDERS.md
   model: gpt-5                     # global default
+  base_url: null                   # only for HTTP-direct overrides (OpenAI-compatible proxies, local gateways). Honored by openai/codex/gemini/ollama/vllm transports.
+  api_key_env: null                # override the standard env-var name (e.g. CORP_OPENAI_KEY). When null, the provider uses its conventional name (OPENAI_API_KEY, GEMINI_API_KEY, …).
+  extra: {}                        # transport-specific bag — e.g. extra HTTP headers for a proxy, or codex-CLI flags.
   # Per-node override (optional). Match keys exactly to engine node
   # names. Reviewer-panel personas are routed via
   # `review_panel.<persona>`; the moderator via `review_moderator`.
@@ -207,6 +210,11 @@ output:
   paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   require_pdf: false                # strict mode for paper_pdf — see below
+
+# Free-text steering prepended to every node's system prompt. Use for
+# project-wide constraints the LLM should respect (style guide,
+# preferred libraries, audience hints, regulatory text). Empty by default.
+extra_directives: ""
 ```
 
 ### `output.require_pdf` — strict-mode PDF enforcement
@@ -364,10 +372,10 @@ retrieval, `auto_collect_data` can invoke structured-data adapters
 that hit public APIs and write tabular evidence into
 `<quest_root>/data/auto_collected/<adapter>/`. Opt in via:
 
-* `engine.dataset_adapters: [worldbank]` — list of registered
-  adapter names. Empty (default) means "Axon only — D1 behavior
-  unchanged". Available adapters: `worldbank`. Unknown names log
-  a WARNING and are skipped (no hard error on typo).
+* `engine.dataset_adapters: [worldbank, wikipedia]` — list of
+  registered adapter names. Empty (default) means "Axon only — D1
+  behavior unchanged". Available adapters: `worldbank`, `wikipedia`.
+  Unknown names log a WARNING and are skipped (no hard error on typo).
 * `engine.dataset_adapter_top_k: 3` — rows per adapter. Smaller
   default than the Axon knob because each row hits an external API.
 
@@ -378,6 +386,20 @@ scores ~1500 indicator names against the query keywords, and writes
 the top `top_k` matches as Markdown tables with the last 5 years of
 data. Adapter failures (network down, indicator not found, every
 write failing) fall through silently to the safety net.
+
+The Wikipedia adapter handles the long-tail "qualitative comparison"
+case where neither corpus-RAG nor structured-data fits — e.g.
+*"compare the 1968 student protests in Paris and Mexico City"*. It
+compresses the query to its top-6 keywords, calls
+`api.php?action=opensearch` to get candidate article titles, then
+fetches `api/rest_v1/page/summary/<title>` for each match and writes
+a Markdown file per article. The page's `description` and `extract`
+land in the document body; YAML front matter carries `source:
+wikipedia`, the canonical `title` / `url`, the article's
+`wikipedia_type` (e.g. `standard`, `disambiguation`), and
+`adapter: wikipedia` for downstream provenance. Articles with
+extracts under ~200 characters are dropped as too thin to cite.
+Request budget per quest: `1 + dataset_adapter_top_k` HTTP calls.
 
 Auto-collect falls through to the user-data pause (no files
 written, `auto_collected_count: 0` in state) in four cases:
