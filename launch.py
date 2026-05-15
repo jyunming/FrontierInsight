@@ -1142,7 +1142,19 @@ async def _run_analyze(
         f"[FI] --analyze: quest_id={quest_id} "
         f"files_staged={files_staged} provider={cfg.provider.name}",
     )
-    await run_one(cfg, supervisor=supervisor, profile=profile)
+    # Pass the minted quest_id through as ``resume_quest_id`` so the
+    # Engine reuses it instead of generating a fresh one. Without
+    # this, the data we just staged into
+    # ``<output_root>/<quest_id>/data/`` would be orphaned —
+    # ``Engine`` would mint its own quest_id, write to a different
+    # quest_root, and pause for "missing" data files. The resume
+    # gate inside Engine.run treats a quest_id with no prior
+    # checkpoint as a brand-new quest with that pre-specified id,
+    # which is exactly the contract this path needs.
+    await run_one(
+        cfg, supervisor=supervisor, profile=profile,
+        resume_quest_id=quest_id,
+    )
     return 0
 
 

@@ -141,3 +141,58 @@ def test_prepare_analyze_quest_empty_dir_returns_zero(tmp_path: Path) -> None:
     )
     assert n == 0
     assert cfg.topic == "t"
+
+
+def test_mint_quest_id_drops_non_ascii_topic_chars() -> None:
+    """``str.isalnum()`` would have admitted non-ASCII letters
+    (CJK / Cyrillic / accented Latin) into the slug, producing a
+    quest_id the digest/critique/portfolio tools' ASCII regex
+    rejects. New behaviour: ``[a-z0-9-]+`` only."""
+    qid = mint_quest_id("日本語 with English", now_epoch=1778800000)
+    middle = qid[len("1778800000-"):-7]
+    middle_no_dash = middle.replace("-", "")
+    assert middle_no_dash.isascii() and middle_no_dash.isalnum(), (
+        f"slug must be ASCII-only [a-z0-9-]+; got {middle!r}"
+    )
+    # A topic that's ONLY non-ASCII falls back to "analyze".
+    qid = mint_quest_id("中文", now_epoch=1778800000)
+    assert qid.startswith("1778800000-analyze-")
+
+
+def test_stage_data_skips_dest_subtree_when_dest_inside_src(
+    tmp_path: Path,
+) -> None:
+    """``fi --analyze .`` with the default output root puts ``dest``
+    INSIDE ``src``. Without a containment check the recursive walk
+    would copy prior FI outputs as new "data" — and on a second run
+    would copy its own staged files recursively."""
+    src = tmp_path / "project"
+    src.mkdir()
+    (src / "real_data.csv").write_text("real", encoding="utf-8")
+    # Pre-existing FI output that must NOT get re-staged.
+    outputs = src / "outputs" / "prior-quest" / "paper"
+    outputs.mkdir(parents=True)
+    (outputs / "paper.md").write_text("# prior result", encoding="utf-8")
+    # Destination INSIDE src — the analyze-CLI default.
+    dest = src / "outputs" / "new-quest" / "data"
+
+    n = stage_data(src, dest)
+    # Only real_data.csv is copied; the prior outputs and the dest
+    # itself are skipped.
+    assert n == 1
+    assert (dest / "real_data.csv").exists()
+    assert not (dest / "outputs").exists(), (
+        "containment guard failed — prior outputs got staged into data/"
+    )
+
+
+def test_stage_data_no_change_when_dest_outside_src(tmp_path: Path) -> None:
+    """The containment guard must NOT change behaviour for the
+    normal case where ``dest`` is a sibling of ``src``."""
+    src = tmp_path / "data_in"
+    src.mkdir()
+    (src / "a.csv").write_text("x", encoding="utf-8")
+    (src / "b.md").write_text("y", encoding="utf-8")
+    dest = tmp_path / "data_out"  # sibling, not inside src
+    n = stage_data(src, dest)
+    assert n == 2

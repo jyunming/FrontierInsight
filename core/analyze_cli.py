@@ -54,11 +54,20 @@ _SKIP_SUFFIXES = (".pyc", ".pyo", ".log", ".sqlite", ".sqlite-journal")
 
 
 def _slug(text: str, *, max_chars: int = 40) -> str:
-    """Topic → URL-safe slug for the quest_id middle segment."""
+    """Topic → URL-safe slug for the quest_id middle segment.
+
+    ASCII-only ``[a-z0-9-]+`` — matches the canonical
+    ``<epoch>-[a-z0-9-]+-<6hex>`` shape that the digest /
+    critique / portfolio tools parse. ``str.isalnum`` would
+    otherwise admit non-ASCII letters (CJK, Cyrillic, accented
+    Latin), producing a quest_id that those tools would skip or
+    reject."""
     out: list[str] = []
     last_dash = False
     for ch in text.strip().lower():
-        if ch.isalnum():
+        # ``a-z`` and ``0-9`` only; anything else collapses to a
+        # single dash. Matches ``core.engine._slugify``'s contract.
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
             out.append(ch)
             last_dash = False
         elif not last_dash and out:
@@ -88,12 +97,48 @@ def stage_data(src: Path, dest: Path) -> int:
 
     Symlinks aren't followed (security: a malicious symlink could
     point at ``/etc/passwd``). Hidden directories like ``.git`` are
-    skipped wholesale."""
+    skipped wholesale.
+
+    **Containment check:** when ``dest`` sits INSIDE ``src`` — e.g.
+    a user running ``fi --analyze .`` with the default
+    ``./outputs/<quest>/data`` destination — files under ``dest``
+    are skipped during the walk so we don't (a) ingest prior quest
+    outputs as new "data" or (b) recurse into our own staged copy
+    while the walk is still running. Same check applies to the
+    canonical ``outputs/`` parent if it sits inside ``src``."""
+    src = src.resolve()
     if not src.exists() or not src.is_dir():
         raise ValueError(
             f"--analyze data path must be an existing directory; got {src!r}"
         )
     dest.mkdir(parents=True, exist_ok=True)
+    dest_abs = dest.resolve()
+    # Compute a list of "exclude these subtrees from the walk". The
+    # primary one is dest itself when dest is inside src. We also
+    # exclude any ``outputs`` directory sitting at the top level of
+    # src — that's where FI's prior runs live and they'd otherwise
+    # snowball into the staged data on a ``fi --analyze .`` run.
+    exclude_roots: list[Path] = []
+    try:
+        dest_abs.relative_to(src)
+        exclude_roots.append(dest_abs)
+    except ValueError:
+        # dest is OUTSIDE src — no containment issue.
+        pass
+    canonical_outputs = src / "outputs"
+    if canonical_outputs.exists() and canonical_outputs.is_dir():
+        exclude_roots.append(canonical_outputs.resolve())
+
+    def _is_inside_excluded(entry: Path) -> bool:
+        ep = entry.resolve()
+        for root in exclude_roots:
+            try:
+                ep.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
     written = 0
     for entry in src.rglob("*"):
         if entry.is_symlink() or not entry.is_file():
@@ -105,6 +150,10 @@ def stage_data(src: Path, dest: Path) -> int:
         # Skip anything whose path component contains a skip-name dir.
         rel = entry.relative_to(src)
         if any(part in _SKIP_NAMES for part in rel.parts):
+            continue
+        # Containment guard — drop entries that resolve into ``dest``
+        # itself OR a canonical ``outputs/`` subtree inside ``src``.
+        if exclude_roots and _is_inside_excluded(entry):
             continue
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
