@@ -820,6 +820,31 @@ def test_require_pdf_false_keeps_silent_skip_behavior(
 # ``\documentclass``) past raw LaTeX that pdflatex couldn't parse.
 
 
+def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
+    """``\\pandocbounded`` is emitted by pandoc to constrain inline
+    images / float environments to the text width. The standard
+    pandoc latex template defines it; when FI overrides with a
+    custom template, we have to re-declare or pdflatex errors with
+    ``! Undefined control sequence. l.NNN \\pandocbounded`` —
+    exactly the hit on a user-reported quest. Pin every shipped
+    paper template carries the providecommand on a non-comment line."""
+    repo = Path(__file__).resolve().parent.parent
+    working = ["generic", "neurips", "essay", "report", "policy_brief", "whitepaper"]
+    for fmt in working:
+        path = repo / "templates" / "paper" / fmt / "template.tex"
+        assert path.exists(), f"working template {fmt!r} is missing"
+        body = path.read_text(encoding="utf-8")
+        non_comment = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("%")
+        )
+        assert "\\providecommand{\\pandocbounded}" in non_comment, (
+            f"templates/paper/{fmt}/template.tex must \\providecommand "
+            f"\\pandocbounded — pandoc emits it around inline images / "
+            f"resizebox-bounded floats and the default-template definition "
+            f"is lost when we override the pandoc latex template."
+        )
+
+
 def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
     """Every working paper template must include \\providecommand for
     \\tightlist and \\passthrough plus the pandoc highlighting-macros
