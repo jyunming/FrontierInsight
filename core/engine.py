@@ -552,14 +552,22 @@ class Engine:
         # and skip the clarify LLM call entirely. The user already
         # approved the hypothesis + success criteria when they ran
         # ``/proposal``; re-asking is wasted compute.
-        if mode in ("auto", "interactive"):
+        #
+        # Gated on ``mode == "auto"`` only — ``interactive`` mode's
+        # contract is "let the human confirm / override every slot",
+        # so silently bypassing the prompt because a proposal MD
+        # happens to be pinned would surprise users. In interactive
+        # mode the regular ``interrupt()`` path still runs; the
+        # human can copy values from the proposal MD into the modal
+        # if they want.
+        if mode == "auto":
             seeded = self._maybe_seed_clarify_from_proposal()
             if seeded is not None:
                 proposal_path, answers = seeded
                 self._log.info(
-                    "[clarify] mode=%s; seeded from proposal %s "
+                    "[clarify] mode=auto; seeded from proposal %s "
                     "(skipped LLM call)",
-                    mode, proposal_path.name,
+                    proposal_path.name,
                 )
                 return {
                     "clarify_questions": {},
@@ -613,7 +621,7 @@ class Engine:
 
     def _maybe_seed_clarify_from_proposal(
         self,
-    ) -> tuple[Any, dict[str, Any]] | None:
+    ) -> tuple[Path, dict[str, Any]] | None:
         """Check ``knowledge.local_papers`` for a ``*-proposal.md`` and
         parse it into a clarify_answers shape. Returns
         ``(proposal_path, answers)`` when a proposal is found and

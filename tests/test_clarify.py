@@ -246,6 +246,43 @@ async def test_clarify_auto_seeded_from_proposal_skips_llm_call(
 
 
 @pytest.mark.asyncio
+async def test_clarify_interactive_does_not_seed_from_proposal(
+    tmp_path: Path,
+) -> None:
+    """``interactive`` mode's contract is "let the human confirm /
+    override every slot". Silently skipping the prompt because a
+    proposal MD happens to be pinned would surprise users — they
+    pinned the proposal as context for retrieval, NOT as a license
+    to bypass the clarify modal. The short-circuit is gated on
+    ``mode == "auto"`` only; ``interactive`` still calls the LLM
+    to generate questions, then ``interrupt()`` for the human."""
+    from unittest.mock import AsyncMock
+
+    proposal = tmp_path / "1778800000-test-aabbcc-proposal.md"
+    proposal.write_text(_PROPOSAL_FOR_SEED, encoding="utf-8")
+
+    cfg = _mk_cfg(tmp_path, "interactive", local_papers=[proposal])
+    eng = Engine(cfg)
+    chat_mock = AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    try:
+        # In interactive mode the engine eventually hits
+        # ``interrupt()``. We don't care to drive a resume here —
+        # we just need to assert chat WAS called (the short-circuit
+        # MUST NOT engage).
+        await eng._node_clarify({"topic": "anything"})
+    except Exception:
+        # ``interrupt()`` raises in some test runtimes; only the
+        # pre-interrupt chat-call matters.
+        pass
+    chat_mock.assert_awaited(), (
+        "interactive mode must still call the LLM to generate "
+        "questions even when a proposal MD is pinned"
+    )
+
+
+@pytest.mark.asyncio
 async def test_clarify_auto_falls_through_to_llm_when_no_proposal(
     tmp_path: Path,
 ) -> None:

@@ -89,12 +89,19 @@ def _extract_hypothesis(body: str) -> str:
 def _detect_simulatability(plan_body: str) -> str:
     """Decide ``yes`` / ``no`` / ``uncertain`` based on the experimental
     plan's keywords. Same documented set as the clarify agent's
-    simulatability slot. Bias toward "yes" — the dominant case is a
-    Python experiment, and the engine logs the source so a wrong
-    pick is recoverable.
+    simulatability slot. Keyword lists are tight on purpose —
+    incidental prose like "compute citation counts" or "the
+    algorithm of protest mobilization" should NOT flip the decision
+    to ``yes``.
 
-    The keyword lists are intentionally narrow + specific so noise
-    in the plan doesn't flip the decision."""
+    No-simulation markers are checked first; if any fire, we return
+    ``no`` immediately. The yes-simulation set is reserved for terms
+    very unlikely to appear outside computational plans (specific
+    tooling names like ``numpy`` / ``scipy``, "Monte Carlo", "neural
+    network", "simulation"). When neither list fires, return
+    ``uncertain`` — the engine's downstream resolver then picks the
+    simulate path with extra review scrutiny, which is the safer
+    default than flipping to ``yes`` on incidental matches."""
     text = plan_body.lower()
     # Strong "no-simulation" indicators: the user is going to gather
     # qualitative/archival/survey data.
@@ -105,11 +112,18 @@ def _detect_simulatability(plan_body: str) -> str:
     ]
     if any(m in text for m in no_sim_markers):
         return "no"
-    # Strong "yes-simulation" indicators: the plan calls for code.
+    # Strong "yes-simulation" indicators. Specific tooling names + the
+    # exact method labels LLMs reliably use for computational plans.
+    # Dropped bare "compute" (matches "compute citation counts" /
+    # "compute the mean of survey responses"), "algorithm" (matches
+    # "the algorithm of protest mobilization"), and "fit " (matches
+    # "fit the historical narrative") — all false-positives that
+    # would have flipped to ``yes`` on prose-only plans.
     yes_sim_markers = [
-        "simulation", "monte carlo", "numerical experiment",
-        "benchmark", "fit ", "regression", "neural network",
-        "matplotlib", "numpy", "scipy", "compute", "algorithm",
+        "simulation", "simulate ", "monte carlo", "numerical experiment",
+        "computational experiment", "benchmark suite",
+        "regression model", "neural network", "deep learning",
+        "matplotlib", "numpy", "scipy", "pandas",
     ]
     if any(m in text for m in yes_sim_markers):
         return "yes"

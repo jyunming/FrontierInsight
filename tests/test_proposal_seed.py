@@ -94,6 +94,43 @@ def test_parse_proposal_md_detects_simulatable_topic() -> None:
     assert answers["simulatability"] == "yes"
 
 
+def test_parse_proposal_md_does_not_false_positive_yes_on_incidental_words() -> None:
+    """Earlier keyword set included bare ``compute`` / ``algorithm``
+    / ``fit ``, which match common humanities-prose phrases like
+    ``compute citation counts`` / ``the algorithm of protest
+    mobilization`` / ``fit the historical narrative``. Those plans
+    are NOT computational. New tighter set returns ``uncertain``
+    here — the engine then runs simulation but logs the marginal
+    decision, which is the safer default than flipping to ``yes``."""
+    md = """\
+## TL;DR
+Compare narratives of protest mobilization across two decades.
+
+## Background and prior work
+Standard sociological literature on the topic.
+
+## Hypothesis
+
+> H: The two periods used structurally different mobilization frames.
+
+## Experimental plan
+
+- Compute citation counts of key documents per period.
+- Identify the algorithm of cross-movement coalition formation.
+- Fit the historical narrative to a structuration-theory lens.
+
+## Success criteria
+
+A defensible side-by-side analysis with at least 5 cited sources.
+"""
+    answers = parse_proposal_md(md)
+    assert answers is not None
+    assert answers["simulatability"] == "uncertain", (
+        "incidental 'compute' / 'algorithm' / 'fit' must NOT flip "
+        "simulatability to 'yes'"
+    )
+
+
 def test_parse_proposal_md_detects_non_simulatable_topic() -> None:
     """Qualitative / archival topics map to ``simulatability: no``."""
     md = """\
