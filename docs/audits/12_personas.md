@@ -8,11 +8,11 @@
 
 ## Executive summary
 
-FI uses persona framing in exactly **one** place — the four-member `review_panel` (`methodologist`, `statistician`, `devil_advocate`, `reproducibility`). Engine nodes use functional framing ("You are the Ideation stage…"); three of five companion commands (`proposal`, `critique`, `portfolio`, `digest`) already declare a senior-role persona.
+FI uses persona framing in exactly **one** engine-node place — the four-member `review_panel` (`methodologist`, `statistician`, `devil_advocate`, `reproducibility`). Engine nodes use functional framing ("You are the Ideation stage…"); all **four** of the four prose-output companion commands (`proposal`, `critique`, `portfolio`, `digest`) already declare a named senior-role persona. (`summarize`, the fifth companion command, lacks one.)
 
 The 2024–2026 empirical literature converges on one result that pins the recommendations: **persona prompting is a "double-edged sword" — helps alignment-shaped tasks (writing, role-play, safety), hurts pretraining-shaped tasks (math, factual recall, coding).** Wharton's Prompting Science Report 4 (Mollick et al., Dec 2025) and a USC ACL 2024 long paper both report no-or-negative effect of expert-persona prompts on MMLU-style benchmarks; the same persona prompts measurably help writing tone, safety adherence, and review-panel verdict diversity.
 
-Recommendation in one sentence: **add named personas to the nodes whose output is judged on rhetorical fitness (`write`, `summarize`, `poster`, `slides`, `speech`), leave the JSON-extraction nodes (`clarify`, `ideate`, `analyze`, `cross_check`, `data_load`) functional, and add ONE domain-conditional override keyed on existing clarify slots so auto-mode quests stop writing biomed papers in an ML voice.**
+Recommendation in one sentence: **add named personas to the prose-output surfaces that lack them today (the `write` engine node, the `summarize` companion command, and the `poster` / `slides` / `speech` output-generator prompts), leave the JSON-extraction engine nodes (`clarify`, `ideate`, `analyze`, `cross_check`, `data_load`) functional, and add ONE domain-conditional override keyed on existing clarify slots so auto-mode quests stop writing biomed papers in an ML voice.**
 
 ---
 
@@ -22,41 +22,41 @@ Recommendation in one sentence: **add named personas to the nodes whose output i
 
 The table below was produced by reading each prompt in `agents/*.md`. The "Persona explicit?" column means the prompt opens with an identifiable named role beyond the generic "you are the X stage." The "Output kind" column is the empirical-vs-rhetorical split that, per the 2024–2026 literature, governs whether a persona will help or hurt.
 
-| Node / command         | Persona explicit? | Output kind         | Implicit voice                 |
-| ---------------------- | ----------------- | ------------------- | ------------------------------ |
-| `clarify.md`           | No                | JSON extraction     | Asks-not-tells                 |
-| `ideate.md`            | No                | JSON enumeration    | Brainstormer                   |
-| `ideate_reflect.md`    | No                | JSON judgement      | Self-critical reader           |
-| `ideate_tournament.md` | No                | JSON judgement      | A-or-B referee                 |
-| literature (retrieval) | n/a               | n/a                 | n/a                            |
-| `design.md`            | No                | JSON spec           | Experimentalist                |
-| `implement.md`         | No                | Python code         | Engineer                       |
-| `execute_reflect.md`   | No                | Python patch        | Debugger                       |
-| `analyze.md`           | No                | JSON judgement      | Senior reviewer                |
-| `cross_check.md`       | No                | JSON classification | Librarian                      |
-| `write.md`             | No                | Markdown prose      | Author                         |
-| `review.md`            | Half (trait only) | JSON judgement      | Demanding peer reviewer        |
-| `review_persona_*.md`  | YES — 4 named     | JSON judgement      | (Per persona, see below)       |
-| `review_moderate.md`   | Half              | JSON aggregation    | Chair                          |
-| `auto_collect_data`    | n/a               | n/a                 | n/a                            |
-| `wait_for_data`        | n/a               | n/a                 | n/a                            |
-| `data_load.md`         | No                | JSON synthesis      | Archivist                      |
-| `proposal.md`          | YES               | Markdown plan       | Senior researcher              |
-| `critique.md`          | YES               | Markdown critique   | Adversarial reviewer           |
-| `portfolio.md`         | YES               | Markdown synthesis  | Lab director                   |
-| `digest.md`            | YES               | Markdown digest     | Project manager                |
-| `summarize.md`         | No                | Markdown synthesis  | Cataloguer                     |
-| `poster.md`            | No                | LaTeX columns       | Designer                       |
-| `slides.md`            | No                | Marp markdown       | Lecturer                       |
-| `speech.md`            | No                | Spoken-word prose   | Talk-giver                     |
+| Subsystem           | Prompt / surface       | Persona explicit? | Output kind         | Implicit voice                 |
+| ------------------- | ---------------------- | ----------------- | ------------------- | ------------------------------ |
+| **engine node**     | `clarify.md`           | No                | JSON extraction     | Asks-not-tells                 |
+| **engine node**     | `ideate.md`            | No                | JSON enumeration    | Brainstormer                   |
+| **engine node**     | `ideate_reflect.md`    | No                | JSON judgement      | Self-critical reader           |
+| **engine node**     | `ideate_tournament.md` (PR #77) | No       | JSON judgement      | A-or-B referee                 |
+| **engine node**     | literature (retrieval) | n/a               | n/a                 | n/a                            |
+| **engine node**     | `design.md`            | No                | JSON spec           | Experimentalist                |
+| **engine node**     | `implement.md`         | No                | Python code         | Engineer                       |
+| **engine node**     | `execute_reflect.md`   | No                | Python patch        | Debugger                       |
+| **engine node**     | `analyze.md`           | No                | JSON judgement      | Senior reviewer                |
+| **engine node**     | `cross_check.md`       | No                | JSON classification | Librarian                      |
+| **engine node**     | `write.md`             | No                | Markdown prose      | Author                         |
+| **engine node**     | `review.md`            | Half (trait only) | JSON judgement      | Demanding peer reviewer        |
+| **engine node**     | `review_persona_*.md`  | YES — 4 named     | JSON judgement      | (Per persona, see below)       |
+| **engine node**     | `review_moderate.md`   | Half              | JSON aggregation    | Chair                          |
+| **engine node**     | `auto_collect_data`    | n/a               | n/a                 | n/a                            |
+| **engine node**     | `wait_for_data`        | n/a               | n/a                 | n/a                            |
+| **engine node**     | `data_load.md`         | No                | JSON synthesis      | Archivist                      |
+| **companion CLI**   | `proposal.md`          | YES               | Markdown plan       | Senior researcher              |
+| **companion CLI**   | `critique.md`          | YES               | Markdown critique   | Adversarial reviewer           |
+| **companion CLI**   | `portfolio.md`         | YES               | Markdown synthesis  | Lab director                   |
+| **companion CLI**   | `digest.md`            | YES               | Markdown digest     | Project manager                |
+| **companion CLI**   | `summarize.md`         | No                | Markdown synthesis  | Cataloguer                     |
+| **output generator**| `poster.md`            | No                | LaTeX columns       | Designer                       |
+| **output generator**| `slides.md`            | No                | Marp markdown       | Lecturer                       |
+| **output generator**| `speech.md`            | No                | Spoken-word prose   | Talk-giver                     |
 
 Three patterns jump out:
 
 1. **The review-panel personas earn their keep.** Each of the four prefixes instructs the model to default `revise` on a different failure mode (design-level flaws, missing uncertainties, alternative explanations, missing repro info). `_aggregate_panel_reviews` (`core/engine.py:~2112`) takes median score and union of weaknesses — only useful because the verdicts genuinely disagree across personas.
-2. **Companion commands skew rhetorical and already use personas.** `proposal`, `critique`, `portfolio`, `digest` all emit markdown prose; three of four declare a senior-role persona. The pattern is internally consistent: rhetoric → role.
-3. **Engine nodes skew JSON-extraction and lean functional.** `clarify`, `ideate`, `analyze`, `cross_check` emit fixed-schema JSON. The persona on these would be window dressing — the schema already pins the output. Per the Wharton finding, an expert persona on MMLU-shaped tasks tends to *hurt*.
+2. **Companion CLI commands skew rhetorical and mostly already use personas.** `proposal`, `critique`, `portfolio`, `digest` all emit markdown prose and **all four** declare a named senior-role persona — pattern is internally consistent. The fifth companion (`summarize`) is the outlier that doesn't.
+3. **Engine nodes skew JSON-extraction and lean functional.** `clarify`, `ideate`, `analyze`, `cross_check`, `data_load` emit fixed-schema JSON. The persona on these would be window dressing — the schema already pins the output. Per the Wharton finding, an expert persona on MMLU-shaped tasks tends to *hurt*.
 
-The two outliers: `write.md` and `summarize.md`. Both emit free-form markdown, both lack a named persona. `write.md` already does extensive constraint-loading (honesty section, topic-shape recognition, study-depth) — a persona prefix sits alongside, not in conflict. High-impact, low-effort win (see Rec 1).
+The outliers across all three subsystems — prose surfaces lacking a named persona: `write.md` (engine node), `summarize.md` (companion CLI), `poster.md` / `slides.md` / `speech.md` (output generators). All five emit free-form prose or layout markup. `write.md` already does extensive constraint-loading (honesty section, topic-shape recognition, study-depth) — a persona prefix sits alongside, not in conflict. High-impact, low-effort win (see Rec 1). Note that any prompt edits to `summarize.md` change the folder-summarizer subsystem, and edits to `poster`/`slides`/`speech` change the `generation/` output-generator subsystem — implementers should edit those modules rather than `core/engine.py`.
 
 ### Part B — Competitive research: how peers handle personas
 
@@ -72,7 +72,7 @@ Richest persona schema in the peer landscape. Six specialized agents named for t
 
 - **Generation** — explores literature and runs *simulated scientific debates among expert personas* to seed hypotheses.
 - **Reflection** — peer-reviewer-style assessment (plausible, novel, testable). Analog to FI's `review`.
-- **Ranking** — Elo tournament across hypotheses; analog to FI's `ideate_tournament` but continuous Elo not win-count.
+- **Ranking** — Elo tournament across hypotheses; closest analog to the pairwise-tournament pattern FI added in PR #77's `ideate_tournament` node, but Co-Scientist uses continuous Elo while FI uses simple win-count plus decisive-margin tiebreak.
 - **Evolution** — iteratively improves top-ranked hypotheses. No FI analog.
 - **Proximity** — clusters hypotheses by similarity.
 - **Meta-review** — synthesizes panel feedback. Analog to FI's `review_moderate`.
@@ -104,9 +104,15 @@ The integrated takeaway: persona framing is a *stylistic* lever, not a knowledge
 
 Ranked by impact-per-effort. Each recommendation cites the empirical justification.
 
-### 1. Add named personas to the seven rhetorical-output prompts (HIGH impact, LOW effort)
+### 1. Add named personas to the five prose-output prompts that lack them (HIGH impact, LOW effort)
 
-The prompts whose output is judged on rhetorical fitness — `write.md`, `summarize.md`, `poster.md`, `slides.md`, `speech.md` in the engine, plus parity-check `proposal.md` / `critique.md` / `portfolio.md` / `digest.md` which already have personas — all benefit from an explicit named role. The Wharton/USC result says rhetorical tasks gain measurably from persona. Suggested defaults:
+Five prose-output prompts currently have no named persona:
+`write.md` (engine node), `summarize.md` (companion CLI), and
+`poster.md` / `slides.md` / `speech.md` (output generators). The
+other four prose-output companions (`proposal.md`, `critique.md`,
+`portfolio.md`, `digest.md`) already declare senior-role personas
+and serve as parity references. The Wharton/USC result says
+rhetorical tasks gain measurably from persona. Suggested defaults:
 
 - `write.md` → "You are a **senior researcher** writing an IMRAD paper for publication."
 - `summarize.md` → "You are a **research librarian** cataloguing a folder of mixed content."
@@ -129,17 +135,17 @@ The clarify node already collects two slots that uniquely identify the appropria
 
 Plus the new `simulatability` slot determines no-simulation routing.
 
-Concrete swap table:
+Concrete swap table (acts on `write` only — keep `design` functional per Rec 5):
 
-| Slot combination                                    | `design` persona | `write` persona       |
-| --------------------------------------------------- | ---------------- | --------------------- |
-| empirical + neurips/iclr                            | experimentalist  | senior_researcher (ML-aware variant) |
-| empirical + ieee_access                             | experimentalist  | senior_researcher (engineering-aware) |
-| empirical + nature_mi                               | experimentalist  | senior_researcher (physical-science-aware) |
-| theoretical + any                                   | theorist         | senior_researcher (math-aware) |
-| simulatability=no (humanities, social, archival)    | librarian        | senior_researcher (essay voice) |
+| Slot combination                                    | `write` persona       |
+| --------------------------------------------------- | --------------------- |
+| empirical + neurips/iclr                            | senior_researcher (ML-aware variant) |
+| empirical + ieee_access                             | senior_researcher (engineering-aware) |
+| empirical + nature_mi                               | senior_researcher (physical-science-aware) |
+| theoretical + any                                   | senior_researcher (math-aware) |
+| simulatability=no (humanities, social, archival)    | senior_researcher (essay voice) |
 
-The post-PR-#1 format slot (e.g. `essay`/`policy_brief`) plugs into the same table — when format=`essay`, write persona becomes `editor` and writing tone shifts from IMRAD to long-form argument. Add the override table to `_load_persona_prefix`-style resolution and gate on `state["clarify"]`.
+If PR #1 lands an `essay`/`policy_brief` format Literal on `OutputConfig.paper_format`, the override table widens to gate on `state["clarify_answers"]["paper_venue"]` (and on the future format slot if one is added to the clarify questionnaire — today `paper_venue` is the only writing-style hint clarify collects). Add the override table to `_load_persona_prefix`-style resolution and read from `state["clarify_answers"]` (NOT `state["clarify"]` — the answers live under the `_answers` suffix).
 
 The reason this is high-impact-low-effort: the slots are *already collected*, so this is a routing decision, not a new prompt. The two regimes that today produce the most-jarring style mismatches — humanities quests written in ML-paper voice, theoretical quests written as if they ran an experiment — both go away.
 
@@ -173,7 +179,7 @@ Co-Scientist's Generation agent spawns expert-persona sub-debates per topic — 
 8. Gottweis, J. et al. — *Towards an AI Co-Scientist*, arXiv:2502.18864 (Feb 2025). https://arxiv.org/abs/2502.18864
 9. Google Research — *Accelerating scientific breakthroughs with an AI co-scientist* (blog). https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/
 10. Fourney, A. et al. — *Magentic-One: A Generalist Multi-Agent System for Solving Complex Tasks*, arXiv:2411.04468 (Nov 2024). https://arxiv.org/html/2411.04468v1
-11. Microsoft AutoGen documentation — *Magentic-One*. https://microsoft.github.io/autogen/stable//user-guide/agentchat-user-guide/magentic-one.html
+11. Microsoft AutoGen documentation — *Magentic-One*. https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/magentic-one.html
 12. CrewAI — *Crafting Effective Agents*. https://docs.crewai.com/en/guides/agents/crafting-effective-agents
 13. Search Engine Journal — *Research Shows Where Persona Prompting Works And When It Backfires* (Dec 2025). https://www.searchenginejournal.com/research-you-are-an-expert-prompts-can-damage-factual-accuracy/570397/
 14. The Register — *Telling an AI model that it's an expert makes it worse* (March 2026). https://www.theregister.com/2026/03/24/ai_models_persona_prompting/
