@@ -157,6 +157,11 @@ engine:
   cross_check_per_finding_k: 3    # per-finding literature hits
   enable_analyze_reroute: true    # analyze-driven re_experiment / broaden_lit
   review_panel: []                # personas: [methodologist, statistician, devil_advocate, reproducibility]
+  no_simulation: false            # YAML hard-override: skip implement → execute and route through auto_collect_data → wait_for_data → data_load → analyze. See row "No-simulation / data-required mode" above.
+  auto_collect_data: true         # PR #60: try Axon (and any registered dataset_adapters) BEFORE the user-data pause.
+  auto_collect_top_k: 5           # Axon ``top_k`` used by auto_collect_data when knowledge.enabled.
+  dataset_adapters: []            # PR #61/#62: structured-data + web-fetch adapters. Available: "worldbank", "wikipedia".
+  dataset_adapter_top_k: 3        # rows per adapter — each row is one external API hit.
 
 execution:
   sandbox: venv                   # or docker
@@ -190,6 +195,14 @@ output:
   kinds: [paper_md, paper_pdf, slides, poster, speech]
   paper_format: generic           # scientific: generic|neurips|iclr|ieee_access|nature_mi; non-scientific prose: essay|report|policy_brief|whitepaper
   output_dir: ./outputs
+  require_pdf: false              # PR #58 strict mode: when ``paper_pdf`` in kinds AND pandoc/LaTeX missing, abort pre-flight (saves ~15 min of LLM cost). Default keeps the graceful skip + ``paper_pdf_skipped.md`` diagnostic.
+
+# Reserved free-text steering slot — declared in ``core/config.py``
+# but NOT YET wired into any prompt template or ``Engine._chat`` path
+# as of today. Parses and round-trips through the schema; setting it
+# has no behavioural effect until a future PR threads it into the
+# system prompts.
+extra_directives: ""
 ```
 
 ## Example quests
