@@ -219,6 +219,16 @@ schema entry.
 
 Inverts the flow: get a 1-page LLM-written proposal *first* (TL;DR, background, hypothesis, plan, success criteria, risks, scope limits, recommended next step) before committing compute to a full quest. Writes `outputs/_drafts/<id>-proposal.md` (the planning doc) plus `outputs/_drafts/<id>.yaml` (a minimal config you can feed to `/start` once the plan looks right). Ingested as `kind=fi_proposal`.
 
+## Analyze pre-staged data
+
+```
+@fi /analyze ./my_data Compare ridership trends across the three regions
+```
+
+The inverse of `/proposal`: when you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a one-sentence analysis topic. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `ideate` / `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
+
+Quote the path if it contains spaces: `@fi /analyze "C:/My Data" Find common failure modes`.
+
 ## Adversarial critique
 
 ```
