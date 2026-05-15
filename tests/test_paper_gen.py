@@ -819,6 +819,13 @@ def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
     that broke a user-reported quest pre-hotfix)."""
     repo = Path(__file__).resolve().parent.parent
     working = ["generic", "neurips", "essay", "report", "policy_brief", "whitepaper"]
+    # Pandoc's variable expansion that pulls in the Shaded env + token
+    # color commands. The literal directive we want pandoc to see is
+    # the bare-name form sandwiched between two ``$`` sigils; we build
+    # it here from a placeholder concat so this assertion line itself
+    # is never confused with a pandoc directive by editors/linters.
+    sigil = "$"
+    directive = f"{sigil}highlighting-macros{sigil}"
     for fmt in working:
         path = repo / "templates" / "paper" / fmt / "template.tex"
         assert path.exists(), f"working template {fmt!r} is missing"
@@ -832,13 +839,19 @@ def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
             f"templates/paper/{fmt}/template.tex must \\providecommand "
             f"\\passthrough — pandoc emits it around inline raw-blocks."
         )
-        # The highlighting-macros variable expansion (pandoc's
-        # ``$highlighting-macros$``) — written here without the
-        # surrounding $-sigils so this test file isn't itself
-        # template-substituted by some future build step.
-        assert "highlighting-macros" in body, (
-            f"templates/paper/{fmt}/template.tex must include pandoc's "
-            f"highlighting-macros variable expansion (Shaded env)."
+        # Strip ``%``-comments before checking for the actual template
+        # directive — the templates have inline comments that mention
+        # ``highlighting-macros`` by name, so a bare substring search
+        # would pass even if the real ``$highlighting-macros$`` line
+        # got deleted. That is the exact regression this test guards.
+        non_comment = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("%")
+        )
+        assert directive in non_comment, (
+            f"templates/paper/{fmt}/template.tex must include the real "
+            f"pandoc {directive} template directive on a non-comment "
+            f"line (Shaded env + token colors). Found only in comments "
+            f"or not at all."
         )
 
 
