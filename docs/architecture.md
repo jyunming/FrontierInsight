@@ -15,51 +15,95 @@
             │   tilde expansion on paths  │
             └──────────────┬──────────────┘
                            │
-            ┌──────────────▼──────────────┐
-            │ core/engine.py              │
-            │   async LangGraph           │
-            │   ideate ▸ literature ▸     │
-            │   design ▸ implement ▸      │
-            │   execute ▸ analyze ▸       │
-            │   write ▸ review            │
-            │   conditional revise edge   │
-            │   AsyncSqliteSaver          │
-            └──┬──────────┬──────────┬────┘
-               │          │          │
-   ┌───────────▼──┐  ┌────▼─────┐  ┌─▼─────────────────┐
-   │ core/        │  │ core/    │  │ core/             │
-   │ provider.py  │  │ execution│  │ knowledge.py      │
-   │              │  │ .py      │  │                   │
-   │ LLMClient    │  │ Venv|    │  │ asearch():        │
-   │ Proxy-       │  │ Docker   │  │  local → Axon →   │
-   │ Supervisor   │  │ Executor │  │  router (7 srcs)  │
-   │              │  │          │  │ +full-text fetch  │
-   │              │  │          │  │ structured write- │
-   │              │  │          │  │ back (5 doc kinds)│
-   └───────┬──────┘  └──────────┘  └───────────────────┘
-           │                           ▲
-           │ OpenAI Chat Completions   │
-           ▼                           │
-   ┌───────────────────────┐           │
-   │ Backends              │           │
-   │ ├─ codex / openai     │           │
-   │ ├─ gemini             │           │
-   │ ├─ ollama / vllm      │           │
-   │ ├─ claude_code via    │           │
-   │ │  poetry-spawned     │           │
-   │ │  proxy              │           │
-   │ └─ github_copilot via │           │
-   │    npx-spawned proxy  │           │
-   └───────────────────────┘           │
-                                       │
-   ┌────────────────────────┐          │
-   │ generation/            │──────────┘
-   │ ├─ paper.py (pandoc+TeX)│   consume QuestArtifacts
-   │ ├─ slides.py (Marp)    │
-   │ ├─ poster.py (beamer)  │
-   │ └─ speech.py (LLM-only)│
-   └────────────────────────┘
+            ┌──────────────▼──────────────────────────────────┐
+            │ core/engine.py — async LangGraph                │
+            │                                                 │
+            │  clarify → ideate → literature → design         │
+            │                                       │         │
+            │     simulate path ─────┬──────────────┘         │
+            │     no-simulation path ┘                        │
+            │                                                 │
+            │  ┌─ simulate ──────────────────────────┐        │
+            │  │  implement → execute                │        │
+            │  │    └─ execute_reflect (retry/proceed)        │
+            │  └─────────────────────┬───────────────┘        │
+            │                        │                        │
+            │  ┌─ no-simulation ─────┘                        │
+            │  │  auto_collect_data → wait_for_data           │
+            │  │    └─ data_load                              │
+            │  └─────────────────────┬──────────────┐         │
+            │                        ▼              │         │
+            │                     analyze           │         │
+            │                        │              │         │
+            │                  cross_check ─(redesign)┘       │
+            │                        │ (write)               │
+            │                     write → review → END        │
+            │                              │ (revise)         │
+            │                              └── design         │
+            │                                                 │
+            │  AsyncSqliteSaver (one per quest_root)          │
+            └──┬───────────────┬─────────────────────┬────────┘
+               │               │                     │
+   ┌───────────▼──┐  ┌─────────▼──────┐  ┌──────────▼─────────────────┐
+   │ core/        │  │ core/          │  │ core/                      │
+   │ provider.py  │  │ execution.py   │  │ knowledge.py + datasets/   │
+   │              │  │                │  │                            │
+   │ LLMClient    │  │ Venv | Docker  │  │ asearch():                 │
+   │ Proxy-       │  │ Executor       │  │  local → Axon →            │
+   │ Supervisor   │  │                │  │  router (7 srcs)           │
+   │              │  │                │  │ +full-text fetch           │
+   │              │  │                │  │ structured write-back      │
+   │              │  │                │  │ (5 doc kinds)              │
+   │              │  │                │  │                            │
+   │              │  │                │  │ datasets/ adapters         │
+   │              │  │                │  │  ├─ worldbank.py           │
+   │              │  │                │  │  │   (country-indicator    │
+   │              │  │                │  │  │    tables, 5-year span) │
+   │              │  │                │  │  └─ wikipedia.py           │
+   │              │  │                │  │      (opensearch +         │
+   │              │  │                │  │       page summaries)      │
+   │              │  │                │  │ → auto_collected/<adapter>/│
+   └───────┬──────┘  └────────────────┘  └────────────────────────────┘
+           │                                          ▲
+           │ OpenAI-shaped Chat Completions           │
+           ▼                                          │
+   ┌──────────────────────────────────────┐           │
+   │ Transports                           │           │
+   │ ├─ HTTP-direct                       │           │
+   │ │   ├─ openai / codex                │           │
+   │ │   ├─ gemini                        │           │
+   │ │   └─ ollama / vllm                 │           │
+   │ ├─ HTTP-via-proxy                    │           │
+   │ │   ├─ claude_code (poetry-spawned)  │           │
+   │ │   └─ github_copilot_* (npx-spawned)│           │
+   │ ├─ CLI exec (one subprocess per call)│           │
+   │ │   ├─ claude_cli                    │           │
+   │ │   ├─ codex_cli                     │           │
+   │ │   ├─ copilot_cli (agentic — warn)  │           │
+   │ │   └─ gemini_cli                    │           │
+   │ └─ VSCode bridge                     │           │
+   │     └─ vscode_extension              │           │
+   │         (TCP → vscode.lm.* in the    │           │
+   │          chat-participant host)      │           │
+   └──────────────────────────────────────┘           │
+                                                      │
+   ┌────────────────────────────┐                     │
+   │ generation/                │─────────────────────┘
+   │ ├─ paper.py (pandoc+TeX)   │   consume QuestArtifacts
+   │ ├─ slides.py (Marp)        │
+   │ ├─ poster.py (beamer)      │
+   │ └─ speech.py (LLM-only)    │
+   └────────────────────────────┘
 ```
+
+Conditional edges visible in the graph:
+
+| Edge | Trigger | Bound by |
+|---|---|---|
+| `execute_reflect → execute` | Script crashed (rc != 0 or no `RESULT_JSON`) | `engine.exec_reflect_max_iterations` (default 3) |
+| `cross_check → design` | `analyze.next_step ∈ {re_experiment, broaden_lit}` | `engine.max_iterations` (default 2) |
+| `review → design` | `review.verdict == "revise"` | `engine.max_iterations` (default 2) |
+| `design → auto_collect_data` | `state.no_simulation_resolved is True` (set at clarify or by YAML) | one-shot — the no-simulation branch never loops back into design |
 
 ## Key contracts
 
@@ -168,6 +212,21 @@ prerequisites.
   instead of replaying from `ideate`.
 - Memory ceiling: `--memory-cap-mb` on `launch.py --fleet` defers new
   starts when RSS approaches the cap (psutil-based).
+
+## Dataset adapters
+
+The no-simulation `auto_collect_data` node calls
+`Engine._run_dataset_adapters` (`core/engine.py:~1055`) which
+walks the `engine.dataset_adapters` list, dispatches each name to
+the matching module under `core/datasets/` (`worldbank.py`,
+`wikipedia.py`), and writes the returned `DatasetRow`s into
+`<quest_root>/data/auto_collected/<adapter>/`. Adapters share a
+small `DatasetAdapter` protocol (one `fetch(query, top_k)`
+coroutine returning a list of rows). Failures inside an adapter
+log a WARNING and return an empty list — the parent node sums the
+counts across adapters and keeps the quest moving. Adding a new
+adapter is a single-file change in `core/datasets/` plus an entry
+in the registry; no engine-graph edit needed.
 
 ## Why we own the loop
 
