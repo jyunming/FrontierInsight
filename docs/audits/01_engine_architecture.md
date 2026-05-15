@@ -1,8 +1,14 @@
 # 01 - Engine Architecture Audit
 
 **Date:** 2026-05-15
-**Scope:** `core/engine.py` (2,685 LOC)
-**Companion audits:** see siblings in `outputs/audit_2026-05-15/`
+**Scope:** `core/engine.py` (2,685 LOC by `wc -l`; editor last-line counters report 2686 — same file).
+**Companion audits:** see siblings in `docs/audits/`.
+
+> All LOC counts in this audit come from `wc -l`. An editor or
+> reviewer using "last-line number" counting will see N+1
+> (e.g. `tests/test_engine_helpers.py` reports as 2243 in a
+> right-margin counter, 2242 from `wc -l`); both refer to the same
+> file.
 
 `core/engine.py` is the spine of FrontierInsight: one file holds the `Engine`
 orchestrator class, the LangGraph DAG topology, 14 `_node_*` coroutines, the
