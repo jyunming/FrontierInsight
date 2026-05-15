@@ -4,6 +4,11 @@ Scope: `core/knowledge.py` (1 657 LOC), `core/datasets/` (754 LOC across
 `__init__.py`, `base.py`, `worldbank.py`, `wikipedia.py`), and
 `tests/test_knowledge.py` (48 tests, 1 115 LOC). Read on 2026-05-15.
 
+> All LOC counts in this audit come from `wc -l`. An editor or
+> reviewer using "last-line number" counting will see N+1 (e.g. the
+> editor reports 1 658 for `knowledge.py`); both numbers refer to the
+> same file.
+
 ## Findings
 
 ### F1 — `core/knowledge.py` is a *grab-bag* module, not "one thing"
@@ -40,7 +45,7 @@ which a test that monkeypatches a single adapter actually needs.
 
 ### F2 — Layering is clean upward; coupling is intra-module
 
-`core/knowledge.py` imports only `httpx`, `yaml`, and `.config`
+`core/knowledge.py`'s only non-stdlib imports are `httpx`, `yaml`, and `.config`
 (`core/knowledge.py:59-75`). It does NOT import `engine`, `provider`,
 `execution`, or anything else from `core/`. Good — `Knowledge` is a
 true facade and `engine.py` is the only consumer that knows about it

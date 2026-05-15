@@ -106,13 +106,13 @@ Anthropic's **Agent View** (announced 2026-05) is a CLI dashboard in Claude Code
 
 ## References
 
-**FI source paths:**
-- `C:\dev\FrontierInsight\launch.py` — 11-mode entrypoint (lines 38-277 cover argparse).
-- `C:\dev\FrontierInsight\core\config.py` — Pydantic schema; ~17 EngineConfig fields (lines 80-200).
-- `C:\dev\FrontierInsight\web\server.py` — `--serve` FastAPI status GUI.
-- `C:\dev\FrontierInsight\vscode-frontier-insight\` — chat extension, 4.6k LOC TS.
-- `C:\dev\FrontierInsight\examples\` — sample YAML configs (`bernstein_vazirani_noise`, `euv_mor_shot_noise`, `integrator_bakeoff`).
-- `C:\dev\FrontierInsight\docs\USAGE.md` — current CLI documentation.
+**FI source paths (repo-relative):**
+- `launch.py` — 11-mode entrypoint (lines 38-277 cover argparse).
+- `core/config.py` — Pydantic schema; ~17 EngineConfig fields (lines 80-200).
+- `web/server.py` — `--serve` FastAPI status GUI.
+- `vscode-frontier-insight/` — chat extension, 4.6k LOC TS.
+- `examples/` — sample YAML configs (`bernstein_vazirani_noise`, `euv_mor_shot_noise`, `integrator_bakeoff`).
+- `docs/USAGE.md` — current CLI documentation.
 
 **Peer documentation:**
 - Cursor configuration reference — https://cursor.com/docs/cli/reference/configuration

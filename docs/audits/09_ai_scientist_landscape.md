@@ -10,14 +10,14 @@
 
 FrontierInsight (FI) is one of a dozen-plus systems that, in mid-2026, attempt to drive a research project end-to-end with LLM agents. The interesting thing is **not** that FI exists — it is that FI's design decisions are *quantitatively different* from its peers on three axes that matter:
 
-1. **LLM-call budget** — FI spends **8–18 calls per quest** ([`docs/USAGE.md:28`](C:\dev\FrontierInsight\docs\USAGE.md)). Sakana's *AI Scientist v2* spends an estimated **40–45** per paper, and Google's *PaperOrchestra* (April 2026) spends **60–70**. Agent Laboratory (Schmidgall & Moor, EMNLP 2025) is closest to FI at roughly **20–30** per paper. **FI is 3–8x cheaper per quest** than the frontier in token spend, but is also doing less ambitious work (no agentic tree search, no multi-reviewer Elo tournament).
+1. **LLM-call budget** — FI spends **8–18 calls per quest** ([`docs/USAGE.md:28`](../../docs/USAGE.md)). Sakana's *AI Scientist v2* spends an estimated **40–45** per paper, and Google's *PaperOrchestra* (April 2026) spends **60–70**. Agent Laboratory (Schmidgall & Moor, EMNLP 2025) is closest to FI at roughly **20–30** per paper. **FI is 3–8x cheaper per quest** than the frontier in token spend, but is also doing less ambitious work (no agentic tree search, no multi-reviewer Elo tournament).
 2. **Domain breadth** — Sakana is locked to ML-on-ML research, Google AI Co-Scientist is locked to biomed hypothesis generation, FutureHouse's Phoenix/Crow/Falcon is locked to chemistry+literature. FI is the only one designed for **arbitrary `topic: <string>` + Python kernel**, which is both its market position and its weakness (no domain priors).
-3. **Output format breadth** — Most peers produce a single LaTeX→PDF artifact. FI produces markdown paper + figures + reproducible code bundle + slides + speech script, with Axon serving retrieved literature back into future quests ([`docs/capabilities.md:50–64`](C:\dev\FrontierInsight\docs\capabilities.md)). This is genuinely differentiated.
+3. **Output format breadth** — Most peers produce a single LaTeX→PDF artifact. FI produces markdown paper + figures + reproducible code bundle + slides + speech script, with Axon serving retrieved literature back into future quests ([`docs/capabilities.md:50–64`](../../docs/capabilities.md)). This is genuinely differentiated.
 
 **The three things FI should adopt from peers, in priority order:**
 1. **Sakana's agentic tree-search experiment loop** — but bounded. FI's current `execute_reflect` is a flat retry counter (≤3); a *small* tree (3 wide × 2 deep) would catch failure modes a linear retry never explores. **High impact, medium effort.**
-2. **Google Co-Scientist's tournament + Elo ranking** for `ideate` — FI currently picks one of 3 ideas via a single LLM critique call ([`core/engine.py:_node_ideate`](C:\dev\FrontierInsight\core\engine.py)). A 3-way pairwise tournament would add one extra call but produces a measurably better-ranked chosen_idea. **Medium impact, low effort.**
-3. **Agent Laboratory / AgentRxiv shared preprint server** — FI already has Axon for cross-quest memory, but Axon stores *retrieved literature*, not *FI's own outputs*. AgentRxiv's contribution is showing that re-ingesting prior runs gives a 11–14% downstream accuracy lift on MATH-500. FI should add an `auto_ingest_outputs` flag so each completed quest is queryable by the next. **High impact, low effort.**
+2. **Google Co-Scientist's tournament + Elo ranking** for `ideate` — FI currently picks one of 3 ideas via a single LLM critique call ([`core/engine.py:_node_ideate`](../../core/engine.py)). A 3-way pairwise tournament would add one extra call but produces a measurably better-ranked chosen_idea. **Medium impact, low effort.**
+3. **Agent Laboratory / AgentRxiv shared preprint server** — partially already implemented. `Engine._write_back_knowledge` (core/engine.py:1713) calls `Knowledge.add_quest_artifacts` when `knowledge.write_back_quests` is enabled and the review verdict is `accept`, indexing five document kinds (`fi_paper_spine`, `fi_quest_paper`, `fi_quest_summary`, `fi_topic_event`, plus the analyzer key-findings). The remaining delta vs. AgentRxiv is mainly *what* gets indexed (chosen_idea + cross_check classifications are not currently stored) and whether the default should be ON. **Medium impact, low effort.**
 
 The five things FI should **NOT** adopt: Aider-based file editing (Sakana's source of half its failure modes), Sakana's 40+ LLM-call writeup pipeline (FI's 1–2 write calls produce comparable markdown), PaperOrchestra's PaperBanana VLM figure refinement (over-engineered for FI's domain breadth), Google's drug-repurposing-specific tooling (not generalizable), and the Sakana "Aider edits its own runtime" architecture (security disaster).
 
@@ -74,7 +74,7 @@ Agent Laboratory (arXiv:2501.04227) and its follow-up AgentRxiv (arXiv:2503.1810
 7. **Code availability** — **MIT license.** github.com/SamuelSchmidgall/AgentLaboratory.
 8. **Architecture pattern** — Specialized-agent pool (5 named personas) + tool-using subagents (mle-solver, paper-solver). Not a DAG — orchestration is procedural.
 
-**FI gap vs. Agent Laboratory:** AgentRxiv's shared-preprint idea. FI's Axon stores retrieved external knowledge, but completed FI quests don't auto-flow back into Axon as searchable artifacts. Agent Laboratory's 11–14% empirical lift is the strongest evidence in 2026 that cross-run memory pays off.
+**FI status vs. Agent Laboratory:** AgentRxiv's shared-preprint idea is the closest analog to FI's existing `Engine._write_back_knowledge` + `Knowledge.add_quest_artifacts` path. The gap is narrower than first looks: FI already writes back 5 document kinds for accepted quests, but `chosen_idea` and per-finding `cross_check` classifications are not currently among them. Agent Laboratory's 11–14% empirical lift is the strongest evidence in 2026 that cross-run memory pays off — FI's task is enriching the existing write-back, not adding it.
 
 **FI advantage over Agent Laboratory:** Reviewer panel (FI's multi-persona panel is more rigorous than Agent Laboratory's single Professor synthesis), reproducibility bundle, slides/speech outputs.
 
@@ -114,7 +114,7 @@ This is **not** a direct competitor to FI's end-to-end loop — but their litera
 | Revision / iteration bound | `max_iterations: 2` | `max_debug_depth: 3` | Until compute exhausted | implicit | Score-gated, monotonic |
 | Tournament / Elo | **No** | No | Yes (Elo on hypotheses) | No | No |
 | Tree search | **No** | Yes (BFTS) | No | No | No |
-| Multi-quest memory | Axon (retrieval only) | No | No | **Yes (AgentRxiv preprint server)** | No |
+| Multi-quest memory | Axon retrieval + write-back of accepted quests (`fi_quest_*` docs) | No | No | **Yes (AgentRxiv preprint server)** | No |
 | Output: slides | Yes | No | No | No | No |
 | Output: speech script | Yes | No | No | No | No |
 | Output: reproducibility bundle | Yes (`bundle_manifest`) | No | N/A | No | No |
@@ -132,7 +132,7 @@ Each recommendation is tagged `[impact: H/M/L][effort: H/M/L]`. Sorted by impact
 
 ### 1. Borrow Sakana's bounded tree-search experiment loop — modify `execute_reflect` in `core/engine.py` `[impact: H][effort: M]`
 
-FI's `_node_execute_reflect` ([`core/engine.py:1207`](C:\dev\FrontierInsight\core\engine.py)) is a flat linear retry: attempt 1 fails → attempt 2 fails → attempt 3 fails → give up. Each attempt inherits the prior attempt's diagnosis. If diagnosis 1 is wrong (e.g., "the bug is in the integrator" when it's actually in the data loader), attempts 2 and 3 are wasted.
+FI's `_node_execute_reflect` ([`core/engine.py:1207`](../../core/engine.py)) is a flat linear retry: attempt 1 fails → attempt 2 fails → attempt 3 fails → give up. Each attempt inherits the prior attempt's diagnosis. If diagnosis 1 is wrong (e.g., "the bug is in the integrator" when it's actually in the data loader), attempts 2 and 3 are wasted.
 
 **Proposal:** Replace the linear counter with a 2-wide × 2-deep search. On first failure, generate *two* different diagnoses (one LLM call producing a dict of two repair theories), apply each to a separate code branch, execute both in parallel via the existing `ExecutionResult` plumbing. If either succeeds, take that branch; if both fail, do one more `(2,2)` step from the better of the two failures. Bound at 4 total executions per failed `execute` (vs. current 3 linear).
 
@@ -142,7 +142,7 @@ FI's `_node_execute_reflect` ([`core/engine.py:1207`](C:\dev\FrontierInsight\cor
 
 ### 2. Add ideate tournament with pairwise Elo — modify `_node_ideate` `[impact: M][effort: L]`
 
-FI's `_node_ideate` ([`core/engine.py:634`](C:\dev\FrontierInsight\core\engine.py)) generates 3 ideas and picks one via a single critique LLM call. Google Co-Scientist demonstrates this is leaving signal on the table: pairwise multi-turn debate produces measurably better rankings than single-shot rating.
+FI's `_node_ideate` ([`core/engine.py:634`](../../core/engine.py)) generates 3 ideas and picks one via a single critique LLM call. Google Co-Scientist demonstrates this is leaving signal on the table: pairwise multi-turn debate produces measurably better rankings than single-shot rating.
 
 **Proposal:** When `engine.ideate_tournament: true` (new flag, default `false`), after generating the 3 ideas, run `C(3,2)=3` pairwise comparison LLM calls. Each call sees two ideas and outputs winner + reasoning. Update simple Elo (start everyone at 1500, K=32). Pick the highest-Elo idea. Optionally, with `ideate_reflect: true` already enabled, fold the reflection into the tournament rather than running it as a separate step.
 
@@ -150,21 +150,19 @@ FI's `_node_ideate` ([`core/engine.py:634`](C:\dev\FrontierInsight\core\engine.p
 
 **File pointer:** `core/engine.py:634–697`. New `engine.ideate_tournament` flag in `core/config.py:Engine`.
 
-### 3. Add own-output ingestion to Axon — new flag in `core/engine.py` run-completion hook `[impact: H][effort: L]`
+### 3. Enrich existing Axon write-back with `chosen_idea` + `cross_check` documents `[impact: M][effort: L]`
 
-The single highest-leverage idea in this audit. AgentRxiv's 11–14% MATH-500 lift came purely from letting Agent Laboratory instances re-read each other's prior papers. FI has Axon for *external* knowledge retrieval but does **not** ingest FI's own completed quests back into Axon.
+The original framing of this recommendation was wrong — FI already ingests accepted quests via `Engine._write_back_knowledge` (core/engine.py:1713) and `Knowledge.add_quest_artifacts` (core/knowledge.py), gated on `knowledge.write_back_quests` and a passing `review` verdict. Five document kinds are indexed today: `fi_paper_spine`, `fi_quest_paper`, `fi_quest_summary`, `fi_topic_event`, and the analyzer key-findings.
 
-**Proposal:** At the end of `Engine.run()` (after `review` succeeds), call `self.knowledge.ingest_completed_quest(self.quest_root)`. Index the paper markdown, the `result_json`, the `cross_check` findings, the chosen idea, and tag with `source: fi-quest`, `quest_id`, `topic`. Future `_node_literature` calls would then retrieve relevant FI prior runs alongside arXiv hits.
+**What's actually missing vs. AgentRxiv:** `chosen_idea` (the rationale for picking one of the brainstormed directions over the others) and the per-finding `cross_check` classifications (supports/conflicts/neutral). Both would meaningfully sharpen what a future `_node_literature` retrieval surfaces back about prior FI work — "we already tried this hypothesis and it didn't beat the baseline".
 
-**Why low effort:** Knowledge layer already supports ingest (Axon API). Need: a config flag (`knowledge.ingest_own_outputs: bool`, default `true`), a serializer that turns `QuestArtifacts` into Axon-ingestable docs, and a 5-line hook at the end of `Engine.run()`.
+**Proposal:** Extend `Knowledge.add_quest_artifacts` to accept two additional payloads (`chosen_idea`, `cross_check_findings`) and emit two new document kinds (`fi_quest_idea`, `fi_quest_finding`) alongside the existing five. Update the caller in `_write_back_knowledge` to pass them.
 
-**File pointers:** `core/engine.py` (around the success-path exit of `run()`); `core/knowledge.py` (`Knowledge.ingest_completed_quest`); `core/config.py:Knowledge`.
-
-**Beware:** Don't ingest *until* the reviewer panel signs off (verdict ≠ revise) — otherwise FI poisons its own retrieval with rejected drafts.
+**Beware:** The existing accept-only gate is correct policy — don't change it. AgentRxiv's paper acknowledged that letting failed runs into the corpus hurt; FI gets this right today.
 
 ### 4. Add monotonic-improvement gate on `review → revise → write` `[impact: M][effort: L]`
 
-Borrowed from PaperOrchestra's `Content Refinement Agent`. FI's `review` loop currently fires `verdict == "revise"` → re-runs `design` (per [`docs/capabilities.md:35`](C:\dev\FrontierInsight\docs\capabilities.md)) but never compares the revised review against the prior review. If the revision makes things worse, FI still ships the revision.
+Borrowed from PaperOrchestra's `Content Refinement Agent`. FI's `review` loop currently fires `verdict == "revise"` → re-runs `design` (per [`docs/capabilities.md:35`](../../docs/capabilities.md)) but never compares the revised review against the prior review. If the revision makes things worse, FI still ships the revision.
 
 **Proposal:** Store `prior_review_score` in `QuestState`. On the second `review` call, compare; if the revised review has a lower aggregate score (e.g., review JSON's `overall_quality`), keep the prior paper and write a "regression on revise" note to the quest log.
 
@@ -252,11 +250,11 @@ Total LLM-call ceiling impact after all six adoptions: FI's worst case rises fro
 - OpenAI, *MLE-bench: Evaluating Machine Learning Agents on Machine Learning Engineering*. https://openai.com/index/mle-bench/
 
 ### FI source references
-- [`core/engine.py`](C:\dev\FrontierInsight\core\engine.py) — graph construction at line 335, `_node_execute_reflect` at line 1207, `_node_ideate` at line 634, `_node_literature` at line 697, `_node_review` at line 1437.
-- [`core/config.py`](C:\dev\FrontierInsight\core\config.py) — `max_iterations` default 2, `exec_reflect_max_iterations` default 3, `review_panel: list[str]`.
-- [`docs/USAGE.md:26–47`](C:\dev\FrontierInsight\docs\USAGE.md) — per-quest LLM call breakdown (8–18 floor/ceiling).
-- [`docs/capabilities.md:33–35`](C:\dev\FrontierInsight\docs\capabilities.md) — retry/revise loop documentation.
-- [`docs/plan.md`](C:\dev\FrontierInsight\docs\plan.md) — phase plan (K, K2, L, M, N, O references).
+- [`core/engine.py`](../../core/engine.py) — graph construction at line 335, `_node_execute_reflect` at line 1207, `_node_ideate` at line 634, `_node_literature` at line 697, `_node_review` at line 1437.
+- [`core/config.py`](../../core/config.py) — `max_iterations` default 2, `exec_reflect_max_iterations` default 3, `review_panel: list[str]`.
+- [`docs/USAGE.md:26–47`](../../docs/USAGE.md) — per-quest LLM call breakdown (8–18 floor/ceiling).
+- [`docs/capabilities.md:33–35`](../../docs/capabilities.md) — retry/revise loop documentation.
+- [`docs/plan.md`](../../docs/plan.md) — phase plan (K, K2, L, M, N, O references).
 
 ---
 

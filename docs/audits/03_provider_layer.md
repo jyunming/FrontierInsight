@@ -2,7 +2,9 @@
 
 Scope: `core/provider.py` (1,030 LOC), `core/vscode_bridge.py` (281 LOC),
 `docs/PROVIDERS.md` (129 LOC), and the policy hook in `core/engine.py`.
-Date: 2026-05-15.
+LOC counts here come from `wc -l`; an editor reading the
+last-line-number reports N+1 (1031 / 282 / 130 for the three above) —
+both numbers point at the same file. Date: 2026-05-15.
 
 ## Findings
 
@@ -82,8 +84,8 @@ miss when adding a new provider.
 
 - 6 attempts, exp backoff 4–60 s, custom predicate
   (`provider.py:962-967`), with `_TRANSIENT_BRIDGE_MARKERS` at
-  `provider.py:373-402` listing 16 different transient strings to
-  match.
+  `provider.py:373-402` listing 18 different transient strings to
+  match (including `"bridge stalled"`).
 - Wraps an "across 6 retry attempts" friendly message at
   `provider.py:973-981` — by far the best error UX of any transport.
 

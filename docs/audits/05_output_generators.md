@@ -1,7 +1,7 @@
 # Output Generators Audit (Unit 05)
 
 **Date:** 2026-05-15
-**Scope:** `generation/` (1,530 LOC across 5 files), the five paper-venue
+**Scope:** `generation/` (~770 LOC: paper 384 + slides 183 + poster 130 + speech 67 + `__init__.py` 2; `wc -l`), the five paper-venue
 templates under `templates/paper/`, the beamerposter under
 `templates/poster/`, and the `_run_generators` wiring in `launch.py`.
 **Baseline:** PR #55 (`paper_pdf_skipped.md` diagnostic) and PR #58
@@ -40,20 +40,26 @@ else:
 
 The "else" branch is unreachable for iclr/ieee_access/nature_mi because
 their `template.tex` **does** exist — it just contains nothing but a
-comment. Pandoc will accept the file as a template but produce a
-near-empty PDF (no `$body$` is substituted, so the entire paper.md body
-is dropped). This is a silent quality regression: a user who sets
-`paper_format: iclr` in their YAML gets a successful-looking
-`paper.pdf` that is structurally empty, NOT a clean fall-through to
-pandoc's built-in template.
+LaTeX comment. Pandoc invokes the engine with that file as the
+`--template` argument, and because a one-line `%` comment is NOT a
+valid pandoc template (no `$body$`, no document scaffolding, no
+`\begin{document}`), the LaTeX engine exits non-zero. PR #58's
+strict-mode and PR #55's `paper_pdf_skipped.md` diagnostic catch the
+failure, so this manifests as a **silent PDF skip**, not as a
+successful-looking empty PDF (that earlier framing was wrong).
 
-Worth noting the docstring at `generation/paper.py:248-252` still says
-"no template at %s; using pandoc default" — that comment describes the
-old fallback path that no longer triggers for the three stub venues.
-There is no test in `tests/test_paper_gen.py` for "stub template
-produces empty PDF." `test_missing_template_falls_back_to_pandoc_default`
-at line 131 covers the case where the file is **absent**, not the case
-where the file is a one-line comment.
+The user-visible regression is still real: someone sets
+`paper_format: iclr` and gets `paper.md` + a `paper_pdf_skipped.md`
+with an opaque `iclr_rc_<n>` reason, where the actual cause is
+"FI shipped an empty template." A clean fall-through to pandoc's
+default would have produced a working PDF.
+
+Worth noting the log line at `generation/paper.py:248-252`
+("no template at %s; using pandoc default") describes the
+correct fallback path that ONLY triggers when the file is absent.
+There is no test in `tests/test_paper_gen.py` for the stub-template
+case. `test_missing_template_falls_back_to_pandoc_default` at line
+131 covers the file-absent case, not the file-is-a-comment case.
 
 ### 2. Failure UX — slides/poster/speech have no diagnostic, by design
 
@@ -90,8 +96,12 @@ The other three generators have **zero** equivalent. The failure modes:
 The cost to the user: they ask for `output.kinds: [paper_pdf, slides,
 poster, speech]`, the quest runs, they look at the quest dir, and find
 `paper.md` + `slides.md` + `poster.tex` + ... nothing telling them why
-the renderables are missing. They have to grep `run.log` — exactly the
-problem PR #55 fixed for the paper pipeline.
+the renderables are missing. Note that `_run_generators` in `launch.py`
+catches per-generator exceptions with `print(..., file=sys.stderr)`,
+not the per-quest logger — so unless the caller captures stderr the
+failure may not even appear in `.fi/run.log`. PR #55 fixed exactly this
+discoverability gap for the paper pipeline by writing a sibling
+diagnostic file; the other three generators still leak.
 
 ### 3. Strict-mode contract — `require_pdf` is paper-only
 
@@ -144,7 +154,9 @@ the next generator only starts after the previous one's
 `await/return`. The shared-resource graph:
 
 - All four read `art.paper_md` (read-only).
-- All four read `art.figures_dir` (read-only).
+- `SlideGenerator`, `PosterGenerator`, and `PaperGenerator` read
+  `art.figures_dir` (read-only). `SpeechGenerator` does NOT — only
+  paper/slides/poster surface figures.
 - `SlideGenerator` writes `slides.md` (and `slides.html/pdf/pptx`).
 - `PosterGenerator` writes `poster.tex` (and `poster.pdf`).
 - `SpeechGenerator` writes `talk.md` AND **reads `slides.md`**
@@ -153,9 +165,16 @@ the next generator only starts after the previous one's
   `paper_pdf_skipped.md`, `figures/`, `paper_bundle_manifest.json`.
 
 So the topological order is: `paper` and `slides` and `poster` can run
-in parallel; `speech` must wait for `slides`. PaperGenerator is sync
-(uses `subprocess.run`); the other three are async (use
-`asyncio.create_subprocess_exec`).
+in parallel; `speech` must wait for `slides`. PaperGenerator's PDF
+compile is sync (`subprocess.run`). `SlideGenerator` is async for its
+LLM call AND uses `asyncio.create_subprocess_exec` for the Marp
+render. `PosterGenerator` is async for its LLM call but invokes
+pdflatex via synchronous `subprocess.run(..., timeout=180)`.
+`SpeechGenerator` is async for its single LLM call and has no
+subprocess at all. **Practical implication for R8 below:** to truly
+parallelize, the poster render must move to `asyncio.to_thread` or
+`asyncio.create_subprocess_exec` — otherwise it blocks the event loop
+even when wrapped in a task.
 
 Today's sequential ordering means a quest with all four kinds takes
 roughly `paper_pdf_time + slides_LLM_time + slides_render_time +
@@ -171,8 +190,11 @@ parallel structure is leaving wall-clock on the table.
 There's also a subtle correctness lever: `_run_generators` shares
 **one** `ProxySupervisor` across all four (`launch.py:557, 565, 572`),
 which respects the proxy session lifecycle. A parallel rewrite must
-preserve this — three concurrent `resolve_endpoint_async` calls would
-race on `PROXY_PROVIDERS` session startup.
+preserve this — but the concurrent-startup race is already handled
+by `ProxySupervisor.acquire()`'s internal `asyncio.Lock`, so the
+real requirement is just to keep sharing the same supervisor and
+preserve balanced `acquire`/`release` semantics, not to serialize
+startup explicitly.
 
 ### 6. TTS / speech.py — there is no TTS
 
@@ -212,7 +234,7 @@ The two **real** templates:
   the same hardcoded "Frontier Insight" author. The header comment
   is honest: "Replace with the official `neurips_2024.sty` when you
   actually submit." It's a stand-in, not a submission-ready file.
-- `templates/poster/poster.tex` (29 lines): beamerposter, fixed 36"x48",
+- `templates/poster/poster.tex` (29 lines): beamerposter, fixed 48"x36" landscape (121.92x91.44 cm in the source),
   three columns. Uses `string.Template`-style `$title`, `$left`,
   `$middle`, `$right` placeholders (note: bare `$` without trailing
   `$`, matching Python's `string.Template` not pandoc's `$x$`). The
@@ -310,7 +332,10 @@ Numbered, ordered by impact-per-effort.
 `templates/paper/iclr/template.tex`, `templates/paper/ieee_access/template.tex`,
 and `templates/paper/nature_mi/template.tex` are actively harmful —
 they trip `template.exists()` at `generation/paper.py:246` and feed
-pandoc a template with no `$body$` placeholder, producing empty PDFs.
+pandoc a template that is just a `%` comment, which the LaTeX engine
+rejects. Strict-mode raises; default mode writes `paper_pdf_skipped.md`
+with an opaque `<engine>_rc_<n>` reason — neither result is what the
+user expected from picking `paper_format: iclr`.
 **Action:** `git rm` all three stub files (keep the directories and
 `__init__.py` so `paper_format: iclr` still validates against the
 Literal). The existing `else: _log.info("no template at ..., using
@@ -391,7 +416,7 @@ reproducibility).
 
 The current naming implies audio output. Rename:
 - `generation/speech.py` → `generation/talk_script.py`
-- `OutputKind` enum: `"speech"` → `"talk_script"`
+- `OutputKind` Literal in `core/config.py`: `"speech"` → `"talk_script"`
 - `agents/speech.md` → `agents/talk_script.md`
 - The output file is already `talk.md`, which is honest. Keep that.
 

@@ -15,8 +15,10 @@ routers (`engine.py:403-466`), and `interrupt()`-based pause in
 clarify and wait_for_data (`engine.py:524`, `978`). The review panel
 (`engine.py:1488-1517`) fans personas out with bare `asyncio.gather`,
 the provider layer (`core/provider.py`, 13 backends) has no
-token/cost accounting, and there is no public SDK surface — every
-external caller reaches into private `_node_*` methods.
+token/cost accounting, and there is no public extension hook for
+custom nodes — `launch.py` and `web/server.py` are the only known
+out-of-tree callers and they use `Engine.run()`; direct `_node_*`
+access is concentrated in the test suite.
 
 This audit reads four leading frameworks against eight dimensions and
 proposes adopt / partial / reject decisions.
@@ -187,8 +189,8 @@ agent — closer to FI's workload than the multi-agent SDKs.
    a half-finished panel resumes from the crashed persona. FI's
    atomic `asyncio.gather` re-runs *all* personas on resume.
 6. **Provider.** `init_chat_model(...)` covers ~10 providers
-   (Anthropic, OpenAI, Bedrock, Vertex). FI's `Endpoint`
-   (`provider.py:217`) is wider in *kind* (proxy + CLI + HTTP).
+   (Anthropic, OpenAI, Bedrock, Vertex). FI's `ResolvedEndpoint`
+   (`provider.py:204`) is wider in *kind* (proxy + CLI + HTTP).
 7. **Cost telemetry.** Inherits LangSmith tracing when configured
    (`LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true`). FI does not
    import any langchain tracing context.
@@ -268,12 +270,15 @@ and only unfinished ones re-execute. For a $0.50/persona-call panel,
 this is real money saved on every interrupted run.
 
 Cost of the change: panel results land in state via the reducer in
-arrival order rather than the deterministic order
-`_aggregate_panel_reviews` (`core/engine.py:1958`) currently sees.
-The aggregator already sorts personas by name internally for
-deterministic voting, so no semantic change downstream — but the
-reducer-list write order will be nondeterministic and snapshot tests
-that diff `review_panel[0]` need updating.
+arrival order. `_aggregate_panel_reviews` (`core/engine.py:1958`)
+preserves input order today for weaknesses, suggestions, and the
+first blocking note (it does NOT sort by persona before aggregation),
+so arrival-order writes from the reducer would make those fields
+nondeterministic. The fix is to either (a) sort the reducer's
+combined list by persona name before passing it to the aggregator,
+or (b) teach `_aggregate_panel_reviews` to sort before aggregating.
+Either resolves the determinism issue at small cost. Snapshot tests
+that diff `review_panel[0]` still need updating.
 
 ### 3. Adopt CrewAI's role/goal/backstory schema for panel personas  [impact: LOW] [effort: S]
 
@@ -313,16 +318,21 @@ the load-bearing structure.
 - `Quest.run() -> QuestArtifacts` — calls `Engine.run` under the hood
 - `Node` — protocol for custom node callables `(state: QuestState) -> QuestState`
 - `register_node(name: str, fn: Node)` — extension hook
-- `register_provider(name: str, transport: TransportSpec)` — public
-  provider registration (currently `_PROXY_PROVIDERS` at
-  `core/provider.py:108` is private)
+- `register_provider(name: str, transport: TransportSpec)` — currently
+  there is no registration hook; `PROXY_PROVIDERS` / `CLI_PROVIDERS`
+  in `core/provider.py` are already public constants (the
+  underscored names remain as back-compat aliases), but adding a new
+  provider still requires editing core code rather than registering
+  a transport from outside.
 
-The engine is currently *not* a library — every external caller
-(`launch.py`, the VSCode extension, the test suite) reaches into
-private `_node_*` methods. A real SDK lets users write their own
-node variants without forking the engine, which is what AutoGen v0.4
-gets right via its extensions layer and what FI gets wrong by having a
-single 2,685-LOC file at `core/engine.py:1` own everything.
+The engine is currently *not* a library in the SDK sense — `launch.py`
+and `web/server.py` use `Engine.run()` as the public entry point
+(good), but there is no extension point for writing custom node
+variants without forking `core/engine.py`. Direct `_node_*` access
+happens primarily in the test suite and inside `Engine._build_graph`
+itself. A real SDK would let users register their own nodes the way
+AutoGen v0.4 does via its extensions layer; FI's 2,685-LOC
+`core/engine.py:1` owns the entire DAG today.
 
 This is a 2-3 week project, not a one-PR change. It unblocks the
 "users write their own engine variants" story that the README
@@ -448,5 +458,5 @@ own node (the YAGNI risk is real otherwise).
 - `core/engine.py:1958` — `_aggregate_panel_reviews` deterministic voting
 - `core/provider.py:103-108` — `PROXY_PROVIDERS` set
 - `core/provider.py:194` — `CLI_PROVIDERS` set
-- `core/provider.py:217` — `Endpoint` abstraction
+- `core/provider.py:204` — `ResolvedEndpoint` dataclass (the provider abstraction; line 217 is its `provider_name` field)
 - `core/provider.py:759` — `chat(...)` interface (no usage return)

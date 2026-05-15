@@ -41,7 +41,7 @@ from the comments in `core/config.py:80-194` and the matching commits:
 | `no_simulation` | `bool = False` | — | Phase D / #57 | `core/engine.py:496,573` | OK. |
 | `auto_collect_data` | `bool = True` | — | Phase D1 / #60 | `core/engine.py:763` | Defaults to True. See §4 — this means every no-simulation quest queries Axon by default even when the corpus is empty. The graceful-passthrough story is good (engine just logs INFO and falls through), but the implicit "Axon was queried for every quest you ran" is surprising. |
 | `auto_collect_top_k` | `int = 5`, `ge=1` | `ge=1` | Phase D1 / #60 | `core/engine.py:825` | OK. `ge=1` added after a bot review on #60. |
-| `dataset_adapters` | `list[str] = []` | none | Phase D2 / #61 | `core/engine.py:878` | **Missing string-Literal.** Available values today are exactly `["worldbank", "wikipedia"]` (`core/datasets/__init__.py:ADAPTER_REGISTRY`). A typo like `worldbnk` is silently dropped with a runtime WARNING — a YAML-load error would catch it earlier. See §3. |
+| `dataset_adapters` | `list[str] = []` | none | Phase D2 / #61 | `core/engine.py:878` | **Missing string-Literal.** Available values today are exactly `["worldbank", "wikipedia"]` (`core/datasets/__init__.py:ADAPTER_REGISTRY`). A typo like `worldbnk` is silently dropped with a runtime WARNING — a YAML-load error would catch it earlier. See §3. Note also `core/config.py:181`'s inline comment says "Available names: `\"worldbank\"`" only — drift since PR #62 added Wikipedia; should be updated when this field is restructured. |
 | `dataset_adapter_top_k` | `int = 3`, `ge=1` | `ge=1` | Phase D2 / #61 | `core/engine.py:883` | OK. |
 
 Outside `EngineConfig`, `OutputConfig.require_pdf` (added in Phase D /
@@ -66,12 +66,12 @@ class SimulationConfig(BaseModel):
     no_simulation: bool = False
     auto_collect_data: bool = True
     auto_collect_top_k: int = Field(5, ge=1)
-    dataset_adapters: list[str] = []
+    dataset_adapters: list[str] = Field(default_factory=list)
     dataset_adapter_top_k: int = Field(3, ge=1)
 
 class ReviewConfig(BaseModel):
     review_loop: bool = True
-    review_panel: list[str] = []
+    review_panel: list[str] = Field(default_factory=list)
 
 class ClarifyConfig(BaseModel):
     mode: ClarifyMode = "off"
@@ -217,11 +217,14 @@ Per-field issues, ordered by likelihood-of-bite:
   Literal is documented in the comment block at
   `core/config.py:222-231` (seven legal names) but the type is
   `list[str] | str`. Same fix as `review_panel`: a Literal would
-  catch typos at YAML load. The "user-supplied custom sources via
-  Axon catalog" extension story (`seed_source_catalog: bool`) is
-  the only reason `list[str]` exists — but a custom-source path can
-  still validate through a `model_validator` that allows the union
-  of built-ins + names known to the live Axon catalog.
+  catch typos at YAML load. **Important constraint:** the only
+  names the retrieval layer actually routes on are those in
+  `_SOURCE_REGISTRY` (the built-in adapter table); the broader Axon
+  source catalog is a routing-awareness layer that does NOT make
+  arbitrary names executable. So a `model_validator` should validate
+  against `_SOURCE_REGISTRY` keys, not the union with the catalog —
+  otherwise it would accept names the retrieval layer silently
+  ignores at runtime.
 
 ### 4. Defaults audit
 
@@ -243,18 +246,34 @@ running everything; less so for a new user with no Axon corpus.
     `core/engine.py:819`).
   - Make `auto_collect_data` default to whatever `knowledge.enabled`
     resolves to (a `model_validator(mode="after")` on `Config` that
-    sets the engine field when not explicitly set). The user
-    intuition matches: "Axon on" → "use Axon for collection too."
+    sets the engine field when not explicitly set) **ONLY when
+    `dataset_adapters` is empty.** Dataset adapters were explicitly
+    designed to run independently of Axon (`core/engine.py:781-791`,
+    pinned by `tests/test_engine_helpers.py:1806-1837`); making
+    `auto_collect_data` strictly inherit `knowledge.enabled` would
+    silently stop adapters from firing on quests where the user opted
+    in to `dataset_adapters: [worldbank]` but doesn't have Axon
+    configured.
 
-  I'd do the second. It eliminates a class of "why is the engine
-  calling Axon when I disabled it elsewhere" confusion. The
-  `knowledge.enabled=False` short-circuit at `core/engine.py:819`
-  already enforces this at runtime — making the default mirror it
-  saves one log line per quest.
+  I'd do the second variant with the adapter carve-out. It eliminates
+  the "why is the engine calling Axon when I disabled it elsewhere"
+  confusion for the no-adapter case while preserving the documented
+  adapter-independence contract.
+
+  Important UX caveat in the cost analysis: `_axon_collect_step`
+  doesn't just hit the in-process Axon retriever — when Axon returns
+  no docs, `Knowledge.asearch` falls through to
+  `knowledge.external_fallback` (default sources: `openalex`, `arxiv`,
+  `crossref`), each of which is a network call. So "wasted query on an
+  empty corpus" can actually be 3+ external HTTP calls, not just one
+  embedded lookup. That sharpens the case for the inherited-default
+  proposal.
 
 - **`clarify_mode: ClarifyMode = "off"`** (`core/config.py:95`).
-  Justified ("Default for tests and fleet"). But the bare `fi --new`
-  / `@fi /new` path is for first-time interactive users — they
+  Justified ("Default for tests and fleet"). But the bare
+  `@fi /new` path (the VSCode-only interactive entry; there is no
+  matching `fi --new` CLI flag — `launch.py:38-277` defines a closed
+  set of mode flags) is for first-time interactive users — they
   benefit most from the clarify questionnaire. Consider:
   - `EngineConfig.clarify_mode: "off"` (engine default — what fleet
     sees) AND
@@ -288,11 +307,11 @@ running everything; less so for a new user with no Axon corpus.
 
 Counting fields a typical user must set in the existing examples:
 
-| Example | Total YAML lines | Engine block lines | Knowledge block lines | Output block lines | Required-by-user fields |
+| Example | Total YAML lines | Engine block lines | Knowledge block lines | Output block lines | Fields overridden by example (not strictly required) |
 |---|---|---|---|---|---|
-| `bernstein_vazirani_noise/config.yaml` | 97 | 4 | 2 | 9 | `topic`, `title`, `provider.name`, `engine.review_loop`, `output.kinds`, `output.paper_format` |
-| `euv_mor_shot_noise/config.yaml` | 88 | 4 | 2 | 9 | same shape — 6 fields plus the long topic block |
-| `integrator_bakeoff/config.yaml` | 51 | 4 | 12 | 5 | 6 fields plus Axon inline block |
+| `bernstein_vazirani_noise/config.yaml` | 97 | 4 | 2 | 9 | `topic` is the only strictly required field; the example also overrides `title`, `provider.name`, `engine.review_loop`, `output.kinds`, `output.paper_format` — all of which have defaults in `core/config.py` |
+| `euv_mor_shot_noise/config.yaml` | 88 | 4 | 2 | 9 | same shape — `topic` required, plus 5 overridden defaults |
+| `integrator_bakeoff/config.yaml` | 51 | 4 | 12 | 5 | `topic` required, plus 5 overridden defaults and the Axon inline block |
 
 The 80%-of-the-bytes is the topic prose. Of the **structural**
 fields, every example overrides the same handful: `provider.name`,
@@ -301,7 +320,10 @@ fields, every example overrides the same handful: `provider.name`,
 preset shape begging to be named.
 
 Proposal: add `Config.preset: Literal["minimal", "scientific",
-"journal", "fleet"] | None = None`, with semantics:
+"journal", "fleet"] | None = None`, with semantics. (Note this audit
+adds `fleet` as a fourth preset to the three named in the PR
+description — flagged here for review; the body of the proposal
+covers all four.)
 
 ```python
 PRESETS = {
@@ -345,10 +367,15 @@ Three discoverability fixes, increasing impact:
 
 - **`fi --print-schema`** — emit Pydantic's
   `Config.model_json_schema()` as YAML-shaped output, or pretty-print
-  it as a tree. The Pydantic schema already carries every
-  description, default, and constraint — the function is `print(
-  yaml.safe_dump(Config.model_json_schema()))`. [effort: 30 min,
-  excluding the cosmetic prettier-tree if anyone cares].
+  it as a tree. **Caveat**: the schema covers types, defaults, and
+  constraints, but NOT the explanatory prose that lives in inline
+  comments today — `core/config.py` doesn't use `Field(description=...)`
+  for any of the 17+ knobs. To make the printout user-useful, this
+  recommendation has a sub-step: migrate the existing inline comments
+  into `Field(description=...)` arguments so the schema picks them up.
+  Without that, the function is `print(yaml.safe_dump(
+  Config.model_json_schema()))` but the output is types-only.
+  [effort: 30 min for the printer, ~2 hours for the migration].
 
 - **`fi --init [preset]`** — write a stub YAML to stdout (or a file
   with `--init-out path.yaml`). Pairs with the preset story from §5.
@@ -442,12 +469,16 @@ Doc parity is good — every EngineConfig field appears in
   them will read `config.py`. If we ever ship `fi --print-schema`,
   the question becomes moot.
 
-The biggest doc gap is **NOT in USAGE.md**: it's that the README and
-`docs/capabilities.md` show only the simulation flow and never
-describe what fraction of `EngineConfig` an `@fi /new` interview
-actually fills in. A new user reading the README has no mental model
-for "the 14 knobs exist, but the wizard sets 13 for me." Worth a
-sentence in the README's "first quest" section.
+The biggest doc gap is **NOT in USAGE.md**: it's that the README
+shows only the simulation flow and never describes what fraction of
+`EngineConfig` an `@fi /new` interview actually fills in.
+(`docs/capabilities.md:72` already has a dedicated entry for the
+no-simulation / data-required mode covering `auto_collect_data` and
+`engine.dataset_adapters` — so the capabilities-page gap is narrower
+than first looks; it's mostly README-side.) A new user reading the
+README has no mental model for "the 14 knobs exist, but the wizard
+sets 13 for me." Worth a sentence in the README's "first quest"
+section.
 
 ## Recommendations
 
@@ -474,9 +505,12 @@ ratio.
 
 4. **Add `fi --print-schema` that emits
    `yaml.safe_dump(Config.model_json_schema())` (or a prettier
-   tree).** [impact: M] [effort: S] Pure win for discoverability;
-   the schema is already richly described via Pydantic. ~20 LoC +
-   1 test. Mention in `fi --help`.
+   tree).** [impact: M] [effort: S—M] The printer itself is ~20 LoC,
+   but to make the output user-useful, this should be paired with
+   migrating today's inline `core/config.py` comments into
+   `Field(description=...)` arguments — currently the schema has
+   types/defaults but zero description text. Without the migration
+   the printout is structural only.
 
 5. **Add a `Config.preset: Literal[...] | None = None` with three
    curated presets (`minimal` / `scientific` / `journal`).**
