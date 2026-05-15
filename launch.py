@@ -125,6 +125,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "--config. Ingests as kind=fi_proposal.",
     )
     mode.add_argument(
+        "--analyze",
+        type=Path,
+        help="Run a no-simulation quest with pre-staged data. Pass a "
+             "directory path; every file under it (recursive, "
+             "symlinks skipped) is copied into the new quest's "
+             "data/ directory before the engine starts. The engine "
+             "then routes auto_collect_data (passthrough) → "
+             "wait_for_data (passthrough, data is already there) → "
+             "data_load → analyze → cross_check → write → review. "
+             "Requires --analyze-topic to describe what to analyze. "
+             "Use when you already have the dataset and just want a "
+             "paper analyzing it — the inverse of --proposal.",
+    )
+    mode.add_argument(
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
@@ -190,6 +204,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="vscode_extension",
         help="Provider for --proposal. Same conventions as the other "
+             "PM-command providers — vscode_extension when launched "
+             "from chat, headless CLI providers otherwise.",
+    )
+    p.add_argument(
+        "--analyze-topic",
+        type=str,
+        default=None,
+        help="Required companion to --analyze: a one-sentence "
+             "description of what the analysis should produce "
+             "(\"Compare ridership trends across regions\", "
+             "\"Find common failure modes in these logs\"). The "
+             "engine's analyze + write nodes read this verbatim as "
+             "the quest topic.",
+    )
+    p.add_argument(
+        "--analyze-provider",
+        type=str,
+        default="vscode_extension",
+        help="Provider for --analyze. Same conventions as the other "
              "PM-command providers — vscode_extension when launched "
              "from chat, headless CLI providers otherwise.",
     )
@@ -274,6 +307,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--output is irrelevant in --ingest mode.")
     if args.resume and not args.config:
         p.error("--resume requires --config (the YAML for the original quest).")
+    if args.analyze and not args.analyze_topic:
+        p.error(
+            "--analyze requires --analyze-topic to describe what the "
+            "analysis should produce (one sentence is fine).",
+        )
+    if args.analyze_topic and not args.analyze:
+        p.error("--analyze-topic only makes sense with --analyze.")
     return args
 
 
@@ -747,6 +787,17 @@ async def main_async(args: argparse.Namespace) -> int:
                 supervisor=supervisor,
             )
 
+        if args.analyze:
+            return await _run_analyze(
+                data_path=args.analyze.resolve(),
+                topic=args.analyze_topic,
+                output_root=args.output_root,
+                provider_name=args.analyze_provider,
+                vscode_bridge_port=args.vscode_bridge_port,
+                supervisor=supervisor,
+                profile=args.profile,
+            )
+
         if args.summarize:
             return await _run_summarize(
                 folder=args.summarize.resolve(),
@@ -1042,6 +1093,56 @@ async def _run_critique(
         f"[FI] critique_provider={art.critique_provider}; "
         f"ingested_to_axon={art.ingested_to_axon}",
     )
+    return 0
+
+
+async def _run_analyze(
+    *,
+    data_path: Path,
+    topic: str,
+    output_root: Path,
+    provider_name: str,
+    vscode_bridge_port: int,
+    supervisor: ProxySupervisor,
+    profile: bool = False,
+) -> int:
+    """Top-level wiring for ``python launch.py --analyze <data_path>
+    --analyze-topic "..."``.
+
+    Builds a no-simulation Config, stages the user's data into the
+    quest's ``data/`` directory, then runs the engine through
+    ``run_one``. The engine's no-simulation path (auto_collect_data
+    passthrough → wait_for_data passthrough since data exists →
+    data_load → analyze → write → review) handles the rest."""
+    from core.analyze_cli import prepare_analyze_quest
+
+    if vscode_bridge_port > 0:
+        provider_name = "vscode_extension"
+
+    try:
+        cfg, quest_id, files_staged = prepare_analyze_quest(
+            data_path=data_path, topic=topic, output_root=output_root,
+            provider_name=provider_name,
+        )
+    except ValueError as e:
+        print(f"[FI] --analyze: {e}", file=sys.stderr)
+        return 1
+
+    if files_staged == 0:
+        print(
+            f"[FI] --analyze: no files copied from {data_path} (empty "
+            f"directory, or every file matched the skip list). Aborting.",
+            file=sys.stderr,
+        )
+        return 1
+
+    _apply_vscode_bridge_override(cfg, vscode_bridge_port)
+
+    print(
+        f"[FI] --analyze: quest_id={quest_id} "
+        f"files_staged={files_staged} provider={cfg.provider.name}",
+    )
+    await run_one(cfg, supervisor=supervisor, profile=profile)
     return 0
 
 
