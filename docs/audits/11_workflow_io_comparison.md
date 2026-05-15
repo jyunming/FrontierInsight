@@ -107,10 +107,10 @@ Anthropic's **Agent View** (announced 2026-05) is a CLI dashboard in Claude Code
 ## References
 
 **FI source paths (repo-relative):**
-- `launch.py` — 11-mode entrypoint (lines 38-277 cover argparse).
-- `core/config.py` — Pydantic schema; ~17 EngineConfig fields (lines 80-200).
+- `launch.py` — 10-mode entrypoint (`--config`, `--fleet`, `--ingest`, `--serve`, `--summarize`, `--digest`, `--portfolio`, `--critique`, `--proposal`, `--install-tectonic`); lines 38-277 cover argparse.
+- `core/config.py` — Pydantic schema; ~14 EngineConfig fields (lines 80-200).
 - `web/server.py` — `--serve` FastAPI status GUI.
-- `vscode-frontier-insight/` — chat extension, 4.6k LOC TS.
+- `vscode-frontier-insight/src/` — chat extension, ~2.3k LOC TS across `bridge.ts` (675), `extension.ts` (1212), `interview.ts` (241), `interview-core.ts` (168).
 - `examples/` — sample YAML configs (`bernstein_vazirani_noise`, `euv_mor_shot_noise`, `integrator_bakeoff`).
 - `docs/USAGE.md` — current CLI documentation.
 
