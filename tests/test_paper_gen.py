@@ -966,11 +966,13 @@ def test_sanitize_unicode_covers_greek_letters_and_superscripts() -> None:
     assert r"\ensuremath{^{4}}" in out
 
 
-def test_sanitize_unicode_leaves_fenced_code_blocks_untouched() -> None:
-    """Inside ```...``` we preserve the raw glyphs — LLMs sometimes
-    include terminal output where the user wants to see the actual
-    character, and pandoc emits fenced code into a Verbatim
-    environment where ≈ is fine via inputenc's listings handling."""
+def test_sanitize_unicode_outside_code_helper_preserves_code_blocks() -> None:
+    """The ``_outside_code_blocks`` helper exists as a documented
+    option for callers that legitimately need prose-only rewriting.
+    The PDF pipeline does NOT use it (sanitizes everything — see
+    the ``compile_pdf`` test below) because the templates lack a
+    ``\\DeclareUnicodeCharacter`` safety net. This test just pins
+    the helper's prose-only contract for any future consumer."""
     src = (
         "Text with ≈ outside.\n"
         "```\n"
@@ -1048,3 +1050,98 @@ def test_compile_pdf_writes_sanitized_md_alongside_paper(
     # Original paper.md (the user-facing archive copy) is unchanged.
     orig = (out_dir / "paper.md").read_text(encoding="utf-8")
     assert "≈" in orig, "user-facing paper.md must keep the original glyphs"
+
+
+def test_count_sanitized_glyphs_returns_source_count() -> None:
+    """Honest counter: the INFO log reports source-glyph occurrences,
+    not length-deltas. The PR #93 bot review caught the original
+    implementation deriving the count from length deltas, which went
+    negative because LaTeX replacements (~20 chars) are longer than
+    the source glyphs (1 char each)."""
+    assert paper_mod._count_sanitized_glyphs("plain ASCII only") == 0
+    # 3 distinct glyphs, each appearing once → 3.
+    assert paper_mod._count_sanitized_glyphs("FNR ≈ x, ≥ y, × z") == 3
+    # 3 ≈ occurrences → 3 (not 1).
+    assert paper_mod._count_sanitized_glyphs("≈ a ≈ b ≈ c") == 3
+
+
+def test_compile_pdf_sanitizes_unicode_inside_code_blocks_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: an earlier version sanitized only prose, leaving
+    raw glyphs inside fenced/inline code. pdflatex still errored on
+    those because the templates don't have a
+    ``\\DeclareUnicodeCharacter`` safety net. The PDF pipeline now
+    sanitizes everything — what lands in ``paper_pdf_source.md``
+    has zero leftover unicode from the source paper.md, including
+    inside code blocks."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex" if name == "pdflatex" else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        out_idx = cmd.index("-o") + 1
+        Path(cmd[out_idx]).write_bytes(b"%PDF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "Text ≈ outside.\n"
+        "```\n"
+        "print('inside ≈ would have killed pdflatex')\n"
+        "```\n"
+        "Inline `f(x) ≥ y` too.\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    PaperGenerator(cfg).generate(art, out_dir)
+
+    sanitized = (out_dir / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "≈" not in sanitized, (
+        "raw ≈ inside code blocks must also be rewritten — "
+        "templates lack a \\DeclareUnicodeCharacter safety net"
+    )
+    assert "≥" not in sanitized
+
+
+def test_compile_pdf_cleans_stale_source_md_on_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the PDF compile is skipped, the stale
+    ``paper_pdf_source.md`` from a prior SUCCESSFUL run must be
+    removed — its purpose ("exactly what pandoc consumed") would be
+    misleading for the just-failed attempt that didn't run pandoc."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stale = out_dir / "paper_pdf_source.md"
+    stale.write_text("from a previous successful run", encoding="utf-8")
+
+    # pandoc missing → skip path.
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    PaperGenerator(cfg).generate(art, out_dir)
+    assert not stale.exists()
+
+
+def test_generate_cleans_paper_pdf_source_when_pdf_not_in_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the user removes ``paper_pdf`` from ``output.kinds``, the
+    quest dir should not retain a stale ``paper_pdf_source.md`` from
+    a previous run that DID request it. Mirrors the existing cleanup
+    for ``paper_pdf_skipped.md``."""
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stale = out_dir / "paper_pdf_source.md"
+    stale.write_text("from when paper_pdf was on", encoding="utf-8")
+
+    cfg = _make_config(tmp_path, ["paper_md"])  # no paper_pdf
+    art = _make_artifacts(tmp_path)
+    PaperGenerator(cfg).generate(art, out_dir)
+    assert not stale.exists()

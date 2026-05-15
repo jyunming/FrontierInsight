@@ -33,9 +33,12 @@ from core.engine import QuestArtifacts
 # ``pdflatex`` + ``\usepackage[utf8]{inputenc}`` can't handle on its
 # own. Maps each char to a LaTeX replacement that works in BOTH text
 # and math contexts (``\ensuremath`` flips into math mode if
-# necessary). The map is the single source of truth — both the
-# pre-pandoc sanitizer (this file) and the ``\DeclareUnicodeCharacter``
-# safety net in templates should stay in sync with it.
+# necessary). This map is the ONLY protection for these glyphs — the
+# paper templates load ``inputenc`` but do not currently define
+# ``\DeclareUnicodeCharacter`` mappings, so any glyph that escapes
+# this dict will reach pdflatex unchanged and fail compile. Extend
+# the map (don't carve out skip regions) when new glyphs show up in
+# user-reported failures.
 _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     # Math operators
     "×": r"\ensuremath{\times}",        # ×
@@ -141,23 +144,39 @@ def _sanitize_unicode_for_latex(markdown: str) -> str:
     return replaced
 
 
-# Pattern: any code-fence block. We don't sanitize inside fenced code
-# because the chars might be intentional terminal-output samples and
-# pandoc emits them inside a Verbatim environment where they go
-# through different LaTeX handling.
+# Pattern: any code-fence block (used by tests + downstream tooling
+# that wants prose-only sanitization for non-PDF flows). The PDF
+# pipeline uses the unconditional sanitizer below — preserving raw
+# glyphs in code blocks would just push the pdflatex failure
+# downstream because the templates don't have a
+# ``\DeclareUnicodeCharacter`` safety net to catch them.
 _CODE_FENCE_RE = re.compile(r"(```.*?\n.*?```|`[^`\n]+`)", re.DOTALL)
 
 
 def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
     """Apply :func:`_sanitize_unicode_for_latex` to prose but leave
-    fenced code + inline code untouched. Inside fenced code, LLMs
-    sometimes include terminal output where the user wants to see the
-    raw glyph; rewriting it there would change the meaning."""
+    fenced code + inline code untouched. NOTE: this is NOT what the
+    PDF pipeline uses — that path sanitizes everything to avoid the
+    "raw glyph survives in a code block and pdflatex errors" failure
+    mode. This helper is kept as a documented option for any future
+    consumer that legitimately needs prose-only rewriting; today no
+    caller in this file uses it (tests still pin its behaviour as
+    contract)."""
     parts = _CODE_FENCE_RE.split(markdown)
     # Even-indexed parts are prose; odd-indexed are code matches.
     for i in range(0, len(parts), 2):
         parts[i] = _sanitize_unicode_for_latex(parts[i])
     return "".join(parts)
+
+
+def _count_sanitized_glyphs(markdown: str) -> int:
+    """Count how many source-glyph occurrences the sanitizer rewrote.
+    Used for the INFO log so the count is honest. Computing from
+    output-length deltas was misleading because the LaTeX
+    replacements are typically ~20 chars longer than the source
+    glyph — a single ``≈`` rewrite added ~20 chars to length but
+    only 1 to the "rewrites" count, making the delta negative."""
+    return sum(markdown.count(c) for c in _LATEX_UNICODE_REPLACEMENTS)
 
 _log = logging.getLogger("frontier_insight.paper")
 
@@ -213,6 +232,7 @@ class PaperGenerator:
             pdf_src = result.get("paper_md") or art.paper_md
             pdf, skip_reason = self._compile_pdf(pdf_src, out_dir)
             diag_path = out_dir / "paper_pdf_skipped.md"
+            sanitized_src = out_dir / "paper_pdf_source.md"
             if pdf is not None:
                 result["paper_pdf"] = pdf
                 # Success on this run — remove any stale skip
@@ -225,6 +245,17 @@ class PaperGenerator:
                     except OSError:
                         pass
             elif skip_reason is not None:
+                # PDF compile skipped — also clean up any sanitized
+                # source file from a PRIOR successful run. The comment
+                # on that file says "exactly what pandoc consumed";
+                # leaving it stale after a skip would mislead users
+                # into thinking the just-written file was the source
+                # of the (skipped) failure.
+                if sanitized_src.is_file():
+                    try:
+                        sanitized_src.unlink()
+                    except OSError:
+                        pass
                 # User asked for a PDF, none was produced, AND we know why.
                 # Write a single-paragraph diagnostic file in the same
                 # directory so the failure is discoverable without grepping
@@ -255,14 +286,18 @@ class PaperGenerator:
                     )
         elif "paper_pdf" not in kinds:
             # ``paper_pdf`` was not requested — clean up any stale
-            # diagnostic from a previous run that did request it. Keeps
-            # the quest dir tidy after a config edit.
-            stale = out_dir / "paper_pdf_skipped.md"
-            if stale.is_file():
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
+            # diagnostic AND the sanitized-source copy from a previous
+            # run that did request it. Keeps the quest dir tidy after
+            # a config edit so a user who turns off paper_pdf doesn't
+            # see leftover artifacts that look like they were produced
+            # by the current run.
+            for stale_name in ("paper_pdf_skipped.md", "paper_pdf_source.md"):
+                stale = out_dir / stale_name
+                if stale.is_file():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
 
         return result
 
@@ -372,21 +407,23 @@ class PaperGenerator:
         # —, lowercase Greek, etc.) into LaTeX commands before pandoc
         # sees the file. ``pdflatex`` + ``inputenc utf8`` can't handle
         # them on its own ("Unicode character ≈ (U+2248) not set up for
-        # use with LaTeX"). The user's original paper.md is preserved
-        # unchanged; the sanitized copy lands at
+        # use with LaTeX"). Sanitize UNCONDITIONALLY (including inside
+        # fenced + inline code) because the paper templates don't have
+        # a ``\DeclareUnicodeCharacter`` safety net — a raw glyph
+        # surviving in a code block would still kill the compile, just
+        # one stack-frame later. The user's original paper.md is
+        # preserved unchanged; the sanitized copy lands at
         # ``out_dir/paper_pdf_source.md`` so it's visible if the user
         # wants to see exactly what pandoc consumed.
         try:
             md_text = paper_md.read_text(encoding="utf-8")
-            sanitized_md = _sanitize_unicode_outside_code_blocks(md_text)
-            if sanitized_md != md_text:
+            glyph_count = _count_sanitized_glyphs(md_text)
+            sanitized_md = _sanitize_unicode_for_latex(md_text)
+            if glyph_count:
                 _log.info(
-                    "paper.pdf: sanitized Unicode glyphs in paper.md "
-                    "before pandoc (%d chars rewritten)",
-                    len(md_text) - len(sanitized_md) + sum(
-                        sanitized_md.count(v) for v in
-                        _LATEX_UNICODE_REPLACEMENTS.values()
-                    ),
+                    "paper.pdf: rewrote %d Unicode glyph occurrence(s) "
+                    "in paper.md before pandoc",
+                    glyph_count,
                 )
             sanitized_path = out_dir / "paper_pdf_source.md"
             sanitized_path.write_text(sanitized_md, encoding="utf-8")
