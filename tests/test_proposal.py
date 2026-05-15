@@ -121,6 +121,61 @@ def test_companion_yaml_references_proposal_md_filename() -> None:
     assert "1778452404-test-aabbcc-proposal.md" in yaml_text
 
 
+def test_companion_yaml_pins_proposal_md_into_local_papers(tmp_path: Path) -> None:
+    """The generated proposal needs to feed the quest it spawns. The
+    cheapest way: emit a ``knowledge.local_papers: [<proposal_md>]``
+    entry so retrieval pins the planning doc at the head of every
+    asearch, ensuring design + write nodes see the hypothesis /
+    success-criteria / scope-limits the user already approved
+    (instead of relying on probabilistic Axon retrieval).
+
+    Pass the absolute path so the YAML survives being moved before
+    ``/start`` — relative paths would break the moment the user
+    cd's away from the repo."""
+    import yaml as pyyaml
+    proposal_md = tmp_path / "1778452404-rk4-vs-verlet-aabbcc-proposal.md"
+    proposal_md.write_text("# Proposal\n", encoding="utf-8")
+    yaml_text = _render_companion_yaml(
+        "Compare RK4 vs Verlet",
+        proposal_id="1778452404-rk4-vs-verlet-aabbcc",
+        generated_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+        proposal_path=proposal_md,
+    )
+    parsed = pyyaml.safe_load(yaml_text)
+    assert "local_papers" in parsed.get("knowledge", {}), (
+        "companion YAML must declare knowledge.local_papers so the "
+        "proposal is pinned in retrieval"
+    )
+    pinned = parsed["knowledge"]["local_papers"]
+    assert isinstance(pinned, list) and len(pinned) == 1, (
+        f"local_papers must be a 1-element list; got {pinned!r}"
+    )
+    # Posix-normalized comparison — _render writes forward slashes
+    # on Windows so the YAML round-trips identically across OS.
+    assert pinned[0].replace("\\", "/") == str(proposal_md).replace("\\", "/")
+
+
+def test_companion_yaml_local_papers_loads_through_config(tmp_path: Path) -> None:
+    """End-to-end: the local_papers entry in the companion YAML must
+    survive Pydantic + tilde-expansion and end up on
+    ``cfg.knowledge.local_papers`` as a one-element list of Paths."""
+    from core.config import Config
+
+    proposal_md = tmp_path / "p.md"
+    proposal_md.write_text("# Proposal\n", encoding="utf-8")
+    yaml_text = _render_companion_yaml(
+        "T",
+        proposal_id="aaa",
+        generated_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+        proposal_path=proposal_md,
+    )
+    yaml_path = tmp_path / "companion.yaml"
+    yaml_path.write_text(yaml_text, encoding="utf-8")
+    cfg = Config.from_yaml(yaml_path)
+    assert len(cfg.knowledge.local_papers) == 1
+    assert cfg.knowledge.local_papers[0].resolve() == proposal_md.resolve()
+
+
 # ---------- end-to-end ------------------------------------------------------
 
 

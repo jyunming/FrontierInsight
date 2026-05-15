@@ -140,6 +140,13 @@ execution:
 
 knowledge:
   enabled: true
+  # Pin the planning doc this YAML was generated from so the quest
+  # engine reads it verbatim (not just via probabilistic Axon
+  # retrieval). Forces the design + write nodes to honour the
+  # hypothesis / success criteria / scope limits already approved
+  # in the proposal.
+  local_papers:
+    - ${proposal_path}
 
 output:
   kinds: [paper_md, paper_pdf]
@@ -149,22 +156,33 @@ output:
 
 def _render_companion_yaml(
     topic: str, *, proposal_id: str, generated_at: datetime,
+    proposal_path: Path | None = None,
 ) -> str:
     """Build the minimal YAML companion. ``topic:`` carries the user's
     ORIGINAL string verbatim (the LLM's expansion stays in the .md
-    file); the quest engine starts fresh from the user's intent."""
+    file); the quest engine starts fresh from the user's intent.
+
+    ``proposal_path`` is the absolute path of the just-written
+    planning markdown; we render it under ``knowledge.local_papers``
+    so the quest engine pins the proposal at the head of literature
+    retrieval. Absolute (not relative) so the YAML survives being
+    moved before ``/start``."""
     # Indent every line of the topic by 2 spaces so the YAML's `|`
     # block-scalar parses cleanly even when the topic has empty lines.
     indented = "\n".join(
         ("  " + line) if line else "  " for line in topic.strip().splitlines()
     )
     title_slug = _slugify_topic(topic, max_chars=64)
+    pinned = str(proposal_path).replace("\\", "/") if proposal_path else (
+        f"outputs/_drafts/{proposal_id}-proposal.md"
+    )
     return string.Template(_DEFAULT_YAML_TEMPLATE).substitute(
         generated_at=generated_at.date().isoformat(),
         proposal_filename=f"{proposal_id}-proposal.md",
         yaml_filename=f"outputs/_drafts/{proposal_id}.yaml",
         indented_topic=indented,
         title=title_slug,
+        proposal_path=pinned,
     )
 
 
@@ -256,6 +274,7 @@ async def generate_proposal(
 
     yaml_text = _render_companion_yaml(
         topic, proposal_id=proposal_id, generated_at=now,
+        proposal_path=proposal_path,
     )
     yaml_path.write_text(yaml_text, encoding="utf-8")
 
