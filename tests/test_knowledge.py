@@ -64,33 +64,30 @@ def test_add_quest_artifacts_returns_false_when_writeback_disabled(tmp_path: Pat
 
 
 class _BrainAddText:
-    """Mock brain exposing only `add_text` (the most idiomatic path)."""
+    """Mock brain that captures ``brain.ingest(documents)`` calls.
+
+    The real AxonBrain API is ``ingest(documents: list[dict])`` where
+    each doc has ``id`` / ``text`` / ``metadata``. The class is named
+    ``_BrainAddText`` for historical continuity with the older test
+    suite which mocked a non-existent ``add_text`` method.
+
+    ``self.calls`` is the flattened list of ``(text, metadata)``
+    tuples — one entry per document — so existing test bodies that
+    index by kind via ``_calls_by_kind`` keep working without
+    knowing about the batch-call shape."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.batches: list[list[dict]] = []
+        self.finalize_calls: int = 0
 
-    def add_text(self, text: str, *, metadata: dict) -> None:
-        self.calls.append((text, metadata))
+    def ingest(self, documents: list[dict]) -> None:
+        self.batches.append(list(documents))
+        for doc in documents:
+            self.calls.append((doc.get("text", ""), doc.get("metadata", {}) or {}))
 
-
-class _BrainIngestText:
-    """Mock brain exposing only `ingest_text` (the secondary path)."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict]] = []
-
-    def ingest_text(self, text: str, *, metadata: dict) -> None:
-        self.calls.append((text, metadata))
-
-
-class _BrainIngestOnly:
-    """Mock brain exposing only `ingest` (the file-path fallback)."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def ingest(self, source: str) -> None:
-        self.calls.append(source)
+    def finalize_ingest(self) -> None:
+        self.finalize_calls += 1
 
 
 def _enabled_knowledge_with(brain: object, *, write_back: bool = True) -> Knowledge:
@@ -783,36 +780,26 @@ def test_arxiv_fallback_tolerates_network_failure(monkeypatch) -> None:
     assert k.search("anything") == []
 
 
-def test_add_quest_artifacts_uses_ingest_text_when_add_text_missing(tmp_path: Path) -> None:
-    """Confirms the `add_text` -> `ingest_text` fallback step routes the
-    full structured bundle through `ingest_text` when that's the only
-    method the brain exposes."""
-    brain = _BrainIngestText()
+def test_add_quest_artifacts_calls_brain_ingest_once_per_quest(tmp_path: Path) -> None:
+    """Real Axon API is ``brain.ingest(documents)`` taking a LIST of
+    docs. The full bundle (spine, body, summary, topic event) lands
+    in a SINGLE call so the embed/index flush — driven by
+    ``finalize_ingest`` — runs once for the whole quest, not five
+    times. Earlier versions of this code mistakenly called a per-doc
+    ``add_text`` that didn't exist on the brain at all."""
+    brain = _BrainAddText()
     k = _enabled_knowledge_with(brain)
     paper = tmp_path / "paper.md"
     paper.write_text("# body", encoding="utf-8")
 
     ok = k.add_quest_artifacts(quest_id="qX", paper_md_path=paper, summary="s")
-
     assert ok is True
-    assert len(brain.calls) == 4
-    by_kind = _calls_by_kind(brain)
-    body_text, body_meta = by_kind["fi_quest_paper"]
-    assert body_text.endswith("# body")
-    assert body_meta["tag"] == "fi-quest:qX"
-
-
-def test_add_quest_artifacts_falls_through_to_ingest(tmp_path: Path) -> None:
-    """When neither add_text nor ingest_text exist, falls back to ingest(path)."""
-    brain = _BrainIngestOnly()
-    k = _enabled_knowledge_with(brain)
-    paper = tmp_path / "paper.md"
-    paper.write_text("# body", encoding="utf-8")
-
-    ok = k.add_quest_artifacts(quest_id="q1", paper_md_path=paper, summary="s")
-
-    assert ok is True
-    assert brain.calls == [str(paper)]
+    assert len(brain.batches) == 1, (
+        "the structured bundle must batch into a single ingest call"
+    )
+    assert brain.finalize_calls == 1, (
+        "finalize_ingest must run once so embeddings flush after the batch"
+    )
 
 
 def test_add_quest_artifacts_handles_missing_paper_with_add_text(tmp_path: Path) -> None:
@@ -833,37 +820,80 @@ def test_add_quest_artifacts_handles_missing_paper_with_add_text(tmp_path: Path)
     assert body_text.endswith("\n") or body_text.count("\n") == 1
 
 
-# --- ingest fallback ---------------------------------------------------------
+# --- ingest -----------------------------------------------------------------
 
 
-def test_ingest_uses_ingest_method_first(tmp_path: Path) -> None:
-    brain = _BrainIngestOnly()
+def test_ingest_reads_file_and_calls_brain_ingest(tmp_path: Path) -> None:
+    """``Knowledge.ingest(file_path)`` reads the file and calls the
+    real ``brain.ingest([{id, text, metadata}])`` API, then flushes
+    via ``finalize_ingest``. Assertion shape is loose — ``id`` must
+    be non-empty and derived from the source path, but the exact
+    format stays implementation-detail (pinning ``doc.txt`` was too
+    coupled and broke when the id strategy tightened against
+    same-basename collisions)."""
+    brain = _BrainAddText()
     k = _enabled_knowledge_with(brain)
     f = tmp_path / "doc.txt"
-    f.write_text("x", encoding="utf-8")
+    f.write_text("hello payload", encoding="utf-8")
     assert k.ingest(f) is True
-    assert brain.calls == [str(f)]
+    assert len(brain.batches) == 1
+    doc = brain.batches[0][0]
+    assert doc["text"] == "hello payload"
+    assert doc["id"], "doc id must be non-empty"
+    assert "doc.txt" in doc["id"]
+    assert str(tmp_path.resolve()).replace("\\", "/") in doc["id"], (
+        "doc id must carry the resolved parent-path so distinct files "
+        "with the same basename don't collide on ingest"
+    )
+    assert doc["metadata"]["kind"] == "fi_local_paper"
+    assert brain.finalize_calls == 1
 
 
-class _BrainAddDocument:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def add_document(self, source: str) -> None:
-        self.calls.append(source)
-
-
-def test_ingest_falls_back_to_add_document(tmp_path: Path) -> None:
-    brain = _BrainAddDocument()
+def test_ingest_distinct_files_with_same_basename_dont_collide(
+    tmp_path: Path,
+) -> None:
+    """Two files named ``data.csv`` from different subdirs ingest as
+    distinct documents — bare ``path.name`` would have caused the
+    second ingest to overwrite the first."""
+    brain = _BrainAddText()
     k = _enabled_knowledge_with(brain)
-    f = tmp_path / "doc.txt"
-    f.write_text("x", encoding="utf-8")
-    assert k.ingest(f) is True
-    assert brain.calls == [str(f)]
+    a = tmp_path / "a" / "data.csv"
+    b = tmp_path / "b" / "data.csv"
+    a.parent.mkdir()
+    b.parent.mkdir()
+    a.write_text("from a", encoding="utf-8")
+    b.write_text("from b", encoding="utf-8")
+    assert k.ingest(a) is True
+    assert k.ingest(b) is True
+    ids = [doc["id"] for batch in brain.batches for doc in batch]
+    assert len(set(ids)) == 2, f"expected 2 distinct ids; got {ids}"
+
+
+def test_mint_doc_id_uses_paper_id_and_rel_path_for_disambiguation() -> None:
+    """``_mint_doc_id`` previously only checked the top-level
+    quest_id / proposal_id / etc. keys, so ``fi_summary_input`` docs
+    that share a summary_id but live at different paths would all
+    collide to the same id. New behaviour: composite key including
+    ``paper_id``, ``rel_path``, and ``tag`` discriminators."""
+    from core.knowledge import Knowledge
+    # Same summary_id but different rel_path → distinct ids.
+    a = Knowledge._mint_doc_id("fi_summary_input", {
+        "summary_id": "abc", "rel_path": "papers/x.pdf",
+    })
+    b = Knowledge._mint_doc_id("fi_summary_input", {
+        "summary_id": "abc", "rel_path": "papers/y.pdf",
+    })
+    assert a != b, "rel_path must disambiguate fi_summary_input docs"
+    # fi_external_ref_spine carries paper_id, not quest_id —
+    # previously this would have fallen through to time+uuid.
+    c = Knowledge._mint_doc_id("fi_external_ref_spine", {
+        "paper_id": "doi:10.1/x", "tag": "fi-paper:doi:10.1/x",
+    })
+    assert "doi:10.1/x" in c, "paper_id must be the stable id when present"
 
 
 def test_ingest_returns_false_when_brain_has_no_ingest_api(tmp_path: Path) -> None:
-    brain = object()  # neither ingest nor add_document
+    brain = object()  # no ingest method
     k = _enabled_knowledge_with(brain)
     f = tmp_path / "doc.txt"
     f.write_text("x", encoding="utf-8")
