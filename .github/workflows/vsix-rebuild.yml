@@ -21,6 +21,8 @@ on:
       - "vscode-frontier-insight/.vscodeignore"
       - "vscode-frontier-insight/README.md"
       - "vscode-frontier-insight/LICENSE.txt"
+      - "vscode-frontier-insight/images/icon.png"
+      - "vscode-frontier-insight/images/icon.svg"
   workflow_dispatch: {}
 
 permissions:

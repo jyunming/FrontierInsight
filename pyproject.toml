@@ -75,6 +75,13 @@ dev = [
   "pytest-mock>=3.14",
   "pytest-cov>=6.0",
   "pytest-testmon>=2.2",
+  # Pillow is used by scripts/render_icon.py and the icon-asset
+  # regression tests in tests/test_vscode_extension_icon.py. We
+  # declare it explicitly rather than relying on the transitive
+  # install via matplotlib — a fresh dev env that installs only
+  # ``frontier-insight[dev]`` (no matplotlib) would otherwise
+  # ImportError on ``from PIL import Image``.
+  "pillow>=10.0",
 ]
 # Expanded to the concrete deps rather than a self-reference
 # (`frontier-insight[pdf,docker,knowledge]`) — some pip resolver
