@@ -105,9 +105,24 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
         assert "output_kinds" in questions
 
         # 3. Submit answers via the clarify endpoint.
+        # IMPORTANT — keep ``empirical_vs_theoretical`` AWAY from
+        # ``"empirical"`` here. PR #59 introduced the legacy
+        # ``empirical_vs_theoretical=="empirical"`` fallback that
+        # routes the quest into no-simulation mode (pauses for user
+        # data and exits rc=0 without writing paper.md). This test
+        # is an end-to-end SIMULATION smoke; we want the regular
+        # implement/execute path to run, which means the
+        # simulatability resolver must NOT trigger. Either:
+        # (a) leave the new ``simulatability`` slot absent AND set
+        #     ``empirical_vs_theoretical: "theoretical"`` (legacy
+        #     fallback inactive), or
+        # (b) explicitly set ``simulatability.default: "yes"``
+        #     (new slot wins over legacy).
+        # Going with (a) — minimal change, no new slot in test
+        # fixtures yet.
         answers = {
             "comparative_baseline": "user-supplied baseline X",
-            "empirical_vs_theoretical": "empirical",
+            "empirical_vs_theoretical": "theoretical",
             "success_metric": "user-supplied metric M",
             "budget": "1 minute",
             "output_kinds": ["paper_md"],

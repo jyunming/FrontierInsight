@@ -1,7 +1,12 @@
 """Phase I clarify-node tests.
 
 Three modes:
-  - ``off``         — node returns ``{"clarify_done": True}`` and no questions.
+  - ``off``         — node returns ``{"clarify_done": True,
+                      "no_simulation_resolved": <yaml-flag>}`` and no
+                      questions. (``no_simulation_resolved`` was added
+                      by PR #59 — even with clarify off, the engine
+                      still has to surface a routing decision for
+                      ``_route_after_design``.)
   - ``auto``        — LLM generates questions, agent self-answers from defaults.
   - ``interactive`` — LLM generates questions, node calls ``interrupt()``;
                       resuming with answers populates ``clarify_answers``.
@@ -120,7 +125,12 @@ async def test_clarify_off_skips_node(tmp_path: Path, monkeypatch) -> None:
 
     patch = await eng._node_clarify({"topic": "x"})
 
-    assert patch == {"clarify_done": True}
+    # Phase D1 / β change: _node_clarify now ALSO returns the resolved
+    # ``no_simulation_resolved`` flag so the routing decision is
+    # visible at the state level (not just inferred from YAML/clarify
+    # downstream). With clarify_mode='off' and ``engine.no_simulation``
+    # unset, the resolved flag is False.
+    assert patch == {"clarify_done": True, "no_simulation_resolved": False}
     assert chat_calls == []  # LLM was never invoked
 
 
