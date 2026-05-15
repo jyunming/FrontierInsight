@@ -216,12 +216,32 @@ def test_route_after_cross_check_re_experiment_routes_to_design(tmp_path: Path) 
     }) == "redesign"
 
 
-def test_route_after_cross_check_broaden_lit_routes_to_design(tmp_path: Path) -> None:
+def test_route_after_cross_check_broaden_lit_routes_to_literature(
+    tmp_path: Path,
+) -> None:
+    """``broaden_lit`` re-enters the literature node so the next pass
+    can fetch fresh evidence. Until this routing existed, the signal
+    collapsed onto ``redesign`` and the design node re-ran with the
+    SAME literature it already had — defeating the whole point of
+    saying "broaden_lit"."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     assert eng._route_after_cross_check({
         "analysis": {"next_step": "broaden_lit"},
         "iteration": 0,
-    }) == "redesign"
+    }) == "broaden_lit"
+
+
+def test_route_after_cross_check_broaden_lit_falls_through_when_budget_exhausted(
+    tmp_path: Path,
+) -> None:
+    """Like the re_experiment branch, broaden_lit respects the
+    shared ``engine.max_iterations`` budget — at the cap the quest
+    publishes instead of looping again."""
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
+    assert eng._route_after_cross_check({
+        "analysis": {"next_step": "broaden_lit"},
+        "iteration": 2,
+    }) == "write"
 
 
 def test_route_after_cross_check_falls_through_to_write_when_budget_exhausted(
@@ -244,3 +264,68 @@ def test_route_after_cross_check_respects_config_disable(tmp_path: Path) -> None
         "analysis": {"next_step": "re_experiment"},
         "iteration": 0,
     }) == "write"
+
+
+# --- _node_literature iterative-loop behaviour ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_node_literature_first_pass_sets_iter_to_one(tmp_path: Path) -> None:
+    """First entry into the literature node — no prior literature, no
+    counter. Result: literature populated, ``literature_iter`` == 1."""
+    eng = Engine(_mk_cfg(tmp_path))
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(content="abstract A", metadata={"doi": "10.1/a", "url": "u1"}),
+            RetrievedDoc(content="abstract B", metadata={"doi": "10.1/b", "url": "u2"}),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    patch = await eng._node_literature({
+        "topic": "first-pass topic",
+        "chosen_idea": {"title": "T"},
+    })
+    assert patch["literature_iter"] == 1
+    assert len(patch["literature"]) == 2
+    assert patch["literature"][0]["metadata"]["doi"] == "10.1/a"
+
+
+@pytest.mark.asyncio
+async def test_node_literature_broaden_lit_reentry_accumulates_and_dedups(
+    tmp_path: Path,
+) -> None:
+    """When ``broaden_lit`` routes back into ``literature``, the second
+    pass MUST keep the previously-retrieved docs and only append new
+    ones (DOI- / URL- / content-prefix dedup). Without accumulation
+    the design node would lose context every time the loop fires."""
+    eng = Engine(_mk_cfg(tmp_path))
+
+    # Second pass returns one overlap (doi 10.1/a) and two genuinely new.
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(content="abstract A (dup)", metadata={"doi": "10.1/a"}),
+            RetrievedDoc(content="abstract C", metadata={"doi": "10.1/c"}),
+            RetrievedDoc(content="abstract D", metadata={"url": "uniq-url-d"}),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    prior_state = {
+        "topic": "re-entry topic",
+        "chosen_idea": {"title": "T"},
+        "design": {"hypothesis": "specific design hypothesis"},
+        "literature_iter": 1,
+        "literature": [
+            {"content": "abstract A", "metadata": {"doi": "10.1/a", "url": "u1"}},
+            {"content": "abstract B", "metadata": {"doi": "10.1/b", "url": "u2"}},
+        ],
+    }
+    patch = await eng._node_literature(prior_state)
+    assert patch["literature_iter"] == 2
+    # Original 2 + 2 new (C, D) — the duplicate A is dropped.
+    assert len(patch["literature"]) == 4
+    dois = [e.get("metadata", {}).get("doi") for e in patch["literature"]]
+    assert dois.count("10.1/a") == 1, "duplicate DOI must be dropped on re-entry"
+    assert "10.1/c" in dois
+    urls = [e.get("metadata", {}).get("url") for e in patch["literature"]]
+    assert "uniq-url-d" in urls

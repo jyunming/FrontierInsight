@@ -101,7 +101,8 @@ Conditional edges visible in the graph:
 | Edge | Trigger | Bound by |
 |---|---|---|
 | `execute_reflect → execute` | Script crashed (rc != 0 or no `RESULT_JSON`) | `engine.exec_reflect_max_iterations` (default 3) |
-| `cross_check → design` | `analyze.next_step ∈ {re_experiment, broaden_lit}` | `engine.max_iterations` (default 2) |
+| `cross_check → design` | `analyze.next_step == "re_experiment"` | `engine.max_iterations` (default 2) |
+| `cross_check → literature` | `analyze.next_step == "broaden_lit"` — re-enters the literature node so a second retrieval fetches fresh evidence (the design's hypothesis is folded into the query); new docs merge into the existing list with DOI / URL / content-prefix dedup. | `engine.max_iterations` (default 2) |
 | `review → design` | `review.verdict == "revise"` | `engine.max_iterations` (default 2) |
 | `design → auto_collect_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `auto_collect_data → wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 

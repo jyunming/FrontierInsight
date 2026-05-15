@@ -453,7 +453,14 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     reflect_branch = next(iter(g.branches["execute_reflect"].values()))
     assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
-    assert cross_branch.ends == {"write": "write", "redesign": "design"}
+    # Three terminal labels: ``broaden_lit`` re-enters the literature
+    # node (iterative literature loop), ``redesign`` re-enters design
+    # for ``re_experiment``, and ``write`` is the happy-path exit.
+    assert cross_branch.ends == {
+        "write": "write",
+        "redesign": "design",
+        "broaden_lit": "literature",
+    }
     design_branch = next(iter(g.branches["design"].values()))
     assert design_branch.ends == {
         "implement": "implement",
