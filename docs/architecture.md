@@ -85,8 +85,8 @@ Feature-specific extras:
 - Analyze re-route + cross-paper check: `cross_check` (per-finding classification list).
 - Ideate self-reflection: `ideate_critique`.
 - Reviewer panel: `review_panel` (per-persona reviews + moderator synthesis).
-- No-simulation routing (PR #57/#59): `no_simulation_resolved` (bool, decided at clarify or YAML). When True, the engine skips `implement → execute → execute_reflect` and routes through `auto_collect_data → wait_for_data → data_load → analyze`.
-- Auto-collect bookkeeping (PR #60/#61/#62): `auto_collected_count` (int — total files written into `data/auto_collected/` by Axon plus all enabled `engine.dataset_adapters`). Per-adapter writes land under `data/auto_collected/<adapter>/`.
+- No-simulation routing: `no_simulation_resolved` (bool, decided at clarify or YAML). When True, the engine skips `implement → execute → execute_reflect` and routes through `auto_collect_data → wait_for_data → data_load → analyze`.
+- Auto-collect bookkeeping: `auto_collected_count` (int — total files written into `data/auto_collected/` by Axon plus all enabled `engine.dataset_adapters`). Per-adapter writes land under `data/auto_collected/<adapter>/`.
 
 JSON-serializable so `AsyncSqliteSaver` can checkpoint after every
 node. **Field names are the contract** between the engine, the

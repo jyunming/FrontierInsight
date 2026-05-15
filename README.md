@@ -30,7 +30,7 @@ FI is opinionated about the *whole research workflow*, not just the LLM call. If
 |---|---|
 | **Vanilla Copilot Chat / Cursor / Cline** | The full research loop end-to-end — ideate → literature → code → execute → analyze → write → review — without you driving each step. Chat tools wait for you; FI doesn't. |
 | **A general-purpose AI agent for science** | **Persistent cross-quest memory.** `@fi /digest /portfolio /critique /proposal` accumulate over weeks via the Axon knowledge layer, so FI remembers what you tried last month. Plus a reviewer panel with per-persona model routing (statistician, methodologist, devil's advocate, …) — most agents start fresh each session and use a single reviewer. |
-| **Hand-rolled LangGraph + OpenAI scripts** | The *output layer*: venue paper templates (NeurIPS / ICLR / IEEE Access / Nature MI / generic), slides, posters, speech scripts. Plus resumable quests (`--resume` re-enters from the last LangGraph checkpoint), the sanctioned `vscode.lm` Copilot integration (no reverse-engineered proxies), and a corporate-laptop install path (tectonic LaTeX, no admin needed). |
+| **Hand-rolled LangGraph + OpenAI scripts** | The *output layer*: venue paper templates (NeurIPS / ICLR / IEEE Access / Nature MI / generic), non-scientific prose templates (essay / report / policy_brief / whitepaper), slides, posters, speech scripts. Plus structured-data adapters (`worldbank`, `wikipedia`) that pull live evidence into `data/auto_collected/` for qualitative/archival topics, no Python experiment required. Plus resumable quests (`--resume` re-enters from the last LangGraph checkpoint), the sanctioned `vscode.lm` Copilot integration (no reverse-engineered proxies), and a corporate-laptop install path (tectonic LaTeX, no admin needed). |
 
 Concretely: **per-node model routing** lets you spend cheap on `clarify` and expensive on `write`. **Adversarial `/critique`** runs a second-pass review with a different model family than the one that wrote the paper. **`--fleet`** runs many quests in parallel with bounded concurrency. **`--install-tectonic`** drops a 70 MB self-bootstrapping LaTeX into `tools/` so corporate locked-down envs can still compile PDFs.
 
@@ -41,6 +41,7 @@ Concretely: **per-node model routing** lets you spend cheap on `clarify` and exp
 - **Python 3.11+** (Windows / macOS / Linux — no WSL needed).
 - An LLM provider: a Copilot subscription via VSCode, OpenAI / Anthropic / Gemini API key, or local Ollama. Pick one in the quickstart below.
 - *Optional:* `pandoc` + a LaTeX engine for `paper.pdf` output. If you can't install MiKTeX / TeX Live (no admin, corporate laptop), run `python launch.py --install-tectonic` after install — it drops a 70 MB self-contained LaTeX binary into `tools/` and FI picks it up automatically.
+- *Optional, network only:* the WorldBank + Wikipedia dataset adapters (`engine.dataset_adapters: [worldbank, wikipedia]`, opt-in) use stdlib `urllib` against `api.worldbank.org` and `en.wikipedia.org` — no extra `pip install` needed, but the runtime needs outbound HTTPS to those hosts when the adapters are enabled.
 
 ---
 
@@ -57,6 +58,8 @@ slides.md                             ← if output.kinds: [slides]; Marp markdo
 slides.pptx                           ← real PowerPoint (if pandoc installed too)
 slides.html / slides.pdf              ← if marp CLI installed
 poster.tex, talk.md                   ← optional deliverables
+data/auto_collected/<rank>_<slug>.md  ← Axon hits (no-simulation mode, written before the user-data pause)
+data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldbank, wikipedia) under per-adapter subdirs
 .fi/run.log                           ← full run log
 .fi/state.sqlite                      ← resumable checkpoint
 frontier_insight_summary.json        ← machine-readable index
@@ -241,6 +244,37 @@ python launch.py --config my_quest.yaml --interactive
 ```
 
 The agent prints 5 questions; press Enter to accept each suggested default, or type your own answer.
+
+### Topics that need real data, not a Python script
+
+Some research questions can't honestly be answered by a self-contained Python experiment — cultural comparisons, historical analyses, qualitative cross-case studies, policy reviews. For those, set:
+
+```yaml
+engine:
+  no_simulation: true
+  auto_collect_data: true              # default — try Axon first
+  dataset_adapters: [worldbank, wikipedia]  # opt-in external lookups
+```
+
+The engine skips `implement → execute` entirely. Instead, `auto_collect_data` queries Axon for relevant docs, runs each enabled adapter (WorldBank pulls country-indicator tables, Wikipedia fetches article summaries), and writes everything into `outputs/<id>/data/auto_collected/`. If any files land, the quest continues through `analyze → cross_check → write → review`. If nothing lands (Axon empty + adapters returned nothing), the engine pauses cleanly with a `data/README.md` telling you what to drop. Drop your own files into `data/` and re-run:
+
+```bash
+python launch.py --config <yaml> --resume <quest_id>
+```
+
+The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `clarify_mode: auto|interactive` — setting `no_simulation: true` in YAML is just the explicit override.
+
+### Make the PDF compile a hard gate
+
+For unattended CI / fleet runs, make a missing pandoc/LaTeX engine fail fast instead of dropping a `paper_pdf_skipped.md` after a full quest:
+
+```yaml
+output:
+  kinds: [paper_md, paper_pdf]
+  require_pdf: true
+```
+
+The engine pre-flights `pandoc` + a LaTeX engine (pdflatex / tectonic / repo-local `tools/tectonic[.exe]`) before firing any LLM call. Missing tooling aborts the run with a recipe — saves ~15 min of LLM cost on a quest that was always going to fail at the compile step.
 
 ### Run many quests in parallel
 

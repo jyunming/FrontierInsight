@@ -354,10 +354,10 @@ The engine then runs `clarify → ideate → literature → design →
 auto_collect_data → wait_for_data → data_load → analyze → ...`. The
 two no-simulation-specific stops:
 
-**`auto_collect_data`** — Phase D1 agent-side data collection.
-Before pausing for user input, the engine asks the Knowledge layer
-(Axon) for relevant docs using `topic + design.hypothesis` as the
-query and writes the top hits into `<quest_root>/data/auto_collected/`
+**`auto_collect_data`** — agent-side data collection. Before
+pausing for user input, the engine asks the Knowledge layer (Axon)
+for relevant docs using `topic + design.hypothesis` as the query
+and writes the top hits into `<quest_root>/data/auto_collected/`
 as one Markdown file per doc (with YAML provenance front matter so
 the paper can cite back to specific sources). Controlled by:
 
@@ -369,14 +369,14 @@ the paper can cite back to specific sources). Controlled by:
   only on long-context models with topics that genuinely need
   more breadth.
 
-**Dataset adapters (Phase D2)**: in addition to the corpus-RAG
-retrieval, `auto_collect_data` can invoke structured-data adapters
-that hit public APIs and write tabular evidence into
+**Dataset adapters**: in addition to the corpus-RAG retrieval,
+`auto_collect_data` can invoke structured-data adapters that hit
+public APIs and write tabular evidence into
 `<quest_root>/data/auto_collected/<adapter>/`. Opt in via:
 
 * `engine.dataset_adapters: [worldbank, wikipedia]` — list of
-  registered adapter names. Empty (default) means "Axon only — D1
-  behavior unchanged". Available adapters: `worldbank`, `wikipedia`.
+  registered adapter names. Empty (default) means "Axon only —
+  no adapters run". Available adapters: `worldbank`, `wikipedia`.
   Unknown names log a WARNING and are skipped (no hard error on typo).
 * `engine.dataset_adapter_top_k: 3` — rows per adapter. Smaller
   default than the Axon knob because each row hits an external API.
