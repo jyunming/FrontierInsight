@@ -2281,13 +2281,11 @@ def test_ideate_tournament_prompt_loads() -> None:
 
 @pytest.mark.asyncio
 async def test_run_ideate_tournament_picks_majority_winner(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """3 ideas → 3 pairwise matches. If idea 0 wins both its matches,
     it has 2 wins; the other two have 1 win and 0 wins. Tournament
     must pick idea 0."""
-    from unittest.mock import AsyncMock
-
     engine = _make_tournament_engine(tmp_path)
     ideas = [
         {"title": "Alpha", "summary": "first"},
@@ -2308,7 +2306,6 @@ async def test_run_ideate_tournament_picks_majority_winner(
         # full idea JSON inline, so we match on title to know which pair).
         is_alpha_in_a = '"Alpha"' in prompt.split('# Idea B')[0]
         is_beta_in_a = '"Beta"' in prompt.split('# Idea B')[0]
-        is_alpha_in_b = '"Alpha"' in prompt.split('# Idea B')[1]
         if is_alpha_in_a and '"Beta"' in prompt.split('# Idea B')[1]:
             w = outcomes[(0, 1)]
         elif is_alpha_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
@@ -2319,16 +2316,16 @@ async def test_run_ideate_tournament_picks_majority_winner(
             raise AssertionError(f"unexpected pair in prompt: {prompt[:200]}")
         return f'{{"winner": "{w}", "reason": "tractability", "margin": "decisive"}}'
 
-    import core.engine as engine_mod
-    # _run_ideate_tournament calls self._chat — patch on the Engine class.
-    original_chat = engine_mod.Engine._chat
-    engine_mod.Engine._chat = fake_chat  # type: ignore[assignment]
-    try:
-        winner, record = await engine._run_ideate_tournament(
-            {"topic": "x"}, ideas, initial_chosen=ideas[1],
-        )
-    finally:
-        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+    # monkeypatch.setattr is auto-scoped to this test — pytest's
+    # teardown restores Engine._chat even if an assertion raises mid-test.
+    # Patching the class attribute directly with try/finally is fragile
+    # to a setup-time exception leaking the replacement into later tests.
+    from core.engine import Engine as _Engine
+    monkeypatch.setattr(_Engine, "_chat", fake_chat)
+
+    winner, record = await engine._run_ideate_tournament(
+        {"topic": "x"}, ideas, initial_chosen=ideas[1],
+    )
 
     assert winner["title"] == "Alpha"
     assert record["winner_idx"] == 0
@@ -2342,13 +2339,11 @@ async def test_run_ideate_tournament_picks_majority_winner(
 
 @pytest.mark.asyncio
 async def test_run_ideate_tournament_falls_back_when_inconclusive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If every match returns malformed JSON (winner != "A" or "B"),
     no idea accumulates wins. Tournament must fall back to
     ``initial_chosen`` rather than crashing or picking arbitrarily."""
-    from unittest.mock import AsyncMock
-
     engine = _make_tournament_engine(tmp_path)
     ideas = [{"title": "A", "summary": "x"}, {"title": "B", "summary": "y"}]
     initial = ideas[1]
@@ -2356,15 +2351,11 @@ async def test_run_ideate_tournament_falls_back_when_inconclusive(
     async def fake_chat(self, prompt, *, node, **kw):
         return '{"winner": "TIE", "reason": "?"}'  # invalid winner
 
-    import core.engine as engine_mod
-    original_chat = engine_mod.Engine._chat
-    engine_mod.Engine._chat = fake_chat  # type: ignore[assignment]
-    try:
-        winner, record = await engine._run_ideate_tournament(
-            {"topic": "x"}, ideas, initial_chosen=initial,
-        )
-    finally:
-        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+    from core.engine import Engine as _Engine
+    monkeypatch.setattr(_Engine, "_chat", fake_chat)
+    winner, record = await engine._run_ideate_tournament(
+        {"topic": "x"}, ideas, initial_chosen=initial,
+    )
 
     assert winner["title"] == "B"  # initial_chosen preserved
     assert record["outcome"] == "inconclusive_fallback"
@@ -2373,12 +2364,14 @@ async def test_run_ideate_tournament_falls_back_when_inconclusive(
 
 @pytest.mark.asyncio
 async def test_run_ideate_tournament_dispatches_matches_in_parallel(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """3 pairwise matches with 50ms simulated latency each. Parallel
-    dispatch → wall-clock ~50ms; serial would be 150ms. Assert <130ms
-    with margin for jitter (same pattern as the WorldBank parallel
-    test)."""
+    """3 pairwise matches with 200ms simulated latency each. Parallel
+    dispatch → wall-clock ~200ms; serial would be 600ms. Threshold
+    set well below the serial floor so the test stays unambiguous
+    even under CI scheduling jitter / GC pauses (per PR #77 bot
+    review — a tighter 130ms-with-50ms-sleeps threshold would flake
+    on constrained runners)."""
     import asyncio as _asyncio
     import time as _time
 
@@ -2386,38 +2379,34 @@ async def test_run_ideate_tournament_dispatches_matches_in_parallel(
     ideas = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
 
     async def slow_chat(self, prompt, *, node, **kw):
-        await _asyncio.sleep(0.05)
+        await _asyncio.sleep(0.2)
         return '{"winner": "A", "reason": "x", "margin": "decisive"}'
 
-    import core.engine as engine_mod
-    original_chat = engine_mod.Engine._chat
-    engine_mod.Engine._chat = slow_chat  # type: ignore[assignment]
-    try:
-        start = _time.monotonic()
-        await engine._run_ideate_tournament(
-            {"topic": "x"}, ideas, initial_chosen=ideas[0],
-        )
-        elapsed = _time.monotonic() - start
-    finally:
-        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+    from core.engine import Engine as _Engine
+    monkeypatch.setattr(_Engine, "_chat", slow_chat)
 
-    assert elapsed < 0.13, (
+    start = _time.monotonic()
+    await engine._run_ideate_tournament(
+        {"topic": "x"}, ideas, initial_chosen=ideas[0],
+    )
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 0.5, (
         f"3 matches must dispatch concurrently; wall-clock {elapsed:.3f}s "
-        f"suggests serial execution (serial floor is ~0.15s for 3 × 50ms)."
+        f"suggests serial execution (serial floor is ~0.6s for 3 × 200ms; "
+        f"parallel ceiling is ~0.2s + overhead)."
     )
 
 
 @pytest.mark.asyncio
 async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """C(N, 2) is 0 for N=1, so the tournament has nothing to do.
     ``_node_ideate``'s guard ``len(ideas) >= 2`` keeps the helper
     from being called in this case — but if it ever IS called with
     fewer ideas, the helper should also handle it gracefully (no
     LLM calls, return initial_chosen)."""
-    from unittest.mock import AsyncMock
-
     engine = _make_tournament_engine(tmp_path)
     ideas = [{"title": "Solo"}]
 
@@ -2427,15 +2416,11 @@ async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
         chat_calls += 1
         return '{"winner": "A"}'
 
-    import core.engine as engine_mod
-    original_chat = engine_mod.Engine._chat
-    engine_mod.Engine._chat = fake_chat  # type: ignore[assignment]
-    try:
-        winner, record = await engine._run_ideate_tournament(
-            {"topic": "x"}, ideas, initial_chosen=ideas[0],
-        )
-    finally:
-        engine_mod.Engine._chat = original_chat  # type: ignore[assignment]
+    from core.engine import Engine as _Engine
+    monkeypatch.setattr(_Engine, "_chat", fake_chat)
+    winner, record = await engine._run_ideate_tournament(
+        {"topic": "x"}, ideas, initial_chosen=ideas[0],
+    )
 
     # No matches to play; outcome falls through to inconclusive_fallback.
     assert chat_calls == 0

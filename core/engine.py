@@ -667,27 +667,32 @@ class Engine:
         ideas = parsed.get("ideas") or []
         chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
 
-        # Phase O — pairwise tournament. When enabled, REPLACES the
-        # single critique call below with C(N, 2) parallel pairwise
-        # comparisons and picks the highest-win-count idea. See
+        # Phase O — pairwise tournament. When enabled AND there are
+        # at least 2 ideas to compare, REPLACES the single critique
+        # call below with C(N, 2) parallel pairwise comparisons and
+        # picks the highest-win-count idea. See
         # ``_run_ideate_tournament`` for the aggregation policy.
         critique: dict[str, Any] = {}
         tournament_result: dict[str, Any] | None = None
+        tournament_ran = False
         if self.config.engine.ideate_tournament and len(ideas) >= 2:
             try:
                 chosen, tournament_result = await self._run_ideate_tournament(
                     state, ideas, initial_chosen=chosen,
                 )
+                tournament_ran = True
             except Exception as e:
                 self._log.warning(
-                    "[ideate] tournament failed: %s — falling back to "
-                    "initial chosen", e,
+                    "[ideate] tournament failed: %s — falling through "
+                    "to ideate_reflect if enabled", e,
                 )
-        # Phase M — self-reflection. Single extra LLM call that may swap
-        # chosen_idea to a different entry from the brainstormed list.
-        # Skipped when tournament already ran (the tournament's pick
-        # subsumes the critique's purpose).
-        elif self.config.engine.ideate_reflect and ideas:
+        # Phase M — self-reflection. Single extra LLM call that may
+        # swap chosen_idea to a different entry from the brainstormed
+        # list. Skipped ONLY when the tournament actually ran (its
+        # pick subsumes the critique's purpose). If the tournament
+        # was enabled but couldn't run (N<2 ideas) or raised, reflect
+        # still gets its chance to refine the single idea.
+        if not tournament_ran and self.config.engine.ideate_reflect and ideas:
             try:
                 critique_prompt = self._prompts["ideate_reflect"].substitute(
                     topic=state["topic"],
@@ -751,11 +756,14 @@ class Engine:
         (FI default), that's 3 calls in parallel vs the prior 1
         critique call serially.
 
-        Tie-breaking: highest total wins. If multiple ideas tie at
-        the top, prefer the idea that scored more "decisive" margins;
-        if still tied, fall back to ``initial_chosen``. This avoids
-        the failure mode where the tournament refuses to commit and
-        the engine has no `chosen_idea` to feed downstream nodes.
+        Tie-breaking: highest total wins. Ties are then broken by
+        more "decisive" margins, then by EARLIEST original-list
+        position (the ``-i`` term in the sort key). The earliest-
+        position fallback is deterministic across runs but does NOT
+        prefer ``initial_chosen`` — that fallback only fires when NO
+        match resolved a clean winner (the "inconclusive_fallback"
+        outcome below), so the engine always has a chosen_idea for
+        downstream nodes.
         """
         from itertools import combinations
 
@@ -839,12 +847,21 @@ class Engine:
             winner.get("title", "?"), wins[winner_idx],
             decisive_wins[winner_idx], initial_chosen.get("title", "?"),
         )
+        # Compute the original-list index of ``initial_chosen`` so the
+        # "swapped" / "confirmed" outcome is decided by position, not
+        # title. Title comparison would mis-report a swap as
+        # "confirmed" when two ideas share a title (e.g. both fall
+        # back to the synthesized {"title": "fallback", ...}).
+        initial_title = initial_chosen.get("title")
+        initial_idx = next(
+            (i for i, idea in enumerate(ideas)
+             if idea.get("title") == initial_title),
+            -1,
+        )
         return winner, {
             "matches": valid_matches, "winner_idx": winner_idx,
             "wins": wins, "decisive_wins": decisive_wins,
-            "outcome": "swapped"
-                if winner.get("title") != initial_chosen.get("title")
-                else "confirmed",
+            "outcome": "swapped" if winner_idx != initial_idx else "confirmed",
         }
 
     async def _node_literature(self, state: QuestState) -> QuestState:
