@@ -465,6 +465,15 @@ def test_interview_no_simulation_round_trips_through_pydantic(
     import tempfile
 
     compiled = EXT_DIR / "out" / "interview-core.js"
+    # Mirror the compile-on-miss path the sibling tests use — the
+    # ``skipif`` above admits a fresh ``node_modules/`` checkout where
+    # nothing has been compiled yet, and ``require(interview_path)``
+    # would otherwise fail with MODULE_NOT_FOUND.
+    if not compiled.exists():
+        subprocess.run(
+            [_resolve_npm(), "run", "compile"], cwd=str(EXT_DIR),
+            capture_output=True, text=True, timeout=120, check=True,
+        )
     answers = {
         "topic": "observational quest routing regression",
         "title": "no-sim-roundtrip",
