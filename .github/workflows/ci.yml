@@ -2,9 +2,13 @@ name: CI
 
 # Runs the fast pytest tier on every PR and on push to main. The slow
 # tier (e2e tests that build a real venv per tmp_path, knowledge-
-# writeback flow, real `tenacity` waits) is gated behind the `slow`
-# marker and runs only on push to main where wall-clock budget is
-# less tight. Audit #07 recommended this split.
+# writeback flow, real `tenacity` waits, plus anything tagged
+# `@pytest.mark.slow`) runs only on push to main where wall-clock
+# budget is less tight. Audit #07 recommended this split.
+#
+# Extension-only PRs (touching just `vscode-frontier-insight/**`) get
+# their own TypeScript-compile job so they aren't merged blind — the
+# `vsix-rebuild.yml` workflow only runs post-merge.
 
 on:
   push:
@@ -13,18 +17,22 @@ on:
       - "**.md"
       - "docs/**"
       - "outputs/**"
-      - "vscode-frontier-insight/**"
   pull_request:
     branches: [main]
     paths-ignore:
       - "**.md"
       - "docs/**"
       - "outputs/**"
-      - "vscode-frontier-insight/**"
 
 jobs:
+  # ---- Python pytest (fast tier) -----------------------------------
   fast:
     name: pytest (fast tier)
+    # Skip when the change is extension-only — the `extension` job
+    # below handles TS PRs on its own.
+    if: |
+      !contains(github.event.pull_request.title, '[ext-only]') &&
+      !startsWith(github.event.head_commit.message, 'chore(vsix):')
     strategy:
       # Don't kill the whole matrix when one OS fails — Windows has
       # specific quirks (file locks) we want to see independently.
@@ -42,10 +50,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install package + dev extras
+      # ``[docker]`` extra is needed because ``tests/test_docker_executor.py``
+      # uses ``patch("docker.from_env", ...)`` which resolves the
+      # attribute at patch-enter time and requires the ``docker``
+      # package to be importable even when the test doesn't actually
+      # spawn a daemon.
+      - name: Install package + dev + docker extras
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          pip install -e .[dev,docker]
 
       # The fast tier excludes:
       #   - tests/test_engine_smoke.py    (real venv builds, 50-63s each)
@@ -55,6 +68,7 @@ jobs:
       - name: Run pytest (fast tier)
         run: pytest -q -m "not slow" --ignore=tests/test_engine_smoke.py --ignore=tests/test_self_correction_e2e.py --ignore=tests/test_web_e2e.py
 
+  # ---- Python pytest (slow tier) — post-merge only -----------------
   slow:
     # Only run the slow tier post-merge to main. PRs get fast-tier
     # feedback in ~1-2 min; main gets the full coverage in ~5-10 min.
@@ -70,13 +84,50 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install package + dev extras
+      - name: Install package + dev + docker extras
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          pip install -e .[dev,docker]
 
-      # Slow tier runs the e2e files the fast tier skips. Windows is
-      # excluded — the e2e venv-build tests have a known file-lock
-      # issue (audit #07) that's tracked separately.
-      - name: Run pytest (slow tier)
+      # Slow tier covers BOTH (a) the three e2e files the fast tier
+      # skips by path AND (b) every test tagged @pytest.mark.slow
+      # outside those files. Without the second pytest invocation, a
+      # `slow`-tagged provider-retry / knowledge-writeback test would
+      # be excluded by the fast tier's `-m "not slow"` filter AND
+      # missed by the slow tier's file allowlist — never running
+      # anywhere. Windows is excluded — the e2e venv-build tests
+      # have a known file-lock issue (audit #07) tracked separately.
+      - name: Run pytest (slow tier — e2e files)
         run: pytest -q tests/test_engine_smoke.py tests/test_self_correction_e2e.py tests/test_web_e2e.py
+      - name: Run pytest (slow tier — marker-tagged tests outside e2e files)
+        run: pytest -q -m slow --ignore=tests/test_engine_smoke.py --ignore=tests/test_self_correction_e2e.py --ignore=tests/test_web_e2e.py
+
+  # ---- VSCode extension compile (PRs touching extension only) ------
+  extension:
+    name: vscode extension compile
+    # Run on any PR or main push that touches the extension. Catches
+    # TypeScript syntax / type errors before merge — without this,
+    # extension-only PRs were merged blind (vsix-rebuild.yml runs
+    # only post-merge on main).
+    if: |
+      contains(toJSON(github.event.commits.*.modified), 'vscode-frontier-insight/') ||
+      contains(toJSON(github.event.commits.*.added), 'vscode-frontier-insight/') ||
+      github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode-frontier-insight
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: vscode-frontier-insight/package-lock.json
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
