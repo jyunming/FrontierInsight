@@ -31,7 +31,8 @@ Three feedback loops:
 | Loop | Trigger | Bound by |
 |---|---|---|
 | `execute_reflect → execute` | Script crashed (rc != 0 or no `RESULT_JSON`) | `engine.exec_reflect_max_iterations` (default 3) |
-| `cross_check → design` | `analyze.next_step ∈ {re_experiment, broaden_lit}` | `engine.max_iterations` (default 2) |
+| `cross_check → design` | `analyze.next_step == "re_experiment"` | `engine.max_iterations` (default 2) |
+| `cross_check → literature` | `analyze.next_step == "broaden_lit"` — re-enters the literature node so a second retrieval fetches fresh evidence (with the design's hypothesis folded into the query). Returns merge into the existing literature list with DOI / URL / content-prefix dedup, so design sees the accumulated corpus. | `engine.max_iterations` (default 2) |
 | `review → design` | `review.verdict == "revise"` | `engine.max_iterations` (default 2) |
 
 ## Capability inventory
@@ -45,7 +46,7 @@ Three feedback loops:
 | Per-node model routing — different model per node via `provider.node_models` | ✅ |
 | Pre-flight `clarify` node — 7-slot survey before `ideate`, off / auto / interactive modes | ✅ |
 | Self-correction — execute-repair loop — agent reads traceback, patches code, retries | ✅ |
-| Self-correction — analyze-driven re-route — `re_experiment` / `broaden_lit` routes back to design | ✅ |
+| Self-correction — analyze-driven re-route — `re_experiment` re-enters design; `broaden_lit` re-enters the literature node for a fresh retrieval (with design's hypothesis added to the query), then design picks up the accumulated, deduped literature corpus. | ✅ |
 | Cross-paper check — per-finding literature search + supporting/conflicting/neutral classification | ✅ |
 | Ideate self-reflection — extra LLM call may swap chosen idea | ✅ |
 | Reviewer panel — N personas in parallel + moderator synthesis (`rigor_score` + `depth_score` axes) | ✅ |

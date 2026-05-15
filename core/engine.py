@@ -87,6 +87,13 @@ class QuestState(TypedDict, total=False):
     # "inconclusive_fallback") for visibility + future Axon write-back.
     ideate_tournament: dict[str, Any]
     literature: list[dict[str, Any]]
+    # Iterative-literature counter. Incremented on every entry into
+    # ``_node_literature``. First entry sets it to 1; ``broaden_lit``
+    # re-entries from ``cross_check`` bump it. Used to (a) emit a
+    # distinct INFO log per pass, (b) decide whether to dedup-merge
+    # vs replace the literature list, and (c) optionally cap
+    # additional retrievals at ``engine.max_iterations + 1``.
+    literature_iter: int
     design: dict[str, Any]
     code: str
     deps: list[str]
@@ -408,7 +415,11 @@ class Engine:
         g.add_conditional_edges(
             "cross_check",
             self._route_after_cross_check,
-            {"write": "write", "redesign": "design"},
+            {
+                "write": "write",
+                "redesign": "design",
+                "broaden_lit": "literature",
+            },
         )
         g.add_edge("write", "review")
         g.add_conditional_edges(
@@ -461,17 +472,35 @@ class Engine:
         return "retry"
 
     def _route_after_cross_check(self, state: QuestState) -> str:
-        """Phase L: route based on analyze's `next_step` field. If the
-        config disables analyze-rerouting, always go to write."""
+        """Route based on analyze's ``next_step`` field.
+
+        Three outcomes:
+
+        * ``next_step == "broaden_lit"`` → ``broaden_lit`` (re-enter
+          ``literature`` so the next pass can fetch fresh evidence;
+          design then re-runs with the accumulated literature block).
+          Until this routing existed, ``broaden_lit`` collapsed onto
+          ``redesign`` and the design node re-ran with the SAME
+          literature it already had — defeating the signal.
+        * ``next_step == "re_experiment"`` → ``redesign`` (re-enter
+          ``design`` with the same literature; only the experimental
+          plan changes).
+        * Anything else (or budget exhausted, or rerouting disabled
+          via ``engine.enable_analyze_reroute: false``) → ``write``.
+
+        Both re-entry branches share the same ``engine.max_iterations``
+        budget so the whole quest stays bounded.
+        """
         if not self.config.engine.enable_analyze_reroute:
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
-        if next_step in ("re_experiment", "broaden_lit"):
-            # Share the review-loop iteration budget so the whole quest
-            # stays bounded.
-            if state.get("iteration", 0) < self.config.engine.max_iterations:
-                return "redesign"
+        if state.get("iteration", 0) >= self.config.engine.max_iterations:
+            return "write"
+        if next_step == "broaden_lit":
+            return "broaden_lit"
+        if next_step == "re_experiment":
+            return "redesign"
         return "write"
 
     def _route_after_review(self, state: QuestState) -> str:
@@ -887,18 +916,61 @@ class Engine:
 
     async def _node_literature(self, state: QuestState) -> QuestState:
         chosen = state.get("chosen_idea") or {}
-        query = (chosen.get("title") or "") + " " + state["topic"][:200]
+        prior = list(state.get("literature") or [])
+        prior_iter = int(state.get("literature_iter") or 0)
+        this_iter = prior_iter + 1
+        # On a broaden_lit re-entry, the design has already been
+        # written — fold its hypothesis into the query so the second
+        # pass searches for evidence that addresses the SPECIFIC
+        # design, not just the original chosen idea. First pass keeps
+        # the lean ``title + topic`` query because design hasn't run
+        # yet.
+        if this_iter > 1 and state.get("design"):
+            hypothesis = str(state["design"].get("hypothesis") or "")[:200]
+            query = (chosen.get("title") or "") + " " + hypothesis + " " + state["topic"][:160]
+            self._log.info(
+                "[literature] iteration=%d (broaden_lit re-entry); query incorporates design.hypothesis",
+                this_iter,
+            )
+        else:
+            query = (chosen.get("title") or "") + " " + state["topic"][:200]
         docs = await self.knowledge.asearch(
             query.strip(),
             top_k=self.config.knowledge.top_k,
             chosen_idea=chosen,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
-        self._log.info("[literature] retrieved %d docs", len(docs))
+        new_entries = [
+            {"content": d.content[:2000], "metadata": d.metadata} for d in docs
+        ]
+        # Dedup-merge: identity is DOI when present, otherwise the
+        # canonical URL, otherwise the first 200 chars of content.
+        # On the first iteration ``prior`` is empty so this is a
+        # straight assignment; on broaden_lit re-entries we accumulate
+        # so the design node sees the full corpus FI has seen for
+        # this quest.
+        seen: set[str] = set()
+        merged: list[dict[str, Any]] = []
+        for entry in (*prior, *new_entries):
+            md = entry.get("metadata") or {}
+            ident = (
+                str(md.get("doi") or "").strip()
+                or str(md.get("url") or "").strip()
+                or (entry.get("content") or "")[:200]
+            )
+            if ident and ident in seen:
+                continue
+            if ident:
+                seen.add(ident)
+            merged.append(entry)
+        added = len(merged) - len(prior)
+        self._log.info(
+            "[literature] retrieved %d docs (iter=%d, +%d new after dedup, total=%d)",
+            len(docs), this_iter, added, len(merged),
+        )
         return {
-            "literature": [
-                {"content": d.content[:2000], "metadata": d.metadata} for d in docs
-            ]
+            "literature": merged,
+            "literature_iter": this_iter,
         }
 
     async def _node_design(self, state: QuestState) -> QuestState:
