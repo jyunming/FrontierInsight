@@ -986,6 +986,52 @@ def test_resolve_no_simulation_from_clarify_simulatability_yes_does_not_trigger(
     }) is False
 
 
+def test_resolve_no_simulation_simulatability_str_shape(tmp_path: Path) -> None:
+    """The auto-mode clarify reducer (``{k: v["default"]}`` at the
+    Engine._clarify_node ``mode=="auto"`` branch) collapses every slot
+    to its bare default value — including ``simulatability``. The
+    resolver must accept that string-shaped answer the same way it
+    accepts the unit-test dict shape. Without this, an auto-mode
+    quest with ``simulatability=yes`` falls through to the legacy
+    ``empirical_vs_theoretical=empirical`` rule and incorrectly
+    routes to NO_SIMULATION — the slow-tier smoke test that broke
+    on the first main-branch CI run after PR #80.
+
+    Pinning both str values that should route to SIMULATE plus the
+    str value that should route to NO_SIMULATION."""
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    # Bare-string simulatability — what auto-mode actually produces.
+    assert engine._resolve_no_simulation_from_clarify(
+        {"simulatability": "no"},
+    ) is True
+    assert engine._resolve_no_simulation_from_clarify(
+        {"simulatability": "yes"},
+    ) is False
+    assert engine._resolve_no_simulation_from_clarify(
+        {"simulatability": "uncertain"},
+    ) is False
+    # Bare-string simulatability with whitespace + uppercase — same
+    # normalization the dict path applies.
+    assert engine._resolve_no_simulation_from_clarify(
+        {"simulatability": "  NO  "},
+    ) is True
+    # And bare-string simulatability=yes still overrides the legacy
+    # empirical fallback when both are present.
+    assert engine._resolve_no_simulation_from_clarify({
+        "simulatability": "yes",
+        "empirical_vs_theoretical": "empirical",
+    }) is False
+
+
 def test_resolve_no_simulation_simulatability_beats_empirical_when_both_set(
     tmp_path: Path,
 ) -> None:

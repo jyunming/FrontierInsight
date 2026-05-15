@@ -597,10 +597,27 @@ class Engine:
             )
             return True
 
+        # ``simulatability`` may arrive in either shape:
+        # * dict ``{default, reason}`` — when callers pass through the
+        #   full clarify slot (the unit-test path in
+        #   test_engine_helpers, and any caller that explicitly
+        #   preserves the slot's reason).
+        # * bare string ``"yes" | "no" | "uncertain"`` — what
+        #   ``clarify_mode="auto"`` produces, because the reducer at
+        #   line ~530 collapses ``{k: v["default"]}`` for every slot
+        #   to keep ``clarify_answers`` flat for downstream prompt
+        #   substitution. The reason is dropped in that path; we log
+        #   "(no reason provided)" so the source is still greppable.
+        # Both shapes route the same — the contract is the decision.
         sim = answers.get("simulatability")
+        decision = ""
+        reason = ""
         if isinstance(sim, dict):
             decision = str(sim.get("default", "")).strip().lower()
             reason = str(sim.get("reason", "")).strip()
+        elif isinstance(sim, str):
+            decision = sim.strip().lower()
+        if decision or isinstance(sim, dict):
             if decision == "no":
                 self._log.info(
                     "[clarify] simulatability resolved: NO_SIMULATION "
