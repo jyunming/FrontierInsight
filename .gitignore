@@ -30,3 +30,4 @@ outputs/
 .testmondata*
 tstex_modules/
 tools/
+.claude/
