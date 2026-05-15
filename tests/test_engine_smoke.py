@@ -53,6 +53,19 @@ _FAKE_RESPONSES = {
             "question": "Empirical or theoretical?",
             "default": "empirical",
         },
+        # ``simulatability`` is the routing signal the engine uses to
+        # decide between the normal implement → execute path and the
+        # no-simulation wait_for_data path. The legacy fallback maps
+        # ``empirical_vs_theoretical == "empirical"`` to NO_SIMULATION
+        # when ``simulatability`` is absent, which would pause this
+        # smoke test at wait_for_data and never reach write. The
+        # clarify-completion smoke tests want the full DAG, so we
+        # pin ``simulatability: yes`` here — Python-script-can-answer.
+        "simulatability": {
+            "question": "Can a Python script answer this?",
+            "default": "yes",
+            "reason": "synthetic curve, no real-world data needed",
+        },
         "success_metric": {
             "question": "What metric?",
             "default": "monotonicity of the curve",
@@ -242,9 +255,14 @@ async def test_engine_runs_with_clarify_interactive_via_callback(
         seen_questions.append(questions)
         # Override two defaults so we can verify the callback's answers
         # actually flow into state, not the agent's auto-defaults.
+        # ``simulatability: yes`` is required to keep the engine on
+        # the normal implement → execute path; without it the
+        # legacy fallback on ``empirical_vs_theoretical == "empirical"``
+        # routes to NO_SIMULATION and pauses at wait_for_data.
         return {
             "comparative_baseline": "user-chosen baseline",
             "empirical_vs_theoretical": "empirical",
+            "simulatability": "yes",
             "success_metric": "user-chosen metric",
             "budget": "5 minutes",
             "output_kinds": ["paper_md"],
