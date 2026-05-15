@@ -91,14 +91,16 @@ Or explicitly:
 @fi /new
 ```
 
-The extension walks you through 6 quick questions via VSCode-native input modals:
+The extension walks you through 8 quick questions via VSCode-native input modals:
 
 1. **Topic** — what do you want to study? (free text)
 2. **Title** — short identifier (auto-suggested from the topic).
 3. **Outputs** — paper only / paper + PDF / paper + slides / everything.
-4. **Clarify mode** — just run it / agent self-clarifies / ask me 5 questions.
-5. **Reviewer panel** — single reviewer / 3-persona / 4-persona panel.
-6. **Knowledge layer** — disabled (default) / Axon (if you have it set up).
+4. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
+5. **Research approach** — computational (a Python script can produce the data) vs. observational (real-world data needed). Maps to `engine.no_simulation` — and matches the clarify agent's `simulatability` slot, so picking it here skips the auto-detect path.
+6. **Clarify mode** — just run it / agent self-clarifies / ask me 7 questions.
+7. **Reviewer panel** — single reviewer / 3-persona / 4-persona panel.
+8. **Knowledge layer** — disabled (default) / Axon (if you have it set up).
 
 It writes a config.yaml to `outputs/_drafts/<timestamp>-<title>.yaml`, then immediately starts the quest. You can re-run that same config later with `@fi /start <that-path>`, or edit it and re-run.
 
