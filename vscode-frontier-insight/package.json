@@ -69,6 +69,10 @@
             "description": "Pre-quest planning doc: background, hypothesis, plan, success criteria, risks. Writes a markdown proposal + companion YAML to outputs/_drafts/. Use to scope a quest BEFORE committing compute. Example: @fi /proposal Compare RK4 vs Verlet on the Kepler problem"
           },
           {
+            "name": "analyze",
+            "description": "Run a no-simulation quest with pre-staged data. Pass a directory path; every file under it (recursive, symlinks skipped) is copied into the new quest's data/ dir before the engine starts. Then provide a one-sentence analysis topic. Example: @fi /analyze ./my_data Compare ridership trends across regions"
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }

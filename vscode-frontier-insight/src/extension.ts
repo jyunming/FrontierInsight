@@ -105,6 +105,10 @@ async function handleRequest(
         await runProposal(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "analyze") {
+        await runAnalyze(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -129,6 +133,7 @@ function helpText(): string {
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
+        "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",
         "All LLM calls go through your Copilot subscription via the",
         "`vscode.lm` Language Model API. Each quest's `provider.node_models`",
@@ -1200,6 +1205,169 @@ async function runProposal(
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Proposal done. Read the markdown, edit either file if needed, then `/start` the YAML when ready.\n");
+    } else {
+        const tail = stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
+            (tail.trim()
+                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
+                : "stderr was empty.\n"),
+        );
+    }
+}
+
+
+/**
+ * Implementation of `@fi /analyze <path> <topic>`. The inverse of
+ * `/proposal`: the user already has data in a directory and wants
+ * FI to write a paper analyzing it. Spawns `python launch.py
+ * --analyze <abs-data-path> --analyze-topic "<topic>"`. Argument
+ * parsing: the first whitespace-delimited token is the data
+ * directory path (single-quoted if it contains spaces), everything
+ * after that is the topic.
+ */
+async function runAnalyze(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+
+    const trimmed = promptArgs.trim();
+    if (!trimmed) {
+        stream.markdown(
+            "Need a data directory + topic. Examples:\n" +
+            "- `@fi /analyze ./my_data Compare ridership trends across regions`\n" +
+            "- `@fi /analyze \"C:/My Data\" Find common failure modes in these logs`\n\n" +
+            "The directory's files are copied into the new quest's `data/` dir, " +
+            "then the engine runs the no-simulation path: " +
+            "`auto_collect_data → wait_for_data → data_load → analyze → write → review`.\n",
+        );
+        return;
+    }
+
+    // Split off the first token (path) — supports double-quoted paths
+    // with spaces. Everything after that token is the topic.
+    let dataPath: string;
+    let topic: string;
+    const quoted = trimmed.match(/^"([^"]+)"\s+(.+)$/s);
+    if (quoted) {
+        dataPath = quoted[1];
+        topic = quoted[2].trim();
+    } else {
+        const idx = trimmed.search(/\s/);
+        if (idx < 0) {
+            stream.markdown(
+                "Need BOTH a data directory AND a topic. " +
+                "Example: `@fi /analyze ./my_data Compare ridership trends`.\n",
+            );
+            return;
+        }
+        dataPath = trimmed.slice(0, idx);
+        topic = trimmed.slice(idx).trim();
+    }
+    if (!topic) {
+        stream.markdown(
+            "Need a topic after the data path. " +
+            "Example: `@fi /analyze ./my_data Compare ridership trends`.\n",
+        );
+        return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    const launchScript = path.join(repoPath, "launch.py");
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+    // Resolve dataPath relative to the workspace if it's relative.
+    const dataAbs = path.isAbsolute(dataPath)
+        ? dataPath
+        : path.join(repoPath, dataPath);
+
+    stream.markdown(
+        `📊 Analyzing pre-staged data:\n` +
+        `  - data dir: \`${dataAbs}\`\n` +
+        `  - topic: ${topic.split("\n").slice(0, 3).join("\n    ")}\n\n` +
+        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+        `▶️ Staging files into the quest's data/ directory, then running the no-simulation graph…\n\n`,
+    );
+
+    const bridge = new Bridge({
+        progress: stream,
+        cancellationToken: token,
+        defaultModel: userPickedModel,
+    });
+    const port = await bridge.listen();
+
+    const argv: string[] = [
+        "-u", launchScript,
+        "--vscode-bridge-port", String(port),
+        "--analyze", dataAbs,
+        "--analyze-topic", topic,
+        "--output-root", outputsDir,
+    ];
+
+    const child = spawn(pythonPath, argv, {
+        cwd: repoPath,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderrTail: string[] = [];
+    const STDERR_TAIL_LINES = 80;
+    bridge.attachChild(child, (line) => {
+        stderrTail.push(line);
+        if (stderrTail.length > STDERR_TAIL_LINES) {
+            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
+        }
+    });
+    token.onCancellationRequested(() => {
+        try { child.kill("SIGTERM"); } catch { /* noop */ }
+    });
+
+    child.stdout.setEncoding("utf-8");
+    let stdoutBuf = "";
+    child.stdout.on("data", (chunk: string) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/\r?\n/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) {
+            const m = line.match(/^\[FI\] --analyze: quest_id=(\S+)\s+files_staged=(\d+)/);
+            if (m) {
+                stream.markdown(
+                    `  ✅ quest \`${m[1]}\` (staged ${m[2]} file${m[2] === "1" ? "" : "s"})\n\n`,
+                );
+                continue;
+            }
+            if (line.startsWith("[FI] start ")) {
+                stream.markdown(`  ▶️ engine started\n`);
+            }
+        }
+    });
+
+    const exitCode: number | null = await new Promise((resolve) => {
+        child.on("close", (code) => resolve(code));
+    });
+    await bridge.close();
+
+    if (exitCode === 0) {
+        stream.markdown(
+            "\n✅ Analyze quest finished. Paper + figures landed in `outputs/<quest_id>/`.\n",
+        );
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
