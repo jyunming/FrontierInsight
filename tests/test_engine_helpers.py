@@ -2398,6 +2398,159 @@ async def test_run_ideate_tournament_dispatches_matches_in_parallel(
     )
 
 
+# ---- non-scientific paper formats + write-persona (Phase Q) -------------
+
+
+def test_paper_format_literal_includes_non_scientific_values() -> None:
+    """Phase Q extends PaperFormat with essay/report/policy_brief/
+    whitepaper. Regression guard so a future Literal edit can't
+    silently drop a format."""
+    from typing import get_args
+    from core.config import PaperFormat
+    values = set(get_args(PaperFormat))
+    # Scientific (must remain — back-compat).
+    for v in ("generic", "neurips", "iclr", "ieee_access", "nature_mi"):
+        assert v in values, f"scientific format {v!r} was dropped"
+    # Non-scientific (Phase Q additions).
+    for v in ("essay", "report", "policy_brief", "whitepaper"):
+        assert v in values, f"non-scientific format {v!r} missing"
+
+
+def test_paper_format_subsets_partition_the_literal() -> None:
+    """``SCIENTIFIC_PAPER_FORMATS`` ∪ ``NON_SCIENTIFIC_PAPER_FORMATS``
+    must equal the full ``PaperFormat`` set with empty intersection.
+    Without this guard, adding a new venue to the Literal could leave
+    it unclassified by either subset and ``_resolve_write_persona``
+    would silently fall through to the default voice — invisible
+    regression."""
+    from typing import get_args
+    from core.config import (
+        NON_SCIENTIFIC_PAPER_FORMATS,
+        PaperFormat,
+        SCIENTIFIC_PAPER_FORMATS,
+    )
+    all_values = set(get_args(PaperFormat))
+    assert SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS == all_values
+    assert SCIENTIFIC_PAPER_FORMATS & NON_SCIENTIFIC_PAPER_FORMATS == set()
+
+
+def test_paper_format_templates_exist_with_body_placeholder(
+    tmp_path: Path,
+) -> None:
+    """Each non-scientific format must have a usable LaTeX template
+    that pandoc accepts — the prior stub-template venues (iclr,
+    ieee_access, nature_mi) shipped a one-line `%` comment and
+    failed at compile time (audit #05). Phase Q's templates must
+    have a `$body$` placeholder + a `\\begin{document}` block at
+    minimum so pandoc treats them as templates rather than
+    invalid documents."""
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    for fmt in ("essay", "report", "policy_brief", "whitepaper"):
+        path = repo_root / "templates" / "paper" / fmt / "template.tex"
+        assert path.exists(), f"missing template.tex for {fmt}"
+        body = path.read_text(encoding="utf-8")
+        assert "$body$" in body, (
+            f"templates/paper/{fmt}/template.tex must contain "
+            f"pandoc's $body$ placeholder so the paper.md body lands "
+            f"in the rendered PDF"
+        )
+        assert "\\begin{document}" in body, (
+            f"templates/paper/{fmt}/template.tex must be a complete "
+            f"LaTeX document (the stub-template trap from audit #05)"
+        )
+
+
+def _make_write_persona_engine(
+    tmp_path: Path, *, paper_format: str = "generic"
+) -> "Engine":
+    cfg = Config(
+        topic="t",
+        title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(
+            output_dir=tmp_path / "outputs", paper_format=paper_format,
+        ),
+    )
+    return Engine(cfg)
+
+
+def test_resolve_write_persona_scientific_returns_empty(tmp_path: Path) -> None:
+    """The five scientific venues (generic + 4 named) keep
+    ``write.md``'s built-in functional framing — the persona block
+    is empty so the prompt's default voice carries it."""
+    for fmt in ("generic", "neurips", "iclr", "ieee_access", "nature_mi"):
+        engine = _make_write_persona_engine(tmp_path, paper_format=fmt)
+        assert engine._resolve_write_persona({"clarify_answers": {}}) == "", (
+            f"scientific format {fmt!r} must return empty persona block"
+        )
+
+
+def test_resolve_write_persona_non_scientific_returns_named_voice(
+    tmp_path: Path,
+) -> None:
+    """Each non-scientific format swaps the default voice for a
+    format-appropriate persona (essayist / consulting analyst /
+    policy analyst / industry analyst)."""
+    expectations = {
+        "essay": "essayist",
+        "report": "consulting analyst",
+        "policy_brief": "policy analyst",
+        "whitepaper": "industry analyst",
+    }
+    for fmt, marker in expectations.items():
+        engine = _make_write_persona_engine(tmp_path, paper_format=fmt)
+        persona = engine._resolve_write_persona({"clarify_answers": {}})
+        assert persona, f"{fmt!r} must produce a non-empty persona block"
+        assert marker in persona.lower(), (
+            f"{fmt!r} persona missing the expected marker {marker!r}: "
+            f"{persona[:200]!r}"
+        )
+
+
+def test_resolve_write_persona_clarify_answers_win_over_yaml(
+    tmp_path: Path,
+) -> None:
+    """The clarify agent's pick (or user override in interactive
+    mode) wins over the YAML default. So a quest configured with
+    ``paper_format: generic`` whose clarify answer landed on
+    ``paper_venue: essay`` produces the essayist persona, not the
+    scientific default."""
+    engine = _make_write_persona_engine(tmp_path, paper_format="generic")
+    persona = engine._resolve_write_persona({
+        "clarify_answers": {"paper_venue": "essay"}
+    })
+    assert "essayist" in persona.lower()
+
+    # Reverse: clarify=generic + YAML=essay → clarify wins.
+    engine2 = _make_write_persona_engine(tmp_path, paper_format="essay")
+    persona2 = engine2._resolve_write_persona({
+        "clarify_answers": {"paper_venue": "generic"}
+    })
+    assert persona2 == "", (
+        "clarify answer 'generic' must override YAML 'essay' → empty persona"
+    )
+
+
+def test_resolve_write_persona_unknown_format_falls_back_to_empty(
+    tmp_path: Path,
+) -> None:
+    """A clarify answer outside the Literal (e.g. a typo or future
+    format not yet wired) must fall back to the default voice, not
+    crash. The Literal validation happens upstream at YAML load
+    time — this is defense-in-depth for the clarify path which
+    accepts free-form strings."""
+    engine = _make_write_persona_engine(tmp_path)
+    persona = engine._resolve_write_persona({
+        "clarify_answers": {"paper_venue": "made_up_format"}
+    })
+    assert persona == ""
+
+
 @pytest.mark.asyncio
 async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

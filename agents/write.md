@@ -1,3 +1,5 @@
+$persona_block
+
 You are the **Writing** stage of an automated research pipeline.
 
 # Topic

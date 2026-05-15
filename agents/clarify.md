@@ -91,7 +91,7 @@ $topic
     "default": "journal-length"
   },
   "paper_venue": {
-    "question": "<one sentence asking which paper template / venue style this study fits — generic, neurips, iclr, ieee_access, or nature_mi>",
+    "question": "<one sentence asking which paper template / format style fits — scientific venues (generic, neurips, iclr, ieee_access, nature_mi) or non-scientific prose (essay, report, policy_brief, whitepaper)>",
     "default": "<your best guess; see venue rules below>"
   }
 }
@@ -111,9 +111,16 @@ $topic
   `comprehensive review` (10–15 pages, synthesis with extensive prior-work discussion).
   Pick the level that matches the topic's natural scope — narrow benchmarks → brief, established
   research questions → journal-length, broad survey/comparative topics → comprehensive review.
-- The `paper_venue` default is one of `{generic, neurips, iclr, ieee_access, nature_mi}` — pick by topic + study_depth + empirical_vs_theoretical:
-  * `neurips` / `iclr` — ML benchmarks, learning algorithms, neural-network experiments (empirical + journal-length).
-  * `ieee_access` — engineering systems, hardware/software architectures, measurement studies (empirical + journal-length).
-  * `nature_mi` — physics / chemistry / materials simulation, scientific-method experiments (empirical + journal-length).
-  * `generic` — surveys, comparative reviews, theoretical derivations, brief preprints, anything that doesn't fit a specific venue. **DEFAULT to `generic` when uncertain.**
+- The `paper_venue` default is one of `{generic, neurips, iclr, ieee_access, nature_mi, essay, report, policy_brief, whitepaper}` — pick by topic + study_depth + empirical_vs_theoretical + simulatability:
+  * **Scientific venues** (when `simulatability=yes` AND the topic is computational/experimental):
+    - `neurips` / `iclr` — ML benchmarks, learning algorithms, neural-network experiments (empirical + journal-length).
+    - `ieee_access` — engineering systems, hardware/software architectures, measurement studies (empirical + journal-length).
+    - `nature_mi` — physics / chemistry / materials simulation, scientific-method experiments (empirical + journal-length).
+    - `generic` — surveys, comparative reviews, theoretical derivations, brief preprints, scientific topics that don't fit a specific venue.
+  * **Non-scientific prose formats** (when `simulatability=no` OR the topic is qualitative/historical/cultural/business):
+    - `essay` — long-form argumentative prose. Cultural comparisons, historical analyses, intellectual history, qualitative cross-case studies. Picks when the natural shape is "argue a thesis with evidence", not "report a measurement".
+    - `report` — consulting-style executive report with cover + TOC. Business analyses, operational reviews, market assessments. Picks when the audience is decision-makers and the structure is exec-summary → findings → recommendations.
+    - `policy_brief` — 2-4 page brief for policymakers. Single decision recommendation backed by issue + context. Picks when the natural shape is "here's the issue, here's what to do, here's why."
+    - `whitepaper` — industry/vendor-neutral 8-20 page analysis. Tech trends, architecture comparisons, standards interpretations. Picks when the audience is industry practitioners and the structure is problem → approach → evidence → conclusion.
+  * **DEFAULT to `generic` when uncertain** for scientific topics; **DEFAULT to `essay`** for non-simulatable topics that fall in humanities / social-science / archival / current-events.
 - No prose outside the JSON object. No code fences. No commentary.
