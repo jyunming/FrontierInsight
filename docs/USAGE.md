@@ -10,7 +10,7 @@ commands:
 
 | Command | What it does | LLM calls |
 |---|---|---|
-| `@fi` *(no command)* | Starts the interactive interview — 7 quick questions, produces a config, runs the quest. Best first-time path. | ~8–18 (one full quest, see below) |
+| `@fi` *(no command)* | Starts the interactive interview — 8 quick questions (topic, title, outputs, paper format, research approach, clarify mode, reviewer panel, knowledge layer), produces a config, runs the quest. Best first-time path. | ~8–18 (one full quest, see below) |
 | `@fi /new` | Same as bare `@fi`. | ~8–18 |
 | `@fi /start <path-to-yaml>` | Runs a quest from an existing YAML config. | ~8–18 |
 | `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~8–18 × N quests |

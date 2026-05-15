@@ -13,6 +13,7 @@ import * as vscode from "vscode";
 import { execSync } from "child_process";
 import {
     InterviewAnswers,
+    PaperFormat,
     answersToYaml,
     writeInterviewYaml,
     truncate,
@@ -140,7 +141,131 @@ export async function runInterview(
         );
     }
 
-    // 4. Clarify mode — does the agent ask follow-up questions before starting?
+    // 4. Paper format (article type) — the venue/style for the
+    // written deliverable. Must stay in sync with PaperFormat in
+    // core/config.py (scientific venues + non-scientific prose).
+    // The clarify agent picks this slot when clarify_mode != "off";
+    // exposing it here lets a user lock the format upfront without
+    // burning a clarify call to "discover" what they already know.
+    const paperFormatChoice = await vscode.window.showQuickPick(
+        [
+            // Scientific venues — pick when the topic is computational
+            // / experimental. The clarify agent maps these to
+            // simulatability == "yes". Order: most generic first.
+            {
+                label: "$(file) generic — scientific paper, IMRAD",
+                description: "Default. Surveys, comparative reviews, theoretical derivations, brief preprints.",
+                value: "generic" as const,
+            },
+            {
+                label: "$(beaker) NeurIPS — ML benchmark / algorithm",
+                description: "Empirical ML, neural networks, learning algorithms, journal-length.",
+                value: "neurips" as const,
+            },
+            {
+                label: "$(beaker) ICLR — representation learning",
+                description: "Representations, generative models, ML theory.",
+                value: "iclr" as const,
+            },
+            {
+                label: "$(circuit-board) IEEE Access — engineering / systems",
+                description: "Hardware/software architectures, measurement studies, engineering experiments.",
+                value: "ieee_access" as const,
+            },
+            {
+                label: "$(symbol-namespace) Nature MI — physical sciences",
+                description: "Physics / chemistry / materials simulation, scientific-method experiments.",
+                value: "nature_mi" as const,
+            },
+            // Non-scientific prose — pick when the topic is
+            // qualitative / historical / cultural / business / policy.
+            // The clarify agent maps these to simulatability == "no".
+            {
+                label: "$(book) essay — long-form argumentative prose",
+                description: "Cultural / historical / intellectual / qualitative cross-case analysis. Argue a thesis.",
+                value: "essay" as const,
+            },
+            {
+                label: "$(briefcase) report — consulting-style exec report",
+                description: "Business / operational / market analysis with cover + TOC. Decision-maker audience.",
+                value: "report" as const,
+            },
+            {
+                label: "$(law) policy brief — 2-4 page recommendation",
+                description: "Single decision for policymakers. Issue + context + recommendation.",
+                value: "policy_brief" as const,
+            },
+            {
+                label: "$(file-pdf) whitepaper — 8-20 page industry analysis",
+                description: "Vendor-neutral tech trends / standards / architecture comparisons. Practitioner audience.",
+                value: "whitepaper" as const,
+            },
+        ],
+        {
+            title: "Frontier Insight — paper format / venue?",
+            placeHolder:
+                "Picks the LaTeX template + writing persona. 'generic' is the safe default for scientific topics; 'essay' for non-computational humanities/social-science.",
+            ignoreFocusOut: true,
+        },
+    );
+    if (!paperFormatChoice) return undefined;
+    const paperFormat: PaperFormat = paperFormatChoice.value;
+    stream.markdown(`  **Paper format:** \`${paperFormat}\`\n\n`);
+
+    // 5. Research approach — computational vs. observational.
+    // Maps to ``engine.no_simulation`` in YAML. Pre-setting this
+    // bypasses the clarify-auto-detect path: when True the engine
+    // skips implement → execute and routes to wait_for_data /
+    // auto_collect_data instead. The clarify agent calls this
+    // ``simulatability``; we surface it under a name a non-technical
+    // user can answer without reading the engine docs.
+    //
+    // Auto-hint the default off the paper_format choice the user
+    // just made — non-scientific formats almost always want
+    // no_simulation=true. Saves the user one extra click in the
+    // typical case while leaving the gate fully overridable.
+    const isProseFormat = ["essay", "report", "policy_brief", "whitepaper"].includes(paperFormat);
+    const simulatableLabel = "$(zap) Computational — a Python script can produce the data";
+    const observationalLabel = "$(eye) Observational — needs real-world data the engine can't simulate";
+    const noSimChoice = await vscode.window.showQuickPick(
+        [
+            isProseFormat
+                ? {
+                    label: `${observationalLabel} (recommended for ${paperFormat})`,
+                    description: "Skip implement/execute; route to wait_for_data + auto_collect_data. For cultural / historical / qualitative / policy topics.",
+                    value: true,
+                }
+                : {
+                    label: `${simulatableLabel} (recommended for ${paperFormat})`,
+                    description: "Run normal implement → execute pipeline. For physics / ML / algorithmic / benchmark topics.",
+                    value: false,
+                },
+            isProseFormat
+                ? {
+                    label: simulatableLabel,
+                    description: "Override: run the implement/execute pipeline even though the paper format is prose.",
+                    value: false,
+                }
+                : {
+                    label: observationalLabel,
+                    description: "Override: skip simulation even though the paper format is scientific.",
+                    value: true,
+                },
+        ],
+        {
+            title: "Frontier Insight — research approach?",
+            placeHolder:
+                "Decides whether the engine runs a Python experiment or waits for real-world data. Matches the clarify agent's 'simulatability' slot.",
+            ignoreFocusOut: true,
+        },
+    );
+    if (!noSimChoice) return undefined;
+    const noSimulation = noSimChoice.value as boolean;
+    stream.markdown(
+        `  **Research approach:** ${noSimulation ? "observational (no_simulation=true)" : "computational (no_simulation=false)"}\n\n`,
+    );
+
+    // 6. Clarify mode — does the agent ask follow-up questions before starting?
     const clarifyChoice = await vscode.window.showQuickPick(
         [
             {
@@ -169,7 +294,7 @@ export async function runInterview(
     if (!clarifyChoice) return undefined;
     stream.markdown(`  **Clarify mode:** \`${clarifyChoice.value}\`\n\n`);
 
-    // 5. Reviewer panel — debate or single reviewer?
+    // 7. Reviewer panel — debate or single reviewer?
     const panelChoice = await vscode.window.showQuickPick(
         [
             {
@@ -202,7 +327,7 @@ export async function runInterview(
         `  **Reviewer panel:** ${panel.length === 0 ? "single reviewer" : panel.join(", ")}\n\n`,
     );
 
-    // 6. Knowledge layer — opt in only if Axon is set up.
+    // 8. Knowledge layer — opt in only if Axon is set up.
     const knowledgeChoice = await vscode.window.showQuickPick(
         [
             {
@@ -233,9 +358,11 @@ export async function runInterview(
         topic: topic.trim(),
         title: (title || suggestedTitle).trim(),
         output_kinds: outputChoice.value as string[],
+        paper_format: paperFormat,
         clarify_mode: clarifyChoice.value,
         review_panel: panel,
         knowledge_enabled: knowledgeChoice.value,
+        no_simulation: noSimulation,
         max_iterations: 2,
     };
 }

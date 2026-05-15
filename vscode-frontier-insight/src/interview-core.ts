@@ -10,13 +10,36 @@
 import * as fs from "fs";
 import * as path from "path";
 
+/** The nine paper-format venues the engine supports. Must stay in
+ * sync with ``PaperFormat`` in core/config.py and the venue rules in
+ * agents/clarify.md — both pin the same Literal. */
+export type PaperFormat =
+    | "generic"
+    | "neurips"
+    | "iclr"
+    | "ieee_access"
+    | "nature_mi"
+    | "essay"
+    | "report"
+    | "policy_brief"
+    | "whitepaper";
+
 export interface InterviewAnswers {
     topic: string;
     title: string;
     output_kinds: string[];
+    paper_format: PaperFormat;
     clarify_mode: "off" | "auto" | "interactive";
     review_panel: string[];           // empty = single reviewer
     knowledge_enabled: boolean;
+    // Whether to skip Python simulation entirely and route to the
+    // wait_for_data / auto_collect_data path. Maps to
+    // ``engine.no_simulation`` in YAML. The same gate the clarify
+    // agent's ``simulatability`` slot ultimately resolves to —
+    // exposing it here lets the user pre-set it when they already
+    // know the topic is non-computational (cultural / historical /
+    // qualitative) and skip the auto-detect dance.
+    no_simulation: boolean;
     max_iterations: number;
 }
 
@@ -60,6 +83,12 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}max_iterations: ${answers.max_iterations}`);
     lines.push(`${indent}review_loop: true`);
     lines.push(`${indent}clarify_mode: "${answers.clarify_mode}"`);
+    // ``no_simulation: true`` routes the engine to wait_for_data
+    // instead of running implement → execute. Pre-setting it here
+    // bypasses the clarify auto-detect path entirely. Always emit
+    // the flag (both branches) so the YAML is self-documenting and
+    // a YAML editor can flip it without re-reading the schema.
+    lines.push(`${indent}no_simulation: ${answers.no_simulation ? "true" : "false"}`);
     // ---- COST DISCIPLINE — these defaults are LOW so a basic quest is
     // ~6 LLM calls instead of ~26. Each line below switches off an
     // expensive feature that the Python defaults turn ON. A user who
@@ -105,7 +134,7 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push("output:");
     const quotedKinds = answers.output_kinds.map((k) => `"${yamlEscape(k)}"`).join(", ");
     lines.push(`${indent}kinds: [${quotedKinds}]`);
-    lines.push(`${indent}paper_format: "generic"`);
+    lines.push(`${indent}paper_format: "${yamlEscape(answers.paper_format)}"`);
     lines.push(`${indent}output_dir: "./outputs"`);
     lines.push("");
 

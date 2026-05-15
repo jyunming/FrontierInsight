@@ -56,7 +56,7 @@ Three feedback loops:
 | Opportunistic full-text fetch — host-network publisher PDFs with login-wall rejection | ✅ |
 | Structured ingest — title-searchable spine docs + citation-header'd body + topic rollups | ✅ |
 | Status GUI — FastAPI server with a vanilla-JS single-page frontend (`web/static/index.html`): fleet list, SSE log stream, clarify panel, paper preview, panel-review cards | ✅ |
-| VSCode extension — sanctioned `vscode.lm.*` integration with `@fi /new`, `/start`, `/fleet`, `/resume`, `/summarize` | ✅ |
+| VSCode extension — sanctioned `vscode.lm.*` integration with `@fi /new`, `/start`, `/fleet`, `/resume`, `/summarize`. The `/new` interview asks 8 questions: topic, title, output kinds, **paper format** (all 9 venues — generic/neurips/iclr/ieee_access/nature_mi/essay/report/policy_brief/whitepaper, maps to `output.paper_format`), **research approach** (computational vs. observational, maps to `engine.no_simulation`), clarify mode, reviewer panel, knowledge layer. Format and approach slots match the clarify agent's `paper_venue` + `simulatability` slots so users can lock both upfront without a clarify call. | ✅ |
 | Folder summarizer — `python launch.py --summarize <folder>` and `@fi /summarize`; auto-detects content kind (literature / code / study / execution / mixed); always ingests input + summary into Axon | ✅ |
 | No-admin LaTeX install — `python launch.py --install-tectonic` drops a self-bootstrapping LaTeX binary into `tools/` for corporate environments where MiKTeX install is blocked | ✅ |
 | Resumable quests — `python launch.py --resume <quest_id>` / `@fi /resume` re-enter the LangGraph from the last checkpointed node when a prior run died mid-pipeline | ✅ |

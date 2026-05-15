@@ -182,9 +182,11 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         "topic": "Compare two numerical integrators on a damped harmonic oscillator.\nReport energy drift.",
         "title": "rk4-vs-euler",
         "output_kinds": ["paper_md", "slides"],
+        "paper_format": "generic",
         "clarify_mode": "auto",
         "review_panel": ["methodologist", "statistician"],
         "knowledge_enabled": False,
+        "no_simulation": False,
         "max_iterations": 2,
     }
     interview_path = str(compiled).replace("\\", "/")
@@ -307,9 +309,11 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
         # sure they survive too.
         "title": "no-yes-off-test",
         "output_kinds": ["paper_md"],
+        "paper_format": "generic",
         "clarify_mode": clarify_mode,
         "review_panel": [],
         "knowledge_enabled": False,
+        "no_simulation": False,
         "max_iterations": 2,
     }
     interview_path = str(compiled).replace("\\", "/")
@@ -354,6 +358,159 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
         # Title with "no" / "yes" / "off" tokens survives as a string,
         # not a coerced boolean.
         assert cfg.title == "no-yes-off-test"
+    finally:
+        Path(tmp_path_str).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not _have_npm(), reason="node/npm not on PATH")
+@pytest.mark.skipif(
+    not (EXT_DIR / "out" / "interview-core.js").exists() and not _have_node_modules(),
+    reason="run `npm install && npm run compile` in vscode-frontier-insight/ first",
+)
+@pytest.mark.parametrize(
+    "paper_format",
+    [
+        # All nine venues PaperFormat in core/config.py declares. The
+        # interview must produce a YAML that Pydantic accepts for each.
+        "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+        "essay", "report", "policy_brief", "whitepaper",
+    ],
+)
+def test_interview_paper_format_round_trips_through_pydantic(
+    paper_format: str,
+) -> None:
+    """User-visible parity gap (task #39): the VSCode interview used
+    to hardcode ``output.paper_format: "generic"`` regardless of the
+    user's choice — the 8 other venues the clarify agent picks were
+    unreachable from the UI. This test pins the fix: each format the
+    interview offers must survive the TS → YAML → Pydantic round-trip.
+    """
+    import json
+    import tempfile
+
+    compiled = EXT_DIR / "out" / "interview-core.js"
+    if not compiled.exists():
+        subprocess.run(
+            [_resolve_npm(), "run", "compile"], cwd=str(EXT_DIR),
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+
+    answers = {
+        "topic": "paper-format parity regression",
+        "title": "paper-format-roundtrip",
+        "output_kinds": ["paper_md"],
+        "paper_format": paper_format,
+        "clarify_mode": "off",
+        "review_panel": [],
+        "knowledge_enabled": False,
+        "no_simulation": False,
+        "max_iterations": 2,
+    }
+    interview_path = str(compiled).replace("\\", "/")
+    node_script = (
+        f"const {{ answersToYaml }} = require({json.dumps(interview_path)});\n"
+        f"const answers = {json.dumps(answers)};\n"
+        "process.stdout.write(answersToYaml(answers));\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(node_script)
+        driver_path = f.name
+    try:
+        proc = subprocess.run(
+            [_resolve_node(), driver_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        Path(driver_path).unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
+    yaml_blob = proc.stdout
+    assert f'paper_format: "{paper_format}"' in yaml_blob, (
+        f"interview YAML must surface the chosen paper_format verbatim; "
+        f"got:\n{yaml_blob}"
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(yaml_blob)
+        tmp_path_str = f.name
+    try:
+        from core.config import Config
+        cfg = Config.from_yaml(Path(tmp_path_str))
+        assert cfg.output.paper_format == paper_format, (
+            f"Pydantic must accept paper_format={paper_format!r} from the "
+            f"interview-generated YAML; got {cfg.output.paper_format!r}"
+        )
+    finally:
+        Path(tmp_path_str).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not _have_npm(), reason="node/npm not on PATH")
+@pytest.mark.skipif(
+    not (EXT_DIR / "out" / "interview-core.js").exists() and not _have_node_modules(),
+    reason="run `npm install && npm run compile` in vscode-frontier-insight/ first",
+)
+@pytest.mark.parametrize("no_simulation", [True, False])
+def test_interview_no_simulation_round_trips_through_pydantic(
+    no_simulation: bool,
+) -> None:
+    """Parity gap (task #39): the interview used to never emit
+    ``engine.no_simulation`` — the gate that routes observational
+    quests away from implement → execute. The clarify agent had to
+    auto-detect it from the topic. Now the user can pre-set it.
+    This test pins both YAML branches reach Pydantic intact."""
+    import json
+    import tempfile
+
+    compiled = EXT_DIR / "out" / "interview-core.js"
+    answers = {
+        "topic": "observational quest routing regression",
+        "title": "no-sim-roundtrip",
+        "output_kinds": ["paper_md"],
+        "paper_format": "essay" if no_simulation else "generic",
+        "clarify_mode": "off",
+        "review_panel": [],
+        "knowledge_enabled": False,
+        "no_simulation": no_simulation,
+        "max_iterations": 2,
+    }
+    interview_path = str(compiled).replace("\\", "/")
+    node_script = (
+        f"const {{ answersToYaml }} = require({json.dumps(interview_path)});\n"
+        f"const answers = {json.dumps(answers)};\n"
+        "process.stdout.write(answersToYaml(answers));\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(node_script)
+        driver_path = f.name
+    try:
+        proc = subprocess.run(
+            [_resolve_node(), driver_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        Path(driver_path).unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
+    yaml_blob = proc.stdout
+    expected = "true" if no_simulation else "false"
+    assert f"no_simulation: {expected}" in yaml_blob, (
+        f"interview YAML must emit engine.no_simulation={expected}; "
+        f"got:\n{yaml_blob}"
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8",
+    ) as f:
+        f.write(yaml_blob)
+        tmp_path_str = f.name
+    try:
+        from core.config import Config
+        cfg = Config.from_yaml(Path(tmp_path_str))
+        assert cfg.engine.no_simulation is no_simulation
     finally:
         Path(tmp_path_str).unlink(missing_ok=True)
 
