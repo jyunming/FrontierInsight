@@ -164,6 +164,53 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+## Topics that need real data (no simulation)
+
+Some research questions can't honestly be answered by a Python
+experiment — cultural comparisons, historical analyses, qualitative
+cross-case studies, policy reviews. The `/new` interview's
+**Research approach** question covers this: pick *"observational"*
+and the generated YAML sets `engine.no_simulation: true`. The
+engine then skips `implement → execute` entirely and routes through
+`auto_collect_data → wait_for_data → data_load → analyze`.
+
+Before pausing, `auto_collect_data` runs:
+
+1. Axon retrieval against `topic + design.hypothesis`. Top hits
+   land as Markdown files under
+   `outputs/<id>/data/auto_collected/<rank>_<slug>.md` with YAML
+   provenance front matter.
+2. Each adapter in `engine.dataset_adapters` (e.g. `worldbank`,
+   `wikipedia`) runs an external lookup and writes evidence into
+   `outputs/<id>/data/auto_collected/<adapter>/`.
+
+If any files land, the chat panel shows the count and the quest
+continues — many no-simulation quests run end-to-end without
+manual data drops. If Axon was empty AND every adapter returned
+nothing, the chat panel shows a *"Quest paused for data — drop
+files into `data/`"* line and the engine exits cleanly. Drop your
+own files and re-run with `@fi /resume <quest_id>`.
+
+## PDF strict mode
+
+For unattended fleet runs, add to the YAML so a missing pandoc /
+LaTeX engine fails fast at pre-flight instead of after a full quest:
+
+```yaml
+output:
+  kinds: [paper_md, paper_pdf]
+  require_pdf: true
+```
+
+The engine aborts at startup with a recipe for the missing tool
+(`pandoc`, `pdflatex`, or `tectonic`), saving the LLM cost of a
+quest that was always going to fail at the compile step. The
+default (`require_pdf: false`) keeps the graceful skip — quest
+completes, writes `paper.md`, drops a `paper_pdf_skipped.md`
+diagnostic next to it. See [`docs/USAGE.md`](../docs/USAGE.md) — the
+"strict-mode PDF enforcement" section under the `output.require_pdf`
+schema entry.
+
 ## Pre-quest proposal
 
 ```
@@ -239,6 +286,7 @@ Approximate per-quest burn:
 - Bare quest (clarify=off, single reviewer): ~10 premium requests
 - Full panel (3 personas + moderator) + clarify-auto: ~18 premium requests
 - Worst case (panel + re_experiment + 2 revise iterations): ~30+
+- No-simulation quest (skips `implement → execute → execute_reflect`): ~6 premium requests — the saving comes from cutting the implement/execute self-correction loop entirely.
 
 On Copilot Pro (~300 premium requests/month) you can run ~15–30 quests
 a month depending on configuration. On Business / Enterprise the
@@ -264,8 +312,8 @@ abuse-detection risk from scraped tokens.
 
 - **VSCode must stay open** for the duration of the quest. Closing
   VSCode kills the Python child cleanly via the chat-cancellation
-  token, but you lose any uncheckpointed state. (Phase B's
-  SqliteSaver lets a killed quest resume with the same `quest_id`.)
+  token, but you lose any uncheckpointed state. The SqliteSaver
+  checkpoint lets a killed quest resume with the same `quest_id`.
 - **Per-extension rate limits exist** on `vscode.lm`. VSCode docs say
   these "will be expanded as we learn more." Very long quests (e.g.
   full panel + cross_check + many literature hits) can theoretically
@@ -277,3 +325,10 @@ abuse-detection risk from scraped tokens.
 - **Model availability depends on your subscription.** Run
   `vscode.lm.selectChatModels({vendor: 'copilot'})` to see what you
   have access to; copy model names from there into your `node_models`.
+- **`engine.dataset_adapters` make direct outbound HTTPS, not via
+  `vscode.lm`.** Enabling `worldbank` / `wikipedia` issues stdlib
+  `urllib` requests (wrapped in `asyncio.to_thread`) from the
+  engine process to `api.worldbank.org` / `en.wikipedia.org` — no
+  Copilot routing, no `vscode.lm` involvement. On a network that
+  blocks those hosts (corporate proxy, air-gapped VM), leave
+  `dataset_adapters` empty and rely on Axon + manual data drops.
