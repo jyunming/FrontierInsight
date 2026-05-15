@@ -18,6 +18,7 @@ in 2026-05-14 when the host had no pandoc/pdflatex/tectonic installed.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,137 @@ from pathlib import Path
 
 from core.config import Config
 from core.engine import QuestArtifacts
+
+
+# Unicode math + typographic glyphs LLMs routinely emit that
+# ``pdflatex`` + ``\usepackage[utf8]{inputenc}`` can't handle on its
+# own. Maps each char to a LaTeX replacement that works in BOTH text
+# and math contexts (``\ensuremath`` flips into math mode if
+# necessary). The map is the single source of truth — both the
+# pre-pandoc sanitizer (this file) and the ``\DeclareUnicodeCharacter``
+# safety net in templates should stay in sync with it.
+_LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
+    # Math operators
+    "×": r"\ensuremath{\times}",        # ×
+    "÷": r"\ensuremath{\div}",          # ÷
+    "±": r"\ensuremath{\pm}",           # ±
+    "−": r"\ensuremath{-}",             # − (minus sign, distinct from hyphen)
+    "≈": r"\ensuremath{\approx}",       # ≈
+    "≠": r"\ensuremath{\neq}",          # ≠
+    "≤": r"\ensuremath{\leq}",          # ≤
+    "≥": r"\ensuremath{\geq}",          # ≥
+    "∝": r"\ensuremath{\propto}",       # ∝
+    "∞": r"\ensuremath{\infty}",        # ∞
+    "·": r"\ensuremath{\cdot}",         # ·
+    "⋅": r"\ensuremath{\cdot}",         # ⋅
+    "∑": r"\ensuremath{\sum}",          # ∑
+    "∫": r"\ensuremath{\int}",          # ∫
+    "∂": r"\ensuremath{\partial}",      # ∂
+    "∇": r"\ensuremath{\nabla}",        # ∇
+    "√": r"\ensuremath{\sqrt{}}",       # √ (bare; users wanting body need explicit LaTeX)
+    # Arrows
+    "→": r"\ensuremath{\rightarrow}",   # →
+    "←": r"\ensuremath{\leftarrow}",    # ←
+    "⇒": r"\ensuremath{\Rightarrow}",   # ⇒
+    "⇔": r"\ensuremath{\Leftrightarrow}",   # ⇔
+    # Superscripts (common in formulas like 10^4)
+    "²": r"\ensuremath{^{2}}",          # ²
+    "³": r"\ensuremath{^{3}}",          # ³
+    "¹": r"\ensuremath{^{1}}",          # ¹
+    "⁰": r"\ensuremath{^{0}}",          # ⁰
+    "⁴": r"\ensuremath{^{4}}",          # ⁴
+    "⁵": r"\ensuremath{^{5}}",          # ⁵
+    "⁶": r"\ensuremath{^{6}}",          # ⁶
+    "⁷": r"\ensuremath{^{7}}",          # ⁷
+    "⁸": r"\ensuremath{^{8}}",          # ⁸
+    "⁹": r"\ensuremath{^{9}}",          # ⁹
+    # Degrees + typography
+    "°": r"\ensuremath{^{\circ}}",      # °
+    "—": "---",                          # — em dash
+    "–": "--",                           # – en dash
+    "…": r"\ldots{}",                   # …
+    "«": "``",                           # «
+    "»": "''",                           # »
+    "“": "``",                           # "
+    "”": "''",                           # "
+    "‘": "`",                            # '
+    "’": "'",                            # '
+    # Common Greek letters (lowercase) — full set; LLMs use these
+    # bare in prose like "α = 0.05".
+    "α": r"\ensuremath{\alpha}",
+    "β": r"\ensuremath{\beta}",
+    "γ": r"\ensuremath{\gamma}",
+    "δ": r"\ensuremath{\delta}",
+    "ε": r"\ensuremath{\epsilon}",
+    "ζ": r"\ensuremath{\zeta}",
+    "η": r"\ensuremath{\eta}",
+    "θ": r"\ensuremath{\theta}",
+    "ι": r"\ensuremath{\iota}",
+    "κ": r"\ensuremath{\kappa}",
+    "λ": r"\ensuremath{\lambda}",
+    "μ": r"\ensuremath{\mu}",
+    "ν": r"\ensuremath{\nu}",
+    "ξ": r"\ensuremath{\xi}",
+    "π": r"\ensuremath{\pi}",
+    "ρ": r"\ensuremath{\rho}",
+    "σ": r"\ensuremath{\sigma}",
+    "τ": r"\ensuremath{\tau}",
+    "φ": r"\ensuremath{\varphi}",
+    "χ": r"\ensuremath{\chi}",
+    "ψ": r"\ensuremath{\psi}",
+    "ω": r"\ensuremath{\omega}",
+    # Common uppercase Greek (only the ones not identical to Latin)
+    "Γ": r"\ensuremath{\Gamma}",
+    "Δ": r"\ensuremath{\Delta}",
+    "Θ": r"\ensuremath{\Theta}",
+    "Λ": r"\ensuremath{\Lambda}",
+    "Ξ": r"\ensuremath{\Xi}",
+    "Π": r"\ensuremath{\Pi}",
+    "Σ": r"\ensuremath{\Sigma}",
+    "Φ": r"\ensuremath{\Phi}",
+    "Ψ": r"\ensuremath{\Psi}",
+    "Ω": r"\ensuremath{\Omega}",
+}
+
+# Pre-compile a translator for str.translate — that path is faster
+# than a chained str.replace and Python's translate handles multi-
+# char destination strings transparently.
+_LATEX_UNICODE_TRANSLATOR = str.maketrans(_LATEX_UNICODE_REPLACEMENTS)
+
+
+def _sanitize_unicode_for_latex(markdown: str) -> str:
+    """Replace common LLM-emitted Unicode math/typography glyphs with
+    LaTeX-safe equivalents so ``pdflatex`` + ``\\usepackage[utf8]{inputenc}``
+    doesn't error with ``Unicode character … not set up for use with
+    LaTeX``.
+
+    Skipped glyphs (anything outside :data:`_LATEX_UNICODE_REPLACEMENTS`)
+    are left as-is. If the template's ``\\DeclareUnicodeCharacter``
+    safety net covers them, fine; otherwise pdflatex will still error
+    — at which point the right fix is to extend the map. Logged at
+    INFO when the sanitizer actually replaced anything so run.log
+    surfaces what was rewritten."""
+    replaced = markdown.translate(_LATEX_UNICODE_TRANSLATOR)
+    return replaced
+
+
+# Pattern: any code-fence block. We don't sanitize inside fenced code
+# because the chars might be intentional terminal-output samples and
+# pandoc emits them inside a Verbatim environment where they go
+# through different LaTeX handling.
+_CODE_FENCE_RE = re.compile(r"(```.*?\n.*?```|`[^`\n]+`)", re.DOTALL)
+
+
+def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
+    """Apply :func:`_sanitize_unicode_for_latex` to prose but leave
+    fenced code + inline code untouched. Inside fenced code, LLMs
+    sometimes include terminal output where the user wants to see the
+    raw glyph; rewriting it there would change the meaning."""
+    parts = _CODE_FENCE_RE.split(markdown)
+    # Even-indexed parts are prose; odd-indexed are code matches.
+    for i in range(0, len(parts), 2):
+        parts[i] = _sanitize_unicode_for_latex(parts[i])
+    return "".join(parts)
 
 _log = logging.getLogger("frontier_insight.paper")
 
@@ -236,9 +368,40 @@ class PaperGenerator:
         template = TEMPLATES_DIR / fmt / "template.tex"
         out_pdf = out_dir / "paper.pdf"
 
+        # Pre-process: rewrite common Unicode math glyphs (≈, ≥, ×, −,
+        # —, lowercase Greek, etc.) into LaTeX commands before pandoc
+        # sees the file. ``pdflatex`` + ``inputenc utf8`` can't handle
+        # them on its own ("Unicode character ≈ (U+2248) not set up for
+        # use with LaTeX"). The user's original paper.md is preserved
+        # unchanged; the sanitized copy lands at
+        # ``out_dir/paper_pdf_source.md`` so it's visible if the user
+        # wants to see exactly what pandoc consumed.
+        try:
+            md_text = paper_md.read_text(encoding="utf-8")
+            sanitized_md = _sanitize_unicode_outside_code_blocks(md_text)
+            if sanitized_md != md_text:
+                _log.info(
+                    "paper.pdf: sanitized Unicode glyphs in paper.md "
+                    "before pandoc (%d chars rewritten)",
+                    len(md_text) - len(sanitized_md) + sum(
+                        sanitized_md.count(v) for v in
+                        _LATEX_UNICODE_REPLACEMENTS.values()
+                    ),
+                )
+            sanitized_path = out_dir / "paper_pdf_source.md"
+            sanitized_path.write_text(sanitized_md, encoding="utf-8")
+            pandoc_input = sanitized_path
+        except OSError as e:
+            _log.warning(
+                "paper.pdf: could not pre-process paper.md (%r); "
+                "falling back to original — pdflatex may fail on "
+                "Unicode glyphs.", e,
+            )
+            pandoc_input = paper_md
+
         cmd: list[str] = [
             pandoc_exe,
-            str(paper_md),
+            str(pandoc_input),
             "-o", str(out_pdf),
             f"--pdf-engine={engine_path}",
             "--standalone",
