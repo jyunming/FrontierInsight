@@ -38,11 +38,13 @@ SandboxKind = Literal["venv", "docker"]
 # Five scientific venues + four non-scientific prose formats added
 # in Phase Q. The non-scientific formats are IMRAD-free — prose-
 # shaped output for cultural / historical / business / policy topics
-# where Methods → Results doesn't fit. ``write.md`` branches on the
-# format hint; ``Engine._resolve_write_persona`` swaps the default
-# (senior_researcher) voice for the format's natural persona
-# (essayist, consulting analyst, policy analyst, industry analyst)
-# per audit #12 Rec 3.
+# where Methods → Results doesn't fit.
+# ``Engine._resolve_write_persona`` (NOT the prompt itself) reads
+# the format and loads a per-format persona prefix from
+# ``agents/write_persona_<name>.md``, which the prompt then prepends
+# via ``$persona_block``. Scientific venues yield an empty persona
+# block, so ``write.md`` falls through to its built-in IMRAD voice.
+# Audit #12 Rec 3.
 PaperFormat = Literal[
     "generic", "neurips", "iclr", "ieee_access", "nature_mi",
     "essay", "report", "policy_brief", "whitepaper",

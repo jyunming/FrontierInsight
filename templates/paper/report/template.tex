@@ -9,7 +9,10 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
 \usepackage{hyperref}
-\usepackage[default,scale=0.95]{opensans}
+% helvet is universally available in minimal TeX Live installs;
+% opensans (an earlier choice) is not, and tripped paper_pdf compile
+% on stripped containers per PR #79 review.
+\usepackage{helvet}
 \renewcommand{\familydefault}{\sfdefault}
 \usepackage{titlesec}
 \usepackage{fancyhdr}

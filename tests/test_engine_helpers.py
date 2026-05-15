@@ -2434,9 +2434,7 @@ def test_paper_format_subsets_partition_the_literal() -> None:
     assert SCIENTIFIC_PAPER_FORMATS & NON_SCIENTIFIC_PAPER_FORMATS == set()
 
 
-def test_paper_format_templates_exist_with_body_placeholder(
-    tmp_path: Path,
-) -> None:
+def test_paper_format_templates_exist_with_body_placeholder() -> None:
     """Each non-scientific format must have a usable LaTeX template
     that pandoc accepts — the prior stub-template venues (iclr,
     ieee_access, nature_mi) shipped a one-line `%` comment and
