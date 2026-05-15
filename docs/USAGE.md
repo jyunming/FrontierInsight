@@ -204,7 +204,7 @@ knowledge:
 
 output:
   kinds: [paper_md, paper_pdf]
-  paper_format: generic             # generic | neurips | iclr | ieee_access | nature_mi
+  paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   require_pdf: false                # strict mode for paper_pdf — see below
 ```
@@ -251,11 +251,29 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 
 ### `output.paper_format` — which templates ship fully styled
 
+**Scientific (IMRAD):**
+
 | Format | Status |
 |---|---|
 | `generic` | ✅ Fully styled — IMRAD with default LaTeX article geometry. The default; pick this when you don't have a target venue. |
 | `neurips` | ✅ Fully styled — uses the NeurIPS 2024 style sheet. |
 | `iclr`, `ieee_access`, `nature_mi` | ⚠️ Minimal stubs — they compile, but the style sheets are placeholders. Treat as starting points; copy the real venue's `.sty` file into `templates/paper/<format>/` to customize. |
+
+**Non-scientific (prose, IMRAD-free):**
+
+| Format | Status |
+|---|---|
+| `essay` | ✅ Long-form argumentative prose. Wider margins, 1.5× line spacing, serif body. Picks the **essayist** write-persona — opens with thesis, marshals evidence, closes with implications. No IMRAD headings. |
+| `report` | ✅ Consulting executive report with cover page + TOC. Sans-serif body. Picks the **senior consulting analyst** persona — exec summary → findings → recommendations. |
+| `policy_brief` | ✅ 2-4 page brief for policymakers. Tight margins, header strip, dense layout. Picks the **policy analyst** persona — issue → context → single recommendation. |
+| `whitepaper` | ✅ 8-20 page industry analysis. Cover with whitepaper subtitle, modest TOC, sans-serif. Picks the **industry analyst** persona — problem → approach → evidence → conclusions. |
+
+The `clarify` node's `paper_venue` slot accepts both buckets. For
+non-simulatable topics (set via the new `simulatability` clarify
+slot or legacy `empirical_vs_theoretical: empirical`), the agent
+will default to `essay` instead of `generic`. The write-persona
+swap is automatic — set `paper_format: policy_brief` in YAML and
+the `write` node loads the policy-analyst voice.
 
 ### `--fleet` concurrency model
 

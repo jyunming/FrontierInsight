@@ -1,0 +1,44 @@
+% FrontierInsight non-scientific paper template — policy brief.
+% 2-4 page hard limit. The brief is the entire deliverable; there
+% is no longer paper to back it up. Pandoc will respect h1 → section
+% but the prompt should keep the brief to ~5 H1s max. No TOC. Tight
+% margins so the brief reads dense without being cramped.
+
+\documentclass[10pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+% Bold section headings to anchor the brief's three-act shape:
+% "Issue" → "Context" → "Recommendation". Pandoc maps Markdown h1
+% to \section; configure those for visual weight.
+\titleformat{\section}{\normalfont\large\bfseries\color{black!85}}{\thesection}{0.6em}{}
+\titlespacing*{\section}{0pt}{1.0em}{0.4em}
+
+% Header strip with the title + date so readers know what they're
+% holding when the brief gets printed and detached from any email.
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\textbf{Policy Brief} — $title$}
+\rhead{\small $date$}
+\rfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\Large\bfseries $title$}
+\author{}
+\date{}
+
+\begin{document}
+{\Large\bfseries $title$ \par}
+\vspace{0.4em}
+{\small Frontier Insight — $date$ \par}
+\vspace{1.2em}
+
+$body$
+
+\end{document}

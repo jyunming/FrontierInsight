@@ -34,7 +34,11 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from .config import Config
+from .config import (
+    Config,
+    NON_SCIENTIFIC_PAPER_FORMATS,
+    SCIENTIFIC_PAPER_FORMATS,
+)
 from .execution import ExecutionResult, make_executor
 from .knowledge import Knowledge, RetrievedDoc
 from .provider import (
@@ -1584,9 +1588,46 @@ class Engine:
                 )
         return patch
 
+    def _resolve_write_persona(self, state: QuestState) -> str:
+        """Pick a persona prefix for the ``write`` node based on the
+        format hint in clarify answers + output config.
+
+        Scientific venues return empty so ``write.md``'s built-in
+        IMRAD framing carries the prompt unchanged. Non-scientific
+        formats load their persona prefix from
+        ``agents/write_persona_<name>.md`` via ``_load_persona_prefix``
+        — same pattern as the ``review_persona_*`` files. Unknown
+        format values fall back to empty (defense-in-depth for the
+        clarify path, which accepts free-form strings from the LLM).
+
+        Resolution order (first match wins):
+        1. ``state["clarify_answers"]["paper_venue"]`` — clarify
+           agent's pick (LLM-generated; normalized via ``.strip().lower()``).
+        2. ``self.config.output.paper_format`` — YAML default
+           (Pydantic-validated against ``PaperFormat`` so case is
+           already canonical).
+        """
+        venue = ""
+        answers = state.get("clarify_answers") or {}
+        if isinstance(answers, dict):
+            venue = str(answers.get("paper_venue") or "").strip().lower()
+        if not venue:
+            venue = self.config.output.paper_format or ""
+
+        if venue in SCIENTIFIC_PAPER_FORMATS:
+            return ""
+        if venue not in NON_SCIENTIFIC_PAPER_FORMATS:
+            return ""
+        return _load_persona_prefix(venue, category="write")
+
     async def _node_write(self, state: QuestState) -> QuestState:
-        self._log.info("[write] authoring IMRAD paper.md")
+        persona_block = self._resolve_write_persona(state)
+        self._log.info(
+            "[write] authoring paper.md (persona=%s)",
+            persona_block.split("\n", 1)[0][:80] if persona_block else "default",
+        )
         prompt = self._prompts["write"].substitute(
+            persona_block=persona_block,
             topic=state["topic"],
             title=state.get("title", "Untitled"),
             design_block=json.dumps(state.get("design") or {}, indent=2),
@@ -2107,18 +2148,26 @@ def _format_reflect_history(history: list[dict[str, Any]]) -> str:
 _PERSONA_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-def _load_persona_prefix(name: str) -> str:
-    """Phase N: load the persona-specific prefix that gets prepended to
-    `agents/review.md` when this persona reviews. Falls back to a
-    generic prefix when no per-persona file exists, so users can
-    declare a custom persona name in YAML without shipping a new file."""
+def _load_persona_prefix(name: str, *, category: str = "review") -> str:
+    """Load a persona-specific prefix from
+    ``agents/<category>_persona_<name>.md`` (Phase N for ``review``;
+    Phase Q for ``write``). Falls back to a generic prefix when no
+    per-persona file exists so users can declare a custom persona
+    name in YAML without shipping a new file. The fallback path only
+    applies to the ``review`` category — write personas without a
+    file return an empty string so the caller can decide whether to
+    use the default voice."""
     if not _PERSONA_NAME_RE.match(name):
         raise ValueError(
             f"invalid persona name {name!r}: must match [a-z][a-z0-9_]*"
         )
-    persona_path = PROMPTS_DIR / f"review_persona_{name}.md"
+    persona_path = PROMPTS_DIR / f"{category}_persona_{name}.md"
     if persona_path.exists():
         return persona_path.read_text(encoding="utf-8").strip()
+    if category != "review":
+        # Write personas don't have a generic-fallback prompt — return
+        # empty so callers fall back to the prompt's default voice.
+        return ""
     generic_path = PROMPTS_DIR / "review_persona_generic.md"
     if not generic_path.exists():
         return f"**Persona: {name}.**"

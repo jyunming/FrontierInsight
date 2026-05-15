@@ -1,0 +1,41 @@
+% FrontierInsight non-scientific paper template — executive report.
+% Consulting-style: cover page with title, TOC after the cover,
+% sans-serif body, page numbers in the footer. The Markdown body
+% should open with an "Executive Summary" H1 — pandoc renders that
+% as the first section after the TOC.
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+% helvet is universally available in minimal TeX Live installs;
+% opensans (an earlier choice) is not, and tripped paper_pdf compile
+% on stripped containers per PR #79 review.
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rfoot{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+
+\title{\Huge\bfseries $title$}
+\author{Frontier Insight}
+\date{$date$}
+
+\begin{document}
+\begin{titlepage}
+  \maketitle
+  \thispagestyle{empty}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+$body$
+
+\end{document}

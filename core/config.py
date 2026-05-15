@@ -35,7 +35,31 @@ ProviderName = Literal[
 ]
 EngineFramework = Literal["langgraph"]
 SandboxKind = Literal["venv", "docker"]
-PaperFormat = Literal["generic", "neurips", "iclr", "ieee_access", "nature_mi"]
+# Five scientific venues + four non-scientific prose formats added
+# in Phase Q. The non-scientific formats are IMRAD-free — prose-
+# shaped output for cultural / historical / business / policy topics
+# where Methods → Results doesn't fit.
+# ``Engine._resolve_write_persona`` (NOT the prompt itself) reads
+# the format and loads a per-format persona prefix from
+# ``agents/write_persona_<name>.md``, which the prompt then prepends
+# via ``$persona_block``. Scientific venues yield an empty persona
+# block, so ``write.md`` falls through to its built-in IMRAD voice.
+# Audit #12 Rec 3.
+PaperFormat = Literal[
+    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    "essay", "report", "policy_brief", "whitepaper",
+]
+# Subsets of PaperFormat used by Engine._resolve_write_persona and
+# tests. Kept here (not in engine.py) so the next venue addition
+# updates one location. The empty-intersection + union-equals-
+# PaperFormat invariants are pinned by
+# test_paper_format_subsets_partition_the_literal.
+SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
+    "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+})
+NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
+    "essay", "report", "policy_brief", "whitepaper",
+})
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
 
 

@@ -1,3 +1,5 @@
+$persona_block
+
 You are the **Writing** stage of an automated research pipeline.
 
 # Topic
@@ -26,13 +28,18 @@ $cross_check_block
 
 # Your task
 
-Produce a single Markdown paper in IMRAD format (Introduction, Methods, Results, Discussion). Include all figures using `![caption](figures/<filename>)`.
+Produce a single Markdown paper. **Structure depends on the persona block above:**
+
+- If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats.
+- If the persona block is empty (scientific venues — `generic` / `neurips` / `iclr` / `ieee_access` / `nature_mi`), use **IMRAD** (Introduction, Methods, Results, Discussion).
+
+Include all figures using `![caption](figures/<filename>)`.
 
 **Length is determined by the `Study depth` slot in the clarifications block above.** Honor it:
 
-- `brief preprint` — 1–2 pages, terse Introduction (1 paragraph), minimal Methods, focus on novel findings only. Citations OK to be few; don't pad.
-- `journal-length` (default) — 4–8 pages, full IMRAD with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** cited sources **by content** (not just listed in References), and an explicit Limitations subsection. Aim for ~1500–2500 words.
-- `comprehensive review` — 10–15 pages with a Background section between Introduction and Methods, a Comparison or Synthesis section after Results, and Discussion that integrates every cited source by content. Aim for 4000+ words and at least 10 citations actually discussed.
+- `brief preprint` — 1–2 pages, terse opening (1 paragraph), focus on novel findings only. Citations OK to be few; don't pad.
+- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** cited sources **by content** (not just listed in References), and an explicit Limitations subsection. Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
+- `comprehensive review` — 10–15 pages with a Background / Context section near the start, a Comparison or Synthesis section in the middle, and a closing section that integrates every cited source by content. Aim for 4000+ words and at least 10 citations actually discussed.
 
 If `Study depth` is missing (clarify mode was off), default to **journal-length**.
 

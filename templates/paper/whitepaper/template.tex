@@ -1,0 +1,53 @@
+% FrontierInsight non-scientific paper template — whitepaper.
+% Industry / vendor-neutral analysis: problem → approach → evidence
+% → conclusions. Cover page with subtitle slot, sans-serif body,
+% modest TOC for the medium-length doc (8-20 pages typical). Avoids
+% the academic "Authors / Affiliations" line — whitepapers are
+% organizational outputs, not bylined.
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+% helvet is universally available in minimal TeX Live installs;
+% opensans (an earlier choice) is not, and tripped paper_pdf compile
+% on stripped containers per PR #79 review.
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+% Slightly heavier section style than `report` — whitepapers benefit
+% from clearer hierarchy when the doc spans 10+ pages.
+\titleformat{\section}{\Large\bfseries\color{black!90}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{black!75}}{\thesubsection}{0.5em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\textit{$title$}}
+\rfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\Huge\bfseries $title$}
+\author{Frontier Insight}
+\date{$date$}
+
+\begin{document}
+\begin{titlepage}
+  \vspace*{2cm}
+  {\Huge\bfseries $title$ \par}
+  \vspace{1cm}
+  {\Large A Frontier Insight whitepaper \par}
+  \vfill
+  {\large $date$ \par}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+$body$
+
+\end{document}
