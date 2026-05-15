@@ -18,6 +18,12 @@
 \usepackage{fancyhdr}
 \usepackage{booktabs}
 
+% Pandoc-compatibility preamble — see generic/template.tex.
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+$highlighting-macros$
+
 \pagestyle{fancy}
 \fancyhf{}
 \rfoot{\thepage}

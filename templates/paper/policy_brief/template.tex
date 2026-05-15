@@ -13,6 +13,12 @@
 \usepackage{booktabs}
 \usepackage{xcolor}
 
+% Pandoc-compatibility preamble — see generic/template.tex.
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+$highlighting-macros$
+
 % Bold section headings to anchor the brief's three-act shape:
 % "Issue" → "Context" → "Recommendation". Pandoc maps Markdown h1
 % to \section; configure those for visual weight.

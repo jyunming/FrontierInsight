@@ -1,5 +1,19 @@
 % Frontier Insight - fixed 36"x48" 3-column poster template.
-% Substitutions (Python string.Template): $title, $left, $middle, $right.
+% Substitutions (Python string.Template): title, left, middle, right.
+% In the body below, each placeholder appears as a single-dollar
+% ``$$name`` form — that is what safe_substitute() actually replaces.
+% (The double-dollar ``$$$$name`` form you see in THIS comment is the
+% string.Template escape: safe_substitute reduces ``$$$$`` to a literal
+% ``$$`` and does NOT perform any replacement on it. Every dollar-
+% prefixed variable name in the rest of THIS comment is therefore
+% doubled on purpose so the comment renders verbatim instead of being
+% substituted itself.)
+% If you let a bare single-dollar ``$$name`` appear in this comment,
+% multi-line LLM-generated content (which can contain its own
+% \begin/end{column} markers) gets injected INTO this comment line;
+% the second and later lines are no longer inside a "%" comment and
+% end up as raw LaTeX BEFORE \documentclass — pdflatex then errors
+% on \textbf with "Undefined control sequence".
 \documentclass[final,t]{beamer}
 \usepackage[size=custom,width=121.92,height=91.44,scale=1.0]{beamerposter}
 \usepackage{graphicx}

@@ -796,3 +796,121 @@ def test_require_pdf_false_keeps_silent_skip_behavior(
     assert "paper_pdf" not in result
     assert "paper_pdf_skipped" in result
     assert (out_dir / "paper_pdf_skipped.md").exists()
+
+
+# ---- Template-substitution-leak regression (Phase Q hotfix) -------------
+#
+# Two bugs hit the user post-#79: (a) paper.pdf compile failed with
+# "Environment Shaded undefined" + "\\tightlist undefined" because
+# pandoc emits those commands but our custom templates didn't define
+# them; (b) poster.tex compile failed because the template's
+# top-of-file comment ``% Substitutions (Python string.Template):
+# $title, $left, ...`` was itself substituted by ``safe_substitute``,
+# and the multi-line ``$left`` content injected into the comment
+# broke the comment boundary, pushing later lines (including
+# ``\documentclass``) past raw LaTeX that pdflatex couldn't parse.
+
+
+def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
+    """Every working paper template must include \\providecommand for
+    \\tightlist and \\passthrough plus the pandoc highlighting-macros
+    expansion. Without these, paper.md containing fenced code blocks
+    or compact lists fails pdflatex compile (the exact regression
+    that broke a user-reported quest pre-hotfix)."""
+    repo = Path(__file__).resolve().parent.parent
+    working = ["generic", "neurips", "essay", "report", "policy_brief", "whitepaper"]
+    # Pandoc's variable expansion that pulls in the Shaded env + token
+    # color commands. The literal directive we want pandoc to see is
+    # the bare-name form sandwiched between two ``$`` sigils; we build
+    # it here from a placeholder concat so this assertion line itself
+    # is never confused with a pandoc directive by editors/linters.
+    sigil = "$"
+    directive = f"{sigil}highlighting-macros{sigil}"
+    for fmt in working:
+        path = repo / "templates" / "paper" / fmt / "template.tex"
+        assert path.exists(), f"working template {fmt!r} is missing"
+        body = path.read_text(encoding="utf-8")
+        assert "\\providecommand{\\tightlist}" in body, (
+            f"templates/paper/{fmt}/template.tex must \\providecommand "
+            f"\\tightlist — pandoc emits it inside compact lists and "
+            f"the default-template definition is lost when we override."
+        )
+        assert "\\providecommand{\\passthrough}" in body, (
+            f"templates/paper/{fmt}/template.tex must \\providecommand "
+            f"\\passthrough — pandoc emits it around inline raw-blocks."
+        )
+        # Strip ``%``-comments before checking for the actual template
+        # directive — the templates have inline comments that mention
+        # ``highlighting-macros`` by name, so a bare substring search
+        # would pass even if the real ``$highlighting-macros$`` line
+        # got deleted. That is the exact regression this test guards.
+        non_comment = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("%")
+        )
+        assert directive in non_comment, (
+            f"templates/paper/{fmt}/template.tex must include the real "
+            f"pandoc {directive} template directive on a non-comment "
+            f"line (Shaded env + token colors). Found only in comments "
+            f"or not at all."
+        )
+
+
+def test_paper_stub_templates_were_deleted() -> None:
+    """The iclr/ieee_access/nature_mi templates shipped as 1-line
+    LaTeX-comment stubs that pandoc accepted as templates and
+    pdflatex rejected at compile. Audit #05 flagged this; the
+    Phase-Q hotfix deletes them so ``_find_pdf_engine`` /
+    ``template.exists()`` returns False and pandoc's built-in
+    default template runs — which actually compiles."""
+    repo = Path(__file__).resolve().parent.parent
+    for fmt in ("iclr", "ieee_access", "nature_mi"):
+        stub = repo / "templates" / "paper" / fmt / "template.tex"
+        assert not stub.exists(), (
+            f"templates/paper/{fmt}/template.tex must NOT exist — the "
+            f"file is a 1-line stub that breaks pdflatex compile. "
+            f"Pandoc-default fallback works correctly when no "
+            f"template.tex is present."
+        )
+
+
+def test_poster_template_substitution_does_not_leak_into_preamble() -> None:
+    """Phase-Q hotfix regression guard. The poster template's top
+    comment used to read
+    ``% Substitutions (Python string.Template): $title, $left, ...``
+    — and ``string.Template.safe_substitute`` happily expanded the
+    bare dollar names inside the comment. When the LLM's ``$left``
+    content was multi-line (a column wrapper with its own
+    ``\\begin{column}`` ... ``\\end{column}``), the second+ lines
+    landed outside the ``%`` comment and became raw LaTeX BEFORE
+    ``\\documentclass`` — pdflatex then errored on the first
+    ``\\textbf`` it saw with "Undefined control sequence".
+
+    This test pins the fix: after substitution with a multi-line
+    ``left`` value, ``\\documentclass`` must still appear AFTER all
+    the comment lines, AND the rendered file must not contain raw
+    LaTeX commands before ``\\documentclass``."""
+    import string
+
+    repo = Path(__file__).resolve().parent.parent
+    tmpl = (repo / "templates" / "poster" / "poster.tex").read_text(encoding="utf-8")
+
+    out = string.Template(tmpl).safe_substitute(
+        title="Cross-Country Achievement",
+        left="\\begin{column}{0.32\\textwidth}\nLEFT CONTENT\n\\end{column}",
+        middle="middle",
+        right="right",
+    )
+    # \documentclass must appear in the output and must be preceded
+    # only by comment lines (so the preamble is intact).
+    doc_idx = out.find("\\documentclass")
+    assert doc_idx > 0, "rendered poster.tex must contain \\documentclass"
+    before = out[:doc_idx]
+    for line in before.splitlines():
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        assert stripped.startswith("%"), (
+            f"rendered poster.tex has non-comment raw LaTeX before "
+            f"\\documentclass: {line!r} — the comment-substitution "
+            f"leak has regressed."
+        )

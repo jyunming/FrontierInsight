@@ -11,6 +11,16 @@
 \usepackage{microtype}
 \usepackage{authblk}
 
+% Pandoc-compatibility preamble — see generic/template.tex for the
+% full rationale. tightlist + passthrough + the highlighting-macros
+% variable that expands to the Shaded env + per-token color
+% commands. Variable names are NOT spelled out in this comment to
+% avoid the same multi-line-expansion-breaks-the-comment trap.
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+$highlighting-macros$
+
 \renewcommand{\Authands}{, }
 
 \title{$title$}

@@ -7,6 +7,26 @@
 \usepackage{booktabs}
 \usepackage{listings}
 
+% Pandoc-compatibility preamble. The standard pandoc latex template
+% defines these commands and the Shaded env; when we override with a
+% custom template, we must re-declare them ourselves or pdflatex
+% errors on the first encounter.
+%
+% Variable names below are NOT spelled out in this comment because
+% pandoc would substitute them in the comment itself, and multi-line
+% expansion would break the comment boundary and tear down the
+% preamble (see also templates/poster/poster.tex for the same trap).
+%
+% \tightlist is emitted inside markdown compact lists.
+% \passthrough is emitted around inline raw-blocks.
+% The highlighting-macros variable below expands to the Shaded /
+% Highlighting envs + per-token color commands; expands to no-op
+% when paper.md has no code blocks.
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+$highlighting-macros$
+
 \title{$title$}
 \author{Frontier Insight}
 \date{$date$}
