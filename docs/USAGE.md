@@ -145,7 +145,7 @@ provider:
   model: gpt-5                     # global default
   base_url: null                   # only for HTTP-direct overrides (OpenAI-compatible proxies, local gateways). Honored by openai/codex/gemini/ollama/vllm transports.
   api_key_env: null                # override the standard env-var name (e.g. CORP_OPENAI_KEY). When null, the provider uses its conventional name (OPENAI_API_KEY, GEMINI_API_KEY, …).
-  extra: {}                        # transport-specific bag — e.g. extra HTTP headers for a proxy, or codex-CLI flags.
+  extra: {}                        # forward-compat transport bag. Currently only ``bridge_port`` is consumed (``vscode_extension`` transport, set automatically by ``launch.py``). Other keys parse fine but no transport reads them today — don't rely on stashing CLI flags or HTTP headers here.
   # Per-node override (optional). Match keys exactly to engine node
   # names. Reviewer-panel personas are routed via
   # `review_panel.<persona>`; the moderator via `review_moderator`.
@@ -211,9 +211,11 @@ output:
   output_dir: ./outputs
   require_pdf: false                # strict mode for paper_pdf — see below
 
-# Free-text steering prepended to every node's system prompt. Use for
-# project-wide constraints the LLM should respect (style guide,
-# preferred libraries, audience hints, regulatory text). Empty by default.
+# Reserved free-text steering slot — declared in ``core/config.py``
+# but NOT YET wired into any prompt template or ``Engine._chat`` path
+# as of today. Parses and round-trips through the schema; setting it
+# has no behavioural effect until a future PR threads it into the
+# system prompts. Documented here so users see the field exists.
 extra_directives: ""
 ```
 
@@ -390,10 +392,12 @@ write failing) fall through silently to the safety net.
 The Wikipedia adapter handles the long-tail "qualitative comparison"
 case where neither corpus-RAG nor structured-data fits — e.g.
 *"compare the 1968 student protests in Paris and Mexico City"*. It
-compresses the query to its top-6 keywords, calls
-`api.php?action=opensearch` to get candidate article titles, then
-fetches `api/rest_v1/page/summary/<title>` for each match and writes
-a Markdown file per article. The page's `description` and `extract`
+attempts to compress the query to its top-6 informative keywords
+(falls back to the raw trimmed query if every token was filtered
+out as a stop-word), calls `api.php?action=opensearch` to get
+candidate article titles, then fetches
+`api/rest_v1/page/summary/<title>` for each match and writes a
+Markdown file per article. The page's `description` and `extract`
 land in the document body; YAML front matter carries `source:
 wikipedia`, the canonical `title` / `url`, the article's
 `wikipedia_type` (e.g. `standard`, `disambiguation`), and
