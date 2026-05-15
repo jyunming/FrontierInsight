@@ -18,6 +18,7 @@ in 2026-05-14 when the host had no pandoc/pdflatex/tectonic installed.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,156 @@ from pathlib import Path
 
 from core.config import Config
 from core.engine import QuestArtifacts
+
+
+# Unicode math + typographic glyphs LLMs routinely emit that
+# ``pdflatex`` + ``\usepackage[utf8]{inputenc}`` can't handle on its
+# own. Maps each char to a LaTeX replacement that works in BOTH text
+# and math contexts (``\ensuremath`` flips into math mode if
+# necessary). This map is the ONLY protection for these glyphs — the
+# paper templates load ``inputenc`` but do not currently define
+# ``\DeclareUnicodeCharacter`` mappings, so any glyph that escapes
+# this dict will reach pdflatex unchanged and fail compile. Extend
+# the map (don't carve out skip regions) when new glyphs show up in
+# user-reported failures.
+_LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
+    # Math operators
+    "×": r"\ensuremath{\times}",        # ×
+    "÷": r"\ensuremath{\div}",          # ÷
+    "±": r"\ensuremath{\pm}",           # ±
+    "−": r"\ensuremath{-}",             # − (minus sign, distinct from hyphen)
+    "≈": r"\ensuremath{\approx}",       # ≈
+    "≠": r"\ensuremath{\neq}",          # ≠
+    "≤": r"\ensuremath{\leq}",          # ≤
+    "≥": r"\ensuremath{\geq}",          # ≥
+    "∝": r"\ensuremath{\propto}",       # ∝
+    "∞": r"\ensuremath{\infty}",        # ∞
+    "·": r"\ensuremath{\cdot}",         # ·
+    "⋅": r"\ensuremath{\cdot}",         # ⋅
+    "∑": r"\ensuremath{\sum}",          # ∑
+    "∫": r"\ensuremath{\int}",          # ∫
+    "∂": r"\ensuremath{\partial}",      # ∂
+    "∇": r"\ensuremath{\nabla}",        # ∇
+    "√": r"\ensuremath{\sqrt{}}",       # √ (bare; users wanting body need explicit LaTeX)
+    # Arrows
+    "→": r"\ensuremath{\rightarrow}",   # →
+    "←": r"\ensuremath{\leftarrow}",    # ←
+    "⇒": r"\ensuremath{\Rightarrow}",   # ⇒
+    "⇔": r"\ensuremath{\Leftrightarrow}",   # ⇔
+    # Superscripts (common in formulas like 10^4)
+    "²": r"\ensuremath{^{2}}",          # ²
+    "³": r"\ensuremath{^{3}}",          # ³
+    "¹": r"\ensuremath{^{1}}",          # ¹
+    "⁰": r"\ensuremath{^{0}}",          # ⁰
+    "⁴": r"\ensuremath{^{4}}",          # ⁴
+    "⁵": r"\ensuremath{^{5}}",          # ⁵
+    "⁶": r"\ensuremath{^{6}}",          # ⁶
+    "⁷": r"\ensuremath{^{7}}",          # ⁷
+    "⁸": r"\ensuremath{^{8}}",          # ⁸
+    "⁹": r"\ensuremath{^{9}}",          # ⁹
+    # Degrees + typography
+    "°": r"\ensuremath{^{\circ}}",      # °
+    "—": "---",                          # — em dash
+    "–": "--",                           # – en dash
+    "…": r"\ldots{}",                   # …
+    "«": "``",                           # «
+    "»": "''",                           # »
+    "“": "``",                           # "
+    "”": "''",                           # "
+    "‘": "`",                            # '
+    "’": "'",                            # '
+    # Common Greek letters (lowercase) — full set; LLMs use these
+    # bare in prose like "α = 0.05".
+    "α": r"\ensuremath{\alpha}",
+    "β": r"\ensuremath{\beta}",
+    "γ": r"\ensuremath{\gamma}",
+    "δ": r"\ensuremath{\delta}",
+    "ε": r"\ensuremath{\epsilon}",
+    "ζ": r"\ensuremath{\zeta}",
+    "η": r"\ensuremath{\eta}",
+    "θ": r"\ensuremath{\theta}",
+    "ι": r"\ensuremath{\iota}",
+    "κ": r"\ensuremath{\kappa}",
+    "λ": r"\ensuremath{\lambda}",
+    "μ": r"\ensuremath{\mu}",
+    "ν": r"\ensuremath{\nu}",
+    "ξ": r"\ensuremath{\xi}",
+    "π": r"\ensuremath{\pi}",
+    "ρ": r"\ensuremath{\rho}",
+    "σ": r"\ensuremath{\sigma}",
+    "τ": r"\ensuremath{\tau}",
+    "φ": r"\ensuremath{\varphi}",
+    "χ": r"\ensuremath{\chi}",
+    "ψ": r"\ensuremath{\psi}",
+    "ω": r"\ensuremath{\omega}",
+    # Common uppercase Greek (only the ones not identical to Latin)
+    "Γ": r"\ensuremath{\Gamma}",
+    "Δ": r"\ensuremath{\Delta}",
+    "Θ": r"\ensuremath{\Theta}",
+    "Λ": r"\ensuremath{\Lambda}",
+    "Ξ": r"\ensuremath{\Xi}",
+    "Π": r"\ensuremath{\Pi}",
+    "Σ": r"\ensuremath{\Sigma}",
+    "Φ": r"\ensuremath{\Phi}",
+    "Ψ": r"\ensuremath{\Psi}",
+    "Ω": r"\ensuremath{\Omega}",
+}
+
+# Pre-compile a translator for str.translate — that path is faster
+# than a chained str.replace and Python's translate handles multi-
+# char destination strings transparently.
+_LATEX_UNICODE_TRANSLATOR = str.maketrans(_LATEX_UNICODE_REPLACEMENTS)
+
+
+def _sanitize_unicode_for_latex(markdown: str) -> str:
+    """Replace common LLM-emitted Unicode math/typography glyphs with
+    LaTeX-safe equivalents so ``pdflatex`` + ``\\usepackage[utf8]{inputenc}``
+    doesn't error with ``Unicode character … not set up for use with
+    LaTeX``.
+
+    Skipped glyphs (anything outside :data:`_LATEX_UNICODE_REPLACEMENTS`)
+    are left as-is. If the template's ``\\DeclareUnicodeCharacter``
+    safety net covers them, fine; otherwise pdflatex will still error
+    — at which point the right fix is to extend the map. Logged at
+    INFO when the sanitizer actually replaced anything so run.log
+    surfaces what was rewritten."""
+    replaced = markdown.translate(_LATEX_UNICODE_TRANSLATOR)
+    return replaced
+
+
+# Pattern: any code-fence block (used by tests + downstream tooling
+# that wants prose-only sanitization for non-PDF flows). The PDF
+# pipeline uses the unconditional sanitizer below — preserving raw
+# glyphs in code blocks would just push the pdflatex failure
+# downstream because the templates don't have a
+# ``\DeclareUnicodeCharacter`` safety net to catch them.
+_CODE_FENCE_RE = re.compile(r"(```.*?\n.*?```|`[^`\n]+`)", re.DOTALL)
+
+
+def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
+    """Apply :func:`_sanitize_unicode_for_latex` to prose but leave
+    fenced code + inline code untouched. NOTE: this is NOT what the
+    PDF pipeline uses — that path sanitizes everything to avoid the
+    "raw glyph survives in a code block and pdflatex errors" failure
+    mode. This helper is kept as a documented option for any future
+    consumer that legitimately needs prose-only rewriting; today no
+    caller in this file uses it (tests still pin its behaviour as
+    contract)."""
+    parts = _CODE_FENCE_RE.split(markdown)
+    # Even-indexed parts are prose; odd-indexed are code matches.
+    for i in range(0, len(parts), 2):
+        parts[i] = _sanitize_unicode_for_latex(parts[i])
+    return "".join(parts)
+
+
+def _count_sanitized_glyphs(markdown: str) -> int:
+    """Count how many source-glyph occurrences the sanitizer rewrote.
+    Used for the INFO log so the count is honest. Computing from
+    output-length deltas was misleading because the LaTeX
+    replacements are typically ~20 chars longer than the source
+    glyph — a single ``≈`` rewrite added ~20 chars to length but
+    only 1 to the "rewrites" count, making the delta negative."""
+    return sum(markdown.count(c) for c in _LATEX_UNICODE_REPLACEMENTS)
 
 _log = logging.getLogger("frontier_insight.paper")
 
@@ -81,6 +232,7 @@ class PaperGenerator:
             pdf_src = result.get("paper_md") or art.paper_md
             pdf, skip_reason = self._compile_pdf(pdf_src, out_dir)
             diag_path = out_dir / "paper_pdf_skipped.md"
+            sanitized_src = out_dir / "paper_pdf_source.md"
             if pdf is not None:
                 result["paper_pdf"] = pdf
                 # Success on this run — remove any stale skip
@@ -93,6 +245,17 @@ class PaperGenerator:
                     except OSError:
                         pass
             elif skip_reason is not None:
+                # PDF compile skipped — also clean up any sanitized
+                # source file from a PRIOR successful run. The comment
+                # on that file says "exactly what pandoc consumed";
+                # leaving it stale after a skip would mislead users
+                # into thinking the just-written file was the source
+                # of the (skipped) failure.
+                if sanitized_src.is_file():
+                    try:
+                        sanitized_src.unlink()
+                    except OSError:
+                        pass
                 # User asked for a PDF, none was produced, AND we know why.
                 # Write a single-paragraph diagnostic file in the same
                 # directory so the failure is discoverable without grepping
@@ -123,14 +286,18 @@ class PaperGenerator:
                     )
         elif "paper_pdf" not in kinds:
             # ``paper_pdf`` was not requested — clean up any stale
-            # diagnostic from a previous run that did request it. Keeps
-            # the quest dir tidy after a config edit.
-            stale = out_dir / "paper_pdf_skipped.md"
-            if stale.is_file():
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
+            # diagnostic AND the sanitized-source copy from a previous
+            # run that did request it. Keeps the quest dir tidy after
+            # a config edit so a user who turns off paper_pdf doesn't
+            # see leftover artifacts that look like they were produced
+            # by the current run.
+            for stale_name in ("paper_pdf_skipped.md", "paper_pdf_source.md"):
+                stale = out_dir / stale_name
+                if stale.is_file():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
 
         return result
 
@@ -236,9 +403,42 @@ class PaperGenerator:
         template = TEMPLATES_DIR / fmt / "template.tex"
         out_pdf = out_dir / "paper.pdf"
 
+        # Pre-process: rewrite common Unicode math glyphs (≈, ≥, ×, −,
+        # —, lowercase Greek, etc.) into LaTeX commands before pandoc
+        # sees the file. ``pdflatex`` + ``inputenc utf8`` can't handle
+        # them on its own ("Unicode character ≈ (U+2248) not set up for
+        # use with LaTeX"). Sanitize UNCONDITIONALLY (including inside
+        # fenced + inline code) because the paper templates don't have
+        # a ``\DeclareUnicodeCharacter`` safety net — a raw glyph
+        # surviving in a code block would still kill the compile, just
+        # one stack-frame later. The user's original paper.md is
+        # preserved unchanged; the sanitized copy lands at
+        # ``out_dir/paper_pdf_source.md`` so it's visible if the user
+        # wants to see exactly what pandoc consumed.
+        try:
+            md_text = paper_md.read_text(encoding="utf-8")
+            glyph_count = _count_sanitized_glyphs(md_text)
+            sanitized_md = _sanitize_unicode_for_latex(md_text)
+            if glyph_count:
+                _log.info(
+                    "paper.pdf: rewrote %d Unicode glyph occurrence(s) "
+                    "in paper.md before pandoc",
+                    glyph_count,
+                )
+            sanitized_path = out_dir / "paper_pdf_source.md"
+            sanitized_path.write_text(sanitized_md, encoding="utf-8")
+            pandoc_input = sanitized_path
+        except OSError as e:
+            _log.warning(
+                "paper.pdf: could not pre-process paper.md (%r); "
+                "falling back to original — pdflatex may fail on "
+                "Unicode glyphs.", e,
+            )
+            pandoc_input = paper_md
+
         cmd: list[str] = [
             pandoc_exe,
-            str(paper_md),
+            str(pandoc_input),
             "-o", str(out_pdf),
             f"--pdf-engine={engine_path}",
             "--standalone",
