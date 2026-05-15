@@ -20,6 +20,12 @@
 \usepackage{booktabs}
 \usepackage{xcolor}
 
+% Pandoc-compatibility preamble — see generic/template.tex.
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+$highlighting-macros$
+
 % Slightly heavier section style than `report` — whitepapers benefit
 % from clearer hierarchy when the doc spans 10+ pages.
 \titleformat{\section}{\Large\bfseries\color{black!90}}{\thesection}{0.6em}{}

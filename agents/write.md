@@ -20,6 +20,8 @@ $literature_block
 # Figures available (reference each by filename)
 $figure_list
 
+**Hard rule on figures:** you may ONLY emit `![caption](figures/<filename>)` for filenames that appear in the list above. If a figure was planned but the experiment did not produce it, describe what it would have shown in prose ("The planned scatter plot of GDP vs. scores would have...") instead of emitting a broken image link. Pandoc treats a missing image as a placeholder, so a stale link both wastes space and yields a partial-success PDF.
+
 # Pre-flight clarifications (user-supplied or auto-derived)
 $clarify_block
 
