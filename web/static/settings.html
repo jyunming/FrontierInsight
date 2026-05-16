@@ -176,24 +176,36 @@
         }
         reingestCard.style.display = '';
         const storePath = data.store_path || '(not exposed by this Axon version)';
-        const counts = data.doc_counts_by_kind || {};
-        const countRows = Object.keys(counts).map(k => `
+        const bm25 = data.bm25_path;
+        const bySource = data.doc_counts_by_source || {};
+        const totalDocs = data.total_documents;
+        const totalChunks = data.total_chunks;
+        const countsError = data.counts_error;
+        const countsNote = data.counts_note;
+        const sourceRows = Object.keys(bySource).sort().map(s => `
           <tr>
-            <td class="fi-mono" style="padding:0.25rem 0.75rem 0.25rem 0">${escapeHtml(k)}</td>
-            <td style="padding:0.25rem 0">${counts[k] == null ? '<span style="color:var(--fi-text-subtle)">(unavailable)</span>' : escapeHtml(String(counts[k]))}</td>
+            <td class="fi-mono" style="padding:0.25rem 0.75rem 0.25rem 0">${escapeHtml(s)}</td>
+            <td style="padding:0.25rem 0">${escapeHtml(String(bySource[s]))} chunks</td>
           </tr>`).join('');
         el.innerHTML = `
           <div class="fi-card-title">
             <h3>Axon corpus</h3>
             <span class="fi-badge fi-badge-done">✓ available</span>
           </div>
-          <p><b>Store location:</b> <code class="fi-mono">${escapeHtml(storePath)}</code></p>
+          <p><b>Store base:</b> <code class="fi-mono">${escapeHtml(storePath)}</code></p>
+          ${bm25 ? `<p><b>BM25 index:</b> <code class="fi-mono">${escapeHtml(bm25)}</code></p>` : ''}
+          <p>
+            <b>Documents:</b> ${totalDocs != null ? escapeHtml(String(totalDocs)) : '?'} ·
+            <b>Chunks:</b> ${totalChunks != null ? escapeHtml(String(totalChunks)) : '?'}
+          </p>
           <details>
-            <summary>AxonConfig (default)</summary>
-            <pre style="margin-top:0.5rem">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
+            <summary>AxonConfig (secrets redacted)</summary>
+            <pre style="margin-top:0.5rem; max-height:300px; overflow:auto">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
           </details>
-          <h4 style="margin-top:1rem">Doc counts by kind</h4>
-          <table style="font-size:0.875rem"><tbody>${countRows}</tbody></table>`;
+          <h4 style="margin-top:1rem">Chunks by source</h4>
+          ${countsError ? `<p class="fi-card-meta" style="color:var(--fi-warn)">${escapeHtml(countsError)}</p>` : ''}
+          ${Object.keys(bySource).length === 0 ? '<p class="fi-card-meta">Empty corpus. Run a quest with <code class="fi-mono">knowledge.enabled: true</code>, or click "Re-ingest" below to backfill from existing quest outputs.</p>' : `<table style="font-size:0.875rem"><tbody>${sourceRows}</tbody></table>`}
+          ${countsNote ? `<p class="fi-card-meta" style="margin-top:0.5rem; font-style:italic">${escapeHtml(countsNote)}</p>` : ''}`;
       } catch (e) {
         document.getElementById('axon-info').textContent = `Error: ${e}`;
       }

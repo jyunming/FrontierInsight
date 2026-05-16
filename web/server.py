@@ -365,50 +365,82 @@ def make_app(
                 ),
             })
 
-        # No persistent config file exposed via --serve flags today,
-        # so we describe the DEFAULT AxonConfig (what FI would build
-        # if a quest YAML doesn't override it) plus probe the
-        # actual on-disk store path.
         info: dict[str, Any] = {"available": True}
         try:
             ac = AxonConfig()  # default
-            info["axon_config"] = ac.model_dump(mode="json")
-            # AxonConfig exposes the db_path / store dir. Different
-            # Axon versions name this slightly differently — be
-            # liberal in what we surface.
-            for key in ("db_path", "store_path", "persist_dir",
-                        "vector_store_path", "data_dir"):
-                v = getattr(ac, key, None)
-                if v:
-                    info["store_path"] = str(v)
-                    break
+            # AxonConfig isn't a pydantic BaseModel (no model_dump);
+            # enumerate plain attributes. REDACT anything that looks
+            # like a secret — the real AxonConfig holds api_key,
+            # brave_api_key, etc. in plaintext. Returning them to the
+            # browser would leak into network logs + DevTools history.
+            secret_re = re.compile(r"(_?(api_)?(key|token|secret|password))$", re.I)
+            cfg_dump: dict[str, Any] = {}
+            for attr in sorted(dir(ac)):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    val = getattr(ac, attr)
+                except Exception:
+                    continue
+                if callable(val):
+                    continue
+                # Coerce paths + simple types only; skip nested objects.
+                if not isinstance(val, (str, int, float, bool, list, type(None))):
+                    val = str(val)
+                if secret_re.search(attr) and isinstance(val, str) and val:
+                    val = f"<redacted len={len(val)}>"
+                cfg_dump[attr] = val
+            info["axon_config"] = cfg_dump
+            # The actual store base — Axon's directory layout is
+            # ``<store_base>/AxonStore/<user>/<project>/`` and the
+            # bm25 index lives inside that. Surface both.
+            base = getattr(ac, "axon_store_base", None)
+            bm25 = getattr(ac, "bm25_path", None)
+            if base:
+                info["store_path"] = str(base)
+            if bm25:
+                info["bm25_path"] = str(bm25)
         except Exception as e:
             info["config_error"] = repr(e)
 
-        # Doc count by kind. Best-effort: instantiate an AxonBrain
-        # and query for each known FI kind. When Axon's API doesn't
-        # support counting (some versions), report (None) per kind.
+        # Document inventory via the real `list_documents` API.
+        # AxonBrain returns one entry per PARENT doc (grouped by
+        # source) with a chunk count — the `kind` field FI's engine
+        # writes lives inside the per-chunk metadata, not at the
+        # parent level, so a "count by kind" view requires drilling
+        # into individual chunks. For the dashboard we just surface
+        # the source × chunks breakdown — which is what the user
+        # actually wants to see ("did my re-ingest land?").
         try:
             brain = AxonBrain(AxonConfig())
-            kinds_to_check = (
-                "fi_quest_paper", "fi_local_paper", "fi_proposal",
-                "fi_critique", "fi_digest", "fi_portfolio",
-                "fi_summary", "fi_summary_input", "fi_quest_spine",
+            try:
+                docs = brain.list_documents()
+            except Exception as e:
+                info["counts_error"] = (
+                    f"list_documents() failed: {e!r}."
+                )
+                docs = []
+            by_source: dict[str, int] = {}
+            total_chunks = 0
+            total_docs = 0
+            for d in docs or []:
+                total_docs += 1
+                if not isinstance(d, dict):
+                    continue
+                src = str(d.get("source") or "<unknown>")
+                chunks = int(d.get("chunks") or 0)
+                by_source[src] = by_source.get(src, 0) + chunks
+                total_chunks += chunks
+            info["doc_counts_by_source"] = by_source
+            info["total_documents"] = total_docs
+            info["total_chunks"] = total_chunks
+            info["counts_note"] = (
+                "Each parent doc carries multiple text chunks. "
+                "Counts above are CHUNKS grouped by source. Engine "
+                "write-back uses source='fi_quest_paper' etc.; "
+                "/api/knowledge/reingest tags new docs as "
+                "source='web-reingest'."
             )
-            counts: dict[str, int | None] = {}
-            for kind in kinds_to_check:
-                got: int | None = None
-                for method_name in ("count_by_kind", "count", "doc_count"):
-                    method = getattr(brain, method_name, None)
-                    if callable(method):
-                        try:
-                            v = method(kind=kind)
-                            got = int(v)
-                            break
-                        except Exception:
-                            continue
-                counts[kind] = got
-            info["doc_counts_by_kind"] = counts
         except Exception as e:
             info["counts_error"] = repr(e)
         return JSONResponse(info)

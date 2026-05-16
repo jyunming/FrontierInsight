@@ -105,11 +105,26 @@ def test_resume_rejects_path_traversal(tmp_path: Path) -> None:
 
 def test_install_tectonic_spawns_subprocess(
     tmp_path: Path, mock_subprocess: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Mock both presence probes (tools/tectonic + PATH) so the
+    endpoint actually spawns instead of short-circuiting with
+    already_present=True. Without this, the test was flaky
+    depending on whether prior smoke runs left tools/tectonic.exe
+    on disk."""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    real_is_file = Path.is_file
+    def patched_is_file(self):
+        if self.name.startswith("tectonic"):
+            return False
+        return real_is_file(self)
+    monkeypatch.setattr(Path, "is_file", patched_is_file)
     client = _client(tmp_path)
     res = client.post("/api/system/install-tectonic")
     assert res.status_code == 200, res.text
     body = res.json()
+    assert body.get("spawned") is True, body
     assert body["job_id"].startswith("tectonic-")
     assert "--install-tectonic" in mock_subprocess[0]
 
