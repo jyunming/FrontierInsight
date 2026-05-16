@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Settings</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
+</head>
+<body>
+  <div id="fi-header-root" data-breadcrumb="Settings"></div>
+  <main>
+    <h1>Settings</h1>
+    <p class="fi-subtitle">Inspect this server's configuration and run system tasks.</p>
+
+    <h2>Provider availability</h2>
+    <p class="fi-subtitle">Which LLM providers have working auth on this machine right now. ✓ = ready; ⚠ = needs setup.</p>
+    <div id="providers"></div>
+
+    <h2>System tasks</h2>
+    <div class="fi-card">
+      <div class="fi-card-title">
+        <h3>Install tectonic LaTeX</h3>
+      </div>
+      <p class="fi-card-meta">
+        Downloads tectonic (~70 MB) into <code class="fi-mono">tools/</code> so <code class="fi-mono">paper.pdf</code> works without an admin install of MiKTeX. Self-bootstrapping — fetches CTAN packages on first compile.
+      </p>
+      <button class="fi-btn fi-btn-primary" onclick="installTectonic()">Install tectonic</button>
+      <span id="tectonic-status" class="fi-card-meta" style="margin-left:1rem"></span>
+    </div>
+
+    <h2>Cost-aware provider choice</h2>
+    <p class="fi-subtitle">FI talks to two billing models. Pick wisely:</p>
+    <div class="fi-card">
+      <p><b>Per-call (Copilot)</b> — every LLM call is one "premium request" regardless of token count. <i>Best for:</i> bursty, heavy single quests where a few large prompts dominate.</p>
+      <p><b>Per-token (OpenAI / Codex / Claude / Gemini)</b> — prompt and completion tokens are priced separately. <i>Best for:</i> long-running automations where you can keep prompts skinny. Cost charts on each quest show the running total.</p>
+      <p><b>Free (Ollama, local)</b> — runs on your machine. Quality varies; use for high-volume cheap nodes or airgapped runs.</p>
+    </div>
+  </main>
+
+  <script>
+    async function loadProviders() {
+      const res = await fetch('/api/providers/availability');
+      const data = await res.json();
+      const html = data.providers.map(p => `
+        <div class="fi-card" style="margin-bottom:0.5rem">
+          <div class="fi-card-title">
+            <h3>${escapeHtml(p.label)}</h3>
+            <span class="fi-badge ${p.available ? 'fi-badge-done' : 'fi-badge-paused'}">${p.available ? '✓ ready' : '⚠ needs setup'}</span>
+          </div>
+          <p class="fi-card-meta">${escapeHtml(p.description)}</p>
+        </div>`).join('');
+      document.getElementById('providers').innerHTML = html;
+    }
+
+    async function installTectonic() {
+      const status = document.getElementById('tectonic-status');
+      status.textContent = 'starting…';
+      const res = await fetch('/api/system/install-tectonic', {method: 'POST'});
+      if (!res.ok) {
+        status.textContent = 'failed: ' + await res.text();
+        return;
+      }
+      const body = await res.json();
+      status.textContent = `started (job ${body.job_id}, pid ${body.pid}). Output goes to tools/.`;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    loadProviders();
+  </script>
+</body>
+</html>

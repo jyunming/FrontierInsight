@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,23 @@ def _read_log_tail(log_path: Path, n: int = 200) -> list[str]:
 _QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
 
 
+def _dir_size(path: Path) -> int:
+    """Recursive byte count of a directory. Used by the trash listing
+    so the user can see at a glance which trashed quests are large.
+    Returns 0 on any I/O hiccup rather than raising."""
+    total = 0
+    try:
+        for p in path.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
 def _resolve_quest_root(output_root: Path, quest_id: str) -> Path:
     """Sanitize the user-supplied `quest_id` before composing a
     filesystem path with it. We:
@@ -263,6 +281,12 @@ def make_app(
     from web.interview_routes import register_interview_routes
     register_interview_routes(app, output_root)
 
+    # Tools routes — /tools/<name> (form pages for proposal, critique,
+    # digest, portfolio, summarize, analyze, fleet, ingest), backed
+    # by web/tools_routes.py:TOOL_SPECS as the source of truth.
+    from web.tools_routes import register_tools_routes
+    register_tools_routes(app, output_root)
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         index_html = static_dir / "index.html"
@@ -271,6 +295,63 @@ def make_app(
                 "<h1>Frontier Insight</h1><p>UI not installed.</p>", status_code=500,
             )
         return HTMLResponse(index_html.read_text(encoding="utf-8"))
+
+    @app.get("/trash", response_class=HTMLResponse)
+    async def trash_page() -> HTMLResponse:
+        page = static_dir / "trash.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Trash UI not installed</h1>", status_code=500,
+            )
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page() -> HTMLResponse:
+        page = static_dir / "settings.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Settings UI not installed</h1>", status_code=500,
+            )
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/about", response_class=HTMLResponse)
+    async def about_page() -> HTMLResponse:
+        page = static_dir / "about.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>About UI not installed</h1>", status_code=500,
+            )
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/compare", response_class=HTMLResponse)
+    async def compare_page() -> HTMLResponse:
+        page = static_dir / "compare.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Compare UI not installed</h1>", status_code=500,
+            )
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/api/providers/availability")
+    async def provider_availability() -> JSONResponse:
+        """Probe which providers have working auth on this host so
+        the Settings page can show ✓/⚠ next to each. Reuses the same
+        helper the CLI interview's smart-default uses."""
+        from core.interview import (
+            available_providers, PROVIDER_CHOICES,
+        )
+        avail = set(available_providers())
+        return JSONResponse({
+            "providers": [
+                {
+                    "name": c.value,
+                    "label": c.label,
+                    "description": c.description,
+                    "available": c.value in avail,
+                }
+                for c in PROVIDER_CHOICES
+            ],
+        })
 
     @app.get("/quest/{quest_id}", response_class=HTMLResponse)
     async def quest_detail(quest_id: str) -> HTMLResponse:
@@ -292,6 +373,159 @@ def make_app(
             1,
         )
         return HTMLResponse(injected)
+
+    @app.post("/api/quests/{quest_id}/resume")
+    async def resume_quest(quest_id: str) -> JSONResponse:
+        """Spawn ``python launch.py --config <quest_root>/config.yaml
+        --resume <id>`` as a subprocess via the launcher. Different
+        from ``--update``: no interview; just continue from the last
+        checkpoint with the existing YAML unchanged."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        yaml_path = quest_root / "config.yaml"
+        if not yaml_path.is_file():
+            raise HTTPException(
+                400, f"no config.yaml at {yaml_path}. "
+                "Resume requires the YAML that was used to start "
+                "the quest. CLI-started quests may not have one.",
+            )
+        sqlite_path = quest_root / ".fi" / "state.sqlite"
+        if not sqlite_path.is_file():
+            raise HTTPException(
+                400, f"no checkpoint at {sqlite_path}. The quest "
+                "directory must contain a .fi/state.sqlite from a "
+                "prior run before --resume can pick it up.",
+            )
+        from web.quest_launcher import QuestLauncherFull
+        try:
+            launched = app.state.launcher.launch_command(
+                argv_tail=["--config", str(yaml_path), "--resume", quest_id],
+                job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
+            )
+        except QuestLauncherFull as e:
+            return JSONResponse(
+                {"error": "launcher at capacity", "detail": str(e),
+                 "retry_after_seconds": 30},
+                status_code=503,
+                headers={"Retry-After": "30"},
+            )
+        return JSONResponse({
+            "quest_id": quest_id,
+            "pid": launched.pid,
+            "resumed": True,
+        })
+
+    @app.post("/api/system/install-tectonic")
+    async def install_tectonic() -> JSONResponse:
+        """Spawn ``python launch.py --install-tectonic`` as a job.
+        Downloads tectonic into tools/ so paper_pdf works without
+        an admin install of MiKTeX."""
+        from web.quest_launcher import QuestLauncherFull
+        try:
+            launched = app.state.launcher.launch_command(
+                argv_tail=["--install-tectonic"],
+                job_id=f"tectonic-{int(time.time())}",
+            )
+        except QuestLauncherFull as e:
+            return JSONResponse(
+                {"error": "launcher at capacity", "detail": str(e),
+                 "retry_after_seconds": 30},
+                status_code=503,
+                headers={"Retry-After": "30"},
+            )
+        return JSONResponse({
+            "job_id": launched.quest_id, "pid": launched.pid,
+        })
+
+    @app.delete("/api/quests/{quest_id}")
+    async def trash_quest(quest_id: str) -> JSONResponse:
+        """Move the quest dir to ``outputs/_trash/<id>-<timestamp>``.
+        Safe-by-default delete — user can restore from /trash, or
+        purge forever once they're sure."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        if not quest_root.is_dir():
+            raise HTTPException(404, f"quest {quest_id} not found")
+        trash_dir = app.state.output_root / "_trash"
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        bin_id = f"{quest_id}-{int(time.time())}"
+        target = trash_dir / bin_id
+        try:
+            shutil.move(str(quest_root), str(target))
+        except OSError as e:
+            raise HTTPException(500, f"trash failed: {e}") from e
+        return JSONResponse({"trashed": True, "bin_id": bin_id})
+
+    @app.get("/api/trash")
+    async def list_trash() -> JSONResponse:
+        trash_dir = app.state.output_root / "_trash"
+        if not trash_dir.is_dir():
+            return JSONResponse({"items": []})
+        items = []
+        for d in sorted(trash_dir.iterdir(), reverse=True):
+            if not d.is_dir():
+                continue
+            try:
+                stat = d.stat()
+                items.append({
+                    "bin_id": d.name,
+                    "trashed_at": stat.st_mtime,
+                    "size_bytes": _dir_size(d),
+                })
+            except OSError:
+                continue
+        return JSONResponse({"items": items})
+
+    @app.post("/api/trash/{bin_id}/restore")
+    async def restore_trash(bin_id: str) -> JSONResponse:
+        # Validate against the allowlist + a bin-id-specific check
+        # (trailing -<timestamp> is added by trash_quest).
+        if not re.match(r"^[A-Za-z0-9_\-.]+$", bin_id):
+            raise HTTPException(400, f"bad bin_id: {bin_id!r}")
+        trash_dir = app.state.output_root / "_trash"
+        src = (trash_dir / bin_id).resolve()
+        try:
+            src.relative_to(trash_dir.resolve())
+        except ValueError:
+            raise HTTPException(400, "bin_id escapes trash dir") from None
+        if not src.is_dir():
+            raise HTTPException(404, f"trash item not found: {bin_id}")
+        # Strip the trailing "-<ts>" the trash op added to recover
+        # the original quest_id. Fall through to the full bin_id when
+        # the timestamp isn't present.
+        original_id = re.sub(r"-\d{9,}$", "", bin_id) or bin_id
+        target = app.state.output_root / original_id
+        if target.exists():
+            raise HTTPException(
+                409, f"can't restore: {target} already exists. "
+                "Rename or purge the existing quest first.",
+            )
+        try:
+            shutil.move(str(src), str(target))
+        except OSError as e:
+            raise HTTPException(500, f"restore failed: {e}") from e
+        return JSONResponse({"restored": True, "quest_id": original_id})
+
+    @app.delete("/api/trash/{bin_id}")
+    async def purge_trash(bin_id: str) -> JSONResponse:
+        """Permanent delete. Confirm modal lives in the trash UI."""
+        if not re.match(r"^[A-Za-z0-9_\-.]+$", bin_id):
+            raise HTTPException(400, f"bad bin_id: {bin_id!r}")
+        trash_dir = app.state.output_root / "_trash"
+        target = (trash_dir / bin_id).resolve()
+        try:
+            target.relative_to(trash_dir.resolve())
+        except ValueError:
+            raise HTTPException(400, "bin_id escapes trash dir") from None
+        if not target.is_dir():
+            raise HTTPException(404, f"trash item not found: {bin_id}")
+        try:
+            shutil.rmtree(target)
+        except OSError as e:
+            raise HTTPException(500, f"purge failed: {e}") from e
+        return JSONResponse({"purged": True, "bin_id": bin_id})
 
     @app.post("/api/quests/{quest_id}/cancel")
     async def cancel_quest(quest_id: str) -> JSONResponse:
@@ -436,6 +670,222 @@ def make_app(
         if not paper.exists():
             raise HTTPException(404, "paper.md not yet written")
         return FileResponse(str(paper), media_type="text/markdown")
+
+    @app.get("/api/quests/{quest_id}/files")
+    async def list_quest_files(quest_id: str) -> JSONResponse:
+        """Return a flat list of every file under the quest_root,
+        with relative path + size + content-type hint. Used by the
+        file-browser pane on /quest/<id>. Skips ``.fi/`` (engine
+        internals) so the user doesn't see SQLite + run.log clutter."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        items: list[dict[str, Any]] = []
+        for p in sorted(quest_root.rglob("*")):
+            try:
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(quest_root)
+                if rel.parts and rel.parts[0] == ".fi":
+                    continue
+                items.append({
+                    "path": str(rel).replace("\\", "/"),
+                    "size_bytes": p.stat().st_size,
+                    "ext": p.suffix.lower(),
+                })
+            except OSError:
+                continue
+        return JSONResponse({"quest_id": quest_id, "files": items})
+
+    @app.get("/api/quests/{quest_id}/file")
+    async def get_quest_file(quest_id: str, path: str) -> FileResponse:
+        """Serve a single file from the quest_root by relative path.
+        Path-traversal guarded: resolves and confirms the final
+        path stays inside quest_root."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        target = (quest_root / path).resolve()
+        try:
+            target.relative_to(quest_root.resolve())
+        except ValueError:
+            raise HTTPException(400, "path escapes quest dir") from None
+        if not target.is_file():
+            raise HTTPException(404, "file not found")
+        return FileResponse(str(target))
+
+    @app.get("/api/quests/{quest_id}/download")
+    async def download_quest_zip(quest_id: str) -> StreamingResponse:
+        """Stream the entire quest_root as a zip. Cheaper than
+        materializing a temp file on disk — the BytesIO buffer
+        builds in memory and streams out. Quests are typically
+        a few MB; if you have a 500 MB quest, refactor to use
+        ZipFile + temp file with proper cleanup."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in quest_root.rglob("*"):
+                try:
+                    if p.is_file():
+                        rel = p.relative_to(quest_root)
+                        # Skip the SQLite checkpoint — it's binary
+                        # state that doesn't compress well + isn't
+                        # useful to a recipient who can't replay it.
+                        if rel.parts and rel.parts[0] == ".fi":
+                            continue
+                        zf.write(p, arcname=str(rel))
+                except OSError:
+                    continue
+        buf.seek(0)
+
+        async def gen():
+            chunk = 64 * 1024
+            while True:
+                data = buf.read(chunk)
+                if not data:
+                    break
+                yield data
+
+        return StreamingResponse(
+            gen(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{quest_id}.zip"'},
+        )
+
+    @app.get("/api/quests/{quest_id}/labels")
+    async def get_labels(quest_id: str) -> JSONResponse:
+        """Tags / labels stored in ``<quest_root>/.fi/labels.json``.
+        Returns ``{"labels": [...]}``; empty list when the file
+        doesn't exist yet."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        labels_path = quest_root / ".fi" / "labels.json"
+        if not labels_path.is_file():
+            return JSONResponse({"quest_id": quest_id, "labels": []})
+        try:
+            data = json.loads(labels_path.read_text(encoding="utf-8"))
+            labels = data.get("labels", []) if isinstance(data, dict) else []
+        except (json.JSONDecodeError, OSError):
+            labels = []
+        return JSONResponse({"quest_id": quest_id, "labels": labels})
+
+    @app.put("/api/quests/{quest_id}/labels")
+    async def set_labels(quest_id: str, request: Request) -> JSONResponse:
+        """Replace the label set for a quest."""
+        body = await request.json()
+        labels = body.get("labels", [])
+        if not isinstance(labels, list):
+            raise HTTPException(400, "labels must be a list of strings")
+        labels = [str(l).strip() for l in labels if str(l).strip()]
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        fi_dir = quest_root / ".fi"
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        (fi_dir / "labels.json").write_text(
+            json.dumps({"labels": labels}, indent=2), encoding="utf-8",
+        )
+        return JSONResponse({"quest_id": quest_id, "labels": labels})
+
+    @app.get("/api/quests/{quest_id}/iterations")
+    async def get_paper_iterations(quest_id: str) -> JSONResponse:
+        """List paper.md snapshots across review iterations for the
+        diff viewer. Looks for ``paper/paper.md.iter-N.md`` files
+        the engine could write (Phase E follow-up — for now just
+        returns the current paper.md as a single iteration when
+        the rolled-snapshot machinery isn't in place yet)."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        paper_dir = quest_root / "paper"
+        iterations: list[dict[str, Any]] = []
+        if paper_dir.is_dir():
+            for p in sorted(paper_dir.glob("paper.iter-*.md")):
+                m = re.search(r"iter-(\d+)", p.name)
+                if not m:
+                    continue
+                iterations.append({
+                    "iter": int(m.group(1)),
+                    "content": p.read_text(encoding="utf-8"),
+                })
+            current = paper_dir / "paper.md"
+            if current.is_file():
+                iterations.append({
+                    "iter": len(iterations) + 1,
+                    "label": "current",
+                    "content": current.read_text(encoding="utf-8"),
+                })
+        return JSONResponse({"quest_id": quest_id, "iterations": iterations})
+
+    @app.post("/api/quests/{quest_id}/code/execute")
+    async def execute_quest_code(quest_id: str, request: Request) -> JSONResponse:
+        """Save an edited ``code/experiment.py`` and re-run the
+        execute node by spawning ``python launch.py --resume <id>``.
+        Gated behind a config flag because this endpoint takes
+        user-supplied Python code and runs it on the server. The
+        existing ``--resume`` path picks up at ``execute`` if the
+        upstream nodes (clarify / ideate / design / implement) have
+        already completed.
+
+        On a non-loopback bind, this endpoint is a code-execution
+        risk — the warning emitted by ``_warn_if_non_loopback``
+        explicitly flags it.
+        """
+        # The config-flag gate isn't a substitute for auth (we have
+        # none) — it's a defense-in-depth opt-in for users who DO
+        # bind to non-loopback.
+        import os
+        if not os.environ.get("FI_WEB_ALLOW_EXEC_EDIT", "").strip():
+            raise HTTPException(
+                403,
+                "Re-execute is disabled. Start the server with "
+                "FI_WEB_ALLOW_EXEC_EDIT=1 to opt in. This endpoint "
+                "runs user-supplied Python on the server; only enable "
+                "it on trusted hosts.",
+            )
+        body = await request.json()
+        code = body.get("code", "")
+        if not isinstance(code, str) or not code.strip():
+            raise HTTPException(400, "code field is required")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        target = quest_root / "code" / "experiment.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(code, encoding="utf-8")
+        # Then resume the quest — the execute node re-reads
+        # experiment.py from disk.
+        yaml_path = quest_root / "config.yaml"
+        if not yaml_path.is_file():
+            raise HTTPException(400, "quest has no config.yaml; can't resume")
+        from web.quest_launcher import QuestLauncherFull
+        try:
+            launched = app.state.launcher.launch_command(
+                argv_tail=["--config", str(yaml_path), "--resume", quest_id],
+                job_id=quest_id,
+            )
+        except QuestLauncherFull as e:
+            return JSONResponse(
+                {"error": "launcher at capacity", "detail": str(e)},
+                status_code=503,
+            )
+        return JSONResponse({
+            "saved": True, "rerun_pid": launched.pid,
+        })
+
+    @app.get("/api/quests/{quest_id}/cost")
+    async def get_quest_cost(quest_id: str) -> JSONResponse:
+        """Read <quest_root>/.fi/cost.jsonl rows produced by the
+        engine's cost instrumentation. Returns the per-call records;
+        the chart on /quest/<id> aggregates client-side."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        cost_path = quest_root / ".fi" / "cost.jsonl"
+        if not cost_path.is_file():
+            return JSONResponse({"records": [], "available": False})
+        records = []
+        try:
+            for line in cost_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+        return JSONResponse({"records": records, "available": True})
 
     @app.get("/api/quests/{quest_id}/figure/{name}")
     async def get_figure(quest_id: str, name: str) -> FileResponse:

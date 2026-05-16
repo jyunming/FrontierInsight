@@ -133,6 +133,30 @@ Then change `provider.name` to `openai` or `gemini`.
 > Anthropic API-key usage, use Option B (`claude login` + then set
 > `provider.name: claude_cli`).
 
+#### What each provider charges you in — read this before picking
+
+FI talks to two billing models. The right pick depends on how
+bursty your usage is:
+
+| Provider family | Unit billed | Cost-efficient for |
+|---|---|---|
+| `vscode_extension` / `copilot_cli` (GitHub Copilot) | **Premium request** — 1 call = 1 unit regardless of token count | Bursty single quests with heavy prompts. A 50-call quest is 50 units whether each call was 200 tokens or 200K. The flat-rate dominates when prompts are large. |
+| `openai` / `codex` / `codex_cli` (OpenAI / ChatGPT) | **Per-token** — prompt + completion priced separately | Long-running automations where you can keep prompts skinny. `gpt-4o-mini` is cheap enough that low-value nodes (clarify, cross_check) shouldn't burn budget. |
+| `claude_cli` (Claude Code CLI) | **Per-token** | Same as above. Sonnet is the workhorse; reserve Opus for `write` + `review` via `provider.node_models`. |
+| `gemini_cli` | **Per-token** | Cheapest cloud option for long-context tasks. |
+| `ollama` (local) | **Free** | High-volume nodes where you don't need top-tier model quality, or airgapped runs. |
+
+The web UI's `/quest/<id>` page shows per-quest cost for the
+token-priced providers (the engine instruments every LLM call into
+`<quest_root>/.fi/cost.jsonl`). Copilot's premium-request unit is
+opaque to FI, so cost shows as $0.00 — track those via GitHub's
+own usage page.
+
+**Rule of thumb:** if you're running 1-2 quests/day, Copilot's
+flat-rate per-call is usually cheapest. If you're running 10+
+quests/day, switch to a token-priced provider and lean on
+`node_models` to route cheap models at low-value nodes.
+
 #### Option D — Local Ollama (free, no API key)
 
 ```bash

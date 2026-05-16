@@ -117,6 +117,27 @@ async function handleRequest(
         await runUpdate(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "ingest") {
+        // Phase T — Axon literature ingest. Opens an integrated
+        // terminal that runs `python launch.py --ingest <paths>`.
+        // Mirrors the web UI's /tools/ingest flow + the CLI's
+        // --ingest flag for cross-interface parity.
+        await runTerminalCommand(
+            "ingest", `--ingest ${prompt}`,
+            stream, "Opening a terminal to ingest into Axon. " +
+            "Pass space-separated file paths after `/ingest`.",
+        );
+        return;
+    }
+    if (cmd === "install-tectonic" || cmd === "tectonic") {
+        // Phase T — no-admin LaTeX install for paper_pdf support.
+        await runTerminalCommand(
+            "tectonic", "--install-tectonic",
+            stream, "Opening a terminal to install tectonic (~70 MB) " +
+            "into tools/. Self-bootstrapping; no admin needed.",
+        );
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -335,6 +356,41 @@ async function runResume(
         /*resumeQuestId*/ chosenId,
     );
 }
+
+async function runTerminalCommand(
+    label: string,
+    pythonArgs: string,
+    stream: vscode.ChatResponseStream,
+    hint: string,
+): Promise<void> {
+    // Shared helper for /ingest, /install-tectonic, and any other
+    // future CLI command that's easier to expose as a terminal
+    // pass-through than as a fully-rendered chat UI. Opens an
+    // integrated terminal in the FI repo root and runs the
+    // command; the user sees the live output there.
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings, then try again.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    stream.markdown(`${hint}\n\n`);
+    const term = vscode.window.createTerminal({
+        name: `FI ${label}`,
+        cwd: repoPath,
+    });
+    term.show();
+    term.sendText(`${pythonPath} launch.py ${pythonArgs}`);
+}
+
 
 async function runUpdate(
     promptArgs: string,

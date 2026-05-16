@@ -19,6 +19,26 @@
       <a class="fi-btn fi-btn-primary" href="/interview">+ New Quest</a>
     </div>
 
+    <div id="filter-bar" style="display:flex; gap:0.5rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap">
+      <input type="text" id="search" placeholder="Search by quest_id or provider…"
+             oninput="applyFilter()"
+             style="flex:1; min-width:200px; padding:0.4rem 0.75rem; border:1px solid var(--fi-border); border-radius:var(--fi-radius); background:var(--fi-bg); color:var(--fi-text); font-family:inherit; font-size:0.875rem">
+      <select id="status-filter" onchange="applyFilter()"
+              style="padding:0.4rem 0.6rem; border:1px solid var(--fi-border); border-radius:var(--fi-radius); background:var(--fi-bg); color:var(--fi-text); font-family:inherit; font-size:0.875rem">
+        <option value="">All statuses</option>
+        <option value="complete">Complete</option>
+        <option value="(running)">In progress</option>
+        <option value="revise">Needs revision</option>
+      </select>
+      <select id="sort-by" onchange="applyFilter()"
+              style="padding:0.4rem 0.6rem; border:1px solid var(--fi-border); border-radius:var(--fi-radius); background:var(--fi-bg); color:var(--fi-text); font-family:inherit; font-size:0.875rem">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="alpha">By quest_id (A–Z)</option>
+      </select>
+      <span class="fi-card-meta" id="result-count" style="margin-left:auto"></span>
+    </div>
+
     <div id="empty-banner" class="fi-empty" style="display:none">
       <p>No quests yet.</p>
       <p style="margin-top:0.5rem;">
@@ -30,19 +50,40 @@
   </main>
 
   <script>
+    let allQuests = [];
+
     async function loadQuests() {
       const res = await fetch('/api/quests');
       const data = await res.json();
-      const list = document.getElementById('quest-list');
+      allQuests = data.quests || [];
+      applyFilter();
+    }
+
+    function applyFilter() {
       const empty = document.getElementById('empty-banner');
-      const quests = data.quests || [];
-      if (quests.length === 0) {
+      const list = document.getElementById('quest-list');
+      const count = document.getElementById('result-count');
+      if (allQuests.length === 0) {
         empty.style.display = '';
         list.innerHTML = '';
+        count.textContent = '';
         return;
       }
+      const search = (document.getElementById('search').value || '').toLowerCase();
+      const status = document.getElementById('status-filter').value || '';
+      const sortBy = document.getElementById('sort-by').value || 'newest';
+      let filtered = allQuests.filter(q => {
+        if (search && !`${q.quest_id} ${q.provider || ''}`.toLowerCase().includes(search)) return false;
+        if (status && q.verdict !== status) return false;
+        return true;
+      });
+      if (sortBy === 'oldest') filtered.sort((a, b) => (b.age_s || 0) - (a.age_s || 0));
+      else if (sortBy === 'alpha') filtered.sort((a, b) => a.quest_id.localeCompare(b.quest_id));
+      else filtered.sort((a, b) => (a.age_s || 0) - (b.age_s || 0));
       empty.style.display = 'none';
-      list.innerHTML = quests.map(renderQuestCard).join('');
+      list.innerHTML = filtered.map(renderQuestCard).join('') ||
+        '<div class="fi-empty">No quests match the filter.</div>';
+      count.textContent = `${filtered.length} of ${allQuests.length} quest${allQuests.length === 1 ? '' : 's'}`;
     }
 
     function renderQuestCard(q) {

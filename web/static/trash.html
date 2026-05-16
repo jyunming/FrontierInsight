@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Trash</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
+</head>
+<body>
+  <div id="fi-header-root" data-breadcrumb="Trash"></div>
+  <main>
+    <h1>Trash</h1>
+    <p class="fi-subtitle">Quests you deleted are kept here. Restore to put one back in the main outputs directory, or purge to delete it forever.</p>
+    <div id="trash-list"></div>
+    <div id="empty" class="fi-empty" style="display:none">No trashed quests.</div>
+  </main>
+
+  <script>
+    async function load() {
+      const res = await fetch('/api/trash');
+      const data = await res.json();
+      const list = document.getElementById('trash-list');
+      const empty = document.getElementById('empty');
+      if (!data.items || data.items.length === 0) {
+        empty.style.display = '';
+        list.innerHTML = '';
+        return;
+      }
+      empty.style.display = 'none';
+      list.innerHTML = data.items.map(renderItem).join('');
+    }
+
+    function renderItem(it) {
+      const when = new Date(it.trashed_at * 1000).toLocaleString();
+      const mb = (it.size_bytes / 1024 / 1024).toFixed(1);
+      return `
+        <div class="fi-card">
+          <div class="fi-card-title">
+            <h3 class="fi-mono">${escapeHtml(it.bin_id)}</h3>
+            <span class="fi-card-meta">${mb} MB · trashed ${escapeHtml(when)}</span>
+          </div>
+          <div style="margin-top:0.5rem; display:flex; gap:0.5rem">
+            <button class="fi-btn fi-btn-secondary" onclick="restore('${escapeHtml(it.bin_id)}')">Restore</button>
+            <button class="fi-btn fi-btn-danger" onclick="purge('${escapeHtml(it.bin_id)}')">Purge forever</button>
+          </div>
+        </div>`;
+    }
+
+    async function restore(binId) {
+      const res = await fetch(`/api/trash/${encodeURIComponent(binId)}/restore`, {method: 'POST'});
+      if (!res.ok) { alert('Restore failed: ' + await res.text()); return; }
+      load();
+    }
+
+    async function purge(binId) {
+      if (!confirm(`Permanently delete ${binId}? This cannot be undone.`)) return;
+      const res = await fetch(`/api/trash/${encodeURIComponent(binId)}`, {method: 'DELETE'});
+      if (!res.ok) { alert('Purge failed: ' + await res.text()); return; }
+      load();
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    load();
+  </script>
+</body>
+</html>

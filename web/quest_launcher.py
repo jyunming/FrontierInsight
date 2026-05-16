@@ -238,6 +238,70 @@ class QuestLauncher:
             self._quests = [q for q in self._quests if q.is_alive()]
 
 
+    def launch_command(
+        self,
+        *,
+        argv_tail: list[str],
+        job_id: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> LaunchedQuest:
+        """Spawn ``python launch.py <argv_tail>`` for a tool that
+        doesn't produce a regular quest (e.g. ``--digest``,
+        ``--portfolio``, ``--ingest``, ``--proposal``,
+        ``--critique``, ``--install-tectonic``). ``job_id`` is the
+        synthetic identifier the launcher tracks the subprocess
+        under — typically ``"digest-<timestamp>"`` or similar.
+
+        Same concurrency cap + reaping as :meth:`launch`. Reuses
+        the LaunchedQuest tuple even though there's no quest dir;
+        the front-end consults ``status_for(job_id)`` to know when
+        the subprocess has finished + show a link to the produced
+        artifact (under ``outputs/_digests/``, ``outputs/_drafts/``,
+        etc., depending on the tool).
+        """
+        self._reap_finished()
+        with self._lock:
+            alive = sum(1 for q in self._quests if q.is_alive())
+            if alive >= self.max_concurrent:
+                raise QuestLauncherFull(
+                    f"already running {alive} job(s); cap is "
+                    f"{self.max_concurrent}. Wait for one to finish "
+                    f"or raise --max-concurrent."
+                )
+            argv = [self.python_path, "-u", str(self.repo_root / "launch.py")]
+            argv.extend(argv_tail)
+            if self.vscode_bridge_port > 0 and "--vscode-bridge-port" not in argv_tail:
+                argv.extend(["--vscode-bridge-port", str(self.vscode_bridge_port)])
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            if extra_env:
+                env.update(extra_env)
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(self.repo_root),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=(os.name != "nt"),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    if os.name == "nt" else 0
+                ),
+            )
+            # The job_id stands in for quest_id in the LaunchedQuest
+            # tuple. yaml_path is the empty path — these tools don't
+            # take a config file. status_for(job_id) lets the UI
+            # show a spinner while the child runs.
+            entry = LaunchedQuest(
+                quest_id=job_id,
+                yaml_path=Path(""),
+                pid=proc.pid,
+                started_at=time.time(),
+                process=proc,
+            )
+            self._quests.append(entry)
+            return entry
+
+
 class QuestLauncherFull(Exception):
     """Raised when ``QuestLauncher.launch`` would exceed
     ``max_concurrent``. The HTTP handler should map this to 503

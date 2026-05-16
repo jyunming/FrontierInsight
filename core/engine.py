@@ -1975,10 +1975,12 @@ class Engine:
         on this call only. Otherwise the endpoint default applies."""
         assert self._client is not None
         messages = [{"role": "user", "content": prompt}]
-        return await self._client.chat(
+        response = await self._client.chat(
             messages, temperature=0.2, model=self._model_for_node(node),
             node=node or "",
         )
+        self._log_chat_cost(node=node or "")
+        return response
 
     async def _chat_messages(
         self,
@@ -1991,10 +1993,57 @@ class Engine:
         source-router) that build their own messages array. Honors the
         same Phase-O per-node model routing as ``_chat``."""
         assert self._client is not None
-        return await self._client.chat(
+        response = await self._client.chat(
             messages, temperature=temperature, model=self._model_for_node(node),
             node=node or "",
         )
+        self._log_chat_cost(node=node or "")
+        return response
+
+    def _log_chat_cost(self, *, node: str) -> None:
+        """Append one row to ``<quest_root>/.fi/cost.jsonl`` per chat
+        call. Pulled out of ``_chat`` / ``_chat_messages`` so both
+        call sites stay tight.
+
+        Captures: timestamp, node, model, usage dict (when the
+        transport returned one), estimated USD cost (when the model
+        has a pricing row). CLI / vscode_bridge transports leave
+        ``last_usage = None`` — we still write the row so the chart
+        on ``/quest/<id>`` can show "call count" + node breakdown
+        even when token-level data is unavailable.
+        """
+        assert self._client is not None
+        # Lazy-import: web UI quests touch this file every chat call;
+        # importing json + time once and keeping a bound reference at
+        # the function level is the same cost path most stdlib code
+        # uses. The provider module is the source of `estimate_cost_usd`.
+        from core.provider import estimate_cost_usd
+        usage = self._client.last_usage
+        model = self._client.last_model or ""
+        cost = None
+        if usage:
+            cost = estimate_cost_usd(
+                model,
+                int(usage.get("prompt_tokens", 0) or 0),
+                int(usage.get("completion_tokens", 0) or 0),
+            )
+        record = {
+            "ts": time.time(),
+            "node": node,
+            "model": model,
+            "usage": usage,
+            "cost_usd": cost,
+        }
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            with (self.fi_dir / "cost.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError as e:
+            # Cost logging is best-effort — a disk-full or
+            # permission failure must NOT crash the quest. Log to the
+            # quest's own logger and move on; the chart will just
+            # show fewer rows.
+            self._log.debug("[cost] failed to write cost.jsonl: %r", e)
 
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node — empty string when
