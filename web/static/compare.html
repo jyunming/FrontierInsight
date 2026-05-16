@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Compare</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
+  <script defer src="/static/md_lite.js"></script>
+  <style>
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 800px) {
+      .compare-grid { grid-template-columns: 1fr; }
+    }
+    .compare-pane {
+      border: 1px solid var(--fi-border);
+      border-radius: var(--fi-radius);
+      padding: 1rem;
+      background: var(--fi-bg-elev);
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+    .picker-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="fi-header-root" data-breadcrumb="Compare"></div>
+  <main>
+    <section class="fi-page-hero">
+      <h1>Compare two quests</h1>
+      <p class="fi-subtitle">Side-by-side paper preview, verdict, and cost. Useful for "did my tweak help?"</p>
+    </section>
+
+    <div class="picker-row">
+      <label>A:</label>
+      <select id="pick-a" onchange="loadBoth()"></select>
+      <span style="color:var(--fi-text-subtle)">vs</span>
+      <label>B:</label>
+      <select id="pick-b" onchange="loadBoth()"></select>
+    </div>
+
+    <div class="compare-grid">
+      <div class="compare-pane" id="pane-a">
+        <h3 id="title-a" class="fi-mono"></h3>
+        <p class="fi-card-meta" id="meta-a"></p>
+        <h4>Paper</h4>
+        <div class="fi-md-body" id="paper-a"></div>
+      </div>
+      <div class="compare-pane" id="pane-b">
+        <h3 id="title-b" class="fi-mono"></h3>
+        <p class="fi-card-meta" id="meta-b"></p>
+        <h4>Paper</h4>
+        <div class="fi-md-body" id="paper-b"></div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    async function init() {
+      const res = await fetch('/api/quests');
+      const data = await res.json();
+      const quests = data.quests || [];
+      const a = document.getElementById('pick-a');
+      const b = document.getElementById('pick-b');
+      for (const sel of [a, b]) {
+        sel.innerHTML = '<option value="">(pick a quest)</option>'
+          + quests.map(q => `<option value="${q.quest_id}">${q.quest_id}</option>`).join('');
+      }
+      // Pre-fill from query string ?a=...&b=...
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('a')) a.value = params.get('a');
+      if (params.get('b')) b.value = params.get('b');
+      if (a.value || b.value) loadBoth();
+    }
+
+    async function loadBoth() {
+      const a = document.getElementById('pick-a').value;
+      const b = document.getElementById('pick-b').value;
+      if (a) loadOne(a, 'a');
+      if (b) loadOne(b, 'b');
+    }
+
+    async function loadOne(qid, side) {
+      const title = document.getElementById(`title-${side}`);
+      const meta = document.getElementById(`meta-${side}`);
+      const paper = document.getElementById(`paper-${side}`);
+      title.textContent = qid;
+      try {
+        const res = await fetch(`/api/quests/${encodeURIComponent(qid)}`);
+        if (!res.ok) {
+          meta.textContent = `Error ${res.status}`;
+          paper.innerHTML = '';
+          return;
+        }
+        const data = await res.json();
+        const verdict = data.review?.verdict || data.summary?.verdict || '(no review)';
+        const score = data.review?.score ?? '?';
+        const cost = await fetchCost(qid);
+        meta.textContent = `verdict: ${verdict} · score ${score} · cost \$${cost.toFixed(4)}`;
+        if (data.paper_preview && window.fi_renderMarkdown) {
+          paper.innerHTML = window.fi_renderMarkdown(data.paper_preview);
+        } else {
+          paper.textContent = data.paper_preview || '(no paper yet)';
+        }
+      } catch (e) {
+        meta.textContent = `Error: ${e}`;
+        paper.innerHTML = '';
+      }
+    }
+
+    async function fetchCost(qid) {
+      try {
+        const res = await fetch(`/api/quests/${encodeURIComponent(qid)}/cost`);
+        if (!res.ok) return 0;
+        const data = await res.json();
+        return (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
+      } catch (_) { return 0; }
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Automated research, end-to-end</title>
+  <meta name="description" content="From a one-sentence topic to a peer-reviewable paper. Frontier Insight plans, runs the experiment, writes the paper, gets a critique, and ships the PDF.">
+  <meta property="og:title" content="Frontier Insight">
+  <meta property="og:description" content="End-to-end automated research that produces real papers, with real experiments, citing real prior work.">
+  <meta property="og:type" content="website">
+  <style>
+    /* Self-contained, single-file deploy. No CDN, no external fonts.
+     * Design principles:
+     *  - System fonts (-apple-system / Inter / Segoe UI fallbacks).
+     *  - Restrained palette: one warm-blue accent + neutrals.
+     *  - Generous vertical rhythm; reading width ~720px max.
+     *  - Subtle gradients + a single hero visual built from inline SVG.
+     *  - Dark mode via prefers-color-scheme (no manual toggle on a
+     *    marketing page; visitors are passing through). */
+    :root {
+      --bg: #FAFAF7;
+      --bg-elev: #FFFFFF;
+      --bg-deep: #F1F2EE;
+      --border: #E5E5E0;
+      --border-strong: #D4D4CE;
+      --text: #181818;
+      --text-muted: #525252;
+      --text-subtle: #A3A3A3;
+      --accent: #2D5DAA;
+      --accent-soft: #E8EEF8;
+      --accent-strong: #1E3F73;
+      --highlight: #C97B3A;
+      --code-bg: #F4F4EE;
+      --radius: 10px;
+      --shadow-sm: 0 1px 2px rgba(24,24,24,0.04), 0 1px 1px rgba(24,24,24,0.06);
+      --shadow-lg: 0 12px 32px rgba(24,24,24,0.06), 0 4px 8px rgba(24,24,24,0.04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0E1116;
+        --bg-elev: #161B22;
+        --bg-deep: #0A0D11;
+        --border: #2A2F37;
+        --border-strong: #3A4049;
+        --text: #E8EDF2;
+        --text-muted: #9CA3AF;
+        --text-subtle: #6B7280;
+        --accent: #79A6EC;
+        --accent-soft: #1A2538;
+        --accent-strong: #B8CFF2;
+        --highlight: #E9A56C;
+        --code-bg: #1A1F26;
+        --shadow-sm: 0 1px 2px rgba(0,0,0,0.5), 0 1px 1px rgba(0,0,0,0.4);
+        --shadow-lg: 0 12px 32px rgba(0,0,0,0.5), 0 4px 8px rgba(0,0,0,0.3);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      letter-spacing: -0.005em;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 0 1.5rem; }
+
+    /* ───────── Nav ───────── */
+    nav.top {
+      display: flex; align-items: center; gap: 1rem;
+      padding: 1.25rem 0; max-width: 880px; margin: 0 auto;
+      padding-inline: 1.5rem;
+    }
+    .brand {
+      display: inline-flex; align-items: center; gap: 0.55rem;
+      font-weight: 600; font-size: 1.05rem; color: var(--text);
+      text-decoration: none; letter-spacing: -0.015em;
+    }
+    .brand svg { width: 28px; height: 28px; }
+    nav.top .right {
+      margin-left: auto; display: inline-flex; gap: 1rem;
+      font-size: 0.9rem;
+    }
+    nav.top .right a {
+      color: var(--text-muted); text-decoration: none;
+      transition: color 0.15s;
+    }
+    nav.top .right a:hover { color: var(--accent); }
+
+    /* ───────── Hero ───────── */
+    .hero {
+      padding: 4.5rem 1.5rem 3rem;
+      text-align: center;
+      position: relative;
+    }
+    .hero::before {
+      /* subtle decorative gradient behind hero */
+      content: "";
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse 700px 360px at 50% 0%, var(--accent-soft) 0%, transparent 65%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .hero > * { position: relative; z-index: 1; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.3rem 0.7rem;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+      box-shadow: var(--shadow-sm);
+      margin-bottom: 1.5rem;
+    }
+    .eyebrow .dot {
+      width: 7px; height: 7px; border-radius: 999px;
+      background: var(--highlight);
+      box-shadow: 0 0 0 3px rgba(201, 123, 58, 0.18);
+    }
+    h1.title {
+      font-size: clamp(2.2rem, 5.5vw, 3.2rem);
+      letter-spacing: -0.03em;
+      margin: 0 0 1rem;
+      line-height: 1.1;
+      font-weight: 700;
+    }
+    h1.title .accent { color: var(--accent); }
+    .tagline {
+      max-width: 600px; margin: 0 auto 2rem;
+      font-size: 1.13rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+    .cta-row {
+      display: inline-flex; gap: 0.6rem; flex-wrap: wrap;
+      justify-content: center;
+    }
+    a.btn {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.7rem 1.2rem;
+      font-weight: 500;
+      font-size: 0.95rem;
+      border-radius: var(--radius);
+      text-decoration: none;
+      transition: all 0.15s;
+      border: 1px solid transparent;
+    }
+    a.btn.primary {
+      background: var(--accent); color: white;
+      box-shadow: var(--shadow-sm);
+    }
+    a.btn.primary:hover { background: var(--accent-strong); transform: translateY(-1px); }
+    a.btn.secondary {
+      background: var(--bg-elev); color: var(--text);
+      border-color: var(--border-strong);
+    }
+    a.btn.secondary:hover { border-color: var(--text-muted); }
+    a.btn .arrow { transition: transform 0.15s; }
+    a.btn:hover .arrow { transform: translateX(2px); }
+
+    /* ───────── Hero visual ───────── */
+    .hero-visual {
+      margin: 2.5rem auto 0; max-width: 720px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 4px);
+      box-shadow: var(--shadow-lg);
+      overflow: hidden;
+      font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, monospace;
+      font-size: 0.78rem;
+      line-height: 1.55;
+      text-align: left;
+    }
+    .hero-visual header {
+      display: flex; align-items: center; gap: 0.4rem;
+      padding: 0.6rem 0.9rem;
+      background: var(--bg-deep);
+      border-bottom: 1px solid var(--border);
+      font-family: 'Inter', sans-serif;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+    .hero-visual header .dots {
+      display: inline-flex; gap: 0.3rem; margin-right: 0.7rem;
+    }
+    .hero-visual header .dots span {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--border-strong);
+    }
+    .hero-visual .term {
+      padding: 1rem 1.2rem 1.2rem;
+      color: var(--text);
+    }
+    .term .ln { display: block; }
+    .term .prompt { color: var(--accent); font-weight: 600; }
+    .term .ok { color: #2D7E3B; }
+    @media (prefers-color-scheme: dark) {
+      .term .ok { color: #71D88B; }
+    }
+    .term .dim { color: var(--text-subtle); }
+    .term .accent { color: var(--highlight); }
+
+    /* ───────── Sections ───────── */
+    section.block {
+      padding: 3.5rem 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+    section.block:last-of-type { border-bottom: 1px solid var(--border); }
+    section.block .wrap > h2 {
+      font-size: 1.6rem;
+      letter-spacing: -0.022em;
+      margin: 0 0 0.4rem;
+      font-weight: 650;
+    }
+    section.block .wrap > p.lede {
+      color: var(--text-muted);
+      margin: 0 0 2rem;
+      font-size: 1.02rem;
+      max-width: 600px;
+    }
+
+    /* feature grid */
+    .features {
+      display: grid; gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+    .feature {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.3rem;
+      transition: border-color 0.15s, transform 0.1s;
+    }
+    .feature:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+    .feature .ico {
+      width: 36px; height: 36px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-bottom: 0.85rem;
+    }
+    .feature h3 {
+      margin: 0 0 0.35rem;
+      font-size: 1.02rem;
+      font-weight: 600;
+    }
+    .feature p {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    /* comparison */
+    .compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }
+    .compare .col {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.3rem;
+    }
+    .compare .col.left { opacity: 0.75; }
+    .compare .col h3 {
+      margin: 0 0 0.8rem;
+      font-size: 1rem;
+      font-weight: 600;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .compare .col.left h3::before { content: "✕"; color: var(--text-subtle); }
+    .compare .col.right h3::before { content: "✓"; color: var(--accent); font-weight: 700; }
+    .compare ul {
+      margin: 0; padding-left: 1.2rem; color: var(--text-muted);
+      font-size: 0.92rem;
+    }
+    .compare li { margin: 0.4em 0; }
+
+    /* run-anywhere cards */
+    .surfaces {
+      display: grid; gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+    .surface {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.3rem;
+      display: flex; flex-direction: column; gap: 0.5rem;
+    }
+    .surface .badge {
+      display: inline-flex; align-self: flex-start;
+      padding: 0.18rem 0.55rem;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .surface h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+    .surface p { margin: 0; color: var(--text-muted); font-size: 0.9rem; }
+    .surface pre {
+      margin: 0.4rem 0 0;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      padding: 0.65rem 0.85rem;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+      overflow-x: auto;
+    }
+
+    /* provider table */
+    .provider-table {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .provider-table .row {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1.5fr;
+      gap: 1rem;
+      padding: 1rem 1.2rem;
+      border-bottom: 1px solid var(--border);
+      align-items: start;
+    }
+    .provider-table .row:last-child { border-bottom: none; }
+    .provider-table .row.head {
+      background: var(--bg-deep);
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .provider-table .row .name b {
+      display: block; font-weight: 600;
+    }
+    .provider-table .row .name code,
+    .provider-table .row .unit code {
+      display: inline-block;
+      background: var(--code-bg);
+      padding: 0.1em 0.4em;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+      color: var(--text);
+    }
+    .provider-table .row .unit b { color: var(--accent); }
+    .provider-table .row .use {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+    @media (max-width: 640px) {
+      .provider-table .row {
+        grid-template-columns: 1fr;
+        gap: 0.3rem;
+      }
+      .provider-table .row.head { display: none; }
+    }
+
+    /* artifacts list */
+    .artifact-list {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.3rem;
+      font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+      font-size: 0.82rem;
+      line-height: 1.7;
+      color: var(--text);
+    }
+    .artifact-list .path { color: var(--text); font-weight: 500; }
+    .artifact-list .note { color: var(--text-subtle); }
+
+    /* final CTA */
+    .final-cta {
+      padding: 4rem 1.5rem 3rem;
+      text-align: center;
+      background: linear-gradient(180deg, transparent 0%, var(--accent-soft) 100%);
+    }
+    .final-cta h2 {
+      font-size: 1.7rem; margin: 0 0 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    .final-cta p {
+      color: var(--text-muted); margin: 0 0 1.5rem;
+    }
+
+    /* footer */
+    footer {
+      padding: 2rem 1.5rem;
+      border-top: 1px solid var(--border);
+      color: var(--text-subtle);
+      font-size: 0.85rem;
+      text-align: center;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+    footer a:hover { color: var(--accent); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <!-- ───────── Top nav ───────── -->
+  <nav class="top">
+    <a class="brand" href="#">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-label="FI">
+        <rect width="128" height="128" rx="20" fill="#0B1729"/>
+        <polygon points="64,64 58,70 33,95 70,58" fill="#475569"/>
+        <polygon points="64,64 58,70 95,33 70,58" fill="#22D3EE"/>
+        <polyline points="95,33 105,38 112,22 120,28" stroke="#22D3EE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="64" cy="64" r="5" fill="#F8FAFC"/>
+      </svg>
+      Frontier Insight
+    </a>
+    <div class="right">
+      <a href="#how-it-works">How it works</a>
+      <a href="#run">Run it</a>
+      <a href="#pricing">Providers</a>
+      <a href="https://github.com/jyunming/FrontierInsight">GitHub →</a>
+    </div>
+  </nav>
+
+  <!-- ───────── Hero ───────── -->
+  <section class="hero">
+    <span class="eyebrow"><span class="dot"></span>Open source · Self-hosted · LangGraph + Python</span>
+    <h1 class="title">Automated research, <span class="accent">end-to-end</span>.</h1>
+    <p class="tagline">
+      Frontier Insight turns a one-sentence topic into a peer-reviewable paper.
+      It plans, runs a real experiment in sandboxed Python, retrieves prior work,
+      writes the paper, runs adversarial review, and ships the PDF.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/jyunming/FrontierInsight">
+        Get started on GitHub
+        <span class="arrow">→</span>
+      </a>
+      <a class="btn secondary" href="#how-it-works">How it works</a>
+    </div>
+
+    <!-- visual: terminal-style snippet showing a real quest run -->
+    <div class="hero-visual" aria-hidden="true">
+      <header>
+        <span class="dots"><span></span><span></span><span></span></span>
+        <code>~/research</code>
+      </header>
+      <div class="term">
+        <span class="ln"><span class="prompt">$</span> python launch.py --new</span>
+        <span class="ln"><span class="dim"># 14 questions · provider · clarify slots · &lt;30 s</span></span>
+        <span class="ln">&nbsp;</span>
+        <span class="ln"><span class="dim">[FI] start quest_id=1778952003-coloumb-blockade provider=gemini_cli</span></span>
+        <span class="ln"><span class="dim">[clarify] mode=auto · 8 slots resolved · pinned 7 from interview</span></span>
+        <span class="ln"><span class="dim">[ideate]   ✓  chosen_idea=tournament_winner score=0.81</span></span>
+        <span class="ln"><span class="dim">[literature] retrieved 17 docs · 5 from Axon · 12 from arXiv</span></span>
+        <span class="ln"><span class="dim">[design] → implement → execute</span></span>
+        <span class="ln"><span class="dim">[execute] subprocess venv 🟢 figures: 4 · result_json: 1.2KB</span></span>
+        <span class="ln"><span class="dim">[analyze] → cross_check → write</span></span>
+        <span class="ln"><span class="dim">[review] verdict=<span class="accent">accept</span> score=4 ⮕ paper.pdf <span class="ok">ready</span></span></span>
+        <span class="ln">&nbsp;</span>
+        <span class="ln">paper/paper.md · paper/paper.pdf · figures/ · code/experiment.py</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── How it works ───────── -->
+  <section class="block" id="how-it-works">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="lede">
+        13 LangGraph nodes orchestrate a research pipeline. Each node is an LLM
+        call or a real Python subprocess. The graph is checkpointed to SQLite,
+        so a crash mid-quest doesn't lose work — <code>--resume</code> picks up
+        where it died.
+      </p>
+      <div class="features">
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </div>
+          <h3>13-node pipeline</h3>
+          <p>clarify → ideate → literature → design → implement → execute → analyze → cross_check → write → review (loop) → paper.pdf.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          </div>
+          <h3>Runs real Python</h3>
+          <p>Experiment node spawns a sandboxed venv subprocess. Figures come from real data, not LLM hallucinations.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+          </div>
+          <h3>Literature grounding</h3>
+          <p>Retrieves from arXiv / OpenAlex / Crossref / Axon. Cites by content, not by guessed DOI.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+          </div>
+          <h3>Adversarial review</h3>
+          <p>Multi-persona reviewer panel + a separate critique pass that asks "what did the first reviewer miss?"</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+          </div>
+          <h3>Resumable + reproducible</h3>
+          <p>Every quest checkpoints to SQLite. The bundled <code>experiment.py</code> + manifest make the result a complete deliverable.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+          </div>
+          <h3>Cost-aware</h3>
+          <p>Per-call cost logged to <code>.fi/cost.jsonl</code>. Pick per-call (Copilot) or per-token (OpenAI / Claude / Gemini) — UI shows the running total.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── Why FI vs "just ask an LLM" ───────── -->
+  <section class="block">
+    <div class="wrap">
+      <h2>Why not just ask an LLM directly?</h2>
+      <p class="lede">An LLM with no plan, no experiment, and no review is a guess machine. FI is a research machine.</p>
+      <div class="compare">
+        <div class="col left">
+          <h3>Asking an LLM directly</h3>
+          <ul>
+            <li>One call. The model hallucinates.</li>
+            <li>No experiment — pure prose.</li>
+            <li>References are guessed or non-existent.</li>
+            <li>No review. No reproducibility.</li>
+            <li>Output is a chat reply.</li>
+          </ul>
+        </div>
+        <div class="col right">
+          <h3>Frontier Insight</h3>
+          <ul>
+            <li>13 nodes, each with focused prompt + grounded context.</li>
+            <li>Runs real Python in a sandboxed venv.</li>
+            <li>Retrieves from arXiv / OpenAlex / Crossref / Axon. Cites by content.</li>
+            <li>Multi-persona reviewer panel + adversarial critique.</li>
+            <li>Output is a quest directory with paper, code, figures, manifest.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── Three ways to run it ───────── -->
+  <section class="block" id="run">
+    <div class="wrap">
+      <h2>Run it where you already are</h2>
+      <p class="lede">Same pipeline, three frontends. The 14-question interview is identical across all three.</p>
+      <div class="surfaces">
+        <div class="surface">
+          <span class="badge">Terminal</span>
+          <h3>Headless CLI</h3>
+          <p>For CI, remote shells, overnight fleets.</p>
+          <pre>python launch.py --new
+python launch.py --proposal "..."
+python launch.py --fleet a.yaml b.yaml</pre>
+        </div>
+        <div class="surface">
+          <span class="badge">VSCode</span>
+          <h3>Copilot Chat</h3>
+          <p>Sanctioned <code>vscode.lm</code> bridge — your calls show up in your normal Copilot usage.</p>
+          <pre>@fi /new
+@fi /update &lt;quest_id&gt;
+@fi /proposal Compare RK4 vs Verlet</pre>
+        </div>
+        <div class="surface">
+          <span class="badge">Browser</span>
+          <h3>Local web UI</h3>
+          <p>Dashboard · live quest detail · tools page for every CLI feature.</p>
+          <pre>python launch.py --serve
+# http://127.0.0.1:8765/</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── Provider pricing ───────── -->
+  <section class="block" id="pricing">
+    <div class="wrap">
+      <h2>Choose your provider</h2>
+      <p class="lede">
+        Two billing models. Pick wisely — the wrong choice can be a 5–10× cost
+        difference. The web UI's per-quest cost chart works for token-priced
+        providers; Copilot is per-call so its budget is opaque to FI.
+      </p>
+      <div class="provider-table">
+        <div class="row head">
+          <div>Provider</div>
+          <div>Unit billed</div>
+          <div>Best for</div>
+        </div>
+        <div class="row">
+          <div class="name">
+            <b>GitHub Copilot</b>
+            <code>vscode_extension</code> · <code>copilot_cli</code>
+          </div>
+          <div class="unit"><b>Premium request</b><br><small>1 call = 1 unit</small></div>
+          <div class="use">Bursty heavy quests. Flat-rate per-call wins when prompts are large.</div>
+        </div>
+        <div class="row">
+          <div class="name">
+            <b>OpenAI / Codex</b>
+            <code>openai</code> · <code>codex</code> · <code>codex_cli</code>
+          </div>
+          <div class="unit"><b>Per-token</b><br><small>prompt + completion</small></div>
+          <div class="use">Long-running automations. Skinny prompts win.</div>
+        </div>
+        <div class="row">
+          <div class="name">
+            <b>Claude</b>
+            <code>claude_cli</code>
+          </div>
+          <div class="unit"><b>Per-token</b></div>
+          <div class="use">Sonnet is the workhorse. Reserve Opus for <code>write</code> + <code>review</code> via <code>node_models</code>.</div>
+        </div>
+        <div class="row">
+          <div class="name">
+            <b>Gemini</b>
+            <code>gemini_cli</code>
+          </div>
+          <div class="unit"><b>Per-token</b></div>
+          <div class="use">Cheapest cloud option for long-context tasks.</div>
+        </div>
+        <div class="row">
+          <div class="name">
+            <b>Ollama</b>
+            <code>ollama</code>
+          </div>
+          <div class="unit"><b>Free</b><br><small>local</small></div>
+          <div class="use">High-volume cheap nodes; airgapped runs.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── What you get ───────── -->
+  <section class="block">
+    <div class="wrap">
+      <h2>What lands on disk</h2>
+      <p class="lede">Every quest produces a complete directory you can hand to a teammate.</p>
+      <div class="artifact-list">
+<span class="path">outputs/&lt;quest_id&gt;/</span>
+<span class="path">├─ paper/paper.md</span>          <span class="note"># the finished IMRAD paper</span>
+<span class="path">├─ paper/paper.pdf</span>         <span class="note"># pandoc + LaTeX (or tectonic)</span>
+<span class="path">├─ figures/*.png</span>           <span class="note"># every plot the experiment produced</span>
+<span class="path">├─ code/experiment.py</span>      <span class="note"># exact code that ran</span>
+<span class="path">├─ slides.md · slides.pptx</span> <span class="note"># optional deliverables</span>
+<span class="path">├─ poster.tex · talk.md</span>    <span class="note"># optional deliverables</span>
+<span class="path">├─ data/auto_collected/</span>    <span class="note"># Axon hits + dataset-adapter output</span>
+<span class="path">├─ .fi/run.log</span>             <span class="note"># full run log</span>
+<span class="path">├─ .fi/state.sqlite</span>        <span class="note"># resumable checkpoint</span>
+<span class="path">├─ .fi/cost.jsonl</span>          <span class="note"># per-call cost ledger</span>
+<span class="path">└─ frontier_insight_summary.json</span> <span class="note"># machine-readable index</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── Final CTA ───────── -->
+  <section class="final-cta">
+    <h2>Open source. Self-hosted. Ready in <code>pip install -r requirements.txt</code>.</h2>
+    <p>Built with LangGraph, Python, and a deep respect for reproducibility.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/jyunming/FrontierInsight">
+        Get started on GitHub
+        <span class="arrow">→</span>
+      </a>
+      <a class="btn secondary" href="https://github.com/jyunming/FrontierInsight#readme">Read the docs</a>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      Frontier Insight · open source on
+      <a href="https://github.com/jyunming/FrontierInsight">GitHub</a> ·
+      MIT licensed
+    </p>
+  </footer>
+</body>
+</html>

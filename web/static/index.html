@@ -11,60 +11,148 @@
 <body>
   <div id="fi-header-root"></div>
   <main>
-    <div style="display:flex; align-items:baseline; justify-content:space-between; gap:1rem; margin-bottom:0.5rem;">
-      <div>
-        <h1>Research Quests</h1>
-        <p class="fi-subtitle">All quests in this output directory. Click one to see live status, the paper preview, and figures.</p>
+    <!-- Page hero: gives the dashboard a deliberate top with the CTA
+         pinned top-right. Subtitle stays short. -->
+    <section class="fi-page-hero">
+      <h1>Research Quests</h1>
+      <p class="fi-subtitle">Every quest in this output directory. Click one for live status, paper preview, figures, and cost.</p>
+      <div class="fi-page-hero-actions">
+        <a class="fi-btn fi-btn-primary" href="/interview">+ New Quest</a>
       </div>
-      <a class="fi-btn fi-btn-primary" href="/interview">+ New Quest</a>
+    </section>
+
+    <!-- Status summary cards. Filled in by renderStats(). -->
+    <div class="fi-stats" id="quest-stats" style="display:none">
+      <div class="fi-stat">
+        <span class="fi-stat-label">Total</span>
+        <span class="fi-stat-value" id="stat-total">0</span>
+      </div>
+      <div class="fi-stat fi-stat-running">
+        <span class="fi-stat-label">In progress</span>
+        <span class="fi-stat-value" id="stat-running">0</span>
+      </div>
+      <div class="fi-stat fi-stat-accent">
+        <span class="fi-stat-label">Complete</span>
+        <span class="fi-stat-value" id="stat-complete">0</span>
+      </div>
+      <div class="fi-stat fi-stat-warn">
+        <span class="fi-stat-label">Needs revision</span>
+        <span class="fi-stat-value" id="stat-revise">0</span>
+      </div>
     </div>
 
-    <div id="empty-banner" class="fi-empty" style="display:none">
-      <p>No quests yet.</p>
-      <p style="margin-top:0.5rem;">
-        <a class="fi-btn fi-btn-primary" href="/interview">Start your first quest</a>
-      </p>
+    <!-- Encapsulated filter toolbar. Same controls as before, scoped
+         into .fi-toolbar so it reads as one component. -->
+    <div class="fi-toolbar" id="filter-bar">
+      <input type="text" id="search" placeholder="Search by quest_id or provider…" oninput="applyFilter()">
+      <select id="status-filter" onchange="applyFilter()">
+        <option value="">All statuses</option>
+        <option value="complete">Complete</option>
+        <option value="(running)">In progress</option>
+        <option value="revise">Needs revision</option>
+      </select>
+      <select id="sort-by" onchange="applyFilter()">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="alpha">By quest_id (A–Z)</option>
+      </select>
+      <span class="fi-card-meta" id="result-count" style="margin-left:auto"></span>
+    </div>
+
+    <!-- Richer empty state when there are no quests at all. -->
+    <div id="empty-banner" class="fi-empty-rich" style="display:none">
+      <svg class="fi-empty-art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="10" y="14" width="44" height="36" rx="3"></rect>
+        <line x1="10" y1="24" x2="54" y2="24"></line>
+        <circle cx="16" cy="19" r="1.2"></circle>
+        <circle cx="20" cy="19" r="1.2"></circle>
+        <path d="M22 38l6-6 6 6 12-12"></path>
+      </svg>
+      <h3>No quests yet</h3>
+      <p>Run an end-to-end quest from the 14-question interview. It clarifies your topic, runs the experiment, and writes the paper.</p>
+      <a class="fi-btn fi-btn-primary" href="/interview">Start your first quest</a>
     </div>
 
     <div id="quest-list"></div>
   </main>
 
   <script>
+    let allQuests = [];
+
     async function loadQuests() {
       const res = await fetch('/api/quests');
       const data = await res.json();
-      const list = document.getElementById('quest-list');
-      const empty = document.getElementById('empty-banner');
-      const quests = data.quests || [];
-      if (quests.length === 0) {
-        empty.style.display = '';
-        list.innerHTML = '';
+      allQuests = data.quests || [];
+      renderStats();
+      applyFilter();
+    }
+
+    function renderStats() {
+      // Roll up counts by verdict so the user gets a one-glance status
+      // summary without parsing the list. Hidden until at least one
+      // quest exists so the empty state stays clean.
+      const statsRow = document.getElementById('quest-stats');
+      if (allQuests.length === 0) {
+        statsRow.style.display = 'none';
         return;
       }
+      statsRow.style.display = '';
+      let running = 0, complete = 0, revise = 0;
+      for (const q of allQuests) {
+        if (q.verdict === '(running)') running += 1;
+        else if (q.verdict === 'complete' || q.verdict === 'accept') complete += 1;
+        else if (q.verdict === 'revise') revise += 1;
+      }
+      document.getElementById('stat-total').textContent = allQuests.length;
+      document.getElementById('stat-running').textContent = running;
+      document.getElementById('stat-complete').textContent = complete;
+      document.getElementById('stat-revise').textContent = revise;
+    }
+
+    function applyFilter() {
+      const empty = document.getElementById('empty-banner');
+      const list = document.getElementById('quest-list');
+      const count = document.getElementById('result-count');
+      if (allQuests.length === 0) {
+        empty.style.display = '';
+        list.innerHTML = '';
+        count.textContent = '';
+        return;
+      }
+      const search = (document.getElementById('search').value || '').toLowerCase();
+      const status = document.getElementById('status-filter').value || '';
+      const sortBy = document.getElementById('sort-by').value || 'newest';
+      let filtered = allQuests.filter(q => {
+        if (search && !`${q.quest_id} ${q.provider || ''}`.toLowerCase().includes(search)) return false;
+        if (status && q.verdict !== status) return false;
+        return true;
+      });
+      if (sortBy === 'oldest') filtered.sort((a, b) => (b.age_s || 0) - (a.age_s || 0));
+      else if (sortBy === 'alpha') filtered.sort((a, b) => a.quest_id.localeCompare(b.quest_id));
+      else filtered.sort((a, b) => (a.age_s || 0) - (b.age_s || 0));
       empty.style.display = 'none';
-      list.innerHTML = quests.map(renderQuestCard).join('');
+      list.innerHTML = filtered.map(renderQuestCard).join('') ||
+        '<div class="fi-empty">No quests match the filter.</div>';
+      count.textContent = `${filtered.length} of ${allQuests.length} quest${allQuests.length === 1 ? '' : 's'}`;
     }
 
     function renderQuestCard(q) {
       // The /api/quests scan endpoint returns: quest_id, quest_root,
-      // verdict, score, provider, has_paper, age_s. The detail
-      // endpoint /api/quests/<id> additionally carries `alive` +
-      // `pending_clarify` + current_node + log_tail. The dashboard
-      // intentionally only consumes scan-endpoint fields so the
-      // listing stays cheap (no per-quest registry lookup).
+      // verdict, score, provider, has_paper, age_s. Cards link to the
+      // detail page; the ::after arrow on .fi-card-link gives the
+      // affordance that the whole card is clickable.
       const state = describeState(q);
       const provider = q.provider
         ? `<span class="fi-mono">${escapeHtml(q.provider)}</span>`
         : '';
-      const ageHint = q.age_s != null
-        ? `${formatAge(q.age_s)} ago`
-        : '';
+      const ageHint = q.age_s != null ? `${formatAge(q.age_s)} ago` : '';
       const paperHint = q.has_paper ? '<span class="fi-badge fi-badge-done">paper.md</span>' : '';
+      const icon = state.badgeClass === 'fi-badge-alive' ? '<span class="fi-badge-icon"></span>' : '';
       return `
-        <a class="fi-card" href="/quest/${encodeURIComponent(q.quest_id)}" style="display:block; text-decoration:none; color:inherit;">
+        <a class="fi-card fi-card-link" href="/quest/${encodeURIComponent(q.quest_id)}">
           <div class="fi-card-title">
             <h3>${escapeHtml(q.quest_id)}</h3>
-            <span class="fi-badge ${state.badgeClass}">${escapeHtml(state.label)}</span>
+            <span class="fi-badge ${state.badgeClass}">${icon}${escapeHtml(state.label)}</span>
           </div>
           <div class="fi-card-meta">
             ${provider}${provider && ageHint ? ' · ' : ''}${ageHint}
@@ -76,10 +164,6 @@
     }
 
     function describeState(q) {
-      // verdict comes from frontier_insight_summary.json — present
-      // only when the quest has reached a terminal state.
-      // "(running)" is the placeholder set by _scan_quests when no
-      // summary exists yet.
       if (q.verdict === 'complete' || q.verdict === 'accept') {
         return { label: 'complete', badgeClass: 'fi-badge-done' };
       }

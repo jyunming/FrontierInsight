@@ -108,6 +108,15 @@ The extension walks you through 12 quick questions via VSCode-native input modal
 
 The active Copilot model is captured automatically into `provider.model` so the quest stays on a consistent LLM even if you change Copilot model later. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. `@fi /update <quest_id>` re-opens the interview pre-filled with the editable subset for a mid-quest tweak; the same 12-question schema is used for both new-quest setup and mid-quest update.
 
+### Other chat commands
+
+- `@fi /ingest <paths>` — load PDFs / Markdown / TXT into the Axon corpus as prior work. Opens an integrated terminal.
+- `@fi /install-tectonic` — install the tectonic LaTeX binary (~70 MB) into `tools/` so `paper.pdf` works without an admin install of MiKTeX. Opens an integrated terminal.
+
+### Note on Copilot billing units
+
+Copilot bills **per call** — one "premium request" per LLM call regardless of how many tokens the prompt + completion contain. This is meaningfully different from `openai` / `claude_cli` / `gemini_cli`, which bill **per token**. For a 50-call quest with 10K-token prompts, Copilot is 50 units (flat); a token-priced provider could be substantially cheaper or more expensive depending on the prompt size. The web UI's `/quest/<id>` page shows per-quest cost for token-priced providers; Copilot calls show as $0 because the engine can't see the premium-request count from inside FI.
+
 It writes a config.yaml to `outputs/_drafts/<timestamp>-<title>.yaml`, then immediately starts the quest. You can re-run that same config later with `@fi /start <that-path>`, or edit it and re-run.
 
 Press **Esc** on any modal to cancel.

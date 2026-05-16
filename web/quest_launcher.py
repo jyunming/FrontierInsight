@@ -45,6 +45,10 @@ class LaunchedQuest:
     pid: int
     started_at: float
     process: subprocess.Popen[bytes] = field(repr=False)
+    # Path to the captured stdout+stderr log. Lets the UI surface
+    # "the install actually crashed at step N" instead of just
+    # "started" forever.
+    log_path: Path | None = None
 
     def is_alive(self) -> bool:
         """Return True iff the OS reports the process still running.
@@ -118,12 +122,23 @@ class QuestLauncher:
                 "PYTHONUNBUFFERED": "1",
                 "FI_PRESEED_QUEST_ID": quest_id,
             }
+            # Capture the child's stdout + stderr to a file under
+            # outputs/_logs/ so a silent failure (e.g. tectonic
+            # install crashing on a network error) is investigatable.
+            # Previously stdout/stderr were redirected to DEVNULL,
+            # which gave the UI no way to surface "the install
+            # actually failed" — the user saw "started" forever.
+            from datetime import datetime
+            logs_dir = self.repo_root / "outputs" / "_logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = logs_dir / f"{quest_id}.log"
+            log_file = open(log_path, "wb")
             proc = subprocess.Popen(
                 argv,
                 cwd=str(self.repo_root),
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
                 # detach the child so a server SIGINT doesn't cascade
                 # — quests should keep running until they finish (or
                 # are explicitly canceled). On POSIX, start_new_session
@@ -141,6 +156,7 @@ class QuestLauncher:
                 pid=proc.pid,
                 started_at=time.time(),
                 process=proc,
+                log_path=log_path,
             )
             self._quests.append(entry)
             return entry
@@ -216,19 +232,39 @@ class QuestLauncher:
         """One quest's launcher metadata for the GUI's
         ``GET /api/quests/<id>`` response. Returns ``None`` if the
         quest was never launched through this launcher (e.g. started
-        via the CLI directly)."""
+        via the CLI directly).
+
+        When the child has exited, includes ``exit_code`` so the UI
+        can distinguish "still running" / "finished cleanly" /
+        "crashed". For non-zero exits, also includes the tail of
+        the captured subprocess log so a silent failure (e.g.
+        tectonic install crashing on a network error) surfaces
+        instead of leaving the user staring at a perpetual
+        "starting…" message."""
         with self._lock:
             entry = next(
                 (q for q in self._quests if q.quest_id == quest_id), None,
             )
         if entry is None:
             return None
-        return {
+        alive = entry.is_alive()
+        out: dict[str, Any] = {
             "pid": entry.pid,
             "started_at": entry.started_at,
-            "alive": entry.is_alive(),
+            "alive": alive,
             "age_seconds": entry.age_seconds(),
         }
+        if not alive:
+            out["exit_code"] = entry.process.returncode
+            if entry.process.returncode and entry.log_path and entry.log_path.is_file():
+                try:
+                    lines = entry.log_path.read_text(
+                        encoding="utf-8", errors="replace",
+                    ).splitlines()
+                    out["log_tail"] = lines[-40:]
+                except OSError:
+                    pass
+        return out
 
     def _reap_finished(self) -> None:
         """Walk the registry, drop any entry whose child has exited.
@@ -236,6 +272,97 @@ class QuestLauncher:
         accurate without a separate sweep thread."""
         with self._lock:
             self._quests = [q for q in self._quests if q.is_alive()]
+
+
+    def get_log_tail(self, quest_id: str, *, n: int = 200) -> list[str] | None:
+        """Read the last ``n`` lines of the subprocess's captured
+        stdout+stderr log. Returns None when the quest isn't
+        tracked or no log was captured (e.g. quests launched from
+        CLI directly). Used by the UI to surface install / quest
+        failures that previously went to DEVNULL."""
+        with self._lock:
+            entry = next(
+                (q for q in self._quests if q.quest_id == quest_id), None,
+            )
+        if entry is None or entry.log_path is None:
+            return None
+        if not entry.log_path.is_file():
+            return None
+        try:
+            lines = entry.log_path.read_text(
+                encoding="utf-8", errors="replace",
+            ).splitlines()
+            return lines[-n:]
+        except OSError:
+            return None
+
+    def launch_command(
+        self,
+        *,
+        argv_tail: list[str],
+        job_id: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> LaunchedQuest:
+        """Spawn ``python launch.py <argv_tail>`` for a tool that
+        doesn't produce a regular quest (e.g. ``--digest``,
+        ``--portfolio``, ``--ingest``, ``--proposal``,
+        ``--critique``, ``--install-tectonic``). ``job_id`` is the
+        synthetic identifier the launcher tracks the subprocess
+        under — typically ``"digest-<timestamp>"`` or similar.
+
+        Same concurrency cap + reaping as :meth:`launch`. Reuses
+        the LaunchedQuest tuple even though there's no quest dir;
+        the front-end consults ``status_for(job_id)`` to know when
+        the subprocess has finished + show a link to the produced
+        artifact (under ``outputs/_digests/``, ``outputs/_drafts/``,
+        etc., depending on the tool).
+        """
+        self._reap_finished()
+        with self._lock:
+            alive = sum(1 for q in self._quests if q.is_alive())
+            if alive >= self.max_concurrent:
+                raise QuestLauncherFull(
+                    f"already running {alive} job(s); cap is "
+                    f"{self.max_concurrent}. Wait for one to finish "
+                    f"or raise --max-concurrent."
+                )
+            argv = [self.python_path, "-u", str(self.repo_root / "launch.py")]
+            argv.extend(argv_tail)
+            if self.vscode_bridge_port > 0 and "--vscode-bridge-port" not in argv_tail:
+                argv.extend(["--vscode-bridge-port", str(self.vscode_bridge_port)])
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            if extra_env:
+                env.update(extra_env)
+            logs_dir = self.repo_root / "outputs" / "_logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = logs_dir / f"{job_id}.log"
+            log_file = open(log_path, "wb")
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(self.repo_root),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=(os.name != "nt"),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    if os.name == "nt" else 0
+                ),
+            )
+            # The job_id stands in for quest_id in the LaunchedQuest
+            # tuple. yaml_path is the empty path — these tools don't
+            # take a config file. status_for(job_id) lets the UI
+            # show a spinner while the child runs.
+            entry = LaunchedQuest(
+                quest_id=job_id,
+                yaml_path=Path(""),
+                pid=proc.pid,
+                started_at=time.time(),
+                process=proc,
+                log_path=log_path,
+            )
+            self._quests.append(entry)
+            return entry
 
 
 class QuestLauncherFull(Exception):

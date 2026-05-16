@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Tool</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
+</head>
+<body>
+  <div id="fi-header-root" data-breadcrumb="Tools"></div>
+  <main>
+    <section class="fi-page-hero">
+      <h1 id="tool-title">Loading…</h1>
+      <p class="fi-subtitle" id="tool-blurb"></p>
+    </section>
+    <form class="fi-form" id="tool-form" onsubmit="return submit(event);" enctype="multipart/form-data"></form>
+    <div id="result" style="display:none"></div>
+  </main>
+
+  <script>
+    const toolName = window.__fi_tool_name;
+    let spec = null;
+    let allQuests = [];   // for the critique quest_picker
+    let providerSchema = null;  // interview schema's providers + models
+
+    async function load() {
+      const res = await fetch('/api/tools/schema');
+      const data = await res.json();
+      spec = data.tools.find(t => t.name === toolName);
+      if (!spec) {
+        document.getElementById('tool-title').textContent = 'Unknown tool';
+        return;
+      }
+      document.getElementById('tool-title').textContent = spec.label;
+      document.getElementById('tool-blurb').textContent = spec.blurb;
+      // Critique needs a quest list to pick from.
+      if (spec.fields.some(f => f.kind === 'quest_picker')) {
+        try {
+          const q = await fetch('/api/quests').then(r => r.json());
+          allQuests = q.quests || [];
+        } catch (_) {}
+      }
+      // LLM-using tools get a provider + model picker. Reuse the
+      // interview schema so the option lists are identical across
+      // /new, /update, and every tool.
+      if (spec.needs_llm) {
+        try {
+          providerSchema = await fetch('/api/interview/schema').then(r => r.json());
+        } catch (_) {}
+      }
+      renderForm();
+    }
+
+    function renderForm() {
+      const form = document.getElementById('tool-form');
+      form.innerHTML = '';
+      for (const field of spec.fields) {
+        const fs = document.createElement('fieldset');
+        const legend = document.createElement('legend');
+        legend.textContent = field.label + (field.required === false ? ' (optional)' : '');
+        fs.appendChild(legend);
+        if (field.prompt) {
+          const p = document.createElement('div');
+          p.className = 'prompt';
+          p.textContent = field.prompt;
+          fs.appendChild(p);
+        }
+        fs.appendChild(makeInput(field));
+        form.appendChild(fs);
+      }
+      // Provider + model picker for LLM-using tools. Reuses the
+      // interview schema's PROVIDER_CHOICES + PROVIDER_MODEL_OPTIONS
+      // so the lists match /new and /update.
+      if (spec.needs_llm && providerSchema) {
+        appendProviderPicker(form);
+      }
+      const row = document.createElement('div');
+      row.innerHTML = `<button type="submit" class="fi-btn fi-btn-primary">Run ${escapeHtml(spec.label.split('—')[0].trim())}</button>`;
+      form.appendChild(row);
+    }
+
+    function appendProviderPicker(form) {
+      const providers = providerSchema.providers || [];
+      const modelsByProvider = providerSchema.provider_models || {};
+      // Provider <select>
+      const pfs = document.createElement('fieldset');
+      pfs.innerHTML = '<legend>LLM provider</legend>' +
+        '<div class="prompt">Which backend to run this tool against. Defaults to the first available on this host.</div>';
+      const psel = document.createElement('select');
+      psel.id = 'f-provider';
+      psel.name = 'provider';
+      psel.appendChild(opt('', '(pick one)'));
+      for (const p of providers) {
+        psel.appendChild(opt(p.value, p.label));
+      }
+      pfs.appendChild(psel);
+      form.appendChild(pfs);
+      // Model <select> — populated via cascade.
+      const mfs = document.createElement('fieldset');
+      mfs.innerHTML = '<legend>Provider model (optional)</legend>' +
+        '<div class="prompt">Hint only — the actual model used is whatever provider.model resolves to in the engine.</div>';
+      const msel = document.createElement('select');
+      msel.id = 'f-provider_model';
+      msel.name = 'provider_model';
+      msel.appendChild(opt('', '(pick a provider first)'));
+      mfs.appendChild(msel);
+      form.appendChild(mfs);
+      psel.addEventListener('change', () => {
+        const models = modelsByProvider[psel.value] || [];
+        msel.innerHTML = '';
+        msel.appendChild(opt('', models.length ? '(pick a model)' : '(none for this provider)'));
+        for (const m of models) {
+          msel.appendChild(opt(String(m.value), m.label));
+        }
+      });
+    }
+    function opt(value, label) {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = label;
+      return o;
+    }
+
+    function makeInput(field) {
+      const id = `f-${field.name}`;
+      if (field.kind === 'longtext') {
+        const el = document.createElement('textarea');
+        el.id = id; el.name = field.name;
+        if (field.placeholder) el.placeholder = field.placeholder;
+        if (field.default != null) el.value = field.default;
+        el.rows = 5;
+        return el;
+      }
+      if (field.kind === 'int') {
+        const el = document.createElement('input');
+        el.type = 'number'; el.id = id; el.name = field.name;
+        if (field.default != null) el.value = field.default;
+        return el;
+      }
+      if (field.kind === 'file') {
+        const el = document.createElement('input');
+        el.type = 'file'; el.id = id; el.name = field.name;
+        return el;
+      }
+      if (field.kind === 'files') {
+        const el = document.createElement('input');
+        el.type = 'file'; el.id = id; el.name = field.name;
+        el.multiple = true;
+        return el;
+      }
+      if (field.kind === 'quest_picker') {
+        const sel = document.createElement('select');
+        sel.id = id; sel.name = field.name;
+        const blank = document.createElement('option');
+        blank.value = ''; blank.textContent = '(pick a quest)';
+        sel.appendChild(blank);
+        for (const q of allQuests) {
+          const opt = document.createElement('option');
+          opt.value = q.quest_id;
+          opt.textContent = `${q.quest_id} (${q.verdict || 'idle'})`;
+          sel.appendChild(opt);
+        }
+        return sel;
+      }
+      // text / path / default
+      const el = document.createElement('input');
+      el.type = 'text'; el.id = id; el.name = field.name;
+      if (field.placeholder) el.placeholder = field.placeholder;
+      if (field.default != null) el.value = field.default;
+      return el;
+    }
+
+    async function submit(ev) {
+      ev.preventDefault();
+      const form = document.getElementById('tool-form');
+      const fd = new FormData(form);
+      const result = document.getElementById('result');
+      result.style.display = 'block';
+      result.className = 'fi-banner fi-banner-info';
+      result.textContent = `Running ${spec.label}…`;
+      const res = await fetch(`/api/tools/${spec.name}`, {
+        method: 'POST',
+        body: fd,  // multipart for file fields; FastAPI's form parser handles both
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        result.className = 'fi-banner fi-banner-error';
+        result.textContent = `Error ${res.status}: ${err}`;
+        return false;
+      }
+      const body = await res.json();
+      result.className = 'fi-banner fi-banner-info';
+      result.innerHTML = `
+        <p><b>Job started.</b> Job ID: <code class="fi-mono">${escapeHtml(body.job_id)}</code> · pid ${body.pid}</p>
+        <p>argv: <code class="fi-mono">${escapeHtml(JSON.stringify(body.argv_tail))}</code></p>
+        ${body.artifact_dir ? `<p>Output will land under <code class="fi-mono">${escapeHtml(body.artifact_dir)}</code> when the job finishes.</p>` : ''}
+        <p><a href="/" class="fi-btn fi-btn-secondary">← Dashboard</a></p>
+      `;
+      return false;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    load();
+  </script>
+</body>
+</html>

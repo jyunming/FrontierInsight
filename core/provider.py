@@ -739,12 +739,82 @@ async def resolve_endpoint_async(
     )
 
 
+# Per-1k-token USD pricing for the model variants FI talks to. Used by
+# the cost-instrumentation hook in `Engine` to convert each chat
+# response's ``usage`` block into a $ figure for ``.fi/cost.jsonl``.
+# Numbers come from each provider's published rate card as of
+# 2026-05-16. Update opportunistically; missing entries fall through
+# to cost=None (we don't fabricate). All values are USD per 1000
+# tokens; downstream multiplies by token count and divides by 1000.
+#
+# Entries are matched by SUBSTRING on the model name (case-insensitive)
+# — handles versioned variants like "claude-opus-4-7-20251201" matching
+# "claude-opus-4-7". Order matters: more-specific (longer) keys are
+# checked first.
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    # OpenAI — gpt-5 family
+    "gpt-5-mini": {"prompt_per_1k": 0.00025, "completion_per_1k": 0.002},
+    "gpt-5": {"prompt_per_1k": 0.005, "completion_per_1k": 0.015},
+    # OpenAI — gpt-4o family
+    "gpt-4o-mini": {"prompt_per_1k": 0.00015, "completion_per_1k": 0.0006},
+    "gpt-4o": {"prompt_per_1k": 0.0025, "completion_per_1k": 0.01},
+    "gpt-4-turbo": {"prompt_per_1k": 0.01, "completion_per_1k": 0.03},
+    # OpenAI — o1 reasoning family
+    "o1-preview": {"prompt_per_1k": 0.015, "completion_per_1k": 0.06},
+    "o1-mini": {"prompt_per_1k": 0.003, "completion_per_1k": 0.012},
+    # Anthropic — Claude 4.x
+    "claude-opus-4-7": {"prompt_per_1k": 0.015, "completion_per_1k": 0.075},
+    "claude-sonnet-4-6": {"prompt_per_1k": 0.003, "completion_per_1k": 0.015},
+    "claude-haiku-4-5": {"prompt_per_1k": 0.0008, "completion_per_1k": 0.004},
+    # Anthropic — Claude 3.x (still in active use via copilot_cli etc.)
+    "claude-3-5-sonnet": {"prompt_per_1k": 0.003, "completion_per_1k": 0.015},
+    # Gemini
+    "gemini-2.5-pro": {"prompt_per_1k": 0.00125, "completion_per_1k": 0.005},
+    "gemini-2.5-flash": {"prompt_per_1k": 0.00015, "completion_per_1k": 0.0006},
+    # Local — free
+    "llama3.1:70b": {"prompt_per_1k": 0.0, "completion_per_1k": 0.0},
+    "llama3.1:8b": {"prompt_per_1k": 0.0, "completion_per_1k": 0.0},
+    "qwen2.5:32b": {"prompt_per_1k": 0.0, "completion_per_1k": 0.0},
+}
+
+
+def estimate_cost_usd(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float | None:
+    """Multiply token counts by per-model rates from
+    :data:`MODEL_PRICING`. Returns ``None`` when no pricing row matches
+    — callers log usage but skip the cost field so partial data is
+    obvious in the chart."""
+    if not model:
+        return None
+    needle = model.lower()
+    # Longest key first so "gpt-4o-mini" matches before "gpt-4o".
+    for key in sorted(MODEL_PRICING.keys(), key=len, reverse=True):
+        if key.lower() in needle:
+            rates = MODEL_PRICING[key]
+            return (
+                prompt_tokens * rates["prompt_per_1k"] / 1000.0
+                + completion_tokens * rates["completion_per_1k"] / 1000.0
+            )
+    return None
+
+
 class LLMClient:
     """Thin async wrapper that speaks OpenAI Chat Completions.
 
     Built on `httpx.AsyncClient` rather than the openai SDK directly so
     multiple Engines in one process can share a single connection pool
     cleanly. The request shape is OpenAI-standard.
+
+    Each call updates ``self.last_usage`` (or sets it to ``None``) with
+    the response's token-usage info when the upstream returned one.
+    The Engine reads this attribute after each chat call to write a
+    line to ``<quest_root>/.fi/cost.jsonl``. CLI transports
+    (claude_cli / codex_cli / copilot_cli / gemini_cli) and the
+    vscode_bridge don't return structured usage today; their calls
+    leave ``last_usage = None`` and the chart shows runtime-only.
     """
 
     def __init__(
@@ -768,6 +838,19 @@ class LLMClient:
         # bridge connection is shared across every chat call from this
         # LLMClient instance.
         self._bridge: Any | None = None
+        # Phase S — last chat call's usage info (prompt_tokens /
+        # completion_tokens / total_tokens) parsed from the response
+        # body, or ``None`` when the transport doesn't return one.
+        # Engine reads this after each chat() call to write a
+        # cost-tracking row. Reset to None at the top of every
+        # chat() so a previous call's usage can't leak into a
+        # subsequent one if the new transport doesn't populate it.
+        self.last_usage: dict[str, int] | None = None
+        # Same idea for the model that ACTUALLY ran — for proxy
+        # transports (copilot_cli etc.) the requested model and the
+        # routed model can differ. Engine uses last_model to look up
+        # the right pricing row when writing cost.jsonl.
+        self.last_model: str | None = None
 
     async def aclose(self) -> None:
         if self._bridge is not None:
@@ -860,6 +943,13 @@ class LLMClient:
     ) -> str:
         """The actual chat dispatch, split out from ``chat`` so the
         error-context note in ``chat`` wraps a single call site."""
+        # Phase S — reset cost-tracking state at the top of every
+        # call so a transport that DOESN'T return usage (CLI / bridge)
+        # leaves last_usage = None rather than inheriting a previous
+        # HTTP call's numbers. The Engine cost-logger reads this after
+        # the call returns and skips rows where last_usage is None.
+        self.last_usage = None
+        self.last_model = (model or self.endpoint.model)
         if self.endpoint.transport == "cli":
             return await self._chat_cli(messages, model_override=model)
         if self.endpoint.transport == "vscode_bridge":
@@ -926,6 +1016,28 @@ class LLMClient:
                 # 4xx surfaces immediately — no retry on auth/quota errors.
                 r.raise_for_status()
         data = r.json()
+        # Phase S — capture token usage when the upstream returned
+        # one. OpenAI-compatible servers (openai / codex / gemini /
+        # ollama recent versions) include ``usage`` at the response
+        # top level; older Ollama omits it. Missing → leave
+        # last_usage = None so the cost-logger writes "unknown".
+        usage = data.get("usage") or {}
+        if usage and isinstance(usage, dict):
+            self.last_usage = {
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "total_tokens": int(
+                    usage.get("total_tokens", 0)
+                    or (usage.get("prompt_tokens", 0) or 0)
+                    + (usage.get("completion_tokens", 0) or 0)
+                ),
+            }
+        # Some providers (notably some Copilot proxies) echo the
+        # actual-routed model in the response — record it so the
+        # cost chart attributes the call to the model that ran,
+        # not the one we asked for.
+        if isinstance(data.get("model"), str):
+            self.last_model = data["model"]
         return data["choices"][0]["message"]["content"]
 
     async def _chat_vscode_bridge(

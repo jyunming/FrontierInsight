@@ -117,6 +117,32 @@ async function handleRequest(
         await runUpdate(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "ingest") {
+        // Phase T — Axon literature ingest. The user's prompt is
+        // space-separated paths; quote each one before passing to
+        // the shell so paths with spaces / metacharacters don't
+        // break (or run unintended commands).
+        const paths = parsePathsFromPrompt(prompt);
+        if (paths.length === 0) {
+            stream.markdown("Pass at least one path after `/ingest`. Example: `@fi /ingest ~/papers/foo.pdf`\n");
+            return;
+        }
+        const quotedArgs = paths.map(shellQuote).join(" ");
+        await runTerminalCommand(
+            "ingest", `--ingest ${quotedArgs}`,
+            stream, "Opening a terminal to ingest into Axon.",
+        );
+        return;
+    }
+    if (cmd === "install-tectonic" || cmd === "tectonic") {
+        // Phase T — no-admin LaTeX install for paper_pdf support.
+        await runTerminalCommand(
+            "tectonic", "--install-tectonic",
+            stream, "Opening a terminal to install tectonic (~70 MB) " +
+            "into tools/. Self-bootstrapping; no admin needed.",
+        );
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -335,6 +361,77 @@ async function runResume(
         /*resumeQuestId*/ chosenId,
     );
 }
+
+function parsePathsFromPrompt(prompt: string): string[] {
+    // Split on whitespace OUTSIDE of double-quoted spans so users
+    // can pass paths with spaces by wrapping them in quotes:
+    //   /ingest "C:\My Papers\a.pdf" /home/me/b.pdf
+    const out: string[] = [];
+    const trimmed = (prompt || "").trim();
+    if (!trimmed) return out;
+    const re = /"([^"]+)"|(\S+)/g;
+    let m;
+    while ((m = re.exec(trimmed)) !== null) {
+        const v = m[1] !== undefined ? m[1] : m[2];
+        if (v) out.push(v);
+    }
+    return out;
+}
+
+function shellQuote(arg: string): string {
+    // Cross-shell-safe quoting. On Windows the integrated terminal
+    // is usually PowerShell or cmd.exe; on POSIX it's bash/zsh.
+    // Wrapping in double quotes + escaping internal `"`, `$`, `` ` ``,
+    // and `\` works for all three. This is conservative but correct.
+    if (process.platform === "win32") {
+        // PowerShell: backtick + ` for embedded quotes; cmd: ""
+        // We pick PowerShell-compatible quoting which is also tolerated
+        // by cmd. Escape internal " as `".
+        return `"${arg.replace(/`/g, "``").replace(/"/g, "`\"").replace(/\$/g, "`$")}"`;
+    }
+    // POSIX: single quotes if there's no ' in arg; else fall back to
+    // double-quoted with backslash escapes.
+    if (!arg.includes("'")) return `'${arg}'`;
+    return `"${arg.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\$/g, "\\$").replace(/`/g, "\\`")}"`;
+}
+
+async function runTerminalCommand(
+    label: string,
+    pythonArgs: string,
+    stream: vscode.ChatResponseStream,
+    hint: string,
+): Promise<void> {
+    // Shared helper for /ingest, /install-tectonic, and any other
+    // future CLI command that's easier to expose as a terminal
+    // pass-through than as a fully-rendered chat UI. Opens an
+    // integrated terminal in the FI repo root and runs the
+    // command; the user sees the live output there.
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, " +
+                "or set `frontierInsight.repoPath` in settings, then try again.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    stream.markdown(`${hint}\n\n`);
+    const term = vscode.window.createTerminal({
+        name: `FI ${label}`,
+        cwd: repoPath,
+    });
+    term.show();
+    // Shell-quote the Python path too — the configured value can
+    // include spaces (typical Windows install path:
+    // "C:/Program Files/Python311/python.exe").
+    term.sendText(`${shellQuote(pythonPath)} launch.py ${pythonArgs}`);
+}
+
 
 async function runUpdate(
     promptArgs: string,

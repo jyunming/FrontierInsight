@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Trash</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
+</head>
+<body>
+  <div id="fi-header-root" data-breadcrumb="Trash"></div>
+  <main>
+    <section class="fi-page-hero">
+      <h1>Trash</h1>
+      <p class="fi-subtitle">Quests you deleted live here. Restore to put one back in the main outputs directory, or purge to delete it forever.</p>
+    </section>
+    <div id="trash-list"></div>
+    <div id="empty" class="fi-empty-rich" style="display:none">
+      <svg class="fi-empty-art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="14,18 50,18"></polyline>
+        <path d="M18 18v32a4 4 0 0 0 4 4h20a4 4 0 0 0 4-4V18"></path>
+        <path d="M26 14a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4"></path>
+        <line x1="28" y1="28" x2="28" y2="46"></line>
+        <line x1="36" y1="28" x2="36" y2="46"></line>
+      </svg>
+      <h3>Trash is empty</h3>
+      <p>Quests you delete from the dashboard land here. Nothing to clean up.</p>
+    </div>
+  </main>
+
+  <script>
+    async function load() {
+      const res = await fetch('/api/trash');
+      const data = await res.json();
+      const list = document.getElementById('trash-list');
+      const empty = document.getElementById('empty');
+      if (!data.items || data.items.length === 0) {
+        empty.style.display = '';
+        list.innerHTML = '';
+        return;
+      }
+      empty.style.display = 'none';
+      list.innerHTML = data.items.map(renderItem).join('');
+    }
+
+    function renderItem(it) {
+      const when = new Date(it.trashed_at * 1000).toLocaleString();
+      const mb = (it.size_bytes / 1024 / 1024).toFixed(1);
+      return `
+        <div class="fi-card">
+          <div class="fi-card-title">
+            <h3 class="fi-mono">${escapeHtml(it.bin_id)}</h3>
+            <span class="fi-card-meta">${mb} MB · trashed ${escapeHtml(when)}</span>
+          </div>
+          <div style="margin-top:0.5rem; display:flex; gap:0.5rem">
+            <button class="fi-btn fi-btn-secondary" onclick="restore('${escapeHtml(it.bin_id)}')">Restore</button>
+            <button class="fi-btn fi-btn-danger" onclick="purge('${escapeHtml(it.bin_id)}')">Purge forever</button>
+          </div>
+        </div>`;
+    }
+
+    async function restore(binId) {
+      const res = await fetch(`/api/trash/${encodeURIComponent(binId)}/restore`, {method: 'POST'});
+      if (!res.ok) { alert('Restore failed: ' + await res.text()); return; }
+      load();
+    }
+
+    async function purge(binId) {
+      if (!confirm(`Permanently delete ${binId}? This cannot be undone.`)) return;
+      const res = await fetch(`/api/trash/${encodeURIComponent(binId)}`, {method: 'DELETE'});
+      if (!res.ok) { alert('Purge failed: ' + await res.text()); return; }
+      load();
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    load();
+  </script>
+</body>
+</html>
