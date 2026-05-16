@@ -192,6 +192,7 @@
             <h3>Axon corpus</h3>
             <span class="fi-badge fi-badge-done">✓ available</span>
           </div>
+          <p><b>Project:</b> <code class="fi-mono">${escapeHtml(data.project || '(default)')}</code> ${data.project_error ? `<span style="color:var(--fi-warn)">(${escapeHtml(data.project_error)})</span>` : ''}</p>
           <p><b>Store base:</b> <code class="fi-mono">${escapeHtml(storePath)}</code></p>
           ${bm25 ? `<p><b>BM25 index:</b> <code class="fi-mono">${escapeHtml(bm25)}</code></p>` : ''}
           <p>

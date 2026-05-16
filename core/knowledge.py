@@ -89,6 +89,24 @@ except Exception as e:
     AxonRetriever = None  # type: ignore[assignment]
 
 
+# Dedicated Axon project name for FI's corpus. Quest write-back and
+# retrieval both operate inside this namespace so FI's documents
+# don't mingle with whatever else the user does in Axon (e.g. a
+# personal default project). All AxonBrain instances built via
+# `_build_brain` switch to this project immediately after
+# construction. To override (e.g. for testing), set the env var
+# ``FI_AXON_PROJECT`` before importing this module.
+#
+# Axon enforces lowercase project names (letters / digits / hyphens
+# / underscores, 1-50 chars, must start with a letter or digit).
+# We use `frontier-insight` instead of the camelCase `FrontierInsight`
+# you might expect — the trailing UI / docs still display the
+# product name correctly; only Axon's on-disk directory uses the
+# slug form.
+import os as _os
+FI_AXON_PROJECT = _os.environ.get("FI_AXON_PROJECT", "frontier-insight").strip() or "frontier-insight"
+
+
 @dataclass
 class RetrievedDoc:
     """Loose mirror of LangChain `Document`, decoupled so callers don't
@@ -1346,14 +1364,35 @@ class Knowledge:
     @staticmethod
     def _build_brain(cfg: KnowledgeConfig) -> Any:
         if cfg.axon_config is None:
-            return AxonBrain(AxonConfig())  # type: ignore[misc]
-        if isinstance(cfg.axon_config, Path):
-            return AxonBrain(AxonConfig.from_yaml(cfg.axon_config))  # type: ignore[misc]
-        if isinstance(cfg.axon_config, dict):
+            brain = AxonBrain(AxonConfig())  # type: ignore[misc]
+        elif isinstance(cfg.axon_config, Path):
+            brain = AxonBrain(AxonConfig.from_yaml(cfg.axon_config))  # type: ignore[misc]
+        elif isinstance(cfg.axon_config, dict):
             ac = AxonConfig.model_validate(cfg.axon_config)  # type: ignore[union-attr]
-            return AxonBrain(ac)  # type: ignore[misc]
-        ac = AxonConfig.model_validate(yaml.safe_load(yaml.safe_dump(cfg.axon_config)))  # type: ignore[union-attr]
-        return AxonBrain(ac)  # type: ignore[misc]
+            brain = AxonBrain(ac)  # type: ignore[misc]
+        else:
+            ac = AxonConfig.model_validate(yaml.safe_load(yaml.safe_dump(cfg.axon_config)))  # type: ignore[union-attr]
+            brain = AxonBrain(ac)  # type: ignore[misc]
+        # Phase J — pin the FI corpus to its own project so quest
+        # write-back / retrieval doesn't mingle with whatever else
+        # the user does in Axon. `default` is where AxonBrain
+        # initially lands; create the FI project if it doesn't
+        # exist yet, then switch. ``ensure_project`` is idempotent
+        # — second + subsequent calls are no-ops.
+        try:
+            from axon.projects import ensure_project  # type: ignore[import-not-found]
+            ensure_project(
+                FI_AXON_PROJECT,
+                description="Frontier Insight quest papers + retrieval corpus",
+            )
+            brain.switch_project(FI_AXON_PROJECT)
+        except Exception as e:
+            _log.warning(
+                "axon project setup for %r failed: %s; "
+                "falling back to default project",
+                FI_AXON_PROJECT, e,
+            )
+        return brain
 
     # ---- retrieval --------------------------------------------------------
 

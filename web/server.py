@@ -403,6 +403,11 @@ def make_app(
         except Exception as e:
             info["config_error"] = repr(e)
 
+        # Surface the FI project name so the Settings page can
+        # explicitly show "we're operating in the FrontierInsight
+        # project, not Axon's default."
+        info["project"] = getattr(_knowledge_mod, "FI_AXON_PROJECT", "default")
+
         # Document inventory via the real `list_documents` API.
         # AxonBrain returns one entry per PARENT doc (grouped by
         # source) with a chunk count — the `kind` field FI's engine
@@ -413,6 +418,21 @@ def make_app(
         # actually wants to see ("did my re-ingest land?").
         try:
             brain = AxonBrain(AxonConfig())
+            # Match the engine's project setup so the counts we
+            # report are the FI project's, not Axon's default.
+            # ``ensure_project`` creates the project if it doesn't
+            # exist yet; then ``switch_project`` activates it.
+            try:
+                from axon.projects import ensure_project as _ensure_project
+                _ensure_project(
+                    info["project"],
+                    description="Frontier Insight corpus",
+                )
+                brain.switch_project(info["project"])
+            except Exception as e:
+                info["project_error"] = (
+                    f"could not switch to project {info['project']!r}: {e!r}"
+                )
             try:
                 docs = brain.list_documents()
             except Exception as e:
