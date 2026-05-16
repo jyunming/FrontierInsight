@@ -41,12 +41,21 @@ hint when a destructive invalidation is requested.
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import yaml
+
+
+# Quest IDs are slugified identifiers (digits, letters, ``_-.``).
+# Rejecting anything outside this alphabet blocks path-separator-based
+# traversal — a user-supplied id like ``../somewhere`` would otherwise
+# resolve outside ``output_root`` and let --update read/write
+# arbitrary paths on disk. Mirrors web/server.py:_QUEST_ID_RE.
+_QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
 
 from core.config import Config
 from core.interview import (
@@ -294,11 +303,31 @@ async def run_update_flow(
     runs the interview filtered to editable fields, performs soft
     invalidation, writes the updated YAML, then resumes the quest.
     """
-    quest_root = output_root.resolve() / quest_id
+    # Reject quest_id values that could escape the output root (path
+    # traversal). Two-layer guard: regex allowlist + post-resolve
+    # ``relative_to`` check. Mirrors web/server.py:_resolve_quest_root.
+    if not _QUEST_ID_RE.match(quest_id):
+        print(
+            f"[FI] --update: bad quest_id format: {quest_id!r}. "
+            f"Allowed characters: digits, letters, '_', '-', '.'.",
+            file=sys.stderr,
+        )
+        return 1
+    root = output_root.resolve()
+    quest_root = (root / quest_id).resolve()
+    try:
+        quest_root.relative_to(root)
+    except ValueError:
+        print(
+            f"[FI] --update: quest_id {quest_id!r} escapes output root "
+            f"{root}.",
+            file=sys.stderr,
+        )
+        return 1
     if not quest_root.is_dir():
         print(
             f"[FI] --update: no quest directory at {quest_root}. "
-            f"List candidates with `ls {output_root.resolve()}`.",
+            f"List candidates with `ls {root}`.",
             file=sys.stderr,
         )
         return 1

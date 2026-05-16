@@ -614,6 +614,7 @@ class Engine:
 
         if mode == "auto":
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
+            agent_count = len(answers)  # pre-merge count for honest logging
             # User-pinned overrides (from the interview / --update flow)
             # win over the agent's self-answers. Logged so run.log
             # tells the user exactly which slots they pre-pinned.
@@ -623,10 +624,10 @@ class Engine:
                 self._log.info(
                     "[clarify] mode=auto; agent self-answered %d slots, "
                     "user-pinned overrides applied to %d (%s)",
-                    len(answers), len(pinned), ",".join(pinned),
+                    agent_count, len(pinned), ",".join(pinned),
                 )
             else:
-                self._log.info("[clarify] mode=auto; agent self-answered %d slots", len(answers))
+                self._log.info("[clarify] mode=auto; agent self-answered %d slots", agent_count)
             return {
                 "clarify_questions": questions,
                 "clarify_answers": answers,

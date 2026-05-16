@@ -257,6 +257,35 @@ def test_rewrite_yaml_round_trips_through_config_validation(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+def test_run_update_flow_rejects_path_traversal(tmp_path: Path) -> None:
+    """``python launch.py --update '../somewhere'`` must NOT escape
+    the output root. The flow returns rc=1 with a clear error
+    message instead of read/writing arbitrary paths."""
+    import asyncio
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+
+    async def fake_run_one(*args, **kwargs):
+        raise AssertionError("run_one must NOT be called for hostile quest_id")
+
+    def fake_apply_bridge(cfg, port):
+        pass
+
+    for hostile in ("../somewhere", "a/b", "a\\b", ""):
+        rc = asyncio.run(run_update_flow(
+            quest_id=hostile,
+            output_root=output_root,
+            vscode_bridge_port=0,
+            interactive=False,
+            supervisor=None,
+            run_one=fake_run_one,
+            apply_vscode_bridge_override=fake_apply_bridge,
+        ))
+        assert rc == 1, f"hostile quest_id {hostile!r} returned rc={rc}"
+
+
 def test_no_simulation_in_hard_refuse() -> None:
     """no_simulation is not editable mid-quest. The HARD_REFUSE_FIELDS
     set is consulted by run_update_flow to skip it during the

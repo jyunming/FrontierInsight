@@ -108,7 +108,13 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             soft_invalidate_checkpoint,
         )
 
-        quest_root = (output_root / quest_id).resolve()
+        # Reuse the same quest_id allowlist + relative_to guard the
+        # rest of the web UI uses, so a payload like
+        # ``{"quest_id": "../somewhere"}`` can't escape ``output_root``
+        # and write a config.yaml to an arbitrary path. Imported
+        # lazily to avoid a circular dependency at module load.
+        from web.server import _resolve_quest_root
+        quest_root = _resolve_quest_root(output_root, quest_id)
         if not quest_root.is_dir():
             raise HTTPException(404, f"no quest directory at {quest_root}")
 
@@ -169,31 +175,65 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
 
 def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
     """Validate-and-coerce a JSON answers payload into
-    :class:`InterviewAnswers`. Raises ``KeyError`` / ``TypeError`` /
+    :class:`InterviewAnswers`. Strict per-field type checks: the
+    naïve ``bool(...)`` / ``list(...)`` coercion lets ``"false"`` get
+    interpreted as ``True`` and ``"abc"`` get split into ``['a','b','c']``
+    — both regressions a hostile or buggy client could exploit to
+    write invalid YAML. Raises ``KeyError`` / ``TypeError`` /
     ``ValueError`` on missing or malformed fields — the caller maps
     those to a 400 response."""
     required = (
-        "topic", "title", "output_kinds", "paper_format",
-        "no_simulation", "study_depth", "comparative_baseline",
-        "success_metric", "budget", "clarify_mode", "review_panel",
-        "knowledge_enabled", "provider", "provider_model",
+        ("topic", str),
+        ("title", str),
+        ("output_kinds", list),
+        ("paper_format", str),
+        ("no_simulation", bool),
+        ("study_depth", str),
+        ("comparative_baseline", str),
+        ("success_metric", str),
+        ("budget", str),
+        ("clarify_mode", str),
+        ("review_panel", list),
+        ("knowledge_enabled", bool),
+        ("provider", str),
     )
-    for field in required:
+    for field, expected in required:
         if field not in body:
             raise KeyError(field)
+        value = body[field]
+        if not isinstance(value, expected):
+            raise TypeError(
+                f"field {field!r} must be {expected.__name__}, got {type(value).__name__}"
+            )
+    # output_kinds + review_panel are lists of strings — verify each
+    # element so a junk payload like ``output_kinds: [1, 2, 3]``
+    # doesn't get coerced silently.
+    for field in ("output_kinds", "review_panel"):
+        for i, item in enumerate(body[field]):
+            if not isinstance(item, str):
+                raise TypeError(
+                    f"{field}[{i}] must be str, got {type(item).__name__}"
+                )
+    # provider_model can be ``""`` / ``None`` / a string; the dataclass
+    # field is optional. Anything else is malformed.
+    pm = body.get("provider_model")
+    if pm is not None and not isinstance(pm, str):
+        raise TypeError(
+            f"provider_model must be str or null, got {type(pm).__name__}"
+        )
     return InterviewAnswers(
-        topic=str(body["topic"]),
-        title=str(body["title"]),
+        topic=body["topic"],
+        title=body["title"],
         output_kinds=list(body["output_kinds"]),
-        paper_format=str(body["paper_format"]),
-        no_simulation=bool(body["no_simulation"]),
-        study_depth=str(body["study_depth"]),
-        comparative_baseline=str(body["comparative_baseline"]),
-        success_metric=str(body["success_metric"]),
-        budget=str(body["budget"]),
-        clarify_mode=str(body["clarify_mode"]),
+        paper_format=body["paper_format"],
+        no_simulation=body["no_simulation"],
+        study_depth=body["study_depth"],
+        comparative_baseline=body["comparative_baseline"],
+        success_metric=body["success_metric"],
+        budget=body["budget"],
+        clarify_mode=body["clarify_mode"],
         review_panel=list(body["review_panel"]),
-        knowledge_enabled=bool(body["knowledge_enabled"]),
-        provider=str(body["provider"]),
-        provider_model=str(body["provider_model"]) if body["provider_model"] else None,
+        knowledge_enabled=body["knowledge_enabled"],
+        provider=body["provider"],
+        provider_model=pm if pm else None,
     )

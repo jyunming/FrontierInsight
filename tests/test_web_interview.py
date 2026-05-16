@@ -149,3 +149,43 @@ def test_update_endpoint_404_when_quest_missing(tmp_path: Path) -> None:
         json=_ok_answers_payload(),
     )
     assert res.status_code == 404
+
+
+def test_update_endpoint_rejects_path_traversal(tmp_path: Path) -> None:
+    """Hostile or buggy clients can't escape the output root by
+    composing path separators into the quest_id. Mirrors the same
+    allowlist + relative_to guard used by the GET /api/quests/{id}
+    endpoint."""
+    client = _client(tmp_path)
+    for hostile in ("../somewhere", "..%2Fsomewhere", "a/b", "a\\b"):
+        res = client.post(
+            f"/api/interview/update/{hostile}",
+            json=_ok_answers_payload(),
+        )
+        # Either 400 (caught by the regex) or 404 (after URL decode
+        # the resolved path doesn't exist). Critically NOT 200.
+        assert res.status_code in (400, 404, 422), (
+            f"hostile quest_id {hostile!r} returned "
+            f"unexpected status {res.status_code}: {res.text}"
+        )
+
+
+def test_submit_rejects_wrong_type_for_no_simulation(tmp_path: Path) -> None:
+    """``bool("false")`` evaluates to ``True`` in Python. The web
+    handler must reject a string-typed no_simulation field rather
+    than coercing it silently."""
+    client = _client(tmp_path)
+    bad = _ok_answers_payload()
+    bad["no_simulation"] = "false"  # string, not bool
+    res = client.post("/api/interview/submit", json=bad)
+    assert res.status_code == 400
+
+
+def test_submit_rejects_non_string_in_output_kinds(tmp_path: Path) -> None:
+    """A junk payload like ``output_kinds: [1, 2, 3]`` shouldn't get
+    coerced silently — each element must be a string."""
+    client = _client(tmp_path)
+    bad = _ok_answers_payload()
+    bad["output_kinds"] = [1, 2, 3]
+    res = client.post("/api/interview/submit", json=bad)
+    assert res.status_code == 400

@@ -1235,10 +1235,11 @@ async def _run_new(
     user-cancellation or quest failure. Stdin EOF + Ctrl-C count as
     cancellation, not failure — the quest just doesn't start.
     """
+    # Only the symbols _run_new actually uses. _cli_prompt_for
+    # imports its own (smart_defaults + model_choices_for).
     from core.interview import (
-        QUESTIONS, Question, Choice, InterviewAnswers,
-        answers_to_yaml, available_providers, build_smart_defaults,
-        model_choices_for, preflight_clarify, slugify,
+        QUESTIONS, InterviewAnswers, answers_to_yaml,
+        preflight_clarify, slugify,
     )
 
     # Choice labels include em-dashes / arrows / Unicode math. Windows

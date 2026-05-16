@@ -48,11 +48,12 @@
         ? `Mid-quest update for quest ${updateQuestId}. Only editable fields can be changed.`
         : 'Set up a new research quest. All fields below.';
       if (isUpdate) {
-        const cur = await fetch(`/api/quests/${updateQuestId}`).then(r => r.json()).catch(() => null);
-        // We don't have a dedicated "current answers" endpoint yet;
-        // the update form starts blank and the user re-enters values.
-        // The POST /api/interview/update/{id} preserves non-editable
-        // fields from the quest's YAML, so this is safe.
+        // Update mode displays the editable subset only. Today the
+        // backend pins non-editable fields (topic / title / provider /
+        // model / no_simulation) from the quest's stored YAML, so the
+        // form can leave them blank without harm. A future endpoint
+        // returning current answers can populate `currentAnswers`
+        // here and renderForm() will pre-fill via input.value.
         currentAnswers = {};
       }
       renderForm();
@@ -97,35 +98,39 @@
         return el;
       }
       if (q.kind === 'single') {
-        // For provider_model the choices depend on the picked
-        // provider; we render an empty select that fills via a
-        // change handler on the provider select.
+        // provider_model is a dependent question — its choices
+        // depend on the picked provider. Render it as a select with
+        // a placeholder option; the cascade from #q-provider
+        // populates the real options when the user picks a provider.
         const sel = document.createElement('select');
         sel.id = id;
         sel.name = q.id;
         if (!editable) sel.disabled = true;
         let choices = q.choices;
         if (q.id === 'provider_model') {
+          // Start empty (placeholder added below). The provider
+          // change handler fills in real options + "Other" hatch.
           choices = [];
-        }
-        if (choices.length === 0) {
-          // Fall back to a free-text input.
-          const txt = document.createElement('input');
-          txt.type = 'text';
-          txt.id = id;
-          txt.name = q.id;
-          if (!editable) txt.disabled = true;
-          return txt;
         }
         const blank = document.createElement('option');
         blank.value = '';
-        blank.textContent = '(pick one)';
+        blank.textContent = q.id === 'provider_model'
+          ? '(pick a provider first)' : '(pick one)';
         sel.appendChild(blank);
+        // Stringify complex defaults (lists, objects) so the
+        // `c.value === q.default` reference equality check below
+        // can use the same encoding for both sides. Without this,
+        // bundles like ['paper_md', 'paper_pdf'] never match the
+        // default and no option pre-selects.
+        const defaultEncoded = (q.default !== null && typeof q.default === 'object')
+          ? JSON.stringify(q.default) : q.default;
         for (const c of choices) {
           const opt = document.createElement('option');
-          opt.value = typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value);
+          const valueEncoded = typeof c.value === 'object'
+            ? JSON.stringify(c.value) : String(c.value);
+          opt.value = valueEncoded;
           opt.textContent = c.label;
-          if (c.value === q.default) opt.selected = true;
+          if (valueEncoded === String(defaultEncoded)) opt.selected = true;
           sel.appendChild(opt);
         }
         // Wire provider → provider_model cascade.
@@ -146,22 +151,36 @@
       const models = (schema.provider_models || {})[providerName] || [];
       const sel = document.getElementById('q-provider_model');
       if (!sel) return;
-      sel.innerHTML = '';
+      if (sel.tagName !== 'SELECT') {
+        // Defensive: an earlier renderForm bug rendered this as an
+        // <input>. Replace it with a <select> in place so the
+        // cascade still works.
+        const replacement = document.createElement('select');
+        replacement.id = sel.id;
+        replacement.name = sel.name;
+        sel.replaceWith(replacement);
+      }
+      const target = document.getElementById('q-provider_model');
+      target.innerHTML = '';
       const blank = document.createElement('option');
       blank.value = '';
-      blank.textContent = '(pick a model)';
-      sel.appendChild(blank);
+      blank.textContent = models.length ? '(pick a model)' : '(pick a provider first)';
+      target.appendChild(blank);
       for (const m of models) {
         const opt = document.createElement('option');
         opt.value = String(m.value);
         opt.textContent = m.label;
-        sel.appendChild(opt);
+        target.appendChild(opt);
       }
-      // "Other (type your own)" escape hatch.
-      const other = document.createElement('option');
-      other.value = '__OTHER__';
-      other.textContent = 'Other (type your own)';
-      sel.appendChild(other);
+      // "Other (type your own)" escape hatch — only when at least
+      // one curated model exists; otherwise the picker has nothing
+      // meaningful to escape from.
+      if (models.length) {
+        const other = document.createElement('option');
+        other.value = '__OTHER__';
+        other.textContent = 'Other (type your own)';
+        target.appendChild(other);
+      }
     }
 
     async function submitForm(ev) {
