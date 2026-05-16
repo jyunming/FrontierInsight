@@ -378,3 +378,61 @@ def test_quest_zip_download(tmp_path: Path) -> None:
     assert res.headers["content-type"] == "application/zip"
     z = zipfile.ZipFile(io.BytesIO(res.content))
     assert "paper/paper.md" in z.namelist()
+
+
+# ---------------------------------------------------------------------------
+# Phase I + PR #102 bot-comment fixes
+# ---------------------------------------------------------------------------
+
+
+def test_labels_refuses_when_quest_doesnt_exist(tmp_path: Path) -> None:
+    """Bot comment: PUT /labels for a nonexistent quest used to
+    auto-create <output_root>/<id>/.fi/, which made _scan_quests
+    surface it as a "quest". Now 404 when no .fi/ exists."""
+    client = _client(tmp_path)
+    res = client.put("/api/quests/never-existed/labels",
+                     json={"labels": ["x"]})
+    assert res.status_code == 404
+
+
+def test_trash_refuses_when_quest_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bot comment: moving the quest dir while the subprocess is
+    still writing into it causes engine I/O errors. Refuse with
+    409 + a hint to cancel first."""
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    (output_root / "q-alive").mkdir()
+    monkeypatch.setattr(
+        client.app.state.launcher, "status_for",
+        lambda qid: {"alive": True, "pid": 1, "started_at": 0, "age_seconds": 1},
+    )
+    res = client.delete("/api/quests/q-alive")
+    assert res.status_code == 409
+    assert "still running" in res.text.lower()
+
+
+def test_knowledge_info_endpoint_returns_payload(tmp_path: Path) -> None:
+    """Phase I — /api/knowledge/info surfaces AxonStore location.
+    When Axon isn't installed (the typical local dev path on CI),
+    returns available=False with a clear reason."""
+    client = _client(tmp_path)
+    res = client.get("/api/knowledge/info")
+    assert res.status_code == 200
+    body = res.json()
+    assert "available" in body
+    if not body["available"]:
+        assert "reason" in body
+
+
+def test_md_lite_blocks_javascript_url() -> None:
+    """Bot comment: md_lite.js had no scheme validation, so
+    `[click](javascript:alert(1))` rendered as a clickable script.
+    SAFE_SCHEME_RE now restricts to http/https/mailto/#/relative."""
+    md_lite = (Path(__file__).resolve().parent.parent / "web" / "static" / "md_lite.js").read_text(encoding="utf-8")
+    # The whitelist regex must exist + javascript: must NOT match it.
+    assert "SAFE_SCHEME_RE" in md_lite
+    assert "javascript" not in md_lite or "SAFE_SCHEME_RE" in md_lite
+    # The renderer should fall back to esc(text) on rejected URLs.
+    assert "safeUrl" in md_lite

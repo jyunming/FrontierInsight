@@ -118,14 +118,19 @@ async function handleRequest(
         return;
     }
     if (cmd === "ingest") {
-        // Phase T — Axon literature ingest. Opens an integrated
-        // terminal that runs `python launch.py --ingest <paths>`.
-        // Mirrors the web UI's /tools/ingest flow + the CLI's
-        // --ingest flag for cross-interface parity.
+        // Phase T — Axon literature ingest. The user's prompt is
+        // space-separated paths; quote each one before passing to
+        // the shell so paths with spaces / metacharacters don't
+        // break (or run unintended commands).
+        const paths = parsePathsFromPrompt(prompt);
+        if (paths.length === 0) {
+            stream.markdown("Pass at least one path after `/ingest`. Example: `@fi /ingest ~/papers/foo.pdf`\n");
+            return;
+        }
+        const quotedArgs = paths.map(shellQuote).join(" ");
         await runTerminalCommand(
-            "ingest", `--ingest ${prompt}`,
-            stream, "Opening a terminal to ingest into Axon. " +
-            "Pass space-separated file paths after `/ingest`.",
+            "ingest", `--ingest ${quotedArgs}`,
+            stream, "Opening a terminal to ingest into Axon.",
         );
         return;
     }
@@ -357,6 +362,39 @@ async function runResume(
     );
 }
 
+function parsePathsFromPrompt(prompt: string): string[] {
+    // Split on whitespace OUTSIDE of double-quoted spans so users
+    // can pass paths with spaces by wrapping them in quotes:
+    //   /ingest "C:\My Papers\a.pdf" /home/me/b.pdf
+    const out: string[] = [];
+    const trimmed = (prompt || "").trim();
+    if (!trimmed) return out;
+    const re = /"([^"]+)"|(\S+)/g;
+    let m;
+    while ((m = re.exec(trimmed)) !== null) {
+        const v = m[1] !== undefined ? m[1] : m[2];
+        if (v) out.push(v);
+    }
+    return out;
+}
+
+function shellQuote(arg: string): string {
+    // Cross-shell-safe quoting. On Windows the integrated terminal
+    // is usually PowerShell or cmd.exe; on POSIX it's bash/zsh.
+    // Wrapping in double quotes + escaping internal `"`, `$`, `` ` ``,
+    // and `\` works for all three. This is conservative but correct.
+    if (process.platform === "win32") {
+        // PowerShell: backtick + ` for embedded quotes; cmd: ""
+        // We pick PowerShell-compatible quoting which is also tolerated
+        // by cmd. Escape internal " as `".
+        return `"${arg.replace(/`/g, "``").replace(/"/g, "`\"").replace(/\$/g, "`$")}"`;
+    }
+    // POSIX: single quotes if there's no ' in arg; else fall back to
+    // double-quoted with backslash escapes.
+    if (!arg.includes("'")) return `'${arg}'`;
+    return `"${arg.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\$/g, "\\$").replace(/`/g, "\\`")}"`;
+}
+
 async function runTerminalCommand(
     label: string,
     pythonArgs: string,
@@ -388,7 +426,10 @@ async function runTerminalCommand(
         cwd: repoPath,
     });
     term.show();
-    term.sendText(`${pythonPath} launch.py ${pythonArgs}`);
+    // Shell-quote the Python path too — the configured value can
+    // include spaces (typical Windows install path:
+    // "C:/Program Files/Python311/python.exe").
+    term.sendText(`${shellQuote(pythonPath)} launch.py ${pythonArgs}`);
 }
 
 

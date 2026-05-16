@@ -18,6 +18,10 @@
     <p class="fi-subtitle">Which LLM providers have working auth on this machine right now. ✓ = ready; ⚠ = needs setup.</p>
     <div id="providers"></div>
 
+    <h2>AxonStore knowledge base</h2>
+    <p class="fi-subtitle">Where prior-work retrieval lives. Quests with <code class="fi-mono">knowledge.enabled: true</code> read + write here.</p>
+    <div id="axon-info" class="fi-card">Loading…</div>
+
     <h2>System tasks</h2>
     <div class="fi-card">
       <div class="fi-card-title">
@@ -70,7 +74,46 @@
       return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
+    async function loadAxonInfo() {
+      try {
+        const res = await fetch('/api/knowledge/info');
+        const data = await res.json();
+        const el = document.getElementById('axon-info');
+        if (!data.available) {
+          el.innerHTML = `
+            <div class="fi-card-title">
+              <h3>Axon not available</h3>
+              <span class="fi-badge fi-badge-paused">⚠ not configured</span>
+            </div>
+            <p class="fi-card-meta">${escapeHtml(data.reason || '(no reason given)')}</p>`;
+          return;
+        }
+        const storePath = data.store_path || '(not exposed by this Axon version)';
+        const counts = data.doc_counts_by_kind || {};
+        const countRows = Object.keys(counts).map(k => `
+          <tr>
+            <td class="fi-mono" style="padding:0.25rem 0.75rem 0.25rem 0">${escapeHtml(k)}</td>
+            <td style="padding:0.25rem 0">${counts[k] == null ? '<span style="color:var(--fi-text-subtle)">(unavailable)</span>' : escapeHtml(String(counts[k]))}</td>
+          </tr>`).join('');
+        el.innerHTML = `
+          <div class="fi-card-title">
+            <h3>Axon corpus</h3>
+            <span class="fi-badge fi-badge-done">✓ available</span>
+          </div>
+          <p><b>Store location:</b> <code class="fi-mono">${escapeHtml(storePath)}</code></p>
+          <details>
+            <summary>AxonConfig (default)</summary>
+            <pre style="margin-top:0.5rem">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
+          </details>
+          <h4 style="margin-top:1rem">Doc counts by kind</h4>
+          <table style="font-size:0.875rem"><tbody>${countRows}</tbody></table>`;
+      } catch (e) {
+        document.getElementById('axon-info').textContent = `Error: ${e}`;
+      }
+    }
+
     loadProviders();
+    loadAxonInfo();
   </script>
 </body>
 </html>

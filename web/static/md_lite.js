@@ -21,17 +21,37 @@
     return String(s).replace(/[&<>"']/g, c => ESCAPE_MAP[c]);
   }
 
+  // Whitelist of URL schemes safe to render into href/src. Anything
+  // else (javascript:, data:, vbscript:, file:, etc.) becomes plain
+  // text — a paper.md that contained `[click](javascript:alert(1))`
+  // would otherwise inject script into the rendered page since the
+  // result lands via .innerHTML.
+  const SAFE_SCHEME_RE = /^(?:https?:|mailto:|#|\/|\.{0,2}\/)/i;
+  function safeUrl(url) {
+    const u = String(url || "").trim();
+    return SAFE_SCHEME_RE.test(u) ? u : "";
+  }
+
   function renderInline(s) {
     // Order matters: code spans first so their content is escaped
     // verbatim and not subject to **bold** etc.
     s = s.replace(/`([^`\n]+)`/g, (m, code) =>
       `<code>${esc(code)}</code>`);
-    // Images ![alt](url)
-    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) =>
-      `<img alt="${esc(alt)}" src="${esc(url)}" style="max-width:100%">`);
-    // Links [text](url)
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) =>
-      `<a href="${esc(url)}">${esc(text)}</a>`);
+    // Images ![alt](url) — only safe schemes; unsafe → render the
+    // alt text only so the link doesn't ship as a clickable script.
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
+      const safe = safeUrl(url);
+      return safe
+        ? `<img alt="${esc(alt)}" src="${esc(safe)}" style="max-width:100%">`
+        : esc(alt);
+    });
+    // Links [text](url) — same restriction.
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) => {
+      const safe = safeUrl(url);
+      return safe
+        ? `<a href="${esc(safe)}">${esc(text)}</a>`
+        : esc(text);
+    });
     // Bold **text**
     s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
     // Italic *text*

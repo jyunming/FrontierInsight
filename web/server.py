@@ -327,6 +327,92 @@ def make_app(
             )
         return HTMLResponse(page.read_text(encoding="utf-8"))
 
+    @app.get("/api/knowledge/info")
+    async def knowledge_info() -> JSONResponse:
+        """Surface the AxonStore knowledge-base location + corpus
+        stats on the Settings page. Probes the live Axon instance
+        (if installed + configured) and reports:
+          * configured ``axon_config`` path / inline dict
+          * resolved on-disk location of the vector store
+          * doc count by kind (fi_quest_paper / fi_local_paper /
+            fi_proposal / fi_critique / fi_digest / fi_portfolio /
+            fi_summary / etc.)
+
+        Returns ``{"available": False, "reason": "..."}`` when Axon
+        isn't installed or the user hasn't configured it — so the UI
+        can show a clear hint instead of a misleading "empty corpus"
+        state."""
+        try:
+            from core.knowledge import (
+                _AXON_AVAILABLE, _AXON_IMPORT_ERROR,
+                AxonBrain, AxonConfig,
+            )
+        except Exception as e:
+            return JSONResponse({
+                "available": False,
+                "reason": f"knowledge module unavailable: {e!r}",
+            })
+        if not _AXON_AVAILABLE:
+            return JSONResponse({
+                "available": False,
+                "reason": (
+                    f"axon package not importable: "
+                    f"{_AXON_IMPORT_ERROR!r}. Install with "
+                    f"`pip install axon` (or pull the axon repo "
+                    f"into PYTHONPATH)."
+                ),
+            })
+
+        # No persistent config file exposed via --serve flags today,
+        # so we describe the DEFAULT AxonConfig (what FI would build
+        # if a quest YAML doesn't override it) plus probe the
+        # actual on-disk store path.
+        info: dict[str, Any] = {"available": True}
+        try:
+            ac = AxonConfig()  # default
+            info["axon_config"] = ac.model_dump(mode="json")
+            # AxonConfig exposes the db_path / store dir. Different
+            # Axon versions name this slightly differently — be
+            # liberal in what we surface.
+            for key in ("db_path", "store_path", "persist_dir",
+                        "vector_store_path", "data_dir"):
+                v = getattr(ac, key, None)
+                if v:
+                    info["store_path"] = str(v)
+                    break
+        except Exception as e:
+            info["config_error"] = repr(e)
+
+        # Doc count by kind. Best-effort: instantiate an AxonBrain
+        # and query for each known FI kind. When Axon's API doesn't
+        # support counting (some versions), report (None) per kind.
+        try:
+            brain = AxonBrain(AxonConfig())
+            kinds_to_check = (
+                "fi_quest_paper", "fi_local_paper", "fi_proposal",
+                "fi_critique", "fi_digest", "fi_portfolio",
+                "fi_summary", "fi_summary_input", "fi_quest_spine",
+            )
+            counts: dict[str, int | None] = {}
+            for kind in kinds_to_check:
+                # Try a few likely Axon API names; fall through to
+                # None when none of them work.
+                got: int | None = None
+                for method_name in ("count_by_kind", "count", "doc_count"):
+                    method = getattr(brain, method_name, None)
+                    if callable(method):
+                        try:
+                            v = method(kind=kind)
+                            got = int(v)
+                            break
+                        except Exception:
+                            continue
+                counts[kind] = got
+            info["doc_counts_by_kind"] = counts
+        except Exception as e:
+            info["counts_error"] = repr(e)
+        return JSONResponse(info)
+
     @app.get("/api/providers/availability")
     async def provider_availability() -> JSONResponse:
         """Probe which providers have working auth on this host so
@@ -437,12 +523,30 @@ def make_app(
     async def trash_quest(quest_id: str) -> JSONResponse:
         """Move the quest dir to ``outputs/_trash/<id>-<timestamp>``.
         Safe-by-default delete — user can restore from /trash, or
-        purge forever once they're sure."""
+        purge forever once they're sure.
+
+        Refuses when the quest is still running: the engine
+        subprocess holds open file handles inside quest_root, and
+        moving the dir mid-flight either fails on Windows (file
+        locked) or causes the engine to write into a now-stale path
+        and recreate a partial quest_root. User cancels first, then
+        trashes."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         if not quest_root.is_dir():
             raise HTTPException(404, f"quest {quest_id} not found")
+        # Alive in either tracker = refuse.
+        launcher_alive = bool(
+            (app.state.launcher.status_for(quest_id) or {}).get("alive")
+        )
+        if registry.alive(quest_id) or launcher_alive:
+            raise HTTPException(
+                409,
+                f"quest {quest_id} is still running. Cancel it "
+                f"(POST /api/quests/{quest_id}/cancel) before moving "
+                f"the directory to trash.",
+            )
         trash_dir = app.state.output_root / "_trash"
         trash_dir.mkdir(parents=True, exist_ok=True)
         bin_id = f"{quest_id}-{int(time.time())}"
@@ -635,8 +739,18 @@ def make_app(
                 for line in chunk.splitlines():
                     if line.strip():
                         yield f"data: {line}\n\n"
-                # Stop tailing once the quest task is done.
-                if not registry.alive(quest_id):
+                # Stop tailing once the quest is done. The in-process
+                # `registry.alive(quest_id)` is False for any
+                # subprocess-launched quest (those are tracked by
+                # `app.state.launcher`, not the registry). Without the
+                # OR-merge below, the stream would close on the FIRST
+                # appended chunk for every web-launched quest. Same
+                # bug pattern the GET /api/quests/<id> endpoint had
+                # before the Phase R fix.
+                launcher_alive = bool(
+                    (app.state.launcher.status_for(quest_id) or {}).get("alive")
+                )
+                if not registry.alive(quest_id) and not launcher_alive:
                     yield "data: [stream closed: quest task ended]\n\n"
                     return
 
@@ -763,7 +877,10 @@ def make_app(
 
     @app.put("/api/quests/{quest_id}/labels")
     async def set_labels(quest_id: str, request: Request) -> JSONResponse:
-        """Replace the label set for a quest."""
+        """Replace the label set for a quest. Refuses when the quest
+        doesn't already exist (no ``.fi/`` dir) so a typo in the URL
+        doesn't auto-create a bogus quest_root that ``_scan_quests``
+        would then surface on the dashboard."""
         body = await request.json()
         labels = body.get("labels", [])
         if not isinstance(labels, list):
@@ -771,7 +888,11 @@ def make_app(
         labels = [str(l).strip() for l in labels if str(l).strip()]
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         fi_dir = quest_root / ".fi"
-        fi_dir.mkdir(parents=True, exist_ok=True)
+        if not fi_dir.is_dir():
+            raise HTTPException(
+                404, f"quest {quest_id} not found (no .fi/ dir under "
+                f"{quest_root}). Labels can only be set on existing quests.",
+            )
         (fi_dir / "labels.json").write_text(
             json.dumps({"labels": labels}, indent=2), encoding="utf-8",
         )
@@ -839,6 +960,20 @@ def make_app(
         target = quest_root / "code" / "experiment.py"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(code, encoding="utf-8")
+        # Clear downstream LangGraph state so `--resume` actually
+        # re-runs the execute node. Without this, a terminal-state
+        # checkpoint (paper.md present, review.verdict set) would
+        # short-circuit the graph and the user's code edit would be
+        # silently ignored. Reuses the same soft-invalidation
+        # primitive interview_update.py uses for paper_format /
+        # study_depth changes.
+        from core.interview_update import soft_invalidate_checkpoint
+        await soft_invalidate_checkpoint(
+            quest_root,
+            ["exec_result", "result_json", "figures",
+             "analysis", "cross_check", "paper_md",
+             "review", "review_panel"],
+        )
         # Then resume the quest — the execute node re-reads
         # experiment.py from disk.
         yaml_path = quest_root / "config.yaml"
@@ -857,6 +992,9 @@ def make_app(
             )
         return JSONResponse({
             "saved": True, "rerun_pid": launched.pid,
+            "invalidated_keys": ["exec_result", "result_json", "figures",
+                                  "analysis", "cross_check", "paper_md",
+                                  "review", "review_panel"],
         })
 
     @app.get("/api/quests/{quest_id}/cost")
