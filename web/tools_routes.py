@@ -62,6 +62,14 @@ class ToolSpec:
     fields: tuple[ToolField, ...]
     artifact_dir: str | None = None  # relative to output_root, e.g. "_drafts" — for "View output" link
     accepts_files: bool = False
+    # When True, the form gets a provider + model picker (driven
+    # by the same schema as the interview's provider/model
+    # questions). The POST handler maps the picked values to the
+    # tool's `--<tool>-provider` CLI flag. Defaults to True for
+    # any tool that fires LLM calls; False for tools that only
+    # touch files (ingest) or shell out (fleet has per-config
+    # provider).
+    needs_llm: bool = True
 
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
@@ -183,6 +191,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         name="fleet",
+        needs_llm=False,
         label="Fleet — N quests in parallel",
         blurb="Run multiple config.yaml quests concurrently with bounded concurrency. Each YAML produces its own quest dir.",
         cli_flag="--fleet",
@@ -206,6 +215,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         name="ingest",
+        needs_llm=False,
         label="Ingest — load papers into Axon",
         blurb="Loads PDF / Markdown / TXT files into the Axon corpus as kind=fi_local_paper so future quests retrieve them as prior work.",
         cli_flag="--ingest",
@@ -240,6 +250,7 @@ def _spec_to_dict(spec: ToolSpec) -> dict[str, Any]:
         "cli_flag": spec.cli_flag,
         "artifact_dir": spec.artifact_dir,
         "accepts_files": spec.accepts_files,
+        "needs_llm": spec.needs_llm,
         "fields": [
             {
                 "name": f.name, "label": f.label, "prompt": f.prompt,
@@ -357,27 +368,47 @@ def _build_argv(
 ) -> list[str]:
     """Convert the form payload + uploaded files into the argv tail
     that launch.py expects. Each spec is hand-coded because the
-    CLI shapes differ; this is the place to add a new tool."""
+    CLI shapes differ; this is the place to add a new tool.
+
+    Per-tool provider/model are appended at the end via the
+    ``--<tool>-provider`` flag launch.py already supports. The
+    model goes into a fresh ``--<tool>-model`` flag we don't
+    actually take (the engine reads provider.model from the
+    Config); instead, we set it in the spawned subprocess's env
+    via ``FI_PROVIDER_MODEL_OVERRIDE`` if we add such a path
+    later. For now, the model dropdown is a UX hint — the picked
+    provider is honored; the model field is captured but doesn't
+    flow into argv yet. (Engine-wide per-call model overrides
+    require an env-var pathway in the provider layer that's
+    deferred to a follow-up.)"""
     name = spec.name
+    # Common provider tail for LLM-using tools. Each PM-command
+    # accepts --<tool>-provider with the standard ProviderName
+    # values (openai / codex / claude_cli / etc.).
+    provider = (payload.get("provider") or "").strip()
+    provider_tail: list[str] = []
+    if spec.needs_llm and provider:
+        flag = f"--{spec.name}-provider"
+        provider_tail = [flag, provider]
 
     if name == "proposal":
         topic = (payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("topic is required")
-        return ["--proposal", topic]
+        return ["--proposal", topic, *provider_tail]
 
     if name == "critique":
         quest_id = (payload.get("quest_id") or "").strip()
         if not quest_id:
             raise ValueError("quest_id is required")
-        return ["--critique", quest_id]
+        return ["--critique", quest_id, *provider_tail]
 
     if name == "digest":
         days = int(payload.get("days") or 7)
-        return ["--digest", "--days", str(days)]
+        return ["--digest", "--days", str(days), *provider_tail]
 
     if name == "portfolio":
-        return ["--portfolio"]
+        return ["--portfolio", *provider_tail]
 
     if name == "summarize":
         folder = (payload.get("folder") or "").strip()
@@ -389,6 +420,7 @@ def _build_argv(
         kind = (payload.get("kind") or "").strip()
         if kind and kind != "auto":
             argv.extend(["--summarize-kind", kind])
+        argv.extend(provider_tail)
         return argv
 
     if name == "analyze":
@@ -400,7 +432,7 @@ def _build_argv(
         topic = (payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("analysis topic is required")
-        return ["--analyze", path, "--analyze-topic", topic]
+        return ["--analyze", path, "--analyze-topic", topic, *provider_tail]
 
     if name == "fleet":
         yaml_paths_raw = (payload.get("yaml_paths") or "").strip()

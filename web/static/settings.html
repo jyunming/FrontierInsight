@@ -19,8 +19,16 @@
     <div id="providers"></div>
 
     <h2>AxonStore knowledge base</h2>
-    <p class="fi-subtitle">Where prior-work retrieval lives. Quests with <code class="fi-mono">knowledge.enabled: true</code> read + write here.</p>
+    <p class="fi-subtitle">Where prior-work retrieval lives. Quests with <code class="fi-mono">knowledge.enabled: true</code> read + write here. The interview default is <i>disabled</i>; quests started with that setting won't appear in the corpus until you re-ingest them below.</p>
     <div id="axon-info" class="fi-card">Loading…</div>
+    <div class="fi-card" id="reingest-card" style="margin-top:0.5rem; display:none">
+      <div class="fi-card-title">
+        <h3>Re-ingest existing quests</h3>
+      </div>
+      <p class="fi-card-meta">Walk <code class="fi-mono">outputs/</code> and feed every quest's <code class="fi-mono">paper/paper.md</code> into Axon as <code class="fi-mono">kind=fi_quest_paper</code>. Idempotent — re-ingesting the same quest updates the existing doc.</p>
+      <button class="fi-btn fi-btn-primary" id="reingest-btn" onclick="reingest()">Re-ingest all quests</button>
+      <span id="reingest-status" class="fi-card-meta" style="margin-left:1rem"></span>
+    </div>
 
     <h2>System tasks</h2>
     <div class="fi-card">
@@ -99,22 +107,51 @@
       const body = await res.json();
       if (body.already_present) {
         status.textContent = `already installed at ${body.location}; no action taken.`;
-      } else {
-        status.textContent = `started (job ${body.job_id}, pid ${body.pid}). Output goes to tools/. Re-check status in ~1 minute.`;
-        // Poll status until installed (or 5 min cap).
-        let tries = 0;
-        const poller = setInterval(async () => {
-          tries += 1;
-          if (tries > 100) { clearInterval(poller); return; }
-          const r = await fetch('/api/system/tectonic');
+        btn.disabled = true;
+        return;
+      }
+      const jobId = body.job_id;
+      status.innerHTML = `started (job <code class="fi-mono">${escapeHtml(jobId)}</code>, pid ${body.pid}). Polling for completion…`;
+      // Poll until tectonic shows up OR the subprocess exits.
+      // When the subprocess exits with non-zero, show the log tail
+      // so the user can see what actually failed instead of waiting
+      // forever on a silent install error.
+      let tries = 0;
+      const poller = setInterval(async () => {
+        tries += 1;
+        if (tries > 100) {
+          clearInterval(poller);
+          status.textContent = 'gave up after 5 minutes — check outputs/_logs/ for the install log.';
+          btn.disabled = false;
+          return;
+        }
+        try {
+          const r = await fetch(`/api/system/tectonic?job_id=${encodeURIComponent(jobId)}`);
           if (!r.ok) return;
           const d = await r.json();
           if (d.installed) {
             clearInterval(poller);
             checkTectonic();
+            return;
           }
-        }, 3000);
-      }
+          const js = d.job_status || {};
+          if (js.alive === false && js.exit_code != null) {
+            // Subprocess died without producing the binary.
+            clearInterval(poller);
+            btn.disabled = false;
+            const code = js.exit_code;
+            let html = `<b>Install failed</b> (subprocess exited with code ${code}).`;
+            if (js.log_tail && js.log_tail.length) {
+              html += `<pre style="margin-top:0.5rem; max-height:240px; overflow:auto">${escapeHtml(js.log_tail.join('\n'))}</pre>`;
+            } else {
+              html += `<br>Check <code class="fi-mono">outputs/_logs/${escapeHtml(jobId)}.log</code> for details.`;
+            }
+            status.innerHTML = html;
+          } else if (js.alive) {
+            status.textContent = `running (pid ${js.pid}, ${Math.round(js.age_seconds)}s)…`;
+          }
+        } catch (_) {}
+      }, 3000);
     }
 
     function escapeHtml(s) {
@@ -126,6 +163,7 @@
         const res = await fetch('/api/knowledge/info');
         const data = await res.json();
         const el = document.getElementById('axon-info');
+        const reingestCard = document.getElementById('reingest-card');
         if (!data.available) {
           el.innerHTML = `
             <div class="fi-card-title">
@@ -133,8 +171,10 @@
               <span class="fi-badge fi-badge-paused">⚠ not configured</span>
             </div>
             <p class="fi-card-meta">${escapeHtml(data.reason || '(no reason given)')}</p>`;
+          reingestCard.style.display = 'none';
           return;
         }
+        reingestCard.style.display = '';
         const storePath = data.store_path || '(not exposed by this Axon version)';
         const counts = data.doc_counts_by_kind || {};
         const countRows = Object.keys(counts).map(k => `
@@ -156,6 +196,29 @@
           <table style="font-size:0.875rem"><tbody>${countRows}</tbody></table>`;
       } catch (e) {
         document.getElementById('axon-info').textContent = `Error: ${e}`;
+      }
+    }
+
+    async function reingest() {
+      const btn = document.getElementById('reingest-btn');
+      const status = document.getElementById('reingest-status');
+      btn.disabled = true;
+      status.textContent = 'walking outputs/…';
+      try {
+        const res = await fetch('/api/knowledge/reingest', {method: 'POST'});
+        if (!res.ok) {
+          status.textContent = 'failed: ' + await res.text();
+          btn.disabled = false;
+          return;
+        }
+        const data = await res.json();
+        status.textContent = `ingested ${data.ingested} of ${data.total} quest${data.total === 1 ? '' : 's'}. Reload to see new counts.`;
+        // Refresh the doc counts.
+        loadAxonInfo();
+      } catch (e) {
+        status.textContent = 'error: ' + e;
+      } finally {
+        btn.disabled = false;
       }
     }
 

@@ -413,6 +413,57 @@ def make_app(
             info["counts_error"] = repr(e)
         return JSONResponse(info)
 
+    @app.post("/api/knowledge/reingest")
+    async def reingest_quests() -> JSONResponse:
+        """Walk outputs/ and feed each quest's paper.md back into
+        Axon as ``kind=fi_quest_paper``. Useful when the user ran
+        many quests with ``knowledge.enabled: false`` (the default
+        for the interview-generated YAML) and now wants the corpus
+        retroactively populated. Returns per-quest success/failure
+        so the UI can show what landed."""
+        try:
+            from core import knowledge as _knowledge_mod
+            from core.config import KnowledgeConfig
+        except Exception as e:
+            raise HTTPException(500, f"knowledge module unavailable: {e!r}")
+        if not getattr(_knowledge_mod, "_AXON_AVAILABLE", False):
+            raise HTTPException(
+                503,
+                "Axon package not installed — can't ingest. "
+                "Run `pip install axon` (or pull the axon repo into "
+                "PYTHONPATH) first.",
+            )
+        from core.knowledge import Knowledge
+        # Build a minimal Knowledge instance with enabled=True and the
+        # default AxonConfig — same path the engine uses for the
+        # post-quest write-back.
+        kn = Knowledge(KnowledgeConfig(enabled=True))
+        if not kn.enabled:
+            raise HTTPException(503, "Axon brain failed to initialize")
+        results: list[dict[str, Any]] = []
+        for d in sorted(app.state.output_root.iterdir()):
+            if not d.is_dir() or d.name.startswith("_"):
+                continue
+            paper_md = d / "paper" / "paper.md"
+            if not paper_md.is_file():
+                results.append({"quest_id": d.name, "skipped": "no paper.md"})
+                continue
+            try:
+                text = paper_md.read_text(encoding="utf-8")
+                ok = kn.add_text(
+                    kind="fi_quest_paper",
+                    text=text,
+                    metadata={"quest_id": d.name, "source": "web-reingest"},
+                )
+                results.append({"quest_id": d.name, "ok": ok})
+            except Exception as e:
+                results.append({"quest_id": d.name, "error": repr(e)})
+        return JSONResponse({
+            "total": len(results),
+            "ingested": sum(1 for r in results if r.get("ok")),
+            "results": results,
+        })
+
     @app.get("/api/providers/availability")
     async def provider_availability() -> JSONResponse:
         """Probe which providers have working auth on this host so
@@ -498,10 +549,14 @@ def make_app(
         })
 
     @app.get("/api/system/tectonic")
-    async def tectonic_status() -> JSONResponse:
-        """Report whether tectonic is already installed.
-        The Settings page checks this on load + after a click so
-        repeat clicks don't re-spawn the installer indefinitely."""
+    async def tectonic_status(job_id: str | None = None) -> JSONResponse:
+        """Report whether tectonic is already installed PLUS surface
+        the most recent install attempt's exit state + log tail when
+        a ``job_id`` is passed. Without the log path, a failing
+        install (network error, GitHub asset 404, etc.) shows
+        "starting…" forever in the UI; the user reported this exact
+        symptom on PR #102. Now the Settings page can poll the job
+        and surface the actual error."""
         import sys as _sys
         import shutil as _shutil
         repo_root = Path(__file__).resolve().parent.parent
@@ -509,19 +564,28 @@ def make_app(
             "tectonic.exe" if _sys.platform == "win32" else "tectonic"
         )
         path_bin = _shutil.which("tectonic")
-        if local_bin.is_file():
-            return JSONResponse({
-                "installed": True,
-                "location": str(local_bin),
-                "source": "repo-local",
-            })
-        if path_bin:
-            return JSONResponse({
-                "installed": True,
-                "location": path_bin,
-                "source": "PATH",
-            })
-        return JSONResponse({"installed": False})
+        installed = local_bin.is_file() or bool(path_bin)
+        result: dict[str, Any] = {"installed": installed}
+        if installed:
+            result["location"] = str(local_bin) if local_bin.is_file() else path_bin
+            result["source"] = "repo-local" if local_bin.is_file() else "PATH"
+        # If the caller passed a job_id, surface that job's state +
+        # log tail. The launcher keeps the entry after the
+        # subprocess exits until the next launch reaps the slot.
+        if job_id:
+            status = app.state.launcher.status_for(job_id) or {}
+            result["job_status"] = status
+        return JSONResponse(result)
+
+    @app.get("/api/system/job-log/{job_id}")
+    async def job_log(job_id: str, n: int = 200) -> JSONResponse:
+        """Read the captured stdout+stderr log of a launcher job.
+        Surfaces silent failures that previously vanished into
+        DEVNULL. ``n`` caps the tail length."""
+        lines = app.state.launcher.get_log_tail(job_id, n=n)
+        if lines is None:
+            raise HTTPException(404, f"no log for job {job_id}")
+        return JSONResponse({"job_id": job_id, "lines": lines})
 
     @app.post("/api/system/install-tectonic")
     async def install_tectonic() -> JSONResponse:
