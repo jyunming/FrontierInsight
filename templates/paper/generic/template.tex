@@ -6,6 +6,7 @@
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
 \usepackage{listings}
+\usepackage{titling}
 
 % Pandoc-compatibility preamble. The standard pandoc latex template
 % defines these commands and the Shaded env; when we override with a
@@ -28,12 +29,37 @@
 \providecommand{\pandocbounded}[1]{\noindent\resizebox{\textwidth}{!}{#1}}
 $highlighting-macros$
 
+% Default \maketitle on article class sets the title at \LARGE
+% (~17.3pt at 11pt base), which dominates page 1 and looks oversized
+% next to "Frontier Insight" below it. Drop to \Large (~14.4pt) so
+% the title is still emphasized but no longer crowds the abstract
+% block. titling lets us redefine the title spacing without
+% re-implementing \maketitle.
+\pretitle{\begin{center}\Large\bfseries}
+\posttitle{\par\end{center}\vskip 0.5em}
+\preauthor{\begin{center}\normalsize}
+\postauthor{\par\end{center}}
+\predate{\begin{center}\normalsize}
+\postdate{\par\end{center}}
+
+% PDF metadata: hyperref pulls pdftitle from \title{} only when
+% \hypersetup is called AFTER \title — order matters. Without this
+% block the rendered PDF has an empty Title field in pdfinfo, which
+% breaks reference managers (Zotero, Mendeley) that key on it.
+\hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
+
 \title{$title$}
 \author{Frontier Insight}
 \date{$date$}
 
 \begin{document}
 \maketitle
+
+$if(abstract)$
+\begin{abstract}
+$abstract$
+\end{abstract}
+$endif$
 
 $body$
 

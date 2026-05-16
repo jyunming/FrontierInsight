@@ -76,6 +76,24 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 
 End with `## References` in numbered-list style citing concrete sources from the prior-work block above (or, if none are usable, plausibly-formatted primary references with DOIs).
 
+## References — required format
+
+Every reference MUST carry **author(s) + year + title + venue + DOI/URL** drawn from the prior-work block (each `[i]` entry there now includes author/year/venue/DOI on its second line). Do NOT emit references as bare titles — readers can't look up "Stratonovich-type integral with respect to a general stochastic measure." with no author or year.
+
+Format examples (numbered list, one paragraph per entry):
+
+- `1. Smith, J. & Lee, M. (2021). Title of the paper. *Journal Name*. DOI: 10.xxxx/xxxxx.`
+- `2. Doe, J. et al. (2024). Another title. *Conference Proceedings*. arXiv:2401.12345.`
+- `3. Author One (2019). Solo author paper. *Venue*. https://example.com/paper`
+
+If the prior-work block lacks one of these fields, omit just that field — never fabricate an author name or DOI. Do NOT repeat the title twice; the prior-work entry's header line already gives you the title once.
+
+## No raw code blocks in the body
+
+Reproducibility lives in the bundled `experiment.py` (and `paper_bundle_manifest.json`) shipped alongside the paper, **not** in the body. Do NOT emit fenced ` ```python ` / ` ```bash ` / ` ```r ` blocks — they render as syntax-highlighted Pandoc listings that look out of place next to a real venue's typesetting (IEEE / NeurIPS / Nature never inline raw code in the body).
+
+If a code-style fragment is genuinely necessary (e.g. a one-line command or filename), use *inline* monospace with single backticks. For pseudocode that's load-bearing for the method, write 4–8 lines of plain numbered prose ("1. Sample dose ~ U(0.7, 1.3). 2. Convolve with Gaussian PSF …"), not a fenced block.
+
 # Output format
 Respond with the markdown of the paper only — no JSON, no surrounding fence, no preamble.
 

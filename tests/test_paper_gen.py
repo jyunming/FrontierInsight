@@ -906,22 +906,37 @@ def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
         )
 
 
-def test_paper_stub_templates_were_deleted() -> None:
-    """The iclr/ieee_access/nature_mi templates shipped as 1-line
-    LaTeX-comment stubs that pandoc accepted as templates and
-    pdflatex rejected at compile. Audit #05 flagged this; the
-    Phase-Q hotfix deletes them so ``_find_pdf_engine`` /
-    ``template.exists()`` returns False and pandoc's built-in
-    default template runs — which actually compiles."""
+def test_paper_venue_templates_are_real_not_stubs() -> None:
+    """The iclr/ieee_access/nature_mi templates used to ship as
+    1-line LaTeX-comment stubs that pandoc accepted as templates
+    and pdflatex rejected at compile (audit #05). The Phase-Q
+    hotfix deleted them so pandoc's built-in default ran instead.
+    They now ship as real, minimal venue-flavored templates — this
+    test pins the upgrade: each template must contain the placeholders
+    pandoc needs (``$title$``, ``$body$``) and at least one ``\\documentclass``
+    line so it actually compiles. Future stub regressions (a 1-line
+    comment-only template, an empty file) fail here loudly instead
+    of silently producing an unreadable PDF."""
     repo = Path(__file__).resolve().parent.parent
     for fmt in ("iclr", "ieee_access", "nature_mi"):
-        stub = repo / "templates" / "paper" / fmt / "template.tex"
-        assert not stub.exists(), (
-            f"templates/paper/{fmt}/template.tex must NOT exist — the "
-            f"file is a 1-line stub that breaks pdflatex compile. "
-            f"Pandoc-default fallback works correctly when no "
-            f"template.tex is present."
+        path = repo / "templates" / "paper" / fmt / "template.tex"
+        assert path.exists(), (
+            f"templates/paper/{fmt}/template.tex must exist as a real "
+            f"venue template — `paper_format: {fmt}` quests fall back "
+            f"to pandoc's generic default when the file is missing."
         )
+        body = path.read_text(encoding="utf-8")
+        # Strip LaTeX comments so a stub like "% TODO" can't pass.
+        non_comment = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("%")
+        )
+        for needle in ("\\documentclass", "$title$", "$body$"):
+            assert needle in non_comment, (
+                f"templates/paper/{fmt}/template.tex is missing "
+                f"{needle!r} on a non-comment line — pandoc cannot "
+                f"render a paper without all three. A pure-comment "
+                f"file is the regression that caused audit #05."
+            )
 
 
 def test_poster_template_substitution_does_not_leak_into_preamble() -> None:

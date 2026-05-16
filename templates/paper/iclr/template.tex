@@ -1,6 +1,7 @@
-% Minimal NeurIPS-flavored stand-in. Replace with the official neurips_2024.sty
-% when you actually submit; this is enough for pandoc to compile the paper.md
-% with NeurIPS-style metadata blocks.
+% Minimal ICLR-flavored stand-in. Replace with the official
+% iclr2024_conference.sty when you actually submit; this is enough
+% for pandoc to compile paper.md with ICLR-style metadata blocks
+% (single-column 10pt, abstract env, named author block).
 \documentclass[10pt,letterpaper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[margin=1in]{geometry}
@@ -11,24 +12,25 @@
 \usepackage{microtype}
 \usepackage{authblk}
 \usepackage{titling}
+\usepackage{titlesec}
 
 % Pandoc-compatibility preamble — see generic/template.tex for the
-% full rationale. tightlist + passthrough + the highlighting-macros
-% variable that expands to the Shaded env + per-token color
-% commands. Variable names are NOT spelled out in this comment to
-% avoid the same multi-line-expansion-breaks-the-comment trap.
+% full rationale.
 \providecommand{\tightlist}{%
   \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 \providecommand{\passthrough}[1]{#1}
 \providecommand{\pandocbounded}[1]{\noindent\resizebox{\textwidth}{!}{#1}}
 $highlighting-macros$
 
-\renewcommand{\Authands}{, }
-
-% NeurIPS title at ~17pt — a touch smaller than the article default
-% \LARGE so the affil block reads as a unit with the title.
+% ICLR's title block is centered and noticeably tighter than the
+% article default; matching that visual rhythm here.
 \pretitle{\begin{center}\Large\bfseries}
-\posttitle{\par\end{center}\vskip 0.5em}
+\posttitle{\par\end{center}\vskip 0.4em}
+\preauthor{\begin{center}\normalsize}
+\postauthor{\par\end{center}}
+
+% ICLR uses bold section heads, no leading "Section" word.
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection}{0.6em}{}
 
 \hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
 
@@ -43,10 +45,6 @@ $highlighting-macros$
 $if(abstract)$
 \begin{abstract}
 $abstract$
-\end{abstract}
-$else$
-\begin{abstract}
-This paper was produced end-to-end by Frontier Insight; results in figures and tables are reproducible from the bundled \texttt{experiment.py}.
 \end{abstract}
 $endif$
 
