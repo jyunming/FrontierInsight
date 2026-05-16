@@ -330,36 +330,38 @@ def make_app(
     @app.get("/api/knowledge/info")
     async def knowledge_info() -> JSONResponse:
         """Surface the AxonStore knowledge-base location + corpus
-        stats on the Settings page. Probes the live Axon instance
-        (if installed + configured) and reports:
-          * configured ``axon_config`` path / inline dict
-          * resolved on-disk location of the vector store
-          * doc count by kind (fi_quest_paper / fi_local_paper /
-            fi_proposal / fi_critique / fi_digest / fi_portfolio /
-            fi_summary / etc.)
+        stats on the Settings page.
 
-        Returns ``{"available": False, "reason": "..."}`` when Axon
-        isn't installed or the user hasn't configured it — so the UI
-        can show a clear hint instead of a misleading "empty corpus"
-        state."""
+        ``core.knowledge`` exports ``_AXON_AVAILABLE`` always, but
+        ``_AXON_IMPORT_ERROR`` only exists when the import FAILED
+        (assigned inside the ``except`` branch). My earlier draft
+        imported it unconditionally, which raised ImportError on
+        the success path and masked the real availability state.
+        We now use ``getattr(..., None)`` to read the optional
+        symbol so success + failure paths both report cleanly."""
         try:
-            from core.knowledge import (
-                _AXON_AVAILABLE, _AXON_IMPORT_ERROR,
-                AxonBrain, AxonConfig,
-            )
+            from core import knowledge as _knowledge_mod
         except Exception as e:
             return JSONResponse({
                 "available": False,
                 "reason": f"knowledge module unavailable: {e!r}",
             })
-        if not _AXON_AVAILABLE:
+        axon_available = getattr(_knowledge_mod, "_AXON_AVAILABLE", False)
+        axon_import_error = getattr(_knowledge_mod, "_AXON_IMPORT_ERROR", None)
+        AxonBrain = getattr(_knowledge_mod, "AxonBrain", None)
+        AxonConfig = getattr(_knowledge_mod, "AxonConfig", None)
+
+        if not axon_available or AxonBrain is None or AxonConfig is None:
+            reason = (
+                f"axon package not importable: {axon_import_error!r}. "
+                if axon_import_error is not None
+                else "axon package not installed. "
+            )
             return JSONResponse({
                 "available": False,
-                "reason": (
-                    f"axon package not importable: "
-                    f"{_AXON_IMPORT_ERROR!r}. Install with "
-                    f"`pip install axon` (or pull the axon repo "
-                    f"into PYTHONPATH)."
+                "reason": reason + (
+                    "Install with `pip install axon` (or pull the "
+                    "axon repo into PYTHONPATH)."
                 ),
             })
 
@@ -395,8 +397,6 @@ def make_app(
             )
             counts: dict[str, int | None] = {}
             for kind in kinds_to_check:
-                # Try a few likely Axon API names; fall through to
-                # None when none of them work.
                 got: int | None = None
                 for method_name in ("count_by_kind", "count", "doc_count"):
                     method = getattr(brain, method_name, None)
@@ -497,11 +497,60 @@ def make_app(
             "resumed": True,
         })
 
+    @app.get("/api/system/tectonic")
+    async def tectonic_status() -> JSONResponse:
+        """Report whether tectonic is already installed.
+        The Settings page checks this on load + after a click so
+        repeat clicks don't re-spawn the installer indefinitely."""
+        import sys as _sys
+        import shutil as _shutil
+        repo_root = Path(__file__).resolve().parent.parent
+        local_bin = repo_root / "tools" / (
+            "tectonic.exe" if _sys.platform == "win32" else "tectonic"
+        )
+        path_bin = _shutil.which("tectonic")
+        if local_bin.is_file():
+            return JSONResponse({
+                "installed": True,
+                "location": str(local_bin),
+                "source": "repo-local",
+            })
+        if path_bin:
+            return JSONResponse({
+                "installed": True,
+                "location": path_bin,
+                "source": "PATH",
+            })
+        return JSONResponse({"installed": False})
+
     @app.post("/api/system/install-tectonic")
     async def install_tectonic() -> JSONResponse:
         """Spawn ``python launch.py --install-tectonic`` as a job.
         Downloads tectonic into tools/ so paper_pdf works without
-        an admin install of MiKTeX."""
+        an admin install of MiKTeX.
+
+        Idempotent: when tectonic is already on disk (repo-local
+        or PATH), returns 200 with ``already_present: True`` and
+        does NOT spawn another installer. Without this guard the
+        user could click "Install" repeatedly and each click
+        kicked off a parallel download/CTAN-fetch — wasteful + the
+        spawned subprocess had no completion-state surface so the
+        UI showed it as "running" forever.
+        """
+        # Same probe as the GET endpoint above; in-process so we
+        # don't pay the HTTP round-trip.
+        import sys as _sys
+        import shutil as _shutil
+        repo_root = Path(__file__).resolve().parent.parent
+        local_bin = repo_root / "tools" / (
+            "tectonic.exe" if _sys.platform == "win32" else "tectonic"
+        )
+        if local_bin.is_file() or _shutil.which("tectonic"):
+            return JSONResponse({
+                "already_present": True,
+                "location": str(local_bin) if local_bin.is_file() else _shutil.which("tectonic"),
+                "spawned": False,
+            })
         from web.quest_launcher import QuestLauncherFull
         try:
             launched = app.state.launcher.launch_command(
@@ -517,6 +566,8 @@ def make_app(
             )
         return JSONResponse({
             "job_id": launched.quest_id, "pid": launched.pid,
+            "spawned": True,
+            "already_present": False,
         })
 
     @app.delete("/api/quests/{quest_id}")

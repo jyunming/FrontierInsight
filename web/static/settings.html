@@ -25,12 +25,13 @@
     <h2>System tasks</h2>
     <div class="fi-card">
       <div class="fi-card-title">
-        <h3>Install tectonic LaTeX</h3>
+        <h3>Tectonic LaTeX</h3>
+        <span id="tectonic-badge" class="fi-badge">checking…</span>
       </div>
       <p class="fi-card-meta">
         Downloads tectonic (~70 MB) into <code class="fi-mono">tools/</code> so <code class="fi-mono">paper.pdf</code> works without an admin install of MiKTeX. Self-bootstrapping — fetches CTAN packages on first compile.
       </p>
-      <button class="fi-btn fi-btn-primary" onclick="installTectonic()">Install tectonic</button>
+      <button class="fi-btn fi-btn-primary" id="tectonic-btn" onclick="installTectonic()">Install tectonic</button>
       <span id="tectonic-status" class="fi-card-meta" style="margin-left:1rem"></span>
     </div>
 
@@ -58,16 +59,62 @@
       document.getElementById('providers').innerHTML = html;
     }
 
+    async function checkTectonic() {
+      // Probe on page load so the badge accurately reflects whether
+      // tectonic is already on disk. Updates the button + badge so
+      // the user doesn't click "Install" on something already there.
+      try {
+        const res = await fetch('/api/system/tectonic');
+        const data = await res.json();
+        const badge = document.getElementById('tectonic-badge');
+        const btn = document.getElementById('tectonic-btn');
+        const status = document.getElementById('tectonic-status');
+        if (data.installed) {
+          badge.textContent = '✓ installed';
+          badge.className = 'fi-badge fi-badge-done';
+          btn.disabled = true;
+          btn.textContent = 'Already installed';
+          status.textContent = `at ${data.location} (${data.source})`;
+        } else {
+          badge.textContent = 'not installed';
+          badge.className = 'fi-badge fi-badge-paused';
+          btn.disabled = false;
+          btn.textContent = 'Install tectonic';
+          status.textContent = '';
+        }
+      } catch (_) {}
+    }
+
     async function installTectonic() {
       const status = document.getElementById('tectonic-status');
+      const btn = document.getElementById('tectonic-btn');
+      btn.disabled = true;
       status.textContent = 'starting…';
       const res = await fetch('/api/system/install-tectonic', {method: 'POST'});
       if (!res.ok) {
         status.textContent = 'failed: ' + await res.text();
+        btn.disabled = false;
         return;
       }
       const body = await res.json();
-      status.textContent = `started (job ${body.job_id}, pid ${body.pid}). Output goes to tools/.`;
+      if (body.already_present) {
+        status.textContent = `already installed at ${body.location}; no action taken.`;
+      } else {
+        status.textContent = `started (job ${body.job_id}, pid ${body.pid}). Output goes to tools/. Re-check status in ~1 minute.`;
+        // Poll status until installed (or 5 min cap).
+        let tries = 0;
+        const poller = setInterval(async () => {
+          tries += 1;
+          if (tries > 100) { clearInterval(poller); return; }
+          const r = await fetch('/api/system/tectonic');
+          if (!r.ok) return;
+          const d = await r.json();
+          if (d.installed) {
+            clearInterval(poller);
+            checkTectonic();
+          }
+        }, 3000);
+      }
     }
 
     function escapeHtml(s) {
@@ -114,6 +161,7 @@
 
     loadProviders();
     loadAxonInfo();
+    checkTectonic();
   </script>
 </body>
 </html>

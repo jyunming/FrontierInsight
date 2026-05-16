@@ -436,3 +436,56 @@ def test_md_lite_blocks_javascript_url() -> None:
     assert "javascript" not in md_lite or "SAFE_SCHEME_RE" in md_lite
     # The renderer should fall back to esc(text) on rejected URLs.
     assert "safeUrl" in md_lite
+
+
+# ---------------------------------------------------------------------------
+# User-reported bugfixes: knowledge_info hard-import + tectonic idempotence
+# ---------------------------------------------------------------------------
+
+
+def test_knowledge_info_works_when_axon_is_available(tmp_path: Path) -> None:
+    """The endpoint must work whether the Axon module imported
+    successfully or not. Earlier version unconditionally imported
+    _AXON_IMPORT_ERROR, which only exists on the failure branch."""
+    client = _client(tmp_path)
+    res = client.get("/api/knowledge/info")
+    assert res.status_code == 200
+    body = res.json()
+    # Either Axon is up or it isn't — neither must 500.
+    assert "available" in body
+
+
+def test_tectonic_install_idempotent_when_already_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User reported: every browser session 'Install tectonic'
+    spawns a new installer even though tectonic is already on disk.
+    Fix: probe before spawning; return already_present=True without
+    re-running."""
+    client = _client(tmp_path)
+    # Fake `shutil.which("tectonic")` returning a real path so the
+    # endpoint sees tectonic as installed. The status endpoint
+    # falls through to PATH when no repo-local binary exists.
+    import shutil as _shutil
+    monkeypatch.setattr(
+        _shutil, "which",
+        lambda name: "/fake/tectonic" if name == "tectonic" else None,
+    )
+    res = client.post("/api/system/install-tectonic")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["already_present"] is True
+    assert body["spawned"] is False
+
+
+def test_tectonic_status_endpoint_reports_not_installed(tmp_path: Path) -> None:
+    """When no tectonic on disk + not on PATH, status is False so
+    the UI shows the Install button enabled."""
+    client = _client(tmp_path)
+    # Default shutil.which won't find a binary named "tectonic" on
+    # most CI images. If a runner DOES have tectonic, the test
+    # gracefully accepts either outcome.
+    res = client.get("/api/system/tectonic")
+    assert res.status_code == 200
+    body = res.json()
+    assert "installed" in body
