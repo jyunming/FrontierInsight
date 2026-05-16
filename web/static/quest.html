@@ -37,7 +37,7 @@
 
     <section id="review-section" style="display:none">
       <h2>Review</h2>
-      <pre id="review"></pre>
+      <div id="review"></div>
     </section>
 
     <section id="log-section">
@@ -110,8 +110,14 @@
       }
       if (data.review) {
         document.getElementById('review-section').style.display = '';
-        document.getElementById('review').textContent =
-          typeof data.review === 'string' ? data.review : JSON.stringify(data.review, null, 2);
+        const reviewEl = document.getElementById('review');
+        if (data.review_panel && data.review_panel.length) {
+          reviewEl.innerHTML = renderReviewPanel(data.review, data.review_panel);
+        } else if (typeof data.review === 'object') {
+          reviewEl.innerHTML = renderSingleReview(data.review);
+        } else {
+          reviewEl.textContent = String(data.review);
+        }
       }
       if (data.log_tail && data.log_tail.length) {
         document.getElementById('log').textContent = data.log_tail.join('\n');
@@ -126,11 +132,73 @@
       }
     }
 
+    // Phase N — per-persona panel + moderator synthesis. Ported
+    // from the old index.html dashboard so the polished card UI
+    // survives the dashboard simplification. When the engine
+    // produced a single-reviewer verdict instead of a panel, the
+    // renderSingleReview fallback below shows that cleanly.
+    function renderReviewPanel(finalReview, panel) {
+      const v = finalReview.verdict || '?';
+      const agreement = finalReview.agreement || 'unanimous';
+      const score = finalReview.score != null ? finalReview.score : '?';
+      const rationale = finalReview.rationale || '';
+      const cards = panel.map((r) => {
+        const weak = (r.weaknesses || []).slice(0, 4).map(w => `<li>${escapeHtml(w)}</li>`).join('');
+        const sugg = (r.suggestions || []).slice(0, 3).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+        const strong = (r.strengths || []).slice(0, 3).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+        return `
+          <div class="fi-card" style="margin-bottom:0">
+            <div class="fi-card-title">
+              <h3>${escapeHtml(r.persona || '?')}</h3>
+              <span class="fi-badge ${r.verdict === 'accept' ? 'fi-badge-done' : 'fi-badge-paused'}">${escapeHtml(r.verdict || '?')}</span>
+            </div>
+            <p class="fi-card-meta">score: ${r.score != null ? escapeHtml(String(r.score)) : '?'}</p>
+            ${strong ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>strengths</b></p><ul style="margin:0 0 0.5rem 1rem">${strong}</ul>` : ''}
+            ${weak ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>weaknesses</b></p><ul style="margin:0 0 0.5rem 1rem">${weak}</ul>` : ''}
+            ${sugg ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>suggestions</b></p><ul style="margin:0 0 0.5rem 1rem">${sugg}</ul>` : ''}
+          </div>`;
+      }).join('');
+      return `
+        <p class="fi-card-meta" style="margin-bottom:0.5rem">${panel.length} personas</p>
+        <div class="fi-card" style="margin-bottom:1rem">
+          <div class="fi-card-title">
+            <h3>Moderator verdict</h3>
+            <span class="fi-badge ${v === 'accept' ? 'fi-badge-done' : 'fi-badge-paused'}">${escapeHtml(v)}</span>
+          </div>
+          <p class="fi-card-meta">score ${escapeHtml(String(score))} · agreement: ${escapeHtml(agreement)}</p>
+          ${rationale ? `<p>${escapeHtml(rationale)}</p>` : ''}
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:0.75rem">${cards}</div>`;
+    }
+
+    function renderSingleReview(review) {
+      const v = review.verdict || '?';
+      const score = review.score != null ? review.score : '?';
+      const weak = (review.weaknesses || []).slice(0, 5).map(w => `<li>${escapeHtml(w)}</li>`).join('');
+      const sugg = (review.suggestions || []).slice(0, 5).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+      return `
+        <div class="fi-card">
+          <div class="fi-card-title">
+            <h3>Reviewer verdict</h3>
+            <span class="fi-badge ${v === 'accept' ? 'fi-badge-done' : 'fi-badge-paused'}">${escapeHtml(v)}</span>
+          </div>
+          <p class="fi-card-meta">score ${escapeHtml(String(score))}</p>
+          ${weak ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>weaknesses</b></p><ul style="margin:0 0 0.5rem 1rem">${weak}</ul>` : ''}
+          ${sugg ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>suggestions</b></p><ul style="margin:0 0 0.5rem 1rem">${sugg}</ul>` : ''}
+        </div>`;
+    }
+
     function showError(msg) {
       const badge = document.getElementById('status-badge');
       badge.textContent = 'error';
       badge.className = 'fi-badge';
       document.getElementById('current-node').textContent = msg;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     async function cancelQuest() {

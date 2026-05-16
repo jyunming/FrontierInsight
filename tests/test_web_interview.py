@@ -254,6 +254,18 @@ def test_quest_detail_route_renders(tmp_path: Path) -> None:
     assert "abc-123-def456" in res.text
 
 
+def test_quest_detail_page_carries_review_panel_renderer(tmp_path: Path) -> None:
+    """Phase N panel-renderer + single-reviewer renderer moved from
+    index.html into quest.html (the dashboard is now a list-only
+    surface). This test pins the move so the multi-persona UI
+    survives the simplification."""
+    client = _client(tmp_path)
+    res = client.get("/quest/sample-id")
+    assert res.status_code == 200
+    assert "renderReviewPanel" in res.text
+    assert "renderSingleReview" in res.text
+
+
 def test_quest_detail_route_rejects_path_traversal(tmp_path: Path) -> None:
     """Same guard as the rest of the web UI."""
     client = _client(tmp_path)
