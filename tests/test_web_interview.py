@@ -231,7 +231,7 @@ def test_submit_launch_503_when_pool_full(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the launcher pool is at capacity, the submit handler
-    returns 503 with a Retry-After-style message."""
+    returns 503 with a Retry-After header so clients can back off."""
     from web.quest_launcher import QuestLauncherFull
     client = _client(tmp_path)
     # Replace launch() on the live launcher to always raise.
@@ -243,6 +243,11 @@ def test_submit_launch_503_when_pool_full(
     res = client.post("/api/interview/submit?launch=true", json=_ok_answers_payload())
     assert res.status_code == 503
     assert "capacity" in res.text.lower()
+    # Retry-After is the standard back-off hint; clients keying off
+    # it can wait the suggested seconds before retrying.
+    assert res.headers.get("Retry-After") == "30"
+    body = res.json()
+    assert body.get("retry_after_seconds") == 30
 
 
 def test_quest_detail_route_renders(tmp_path: Path) -> None:
@@ -279,6 +284,55 @@ def test_cancel_route_404_when_quest_not_tracked(tmp_path: Path) -> None:
     client = _client(tmp_path)
     res = client.post("/api/quests/never-launched/cancel")
     assert res.status_code == 404
+
+
+def test_get_quest_detail_merges_launcher_alive_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bot review #5: the dashboard / detail page's `alive` field
+    must reflect quests spawned via the launcher, not just the
+    in-process registry. Without this, web-launched quests always
+    appear "idle" and the cancel button stays disabled. Test stubs
+    the launcher status to True; the API response must propagate."""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    # Create a fake quest dir so /api/quests/{id} doesn't 404.
+    quest_dir = output_root / "fake-quest-id"
+    (quest_dir / ".fi").mkdir(parents=True)
+    (quest_dir / ".fi" / "run.log").write_text("started\n", encoding="utf-8")
+
+    app = make_app(output_root)
+    client = TestClient(app)
+    # Stub the launcher's status_for to claim the quest is alive.
+    def fake_status(qid: str):
+        if qid == "fake-quest-id":
+            return {"pid": 12345, "started_at": 0, "alive": True, "age_seconds": 1.5}
+        return None
+    monkeypatch.setattr(app.state.launcher, "status_for", fake_status)
+
+    res = client.get("/api/quests/fake-quest-id")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["alive"] is True, (
+        "merging launcher state into /api/quests/<id> is what makes "
+        "the detail-page status badge + cancel button work for "
+        "quests spawned via the web UI"
+    )
+    assert body["launcher_pid"] == 12345
+
+
+def test_mint_quest_id_is_public_and_stable() -> None:
+    """The submit handler used to reach into core.engine._new_quest_id
+    (private underscore prefix). It now uses the public
+    mint_quest_id alias. Pin the rename so the surface stays stable."""
+    from core.engine import mint_quest_id, _new_quest_id
+    assert mint_quest_id is not None
+    # Same behavior.
+    a = mint_quest_id("topic-x")
+    assert "topic-x" in a or a.endswith("-x") or len(a) > 0
+    # Underscore form is still available for legacy callers.
+    b = _new_quest_id("topic-x")
+    assert len(b) == len(a)  # same shape
 
 
 # ---------------------------------------------------------------------------

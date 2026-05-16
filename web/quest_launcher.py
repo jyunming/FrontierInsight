@@ -146,10 +146,20 @@ class QuestLauncher:
             return entry
 
     def cancel(self, quest_id: str, *, grace_s: float = 5.0) -> bool:
-        """Send SIGTERM to the quest's child; escalate to SIGKILL
-        after ``grace_s`` seconds. Returns True if a process was
-        signaled, False if the quest_id isn't tracked or already
-        exited."""
+        """Send SIGTERM to the quest's child AND its descendants;
+        escalate to SIGKILL after ``grace_s`` seconds. Returns True
+        if a process was signaled, False if the quest_id isn't
+        tracked or already exited.
+
+        The engine spawns experiment scripts (and venv-managed
+        subprocesses) as grandchildren of the launch.py child. A
+        plain ``Popen.terminate()`` only signals the direct child;
+        grandchildren are reparented to init and survive. On POSIX
+        we signal the whole process group (``os.killpg`` against the
+        new session created by ``start_new_session=True`` in
+        ``launch``). On Windows we use ``CTRL_BREAK_EVENT`` against
+        the process group created by ``CREATE_NEW_PROCESS_GROUP`` —
+        same effect."""
         with self._lock:
             target = next(
                 (q for q in self._quests if q.quest_id == quest_id), None,
@@ -158,11 +168,21 @@ class QuestLauncher:
             return False
         try:
             if os.name == "nt":
-                # CTRL_BREAK_EVENT is the closest equivalent to
-                # SIGTERM for a Windows process group.
+                # CTRL_BREAK_EVENT delivers to the whole process
+                # group created at spawn time.
                 target.process.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                target.process.terminate()
+                # Signal the whole process group. The pgid equals
+                # the child's pid because start_new_session=True
+                # made the child a session/group leader. SIGTERM
+                # the group; if the engine ignores it, the escalation
+                # below sends SIGKILL.
+                try:
+                    os.killpg(target.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    # Group already gone or restricted — fall back
+                    # to the direct child.
+                    target.process.terminate()
         except (ProcessLookupError, OSError):
             return False
         # Wait briefly for cooperative shutdown.
@@ -171,7 +191,15 @@ class QuestLauncher:
             return True
         except subprocess.TimeoutExpired:
             try:
-                target.process.kill()
+                if os.name == "nt":
+                    target.process.kill()
+                else:
+                    # SIGKILL the whole group on the escalation
+                    # path too — same orphan-prevention reason.
+                    try:
+                        os.killpg(target.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        target.process.kill()
                 target.process.wait(timeout=2.0)
             except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
                 pass

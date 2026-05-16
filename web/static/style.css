@@ -1,13 +1,18 @@
 /* Frontier Insight — shared dashboard + interview stylesheet.
  *
- * Clean modern dashboard look: Inter sans-serif throughout, single
- * blue accent (#1F3A5F), white background, JetBrains Mono for code.
- * Dark mode via prefers-color-scheme media query — flips background
- * + text + accent intensity. No third-party CSS framework; we lean
- * on CSS custom properties + clamp() typography.
+ * Clean modern dashboard look: Inter sans-serif when available
+ * (falls back through the system-ui stack so `--serve` works fully
+ * offline without a Google Fonts round-trip), single blue accent
+ * (#1F3A5F), white background, JetBrains Mono for code. Dark mode
+ * via prefers-color-scheme media query — flips background + text +
+ * accent intensity. No third-party CSS framework; we lean on CSS
+ * custom properties + clamp() typography.
+ *
+ * (No `@import` here: the original draft pulled Inter from
+ * fonts.googleapis.com, which breaks privacy + offline use. Users
+ * who install Inter system-wide still get it via the font-family
+ * stack below; everyone else gets system-ui, which is fine.)
  */
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
   /* Brand */

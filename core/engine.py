@@ -2969,6 +2969,19 @@ def _new_quest_id(seed: str) -> str:
     return f"{int(time.time())}-{base}-{uuid.uuid4().hex[:6]}"
 
 
+# Public alias for callers outside the engine module that need to
+# mint a quest_id BEFORE constructing an Engine (e.g. the
+# `--serve` web UI's quest launcher needs the id up-front so the
+# post-submit redirect URL `/quest/<id>` is stable). Forwards to the
+# internal `_new_quest_id`; the rename lets external callers stop
+# depending on a underscore-prefixed private symbol.
+def mint_quest_id(seed: str) -> str:
+    """Generate a new quest_id from a topic / title / slug seed.
+    Same algorithm `Engine.__init__` uses when no explicit
+    `resume_quest_id` or `FI_PRESEED_QUEST_ID` is provided."""
+    return _new_quest_id(seed)
+
+
 def _slugify(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)

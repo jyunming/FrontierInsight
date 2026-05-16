@@ -331,6 +331,17 @@ def make_app(
         # Phase N — expose the panel reviews to the GUI when present.
         review = final_state.get("review")
         review_panel = final_state.get("review_panel")
+        # Phase R — merge launcher state so quests spawned via the
+        # web UI's POST /api/interview/submit?launch=true also report
+        # ``alive: true`` while their child process is running.
+        # Without this, the in-process registry's `alive(quest_id)`
+        # returns False for ANY web-launched quest (those don't
+        # touch the in-process registry — only CLI/VSCode-launched
+        # quests do), so the detail page's status badge would
+        # incorrectly show "idle" and the Cancel button would stay
+        # disabled. registry.alive(...) OR launcher.alive covers both
+        # transports.
+        launcher_status = app.state.launcher.status_for(quest_id) or {}
         return JSONResponse({
             "quest_id": quest_id,
             "quest_root": str(quest_root),
@@ -342,10 +353,19 @@ def make_app(
                 if paper_md.exists() else None
             ),
             "summary": summary,
-            "alive": registry.alive(quest_id),
+            "alive": (
+                registry.alive(quest_id)
+                or bool(launcher_status.get("alive"))
+            ),
             "pending_clarify": registry.pending_clarify(quest_id) is not None,
             "review": review,
             "review_panel": review_panel,
+            # Subprocess-launcher specifics for the detail page UI.
+            # `pid` lets users find the process; `started_at` powers a
+            # "running for X minutes" hint. Both null when the quest
+            # wasn't launched via this server.
+            "launcher_pid": launcher_status.get("pid"),
+            "launcher_started_at": launcher_status.get("started_at"),
         })
 
     @app.get("/api/quests/{quest_id}/log")
@@ -479,9 +499,10 @@ def _warn_if_non_loopback(host: str) -> None:
     endpoint can run arbitrary ``python launch.py --config <yaml>``
     on the server's machine. Binding to anything other than a
     loopback (``127.0.0.1`` / ``::1`` / ``localhost``) exposes that
-    to the network. Log a loud WARNING with the user's IP so they
-    can't miss it; we don't refuse to start because some users
-    legitimately want LAN access on a trusted network."""
+    to the network. Log a loud WARNING with the bound host so the
+    user can see exactly what they're exposing; we don't refuse to
+    start because some users legitimately want LAN access on a
+    trusted network."""
     loopback = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
     if host not in loopback:
         import logging
@@ -500,13 +521,24 @@ async def serve_async(
     output_root: Path,
     host: str = "127.0.0.1",
     port: int = 8765,
+    max_concurrent: int = 4,
+    vscode_bridge_port: int = 0,
 ) -> None:
     """Async entry point — invoked from within an existing event loop.
     Uses ``uvicorn.Server.serve`` so we don't try to nest event loops.
-    The server runs until SIGINT/SIGTERM."""
+    The server runs until SIGINT/SIGTERM.
+
+    ``max_concurrent`` caps how many quests the web UI's subprocess
+    launcher can spawn at once. ``vscode_bridge_port`` is passed to
+    each spawned child so LLM calls keep routing through the same
+    bridge the dashboard inherits. Both forwarded to ``make_app``."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
-    app = make_app(output_root.resolve())
+    app = make_app(
+        output_root.resolve(),
+        max_concurrent=max_concurrent,
+        vscode_bridge_port=vscode_bridge_port,
+    )
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
@@ -517,9 +549,15 @@ def serve(
     output_root: Path,
     host: str = "127.0.0.1",
     port: int = 8765,
+    max_concurrent: int = 4,
+    vscode_bridge_port: int = 0,
 ) -> None:
     """Blocking entry point invoked when run standalone (no event loop)."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
-    app = make_app(output_root.resolve())
+    app = make_app(
+        output_root.resolve(),
+        max_concurrent=max_concurrent,
+        vscode_bridge_port=vscode_bridge_port,
+    )
     uvicorn.run(app, host=host, port=port, log_level="info")

@@ -771,9 +771,16 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.serve:
             # We're already inside an event loop (main_async), so use
             # the async helper rather than the blocking uvicorn.run.
+            # Forward --max-concurrent + --vscode-bridge-port so the
+            # web UI's subprocess launcher inherits the same caps +
+            # transport the rest of FI was started with.
             from web.server import serve_async
             await serve_async(
-                output_root=args.output_root, host=args.host, port=args.port,
+                output_root=args.output_root,
+                host=args.host,
+                port=args.port,
+                max_concurrent=args.max_concurrent,
+                vscode_bridge_port=args.vscode_bridge_port,
             )
             return 0
 

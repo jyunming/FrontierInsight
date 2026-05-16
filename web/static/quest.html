@@ -103,7 +103,9 @@
           // serving for figures isn't wired, the image will simply
           // 404 and the user gets a broken-icon (acceptable
           // degradation, not a crash).
-          img.src = `/api/quests/${encodeURIComponent(questId)}/figures/${encodeURIComponent(fname)}`;
+          // The server route is /api/quests/{id}/figure/{name}
+          // (singular) — see web/server.py:_serve_figure.
+          img.src = `/api/quests/${encodeURIComponent(questId)}/figure/${encodeURIComponent(fname)}`;
           img.alt = fname;
           grid.appendChild(img);
         }

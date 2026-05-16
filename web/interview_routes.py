@@ -98,17 +98,27 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # reuses the quest_id minted here and the redirect URL
         # /quest/<id> is stable before the child reaches Engine init.
         if request.query_params.get("launch") == "true":
-            from core.engine import _new_quest_id
+            from core.engine import mint_quest_id
             from web.quest_launcher import QuestLauncherFull
             seed = answers.title or answers.topic or "quest"
-            quest_id = _new_quest_id(seed)
+            quest_id = mint_quest_id(seed)
             try:
                 launched = app.state.launcher.launch(
                     quest_id=quest_id, yaml_path=yaml_path,
                 )
             except QuestLauncherFull as e:
-                raise HTTPException(
-                    503, f"launcher at capacity: {e}",
+                # 503 with a Retry-After header — the launcher cap
+                # is a transient resource limit; the client should
+                # back off and retry once a slot frees. 30 s is a
+                # reasonable midpoint between "long enough for a
+                # short quest to finish" and "short enough that the
+                # user doesn't think the UI is hung."
+                return JSONResponse(
+                    {"error": "launcher at capacity",
+                     "detail": str(e),
+                     "retry_after_seconds": 30},
+                    status_code=503,
+                    headers={"Retry-After": "30"},
                 )
             return JSONResponse({
                 "yaml_path": str(yaml_path),
