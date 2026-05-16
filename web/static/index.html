@@ -2,470 +2,90 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Frontier Insight</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root {
-      --bg: #0e1116;
-      --panel: #161b22;
-      --border: #30363d;
-      --fg: #e6edf3;
-      --muted: #7d8590;
-      --accent: #58a6ff;
-      --good: #3fb950;
-      --warn: #d29922;
-      --bad: #f85149;
-      --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--fg);
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      font-size: 14px; line-height: 1.5;
-    }
-    header {
-      display: flex; align-items: center; gap: 16px;
-      padding: 12px 20px; border-bottom: 1px solid var(--border);
-      background: var(--panel);
-    }
-    header h1 { margin: 0; font-size: 18px; }
-    header .muted { color: var(--muted); font-size: 12px; }
-    main {
-      display: grid; grid-template-columns: 340px 1fr; min-height: calc(100vh - 53px);
-    }
-    .sidebar { border-right: 1px solid var(--border); padding: 12px; overflow-y: auto; }
-    .panel { padding: 20px; overflow-y: auto; }
-    .quest-row {
-      padding: 10px 12px; margin-bottom: 6px; border-radius: 6px;
-      background: var(--panel); cursor: pointer; border: 1px solid var(--border);
-    }
-    .quest-row:hover { border-color: var(--accent); }
-    .quest-row.active { border-color: var(--accent); background: #0c2747; }
-    .quest-row .id { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-    .quest-row .title { margin-top: 2px; font-weight: 500; }
-    .quest-row .meta { margin-top: 4px; font-size: 11px; color: var(--muted); }
-    .badge {
-      display: inline-block; padding: 1px 7px; border-radius: 8px;
-      font-size: 11px; font-weight: 500;
-    }
-    .badge.running { background: rgba(88, 166, 255, 0.18); color: var(--accent); }
-    .badge.complete { background: rgba(63, 185, 80, 0.18); color: var(--good); }
-    .badge.clarify { background: rgba(210, 153, 34, 0.22); color: var(--warn); }
-    button {
-      background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
-      padding: 6px 14px; font-weight: 500; cursor: pointer; font-size: 13px;
-    }
-    button.secondary { background: var(--panel); color: var(--fg); border: 1px solid var(--border); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    textarea, input {
-      background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-      border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 12px;
-      width: 100%;
-    }
-    h2 { font-size: 16px; margin: 0 0 12px 0; }
-    h3 { font-size: 14px; margin: 24px 0 8px 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-    pre.log {
-      background: #0a0d12; border: 1px solid var(--border); border-radius: 6px;
-      padding: 12px; height: 320px; overflow-y: auto;
-      font-family: var(--mono); font-size: 11.5px; color: #c9d1d9;
-      white-space: pre-wrap; word-break: break-word;
-    }
-    pre.log .line { display: block; }
-    .clarify-panel {
-      background: rgba(210, 153, 34, 0.07); border: 1px solid var(--warn);
-      border-radius: 8px; padding: 16px; margin-bottom: 16px;
-    }
-    .clarify-question { margin-bottom: 14px; }
-    .clarify-question label { display: block; font-weight: 500; margin-bottom: 4px; }
-    .clarify-question .q-text { font-weight: 400; color: var(--fg); font-size: 13px; margin-bottom: 6px; }
-    .clarify-question .default-hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
-    .figure-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
-    .figure-grid img { max-width: 100%; height: auto; border-radius: 4px; border: 1px solid var(--border); }
-    .paper-preview {
-      background: #0a0d12; border: 1px solid var(--border); border-radius: 6px;
-      padding: 16px; max-height: 360px; overflow-y: auto; font-size: 13px;
-      font-family: var(--mono); white-space: pre-wrap;
-    }
-    .panel-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px;
-    }
-    .persona-card {
-      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-      padding: 12px;
-    }
-    .persona-card.accept { border-left: 3px solid var(--good); }
-    .persona-card.revise { border-left: 3px solid var(--warn); }
-    .persona-card .name { font-weight: 600; font-size: 13px; }
-    .persona-card .verdict-row { display: flex; gap: 10px; align-items: center; margin: 4px 0 8px 0; }
-    .persona-card .score { color: var(--muted); font-size: 11px; }
-    .persona-card ul { margin: 4px 0; padding-left: 16px; }
-    .persona-card li { font-size: 11.5px; color: #c9d1d9; }
-    .moderator-card {
-      background: rgba(88, 166, 255, 0.05); border: 1px solid var(--accent);
-      border-radius: 6px; padding: 14px; margin-bottom: 12px;
-    }
-    .moderator-card .rationale { font-style: italic; color: #c9d1d9; margin-top: 6px; font-size: 12.5px; }
-    .agreement-badge {
-      display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 11px;
-    }
-    .agreement-badge.unanimous { background: rgba(63, 185, 80, 0.18); color: var(--good); }
-    .agreement-badge.split { background: rgba(210, 153, 34, 0.22); color: var(--warn); }
-    .agreement-badge.controversial { background: rgba(248, 81, 73, 0.18); color: var(--bad); }
-    .empty { color: var(--muted); padding: 40px; text-align: center; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .row.between { justify-content: space-between; }
-    .new-quest-form { display: none; padding: 20px; }
-    .new-quest-form.open { display: block; }
-    .new-quest-form textarea { min-height: 280px; }
-  </style>
+  <title>Frontier Insight</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
 </head>
 <body>
-
-<header>
-  <h1>Frontier Insight</h1>
-  <span class="muted" id="output-root">scanning...</span>
-  <span style="flex:1"></span>
-  <button class="secondary" onclick="toggleNewQuest()">+ new quest</button>
-  <button class="secondary" onclick="refreshQuests()">↻ refresh</button>
-</header>
-
-<main>
-  <aside class="sidebar">
-    <div id="quest-list"><div class="empty">loading...</div></div>
-  </aside>
-
-  <section class="panel">
-    <div id="new-quest" class="new-quest-form">
-      <h2>Start a new quest</h2>
-      <p class="muted">Paste a YAML config below. <code>output_dir</code> is forced to the server's configured root.</p>
-      <textarea id="new-yaml" placeholder="topic: |
-  Compare two integration methods on a damped harmonic oscillator
-
-provider:
-  name: openai
-
-engine:
-  framework: langgraph
-  max_iterations: 1
-  review_loop: false
-  clarify_mode: interactive
-
-execution:
-  sandbox: venv
-  timeout_s: 60
-
-knowledge:
-  enabled: false
-
-output:
-  kinds: [paper_md]
-"></textarea>
-      <div class="row" style="margin-top: 10px;">
-        <button onclick="startQuest()">start quest</button>
-        <button class="secondary" onclick="toggleNewQuest()">cancel</button>
+  <div id="fi-header-root"></div>
+  <main>
+    <div style="display:flex; align-items:baseline; justify-content:space-between; gap:1rem; margin-bottom:0.5rem;">
+      <div>
+        <h1>Research Quests</h1>
+        <p class="fi-subtitle">All quests in this output directory. Click one to see live status, the paper preview, and figures.</p>
       </div>
+      <a class="fi-btn fi-btn-primary" href="/interview">+ New Quest</a>
     </div>
 
-    <div id="quest-detail">
-      <div class="empty">Pick a quest from the left, or start a new one.</div>
+    <div id="empty-banner" class="fi-empty" style="display:none">
+      <p>No quests yet.</p>
+      <p style="margin-top:0.5rem;">
+        <a class="fi-btn fi-btn-primary" href="/interview">Start your first quest</a>
+      </p>
     </div>
-  </section>
-</main>
 
-<script>
-  const state = {
-    activeQuestId: null,
-    pollTimer: null,
-    eventSource: null,
-  };
+    <div id="quest-list"></div>
+  </main>
 
-  async function fetchJson(url, opts) {
-    const r = await fetch(url, opts);
-    if (!r.ok) throw new Error(`${url}: ${r.status} ${r.statusText}`);
-    return r.json();
-  }
-
-  async function refreshQuests() {
-    try {
-      const data = await fetchJson("/api/quests");
-      renderQuestList(data.quests);
-    } catch (e) {
-      document.getElementById("quest-list").innerHTML = `<div class="empty">error: ${e.message}</div>`;
-    }
-  }
-
-  function renderQuestList(quests) {
-    const root = document.getElementById("quest-list");
-    if (!quests || quests.length === 0) {
-      root.innerHTML = '<div class="empty">no quests yet</div>';
-      return;
-    }
-    // Build the list as DOM nodes rather than `innerHTML +
-    // string-interpolated user data` — this is the defense against
-    // a maliciously-named quest directory (e.g. an attacker who can
-    // create folders on the host) injecting markup or script via the
-    // `quest_id` / `verdict` / `provider` fields. Inline `onclick`
-    // also goes away; we use `addEventListener` with a `data-quest-id`
-    // attribute (HTML-attribute encoding is automatic via .dataset).
-    root.replaceChildren();
-    for (const q of quests) {
-      const row = document.createElement("div");
-      row.className = "quest-row" + (q.quest_id === state.activeQuestId ? " active" : "");
-      row.dataset.questId = q.quest_id;
-      row.addEventListener("click", () => selectQuest(row.dataset.questId));
-
-      const head = document.createElement("div");
-      head.className = "row between";
-      const badge = document.createElement("span");
-      badge.className = "badge " + (q.verdict === "complete" ? "complete" : "running");
-      badge.textContent = q.verdict ?? "";
-      const ageEl = document.createElement("span");
-      ageEl.className = "muted";
-      ageEl.style.fontSize = "11px";
-      const age_s = Number(q.age_s) || 0;
-      const age = age_s < 60 ? `${age_s}s` :
-                  age_s < 3600 ? `${Math.floor(age_s / 60)}m` :
-                  `${Math.floor(age_s / 3600)}h`;
-      ageEl.textContent = `${age} ago`;
-      head.append(badge, ageEl);
-
-      const title = document.createElement("div");
-      title.className = "title";
-      // Strip the timestamp prefix and trailing hash from the slug
-      // when present, but fall back to the raw id otherwise. Always
-      // assigned via `textContent` so HTML never gets interpreted.
-      const parts = String(q.quest_id ?? "").split("-");
-      title.textContent = parts.length > 2
-        ? parts.slice(1, -1).join("-")
-        : String(q.quest_id ?? "");
-
-      const meta = document.createElement("div");
-      meta.className = "meta";
-      meta.textContent = (q.provider || "—") + (q.has_paper ? " · paper.md" : "");
-
-      row.append(head, title, meta);
-      root.appendChild(row);
-    }
-  }
-
-  async function selectQuest(qid) {
-    state.activeQuestId = qid;
-    document.querySelectorAll(".quest-row").forEach(r => r.classList.remove("active"));
-    await refreshQuests();
-    await renderQuestDetail(qid);
-    closeStream();
-    openStream(qid);
-  }
-
-  async function renderQuestDetail(qid) {
-    const detail = document.getElementById("quest-detail");
-    try {
-      const data = await fetchJson(`/api/quests/${qid}`);
-      const clarify = data.pending_clarify
-        ? await fetchJson(`/api/quests/${qid}/clarify`)
-        : { pending: false };
-
-      const figuresHtml = (data.figures || []).map(f =>
-        `<div><img src="/api/quests/${qid}/figure/${f}" alt="${f}"/><div class="muted" style="font-size:11px;">${f}</div></div>`
-      ).join("");
-
-      const clarifyHtml = clarify.pending
-        ? renderClarifyPanel(qid, clarify.questions)
-        : "";
-
-      const reviewHtml = (data.review && data.review_panel)
-        ? renderReviewPanel(data.review, data.review_panel)
-        : (data.review ? renderSingleReview(data.review) : "");
-
-      detail.innerHTML = `
-        <div class="row between">
-          <h2>${qid}</h2>
-          <div>
-            ${data.alive ? '<span class="badge running">running</span>' : ''}
-            ${data.summary ? '<span class="badge complete">complete</span>' : ''}
-            <span class="muted" style="margin-left:8px;">current node: <b>${data.current_node}</b></span>
-          </div>
-        </div>
-
-        ${clarifyHtml}
-
-        ${reviewHtml}
-
-        <h3>Live log</h3>
-        <pre class="log" id="log-pane">${(data.log_tail || []).map(escapeHtml).join("\n")}</pre>
-
-        ${data.figures && data.figures.length ? `
-          <h3>Figures (${data.figures.length})</h3>
-          <div class="figure-grid">${figuresHtml}</div>` : ""}
-
-        ${data.paper_preview ? `
-          <h3>Paper preview (first 4 KB)</h3>
-          <div class="paper-preview">${escapeHtml(data.paper_preview)}</div>` : ""}
-      `;
-    } catch (e) {
-      detail.innerHTML = `<div class="empty">error: ${e.message}</div>`;
-    }
-  }
-
-  function renderReviewPanel(finalReview, panel) {
-    // Phase N — render per-persona reviews + moderator synthesis.
-    const v = finalReview.verdict || "?";
-    const agreement = finalReview.agreement || "unanimous";
-    const score = finalReview.score != null ? finalReview.score : "?";
-    const rationale = finalReview.rationale || "";
-    const cards = panel.map(r => {
-      const cls = r.verdict === "accept" ? "accept" : "revise";
-      const weak = (r.weaknesses || []).slice(0, 4).map(w => `<li>${escapeHtml(w)}</li>`).join("");
-      const sugg = (r.suggestions || []).slice(0, 3).map(s => `<li>${escapeHtml(s)}</li>`).join("");
-      const strong = (r.strengths || []).slice(0, 3).map(s => `<li>${escapeHtml(s)}</li>`).join("");
-      return `
-        <div class="persona-card ${cls}">
-          <div class="name">${escapeHtml(r.persona || "?")}</div>
-          <div class="verdict-row">
-            <span class="badge ${r.verdict === 'accept' ? 'complete' : 'clarify'}">${escapeHtml(r.verdict || '?')}</span>
-            <span class="score">score: ${r.score != null ? escapeHtml(String(r.score)) : '?'}</span>
-          </div>
-          ${strong ? `<div><b style="font-size:11px;color:var(--muted)">strengths</b><ul>${strong}</ul></div>` : ""}
-          ${weak ? `<div><b style="font-size:11px;color:var(--muted)">weaknesses</b><ul>${weak}</ul></div>` : ""}
-          ${sugg ? `<div><b style="font-size:11px;color:var(--muted)">suggestions</b><ul>${sugg}</ul></div>` : ""}
-        </div>`;
-    }).join("");
-    return `
-      <h3>Reviewer panel (${panel.length} personas)</h3>
-      <div class="moderator-card">
-        <div>
-          <b>Moderator verdict:</b>
-          <span class="badge ${v === 'accept' ? 'complete' : 'clarify'}">${escapeHtml(v)}</span>
-          <span class="score" style="margin-left:8px;">score ${escapeHtml(String(score))}</span>
-          <span class="agreement-badge ${agreement}" style="margin-left:8px;">${escapeHtml(agreement)}</span>
-        </div>
-        ${rationale ? `<div class="rationale">${escapeHtml(rationale)}</div>` : ""}
-      </div>
-      <div class="panel-grid">${cards}</div>`;
-  }
-
-  function renderSingleReview(review) {
-    // Backwards-compat single-reviewer rendering.
-    const v = review.verdict || "?";
-    const score = review.score != null ? review.score : "?";
-    const weak = (review.weaknesses || []).slice(0, 5).map(w => `<li>${escapeHtml(w)}</li>`).join("");
-    const sugg = (review.suggestions || []).slice(0, 5).map(s => `<li>${escapeHtml(s)}</li>`).join("");
-    return `
-      <h3>Reviewer verdict</h3>
-      <div class="moderator-card">
-        <div>
-          <b>Verdict:</b>
-          <span class="badge ${v === 'accept' ? 'complete' : 'clarify'}">${escapeHtml(v)}</span>
-          <span class="score" style="margin-left:8px;">score ${escapeHtml(String(score))}</span>
-        </div>
-        ${weak ? `<div style="margin-top:8px;"><b style="font-size:11px;color:var(--muted)">weaknesses</b><ul>${weak}</ul></div>` : ""}
-        ${sugg ? `<div><b style="font-size:11px;color:var(--muted)">suggestions</b><ul>${sugg}</ul></div>` : ""}
-      </div>`;
-  }
-
-  function renderClarifyPanel(qid, questions) {
-    const rows = Object.entries(questions).map(([key, val]) => {
-      // Use `??` not `||` so that legitimately-falsy defaults (0,
-      // false, "") are preserved verbatim instead of being replaced
-      // with the empty-string fallback.
-      const raw = val.default ?? "";
-      const def = Array.isArray(raw) ? raw.join(", ") : String(raw);
-      return `
-        <div class="clarify-question">
-          <div class="q-text"><b>[${escapeHtml(key)}]</b> ${escapeHtml(val.question || key)}</div>
-          <input type="text" data-key="${escapeHtml(key)}" data-islist="${Array.isArray(raw)}" value="${escapeHtml(def)}"/>
-          <div class="default-hint">default: ${escapeHtml(def)}</div>
-        </div>`;
-    }).join("");
-    return `
-      <div class="clarify-panel">
-        <h2>🟡 Pre-flight clarification</h2>
-        <p class="muted">The agent has 5 questions to sharpen this quest. Answers default to the agent's suggestion.</p>
-        ${rows}
-        <button onclick="submitClarify('${qid}')">submit answers</button>
-      </div>`;
-  }
-
-  async function submitClarify(qid) {
-    const inputs = document.querySelectorAll(".clarify-question input");
-    const answers = {};
-    inputs.forEach(inp => {
-      const key = inp.dataset.key;
-      const isList = inp.dataset.islist === "true";
-      const v = inp.value.trim();
-      answers[key] = isList ? v.split(",").map(s => s.trim()).filter(Boolean) : v;
-    });
-    try {
-      await fetchJson(`/api/quests/${qid}/clarify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answers }),
-      });
-      // Re-render detail to clear the clarify panel.
-      await renderQuestDetail(qid);
-    } catch (e) {
-      alert("submit failed: " + e.message);
-    }
-  }
-
-  function openStream(qid) {
-    state.eventSource = new EventSource(`/api/quests/${qid}/log/stream`);
-    const pane = () => document.getElementById("log-pane");
-    state.eventSource.onmessage = (ev) => {
-      const p = pane();
-      if (!p) return;
-      p.textContent = (p.textContent || "") + ev.data + "\n";
-      p.scrollTop = p.scrollHeight;
-      // Cheap heuristic to refresh figures/paper/clarify when key
-      // nodes complete — re-poll the detail every ~3s while streaming.
-    };
-    state.eventSource.onerror = () => closeStream();
-    // Poll detail every 3s while streaming so figures/paper/clarify
-    // surface as they land.
-    state.pollTimer = setInterval(() => {
-      if (state.activeQuestId === qid) {
-        renderQuestDetail(qid).catch(() => {});
+  <script>
+    async function loadQuests() {
+      const res = await fetch('/api/quests');
+      const data = await res.json();
+      const list = document.getElementById('quest-list');
+      const empty = document.getElementById('empty-banner');
+      const quests = data.quests || [];
+      if (quests.length === 0) {
+        empty.style.display = '';
+        list.innerHTML = '';
+        return;
       }
-    }, 3000);
-  }
-
-  function closeStream() {
-    if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
-    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-  }
-
-  function toggleNewQuest() {
-    const f = document.getElementById("new-quest");
-    f.classList.toggle("open");
-    document.getElementById("quest-detail").style.display = f.classList.contains("open") ? "none" : "block";
-  }
-
-  async function startQuest() {
-    const yaml = document.getElementById("new-yaml").value;
-    if (!yaml.trim()) { alert("paste a YAML config first"); return; }
-    try {
-      const r = await fetchJson("/api/quests/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ yaml }),
-      });
-      toggleNewQuest();
-      await refreshQuests();
-      await selectQuest(r.quest_id);
-    } catch (e) {
-      alert("start failed: " + e.message);
+      empty.style.display = 'none';
+      list.innerHTML = quests.map(renderQuestCard).join('');
     }
-  }
 
-  function escapeHtml(s) {
-    return String(s || "")
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+    function renderQuestCard(q) {
+      const state = describeState(q);
+      const updatedHint = q.last_log_ts
+        ? `last log <span class="fi-mono">${escapeHtml(q.last_log_ts)}</span>`
+        : '';
+      const provider = q.provider
+        ? `<span class="fi-mono">${escapeHtml(q.provider)}</span>`
+        : '';
+      const node = q.current_node
+        ? ` · node <span class="fi-mono">${escapeHtml(q.current_node)}</span>`
+        : '';
+      return `
+        <a class="fi-card" href="/quest/${encodeURIComponent(q.quest_id)}" style="display:block; text-decoration:none; color:inherit;">
+          <div class="fi-card-title">
+            <h3>${escapeHtml(q.title || q.quest_id)}</h3>
+            <span class="fi-badge ${state.badgeClass}">${escapeHtml(state.label)}</span>
+          </div>
+          <div class="fi-card-meta">
+            <span class="fi-mono">${escapeHtml(q.quest_id)}</span>
+            ${provider ? ' · ' + provider : ''}${node}
+            ${updatedHint ? ' · ' + updatedHint : ''}
+          </div>
+        </a>
+      `;
+    }
 
-  // Boot
-  refreshQuests();
-  setInterval(refreshQuests, 5000);
-</script>
+    function describeState(q) {
+      if (q.alive) return { label: 'running', badgeClass: 'fi-badge-alive' };
+      if (q.pending_clarify) return { label: 'paused (clarify)', badgeClass: 'fi-badge-paused' };
+      if (q.complete) return { label: 'complete', badgeClass: 'fi-badge-done' };
+      return { label: 'idle', badgeClass: '' };
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    loadQuests();
+    setInterval(loadQuests, 5000);
+  </script>
 </body>
 </html>

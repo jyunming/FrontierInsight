@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Quest</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
+</head>
+<body>
+  <div id="fi-header-root" data-breadcrumb="Quest"></div>
+  <main>
+    <div id="quest-header">
+      <h1 id="quest-title">Quest <span class="fi-mono" id="quest-id">…</span></h1>
+      <p class="fi-subtitle">
+        <span class="fi-badge" id="status-badge">loading…</span>
+        <span id="current-node" style="margin-left:0.5rem"></span>
+      </p>
+    </div>
+
+    <div id="actions" style="margin-bottom:1rem">
+      <a class="fi-btn fi-btn-secondary" href="/" id="back-link">← Dashboard</a>
+      <a class="fi-btn fi-btn-secondary" id="update-link" href="#">Update settings</a>
+      <button class="fi-btn fi-btn-danger" id="cancel-btn" onclick="cancelQuest()">Cancel quest</button>
+    </div>
+
+    <section id="paper-section" style="display:none">
+      <h2>Paper preview</h2>
+      <pre id="paper-preview"></pre>
+    </section>
+
+    <section id="figures-section" style="display:none">
+      <h2>Figures</h2>
+      <div class="fi-figures" id="figures"></div>
+    </section>
+
+    <section id="review-section" style="display:none">
+      <h2>Review</h2>
+      <pre id="review"></pre>
+    </section>
+
+    <section id="log-section">
+      <h2>Log</h2>
+      <pre class="fi-log" id="log"></pre>
+    </section>
+  </main>
+
+  <script>
+    const questId = window.__fi_quest_id;
+    let pollHandle = null;
+    let logOffset = 0;
+    let logBuffer = "";
+
+    document.getElementById('quest-id').textContent = questId;
+    document.getElementById('update-link').href = `/update/${encodeURIComponent(questId)}`;
+
+    async function refresh() {
+      try {
+        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}`);
+        if (!res.ok) {
+          showError(`Quest not found (${res.status}). It may not have started yet.`);
+          return;
+        }
+        const data = await res.json();
+        renderStatus(data);
+      } catch (e) {
+        showError(`Network error: ${e}`);
+      }
+    }
+
+    function renderStatus(data) {
+      const badge = document.getElementById('status-badge');
+      if (data.alive) {
+        badge.textContent = 'running';
+        badge.className = 'fi-badge fi-badge-alive';
+      } else if (data.pending_clarify) {
+        badge.textContent = 'paused (clarify)';
+        badge.className = 'fi-badge fi-badge-paused';
+      } else if (data.summary) {
+        badge.textContent = 'done';
+        badge.className = 'fi-badge fi-badge-done';
+      } else {
+        badge.textContent = 'idle';
+        badge.className = 'fi-badge';
+      }
+      document.getElementById('current-node').textContent =
+        data.current_node ? `node: ${data.current_node}` : '';
+
+      if (data.paper_preview) {
+        document.getElementById('paper-section').style.display = '';
+        document.getElementById('paper-preview').textContent = data.paper_preview;
+      }
+      if (data.figures && data.figures.length) {
+        const sec = document.getElementById('figures-section');
+        sec.style.display = '';
+        const grid = document.getElementById('figures');
+        grid.innerHTML = '';
+        for (const fname of data.figures) {
+          const img = document.createElement('img');
+          // Figures live under <quest_root>/figures/. The server
+          // exposes them through the existing API; if /static-style
+          // serving for figures isn't wired, the image will simply
+          // 404 and the user gets a broken-icon (acceptable
+          // degradation, not a crash).
+          img.src = `/api/quests/${encodeURIComponent(questId)}/figures/${encodeURIComponent(fname)}`;
+          img.alt = fname;
+          grid.appendChild(img);
+        }
+      }
+      if (data.review) {
+        document.getElementById('review-section').style.display = '';
+        document.getElementById('review').textContent =
+          typeof data.review === 'string' ? data.review : JSON.stringify(data.review, null, 2);
+      }
+      if (data.log_tail && data.log_tail.length) {
+        document.getElementById('log').textContent = data.log_tail.join('\n');
+      }
+
+      // Stop polling once the quest is terminal.
+      const terminal = !data.alive && data.summary;
+      document.getElementById('cancel-btn').disabled = terminal || !data.alive;
+      if (terminal && pollHandle) {
+        clearInterval(pollHandle);
+        pollHandle = null;
+      }
+    }
+
+    function showError(msg) {
+      const badge = document.getElementById('status-badge');
+      badge.textContent = 'error';
+      badge.className = 'fi-badge';
+      document.getElementById('current-node').textContent = msg;
+    }
+
+    async function cancelQuest() {
+      if (!confirm(`Cancel quest ${questId}? Sends SIGTERM to the running process.`)) return;
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/cancel`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        alert(`Cancel failed (${res.status}). The quest may have been started outside the web UI and isn't tracked.`);
+        return;
+      }
+      // Refresh once; the next poll will see the process gone.
+      refresh();
+    }
+
+    refresh();
+    pollHandle = setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

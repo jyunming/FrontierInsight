@@ -90,12 +90,40 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         stamp = time.strftime("%Y-%m-%d-%H%M")
         yaml_path = drafts / f"{stamp}-{slugify(answers.title) or 'quest'}.yaml"
         yaml_path.write_text(yaml_text, encoding="utf-8")
+
+        # Optional in-server launch. Triggered by the interview form's
+        # "Launch immediately after submit" checkbox (default ON). The
+        # launcher spawns `python launch.py --config <yaml>` as a child
+        # process with FI_PRESEED_QUEST_ID set, so the child's Engine
+        # reuses the quest_id minted here and the redirect URL
+        # /quest/<id> is stable before the child reaches Engine init.
+        if request.query_params.get("launch") == "true":
+            from core.engine import _new_quest_id
+            from web.quest_launcher import QuestLauncherFull
+            seed = answers.title or answers.topic or "quest"
+            quest_id = _new_quest_id(seed)
+            try:
+                launched = app.state.launcher.launch(
+                    quest_id=quest_id, yaml_path=yaml_path,
+                )
+            except QuestLauncherFull as e:
+                raise HTTPException(
+                    503, f"launcher at capacity: {e}",
+                )
+            return JSONResponse({
+                "yaml_path": str(yaml_path),
+                "quest_id": launched.quest_id,
+                "pid": launched.pid,
+                "launched": True,
+                "next_step": f"GET /quest/{launched.quest_id} for live status",
+            })
+
         return JSONResponse({
             "yaml_path": str(yaml_path),
             "draft_only": True,
             "next_step": (
                 f"Run `python launch.py --config {yaml_path}` to start "
-                f"the quest, or PATCH this endpoint to launch in-process."
+                f"the quest, or POST with ?launch=true to spawn in-server."
             ),
         })
 

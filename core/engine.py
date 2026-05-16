@@ -14,6 +14,7 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import re
 import shutil
 import string
@@ -157,7 +158,18 @@ class Engine:
         # which we set to quest_id below — so reusing the id auto-
         # resumes from the last completed node when a prior run died
         # mid-pipeline, e.g. on a sustained upstream Copilot outage).
-        self.quest_id = resume_quest_id or _new_quest_id(config.title or config.topic)
+        # `FI_PRESEED_QUEST_ID` lets a caller pin the quest_id before
+        # `Engine` mints one — used by the `--serve` web UI's quest
+        # launcher so the post-submit redirect URL `/quest/<id>` is
+        # stable. `resume_quest_id` still wins when both are set
+        # because explicit-API beats env-var. Unset env var → original
+        # behavior unchanged.
+        preseed = os.environ.get("FI_PRESEED_QUEST_ID")
+        self.quest_id = (
+            resume_quest_id
+            or (preseed if preseed and preseed.strip() else None)
+            or _new_quest_id(config.title or config.topic)
+        )
         # quest_root MUST be absolute. When the config sets a relative
         # `output_dir` (e.g. `./outputs`) and the executor later runs a
         # subprocess with `cwd=quest_root`, an absolute argv path is

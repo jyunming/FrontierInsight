@@ -189,3 +189,108 @@ def test_submit_rejects_non_string_in_output_kinds(tmp_path: Path) -> None:
     bad["output_kinds"] = [1, 2, 3]
     res = client.post("/api/interview/submit", json=bad)
     assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Quest launch (subprocess pool)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_with_launch_true_spawns_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POST /api/interview/submit?launch=true`` writes the YAML
+    AND spawns ``python launch.py --config <yaml>``. Monkey-patch
+    Popen so the test doesn't actually start a Python child."""
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 9999
+        def poll(self): return None
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("web.quest_launcher.subprocess.Popen", fake_popen)
+    client = _client(tmp_path)
+    res = client.post("/api/interview/submit?launch=true", json=_ok_answers_payload())
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["launched"] is True
+    assert body["quest_id"]
+    assert body["pid"] == 9999
+    # FI_PRESEED_QUEST_ID was passed to the child so its Engine uses
+    # the same quest_id the response advertised.
+    assert captured["env"]["FI_PRESEED_QUEST_ID"] == body["quest_id"]
+    assert "--config" in captured["argv"]
+
+
+def test_submit_launch_503_when_pool_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the launcher pool is at capacity, the submit handler
+    returns 503 with a Retry-After-style message."""
+    from web.quest_launcher import QuestLauncherFull
+    client = _client(tmp_path)
+    # Replace launch() on the live launcher to always raise.
+    def always_full(**_kwargs):
+        raise QuestLauncherFull("at capacity (test)")
+    monkeypatch.setattr(
+        client.app.state.launcher, "launch", always_full,
+    )
+    res = client.post("/api/interview/submit?launch=true", json=_ok_answers_payload())
+    assert res.status_code == 503
+    assert "capacity" in res.text.lower()
+
+
+def test_quest_detail_route_renders(tmp_path: Path) -> None:
+    """``GET /quest/<id>`` renders the quest.html shell with the
+    quest_id injected as a JS global."""
+    client = _client(tmp_path)
+    res = client.get("/quest/abc-123-def456")
+    assert res.status_code == 200
+    assert "abc-123-def456" in res.text
+
+
+def test_quest_detail_route_rejects_path_traversal(tmp_path: Path) -> None:
+    """Same guard as the rest of the web UI."""
+    client = _client(tmp_path)
+    for hostile in ("../somewhere", "a/b"):
+        res = client.get(f"/quest/{hostile}")
+        # 400 (caught by regex) or 404 (URL routing). NOT 200.
+        assert res.status_code in (400, 404, 422)
+
+
+def test_cancel_route_404_when_quest_not_tracked(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    res = client.post("/api/quests/never-launched/cancel")
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 0.0.0.0 warning
+# ---------------------------------------------------------------------------
+
+
+def test_non_loopback_host_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """When ``--serve`` is bound to a non-loopback address, a clear
+    WARNING fires so the user knows the quest-launch endpoint is
+    reachable from the network."""
+    import logging
+    from web.server import _warn_if_non_loopback
+    caplog.set_level(logging.WARNING, logger="frontier_insight.serve")
+    _warn_if_non_loopback("0.0.0.0")
+    assert any("non-loopback" in rec.message for rec in caplog.records)
+
+
+def test_loopback_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """The default localhost binding must not log a noise warning."""
+    import logging
+    from web.server import _warn_if_non_loopback
+    caplog.set_level(logging.WARNING, logger="frontier_insight.serve")
+    for host in ("127.0.0.1", "localhost", "::1"):
+        caplog.clear()
+        _warn_if_non_loopback(host)
+        assert caplog.records == [], f"unexpected warning for {host}"
