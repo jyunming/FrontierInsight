@@ -109,6 +109,14 @@ async function handleRequest(
         await runAnalyze(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "update") {
+        // Phase R — mid-quest re-entry. Routes to the same
+        // `launch.py --update <quest_id>` flow the CLI uses.
+        // ``prompt`` should be the quest_id; the Python side
+        // validates it exists and refuses gracefully if not.
+        await runUpdate(prompt, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "help" || prompt === "help") {
         stream.markdown(helpText());
         return;
@@ -328,6 +336,101 @@ async function runResume(
     );
 }
 
+async function runUpdate(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+
+    let questId = (promptArgs.trim().split(/\s+/)[0] || "").replace(/^["']+|["']+$/g, "");
+    if (!questId) {
+        if (!(await fsExists(outputsDir))) {
+            stream.markdown(
+                `❌ No outputs directory at \`${outputsDir}\` — nothing to update. Pass a quest_id explicitly: \`@fi /update <quest_id>\`.`,
+            );
+            return;
+        }
+        type Candidate = { questId: string; mtimeMs: number };
+        const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
+        const candidates: Candidate[] = [];
+        await Promise.all(entries.map(async (entry) => {
+            if (!entry.isDirectory() || entry.name.startsWith("_")) return;
+            const configYaml = path.join(outputsDir, entry.name, "config.yaml");
+            try {
+                const stat = await fsPromises.stat(configYaml);
+                if (!stat.isFile()) return;
+                candidates.push({ questId: entry.name, mtimeMs: stat.mtimeMs });
+            } catch {
+                // Quest has no config.yaml — can't be updated. Skip.
+            }
+        }));
+        if (candidates.length === 0) {
+            stream.markdown(
+                `❌ No quests with a \`config.yaml\` under \`${outputsDir}\`. ` +
+                `Only quests started after the \`--new\` interview support \`--update\`.`,
+            );
+            return;
+        }
+        candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+        const picked = await vscode.window.showQuickPick(
+            candidates.map((c) => ({
+                label: `$(beaker) ${c.questId}`,
+                description: new Date(c.mtimeMs).toLocaleString(),
+                questId: c.questId,
+            })),
+            {
+                placeHolder: "Pick a quest to update (most recent config.yaml first)",
+                matchOnDescription: true,
+            },
+        );
+        if (!picked) return;
+        questId = picked.questId;
+    }
+
+    // The Python --update flow is stdin-interactive. The chat
+    // surface can't render Q&A modals back into the Python process,
+    // so we open a VSCode integrated terminal and run the command
+    // there — the user types answers in the terminal, then resume
+    // happens automatically. Same questions, same Python schema,
+    // just a different transport for the prompts.
+    stream.markdown(
+        `🔧 Opening an integrated terminal to run the update interview for \`${questId}\`. ` +
+        `Answer in the terminal; the quest auto-resumes when the interview completes.\n\n`,
+    );
+    const term = vscode.window.createTerminal({
+        name: `FI update: ${questId}`,
+        cwd: repoPath,
+    });
+    term.show();
+    // Quote arguments defensively in case the shell mangles the
+    // quest_id (it shouldn't — quest_ids are slugified — but be
+    // safe). The user's shell determines the quoting style; both
+    // PowerShell and bash accept double-quotes.
+    term.sendText(`${pythonPath} launch.py --update "${questId}"`);
+}
+
+
 async function runInterviewAndQuest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
@@ -337,6 +440,14 @@ async function runInterviewAndQuest(
 
     const answers = await runInterview(stream);
     if (!answers) return;  // user hit Esc somewhere
+
+    // Snapshot the active Copilot model into provider.model so the
+    // quest stays on a consistent LLM even if the user changes
+    // Copilot model later. The interview produces ``provider_model: ""``
+    // as a placeholder; we overwrite here. ``family`` (e.g.
+    // ``claude-opus-4-7`` / ``gpt-4o``) is the stable identifier
+    // the bridge keys on.
+    answers.provider_model = userPickedModel.family || "";
 
     // Resolve repo path the same way runQuest does.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");

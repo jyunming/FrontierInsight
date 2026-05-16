@@ -91,16 +91,22 @@ Or explicitly:
 @fi /new
 ```
 
-The extension walks you through 8 quick questions via VSCode-native input modals:
+The extension walks you through 12 quick questions via VSCode-native input modals:
 
 1. **Topic** — what do you want to study? (free text)
 2. **Title** — short identifier (auto-suggested from the topic).
 3. **Outputs** — paper only / paper + PDF / paper + slides / everything.
 4. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
 5. **Research approach** — computational (a Python script can produce the data) vs. observational (real-world data needed). Maps to `engine.no_simulation` — and matches the clarify agent's `simulatability` slot, so picking it here skips the auto-detect path.
-6. **Clarify mode** — just run it / agent self-clarifies / ask me 7 questions.
-7. **Reviewer panel** — single reviewer / 3-persona / 4-persona panel.
-8. **Knowledge layer** — disabled (default) / Axon (if you have it set up).
+6. **Study depth** — brief preprint / journal-length / comprehensive review. Drives paper word count and citation depth. Smart-defaulted off the chosen paper format.
+7. **Comparative baseline** — what existing method / dataset to compare against (free text).
+8. **Success metric** — what number changing in what direction = headline result (free text).
+9. **Time / compute budget** — soft wall-clock cap (free text).
+10. **Clarify mode** — just run it / agent self-clarifies / ask me 7 questions.
+11. **Reviewer panel** — single reviewer / 3-persona / 4-persona panel.
+12. **Knowledge layer** — disabled (default) / Axon (if you have it set up).
+
+The active Copilot model is captured automatically into `provider.model` so the quest stays on a consistent LLM even if you change Copilot model later. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. `@fi /update <quest_id>` re-opens the interview pre-filled with the editable subset for a mid-quest tweak; the same 12-question schema is used for both new-quest setup and mid-quest update.
 
 It writes a config.yaml to `outputs/_drafts/<timestamp>-<title>.yaml`, then immediately starts the quest. You can re-run that same config later with `@fi /start <that-path>`, or edit it and re-run.
 

@@ -237,6 +237,12 @@ def make_app(output_root: Path) -> FastAPI:
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # Interview routes — /interview (new quest), /update/<id> (mid-quest
+    # re-entry), JSON schema endpoint, and POST handlers. Backed by
+    # core.interview as the single source of truth.
+    from web.interview_routes import register_interview_routes
+    register_interview_routes(app, output_root)
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         index_html = static_dir / "index.html"
