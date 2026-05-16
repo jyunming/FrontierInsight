@@ -1241,6 +1241,20 @@ async def _run_new(
         model_choices_for, preflight_clarify, slugify,
     )
 
+    # Choice labels include em-dashes / arrows / Unicode math. Windows
+    # consoles default to cp1252 which can't encode them; force stdout
+    # + stderr to UTF-8 so the prompts render and don't crash with
+    # ``UnicodeEncodeError: 'charmap' codec can't encode character``.
+    # No-op on POSIX (already UTF-8).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        # Older Pythons / unusual stream wrappers — fall through;
+        # the print calls below will still error on a non-UTF8
+        # console, but at least we tried.
+        pass
+
     print("=" * 72)
     print("Frontier Insight — set up a new research quest")
     print("Press Ctrl-C at any prompt to cancel.")
