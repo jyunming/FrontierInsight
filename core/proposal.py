@@ -132,7 +132,15 @@ title: ${title}
 
 provider:
   name: vscode_extension
-  model: gpt-5
+  # No ``model:`` on purpose. When unset, the vscode_extension
+  # transport uses whatever the user has selected in their Copilot
+  # Chat model picker — the right default for a YAML they just
+  # generated from the chat panel. Hardcoding a specific id (e.g.
+  # ``gpt-5``) surfaces as
+  # ``no Copilot model matches hint gpt-5 — using your Chat-picker
+  # selection instead`` for any subscription that doesn't expose
+  # that exact id. Edit this YAML and add ``model: <id>`` if you
+  # want to lock routing.
 
 execution:
   sandbox: venv

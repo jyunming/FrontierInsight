@@ -121,6 +121,29 @@ def test_companion_yaml_references_proposal_md_filename() -> None:
     assert "1778452404-test-aabbcc-proposal.md" in yaml_text
 
 
+def test_companion_yaml_does_not_hardcode_a_provider_model() -> None:
+    """User-reported: the companion YAML used to emit
+    ``provider.model: gpt-5``. Running a quest from that YAML
+    against a subscription that doesn't expose ``gpt-5`` triggered
+    ``no Copilot model matches hint gpt-5 — using your Chat-picker
+    selection instead`` on every node. Fix: leave ``model:`` unset
+    so the vscode_extension transport falls through to the
+    Copilot Chat picker. This test pins that contract."""
+    import yaml as pyyaml
+    yaml_text = _render_companion_yaml(
+        "Some topic",
+        proposal_id="aaa",
+        generated_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+    )
+    parsed = pyyaml.safe_load(yaml_text)
+    provider = parsed.get("provider", {})
+    assert "model" not in provider or provider["model"] is None, (
+        f"companion YAML must NOT hardcode provider.model — let the "
+        f"chat picker decide; got {provider!r}"
+    )
+    assert provider.get("name") == "vscode_extension"
+
+
 def test_companion_yaml_pins_proposal_md_into_local_papers(tmp_path: Path) -> None:
     """The generated proposal needs to feed the quest it spawns. The
     cheapest way: emit a ``knowledge.local_papers: [<proposal_md>]``
