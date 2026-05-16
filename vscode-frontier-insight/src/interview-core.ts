@@ -32,14 +32,25 @@ export interface InterviewAnswers {
     clarify_mode: "off" | "auto" | "interactive";
     review_panel: string[];           // empty = single reviewer
     knowledge_enabled: boolean;
-    // Whether to skip Python simulation entirely and route to the
-    // wait_for_data / auto_collect_data path. Maps to
-    // ``engine.no_simulation`` in YAML. The same gate the clarify
-    // agent's ``simulatability`` slot ultimately resolves to —
-    // exposing it here lets the user pre-set it when they already
-    // know the topic is non-computational (cultural / historical /
-    // qualitative) and skip the auto-detect dance.
     no_simulation: boolean;
+    // Phase R — study depth + three topic-tuned clarify slots that
+    // were previously LLM-only. The interview now collects them so
+    // the engine's clarify node short-circuits in auto mode (pinned
+    // values win over LLM-generated defaults). Must stay in sync
+    // with core/interview.py:InterviewAnswers (Python source of
+    // truth). The schema-parity test in
+    // tests/test_interview_schema_parity.py fails CI if these drift.
+    study_depth: "brief preprint" | "journal-length" | "comprehensive review";
+    comparative_baseline: string;
+    success_metric: string;
+    budget: string;
+    // The Copilot model the user has selected in the chat view at
+    // interview time, snapshotted into ``provider.model`` so the
+    // quest stays on a consistent model even if the user changes
+    // Copilot model later. Captured via vscode.lm.selectChatModels()
+    // — empty string means "no model captured yet" and the bridge
+    // resolves per-call.
+    provider_model: string;
     max_iterations: number;
 }
 
@@ -76,6 +87,12 @@ export function answersToYaml(answers: InterviewAnswers): string {
 
     lines.push("provider:");
     lines.push(`${indent}name: "vscode_extension"`);
+    // Phase R — pin the active Copilot model the user selected when
+    // they ran @fi /new. Empty string means "let the bridge decide
+    // per call" (older flow); non-empty pins it for the whole quest.
+    if (answers.provider_model) {
+        lines.push(`${indent}model: "${yamlEscape(answers.provider_model)}"`);
+    }
     lines.push("");
 
     lines.push("engine:");
@@ -83,24 +100,11 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}max_iterations: ${answers.max_iterations}`);
     lines.push(`${indent}review_loop: true`);
     lines.push(`${indent}clarify_mode: "${answers.clarify_mode}"`);
-    // ``no_simulation: true`` routes the engine to wait_for_data
-    // instead of running implement → execute. Pre-setting it here
-    // bypasses the clarify auto-detect path entirely. Always emit
-    // the flag (both branches) so the YAML is self-documenting and
-    // a YAML editor can flip it without re-reading the schema.
     lines.push(`${indent}no_simulation: ${answers.no_simulation ? "true" : "false"}`);
     // ---- COST DISCIPLINE — these defaults are LOW so a basic quest is
     // ~6 LLM calls instead of ~26. Each line below switches off an
     // expensive feature that the Python defaults turn ON. A user who
     // wants the full research-quality loop edits the YAML by hand.
-    //
-    //   ideate_reflect: false  → -1 LLM call per quest (no chosen-idea critique pass)
-    //   cross_check_per_finding_k: 0  → -2 calls × N findings × iterations
-    //                                   (was the single biggest Copilot-budget burner)
-    //   enable_analyze_reroute: false → keeps the quest to ONE design iteration;
-    //                                   no re_experiment / broaden_lit loops.
-    //
-    // The user can still hit the heavy path by editing the YAML.
     lines.push(`${indent}ideate_reflect: false`);
     lines.push(`${indent}cross_check_per_finding_k: 0`);
     lines.push(`${indent}enable_analyze_reroute: false`);
@@ -112,6 +116,19 @@ export function answersToYaml(answers: InterviewAnswers): string {
     } else {
         lines.push(`${indent}review_panel: []`);
     }
+    // Phase R — pin the interview's research-shaping answers into
+    // clarify_overrides so the engine's clarify node short-circuits
+    // in auto mode (no LLM call needed). Mirrors the equivalent
+    // block in core/interview.py:answers_to_yaml.
+    lines.push(`${indent}clarify_overrides:`);
+    lines.push(`${indent}${indent}study_depth: "${yamlEscape(answers.study_depth)}"`);
+    lines.push(`${indent}${indent}paper_venue: "${yamlEscape(answers.paper_format)}"`);
+    const kindsCsv = answers.output_kinds.map((k) => `"${yamlEscape(k)}"`).join(", ");
+    lines.push(`${indent}${indent}output_kinds: [${kindsCsv}]`);
+    lines.push(`${indent}${indent}simulatability: "${answers.no_simulation ? "no" : "yes"}"`);
+    lines.push(`${indent}${indent}comparative_baseline: "${yamlEscape(answers.comparative_baseline)}"`);
+    lines.push(`${indent}${indent}success_metric: "${yamlEscape(answers.success_metric)}"`);
+    lines.push(`${indent}${indent}budget: "${yamlEscape(answers.budget)}"`);
     lines.push("");
 
     lines.push("execution:");

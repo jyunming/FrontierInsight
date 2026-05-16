@@ -1,0 +1,732 @@
+{
+  "version": 1,
+  "questions": [
+    {
+      "id": "topic",
+      "label": "Topic",
+      "prompt": "What do you want to study? Be specific about the question, what's known, and what success looks like.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. Compare three numerical integrators on a damped harmonic oscillator and report energy drift.",
+      "default": null,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "title",
+      "label": "Title (short slug)",
+      "prompt": "Short identifier for this quest. Used in folder names. Auto-suggested from your topic.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "",
+      "default": null,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "output_kinds",
+      "label": "Outputs",
+      "prompt": "Which deliverables matter? PDF gracefully degrades to MD if pandoc isn't installed.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": [
+            "paper_md",
+            "paper_pdf"
+          ],
+          "label": "paper + PDF (recommended)",
+          "description": "Markdown + rendered PDF; needs pandoc + LaTeX on PATH. Falls back to MD-only when missing."
+        },
+        {
+          "value": [
+            "paper_md",
+            "paper_pdf",
+            "slides",
+            "poster",
+            "speech"
+          ],
+          "label": "everything",
+          "description": "paper, PDF, slides, poster, talk script. Maximum tooling needed (pandoc + LaTeX + marp + Beamer)."
+        },
+        {
+          "value": [
+            "paper_md",
+            "paper_pdf",
+            "slides"
+          ],
+          "label": "paper + PDF + slides",
+          "description": "PDF via pandoc + LaTeX; slides via Marp; .pptx via pandoc."
+        },
+        {
+          "value": [
+            "paper_md"
+          ],
+          "label": "paper only (Markdown)",
+          "description": "Fastest path; no extra system tools needed."
+        }
+      ],
+      "placeholder": "",
+      "default": [
+        "paper_md",
+        "paper_pdf"
+      ],
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "paper_format",
+      "label": "Paper format / venue",
+      "prompt": "Picks the LaTeX template + writing persona. 'generic' is safe for scientific topics; 'essay' for non-computational humanities/social-science.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "generic",
+          "label": "generic — scientific paper, IMRAD",
+          "description": "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."
+        },
+        {
+          "value": "neurips",
+          "label": "NeurIPS — ML benchmark / algorithm",
+          "description": "Empirical ML, neural networks, learning algorithms, journal-length."
+        },
+        {
+          "value": "iclr",
+          "label": "ICLR — representation learning",
+          "description": "Representations, generative models, ML theory."
+        },
+        {
+          "value": "ieee_access",
+          "label": "IEEE Access — engineering / systems",
+          "description": "Hardware/software architectures, measurement studies, engineering experiments. Two-column layout."
+        },
+        {
+          "value": "nature_mi",
+          "label": "Nature MI — physical sciences",
+          "description": "Physics / chemistry / materials simulation, scientific-method experiments."
+        },
+        {
+          "value": "essay",
+          "label": "essay — long-form argumentative prose",
+          "description": "Cultural / historical / intellectual / qualitative cross-case analysis. Argue a thesis."
+        },
+        {
+          "value": "report",
+          "label": "report — consulting-style exec report",
+          "description": "Business / operational / market analysis with cover + TOC. Decision-maker audience."
+        },
+        {
+          "value": "policy_brief",
+          "label": "policy brief — 2-4 page recommendation",
+          "description": "Single decision for policymakers. Issue + context + recommendation."
+        },
+        {
+          "value": "whitepaper",
+          "label": "whitepaper — 8-20 page industry analysis",
+          "description": "Vendor-neutral tech trends / standards / architecture comparisons. Practitioner audience."
+        }
+      ],
+      "placeholder": "",
+      "default": "generic",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "no_simulation",
+      "label": "Research approach",
+      "prompt": "Decides whether the engine runs a Python experiment or waits for real-world data. Smart-defaults off the paper format.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "Computational — a Python script can produce the data",
+          "description": "Run normal implement → execute pipeline. For physics / ML / algorithmic / benchmark topics."
+        },
+        {
+          "value": true,
+          "label": "Observational — needs real-world data the engine can't simulate",
+          "description": "Skip implement / execute; route to wait_for_data + auto_collect_data. For cultural / historical / qualitative / policy topics."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "study_depth",
+      "label": "Study depth",
+      "prompt": "How mature should the resulting paper be? Drives word count + citation depth.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "brief preprint",
+          "label": "brief preprint",
+          "description": "1–2 pages, terse opening, focus on novel findings only. Citations OK to be few."
+        },
+        {
+          "value": "journal-length",
+          "label": "journal-length (recommended)",
+          "description": "4–8 pages with full IMRAD (or prose equivalent). ~15 citations, 1500–2500 words."
+        },
+        {
+          "value": "comprehensive review",
+          "label": "comprehensive review",
+          "description": "10–15 pages with Background + Comparison + Synthesis sections. 4000+ words, 10+ discussed citations."
+        }
+      ],
+      "placeholder": "",
+      "default": "journal-length",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "comparative_baseline",
+      "label": "Comparative baseline",
+      "prompt": "What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. RandomForest baseline on the same features",
+      "default": null,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "success_metric",
+      "label": "Success metric",
+      "prompt": "What number changing in what direction = headline result?",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. AUC ≥ 0.9 on held-out test set",
+      "default": null,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "budget",
+      "label": "Time / compute budget",
+      "prompt": "Soft cap on wall-clock for the experiment.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. a few minutes on a laptop CPU",
+      "default": null,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "clarify_mode",
+      "label": "Pre-flight clarification mode",
+      "prompt": "Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "auto",
+          "label": "Agent self-clarifies (recommended)",
+          "description": "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."
+        },
+        {
+          "value": "interactive",
+          "label": "Pause for me to answer",
+          "description": "Engine pauses; you confirm/edit each clarify slot. Highest quality, most interruption."
+        },
+        {
+          "value": "off",
+          "label": "Just run it",
+          "description": "Skip the clarify node entirely. Engine relies on the interview answers + topic alone."
+        }
+      ],
+      "placeholder": "",
+      "default": "auto",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "review_panel",
+      "label": "Reviewer panel",
+      "prompt": "Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": [],
+          "label": "Single reviewer (cheapest)",
+          "description": "1 LLM call per review pass."
+        },
+        {
+          "value": [
+            "methodologist",
+            "statistician",
+            "devil_advocate"
+          ],
+          "label": "3-persona panel",
+          "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."
+        },
+        {
+          "value": [
+            "methodologist",
+            "statistician",
+            "devil_advocate",
+            "reproducibility"
+          ],
+          "label": "4-persona panel",
+          "description": "Adds Reproducibility reviewer. ~5× the review cost."
+        }
+      ],
+      "placeholder": "",
+      "default": [],
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "knowledge_enabled",
+      "label": "Knowledge layer (Axon)",
+      "prompt": "Most first-time users should leave this disabled. Mid-quest changes warn — Axon retrievals are one-shot.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "Disabled (recommended for first runs)",
+          "description": "Literature retrieval falls back to free public sources (arXiv, OpenAlex, Crossref) when needed."
+        },
+        {
+          "value": true,
+          "label": "Enabled (requires Axon installed)",
+          "description": "Use the Axon corpus for retrieval + write-back. Skip if you haven't set Axon up."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "provider",
+      "label": "LLM provider",
+      "prompt": "Which transport for LLM calls. VSCode pins this to vscode_extension automatically.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "openai",
+          "label": "openai — HTTP direct (OpenAI API)",
+          "description": "Needs OPENAI_API_KEY. Fastest path, billed against your OpenAI account."
+        },
+        {
+          "value": "codex",
+          "label": "codex — HTTP direct (ChatGPT Plus/Pro OAuth backend)",
+          "description": "Same transport as openai, points at ChatGPT's backend. Needs OPENAI_API_KEY."
+        },
+        {
+          "value": "claude_cli",
+          "label": "claude_cli — local Claude Code CLI",
+          "description": "Needs `claude` binary on PATH + `claude login`. Uses your Claude Pro/Max OAuth."
+        },
+        {
+          "value": "codex_cli",
+          "label": "codex_cli — local Codex CLI",
+          "description": "Needs `codex` binary on PATH + `codex login`. Uses your ChatGPT Plus/Pro OAuth."
+        },
+        {
+          "value": "copilot_cli",
+          "label": "copilot_cli — local GitHub Copilot CLI",
+          "description": "Needs `gh` + Copilot Pro/Business. Uses `gh auth login`."
+        },
+        {
+          "value": "gemini_cli",
+          "label": "gemini_cli — local Gemini CLI",
+          "description": "Needs `gemini` binary on PATH. Uses Google AI Studio OAuth."
+        },
+        {
+          "value": "ollama",
+          "label": "ollama — local server",
+          "description": "Needs Ollama running. Free, fully local; smaller models."
+        }
+      ],
+      "placeholder": "",
+      "default": null,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "serve"
+      ],
+      "allow_other": false
+    },
+    {
+      "id": "provider_model",
+      "label": "Provider model",
+      "prompt": "Which model to call. Curated list per provider; pick 'Other' to type a model name not yet on the list.",
+      "kind": "single",
+      "choices": [],
+      "placeholder": "",
+      "default": null,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "serve"
+      ],
+      "allow_other": true
+    }
+  ],
+  "paper_formats": [
+    {
+      "value": "generic",
+      "label": "generic — scientific paper, IMRAD",
+      "description": "Default for scientific topics. Surveys, comparative reviews, theoretical derivations, brief preprints."
+    },
+    {
+      "value": "neurips",
+      "label": "NeurIPS — ML benchmark / algorithm",
+      "description": "Empirical ML, neural networks, learning algorithms, journal-length."
+    },
+    {
+      "value": "iclr",
+      "label": "ICLR — representation learning",
+      "description": "Representations, generative models, ML theory."
+    },
+    {
+      "value": "ieee_access",
+      "label": "IEEE Access — engineering / systems",
+      "description": "Hardware/software architectures, measurement studies, engineering experiments. Two-column layout."
+    },
+    {
+      "value": "nature_mi",
+      "label": "Nature MI — physical sciences",
+      "description": "Physics / chemistry / materials simulation, scientific-method experiments."
+    },
+    {
+      "value": "essay",
+      "label": "essay — long-form argumentative prose",
+      "description": "Cultural / historical / intellectual / qualitative cross-case analysis. Argue a thesis."
+    },
+    {
+      "value": "report",
+      "label": "report — consulting-style exec report",
+      "description": "Business / operational / market analysis with cover + TOC. Decision-maker audience."
+    },
+    {
+      "value": "policy_brief",
+      "label": "policy brief — 2-4 page recommendation",
+      "description": "Single decision for policymakers. Issue + context + recommendation."
+    },
+    {
+      "value": "whitepaper",
+      "label": "whitepaper — 8-20 page industry analysis",
+      "description": "Vendor-neutral tech trends / standards / architecture comparisons. Practitioner audience."
+    }
+  ],
+  "prose_formats": [
+    "essay",
+    "policy_brief",
+    "report",
+    "whitepaper"
+  ],
+  "study_depths": [
+    {
+      "value": "brief preprint",
+      "label": "brief preprint",
+      "description": "1–2 pages, terse opening, focus on novel findings only. Citations OK to be few."
+    },
+    {
+      "value": "journal-length",
+      "label": "journal-length (recommended)",
+      "description": "4–8 pages with full IMRAD (or prose equivalent). ~15 citations, 1500–2500 words."
+    },
+    {
+      "value": "comprehensive review",
+      "label": "comprehensive review",
+      "description": "10–15 pages with Background + Comparison + Synthesis sections. 4000+ words, 10+ discussed citations."
+    }
+  ],
+  "clarify_modes": [
+    {
+      "value": "auto",
+      "label": "Agent self-clarifies (recommended)",
+      "description": "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."
+    },
+    {
+      "value": "interactive",
+      "label": "Pause for me to answer",
+      "description": "Engine pauses; you confirm/edit each clarify slot. Highest quality, most interruption."
+    },
+    {
+      "value": "off",
+      "label": "Just run it",
+      "description": "Skip the clarify node entirely. Engine relies on the interview answers + topic alone."
+    }
+  ],
+  "review_panels": [
+    {
+      "value": [],
+      "label": "Single reviewer (cheapest)",
+      "description": "1 LLM call per review pass."
+    },
+    {
+      "value": [
+        "methodologist",
+        "statistician",
+        "devil_advocate"
+      ],
+      "label": "3-persona panel",
+      "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."
+    },
+    {
+      "value": [
+        "methodologist",
+        "statistician",
+        "devil_advocate",
+        "reproducibility"
+      ],
+      "label": "4-persona panel",
+      "description": "Adds Reproducibility reviewer. ~5× the review cost."
+    }
+  ],
+  "providers": [
+    {
+      "value": "openai",
+      "label": "openai — HTTP direct (OpenAI API)",
+      "description": "Needs OPENAI_API_KEY. Fastest path, billed against your OpenAI account."
+    },
+    {
+      "value": "codex",
+      "label": "codex — HTTP direct (ChatGPT Plus/Pro OAuth backend)",
+      "description": "Same transport as openai, points at ChatGPT's backend. Needs OPENAI_API_KEY."
+    },
+    {
+      "value": "claude_cli",
+      "label": "claude_cli — local Claude Code CLI",
+      "description": "Needs `claude` binary on PATH + `claude login`. Uses your Claude Pro/Max OAuth."
+    },
+    {
+      "value": "codex_cli",
+      "label": "codex_cli — local Codex CLI",
+      "description": "Needs `codex` binary on PATH + `codex login`. Uses your ChatGPT Plus/Pro OAuth."
+    },
+    {
+      "value": "copilot_cli",
+      "label": "copilot_cli — local GitHub Copilot CLI",
+      "description": "Needs `gh` + Copilot Pro/Business. Uses `gh auth login`."
+    },
+    {
+      "value": "gemini_cli",
+      "label": "gemini_cli — local Gemini CLI",
+      "description": "Needs `gemini` binary on PATH. Uses Google AI Studio OAuth."
+    },
+    {
+      "value": "ollama",
+      "label": "ollama — local server",
+      "description": "Needs Ollama running. Free, fully local; smaller models."
+    }
+  ],
+  "provider_models": {
+    "openai": [
+      {
+        "value": "gpt-4o",
+        "label": "gpt-4o",
+        "description": "Latest GA. Balanced quality + cost."
+      },
+      {
+        "value": "gpt-4o-mini",
+        "label": "gpt-4o-mini",
+        "description": "Cheap; good for high-volume nodes."
+      },
+      {
+        "value": "gpt-4-turbo",
+        "label": "gpt-4-turbo",
+        "description": "Older flagship; still strong."
+      },
+      {
+        "value": "o1-preview",
+        "label": "o1-preview",
+        "description": "Reasoning model; slower + pricier."
+      },
+      {
+        "value": "o1-mini",
+        "label": "o1-mini",
+        "description": "Cheaper reasoning model."
+      }
+    ],
+    "codex": [
+      {
+        "value": "gpt-5",
+        "label": "gpt-5",
+        "description": "ChatGPT backend; quality matches Plus/Pro web UI."
+      },
+      {
+        "value": "gpt-4o",
+        "label": "gpt-4o",
+        "description": "Older default."
+      }
+    ],
+    "claude_cli": [
+      {
+        "value": "claude-opus-4-7",
+        "label": "claude-opus-4-7",
+        "description": "Latest Opus; strongest model."
+      },
+      {
+        "value": "claude-sonnet-4-6",
+        "label": "claude-sonnet-4-6",
+        "description": "Latest Sonnet; balanced."
+      },
+      {
+        "value": "claude-haiku-4-5-20251001",
+        "label": "claude-haiku-4-5",
+        "description": "Latest Haiku; cheapest."
+      }
+    ],
+    "codex_cli": [
+      {
+        "value": "gpt-5",
+        "label": "gpt-5",
+        "description": "ChatGPT backend default."
+      },
+      {
+        "value": "gpt-4o",
+        "label": "gpt-4o",
+        "description": "Older default."
+      }
+    ],
+    "copilot_cli": [
+      {
+        "value": "gpt-4o",
+        "label": "gpt-4o",
+        "description": "Copilot Pro/Business default."
+      },
+      {
+        "value": "claude-3-5-sonnet",
+        "label": "claude-3-5-sonnet",
+        "description": "Available to some Copilot tiers."
+      }
+    ],
+    "gemini_cli": [
+      {
+        "value": "gemini-2.5-pro",
+        "label": "gemini-2.5-pro",
+        "description": "Latest Pro; long context."
+      },
+      {
+        "value": "gemini-2.5-flash",
+        "label": "gemini-2.5-flash",
+        "description": "Cheaper / faster."
+      }
+    ],
+    "ollama": [
+      {
+        "value": "llama3.1:70b",
+        "label": "llama3.1:70b",
+        "description": "Largest Llama 3.1 that fits 80GB VRAM."
+      },
+      {
+        "value": "llama3.1:8b",
+        "label": "llama3.1:8b",
+        "description": "Fits 12GB VRAM; modest quality."
+      },
+      {
+        "value": "qwen2.5:32b",
+        "label": "qwen2.5:32b",
+        "description": "Strong open-source mid-size."
+      }
+    ]
+  },
+  "editable_fields": [
+    "budget",
+    "clarify_mode",
+    "comparative_baseline",
+    "knowledge_enabled",
+    "output_kinds",
+    "paper_format",
+    "review_panel",
+    "study_depth",
+    "success_metric"
+  ],
+  "stage_invalidation": {
+    "paper_format": [
+      "write",
+      "review"
+    ],
+    "output_kinds": [],
+    "study_depth": [
+      "write",
+      "review"
+    ],
+    "comparative_baseline": [
+      "analyze",
+      "cross_check",
+      "write",
+      "review"
+    ],
+    "success_metric": [
+      "analyze",
+      "cross_check",
+      "write",
+      "review"
+    ],
+    "budget": [
+      "analyze",
+      "write",
+      "review"
+    ],
+    "clarify_mode": [],
+    "review_panel": [
+      "review"
+    ],
+    "knowledge_enabled": []
+  }
+}

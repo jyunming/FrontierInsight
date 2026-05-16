@@ -150,6 +150,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "right asset for your OS+arch from GitHub Releases and "
              "verifies the SHA-256 from the release's SHA256SUMS file.",
     )
+    mode.add_argument(
+        "--new",
+        action="store_true",
+        help="Run the interactive interview to set up a new quest. "
+             "Asks topic / title / output_kinds / paper_format / "
+             "research approach / study_depth / clarify slots / "
+             "review panel / knowledge / provider / model. Writes the "
+             "resulting `outputs/_drafts/<id>.yaml` and (unless "
+             "--draft-only is set) starts the quest immediately. "
+             "Mirrors the VSCode `@fi /new` flow for headless use.",
+    )
+    mode.add_argument(
+        "--update",
+        type=str,
+        default=None,
+        metavar="QUEST_ID",
+        help="Mid-quest re-entry. Pass the quest_id of an existing "
+             "quest under --output-root. The interview opens "
+             "pre-filled with the quest's current YAML; only "
+             "research-shaping fields are editable (no topic / "
+             "title / provider). Affected LangGraph stages are "
+             "invalidated based on what changed, then the quest "
+             "resumes via the existing --resume path. Mirrors "
+             "`@fi /update` in the VSCode extension.",
+    )
     p.add_argument(
         "--summarize-kind",
         type=str,
@@ -277,6 +302,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="When `engine.clarify_mode: interactive` is set in the YAML, "
              "pause at the clarify node and read answers from stdin. "
              "Single-quest mode only — fleet runs are headless.",
+    )
+    p.add_argument(
+        "--draft-only",
+        action="store_true",
+        help="With --new: write the generated `outputs/_drafts/<id>.yaml` "
+             "and exit, instead of immediately launching the quest. "
+             "Useful when you want to hand-edit the YAML before "
+             "starting (e.g. set knowledge.local_papers, swap "
+             "provider.model, tune cost knobs). Run "
+             "`python launch.py --config <path>` afterward to start.",
     )
     p.add_argument(
         "--resume",
@@ -748,6 +783,27 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.install_tectonic:
             return _install_tectonic()
 
+        if args.new:
+            return await _run_new(
+                output_root=args.output_root,
+                draft_only=args.draft_only,
+                vscode_bridge_port=args.vscode_bridge_port,
+                interactive=args.interactive,
+                supervisor=supervisor,
+            )
+
+        if args.update:
+            # Phase 3 — see core/interview_update.py for the
+            # invalidation-matrix wiring. The launch-side dispatch
+            # is implemented in _run_update below.
+            return await _run_update(
+                quest_id=args.update,
+                output_root=args.output_root,
+                vscode_bridge_port=args.vscode_bridge_port,
+                interactive=args.interactive,
+                supervisor=supervisor,
+            )
+
         if args.digest:
             return await _run_digest(
                 output_root=args.output_root,
@@ -1156,6 +1212,287 @@ async def _run_analyze(
         resume_quest_id=quest_id,
     )
     return 0
+
+
+async def _run_new(
+    *,
+    output_root: Path,
+    draft_only: bool,
+    vscode_bridge_port: int,
+    interactive: bool,
+    supervisor: ProxySupervisor,
+) -> int:
+    """``python launch.py --new`` — interactive interview frontend.
+
+    Walks the user through the question set defined in
+    :mod:`core.interview`, calls the preflight clarify LLM once (with
+    a visible spinner) for topic-tuned defaults, writes the resulting
+    YAML to ``outputs/_drafts/<stamp>-<title>.yaml``, then (unless
+    ``--draft-only``) immediately starts the quest via the existing
+    ``--config`` path.
+
+    Returns 0 on a completed interview, 0 on quest success, 1 on any
+    user-cancellation or quest failure. Stdin EOF + Ctrl-C count as
+    cancellation, not failure — the quest just doesn't start.
+    """
+    # Only the symbols _run_new actually uses. _cli_prompt_for
+    # imports its own (smart_defaults + model_choices_for).
+    from core.interview import (
+        QUESTIONS, InterviewAnswers, answers_to_yaml,
+        preflight_clarify, slugify,
+    )
+
+    # Choice labels include em-dashes / arrows / Unicode math. Windows
+    # consoles default to cp1252 which can't encode them; force stdout
+    # + stderr to UTF-8 so the prompts render and don't crash with
+    # ``UnicodeEncodeError: 'charmap' codec can't encode character``.
+    # No-op on POSIX (already UTF-8).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        # Older Pythons / unusual stream wrappers — fall through;
+        # the print calls below will still error on a non-UTF8
+        # console, but at least we tried.
+        pass
+
+    print("=" * 72)
+    print("Frontier Insight — set up a new research quest")
+    print("Press Ctrl-C at any prompt to cancel.")
+    print("=" * 72)
+    print()
+
+    partial: dict[str, object] = {}
+    # Which frontend identifier QUESTIONS care about — used to filter
+    # the question list down to the CLI subset (drops provider/model
+    # questions in VSCode, keeps them here).
+    frontend = "cli"
+
+    # Cache the preflight result so we only call once even if the
+    # user goes back over the questions.
+    preflight_cache: dict[str, str] | None = None
+
+    try:
+        # Walk questions in declaration order; skip any whose
+        # ``frontends`` list excludes "cli".
+        for q in QUESTIONS:
+            if frontend not in q.frontends:
+                continue
+
+            # Run preflight after the user has answered the first 5
+            # (topic, title, output_kinds, paper_format, no_simulation)
+            # — that's when we have enough context for a useful LLM
+            # call. Only call once.
+            if q.id == "comparative_baseline" and preflight_cache is None:
+                print()
+                print("⏳ Calling clarify-preflight to suggest topic-tuned defaults...")
+                preflight_cache = await preflight_clarify(
+                    topic=str(partial.get("topic", "")),
+                    paper_format=str(partial.get("paper_format", "generic")),
+                    provider_name=str(partial.get("provider") or "openai"),
+                    provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
+                )
+                print("✓ done")
+                print()
+
+            answer = _cli_prompt_for(q, partial, preflight_cache or {})
+            if answer is None:
+                print()
+                print("— interview cancelled.")
+                return 1
+            partial[q.id] = answer
+
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print("— interview cancelled (Ctrl-C / EOF).")
+        return 1
+
+    # Build the final answers object. Smart defaults already applied
+    # during the walk — partial[k] is whatever the user entered (or
+    # the default they accepted).
+    answers = InterviewAnswers(
+        topic=str(partial["topic"]),
+        title=str(partial["title"]),
+        output_kinds=list(partial["output_kinds"]),  # type: ignore[arg-type]
+        paper_format=str(partial["paper_format"]),
+        no_simulation=bool(partial["no_simulation"]),
+        study_depth=str(partial["study_depth"]),
+        comparative_baseline=str(partial["comparative_baseline"]),
+        success_metric=str(partial["success_metric"]),
+        budget=str(partial["budget"]),
+        clarify_mode=str(partial["clarify_mode"]),
+        review_panel=list(partial["review_panel"]),  # type: ignore[arg-type]
+        knowledge_enabled=bool(partial["knowledge_enabled"]),
+        provider=str(partial.get("provider", "openai")),
+        provider_model=str(partial.get("provider_model")) if partial.get("provider_model") else None,
+    )
+
+    yaml_text = answers_to_yaml(answers, frontend="cli")
+    drafts_dir = output_root / "_drafts"
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d-%H%M")
+    yaml_path = drafts_dir / f"{stamp}-{slugify(answers.title)}.yaml"
+    yaml_path.write_text(yaml_text, encoding="utf-8")
+
+    print()
+    print("=" * 72)
+    print(f"YAML written: {yaml_path}")
+    print("=" * 72)
+
+    if draft_only:
+        print()
+        print("--draft-only: not launching the quest. Run:")
+        print(f"  python launch.py --config {yaml_path}")
+        return 0
+
+    # Launch the quest using the existing --config code path
+    # (``run_one``). The interview already pinned clarify_overrides
+    # in the YAML, so the engine skips its own clarify LLM call.
+    print()
+    print("Launching quest...")
+    cfg = Config.from_yaml(yaml_path)
+    _apply_vscode_bridge_override(cfg, vscode_bridge_port)
+    try:
+        await run_one(
+            cfg,
+            supervisor=supervisor,
+            profile=False,
+            interactive=interactive,
+            source_yaml_path=yaml_path.resolve(),
+        )
+        return 0
+    except Exception as e:
+        print(f"[FI] quest failed: {e!r}", file=sys.stderr)
+        return 1
+
+
+def _cli_prompt_for(
+    q,  # type: ignore[no-untyped-def]
+    partial: dict[str, object],
+    preflight: dict[str, str],
+) -> object | None:
+    """Render one interview question on stdout and read the answer
+    from stdin. Returns the parsed answer (already coerced to the
+    question's value type), or None when the user cancels.
+
+    For ``single``-kind questions we print a numbered choice list and
+    accept either the number or a unique prefix of the label. The
+    default (if any) is shown in parentheses and accepted on blank
+    input. Smart defaults are recomputed each call so cascades work
+    (paper_format flowing into no_simulation, etc).
+    """
+    from core.interview import (
+        Choice, build_smart_defaults, model_choices_for,
+    )
+
+    # Recompute smart defaults given everything answered so far.
+    smart = build_smart_defaults(partial)
+    default = smart.get(q.id, q.default)
+
+    # Preflight overrides for the three topic-tuned slots — they live
+    # in preflight, not the smart_defaults table.
+    if q.id in ("comparative_baseline", "success_metric", "budget"):
+        if preflight.get(q.id):
+            default = preflight[q.id]
+
+    # Provider-model is a derived question — choices depend on the
+    # already-picked provider. Build the choice list at render time.
+    if q.id == "provider_model":
+        provider = partial.get("provider")
+        choices = model_choices_for(str(provider)) if provider else ()
+    else:
+        choices = q.choices
+
+    print()
+    print(f"  [{q.label}] {q.prompt}")
+    if q.placeholder:
+        print(f"      example: {q.placeholder}")
+
+    if q.kind == "text":
+        default_str = "" if default in (None, "") else str(default)
+        prompt_str = f"    answer ({default_str}): " if default_str else "    answer: "
+        try:
+            raw = input(prompt_str).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return raw or default_str or ""
+
+    # single-select (or single-with-allow_other for provider_model)
+    if not choices:
+        # Fall back to free text — happens when allow_other and no
+        # curated list (e.g. unknown provider).
+        try:
+            raw = input("    answer: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return raw
+
+    # Render the choice list.
+    for i, c in enumerate(choices, start=1):
+        marker = " (default)" if c.value == default else ""
+        print(f"    {i}. {c.label}{marker}")
+        if c.description:
+            print(f"        {c.description}")
+    if q.allow_other:
+        print(f"    {len(choices) + 1}. Other (type your own)")
+
+    while True:
+        try:
+            raw = input(f"    select 1-{len(choices) + (1 if q.allow_other else 0)} (or label prefix): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not raw and default is not None:
+            return default
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1].value
+            if q.allow_other and idx == len(choices) + 1:
+                try:
+                    custom = input("    type the value: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+                return custom or None
+            print(f"    (not a valid choice — pick 1 to {len(choices) + (1 if q.allow_other else 0)})")
+            continue
+        # Match by unique label prefix (case-insensitive).
+        lower = raw.lower()
+        matches = [c for c in choices if c.label.lower().startswith(lower)]
+        if len(matches) == 1:
+            return matches[0].value
+        if len(matches) > 1:
+            print(f"    (ambiguous — matches {[c.label for c in matches]})")
+            continue
+        print(f"    (no match for '{raw}' — pick a number or a unique prefix)")
+
+
+async def _run_update(
+    *,
+    quest_id: str,
+    output_root: Path,
+    vscode_bridge_port: int,
+    interactive: bool,
+    supervisor: ProxySupervisor,
+) -> int:
+    """``python launch.py --update <quest_id>`` — mid-quest re-entry.
+
+    Loads the existing quest's ``config.yaml``, runs the interview
+    pre-filled with current values (and limited to the editable
+    field subset), computes a diff, invalidates affected LangGraph
+    stages, writes the updated YAML, then resumes the quest via the
+    existing ``--resume`` path. Implementation in
+    :mod:`core.interview_update`.
+    """
+    from core.interview_update import run_update_flow
+    return await run_update_flow(
+        quest_id=quest_id,
+        output_root=output_root,
+        vscode_bridge_port=vscode_bridge_port,
+        interactive=interactive,
+        supervisor=supervisor,
+        run_one=run_one,
+        apply_vscode_bridge_override=_apply_vscode_bridge_override,
+    )
 
 
 async def _run_proposal(

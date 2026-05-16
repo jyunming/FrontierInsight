@@ -102,7 +102,7 @@ npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
 #   CLI:  code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through 8 quick questions (topic, outputs, paper format, research approach, clarify mode, reviewer panel, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, just type `@fi` — the extension walks you through 12 quick questions (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 
@@ -163,6 +163,22 @@ You'll see log lines firing:
 ```
 
 When it's done, open `outputs/<quest_id>/paper/paper.md`. That's your paper. The figures it references are in the same folder.
+
+---
+
+## Headless interactive interview — `python launch.py --new`
+
+If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same 14-question interview the VSCode `@fi /new` flow uses:
+
+```bash
+python launch.py --new                  # walks you through, then auto-starts the quest
+python launch.py --new --draft-only     # writes the YAML to outputs/_drafts/<id>.yaml and stops
+python launch.py --update <quest_id>    # mid-quest re-entry; pre-fills the editable fields
+```
+
+CLI-only questions: `provider.name` (openai / codex / claude_cli / codex_cli / copilot_cli / gemini_cli / ollama) and `provider.model` (curated list per provider with "Other (type your own)" escape hatch). VSCode skips both because the active Copilot model is captured automatically.
+
+The interview makes ONE LLM call after the first 5 questions to suggest topic-tuned defaults for `comparative_baseline` / `success_metric` / `budget`; the answers land in `engine.clarify_overrides` so the engine's clarify node short-circuits in auto mode (no wasted call). Pick `--draft-only` when you want to hand-edit the YAML before launching (e.g. tune `engine.cross_check_per_finding_k`, add `knowledge.local_papers`).
 
 ---
 

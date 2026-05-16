@@ -227,6 +227,21 @@ class EngineConfig(BaseModel):
     # right cost trade-off. 3 indicators × a few countries each =
     # enough comparative baseline for most no-simulation quests.
     dataset_adapter_top_k: int = Field(default=3, ge=1)
+    # User-pinned answers to the clarify slots, supplied by the
+    # interview frontends (`launch.py --new`, the VSCode `@fi /new`
+    # extension, the `--serve` web UI) or hand-written into YAML. When
+    # present, the clarify node merges these into ``clarify_answers``
+    # AFTER it computes its own auto-answers, so user pins always win.
+    # When every clarify slot is pinned AND ``clarify_mode == "auto"``,
+    # the clarify LLM call is skipped entirely (cost saving). When the
+    # mode is ``interactive`` the LLM still fires so the human can
+    # see the agent's questions, but pinned slots come pre-answered.
+    # Keys are the clarify slot names — ``comparative_baseline`` /
+    # ``empirical_vs_theoretical`` / ``simulatability`` /
+    # ``success_metric`` / ``budget`` / ``output_kinds`` /
+    # ``study_depth`` / ``paper_venue``. Values are whatever shape the
+    # downstream prompts expect (strings, lists for output_kinds).
+    clarify_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionConfig(BaseModel):

@@ -265,7 +265,99 @@ export async function runInterview(
         `  **Research approach:** ${noSimulation ? "observational (no_simulation=true)" : "computational (no_simulation=false)"}\n\n`,
     );
 
-    // 6. Clarify mode — does the agent ask follow-up questions before starting?
+    // 6. Study depth — drives paper length + citation depth.
+    //    Smart-defaulted off the chosen paper_format: policy_brief
+    //    is by definition 2-4 pages, so we default it to "brief
+    //    preprint"; other formats default to "journal-length"
+    //    unless the topic looks survey-shaped. Matches Phase R in
+    //    core/interview.py:smart_default_study_depth.
+    const isPolicyBrief = paperFormat === "policy_brief";
+    const looksSurvey = /\b(survey|review of|compar)/i.test(topic);
+    const studyDepthDefaultLabel = isPolicyBrief
+        ? "brief preprint (recommended for policy_brief)"
+        : looksSurvey
+            ? "comprehensive review (recommended for survey topics)"
+            : "journal-length (recommended)";
+    const studyDepthChoice = await vscode.window.showQuickPick(
+        [
+            {
+                label: `$(symbol-file) ${studyDepthDefaultLabel}`,
+                description: isPolicyBrief
+                    ? "1–2 pages; terse opening; novel findings only. Default for policy_brief."
+                    : looksSurvey
+                        ? "10–15 pages with Background + Comparison + Synthesis. ~4000+ words, 10+ discussed citations."
+                        : "4–8 pages, full IMRAD or prose equivalent. ~1500–2500 words, ~15 citations.",
+                value: (isPolicyBrief
+                    ? "brief preprint"
+                    : looksSurvey
+                        ? "comprehensive review"
+                        : "journal-length") as
+                    | "brief preprint"
+                    | "journal-length"
+                    | "comprehensive review",
+            },
+            {
+                label: "$(book) journal-length",
+                description: "4–8 pages, full IMRAD. ~1500–2500 words, ~15 citations.",
+                value: "journal-length" as const,
+            },
+            {
+                label: "$(zap) brief preprint",
+                description: "1–2 pages, terse, novel findings only.",
+                value: "brief preprint" as const,
+            },
+            {
+                label: "$(library) comprehensive review",
+                description: "10–15 pages with extensive prior-work discussion.",
+                value: "comprehensive review" as const,
+            },
+        ],
+        {
+            title: "Frontier Insight — study depth?",
+            placeHolder:
+                "Gates the paper's length and citation count. journal-length is the safe default.",
+            ignoreFocusOut: true,
+        },
+    );
+    if (!studyDepthChoice) return undefined;
+    const studyDepth = studyDepthChoice.value;
+    stream.markdown(`  **Study depth:** \`${studyDepth}\`\n\n`);
+
+    // 7-9. Topic-tuned clarify slots. The Python frontends make ONE
+    // LLM call here (via agents/clarify_preflight.md) to suggest
+    // topic-tuned defaults; in VSCode, the user has already picked
+    // a model and we *could* fire it, but staying simple for the
+    // initial parity ship: prompt with static placeholders. The
+    // engine's clarify-overrides path still honors whatever the
+    // user types here.
+    stream.markdown(
+        "ℹ️ The next 3 questions sharpen the agent's framing. Press Enter to accept the bracketed placeholder.\n\n",
+    );
+    const comparativeBaseline = await vscode.window.showInputBox({
+        title: "Frontier Insight — comparative baseline",
+        prompt: "What existing method / dataset / regime should this study be compared against?",
+        placeHolder: "e.g. RandomForest baseline on the same features",
+        ignoreFocusOut: true,
+    });
+    if (comparativeBaseline === undefined) return undefined;
+
+    const successMetric = await vscode.window.showInputBox({
+        title: "Frontier Insight — success metric",
+        prompt: "What number changing in what direction = headline result?",
+        placeHolder: "e.g. AUC ≥ 0.9 on held-out test set",
+        ignoreFocusOut: true,
+    });
+    if (successMetric === undefined) return undefined;
+
+    const budget = await vscode.window.showInputBox({
+        title: "Frontier Insight — time / compute budget",
+        prompt: "Soft cap on wall-clock for the experiment.",
+        placeHolder: "e.g. a few minutes on a laptop CPU",
+        ignoreFocusOut: true,
+    });
+    if (budget === undefined) return undefined;
+
+    // 10. Clarify mode — does the agent ask follow-up questions before starting?
     const clarifyChoice = await vscode.window.showQuickPick(
         [
             {
@@ -363,6 +455,15 @@ export async function runInterview(
         review_panel: panel,
         knowledge_enabled: knowledgeChoice.value,
         no_simulation: noSimulation,
+        // Phase R — research-shaping fields.
+        study_depth: studyDepth,
+        comparative_baseline: (comparativeBaseline || "").trim(),
+        success_metric: (successMetric || "").trim(),
+        budget: (budget || "").trim(),
+        // ``runInterview`` is called from extension.ts which knows the
+        // active Copilot model. It overrides this stub with
+        // ``userPickedModel.family`` before invoking writeInterviewYaml.
+        provider_model: "",
         max_iterations: 2,
     };
 }

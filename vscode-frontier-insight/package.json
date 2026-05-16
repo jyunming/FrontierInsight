@@ -73,6 +73,10 @@
             "description": "Run a no-simulation quest with pre-staged data. Pass a directory path; every file under it (recursive, symlinks skipped) is copied into the new quest's data/ dir before the engine starts. Then provide a one-sentence analysis topic. Example: @fi /analyze ./my_data Compare ridership trends across regions"
           },
           {
+            "name": "update",
+            "description": "Mid-quest re-entry of the interview. Pass the quest_id (or pick from the list). Opens an integrated terminal that runs `python launch.py --update <id>`: pre-fills the editable fields with the quest's current values, computes a diff, soft-invalidates affected LangGraph stages, then resumes."
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }

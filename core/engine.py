@@ -564,6 +564,10 @@ class Engine:
             seeded = self._maybe_seed_clarify_from_proposal()
             if seeded is not None:
                 proposal_path, answers = seeded
+                # Even when seeded from a proposal, YAML-pinned
+                # clarify_overrides still win — the interview /
+                # --update path is meant to override proposal defaults.
+                answers = {**answers, **dict(self.config.engine.clarify_overrides)}
                 self._log.info(
                     "[clarify] mode=auto; seeded from proposal %s "
                     "(skipped LLM call)",
@@ -575,6 +579,28 @@ class Engine:
                     "clarify_done": True,
                     "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
                 }
+
+        # When the interview / --update has pinned EVERY known clarify
+        # slot in YAML AND mode is auto, the LLM call is pure waste —
+        # the answers are already known. Skip it. The 8-slot list
+        # matches _CLARIFY_LABELS + the proposal-seed contract.
+        overrides = dict(self.config.engine.clarify_overrides)
+        known_slots = {
+            "comparative_baseline", "empirical_vs_theoretical",
+            "simulatability", "success_metric", "budget",
+            "output_kinds", "study_depth", "paper_venue",
+        }
+        if mode == "auto" and known_slots.issubset(overrides.keys()):
+            self._log.info(
+                "[clarify] mode=auto; all %d slots pinned via "
+                "clarify_overrides (skipped LLM call)", len(known_slots),
+            )
+            return {
+                "clarify_questions": {},
+                "clarify_answers": overrides,
+                "clarify_done": True,
+                "no_simulation_resolved": self._resolve_no_simulation_from_clarify(overrides),
+            }
 
         prompt = self._prompts["clarify"].substitute(topic=state["topic"])
         text = await self._chat(prompt, node="clarify")
@@ -588,7 +614,20 @@ class Engine:
 
         if mode == "auto":
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
-            self._log.info("[clarify] mode=auto; agent self-answered %d slots", len(answers))
+            agent_count = len(answers)  # pre-merge count for honest logging
+            # User-pinned overrides (from the interview / --update flow)
+            # win over the agent's self-answers. Logged so run.log
+            # tells the user exactly which slots they pre-pinned.
+            if overrides:
+                pinned = sorted(overrides.keys() & answers.keys())
+                answers = {**answers, **overrides}
+                self._log.info(
+                    "[clarify] mode=auto; agent self-answered %d slots, "
+                    "user-pinned overrides applied to %d (%s)",
+                    agent_count, len(pinned), ",".join(pinned),
+                )
+            else:
+                self._log.info("[clarify] mode=auto; agent self-answered %d slots", agent_count)
             return {
                 "clarify_questions": questions,
                 "clarify_answers": answers,
@@ -596,6 +635,15 @@ class Engine:
                 "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
             }
 
+        # Interactive: pre-fill any user-pinned answers as the
+        # default for each question's interrupt payload, so the human
+        # sees the interview / --update value already in the slot and
+        # only has to confirm. Cheap merge; an empty overrides dict
+        # is a no-op and preserves prior behavior.
+        if overrides:
+            for slot, value in overrides.items():
+                if isinstance(questions.get(slot), dict):
+                    questions[slot]["default"] = value
         # Interactive: pause the graph until the caller resumes with answers.
         self._log.info(
             "[clarify] mode=interactive; pausing for human input (%d questions)",

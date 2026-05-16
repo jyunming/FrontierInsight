@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Frontier Insight — Interview</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 2em auto; padding: 0 1em; line-height: 1.4; }
+    h1 { font-size: 1.4em; }
+    fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 1em 0; padding: 1em; }
+    legend { font-weight: 600; padding: 0 0.4em; }
+    .prompt { color: #555; font-size: 0.9em; margin: 0.3em 0 0.6em; }
+    input[type="text"], textarea, select { width: 100%; box-sizing: border-box; padding: 0.4em; font-size: 1em; border: 1px solid #bbb; border-radius: 4px; }
+    textarea { min-height: 4em; }
+    label.choice { display: block; padding: 0.3em 0; }
+    .submit-row { margin-top: 1em; }
+    button { padding: 0.5em 1em; background: #1a73e8; color: white; border: none; border-radius: 4px; font-size: 1em; cursor: pointer; }
+    button:hover { background: #1456c1; }
+    button.secondary { background: #777; }
+    button:disabled { background: #bbb; cursor: not-allowed; }
+    #result { margin-top: 1em; padding: 1em; background: #f4f4f4; border-radius: 4px; font-family: monospace; white-space: pre-wrap; display: none; }
+    .pinned { background: #f9f9f9; }
+    .pinned input, .pinned select, .pinned textarea { background: #eee; color: #666; }
+    .small { font-size: 0.85em; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Frontier Insight — New Research Quest</h1>
+  <p class="small" id="mode-hint">Loading question schema…</p>
+  <form id="interview-form" onsubmit="return submitForm(event);"></form>
+  <div id="result"></div>
+
+  <script>
+    // The web UI mirrors the same question set as the CLI `--new` and
+    // the VSCode `@fi /new` flows. Schema is fetched from the server
+    // (which exports it from core/interview.py) so the questions can't
+    // drift across surfaces.
+
+    const updateQuestId = window.__fi_update_quest_id || null;
+    const isUpdate = !!updateQuestId;
+
+    let schema = null;
+    let currentAnswers = null;  // for --update, pre-fills
+
+    async function loadSchema() {
+      const res = await fetch('/api/interview/schema');
+      schema = await res.json();
+      document.getElementById('mode-hint').textContent = isUpdate
+        ? `Mid-quest update for quest ${updateQuestId}. Only editable fields can be changed.`
+        : 'Set up a new research quest. All fields below.';
+      if (isUpdate) {
+        // Update mode displays the editable subset only. Today the
+        // backend pins non-editable fields (topic / title / provider /
+        // model / no_simulation) from the quest's stored YAML, so the
+        // form can leave them blank without harm. A future endpoint
+        // returning current answers can populate `currentAnswers`
+        // here and renderForm() will pre-fill via input.value.
+        currentAnswers = {};
+      }
+      renderForm();
+    }
+
+    function renderForm() {
+      const form = document.getElementById('interview-form');
+      form.innerHTML = '';
+      for (const q of schema.questions) {
+        // Web UI hides VSCode-only or CLI-only questions when
+        // they're not in our frontends list.
+        if (!q.frontends.includes('serve')) continue;
+        const editable = !isUpdate || schema.editable_fields.includes(q.id);
+        const fs = document.createElement('fieldset');
+        if (!editable) fs.classList.add('pinned');
+        const lg = document.createElement('legend');
+        lg.textContent = q.label + (editable ? '' : ' (pinned)');
+        fs.appendChild(lg);
+        const prompt = document.createElement('div');
+        prompt.className = 'prompt';
+        prompt.textContent = q.prompt;
+        fs.appendChild(prompt);
+        const input = makeInput(q, editable);
+        fs.appendChild(input);
+        form.appendChild(fs);
+      }
+      const submit = document.createElement('div');
+      submit.className = 'submit-row';
+      submit.innerHTML = `<button type="submit">${isUpdate ? 'Update Quest' : 'Create Quest'}</button>`;
+      form.appendChild(submit);
+    }
+
+    function makeInput(q, editable) {
+      const id = `q-${q.id}`;
+      if (q.kind === 'text') {
+        const el = document.createElement('textarea');
+        el.id = id;
+        el.name = q.id;
+        if (q.placeholder) el.placeholder = q.placeholder;
+        if (q.default !== null && q.default !== undefined) el.value = q.default;
+        if (!editable) el.disabled = true;
+        return el;
+      }
+      if (q.kind === 'single') {
+        // provider_model is a dependent question — its choices
+        // depend on the picked provider. Render it as a select with
+        // a placeholder option; the cascade from #q-provider
+        // populates the real options when the user picks a provider.
+        const sel = document.createElement('select');
+        sel.id = id;
+        sel.name = q.id;
+        if (!editable) sel.disabled = true;
+        let choices = q.choices;
+        if (q.id === 'provider_model') {
+          // Start empty (placeholder added below). The provider
+          // change handler fills in real options + "Other" hatch.
+          choices = [];
+        }
+        const blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = q.id === 'provider_model'
+          ? '(pick a provider first)' : '(pick one)';
+        sel.appendChild(blank);
+        // Stringify complex defaults (lists, objects) so the
+        // `c.value === q.default` reference equality check below
+        // can use the same encoding for both sides. Without this,
+        // bundles like ['paper_md', 'paper_pdf'] never match the
+        // default and no option pre-selects.
+        const defaultEncoded = (q.default !== null && typeof q.default === 'object')
+          ? JSON.stringify(q.default) : q.default;
+        for (const c of choices) {
+          const opt = document.createElement('option');
+          const valueEncoded = typeof c.value === 'object'
+            ? JSON.stringify(c.value) : String(c.value);
+          opt.value = valueEncoded;
+          opt.textContent = c.label;
+          if (valueEncoded === String(defaultEncoded)) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        // Wire provider → provider_model cascade.
+        if (q.id === 'provider') {
+          sel.addEventListener('change', () => populateProviderModel(sel.value));
+        }
+        return sel;
+      }
+      // Unknown kind — render free text.
+      const el = document.createElement('input');
+      el.type = 'text';
+      el.id = id;
+      el.name = q.id;
+      return el;
+    }
+
+    function populateProviderModel(providerName) {
+      const models = (schema.provider_models || {})[providerName] || [];
+      const sel = document.getElementById('q-provider_model');
+      if (!sel) return;
+      if (sel.tagName !== 'SELECT') {
+        // Defensive: an earlier renderForm bug rendered this as an
+        // <input>. Replace it with a <select> in place so the
+        // cascade still works.
+        const replacement = document.createElement('select');
+        replacement.id = sel.id;
+        replacement.name = sel.name;
+        sel.replaceWith(replacement);
+      }
+      const target = document.getElementById('q-provider_model');
+      target.innerHTML = '';
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = models.length ? '(pick a model)' : '(pick a provider first)';
+      target.appendChild(blank);
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = String(m.value);
+        opt.textContent = m.label;
+        target.appendChild(opt);
+      }
+      // "Other (type your own)" escape hatch — only when at least
+      // one curated model exists; otherwise the picker has nothing
+      // meaningful to escape from.
+      if (models.length) {
+        const other = document.createElement('option');
+        other.value = '__OTHER__';
+        other.textContent = 'Other (type your own)';
+        target.appendChild(other);
+      }
+    }
+
+    async function submitForm(ev) {
+      ev.preventDefault();
+      const out = {};
+      for (const q of schema.questions) {
+        if (!q.frontends.includes('serve')) continue;
+        const el = document.getElementById(`q-${q.id}`);
+        if (!el) continue;
+        let value = el.value;
+        if (value === '__OTHER__') {
+          value = prompt(`Type the value for ${q.label}:`) || '';
+        }
+        // Parse JSON-encoded list/bool defaults back into types.
+        if (typeof value === 'string' && (value.startsWith('[') || value === 'true' || value === 'false')) {
+          try { value = JSON.parse(value); } catch (_) {}
+        }
+        out[q.id] = value;
+      }
+      // Non-editable fields default to empty strings in update mode
+      // (the server uses the current YAML's value); in new mode we
+      // require them.
+      if (!isUpdate) {
+        if (!out.topic || !out.topic.trim()) {
+          alert('Topic is required.');
+          return false;
+        }
+        if (!out.title || !out.title.trim()) {
+          out.title = (out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
+        }
+      } else {
+        // Fill required fields with current values so server validation
+        // passes. The server pins non-editable fields back anyway.
+        if (!out.topic) out.topic = '(unchanged)';
+        if (!out.title) out.title = '(unchanged)';
+        if (!out.provider) out.provider = 'vscode_extension';
+        if (!out.provider_model) out.provider_model = '';
+      }
+      const endpoint = isUpdate
+        ? `/api/interview/update/${encodeURIComponent(updateQuestId)}`
+        : '/api/interview/submit';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(out),
+      });
+      const div = document.getElementById('result');
+      div.style.display = 'block';
+      if (!res.ok) {
+        const err = await res.text();
+        div.textContent = `Error ${res.status}: ${err}`;
+        return false;
+      }
+      const body = await res.json();
+      div.textContent = JSON.stringify(body, null, 2);
+      return false;
+    }
+
+    loadSchema();
+  </script>
+</body>
+</html>
