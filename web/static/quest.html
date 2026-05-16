@@ -12,24 +12,23 @@
 <body>
   <div id="fi-header-root" data-breadcrumb="Quest"></div>
   <main>
-    <div id="quest-header">
+    <section class="fi-page-hero" id="quest-header">
       <h1 id="quest-title">Quest <span class="fi-mono" id="quest-id">…</span></h1>
       <p class="fi-subtitle">
         <span class="fi-badge" id="status-badge">loading…</span>
         <span id="current-node" style="margin-left:0.5rem"></span>
       </p>
-    </div>
+      <div class="fi-actions" id="actions" style="margin-top:1rem">
+        <a class="fi-btn fi-btn-secondary" href="/" id="back-link">← Dashboard</a>
+        <a class="fi-btn fi-btn-secondary" id="update-link" href="#">Update settings</a>
+        <button class="fi-btn fi-btn-primary" id="resume-btn" onclick="resumeQuest()" style="display:none">Resume</button>
+        <a class="fi-btn fi-btn-secondary" id="download-link" href="#">Download .zip</a>
+        <button class="fi-btn fi-btn-danger" id="cancel-btn" onclick="cancelQuest()">Cancel quest</button>
+        <button class="fi-btn fi-btn-danger" id="trash-btn" onclick="trashQuest()">Move to trash</button>
+      </div>
+    </section>
 
-    <div id="actions" style="margin-bottom:1rem; display:flex; gap:0.5rem; flex-wrap:wrap">
-      <a class="fi-btn fi-btn-secondary" href="/" id="back-link">← Dashboard</a>
-      <a class="fi-btn fi-btn-secondary" id="update-link" href="#">Update settings</a>
-      <button class="fi-btn fi-btn-primary" id="resume-btn" onclick="resumeQuest()" style="display:none">Resume</button>
-      <a class="fi-btn fi-btn-secondary" id="download-link" href="#">Download .zip</a>
-      <button class="fi-btn fi-btn-danger" id="cancel-btn" onclick="cancelQuest()">Cancel quest</button>
-      <button class="fi-btn fi-btn-danger" id="trash-btn" onclick="trashQuest()">Move to trash</button>
-    </div>
-
-    <section id="tags-section">
+    <section class="fi-section" id="tags-section">
       <h2>Tags</h2>
       <div id="tags-display" style="margin-bottom:0.5rem"></div>
       <form onsubmit="return saveTags(event)" style="display:flex; gap:0.5rem; flex-wrap:wrap">
@@ -39,24 +38,24 @@
       </form>
     </section>
 
-    <section id="cost-section" style="display:none">
+    <section class="fi-section" id="cost-section" style="display:none">
       <h2>Cost &amp; runtime</h2>
       <div id="cost-summary" class="fi-card-meta"></div>
       <div id="cost-chart" style="margin-top:0.5rem"></div>
     </section>
 
-    <section id="files-section">
+    <section class="fi-section" id="files-section">
       <h2>Files</h2>
       <div id="files-tree" class="fi-mono" style="font-size:0.8125rem"></div>
     </section>
 
-    <section id="iterations-section" style="display:none">
+    <section class="fi-section" id="iterations-section" style="display:none">
       <h2>Paper iterations</h2>
       <p class="fi-subtitle">Compare paper.md across review iterations.</p>
       <div id="iterations-list"></div>
     </section>
 
-    <section id="code-section" style="display:none">
+    <section class="fi-section" id="code-section" style="display:none">
       <h2>Experiment code</h2>
       <p class="fi-subtitle" id="code-hint">View <code class="fi-mono">code/experiment.py</code>. Re-execute requires the server's <code class="fi-mono">FI_WEB_ALLOW_EXEC_EDIT=1</code> env var.</p>
       <textarea id="code-editor" rows="20"

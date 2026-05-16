@@ -543,6 +543,197 @@ pre {
 .fi-banner.fi-banner-info { background: var(--fi-accent-soft); border-color: var(--fi-accent); color: var(--fi-accent); }
 .fi-banner.fi-banner-error { background: rgba(220, 38, 38, 0.08); border-color: var(--fi-danger); color: var(--fi-danger); }
 
+/* ─────────────────────────────────────────────────────────────────
+ * Polish utilities (Phase R+ web UI redesign)
+ * ───────────────────────────────────────────────────────────────── */
+
+/* Page hero — used on dashboard + settings to give each page a more
+ * deliberate "top" instead of a bare H1. The subtle radial gradient
+ * comes from --fi-accent-soft to transparent so it tints into the
+ * surface without dominating. */
+.fi-page-hero {
+  position: relative;
+  padding: 1.5rem 1.5rem 1.75rem;
+  margin: -0.5rem -1.5rem 1.5rem;
+  border-radius: calc(var(--fi-radius) + 2px);
+  background:
+    radial-gradient(ellipse 480px 220px at 5% 0%, var(--fi-accent-soft) 0%, transparent 65%),
+    var(--fi-bg);
+  border: 1px solid var(--fi-border);
+  box-shadow: var(--fi-shadow);
+}
+.fi-page-hero h1 { margin: 0 0 0.25rem; }
+.fi-page-hero p.fi-subtitle { margin: 0 0 0; max-width: 64ch; }
+.fi-page-hero-actions {
+  position: absolute;
+  top: 1.5rem;
+  right: 1.5rem;
+  display: inline-flex;
+  gap: 0.5rem;
+}
+@media (max-width: 640px) {
+  .fi-page-hero { margin: -0.25rem -1rem 1rem; padding: 1.25rem 1rem; }
+  .fi-page-hero-actions { position: static; margin-top: 0.75rem; }
+}
+
+/* Stats row — compact summary cards above lists */
+.fi-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.6rem;
+  margin: 0 0 1.25rem;
+}
+.fi-stat {
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  padding: 0.6rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.fi-stat .fi-stat-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fi-text-subtle);
+  text-transform: uppercase;
+}
+.fi-stat .fi-stat-value {
+  font-size: 1.4rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fi-text);
+  font-variant-numeric: tabular-nums;
+}
+.fi-stat.fi-stat-accent .fi-stat-value { color: var(--fi-accent); }
+.fi-stat.fi-stat-running .fi-stat-value { color: var(--fi-success); }
+.fi-stat.fi-stat-warn .fi-stat-value { color: var(--fi-warn); }
+
+/* Quest card lift — applies to anchor-cards in the dashboard list.
+ * Larger hit area + nice hover. */
+.fi-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  position: relative;
+}
+.fi-card-link:hover {
+  transform: translateY(-1px);
+  border-color: var(--fi-border-strong);
+}
+.fi-card-link::after {
+  content: "→";
+  position: absolute;
+  top: 1rem;
+  right: 1.1rem;
+  color: var(--fi-text-subtle);
+  font-size: 0.95rem;
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.fi-card-link:hover::after {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+/* Inline status icons (single-glyph inside a badge). Sized to badge. */
+.fi-badge .fi-badge-icon {
+  width: 0.65rem;
+  height: 0.65rem;
+  display: inline-block;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+  background: currentColor;
+}
+.fi-badge.fi-badge-alive .fi-badge-icon {
+  background: var(--fi-success);
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18);
+  animation: fi-pulse 1.4s ease-in-out infinite;
+}
+@keyframes fi-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18); }
+  50%      { box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.08); }
+}
+
+/* Filter toolbar — encapsulates the search/sort row on the dashboard
+ * so it reads as a single component rather than three loose inputs. */
+.fi-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0.55rem 0.7rem;
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  margin-bottom: 1rem;
+}
+.fi-toolbar input[type="text"],
+.fi-toolbar select {
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--fi-border);
+  border-radius: 6px;
+  background: var(--fi-bg);
+  color: var(--fi-text);
+  font-family: inherit;
+  font-size: 0.875rem;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.fi-toolbar input[type="text"]:focus,
+.fi-toolbar select:focus {
+  outline: none;
+  border-color: var(--fi-accent);
+  box-shadow: 0 0 0 3px var(--fi-accent-soft);
+}
+.fi-toolbar input[type="text"] { flex: 1; min-width: 200px; }
+
+/* Empty state with illustration */
+.fi-empty-rich {
+  text-align: center;
+  padding: 3.5rem 1rem;
+  background: var(--fi-bg-elev);
+  border: 1px dashed var(--fi-border-strong);
+  border-radius: calc(var(--fi-radius) + 2px);
+  color: var(--fi-text-muted);
+}
+.fi-empty-rich .fi-empty-art {
+  width: 64px; height: 64px;
+  margin: 0 auto 0.85rem;
+  color: var(--fi-text-subtle);
+  opacity: 0.7;
+}
+.fi-empty-rich h3 {
+  margin: 0 0 0.35rem;
+  color: var(--fi-text);
+  font-size: 1.05rem;
+}
+.fi-empty-rich p { margin: 0 0 1rem; font-size: 0.9rem; }
+
+/* Section blocks on quest detail — softer separators */
+section.fi-section {
+  margin: 1.75rem 0;
+  padding: 1.25rem 1.5rem;
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  box-shadow: var(--fi-shadow);
+}
+section.fi-section h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1.1rem;
+}
+section.fi-section > p.fi-subtitle { margin: 0 0 0.85rem; }
+
+/* Action bar (sticky toolbar for quest detail) */
+.fi-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 /* Small screen */
 @media (max-width: 640px) {
   main, .fi-main { padding: 1.25rem 1rem 3rem; }
