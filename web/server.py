@@ -314,14 +314,9 @@ def make_app(
             )
         return HTMLResponse(page.read_text(encoding="utf-8"))
 
-    @app.get("/about", response_class=HTMLResponse)
-    async def about_page() -> HTMLResponse:
-        page = static_dir / "about.html"
-        if not page.exists():
-            return HTMLResponse(
-                "<h1>About UI not installed</h1>", status_code=500,
-            )
-        return HTMLResponse(page.read_text(encoding="utf-8"))
+    # No /about route — the landing page lives separately under
+    # marketing/index.html and is meant for external deployment
+    # (GitHub Pages etc.), not inside the operational --serve UI.
 
     @app.get("/compare", response_class=HTMLResponse)
     async def compare_page() -> HTMLResponse:

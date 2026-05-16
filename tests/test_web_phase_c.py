@@ -216,16 +216,32 @@ def test_provider_availability_endpoint(tmp_path: Path) -> None:
 
 
 def test_static_pages_render(tmp_path: Path) -> None:
+    """The operational --serve UI exposes /trash, /settings, /compare.
+    /about deliberately is NOT here — the landing page lives in
+    marketing/index.html for separate deploy (GitHub Pages etc.)."""
     client = _client(tmp_path)
-    for path in ("/trash", "/settings", "/about", "/compare"):
+    for path in ("/trash", "/settings", "/compare"):
         res = client.get(path)
-        # Compare doesn't have a static page yet — that's Phase E.
-        # It'll return 500 with our placeholder message until then.
-        # The other three exist.
-        if path == "/compare":
-            assert res.status_code in (200, 500)
-        else:
-            assert res.status_code == 200, f"{path} returned {res.status_code}"
+        assert res.status_code == 200, f"{path} returned {res.status_code}"
+    # /about should NOT be served from --serve.
+    res = client.get("/about")
+    assert res.status_code == 404
+
+
+def test_marketing_landing_page_is_self_contained() -> None:
+    """marketing/index.html is intended to be deployed separately
+    (GitHub Pages, Netlify, etc.) as a marketing page. It must
+    have no external dependencies — no /static/* refs, no external
+    URLs except links to GitHub. Single-file deploy."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "marketing" / "index.html"
+    assert page.is_file(), "marketing/index.html must exist"
+    text = page.read_text(encoding="utf-8")
+    # No links to /static/* or /api/* — those are --serve-only paths.
+    assert "/static/" not in text, "marketing page must not reference /static/* (deploys separately)"
+    assert "/api/" not in text, "marketing page must not reference /api/* (no FastAPI server on the marketing host)"
+    # Has the inline SVG logo (not a /static/logo.svg ref).
+    assert "<svg" in text and "viewBox=" in text
 
 
 # ---------------------------------------------------------------------------

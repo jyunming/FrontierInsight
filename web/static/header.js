@@ -46,7 +46,6 @@
                 <a href="/compare" role="menuitem">Compare</a>
                 <a href="/trash" role="menuitem">Trash</a>
                 <a href="/settings" role="menuitem">Settings</a>
-                <a href="/about" role="menuitem">About</a>
               </div>
             </div>
             <button class="fi-theme-toggle" type="button"

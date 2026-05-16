@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — Automated Research, End-to-End</title>
+  <meta name="description" content="From a one-sentence topic to a peer-reviewable paper. End-to-end automated research that plans, runs the experiment, writes the paper, and ships the PDF.">
+  <meta property="og:title" content="Frontier Insight">
+  <meta property="og:description" content="End-to-end automated research, from a one-sentence topic to a peer-reviewable paper.">
+  <meta property="og:type" content="website">
+  <style>
+    /* Self-contained — this page is deployed separately (GitHub
+     * Pages / Netlify / wherever) as marketing for FI. Everything
+     * lives inline so the page works as a single static file with
+     * no external assets except the inlined SVG icon. */
+    :root {
+      --fi-accent: #1F3A5F;
+      --fi-accent-hover: #16294A;
+      --fi-accent-soft: #E8EEF7;
+      --fi-bg: #FFFFFF;
+      --fi-bg-elev: #F8FAFC;
+      --fi-border: #E2E8F0;
+      --fi-text: #0F172A;
+      --fi-text-muted: #475569;
+      --fi-text-subtle: #94A3B8;
+      --fi-radius: 8px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fi-accent: #60A5FA;
+        --fi-accent-hover: #3B82F6;
+        --fi-accent-soft: #1E293B;
+        --fi-bg: #0F172A;
+        --fi-bg-elev: #1E293B;
+        --fi-border: #334155;
+        --fi-text: #F1F5F9;
+        --fi-text-muted: #94A3B8;
+        --fi-text-subtle: #64748B;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--fi-bg);
+      color: var(--fi-text);
+      font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 1.5rem 1.5rem 4rem;
+    }
+    header.brand {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 1rem 0 0.5rem;
+      font-weight: 600;
+    }
+    header.brand svg { width: 32px; height: 32px; }
+    h1, h2, h3 {
+      letter-spacing: -0.015em;
+      margin-top: 2rem;
+      margin-bottom: 0.5rem;
+    }
+    .hero { padding: 2.5rem 0 1.5rem; text-align: center; }
+    .hero h1 { font-size: clamp(2rem, 5vw, 2.8rem); margin: 0 0 0.5rem; }
+    .hero .tagline {
+      font-size: 1.15rem;
+      color: var(--fi-text-muted);
+      max-width: 640px;
+      margin: 0 auto 1.5rem;
+    }
+    .cta-row { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+    a.btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.6rem 1.1rem;
+      font-weight: 500;
+      border-radius: var(--fi-radius);
+      text-decoration: none;
+      border: 1px solid transparent;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    a.btn.primary { background: var(--fi-accent); color: white; }
+    a.btn.primary:hover { background: var(--fi-accent-hover); }
+    a.btn.secondary {
+      background: var(--fi-bg-elev);
+      color: var(--fi-text);
+      border-color: var(--fi-border);
+    }
+    a.btn.secondary:hover { border-color: var(--fi-text-subtle); }
+    pre {
+      font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+      background: var(--fi-bg-elev);
+      border: 1px solid var(--fi-border);
+      border-radius: var(--fi-radius);
+      padding: 0.75rem 1rem;
+      overflow-x: auto;
+      line-height: 1.5;
+    }
+    code {
+      font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+      background: var(--fi-bg-elev);
+      padding: 0.1em 0.4em;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    table th, table td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid var(--fi-border);
+      text-align: left;
+      vertical-align: top;
+    }
+    table th {
+      color: var(--fi-text-muted);
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    ul { padding-left: 1.5em; }
+    li { margin: 0.25em 0; }
+    footer {
+      margin-top: 4rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--fi-border);
+      color: var(--fi-text-muted);
+      font-size: 0.875rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="brand">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-label="FI">
+        <rect width="128" height="128" fill="#0B1729"/>
+        <polygon points="64,64 58,70 33,95 70,58" fill="#475569"/>
+        <polygon points="64,64 58,70 95,33 70,58" fill="#22D3EE"/>
+        <polyline points="95,33 105,38 112,22 120,28" stroke="#22D3EE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="64" cy="64" r="5" fill="#F8FAFC"/>
+      </svg>
+      Frontier Insight
+    </header>
+
+    <section class="hero">
+      <h1>Automated research, end-to-end</h1>
+      <p class="tagline">From a one-sentence topic to a peer-reviewable paper. FI plans, runs the experiment, writes the paper, gets a critique, and ships the PDF.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="https://github.com/jyunming/FrontierInsight">Get started on GitHub</a>
+        <a class="btn secondary" href="https://github.com/jyunming/FrontierInsight#readme">Read the docs</a>
+      </div>
+    </section>
+
+    <h2>What it does</h2>
+    <p>You give it a research question. A LangGraph state machine of 13 nodes plans, retrieves prior work, designs the experiment, writes Python, runs it, analyzes the result, cross-checks against the literature, writes the paper, and reviews it — with checkpointing so a crash mid-quest doesn't lose work.</p>
+    <pre>topic  →  clarify  →  literature  →  design  →  implement  →  execute  →  analyze
+                                                                              ↓
+                                                        cross-check ← write ← ↓
+                                                                              ↓
+                                                                review (loop)  ↓
+                                                                              ↓
+                                                paper.md + paper.pdf + slides ↓</pre>
+
+    <h2>Who it's for</h2>
+    <ul>
+      <li><b>Researchers</b> who want a draft + comparable baseline before committing weeks of bench time.</li>
+      <li><b>Engineers</b> investigating a question who'd rather have an end-to-end answer than open another 20 tabs.</li>
+      <li><b>Curious tinkerers</b> running 200 toy quests on a long weekend just to see what's plausible.</li>
+    </ul>
+
+    <h2>How it differs from "just ask an LLM"</h2>
+    <table>
+      <thead>
+        <tr><th>"Just ask an LLM"</th><th>Frontier Insight</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>One LLM call. The model hallucinates.</td><td>13 nodes, each with a focused prompt + grounded context.</td></tr>
+        <tr><td>No experiment — pure prose.</td><td>Runs real Python in a sandboxed venv; figures come from real data.</td></tr>
+        <tr><td>No literature grounding.</td><td>Retrieves from arXiv / OpenAlex / Crossref / Axon. Cites by content, not by guessed DOI.</td></tr>
+        <tr><td>No review.</td><td>Single or multi-persona reviewer panel + adversarial critique.</td></tr>
+        <tr><td>No reproducibility.</td><td>Bundles <code>experiment.py</code> + manifest. Quest dir is a complete deliverable.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Three ways to run it</h2>
+    <h3>Terminal</h3>
+    <pre>python launch.py --new                    # interactive interview
+python launch.py --config my_quest.yaml   # from a config you wrote
+python launch.py --proposal "..."         # plan before you run</pre>
+    <h3>VSCode Chat</h3>
+    <pre>@fi /new                            # interactive setup
+@fi /update &lt;quest_id&gt;              # mid-quest tweak
+@fi /proposal Compare RK4 vs Verlet on the Kepler problem</pre>
+    <h3>Web UI</h3>
+    <pre>python launch.py --serve            # http://127.0.0.1:8765/</pre>
+    <p>The web UI exposes every CLI feature — a dashboard, an interactive setup form, dedicated pages for each tool (proposal, critique, digest, portfolio, summarize, analyze, fleet, ingest), live quest status with log streaming, file browser, cost &amp; runtime chart, paper-iterations diff, tags, side-by-side compare, and a trash bin.</p>
+
+    <h2>Choosing a provider</h2>
+    <table>
+      <thead>
+        <tr><th>Provider</th><th>Unit billed</th><th>Best for</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>GitHub Copilot</b><br><code>vscode_extension / copilot_cli</code></td>
+          <td><b>Premium request</b> (1 call = 1 unit)</td>
+          <td>Bursty heavy quests. Flat-rate per-call dominates when prompts are large.</td>
+        </tr>
+        <tr>
+          <td><b>OpenAI / Codex</b><br><code>openai / codex / codex_cli</code></td>
+          <td><b>Per-token</b></td>
+          <td>Long-running automations. Skinny prompts win.</td>
+        </tr>
+        <tr>
+          <td><b>Claude</b><br><code>claude_cli</code></td>
+          <td><b>Per-token</b></td>
+          <td>Sonnet is the workhorse; reserve Opus for <code>write</code> + <code>review</code>.</td>
+        </tr>
+        <tr>
+          <td><b>Gemini</b><br><code>gemini_cli</code></td>
+          <td><b>Per-token</b></td>
+          <td>Cheapest cloud option for long-context tasks.</td>
+        </tr>
+        <tr>
+          <td><b>Ollama</b><br><code>ollama</code></td>
+          <td><b>Free</b> (local)</td>
+          <td>Quality varies; use for high-volume cheap nodes or airgapped runs.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>The web UI shows per-quest cost on the detail page (token-priced providers only — Copilot's premium-request unit is opaque to FI).</p>
+
+    <h2>What you get when a quest finishes</h2>
+    <p>Inside <code>outputs/&lt;quest_id&gt;/</code>:</p>
+    <ul>
+      <li><code>paper/paper.md</code> + <code>paper/paper.pdf</code></li>
+      <li><code>figures/*.png</code> — every plot the experiment produced</li>
+      <li><code>code/experiment.py</code> — exact code that ran</li>
+      <li><code>slides.md</code> / <code>slides.pptx</code> / <code>poster.tex</code> / <code>talk.md</code> (optional deliverables)</li>
+      <li><code>data/auto_collected/</code> — Axon hits + dataset-adapter output (no-simulation mode)</li>
+      <li><code>frontier_insight_summary.json</code> — machine-readable index</li>
+    </ul>
+
+    <div class="cta-row" style="margin-top:2.5rem">
+      <a class="btn primary" href="https://github.com/jyunming/FrontierInsight">Get started on GitHub</a>
+      <a class="btn secondary" href="https://github.com/jyunming/FrontierInsight#readme">Read the docs</a>
+    </div>
+
+    <footer>
+      <p>Frontier Insight — open source on <a href="https://github.com/jyunming/FrontierInsight" style="color:inherit">GitHub</a>. End-to-end automated research that produces real papers, with real experiments, that cite real prior work.</p>
+    </footer>
+  </div>
+</body>
+</html>

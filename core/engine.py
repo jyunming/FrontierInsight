@@ -2018,8 +2018,14 @@ class Engine:
         # the function level is the same cost path most stdlib code
         # uses. The provider module is the source of `estimate_cost_usd`.
         from core.provider import estimate_cost_usd
-        usage = self._client.last_usage
-        model = self._client.last_model or ""
+        # Tolerate test stubs that pre-date Phase S — engine + test
+        # suite share dozens of fake LLMClient implementations, and
+        # patching each one to add ``last_usage`` is mechanical work
+        # that doesn't add coverage. ``getattr(..., None)`` returns
+        # the new field when the real LLMClient is in play, or skips
+        # the cost-log row entirely when a stub is used.
+        usage = getattr(self._client, "last_usage", None)
+        model = getattr(self._client, "last_model", None) or ""
         cost = None
         if usage:
             cost = estimate_cost_usd(
