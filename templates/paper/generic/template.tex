@@ -6,6 +6,7 @@
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
 \usepackage{listings}
+\usepackage{titling}
 
 % Pandoc-compatibility preamble. The standard pandoc latex template
 % defines these commands and the Shaded env; when we override with a
@@ -28,12 +29,43 @@
 \providecommand{\pandocbounded}[1]{\noindent\resizebox{\textwidth}{!}{#1}}
 $highlighting-macros$
 
+% Default \maketitle on article class sets the title at \LARGE
+% (~17.3pt at 11pt base), which dominates page 1 and looks oversized
+% next to "Frontier Insight" below it. Drop to \Large (~14.4pt) so
+% the title is still emphasized but no longer crowds the abstract
+% block. titling lets us redefine the title spacing without
+% re-implementing \maketitle.
+\pretitle{\begin{center}\Large\bfseries}
+\posttitle{\par\end{center}\vskip 0.5em}
+\preauthor{\begin{center}\normalsize}
+\postauthor{\par\end{center}}
+\predate{\begin{center}\normalsize}
+\postdate{\par\end{center}}
+
 \title{$title$}
 \author{Frontier Insight}
 \date{$date$}
 
+% PDF metadata: feed the pandoc title variable directly into
+% hyperref so the rendered PDF carries a proper Title field
+% (pdfinfo / Zotero / Mendeley all key on this — leaving it empty
+% breaks reference-manager import). The variable name is NOT
+% spelled out in this comment — see the matching note in the
+% preamble at the top of this file. Pandoc would otherwise
+% substitute it INSIDE the comment, the title's natural line
+% wrap would break the comment boundary, and the leftover lines
+% would land as raw LaTeX outside \begin{document}, killing the
+% compile with "Missing \begin{document}".
+\hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
+
 \begin{document}
 \maketitle
+
+$if(abstract)$
+\begin{abstract}
+$abstract$
+\end{abstract}
+$endif$
 
 $body$
 

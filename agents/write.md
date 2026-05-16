@@ -74,7 +74,27 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 - **Discussion** — what the literature broadly says about the comparison, where consensus exists, where it doesn't.
 - **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question.
 
-End with `## References` in numbered-list style citing concrete sources from the prior-work block above (or, if none are usable, plausibly-formatted primary references with DOIs).
+End with `## References` in numbered-list style citing concrete sources from the prior-work block above. The "References — required format" section below is the binding rule for what each entry must contain; do NOT invent author names or DOIs to plug missing fields.
+
+## References — required format
+
+Every reference MUST carry **author(s) + year + title + venue + DOI/URL** drawn from the prior-work block (each `[i]` entry there now includes author/year/venue/DOI on its second line). Do NOT emit references as bare titles — readers can't look up "Stratonovich-type integral with respect to a general stochastic measure." with no author or year.
+
+Format examples (numbered list, one paragraph per entry):
+
+- `1. Smith, J. & Lee, M. (2021). Title of the paper. *Journal Name*. DOI: 10.xxxx/xxxxx.`
+- `2. Doe, J. et al. (2024). Another title. *Conference Proceedings*. arXiv:2401.12345.`
+- `3. Author One (2019). Solo author paper. *Venue*. https://example.com/paper`
+
+If the prior-work block lacks one of these fields for a particular entry, omit just that field for that entry — never fabricate an author name or DOI to pad out a partial citation. Do NOT repeat the title twice; the prior-work entry's header line already gives you the title once.
+
+When the entire prior-work block is empty or unusable (the engine surfaces `"(no prior work surfaced from the knowledge base)"`), prefer to **cite no sources** rather than invent any. If the persona / venue genuinely requires at least one reference (e.g. a Discussion section that engages with prior work), cite well-known canonical sources for the field with their **real** DOIs — never fabricate a DOI or author. If you cannot recall a real DOI, omit it rather than guess.
+
+## No raw code blocks in the body
+
+Reproducibility lives in the bundled `experiment.py` (and `paper_bundle_manifest.json`) shipped alongside the paper, **not** in the body. Do NOT emit fenced ` ```python ` / ` ```bash ` / ` ```r ` blocks — they render as syntax-highlighted Pandoc listings that look out of place next to a real venue's typesetting (IEEE / NeurIPS / Nature never inline raw code in the body).
+
+If a code-style fragment is genuinely necessary (e.g. a one-line command or filename), use *inline* monospace with single backticks. For pseudocode that's load-bearing for the method, write 4–8 lines of plain numbered prose ("1. Sample dose ~ U(0.7, 1.3). 2. Convolve with Gaussian PSF …"), not a fenced block.
 
 # Output format
 Respond with the markdown of the paper only — no JSON, no surrounding fence, no preamble.

@@ -17,6 +17,7 @@ in 2026-05-14 when the host had no pandoc/pdflatex/tectonic installed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -177,6 +178,143 @@ def _count_sanitized_glyphs(markdown: str) -> int:
     glyph — a single ``≈`` rewrite added ~20 chars to length but
     only 1 to the "rewrites" count, making the delta negative."""
     return sum(markdown.count(c) for c in _LATEX_UNICODE_REPLACEMENTS)
+
+# First top-level ATX heading in the markdown body. Used to lift the
+# title out of `# Title` and into a YAML metadata block so pandoc
+# populates `\title{}` (and `\maketitle` actually renders it) instead
+# of letting the H1 land as a numbered `\section{1 Title}` while
+# `\title{}` stays empty — which is exactly what produced the
+# "Frontier Insight / 1 A Lightweight..." double-stacked header in
+# the user-reported 2026-05-16 PDF.
+_FIRST_H1_RE = re.compile(r"^# +(.+?)\s*$", re.MULTILINE)
+
+# Existing YAML frontmatter at the top of the file. If the upstream
+# already supplied one, we leave it alone (assume it knows what it's
+# doing) — overlaying our own block would either duplicate keys or
+# silently win in pandoc's metadata merge.
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+# Captures the body of the first ``## Abstract`` section so it can
+# be lifted into YAML metadata and rendered by the template inside a
+# proper ``\begin{abstract}...\end{abstract}`` environment instead of
+# landing as a numbered ``\section{Abstract}``. The non-greedy
+# ``.*?`` plus the lookahead at the next ``##`` (or end of file)
+# bounds the capture so it stops at the next H2, not at the end of
+# the doc — important because the writer always emits Introduction
+# / Methods / Results as further H2 sections.
+_ABSTRACT_RE = re.compile(
+    r"^##\s+Abstract\s*\n(.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _extract_abstract_and_strip(markdown: str) -> tuple[str | None, str]:
+    """Find the first ``## Abstract`` block, return ``(abstract, body)``.
+
+    Returns ``(None, markdown)`` when no Abstract heading exists.
+    The body returned has the matched heading + body removed so the
+    template doesn't render the abstract twice (once via metadata,
+    once via the leftover Markdown). Leading blank lines are
+    collapsed so the next section doesn't open with a stray gap.
+    """
+    m = _ABSTRACT_RE.search(markdown)
+    if not m:
+        return None, markdown
+    abstract = m.group(1).strip()
+    if not abstract:
+        return None, markdown
+    start, end = m.span()
+    body = markdown[:start] + markdown[end:]
+    return abstract, body.lstrip("\n")
+
+
+# Detects a reference-list line where the title is duplicated:
+#   "1. Some Title Of A Paper. Some Title Of A Paper."
+# The upstream LLM produces this when the prior-work block it sees
+# starts the abstract excerpt with the paper title — it copies the
+# "title-then-title" pattern back into the references. Anchored on a
+# numbered-list prefix + title-cased sentence to avoid eating
+# legitimate doubled phrases in prose. The {15,} floor + Title-case
+# start keeps this from misfiring on short repeated tokens like
+# "Yes. Yes." in body text.
+_DUP_REF_RE = re.compile(
+    r"^(\s*\d+\.\s+)([A-Z][^.\n]{15,}\.)\s+\2(?=\s|$)",
+    re.MULTILINE,
+)
+
+
+def _extract_title_and_strip(markdown: str) -> tuple[str | None, str]:
+    """Find the first ``# H1`` line, return ``(title, body_without_h1)``.
+
+    Returns ``(None, markdown)`` unchanged when:
+      - the markdown already begins with a YAML frontmatter block
+        (upstream is in charge of metadata; we don't second-guess), or
+      - no top-level H1 is found.
+
+    The body returned has the matched H1 line + its trailing newline
+    removed, with a single leading-blank-line cleanup so the body
+    doesn't start with awkward whitespace after lifting the title.
+    """
+    if _FRONTMATTER_RE.match(markdown):
+        return None, markdown
+    m = _FIRST_H1_RE.search(markdown)
+    if not m:
+        return None, markdown
+    title = m.group(1).strip()
+    if not title:
+        return None, markdown
+    start, end = m.span()
+    # Consume the line's trailing newline if present so we don't leave
+    # a stray blank where the title was.
+    if end < len(markdown) and markdown[end] == "\n":
+        end += 1
+    body = markdown[:start] + markdown[end:]
+    return title, body.lstrip("\n")
+
+
+def _add_metadata_frontmatter(
+    body: str,
+    title: str,
+    abstract: str | None = None,
+) -> str:
+    """Prepend a YAML metadata block carrying the title (and optional
+    abstract).
+
+    Title is JSON-quoted — handles colons, quotes, backslashes, and
+    Unicode without bespoke escaping. Abstract uses a YAML literal
+    block scalar (``|``) so multi-line content + inline LaTeX math
+    pass through to pandoc verbatim; pandoc then parses the indented
+    block as markdown so emphasis / math / inline code still render
+    inside ``\\begin{abstract}``."""
+    lines = [f"title: {json.dumps(title)}"]
+    if abstract:
+        # YAML literal block scalar: every body line indented by 2
+        # spaces. Trailing newlines inside the scalar are preserved,
+        # which is fine here — pandoc strips them when rendering
+        # ``$abstract$``.
+        indented = "\n".join("  " + line for line in abstract.splitlines())
+        lines.append(f"abstract: |\n{indented}")
+    return "---\n" + "\n".join(lines) + "\n---\n\n" + body
+
+
+def _add_title_frontmatter(body: str, title: str) -> str:
+    """Backwards-compatible alias kept for older tests that imported
+    the single-arg helper. New code should call
+    :func:`_add_metadata_frontmatter` directly."""
+    return _add_metadata_frontmatter(body, title, abstract=None)
+
+
+def _dedupe_duplicated_references(markdown: str) -> str:
+    """Collapse ``"1. Foo. Foo."`` reference lines to ``"1. Foo."``.
+
+    The upstream LLM produces this duplication when the prior-work
+    block fed to the writer starts each excerpt with the paper title
+    — it carries the pattern into the References section. Fixing it
+    in markdown post-processing is cheaper than retraining the prompt
+    and doesn't risk breaking legitimate citations. Anchored on a
+    numbered-list prefix to keep matches scoped to reference lines."""
+    return _DUP_REF_RE.sub(r"\1\2", markdown)
+
 
 _log = logging.getLogger("frontier_insight.paper")
 
@@ -415,6 +553,11 @@ class PaperGenerator:
         # preserved unchanged; the sanitized copy lands at
         # ``out_dir/paper_pdf_source.md`` so it's visible if the user
         # wants to see exactly what pandoc consumed.
+        # Default to "no title lifted" so the OSError fallback below
+        # (which skips the title-extraction code path entirely) still
+        # has a defined name when the cmd builder consults it for the
+        # shift-heading-level decision.
+        title: str | None = None
         try:
             md_text = paper_md.read_text(encoding="utf-8")
             glyph_count = _count_sanitized_glyphs(md_text)
@@ -425,6 +568,34 @@ class PaperGenerator:
                     "in paper.md before pandoc",
                     glyph_count,
                 )
+            # Lift the first `# H1` to YAML frontmatter so `\title{}`
+            # in the template gets populated. Without this, pandoc
+            # leaves `\title{}` empty and re-emits the H1 as a
+            # numbered `\section{}` — producing the
+            # "Frontier Insight" + "1 A Lightweight ..." stacked
+            # header reported in the 2026-05-16 PDF.
+            title, sanitized_md = _extract_title_and_strip(sanitized_md)
+            # Lift `## Abstract` body to YAML metadata so the template
+            # can wrap it in `\begin{abstract}…\end{abstract}` instead
+            # of letting it land as `\section{Abstract}` (numbered "1
+            # Abstract", which looks unprofessional next to real venue
+            # rendering). Only meaningful when we also have a title —
+            # without a title the article-class \maketitle has nothing
+            # to attach the abstract to.
+            abstract: str | None = None
+            if title is not None:
+                abstract, sanitized_md = _extract_abstract_and_strip(sanitized_md)
+                sanitized_md = _add_metadata_frontmatter(
+                    sanitized_md, title, abstract=abstract,
+                )
+                _log.info(
+                    "paper.pdf: lifted H1 title%s into frontmatter",
+                    " + abstract" if abstract else "",
+                )
+            # Collapse "Foo. Foo." reference-line duplications the
+            # LLM emits when the prior-work excerpt starts with the
+            # paper title.
+            sanitized_md = _dedupe_duplicated_references(sanitized_md)
             sanitized_path = out_dir / "paper_pdf_source.md"
             sanitized_path.write_text(sanitized_md, encoding="utf-8")
             pandoc_input = sanitized_path
@@ -442,7 +613,25 @@ class PaperGenerator:
             "-o", str(out_pdf),
             f"--pdf-engine={engine_path}",
             "--standalone",
+            # Tolerate the LLM's habit of dropping a bullet/numbered
+            # list immediately after the introducing paragraph with no
+            # blank line in between. Pandoc's default markdown reader
+            # requires the blank line and otherwise jams the entire
+            # list into the paragraph as inline text ("Foo - a - b -
+            # c."), which is exactly the bullets-rendered-as-prose bug
+            # in the 2026-05-16 user-reported PDF.
+            "--from=markdown+lists_without_preceding_blankline",
+            # The first H1 is lifted into the YAML title above, so the
+            # remaining H2/H3/... headings should shift up one level —
+            # otherwise an article-class document numbers them as
+            # "0.1 Abstract / 0.2 Introduction" (subsections of an
+            # implicit section 0) instead of "1 Abstract / 2
+            # Introduction". Only applied when we actually lifted a
+            # title; without the shift, a paper whose author intended
+            # H1=section, H2=subsection would get mangled.
         ]
+        if title is not None:
+            cmd.append("--shift-heading-level-by=-1")
         if template.exists():
             cmd.extend(["--template", str(template)])
         else:

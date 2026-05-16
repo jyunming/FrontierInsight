@@ -2179,13 +2179,103 @@ def _load_prompts() -> dict[str, string.Template]:
 _LIT_EXCERPT_CHARS = 2000
 
 
+def _format_lit_header(meta: dict[str, Any], i: int) -> str:
+    """Render the header line of a prior-work block entry.
+
+    Includes title + authors + year + venue + DOI/URL when the
+    retrieval layer surfaced them. Previously this only emitted the
+    title, which left the writer LLM with no choice but to produce
+    bare-title References like ``"1. Stratonovich-type integral ..."``
+    with no author, year, or DOI — useless for actual citation
+    lookup.
+
+    Format example:
+        [3] Lipton-Lifschitz, 2003. Closed-form approximations ...
+            Quantitative Finance. DOI: 10.1088/1469-7688/3/1/305.
+    """
+    title = meta.get("title") or meta.get("source") or f"item-{i}"
+    authors = meta.get("authors") or []
+    year = meta.get("year") or (meta.get("published") or "")[:4]
+    venue = meta.get("venue") or meta.get("publisher") or ""
+    doi = meta.get("doi") or ""
+    arxiv_id = meta.get("arxiv_id") or ""
+    url = meta.get("url") or ""
+
+    # Author block: prefer "First, Second & Third" for 2-3 authors,
+    # collapse to "First et al." beyond 3. Keeps the prior-work block
+    # readable for the LLM without truncating the citation handle.
+    if isinstance(authors, list) and authors:
+        clean = [a for a in authors if a]
+        if len(clean) == 1:
+            author_str = clean[0]
+        elif len(clean) == 2:
+            author_str = f"{clean[0]} & {clean[1]}"
+        elif len(clean) == 3:
+            author_str = f"{clean[0]}, {clean[1]} & {clean[2]}"
+        elif len(clean) > 3:
+            author_str = f"{clean[0]} et al."
+        else:
+            author_str = ""
+    else:
+        author_str = ""
+
+    parts: list[str] = [f"[{i}]"]
+    head = ""
+    if author_str:
+        head = author_str
+        if year:
+            head += f" ({year})"
+        head += f". {title}"
+    elif year:
+        head = f"({year}) {title}"
+    else:
+        head = title
+    parts.append(head)
+    line1 = " ".join(parts)
+
+    extras: list[str] = []
+    if venue:
+        extras.append(venue)
+    if doi:
+        extras.append(f"DOI: {doi}")
+    elif arxiv_id:
+        extras.append(f"arXiv:{arxiv_id}")
+    elif url:
+        extras.append(url)
+    if extras:
+        return f"{line1}\n    {'. '.join(extras)}."
+    return line1
+
+
+def _format_lit_excerpt(content: str, title: str) -> str:
+    """Trim the leading-title duplication out of arXiv-style excerpts.
+
+    Most loaders set ``content = f"{title}\\n\\n{abstract}"`` (see
+    knowledge.py:166, 199, 290) so the LLM saw ``[i] Title\\nTitle.
+    abstract...`` and propagated the title-twice pattern into the
+    References section. Stripping the duplicated title here gives the
+    writer a clean abstract excerpt to draw on without the visual
+    noise that previously seeded the bug."""
+    excerpt = content[:_LIT_EXCERPT_CHARS]
+    if title and excerpt.lstrip().startswith(title):
+        # Drop the leading title + immediately-following separator
+        # (newline or ". "). Keep everything after as the real
+        # abstract.
+        trimmed = excerpt.lstrip()[len(title):].lstrip(".\n ")
+        return trimmed
+    return excerpt
+
+
 def _format_lit(docs: list[RetrievedDoc]) -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
     for i, d in enumerate(docs, start=1):
-        title = d.metadata.get("title") or d.metadata.get("source") or f"item-{i}"
-        lines.append(f"[{i}] {title}\n{d.content[:_LIT_EXCERPT_CHARS]}")
+        meta = d.metadata or {}
+        title = meta.get("title") or meta.get("source") or f"item-{i}"
+        header = _format_lit_header(meta, i)
+        excerpt = _format_lit_excerpt(d.content, title)
+        lines.append(f"{header}\n{excerpt}" if excerpt else header)
     return "\n\n".join(lines)
 
 
@@ -2197,7 +2287,9 @@ def _format_lit_from_state(state: QuestState) -> str:
     for i, item in enumerate(items, start=1):
         meta = item.get("metadata") or {}
         title = meta.get("title") or meta.get("source") or f"item-{i}"
-        lines.append(f"[{i}] {title}\n{item.get('content', '')[:_LIT_EXCERPT_CHARS]}")
+        header = _format_lit_header(meta, i)
+        excerpt = _format_lit_excerpt(item.get("content", "") or "", title)
+        lines.append(f"{header}\n{excerpt}" if excerpt else header)
     return "\n\n".join(lines)
 
 

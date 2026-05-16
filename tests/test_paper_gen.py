@@ -906,22 +906,84 @@ def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
         )
 
 
-def test_paper_stub_templates_were_deleted() -> None:
-    """The iclr/ieee_access/nature_mi templates shipped as 1-line
-    LaTeX-comment stubs that pandoc accepted as templates and
-    pdflatex rejected at compile. Audit #05 flagged this; the
-    Phase-Q hotfix deletes them so ``_find_pdf_engine`` /
-    ``template.exists()`` returns False and pandoc's built-in
-    default template runs — which actually compiles."""
+def test_paper_templates_dont_spell_pandoc_vars_in_comments() -> None:
+    """Pandoc substitutes ``$var$`` tokens everywhere in the template
+    — including inside ``%``-comments. When the substituted value
+    line-wraps (e.g. a long paper title spilling onto a second line),
+    the leading ``%`` only comments the first line, and every later
+    line lands as raw LaTeX. Most of the time that raw LaTeX appears
+    BEFORE ``\\begin{document}`` and pdflatex dies with
+    "Missing \\begin{document}".
+
+    This test pins the contract: NO comment line in any paper
+    template may spell out the pandoc variables we know wrap onto
+    multiple lines. The matching note inside each template already
+    warns future editors; this assertion makes the warning
+    enforceable. The 2026-05-16 user-reported PDF compile failure
+    is the exact regression this guards."""
+    repo = Path(__file__).resolve().parent.parent
+    venues = (
+        "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+        "essay", "report", "policy_brief", "whitepaper",
+    )
+    # `$body$` and `$title$` are the two that reliably wrap.
+    # `$abstract$` is by definition a paragraph that wraps. The poster
+    # template has its own trap but that is covered separately. We
+    # keep this list explicit (not a regex over all $...$) so a
+    # legitimate substitution like `$if(abstract)$` in a comment —
+    # which is fine because the body it gates is short — doesn't
+    # trigger a false positive.
+    forbidden = ("$title$", "$body$", "$abstract$")
+    for fmt in venues:
+        path = repo / "templates" / "paper" / fmt / "template.tex"
+        if not path.exists():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.lstrip()
+            if not stripped.startswith("%"):
+                continue
+            for tok in forbidden:
+                assert tok not in stripped, (
+                    f"templates/paper/{fmt}/template.tex line {lineno} "
+                    f"spells {tok!r} inside a `%` comment. Pandoc will "
+                    f"substitute the value, and if it wraps onto a "
+                    f"second line, pdflatex dies with "
+                    f"'Missing \\\\begin{{document}}'. Refer to the "
+                    f"variable indirectly in the comment instead."
+                )
+
+
+def test_paper_venue_templates_are_real_not_stubs() -> None:
+    """The iclr/ieee_access/nature_mi templates used to ship as
+    1-line LaTeX-comment stubs that pandoc accepted as templates
+    and pdflatex rejected at compile (audit #05). The Phase-Q
+    hotfix deleted them so pandoc's built-in default ran instead.
+    They now ship as real, minimal venue-flavored templates — this
+    test pins the upgrade: each template must contain the placeholders
+    pandoc needs (``$title$``, ``$body$``) and at least one ``\\documentclass``
+    line so it actually compiles. Future stub regressions (a 1-line
+    comment-only template, an empty file) fail here loudly instead
+    of silently producing an unreadable PDF."""
     repo = Path(__file__).resolve().parent.parent
     for fmt in ("iclr", "ieee_access", "nature_mi"):
-        stub = repo / "templates" / "paper" / fmt / "template.tex"
-        assert not stub.exists(), (
-            f"templates/paper/{fmt}/template.tex must NOT exist — the "
-            f"file is a 1-line stub that breaks pdflatex compile. "
-            f"Pandoc-default fallback works correctly when no "
-            f"template.tex is present."
+        path = repo / "templates" / "paper" / fmt / "template.tex"
+        assert path.exists(), (
+            f"templates/paper/{fmt}/template.tex must exist as a real "
+            f"venue template — `paper_format: {fmt}` quests fall back "
+            f"to pandoc's generic default when the file is missing."
         )
+        body = path.read_text(encoding="utf-8")
+        # Strip LaTeX comments so a stub like "% TODO" can't pass.
+        non_comment = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("%")
+        )
+        for needle in ("\\documentclass", "$title$", "$body$"):
+            assert needle in non_comment, (
+                f"templates/paper/{fmt}/template.tex is missing "
+                f"{needle!r} on a non-comment line — pandoc cannot "
+                f"render a paper without all three. A pure-comment "
+                f"file is the regression that caused audit #05."
+            )
 
 
 def test_poster_template_substitution_does_not_leak_into_preamble() -> None:
@@ -1187,3 +1249,193 @@ def test_generate_cleans_paper_pdf_source_when_pdf_not_in_kinds(
     art = _make_artifacts(tmp_path)
     PaperGenerator(cfg).generate(art, out_dir)
     assert not stale.exists()
+
+
+# ----------------------------------------------------------------------
+# PDF preprocessor — title lift, abstract lift, list extension, heading
+# shift, and ref-line dedupe. These are the user-visible fixes from the
+# 2026-05-16 paper.pdf report; tests live here (not just unit tests on
+# the helpers in isolation) so the full _compile_pdf code path is
+# exercised end-to-end with a fake pandoc and the contract of "what
+# pandoc consumes" is pinned against future regressions.
+# ----------------------------------------------------------------------
+
+
+def _capture_pandoc_call(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Wire up a fake `pandoc` + `pdflatex` and return a dict whose
+    ``cmd`` / ``input_path`` keys get populated when _compile_pdf
+    invokes the pandoc subprocess. The fake writes a stub PDF so the
+    generator's "did pandoc emit the output file?" check still passes."""
+    state: dict = {}
+
+    def fake_which(name: str) -> str | None:
+        if name == "pandoc":
+            return "/fake/pandoc"
+        if name == "pdflatex":
+            return "/fake/pdflatex"
+        return None
+
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        state["cmd"] = list(cmd)
+        state["input_path"] = cmd[1]
+        out_idx = cmd.index("-o") + 1
+        Path(cmd[out_idx]).write_bytes(b"%PDF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+    return state
+
+
+def test_preprocessor_lifts_h1_title_into_yaml_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first `# Title` in paper.md must land in the
+    ``paper_pdf_source.md`` as ``---\\ntitle: "..."\\n---`` and must
+    NOT remain as an H1 in the body, because pandoc would otherwise
+    emit a numbered ``\\section{}`` for it (which is the
+    user-reported "1 A Lightweight ..." double-stacked header)."""
+    state = _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# A Lightweight EUV Simulator\n\n"
+        "## Introduction\nbody text\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    PaperGenerator(cfg).generate(art, out_dir)
+
+    sanitized = (out_dir / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert sanitized.startswith("---\n"), "frontmatter must be first"
+    assert 'title: "A Lightweight EUV Simulator"' in sanitized
+    assert "# A Lightweight EUV Simulator" not in sanitized, (
+        "the original H1 must be stripped from the body — otherwise "
+        "pandoc emits it as a numbered \\section{}"
+    )
+
+
+def test_preprocessor_lifts_abstract_into_yaml_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``## Abstract`` section's body lands in the frontmatter as
+    ``abstract: |`` so the template can render it inside a real
+    ``\\begin{abstract}`` env, not as a numbered ``\\section{Abstract}``.
+    The Abstract heading + body must be removed from the body."""
+    state = _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# Title\n\n"
+        "## Abstract\nFirst sentence. Second sentence.\n\n"
+        "## Introduction\nBody.\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    PaperGenerator(cfg).generate(art, out_dir)
+
+    sanitized = (out_dir / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "abstract: |" in sanitized
+    assert "First sentence. Second sentence." in sanitized
+    # The original heading is gone from the body — only the YAML copy
+    # of the abstract text remains (and that copy is indented by 2
+    # spaces as a literal block scalar).
+    body_after_frontmatter = sanitized.split("---\n", 2)[-1]
+    assert "## Abstract" not in body_after_frontmatter
+    assert "## Introduction" in body_after_frontmatter, (
+        "non-abstract H2s must be preserved"
+    )
+
+
+def test_preprocessor_enables_list_extension_and_shifts_headings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two pandoc CLI contracts that depend on whether a title was
+    lifted: ``--from=markdown+lists_without_preceding_blankline`` is
+    ALWAYS appended (the LLM routinely drops lists immediately after
+    a paragraph with no blank line), and
+    ``--shift-heading-level-by=-1`` is appended ONLY when a title
+    was lifted (otherwise the H2 sections are still the user's
+    top-level structure and shifting would mangle them)."""
+    state = _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# Title\n## Introduction\nbody\n",
+        encoding="utf-8",
+    )
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    cmd = state["cmd"]
+    assert "--from=markdown+lists_without_preceding_blankline" in cmd, (
+        "list-after-paragraph rendering depends on this extension"
+    )
+    assert "--shift-heading-level-by=-1" in cmd, (
+        "title was lifted, so H2s become \\section — without the shift "
+        "they would render as 0.1 / 0.2 subsections of an implicit "
+        "section 0"
+    )
+
+
+def test_preprocessor_skips_heading_shift_when_no_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the markdown has NO ``# H1``, we must NOT pass
+    ``--shift-heading-level-by=-1`` — that would shift the author's
+    intended H2 sections up to H1 (which renders correctly but
+    re-numbers everything), and could even shift H1s the author
+    intentionally wrote into the metadata title space, where pandoc
+    silently drops them.
+
+    The list extension is unaffected: it's safe to enable in either
+    case."""
+    state = _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    # Note: no `# H1` line — body starts straight at H2.
+    art.paper_md.write_text(
+        "## Section one\nbody\n",
+        encoding="utf-8",
+    )
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    cmd = state["cmd"]
+    assert "--from=markdown+lists_without_preceding_blankline" in cmd
+    assert "--shift-heading-level-by=-1" not in cmd, (
+        "with no title to lift, shifting headings would mangle the "
+        "author's intended hierarchy"
+    )
+
+
+def test_preprocessor_dedupes_duplicated_reference_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer LLM emits ``"1. Title. Title."`` when the
+    prior-work excerpt starts with the title (a structural artifact
+    of the engine's old _format_lit format). The preprocessor
+    collapses the duplication so the rendered References section
+    reads cleanly."""
+    state = _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# Title\n\n"
+        "## References\n"
+        "1. Stratonovich-type integral with respect to a general "
+        "stochastic measure. Stratonovich-type integral with respect "
+        "to a general stochastic measure.\n",
+        encoding="utf-8",
+    )
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    sanitized = (tmp_path / "out" / "paper_pdf_source.md").read_text(encoding="utf-8")
+    # The dup pattern is gone — the title appears once per ref line.
+    assert sanitized.count(
+        "Stratonovich-type integral with respect to a general stochastic measure"
+    ) == 1, sanitized
