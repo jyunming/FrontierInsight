@@ -42,15 +42,21 @@ $highlighting-macros$
 \predate{\begin{center}\normalsize}
 \postdate{\par\end{center}}
 
-% PDF metadata: hyperref pulls pdftitle from \title{} only when
-% \hypersetup is called AFTER \title — order matters. Without this
-% block the rendered PDF has an empty Title field in pdfinfo, which
-% breaks reference managers (Zotero, Mendeley) that key on it.
-\hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
-
 \title{$title$}
 \author{Frontier Insight}
 \date{$date$}
+
+% PDF metadata: feed the pandoc title variable directly into
+% hyperref so the rendered PDF carries a proper Title field
+% (pdfinfo / Zotero / Mendeley all key on this — leaving it empty
+% breaks reference-manager import). The variable name is NOT
+% spelled out in this comment — see the matching note in the
+% preamble at the top of this file. Pandoc would otherwise
+% substitute it INSIDE the comment, the title's natural line
+% wrap would break the comment boundary, and the leftover lines
+% would land as raw LaTeX outside \begin{document}, killing the
+% compile with "Missing \begin{document}".
+\hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
 
 \begin{document}
 \maketitle

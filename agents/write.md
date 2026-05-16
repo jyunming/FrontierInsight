@@ -74,7 +74,7 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 - **Discussion** — what the literature broadly says about the comparison, where consensus exists, where it doesn't.
 - **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question.
 
-End with `## References` in numbered-list style citing concrete sources from the prior-work block above (or, if none are usable, plausibly-formatted primary references with DOIs).
+End with `## References` in numbered-list style citing concrete sources from the prior-work block above. The "References — required format" section below is the binding rule for what each entry must contain; do NOT invent author names or DOIs to plug missing fields.
 
 ## References — required format
 
@@ -86,7 +86,9 @@ Format examples (numbered list, one paragraph per entry):
 - `2. Doe, J. et al. (2024). Another title. *Conference Proceedings*. arXiv:2401.12345.`
 - `3. Author One (2019). Solo author paper. *Venue*. https://example.com/paper`
 
-If the prior-work block lacks one of these fields, omit just that field — never fabricate an author name or DOI. Do NOT repeat the title twice; the prior-work entry's header line already gives you the title once.
+If the prior-work block lacks one of these fields for a particular entry, omit just that field for that entry — never fabricate an author name or DOI to pad out a partial citation. Do NOT repeat the title twice; the prior-work entry's header line already gives you the title once.
+
+When the entire prior-work block is empty or unusable (the engine surfaces `"(no prior work surfaced from the knowledge base)"`), prefer to **cite no sources** rather than invent any. If the persona / venue genuinely requires at least one reference (e.g. a Discussion section that engages with prior work), cite well-known canonical sources for the field with their **real** DOIs — never fabricate a DOI or author. If you cannot recall a real DOI, omit it rather than guess.
 
 ## No raw code blocks in the body
 
