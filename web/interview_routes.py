@@ -90,12 +90,50 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         stamp = time.strftime("%Y-%m-%d-%H%M")
         yaml_path = drafts / f"{stamp}-{slugify(answers.title) or 'quest'}.yaml"
         yaml_path.write_text(yaml_text, encoding="utf-8")
+
+        # Optional in-server launch. Triggered by the interview form's
+        # "Launch immediately after submit" checkbox (default ON). The
+        # launcher spawns `python launch.py --config <yaml>` as a child
+        # process with FI_PRESEED_QUEST_ID set, so the child's Engine
+        # reuses the quest_id minted here and the redirect URL
+        # /quest/<id> is stable before the child reaches Engine init.
+        if request.query_params.get("launch") == "true":
+            from core.engine import mint_quest_id
+            from web.quest_launcher import QuestLauncherFull
+            seed = answers.title or answers.topic or "quest"
+            quest_id = mint_quest_id(seed)
+            try:
+                launched = app.state.launcher.launch(
+                    quest_id=quest_id, yaml_path=yaml_path,
+                )
+            except QuestLauncherFull as e:
+                # 503 with a Retry-After header — the launcher cap
+                # is a transient resource limit; the client should
+                # back off and retry once a slot frees. 30 s is a
+                # reasonable midpoint between "long enough for a
+                # short quest to finish" and "short enough that the
+                # user doesn't think the UI is hung."
+                return JSONResponse(
+                    {"error": "launcher at capacity",
+                     "detail": str(e),
+                     "retry_after_seconds": 30},
+                    status_code=503,
+                    headers={"Retry-After": "30"},
+                )
+            return JSONResponse({
+                "yaml_path": str(yaml_path),
+                "quest_id": launched.quest_id,
+                "pid": launched.pid,
+                "launched": True,
+                "next_step": f"GET /quest/{launched.quest_id} for live status",
+            })
+
         return JSONResponse({
             "yaml_path": str(yaml_path),
             "draft_only": True,
             "next_step": (
                 f"Run `python launch.py --config {yaml_path}` to start "
-                f"the quest, or PATCH this endpoint to launch in-process."
+                f"the quest, or POST with ?launch=true to spawn in-server."
             ),
         })
 

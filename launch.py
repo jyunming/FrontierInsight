@@ -771,9 +771,16 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.serve:
             # We're already inside an event loop (main_async), so use
             # the async helper rather than the blocking uvicorn.run.
+            # Forward --max-concurrent + --vscode-bridge-port so the
+            # web UI's subprocess launcher inherits the same caps +
+            # transport the rest of FI was started with.
             from web.server import serve_async
             await serve_async(
-                output_root=args.output_root, host=args.host, port=args.port,
+                output_root=args.output_root,
+                host=args.host,
+                port=args.port,
+                max_concurrent=args.max_concurrent,
+                vscode_bridge_port=args.vscode_bridge_port,
             )
             return 0
 
@@ -1770,7 +1777,21 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
 
 def main() -> int:
     args = parse_args()
-    return asyncio.run(main_async(args))
+    try:
+        return asyncio.run(main_async(args))
+    except KeyboardInterrupt:
+        # Ctrl-C on a long-running mode (--serve, --fleet, a single
+        # quest mid-LLM-call) cleanly cancels uvicorn / the LangGraph
+        # loop. The asyncio runner then re-raises KeyboardInterrupt
+        # at the top level, which without this catch dumps a
+        # CancelledError-then-KeyboardInterrupt traceback on the
+        # user's screen — looks like a crash even though it's a
+        # cooperative shutdown. Exit code 130 is the conventional
+        # "terminated by SIGINT" status on POSIX; Windows callers
+        # treat any non-zero as "interrupted".
+        print()  # newline so the prompt doesn't fight with `^C`
+        print("[FI] interrupted (Ctrl-C). Goodbye.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

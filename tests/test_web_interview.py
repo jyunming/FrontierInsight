@@ -189,3 +189,174 @@ def test_submit_rejects_non_string_in_output_kinds(tmp_path: Path) -> None:
     bad["output_kinds"] = [1, 2, 3]
     res = client.post("/api/interview/submit", json=bad)
     assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Quest launch (subprocess pool)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_with_launch_true_spawns_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POST /api/interview/submit?launch=true`` writes the YAML
+    AND spawns ``python launch.py --config <yaml>``. Monkey-patch
+    Popen so the test doesn't actually start a Python child."""
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 9999
+        def poll(self): return None
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("web.quest_launcher.subprocess.Popen", fake_popen)
+    client = _client(tmp_path)
+    res = client.post("/api/interview/submit?launch=true", json=_ok_answers_payload())
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["launched"] is True
+    assert body["quest_id"]
+    assert body["pid"] == 9999
+    # FI_PRESEED_QUEST_ID was passed to the child so its Engine uses
+    # the same quest_id the response advertised.
+    assert captured["env"]["FI_PRESEED_QUEST_ID"] == body["quest_id"]
+    assert "--config" in captured["argv"]
+
+
+def test_submit_launch_503_when_pool_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the launcher pool is at capacity, the submit handler
+    returns 503 with a Retry-After header so clients can back off."""
+    from web.quest_launcher import QuestLauncherFull
+    client = _client(tmp_path)
+    # Replace launch() on the live launcher to always raise.
+    def always_full(**_kwargs):
+        raise QuestLauncherFull("at capacity (test)")
+    monkeypatch.setattr(
+        client.app.state.launcher, "launch", always_full,
+    )
+    res = client.post("/api/interview/submit?launch=true", json=_ok_answers_payload())
+    assert res.status_code == 503
+    assert "capacity" in res.text.lower()
+    # Retry-After is the standard back-off hint; clients keying off
+    # it can wait the suggested seconds before retrying.
+    assert res.headers.get("Retry-After") == "30"
+    body = res.json()
+    assert body.get("retry_after_seconds") == 30
+
+
+def test_quest_detail_route_renders(tmp_path: Path) -> None:
+    """``GET /quest/<id>`` renders the quest.html shell with the
+    quest_id injected as a JS global."""
+    client = _client(tmp_path)
+    res = client.get("/quest/abc-123-def456")
+    assert res.status_code == 200
+    assert "abc-123-def456" in res.text
+
+
+def test_quest_detail_page_carries_review_panel_renderer(tmp_path: Path) -> None:
+    """Phase N panel-renderer + single-reviewer renderer moved from
+    index.html into quest.html (the dashboard is now a list-only
+    surface). This test pins the move so the multi-persona UI
+    survives the simplification."""
+    client = _client(tmp_path)
+    res = client.get("/quest/sample-id")
+    assert res.status_code == 200
+    assert "renderReviewPanel" in res.text
+    assert "renderSingleReview" in res.text
+
+
+def test_quest_detail_route_rejects_path_traversal(tmp_path: Path) -> None:
+    """Same guard as the rest of the web UI."""
+    client = _client(tmp_path)
+    for hostile in ("../somewhere", "a/b"):
+        res = client.get(f"/quest/{hostile}")
+        # 400 (caught by regex) or 404 (URL routing). NOT 200.
+        assert res.status_code in (400, 404, 422)
+
+
+def test_cancel_route_404_when_quest_not_tracked(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    res = client.post("/api/quests/never-launched/cancel")
+    assert res.status_code == 404
+
+
+def test_get_quest_detail_merges_launcher_alive_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bot review #5: the dashboard / detail page's `alive` field
+    must reflect quests spawned via the launcher, not just the
+    in-process registry. Without this, web-launched quests always
+    appear "idle" and the cancel button stays disabled. Test stubs
+    the launcher status to True; the API response must propagate."""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    # Create a fake quest dir so /api/quests/{id} doesn't 404.
+    quest_dir = output_root / "fake-quest-id"
+    (quest_dir / ".fi").mkdir(parents=True)
+    (quest_dir / ".fi" / "run.log").write_text("started\n", encoding="utf-8")
+
+    app = make_app(output_root)
+    client = TestClient(app)
+    # Stub the launcher's status_for to claim the quest is alive.
+    def fake_status(qid: str):
+        if qid == "fake-quest-id":
+            return {"pid": 12345, "started_at": 0, "alive": True, "age_seconds": 1.5}
+        return None
+    monkeypatch.setattr(app.state.launcher, "status_for", fake_status)
+
+    res = client.get("/api/quests/fake-quest-id")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["alive"] is True, (
+        "merging launcher state into /api/quests/<id> is what makes "
+        "the detail-page status badge + cancel button work for "
+        "quests spawned via the web UI"
+    )
+    assert body["launcher_pid"] == 12345
+
+
+def test_mint_quest_id_is_public_and_stable() -> None:
+    """The submit handler used to reach into core.engine._new_quest_id
+    (private underscore prefix). It now uses the public
+    mint_quest_id alias. Pin the rename so the surface stays stable."""
+    from core.engine import mint_quest_id, _new_quest_id
+    assert mint_quest_id is not None
+    # Same behavior.
+    a = mint_quest_id("topic-x")
+    assert "topic-x" in a or a.endswith("-x") or len(a) > 0
+    # Underscore form is still available for legacy callers.
+    b = _new_quest_id("topic-x")
+    assert len(b) == len(a)  # same shape
+
+
+# ---------------------------------------------------------------------------
+# 0.0.0.0 warning
+# ---------------------------------------------------------------------------
+
+
+def test_non_loopback_host_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """When ``--serve`` is bound to a non-loopback address, a clear
+    WARNING fires so the user knows the quest-launch endpoint is
+    reachable from the network."""
+    import logging
+    from web.server import _warn_if_non_loopback
+    caplog.set_level(logging.WARNING, logger="frontier_insight.serve")
+    _warn_if_non_loopback("0.0.0.0")
+    assert any("non-loopback" in rec.message for rec in caplog.records)
+
+
+def test_loopback_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """The default localhost binding must not log a noise warning."""
+    import logging
+    from web.server import _warn_if_non_loopback
+    caplog.set_level(logging.WARNING, logger="frontier_insight.serve")
+    for host in ("127.0.0.1", "localhost", "::1"):
+        caplog.clear()
+        _warn_if_non_loopback(host)
+        assert caplog.records == [], f"unexpected warning for {host}"

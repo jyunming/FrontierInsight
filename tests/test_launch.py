@@ -520,3 +520,27 @@ def test_paper_venue_override_handles_missing_clarify_answers(tmp_path: Path) ->
     art = QuestArtifacts(quest_id="q", quest_root=tmp_path, raw_state={})
     launch._apply_paper_venue_override(cfg, art)
     assert cfg.output.paper_format == "generic"
+
+
+def test_main_catches_keyboard_interrupt_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """Ctrl-C during --serve, --fleet, or a long quest used to dump a
+    multi-frame traceback (CancelledError + KeyboardInterrupt) that
+    looked like a crash. The fix wraps ``asyncio.run`` in
+    try/except KeyboardInterrupt and exits with rc=130 + a clean
+    goodbye message. Pin both."""
+    monkeypatch.setattr("sys.argv", ["launch.py", "--serve"])
+
+    def boom(_):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("launch.asyncio.run", boom)
+
+    rc = launch.main()
+    assert rc == 130, "POSIX conventional exit code for SIGINT"
+    captured = capsys.readouterr()
+    assert "interrupted" in captured.err.lower()
+    # No tracebacks in the captured streams.
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out

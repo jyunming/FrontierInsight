@@ -2,59 +2,48 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Frontier Insight — Interview</title>
-  <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 2em auto; padding: 0 1em; line-height: 1.4; }
-    h1 { font-size: 1.4em; }
-    fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 1em 0; padding: 1em; }
-    legend { font-weight: 600; padding: 0 0.4em; }
-    .prompt { color: #555; font-size: 0.9em; margin: 0.3em 0 0.6em; }
-    input[type="text"], textarea, select { width: 100%; box-sizing: border-box; padding: 0.4em; font-size: 1em; border: 1px solid #bbb; border-radius: 4px; }
-    textarea { min-height: 4em; }
-    label.choice { display: block; padding: 0.3em 0; }
-    .submit-row { margin-top: 1em; }
-    button { padding: 0.5em 1em; background: #1a73e8; color: white; border: none; border-radius: 4px; font-size: 1em; cursor: pointer; }
-    button:hover { background: #1456c1; }
-    button.secondary { background: #777; }
-    button:disabled { background: #bbb; cursor: not-allowed; }
-    #result { margin-top: 1em; padding: 1em; background: #f4f4f4; border-radius: 4px; font-family: monospace; white-space: pre-wrap; display: none; }
-    .pinned { background: #f9f9f9; }
-    .pinned input, .pinned select, .pinned textarea { background: #eee; color: #666; }
-    .small { font-size: 0.85em; color: #666; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frontier Insight — New Quest</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/header.js"></script>
 </head>
 <body>
-  <h1>Frontier Insight — New Research Quest</h1>
-  <p class="small" id="mode-hint">Loading question schema…</p>
-  <form id="interview-form" onsubmit="return submitForm(event);"></form>
-  <div id="result"></div>
+  <div id="fi-header-root" data-breadcrumb="New Quest"></div>
+  <main>
+    <h1 id="page-title">New Research Quest</h1>
+    <p class="fi-subtitle" id="page-subtitle">Loading questions…</p>
+
+    <div class="fi-progress" id="progress" style="display:none">
+      Question <span id="progress-current">1</span> of <span id="progress-total">14</span>
+    </div>
+
+    <form class="fi-form" id="interview-form" onsubmit="return submitForm(event);"></form>
+
+    <div id="result" style="display:none"></div>
+  </main>
 
   <script>
-    // The web UI mirrors the same question set as the CLI `--new` and
-    // the VSCode `@fi /new` flows. Schema is fetched from the server
-    // (which exports it from core/interview.py) so the questions can't
-    // drift across surfaces.
+    // Frontier Insight web interview — drives the same 14-question
+    // schema the CLI and VSCode flows use. Schema fetched from
+    // /api/interview/schema (exported from core/interview.py).
 
     const updateQuestId = window.__fi_update_quest_id || null;
     const isUpdate = !!updateQuestId;
 
     let schema = null;
-    let currentAnswers = null;  // for --update, pre-fills
 
     async function loadSchema() {
       const res = await fetch('/api/interview/schema');
       schema = await res.json();
-      document.getElementById('mode-hint').textContent = isUpdate
-        ? `Mid-quest update for quest ${updateQuestId}. Only editable fields can be changed.`
-        : 'Set up a new research quest. All fields below.';
+      const title = document.getElementById('page-title');
+      const subtitle = document.getElementById('page-subtitle');
       if (isUpdate) {
-        // Update mode displays the editable subset only. Today the
-        // backend pins non-editable fields (topic / title / provider /
-        // model / no_simulation) from the quest's stored YAML, so the
-        // form can leave them blank without harm. A future endpoint
-        // returning current answers can populate `currentAnswers`
-        // here and renderForm() will pre-fill via input.value.
-        currentAnswers = {};
+        title.textContent = `Update Quest`;
+        subtitle.innerHTML = `Editing <code class="fi-mono">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned to the existing YAML.`;
+      } else {
+        title.textContent = 'New Research Quest';
+        subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write a draft YAML only).';
       }
       renderForm();
     }
@@ -62,15 +51,14 @@
     function renderForm() {
       const form = document.getElementById('interview-form');
       form.innerHTML = '';
-      for (const q of schema.questions) {
-        // Web UI hides VSCode-only or CLI-only questions when
-        // they're not in our frontends list.
-        if (!q.frontends.includes('serve')) continue;
+      const visibleQs = schema.questions.filter((q) => q.frontends.includes('serve'));
+      document.getElementById('progress-total').textContent = visibleQs.length;
+      let questionIdx = 0;
+      for (const q of visibleQs) {
         const editable = !isUpdate || schema.editable_fields.includes(q.id);
         const fs = document.createElement('fieldset');
-        if (!editable) fs.classList.add('pinned');
         const lg = document.createElement('legend');
-        lg.textContent = q.label + (editable ? '' : ' (pinned)');
+        lg.textContent = `${++questionIdx}. ${q.label}${editable ? '' : ' (pinned)'}`;
         fs.appendChild(lg);
         const prompt = document.createElement('div');
         prompt.className = 'prompt';
@@ -80,10 +68,21 @@
         fs.appendChild(input);
         form.appendChild(fs);
       }
-      const submit = document.createElement('div');
-      submit.className = 'submit-row';
-      submit.innerHTML = `<button type="submit">${isUpdate ? 'Update Quest' : 'Create Quest'}</button>`;
-      form.appendChild(submit);
+      // Launch-immediately checkbox — only meaningful for new quests,
+      // not updates (updates always resume in-place).
+      if (!isUpdate) {
+        const row = document.createElement('div');
+        row.className = 'fi-checkbox-row';
+        row.innerHTML = `
+          <input type="checkbox" id="launch-now" checked>
+          <label for="launch-now">Launch the quest immediately after submit (uncheck to write draft YAML only)</label>
+        `;
+        form.appendChild(row);
+      }
+      const submitRow = document.createElement('div');
+      submitRow.innerHTML = `<button type="submit" class="fi-btn fi-btn-primary">${isUpdate ? 'Update Quest' : 'Create Quest'}</button>`;
+      form.appendChild(submitRow);
+      document.getElementById('progress').style.display = '';
     }
 
     function makeInput(q, editable) {
@@ -94,34 +93,27 @@
         el.name = q.id;
         if (q.placeholder) el.placeholder = q.placeholder;
         if (q.default !== null && q.default !== undefined) el.value = q.default;
-        if (!editable) el.disabled = true;
+        if (!editable) {
+          el.disabled = true;
+          el.classList.add('pinned');
+        }
         return el;
       }
       if (q.kind === 'single') {
-        // provider_model is a dependent question — its choices
-        // depend on the picked provider. Render it as a select with
-        // a placeholder option; the cascade from #q-provider
-        // populates the real options when the user picks a provider.
         const sel = document.createElement('select');
         sel.id = id;
         sel.name = q.id;
-        if (!editable) sel.disabled = true;
-        let choices = q.choices;
-        if (q.id === 'provider_model') {
-          // Start empty (placeholder added below). The provider
-          // change handler fills in real options + "Other" hatch.
-          choices = [];
+        if (!editable) {
+          sel.disabled = true;
+          sel.classList.add('pinned');
         }
+        let choices = q.choices;
+        if (q.id === 'provider_model') choices = [];
         const blank = document.createElement('option');
         blank.value = '';
         blank.textContent = q.id === 'provider_model'
           ? '(pick a provider first)' : '(pick one)';
         sel.appendChild(blank);
-        // Stringify complex defaults (lists, objects) so the
-        // `c.value === q.default` reference equality check below
-        // can use the same encoding for both sides. Without this,
-        // bundles like ['paper_md', 'paper_pdf'] never match the
-        // default and no option pre-selects.
         const defaultEncoded = (q.default !== null && typeof q.default === 'object')
           ? JSON.stringify(q.default) : q.default;
         for (const c of choices) {
@@ -130,16 +122,21 @@
             ? JSON.stringify(c.value) : String(c.value);
           opt.value = valueEncoded;
           opt.textContent = c.label;
+          if (c.description) opt.title = c.description;
           if (valueEncoded === String(defaultEncoded)) opt.selected = true;
           sel.appendChild(opt);
         }
-        // Wire provider → provider_model cascade.
         if (q.id === 'provider') {
           sel.addEventListener('change', () => populateProviderModel(sel.value));
         }
+        // When the picked option is the "Other (type your own)"
+        // escape hatch, expose an inline text input so the user
+        // can type their answer immediately. Done with a sibling
+        // <input> rather than a confirm() dialog so the value is
+        // visible and editable.
+        sel.addEventListener('change', () => handleOtherSelection(sel, q));
         return sel;
       }
-      // Unknown kind — render free text.
       const el = document.createElement('input');
       el.type = 'text';
       el.id = id;
@@ -147,39 +144,59 @@
       return el;
     }
 
+    function handleOtherSelection(sel, q) {
+      // The "Other (type your own)" option's value is the sentinel
+      // "__OTHER__". When the user picks it, append (or unhide) a
+      // sibling <input type="text"> with id "<sel.id>-other" so
+      // the user can type. When they pick anything else, hide it.
+      const otherId = `${sel.id}-other`;
+      let other = document.getElementById(otherId);
+      if (sel.value === '__OTHER__') {
+        if (!other) {
+          other = document.createElement('input');
+          other.type = 'text';
+          other.id = otherId;
+          other.placeholder = `type a value for ${q.label}…`;
+          other.style.marginTop = '0.5rem';
+          // Insert directly after the select.
+          sel.insertAdjacentElement('afterend', other);
+        }
+        other.style.display = '';
+        other.focus();
+      } else if (other) {
+        other.style.display = 'none';
+        other.value = '';
+      }
+    }
+
     function populateProviderModel(providerName) {
       const models = (schema.provider_models || {})[providerName] || [];
-      const sel = document.getElementById('q-provider_model');
+      let sel = document.getElementById('q-provider_model');
       if (!sel) return;
       if (sel.tagName !== 'SELECT') {
-        // Defensive: an earlier renderForm bug rendered this as an
-        // <input>. Replace it with a <select> in place so the
-        // cascade still works.
         const replacement = document.createElement('select');
         replacement.id = sel.id;
         replacement.name = sel.name;
         sel.replaceWith(replacement);
+        sel = replacement;
       }
-      const target = document.getElementById('q-provider_model');
-      target.innerHTML = '';
+      sel.innerHTML = '';
       const blank = document.createElement('option');
       blank.value = '';
       blank.textContent = models.length ? '(pick a model)' : '(pick a provider first)';
-      target.appendChild(blank);
+      sel.appendChild(blank);
       for (const m of models) {
         const opt = document.createElement('option');
         opt.value = String(m.value);
         opt.textContent = m.label;
-        target.appendChild(opt);
+        if (m.description) opt.title = m.description;
+        sel.appendChild(opt);
       }
-      // "Other (type your own)" escape hatch — only when at least
-      // one curated model exists; otherwise the picker has nothing
-      // meaningful to escape from.
       if (models.length) {
         const other = document.createElement('option');
         other.value = '__OTHER__';
         other.textContent = 'Other (type your own)';
-        target.appendChild(other);
+        sel.appendChild(other);
       }
     }
 
@@ -191,52 +208,75 @@
         const el = document.getElementById(`q-${q.id}`);
         if (!el) continue;
         let value = el.value;
+        // If "Other (type your own)" is picked, the sibling
+        // <input id="q-<id>-other"> carries the user's typed
+        // value (see handleOtherSelection). Read from there.
         if (value === '__OTHER__') {
-          value = prompt(`Type the value for ${q.label}:`) || '';
+          const other = document.getElementById(`q-${q.id}-other`);
+          value = (other && other.value.trim()) || '';
+          if (!value) {
+            alert(`Please type a value for "${q.label}" in the box that appeared, or pick one of the listed options.`);
+            other && other.focus();
+            return false;
+          }
         }
-        // Parse JSON-encoded list/bool defaults back into types.
         if (typeof value === 'string' && (value.startsWith('[') || value === 'true' || value === 'false')) {
           try { value = JSON.parse(value); } catch (_) {}
         }
         out[q.id] = value;
       }
-      // Non-editable fields default to empty strings in update mode
-      // (the server uses the current YAML's value); in new mode we
-      // require them.
       if (!isUpdate) {
-        if (!out.topic || !out.topic.trim()) {
+        if (!out.topic || !String(out.topic).trim()) {
           alert('Topic is required.');
           return false;
         }
-        if (!out.title || !out.title.trim()) {
-          out.title = (out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
+        if (!out.title || !String(out.title).trim()) {
+          out.title = String(out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
         }
       } else {
-        // Fill required fields with current values so server validation
-        // passes. The server pins non-editable fields back anyway.
         if (!out.topic) out.topic = '(unchanged)';
         if (!out.title) out.title = '(unchanged)';
         if (!out.provider) out.provider = 'vscode_extension';
         if (!out.provider_model) out.provider_model = '';
       }
-      const endpoint = isUpdate
-        ? `/api/interview/update/${encodeURIComponent(updateQuestId)}`
-        : '/api/interview/submit';
+      const launchNow = !isUpdate && document.getElementById('launch-now')?.checked;
+      let endpoint;
+      if (isUpdate) {
+        endpoint = `/api/interview/update/${encodeURIComponent(updateQuestId)}`;
+      } else {
+        endpoint = launchNow
+          ? '/api/interview/submit?launch=true'
+          : '/api/interview/submit';
+      }
+      const div = document.getElementById('result');
+      div.style.display = 'block';
+      div.className = 'fi-banner fi-banner-info';
+      div.textContent = launchNow ? 'Submitting + launching…' : 'Writing draft YAML…';
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(out),
       });
-      const div = document.getElementById('result');
-      div.style.display = 'block';
       if (!res.ok) {
         const err = await res.text();
+        div.className = 'fi-banner fi-banner-error';
         div.textContent = `Error ${res.status}: ${err}`;
         return false;
       }
       const body = await res.json();
+      if (launchNow && body.quest_id) {
+        // Redirect to the quest detail page.
+        window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
+        return false;
+      }
       div.textContent = JSON.stringify(body, null, 2);
       return false;
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     loadSchema();

@@ -1,0 +1,368 @@
+/* Frontier Insight — shared dashboard + interview stylesheet.
+ *
+ * Clean modern dashboard look: Inter sans-serif when available
+ * (falls back through the system-ui stack so `--serve` works fully
+ * offline without a Google Fonts round-trip), single blue accent
+ * (#1F3A5F), white background, JetBrains Mono for code. Dark mode
+ * via prefers-color-scheme media query — flips background + text +
+ * accent intensity. No third-party CSS framework; we lean on CSS
+ * custom properties + clamp() typography.
+ *
+ * (No `@import` here: the original draft pulled Inter from
+ * fonts.googleapis.com, which breaks privacy + offline use. Users
+ * who install Inter system-wide still get it via the font-family
+ * stack below; everyone else gets system-ui, which is fine.)
+ */
+
+:root {
+  /* Brand */
+  --fi-accent: #1F3A5F;          /* deep academic blue */
+  --fi-accent-hover: #16294A;
+  --fi-accent-soft: #E8EEF7;      /* tinted backgrounds */
+
+  /* Surface */
+  --fi-bg: #FFFFFF;
+  --fi-bg-elev: #F8FAFC;
+  --fi-border: #E2E8F0;
+  --fi-border-strong: #CBD5E1;
+
+  /* Text */
+  --fi-text: #0F172A;
+  --fi-text-muted: #475569;
+  --fi-text-subtle: #94A3B8;
+
+  /* Signal */
+  --fi-success: #16A34A;
+  --fi-warn: #D97706;
+  --fi-danger: #DC2626;
+
+  /* Layout */
+  --fi-max-width: 1080px;
+  --fi-radius: 8px;
+  --fi-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+  --fi-shadow-elev: 0 4px 12px rgba(15, 23, 42, 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fi-accent: #60A5FA;
+    --fi-accent-hover: #3B82F6;
+    --fi-accent-soft: #1E293B;
+    --fi-bg: #0F172A;
+    --fi-bg-elev: #1E293B;
+    --fi-border: #334155;
+    --fi-border-strong: #475569;
+    --fi-text: #F1F5F9;
+    --fi-text-muted: #94A3B8;
+    --fi-text-subtle: #64748B;
+    --fi-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    --fi-shadow-elev: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--fi-bg);
+  color: var(--fi-text);
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Header bar — injected by header.js into both pages. */
+.fi-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--fi-bg);
+  border-bottom: 1px solid var(--fi-border);
+  padding: 0.75rem 1.5rem;
+}
+.fi-header-inner {
+  max-width: var(--fi-max-width);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.fi-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  text-decoration: none;
+  color: var(--fi-text);
+  font-weight: 600;
+  font-size: 1.0625rem;
+  letter-spacing: -0.01em;
+}
+.fi-logo img { width: 28px; height: 28px; }
+.fi-breadcrumb {
+  color: var(--fi-text-muted);
+  font-size: 0.875rem;
+}
+.fi-breadcrumb::before { content: "/"; margin: 0 0.5rem; color: var(--fi-text-subtle); }
+.fi-nav {
+  margin-left: auto;
+  display: flex;
+  gap: 1.25rem;
+  align-items: center;
+}
+.fi-nav a {
+  color: var(--fi-text-muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+.fi-nav a:hover { color: var(--fi-accent); }
+
+/* Page container */
+main, .fi-main {
+  max-width: var(--fi-max-width);
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+/* Typography */
+h1, h2, h3, h4 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 1.5em 0 0.5em;
+  color: var(--fi-text);
+}
+h1 { font-size: clamp(1.5rem, 2.5vw, 1.875rem); margin-top: 0; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1.05rem; }
+p { margin: 0.5em 0 1em; }
+.fi-subtitle {
+  color: var(--fi-text-muted);
+  font-size: 0.95rem;
+  margin-top: -0.25rem;
+}
+
+/* Buttons */
+.fi-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  font-family: inherit;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  border-radius: var(--fi-radius);
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s, transform 0.05s;
+  line-height: 1.2;
+}
+.fi-btn:active { transform: translateY(1px); }
+.fi-btn-primary {
+  background: var(--fi-accent);
+  color: white;
+}
+.fi-btn-primary:hover { background: var(--fi-accent-hover); }
+.fi-btn-secondary {
+  background: var(--fi-bg-elev);
+  color: var(--fi-text);
+  border-color: var(--fi-border);
+}
+.fi-btn-secondary:hover { border-color: var(--fi-border-strong); }
+.fi-btn-danger {
+  background: transparent;
+  color: var(--fi-danger);
+  border-color: var(--fi-border);
+}
+.fi-btn-danger:hover { background: rgba(220, 38, 38, 0.08); }
+.fi-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Cards */
+.fi-card {
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--fi-shadow);
+  transition: box-shadow 0.15s, transform 0.05s;
+}
+.fi-card:hover { box-shadow: var(--fi-shadow-elev); }
+.fi-card-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+.fi-card-title h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+.fi-card-meta {
+  color: var(--fi-text-muted);
+  font-size: 0.8125rem;
+}
+
+/* Form */
+.fi-form fieldset {
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  margin: 0 0 1rem;
+  padding: 1rem 1.25rem;
+  background: var(--fi-bg-elev);
+}
+.fi-form legend {
+  font-weight: 600;
+  color: var(--fi-text);
+  padding: 0 0.4rem;
+}
+.fi-form .prompt {
+  color: var(--fi-text-muted);
+  font-size: 0.875rem;
+  margin: 0.25rem 0 0.75rem;
+  line-height: 1.5;
+}
+.fi-form input[type="text"],
+.fi-form textarea,
+.fi-form select {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  background: var(--fi-bg);
+  color: var(--fi-text);
+  font-family: inherit;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.fi-form input[type="text"]:focus,
+.fi-form textarea:focus,
+.fi-form select:focus {
+  outline: none;
+  border-color: var(--fi-accent);
+  box-shadow: 0 0 0 3px var(--fi-accent-soft);
+}
+.fi-form textarea { min-height: 4rem; resize: vertical; }
+.fi-form input.pinned,
+.fi-form textarea.pinned,
+.fi-form select.pinned {
+  background: var(--fi-accent-soft);
+  color: var(--fi-text-muted);
+  cursor: not-allowed;
+}
+
+.fi-form .fi-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.25rem 0;
+}
+.fi-form .fi-checkbox-row input[type="checkbox"] {
+  width: 1rem; height: 1rem;
+}
+
+/* Progress indicator */
+.fi-progress {
+  position: sticky;
+  top: 4rem;
+  background: var(--fi-bg);
+  padding: 0.5rem 0;
+  margin-bottom: 1rem;
+  color: var(--fi-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  z-index: 5;
+  border-bottom: 1px solid var(--fi-border);
+}
+
+/* Code blocks + monospace */
+pre, code, .fi-mono {
+  font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* Log tail */
+.fi-log {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  padding: 0.75rem;
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fi-text);
+}
+
+/* Status badges */
+.fi-badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: var(--fi-bg-elev);
+  border: 1px solid var(--fi-border);
+  color: var(--fi-text-muted);
+}
+.fi-badge.fi-badge-alive { background: rgba(22, 163, 74, 0.12); border-color: rgba(22, 163, 74, 0.3); color: var(--fi-success); }
+.fi-badge.fi-badge-paused { background: rgba(217, 119, 6, 0.12); border-color: rgba(217, 119, 6, 0.3); color: var(--fi-warn); }
+.fi-badge.fi-badge-done { background: rgba(31, 58, 95, 0.12); border-color: rgba(31, 58, 95, 0.3); color: var(--fi-accent); }
+
+/* Figures grid */
+.fi-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+.fi-figures img {
+  width: 100%;
+  border: 1px solid var(--fi-border);
+  border-radius: var(--fi-radius);
+  background: white;
+}
+
+/* Empty / error states */
+.fi-empty {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--fi-text-muted);
+  font-size: 0.9375rem;
+}
+
+/* Toast / banner */
+.fi-banner {
+  padding: 0.75rem 1rem;
+  border-radius: var(--fi-radius);
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  border: 1px solid;
+}
+.fi-banner.fi-banner-info { background: var(--fi-accent-soft); border-color: var(--fi-accent); color: var(--fi-accent); }
+.fi-banner.fi-banner-error { background: rgba(220, 38, 38, 0.08); border-color: var(--fi-danger); color: var(--fi-danger); }
+
+/* Small screen */
+@media (max-width: 640px) {
+  main, .fi-main { padding: 1.25rem 1rem 3rem; }
+  .fi-header { padding: 0.5rem 1rem; }
+  .fi-nav { gap: 0.75rem; }
+  .fi-nav a { font-size: 0.85rem; }
+}

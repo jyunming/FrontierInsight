@@ -272,10 +272,13 @@ def test_app_index_html_loads(tmp_path: Path) -> None:
     r = client.get("/")
     assert r.status_code == 200
     assert "Frontier Insight" in r.text
-    assert "quest-list" in r.text  # HTMX panel id
-    # Phase N — the frontend has the panel renderer wired so per-persona
-    # reviews can land in the UI when the engine produced them.
-    assert "renderReviewPanel" in r.text
+    assert "quest-list" in r.text  # quest cards land here
+    # Phase R — the dashboard delegates per-quest detail (paper preview,
+    # review panel rendering, log tail) to the new /quest/<id> page.
+    # The dashboard now just shows a list + a "+ New Quest" CTA so it
+    # stays simple. The renderReviewPanel function moved into the
+    # quest detail page; the test there pins it.
+    assert "New Quest" in r.text, "dashboard must surface the New Quest CTA"
 
 
 def test_app_detail_endpoint_surfaces_review_panel_when_recorded(

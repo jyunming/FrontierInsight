@@ -223,15 +223,35 @@ def _current_node_from_log(lines: list[str]) -> str:
 # ---- app factory ----------------------------------------------------------
 
 
-def make_app(output_root: Path) -> FastAPI:
+def make_app(
+    output_root: Path,
+    *,
+    max_concurrent: int = 4,
+    vscode_bridge_port: int = 0,
+) -> FastAPI:
     """Build the FastAPI app. Pass the on-disk root where quest dirs
     will live; the server scans this for status and writes new quests
-    here when ``POST /api/quests/start`` is called."""
+    here when ``POST /api/quests/start`` is called.
+
+    ``max_concurrent`` bounds the number of in-flight quests spawned
+    via the web UI interview. ``vscode_bridge_port`` is forwarded to
+    each child quest so LLM calls keep routing through the same
+    bridge the dashboard inherits from its parent."""
     app = FastAPI(title="Frontier Insight", version="1.0")
     registry = _QuestRegistry()
     app.state.registry = registry
     app.state.output_root = output_root
     app.state.supervisor = ProxySupervisor()
+
+    # Subprocess launcher for quests spawned from the web UI.
+    # The launcher lives on the app so request handlers can share it.
+    from web.quest_launcher import QuestLauncher
+    repo_root = Path(__file__).resolve().parent.parent
+    app.state.launcher = QuestLauncher(
+        repo_root=repo_root,
+        max_concurrent=max_concurrent,
+        vscode_bridge_port=vscode_bridge_port,
+    )
 
     static_dir = Path(__file__).resolve().parent / "static"
     if static_dir.is_dir():
@@ -251,6 +271,40 @@ def make_app(output_root: Path) -> FastAPI:
                 "<h1>Frontier Insight</h1><p>UI not installed.</p>", status_code=500,
             )
         return HTMLResponse(index_html.read_text(encoding="utf-8"))
+
+    @app.get("/quest/{quest_id}", response_class=HTMLResponse)
+    async def quest_detail(quest_id: str) -> HTMLResponse:
+        """Live quest-status page. Reuses the static quest.html and
+        injects the quest_id as a window-level constant so the JS
+        knows what to poll. Validates quest_id against the same
+        allowlist used elsewhere to block path traversal."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        page = static_dir / "quest.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Quest UI not installed</h1>", status_code=500,
+            )
+        html = page.read_text(encoding="utf-8")
+        injected = html.replace(
+            "</head>",
+            f'<script>window.__fi_quest_id = {json.dumps(quest_id)};</script></head>',
+            1,
+        )
+        return HTMLResponse(injected)
+
+    @app.post("/api/quests/{quest_id}/cancel")
+    async def cancel_quest(quest_id: str) -> JSONResponse:
+        """Send SIGTERM (or CTRL_BREAK_EVENT on Windows) to a
+        web-launched quest. Returns 404 if the quest_id isn't
+        tracked by the launcher (e.g. started via CLI directly —
+        cancel that with kill from the terminal)."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        canceled = app.state.launcher.cancel(quest_id)
+        if not canceled:
+            raise HTTPException(404, f"quest {quest_id} not tracked by web launcher")
+        return JSONResponse({"quest_id": quest_id, "canceled": True})
 
     @app.get("/api/quests")
     async def list_quests() -> JSONResponse:
@@ -277,6 +331,17 @@ def make_app(output_root: Path) -> FastAPI:
         # Phase N — expose the panel reviews to the GUI when present.
         review = final_state.get("review")
         review_panel = final_state.get("review_panel")
+        # Phase R — merge launcher state so quests spawned via the
+        # web UI's POST /api/interview/submit?launch=true also report
+        # ``alive: true`` while their child process is running.
+        # Without this, the in-process registry's `alive(quest_id)`
+        # returns False for ANY web-launched quest (those don't
+        # touch the in-process registry — only CLI/VSCode-launched
+        # quests do), so the detail page's status badge would
+        # incorrectly show "idle" and the Cancel button would stay
+        # disabled. registry.alive(...) OR launcher.alive covers both
+        # transports.
+        launcher_status = app.state.launcher.status_for(quest_id) or {}
         return JSONResponse({
             "quest_id": quest_id,
             "quest_root": str(quest_root),
@@ -288,10 +353,19 @@ def make_app(output_root: Path) -> FastAPI:
                 if paper_md.exists() else None
             ),
             "summary": summary,
-            "alive": registry.alive(quest_id),
+            "alive": (
+                registry.alive(quest_id)
+                or bool(launcher_status.get("alive"))
+            ),
             "pending_clarify": registry.pending_clarify(quest_id) is not None,
             "review": review,
             "review_panel": review_panel,
+            # Subprocess-launcher specifics for the detail page UI.
+            # `pid` lets users find the process; `started_at` powers a
+            # "running for X minutes" hint. Both null when the quest
+            # wasn't launched via this server.
+            "launcher_pid": launcher_status.get("pid"),
+            "launcher_started_at": launcher_status.get("started_at"),
         })
 
     @app.get("/api/quests/{quest_id}/log")
@@ -419,17 +493,52 @@ def make_app(output_root: Path) -> FastAPI:
     return app
 
 
+def _warn_if_non_loopback(host: str) -> None:
+    """The web UI now spawns quests via ``POST /api/interview/submit?launch=true``.
+    Quest spawn is a privileged action — anyone who can reach the
+    endpoint can run arbitrary ``python launch.py --config <yaml>``
+    on the server's machine. Binding to anything other than a
+    loopback (``127.0.0.1`` / ``::1`` / ``localhost``) exposes that
+    to the network. Log a loud WARNING with the bound host so the
+    user can see exactly what they're exposing; we don't refuse to
+    start because some users legitimately want LAN access on a
+    trusted network."""
+    loopback = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
+    if host not in loopback:
+        import logging
+        log = logging.getLogger("frontier_insight.serve")
+        log.warning(
+            "--serve bound to %s (non-loopback). The /interview "
+            "endpoint launches arbitrary quests on this machine; "
+            "anyone reachable on the network can submit one. "
+            "Bind to 127.0.0.1 unless you trust the network.",
+            host,
+        )
+
+
 async def serve_async(
     *,
     output_root: Path,
     host: str = "127.0.0.1",
     port: int = 8765,
+    max_concurrent: int = 4,
+    vscode_bridge_port: int = 0,
 ) -> None:
     """Async entry point — invoked from within an existing event loop.
     Uses ``uvicorn.Server.serve`` so we don't try to nest event loops.
-    The server runs until SIGINT/SIGTERM."""
+    The server runs until SIGINT/SIGTERM.
+
+    ``max_concurrent`` caps how many quests the web UI's subprocess
+    launcher can spawn at once. ``vscode_bridge_port`` is passed to
+    each spawned child so LLM calls keep routing through the same
+    bridge the dashboard inherits. Both forwarded to ``make_app``."""
     import uvicorn  # imported here so non-server runs don't need it
-    app = make_app(output_root.resolve())
+    _warn_if_non_loopback(host)
+    app = make_app(
+        output_root.resolve(),
+        max_concurrent=max_concurrent,
+        vscode_bridge_port=vscode_bridge_port,
+    )
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
@@ -440,8 +549,15 @@ def serve(
     output_root: Path,
     host: str = "127.0.0.1",
     port: int = 8765,
+    max_concurrent: int = 4,
+    vscode_bridge_port: int = 0,
 ) -> None:
     """Blocking entry point invoked when run standalone (no event loop)."""
     import uvicorn  # imported here so non-server runs don't need it
-    app = make_app(output_root.resolve())
+    _warn_if_non_loopback(host)
+    app = make_app(
+        output_root.resolve(),
+        max_concurrent=max_concurrent,
+        vscode_bridge_port=vscode_bridge_port,
+    )
     uvicorn.run(app, host=host, port=port, log_level="info")
