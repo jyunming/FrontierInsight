@@ -820,6 +820,48 @@ def test_require_pdf_false_keeps_silent_skip_behavior(
 # ``\documentclass``) past raw LaTeX that pdflatex couldn't parse.
 
 
+def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
+    """Pins that every shipped paper template carries a complete
+    ``\\providecommand{\\pandocbounded}`` definition, body included.
+
+    Background: ``\\pandocbounded`` is emitted by pandoc to constrain
+    inline images / float environments to the text width. The
+    standard pandoc latex template defines it; when FI overrides
+    with a custom template, we have to re-declare or pdflatex
+    errors with ``! Undefined control sequence. l.NNN
+    \\pandocbounded``.
+
+    Bot-review-strengthened: assert the FULL body
+    ``\\noindent\\resizebox{\\textwidth}{!}{#1}`` (not just the
+    command name) so a corrupted body — e.g. via shell-escape
+    collapsing ``\\noindent`` into a literal newline + ``oindent``
+    — fails the test. That's the exact regression we'd ship if
+    someone re-applied the change via a brittle ``python -c``
+    one-liner."""
+    repo = Path(__file__).resolve().parent.parent
+    working = ["generic", "neurips", "essay", "report", "policy_brief", "whitepaper"]
+    expected = (
+        r"\providecommand{\pandocbounded}[1]"
+        r"{\noindent\resizebox{\textwidth}{!}{#1}}"
+    )
+    for fmt in working:
+        path = repo / "templates" / "paper" / fmt / "template.tex"
+        assert path.exists(), f"working template {fmt!r} is missing"
+        body = path.read_text(encoding="utf-8")
+        non_comment = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("%")
+        )
+        assert expected in non_comment, (
+            f"templates/paper/{fmt}/template.tex must contain the EXACT "
+            f"\\providecommand{{\\pandocbounded}} body — including the "
+            f"\\noindent / \\resizebox / \\textwidth control sequences. "
+            f"A name-only check would pass even when the body is "
+            f"corrupted into literal text (newline + 'oindent' etc.) "
+            f"and pdflatex would silently emit a PDF with stray text "
+            f"and unbounded images."
+        )
+
+
 def test_paper_templates_declare_pandoc_compatibility_macros() -> None:
     """Every working paper template must include \\providecommand for
     \\tightlist and \\passthrough plus the pandoc highlighting-macros
