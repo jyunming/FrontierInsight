@@ -373,10 +373,10 @@ async def test_slides_invokes_pandoc_for_pptx_when_available(
 async def test_slides_spawn_failure_does_not_abort_other_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for PR #33 review: a `create_subprocess_exec` raise
-    (FileNotFoundError, PermissionError, OSError — possible when the
-    resolved path becomes invalid between `shutil.which` and spawn)
-    must NOT propagate out of `_run_cli`. The slide generator is
+    """A `create_subprocess_exec` raise (FileNotFoundError,
+    PermissionError, OSError — possible when the resolved path
+    becomes invalid between `shutil.which` and spawn) must NOT
+    propagate out of `_run_cli`. The slide generator is
     contractually best-effort across its 3 targets."""
     art = _make_artifacts(tmp_path, with_figure=False)
     cfg = _make_config(tmp_path, kinds=["slides"])

@@ -1,704 +1,571 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight — Automated research, end-to-end</title>
-  <meta name="description" content="From a one-sentence topic to a peer-reviewable paper. Frontier Insight plans, runs the experiment, writes the paper, gets a critique, and ships the PDF.">
-  <meta property="og:title" content="Frontier Insight">
-  <meta property="og:description" content="End-to-end automated research that produces real papers, with real experiments, citing real prior work.">
-  <meta property="og:type" content="website">
-  <style>
-    /* Self-contained, single-file deploy. No CDN, no external fonts.
-     * Design principles:
-     *  - System fonts (-apple-system / Inter / Segoe UI fallbacks).
-     *  - Restrained palette: one warm-blue accent + neutrals.
-     *  - Generous vertical rhythm; reading width ~720px max.
-     *  - Subtle gradients + a single hero visual built from inline SVG.
-     *  - Dark mode via prefers-color-scheme (no manual toggle on a
-     *    marketing page; visitors are passing through). */
-    :root {
-      --bg: #FAFAF7;
-      --bg-elev: #FFFFFF;
-      --bg-deep: #F1F2EE;
-      --border: #E5E5E0;
-      --border-strong: #D4D4CE;
-      --text: #181818;
-      --text-muted: #525252;
-      --text-subtle: #A3A3A3;
-      --accent: #2D5DAA;
-      --accent-soft: #E8EEF8;
-      --accent-strong: #1E3F73;
-      --highlight: #C97B3A;
-      --code-bg: #F4F4EE;
-      --radius: 10px;
-      --shadow-sm: 0 1px 2px rgba(24,24,24,0.04), 0 1px 1px rgba(24,24,24,0.06);
-      --shadow-lg: 0 12px 32px rgba(24,24,24,0.06), 0 4px 8px rgba(24,24,24,0.04);
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0E1116;
-        --bg-elev: #161B22;
-        --bg-deep: #0A0D11;
-        --border: #2A2F37;
-        --border-strong: #3A4049;
-        --text: #E8EDF2;
-        --text-muted: #9CA3AF;
-        --text-subtle: #6B7280;
-        --accent: #79A6EC;
-        --accent-soft: #1A2538;
-        --accent-strong: #B8CFF2;
-        --highlight: #E9A56C;
-        --code-bg: #1A1F26;
-        --shadow-sm: 0 1px 2px rgba(0,0,0,0.5), 0 1px 1px rgba(0,0,0,0.4);
-        --shadow-lg: 0 12px 32px rgba(0,0,0,0.5), 0 4px 8px rgba(0,0,0,0.3);
-      }
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 16px;
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      letter-spacing: -0.005em;
-    }
-    .wrap { max-width: 880px; margin: 0 auto; padding: 0 1.5rem; }
-
-    /* ───────── Nav ───────── */
-    nav.top {
-      display: flex; align-items: center; gap: 1rem;
-      padding: 1.25rem 0; max-width: 880px; margin: 0 auto;
-      padding-inline: 1.5rem;
-    }
-    .brand {
-      display: inline-flex; align-items: center; gap: 0.55rem;
-      font-weight: 600; font-size: 1.05rem; color: var(--text);
-      text-decoration: none; letter-spacing: -0.015em;
-    }
-    .brand svg { width: 28px; height: 28px; }
-    nav.top .right {
-      margin-left: auto; display: inline-flex; gap: 1rem;
-      font-size: 0.9rem;
-    }
-    nav.top .right a {
-      color: var(--text-muted); text-decoration: none;
-      transition: color 0.15s;
-    }
-    nav.top .right a:hover { color: var(--accent); }
-
-    /* ───────── Hero ───────── */
-    .hero {
-      padding: 4.5rem 1.5rem 3rem;
-      text-align: center;
-      position: relative;
-    }
-    .hero::before {
-      /* subtle decorative gradient behind hero */
-      content: "";
-      position: absolute; inset: 0;
-      background:
-        radial-gradient(ellipse 700px 360px at 50% 0%, var(--accent-soft) 0%, transparent 65%);
-      pointer-events: none;
-      z-index: 0;
-    }
-    .hero > * { position: relative; z-index: 1; }
-    .eyebrow {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      padding: 0.3rem 0.7rem;
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      font-size: 0.78rem;
-      font-weight: 500;
-      color: var(--text-muted);
-      letter-spacing: 0.02em;
-      box-shadow: var(--shadow-sm);
-      margin-bottom: 1.5rem;
-    }
-    .eyebrow .dot {
-      width: 7px; height: 7px; border-radius: 999px;
-      background: var(--highlight);
-      box-shadow: 0 0 0 3px rgba(201, 123, 58, 0.18);
-    }
-    h1.title {
-      font-size: clamp(2.2rem, 5.5vw, 3.2rem);
-      letter-spacing: -0.03em;
-      margin: 0 0 1rem;
-      line-height: 1.1;
-      font-weight: 700;
-    }
-    h1.title .accent { color: var(--accent); }
-    .tagline {
-      max-width: 600px; margin: 0 auto 2rem;
-      font-size: 1.13rem;
-      color: var(--text-muted);
-      line-height: 1.55;
-    }
-    .cta-row {
-      display: inline-flex; gap: 0.6rem; flex-wrap: wrap;
-      justify-content: center;
-    }
-    a.btn {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      padding: 0.7rem 1.2rem;
-      font-weight: 500;
-      font-size: 0.95rem;
-      border-radius: var(--radius);
-      text-decoration: none;
-      transition: all 0.15s;
-      border: 1px solid transparent;
-    }
-    a.btn.primary {
-      background: var(--accent); color: white;
-      box-shadow: var(--shadow-sm);
-    }
-    a.btn.primary:hover { background: var(--accent-strong); transform: translateY(-1px); }
-    a.btn.secondary {
-      background: var(--bg-elev); color: var(--text);
-      border-color: var(--border-strong);
-    }
-    a.btn.secondary:hover { border-color: var(--text-muted); }
-    a.btn .arrow { transition: transform 0.15s; }
-    a.btn:hover .arrow { transform: translateX(2px); }
-
-    /* ───────── Hero visual ───────── */
-    .hero-visual {
-      margin: 2.5rem auto 0; max-width: 720px;
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: calc(var(--radius) + 4px);
-      box-shadow: var(--shadow-lg);
-      overflow: hidden;
-      font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, monospace;
-      font-size: 0.78rem;
-      line-height: 1.55;
-      text-align: left;
-    }
-    .hero-visual header {
-      display: flex; align-items: center; gap: 0.4rem;
-      padding: 0.6rem 0.9rem;
-      background: var(--bg-deep);
-      border-bottom: 1px solid var(--border);
-      font-family: 'Inter', sans-serif;
-      font-size: 0.78rem;
-      color: var(--text-muted);
-    }
-    .hero-visual header .dots {
-      display: inline-flex; gap: 0.3rem; margin-right: 0.7rem;
-    }
-    .hero-visual header .dots span {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: var(--border-strong);
-    }
-    .hero-visual .term {
-      padding: 1rem 1.2rem 1.2rem;
-      color: var(--text);
-    }
-    .term .ln { display: block; }
-    .term .prompt { color: var(--accent); font-weight: 600; }
-    .term .ok { color: #2D7E3B; }
-    @media (prefers-color-scheme: dark) {
-      .term .ok { color: #71D88B; }
-    }
-    .term .dim { color: var(--text-subtle); }
-    .term .accent { color: var(--highlight); }
-
-    /* ───────── Sections ───────── */
-    section.block {
-      padding: 3.5rem 1.5rem;
-      border-top: 1px solid var(--border);
-    }
-    section.block:last-of-type { border-bottom: 1px solid var(--border); }
-    section.block .wrap > h2 {
-      font-size: 1.6rem;
-      letter-spacing: -0.022em;
-      margin: 0 0 0.4rem;
-      font-weight: 650;
-    }
-    section.block .wrap > p.lede {
-      color: var(--text-muted);
-      margin: 0 0 2rem;
-      font-size: 1.02rem;
-      max-width: 600px;
-    }
-
-    /* feature grid */
-    .features {
-      display: grid; gap: 1rem;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    }
-    .feature {
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.3rem;
-      transition: border-color 0.15s, transform 0.1s;
-    }
-    .feature:hover {
-      border-color: var(--accent);
-      transform: translateY(-2px);
-    }
-    .feature .ico {
-      width: 36px; height: 36px;
-      border-radius: 8px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      display: inline-flex; align-items: center; justify-content: center;
-      margin-bottom: 0.85rem;
-    }
-    .feature h3 {
-      margin: 0 0 0.35rem;
-      font-size: 1.02rem;
-      font-weight: 600;
-    }
-    .feature p {
-      margin: 0;
-      color: var(--text-muted);
-      font-size: 0.9rem;
-      line-height: 1.5;
-    }
-
-    /* comparison */
-    .compare {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-    }
-    @media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }
-    .compare .col {
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.3rem;
-    }
-    .compare .col.left { opacity: 0.75; }
-    .compare .col h3 {
-      margin: 0 0 0.8rem;
-      font-size: 1rem;
-      font-weight: 600;
-      display: flex; align-items: center; gap: 0.5rem;
-    }
-    .compare .col.left h3::before { content: "✕"; color: var(--text-subtle); }
-    .compare .col.right h3::before { content: "✓"; color: var(--accent); font-weight: 700; }
-    .compare ul {
-      margin: 0; padding-left: 1.2rem; color: var(--text-muted);
-      font-size: 0.92rem;
-    }
-    .compare li { margin: 0.4em 0; }
-
-    /* run-anywhere cards */
-    .surfaces {
-      display: grid; gap: 1rem;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    }
-    .surface {
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.3rem;
-      display: flex; flex-direction: column; gap: 0.5rem;
-    }
-    .surface .badge {
-      display: inline-flex; align-self: flex-start;
-      padding: 0.18rem 0.55rem;
-      background: var(--accent-soft);
-      color: var(--accent);
-      border-radius: 999px;
-      font-size: 0.7rem;
-      font-weight: 600;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-    }
-    .surface h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
-    .surface p { margin: 0; color: var(--text-muted); font-size: 0.9rem; }
-    .surface pre {
-      margin: 0.4rem 0 0;
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      padding: 0.65rem 0.85rem;
-      border-radius: 6px;
-      font-size: 0.78rem;
-      font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
-      overflow-x: auto;
-    }
-
-    /* provider table */
-    .provider-table {
-      background: var(--bg-elev);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      overflow: hidden;
-    }
-    .provider-table .row {
-      display: grid;
-      grid-template-columns: 1.2fr 1fr 1.5fr;
-      gap: 1rem;
-      padding: 1rem 1.2rem;
-      border-bottom: 1px solid var(--border);
-      align-items: start;
-    }
-    .provider-table .row:last-child { border-bottom: none; }
-    .provider-table .row.head {
-      background: var(--bg-deep);
-      font-size: 0.75rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-    }
-    .provider-table .row .name b {
-      display: block; font-weight: 600;
-    }
-    .provider-table .row .name code,
-    .provider-table .row .unit code {
-      display: inline-block;
-      background: var(--code-bg);
-      padding: 0.1em 0.4em;
-      border-radius: 4px;
-      font-size: 0.78rem;
-      font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
-      color: var(--text);
-    }
-    .provider-table .row .unit b { color: var(--accent); }
-    .provider-table .row .use {
-      color: var(--text-muted);
-      font-size: 0.9rem;
-    }
-    @media (max-width: 640px) {
-      .provider-table .row {
-        grid-template-columns: 1fr;
-        gap: 0.3rem;
-      }
-      .provider-table .row.head { display: none; }
-    }
-
-    /* artifacts list */
-    .artifact-list {
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1rem 1.3rem;
-      font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
-      font-size: 0.82rem;
-      line-height: 1.7;
-      color: var(--text);
-    }
-    .artifact-list .path { color: var(--text); font-weight: 500; }
-    .artifact-list .note { color: var(--text-subtle); }
-
-    /* final CTA */
-    .final-cta {
-      padding: 4rem 1.5rem 3rem;
-      text-align: center;
-      background: linear-gradient(180deg, transparent 0%, var(--accent-soft) 100%);
-    }
-    .final-cta h2 {
-      font-size: 1.7rem; margin: 0 0 0.5rem;
-      letter-spacing: -0.02em;
-    }
-    .final-cta p {
-      color: var(--text-muted); margin: 0 0 1.5rem;
-    }
-
-    /* footer */
-    footer {
-      padding: 2rem 1.5rem;
-      border-top: 1px solid var(--border);
-      color: var(--text-subtle);
-      font-size: 0.85rem;
-      text-align: center;
-    }
-    footer a { color: var(--text-muted); text-decoration: none; }
-    footer a:hover { color: var(--accent); text-decoration: underline; }
-  </style>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Frontier Insight — Research, automated.</title>
+<meta name="description" content="From a sentence to a peer-reviewable paper. Frontier Insight plans the experiment, retrieves prior work, runs the code, writes the IMRAD draft, and ships the PDF. Open source, Apache 2.0."/>
+<meta property="og:title" content="Frontier Insight — Research, automated."/>
+<meta property="og:description" content="End-to-end automated research that produces real papers, with real experiments, citing real prior work."/>
+<meta property="og:type" content="website"/>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' fill='none'><rect width='512' height='512' rx='96' fill='%2313121b'/><g stroke='url(%23g)' stroke-width='40' stroke-linecap='round' stroke-linejoin='round'><path d='M256 100V412' stroke-width='48'/><path d='M256 160L320 160L350 130L400 180'/><path d='M256 260H360'/><path d='M140 180C180 200 220 240 256 260' opacity='0.3' stroke-width='32'/><path d='M140 340C180 320 220 280 256 260' opacity='0.3' stroke-width='32'/><circle cx='256' cy='260' r='12' fill='white' stroke='none'/></g><defs><linearGradient id='g' x1='256' y1='100' x2='256' y2='412' gradientUnits='userSpaceOnUse'><stop stop-color='%234f46e5'/><stop offset='1' stop-color='%2306b6d4'/></linearGradient></defs></svg>"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "surface-obsidian": "#0a0a0a",
+          "surface-charcoal": "#171717",
+          "surface-dim": "#131313",
+          "surface-container": "#201f1f",
+          "surface-container-low": "#1c1b1b",
+          "surface-container-lowest": "#0e0e0e",
+          "surface-container-high": "#2a2a2a",
+          "surface-container-highest": "#353534",
+          "surface-bright": "#3a3939",
+          "on-surface": "#e5e2e1",
+          "on-surface-variant": "#c7c4d8",
+          "outline": "#918fa1",
+          "outline-variant": "#464555",
+          "border-subtle": "rgba(255, 255, 255, 0.08)",
+          "glass-bg": "rgba(10, 10, 10, 0.7)",
+          "primary": "#c3c0ff",
+          "primary-container": "#4f46e5",
+          "secondary": "#4cd7f6",
+          "indigo-accent": "#4f46e5",
+          "cyan-accent": "#06b6d4",
+          "electric-lime": "#E4F222",
+        },
+        fontFamily: {
+          // Display — Fraunces (variable serif, opsz 9..144, wght 400..900).
+          // Editorial gravitas for a research tool; falls back to Inter while loading.
+          display: ["Fraunces", "Inter", "system-ui", "serif"],
+          body:    ["Geist", "Inter", "system-ui", "sans-serif"],
+          mono:    ["JetBrains Mono", "ui-monospace", "monospace"],
+        },
+        fontSize: {
+          // Fraunces tops out at 900; tighten tracking for big display sizes.
+          "display-xl-mobile": ["56px", { lineHeight: "1.0",  letterSpacing: "-0.035em", fontWeight: "700" }],
+          "display-xl":        ["104px",{ lineHeight: "0.95", letterSpacing: "-0.045em", fontWeight: "700" }],
+          "headline-lg":       ["48px", { lineHeight: "1.1",  letterSpacing: "-0.025em", fontWeight: "700" }],
+          "headline-md":       ["28px", { lineHeight: "1.25", letterSpacing: "-0.01em",  fontWeight: "600" }],
+          "body-lg":           ["18px", { lineHeight: "1.6",  fontWeight: "400" }],
+          "body-md":           ["16px", { lineHeight: "1.6",  fontWeight: "400" }],
+          "code-sm":           ["13px", { lineHeight: "1.5",  fontWeight: "400" }],
+          "label-caps":        ["12px", { lineHeight: "1",    letterSpacing: "0.14em", fontWeight: "600" }],
+        },
+        borderRadius: { lg: "0.5rem", xl: "0.75rem", "2xl": "1rem" },
+        backgroundImage: {
+          "dot-grid": "radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px)",
+        },
+        backgroundSize: { dots: "24px 24px" },
+      },
+    },
+  };
+</script>
+<style>
+  body { font-feature-settings: "ss01", "cv11"; }
+  .glow-text { text-shadow: 0 0 64px rgba(79, 70, 229, 0.45); }
+  .btn-gradient {
+    background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2), 0 8px 32px -8px rgba(79, 70, 229, 0.6);
+  }
+  .btn-gradient:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3), 0 12px 40px -8px rgba(79, 70, 229, 0.8); }
+  .text-gradient-cool {
+    background: linear-gradient(90deg, #c3c0ff 0%, #4cd7f6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .text-fade {
+    background: linear-gradient(180deg, #e5e2e1 0%, #918fa1 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .card-border-gradient { position: relative; background: #131313; border-radius: 0.75rem; }
+  .card-border-gradient::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    background: linear-gradient(135deg, rgba(79, 70, 229, 0.6), rgba(6, 182, 212, 0.4), transparent 65%);
+    border-radius: 0.75rem;
+    z-index: -1;
+  }
+  .card-border-gradient > * { position: relative; }
+  .glass {
+    background: rgba(10, 10, 10, 0.72);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+  }
+  .terminal-line { opacity: 0; animation: term-in .35s ease-out forwards; }
+  @keyframes term-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  .pulse-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 999px;
+    background: #E4F222;
+    box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.7);
+    animation: pulse 1.6s ease-out infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.7); }
+    70%  { box-shadow: 0 0 0 10px rgba(228, 242, 34, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0); }
+  }
+  .hero-glow {
+    position: absolute; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(700px 360px at 50% -10%, rgba(79, 70, 229, 0.30) 0%, transparent 60%),
+      radial-gradient(500px 280px at 80% 20%, rgba(6, 182, 212, 0.18) 0%, transparent 65%),
+      radial-gradient(400px 240px at 20% 30%, rgba(228, 242, 34, 0.08) 0%, transparent 60%);
+  }
+  .node-chip { transition: transform .2s, box-shadow .2s, border-color .2s, color .2s; }
+  .node-chip:hover {
+    transform: translateY(-2px);
+    border-color: rgba(76, 215, 246, 0.6);
+    color: #4cd7f6;
+    box-shadow: 0 8px 24px -10px rgba(6, 182, 212, 0.45);
+  }
+</style>
 </head>
-<body>
-  <!-- ───────── Top nav ───────── -->
-  <nav class="top">
-    <a class="brand" href="#">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-label="FI">
-        <rect width="128" height="128" rx="20" fill="#0B1729"/>
-        <polygon points="64,64 58,70 33,95 70,58" fill="#475569"/>
-        <polygon points="64,64 58,70 95,33 70,58" fill="#22D3EE"/>
-        <polyline points="95,33 105,38 112,22 120,28" stroke="#22D3EE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        <circle cx="64" cy="64" r="5" fill="#F8FAFC"/>
+<body class="bg-surface-obsidian text-on-surface bg-dot-grid bg-dots min-h-screen font-body selection:bg-indigo-accent selection:text-white antialiased">
+
+<!-- ───────────────── Top Nav (glass) ───────────────── -->
+<nav class="glass sticky top-0 z-50 border-b border-border-subtle">
+  <div class="flex justify-between items-center w-full px-6 md:px-10 max-w-[1440px] mx-auto h-16">
+    <div class="flex items-center gap-3">
+      <svg viewBox="0 0 512 512" class="w-9 h-9" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="none">
+        <rect width="512" height="512" rx="96" fill="#13121b"/>
+        <g stroke="url(#logoG)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M256 100V412" stroke-width="48"/>
+          <path d="M256 160L320 160L350 130L400 180"/>
+          <path d="M256 260H360"/>
+          <path d="M140 180C180 200 220 240 256 260" opacity="0.3" stroke-width="32"/>
+          <path d="M140 340C180 320 220 280 256 260" opacity="0.3" stroke-width="32"/>
+          <circle cx="256" cy="260" r="12" fill="white" stroke="none"/>
+        </g>
+        <defs>
+          <linearGradient id="logoG" x1="256" y1="100" x2="256" y2="412" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#4f46e5"/>
+            <stop offset="1" stop-color="#06b6d4"/>
+          </linearGradient>
+        </defs>
       </svg>
-      Frontier Insight
+      <span class="font-display font-extrabold text-headline-md tracking-tight">Frontier Insight</span>
+      <span class="bg-surface-container-high text-electric-lime font-mono text-label-caps px-2 py-1 rounded border border-border-subtle">BETA</span>
+    </div>
+    <div class="hidden md:flex items-center gap-8">
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#pipeline">Pipeline</a>
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#features">Features</a>
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#providers">Providers</a>
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="https://github.com/jyunming/FrontierInsight#readme">Docs</a>
+    </div>
+    <div class="flex items-center gap-3">
+      <a class="hidden md:inline-flex items-center gap-2 text-on-surface-variant hover:text-primary font-medium text-body-md" href="https://github.com/jyunming/FrontierInsight">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.63 22.41c.58.1.79-.25.79-.56v-2c-3.22.7-3.9-1.39-3.9-1.39-.53-1.35-1.3-1.71-1.3-1.71-1.06-.72.08-.7.08-.7 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.75.41-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.74 0-1.27.46-2.31 1.2-3.12-.12-.3-.52-1.49.11-3.1 0 0 .98-.31 3.2 1.19a11.04 11.04 0 0 1 5.83 0c2.22-1.5 3.2-1.19 3.2-1.19.63 1.61.23 2.8.11 3.1.75.81 1.2 1.85 1.2 3.12 0 4.46-2.71 5.45-5.29 5.74.42.36.79 1.06.79 2.15v3.19c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>
+        Star on GitHub
+      </a>
+      <a class="btn-gradient text-white font-semibold text-body-md px-5 py-2 rounded-lg" href="https://github.com/jyunming/FrontierInsight">Get started</a>
+    </div>
+  </div>
+</nav>
+
+<main class="max-w-[1440px] mx-auto overflow-hidden relative">
+
+<!-- ───────────────── Hero ───────────────── -->
+<section class="relative pt-28 md:pt-36 pb-20 md:pb-24 px-6 md:px-10 flex flex-col items-center text-center">
+  <div class="hero-glow"></div>
+  <span class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-on-surface-variant relative z-10">
+    <span class="pulse-dot"></span>
+    OPEN SOURCE · LANGGRAPH · APACHE 2.0
+  </span>
+  <h1 class="font-display text-display-xl-mobile md:text-display-xl glow-text max-w-5xl mb-6 relative z-10">
+    Research, <span class="text-gradient-cool">automated.</span>
+  </h1>
+  <p class="font-body text-body-lg md:text-xl text-on-surface-variant max-w-2xl mb-12 relative z-10">
+    From one sentence to a peer-reviewable paper. Frontier Insight plans the experiment, retrieves prior work, runs the code, writes the IMRAD draft, and survives adversarial review &mdash; producing a PDF, the figures, and the experiment.py that made them.
+  </p>
+  <div class="flex flex-col sm:flex-row gap-4 mb-20 relative z-10">
+    <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
+      Get started <span class="material-symbols-outlined">arrow_forward</span>
     </a>
-    <div class="right">
-      <a href="#how-it-works">How it works</a>
-      <a href="#run">Run it</a>
-      <a href="#pricing">Providers</a>
-      <a href="https://github.com/jyunming/FrontierInsight">GitHub →</a>
-    </div>
-  </nav>
+    <a class="bg-surface-charcoal border border-border-subtle text-on-surface hover:border-outline hover:text-white transition-all font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="#pipeline">
+      <span class="material-symbols-outlined">code</span> See the pipeline
+    </a>
+  </div>
 
-  <!-- ───────── Hero ───────── -->
-  <section class="hero">
-    <span class="eyebrow"><span class="dot"></span>Open source · Self-hosted · LangGraph + Python</span>
-    <h1 class="title">Automated research, <span class="accent">end-to-end</span>.</h1>
-    <p class="tagline">
-      Frontier Insight turns a one-sentence topic into a peer-reviewable paper.
-      It plans, runs a real experiment in sandboxed Python, retrieves prior work,
-      writes the paper, runs adversarial review, and ships the PDF.
-    </p>
-    <div class="cta-row">
-      <a class="btn primary" href="https://github.com/jyunming/FrontierInsight">
-        Get started on GitHub
-        <span class="arrow">→</span>
-      </a>
-      <a class="btn secondary" href="#how-it-works">How it works</a>
+  <!-- Hero terminal -->
+  <div class="w-full max-w-5xl rounded-2xl border border-border-subtle overflow-hidden shadow-2xl relative z-10 bg-surface-dim text-left">
+    <div class="h-9 bg-surface-container-high border-b border-border-subtle flex items-center px-4 gap-2">
+      <div class="w-3 h-3 rounded-full bg-[#ff5f57]/70"></div>
+      <div class="w-3 h-3 rounded-full bg-[#febc2e]/70"></div>
+      <div class="w-3 h-3 rounded-full bg-[#28c840]/70"></div>
+      <span class="ml-3 font-mono text-xs text-on-surface-variant">~/research/frontier_insight</span>
     </div>
-
-    <!-- visual: terminal-style snippet showing a real quest run -->
-    <div class="hero-visual" aria-hidden="true">
-      <header>
-        <span class="dots"><span></span><span></span><span></span></span>
-        <code>~/research</code>
-      </header>
-      <div class="term">
-        <span class="ln"><span class="prompt">$</span> python launch.py --new</span>
-        <span class="ln"><span class="dim"># 14 questions · provider · clarify slots · &lt;30 s</span></span>
-        <span class="ln">&nbsp;</span>
-        <span class="ln"><span class="dim">[FI] start quest_id=1778952003-coloumb-blockade provider=gemini_cli</span></span>
-        <span class="ln"><span class="dim">[clarify] mode=auto · 8 slots resolved · pinned 7 from interview</span></span>
-        <span class="ln"><span class="dim">[ideate]   ✓  chosen_idea=tournament_winner score=0.81</span></span>
-        <span class="ln"><span class="dim">[literature] retrieved 17 docs · 5 from Axon · 12 from arXiv</span></span>
-        <span class="ln"><span class="dim">[design] → implement → execute</span></span>
-        <span class="ln"><span class="dim">[execute] subprocess venv 🟢 figures: 4 · result_json: 1.2KB</span></span>
-        <span class="ln"><span class="dim">[analyze] → cross_check → write</span></span>
-        <span class="ln"><span class="dim">[review] verdict=<span class="accent">accept</span> score=4 ⮕ paper.pdf <span class="ok">ready</span></span></span>
-        <span class="ln">&nbsp;</span>
-        <span class="ln">paper/paper.md · paper/paper.pdf · figures/ · code/experiment.py</span>
+    <div class="p-5 md:p-7 font-mono text-code-sm leading-relaxed">
+      <div class="terminal-line" style="animation-delay:0ms">
+        <span class="text-cyan-accent font-semibold">$</span>
+        <span class="text-on-surface"> python launch.py --new</span>
       </div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:80ms"># 14 questions · provider · clarify slots · &lt; 30s</div>
+      <div class="terminal-line text-on-surface-variant mb-3" style="animation-delay:160ms">&nbsp;</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:240ms">[FI] start quest_id=<span class="text-primary">1778952003-coulomb-blockade</span> provider=<span class="text-cyan-accent">gemini_cli</span></div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:320ms">[clarify] auto · 8 slots resolved · pinned 7 from interview</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:400ms">[ideate]    <span class="text-electric-lime">✓</span> chosen_idea=tournament_winner score=<span class="text-electric-lime">0.81</span></div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:480ms">[literature] retrieved 17 docs · 5 from Axon · 12 from arXiv</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:560ms">[design] → [implement] → [execute]</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:640ms">[execute]   <span class="text-electric-lime">●</span> subprocess venv · figures: 4 · result_json: 1.2 KB</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:720ms">[analyze]   → [cross_check] → [write]</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:800ms">[review]    verdict=<span class="text-electric-lime font-semibold">accept</span> score=<span class="text-electric-lime">4</span></div>
+      <div class="terminal-line text-on-surface-variant mt-3" style="animation-delay:880ms">⮕ <span class="text-primary">paper/paper.pdf</span> <span class="text-electric-lime">ready</span> &nbsp;|&nbsp; figures/ · code/experiment.py · .fi/cost.jsonl</div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <!-- ───────── How it works ───────── -->
-  <section class="block" id="how-it-works">
-    <div class="wrap">
-      <h2>How it works</h2>
-      <p class="lede">
-        13 LangGraph nodes orchestrate a research pipeline. Each node is an LLM
-        call or a real Python subprocess. The graph is checkpointed to SQLite,
-        so a crash mid-quest doesn't lose work — <code>--resume</code> picks up
-        where it died.
+<!-- ───────────────── Provider strip ───────────────── -->
+<section class="py-10 border-y border-border-subtle/40 bg-surface-container-lowest/40 mb-24 md:mb-32">
+  <div class="px-6 md:px-10 max-w-5xl mx-auto">
+    <p class="text-center font-mono text-label-caps text-on-surface-variant/60 mb-6">TALKS TO EVERY FRONTIER MODEL</p>
+    <div class="flex flex-wrap justify-center items-center gap-8 md:gap-14 opacity-70">
+      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Anthropic</span>
+      <span class="font-display font-bold text-lg md:text-xl tracking-tight">OpenAI</span>
+      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Google&nbsp;Gemini</span>
+      <span class="font-display font-bold text-lg md:text-xl tracking-tight">GitHub&nbsp;Copilot</span>
+      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Codex</span>
+      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Ollama</span>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────── Interactive pipeline ───────────────── -->
+<section id="pipeline" class="px-6 md:px-10 mb-24 md:mb-32">
+  <div class="max-w-6xl mx-auto">
+    <div class="text-center mb-12">
+      <span class="font-mono text-label-caps text-cyan-accent">THE PIPELINE</span>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">14 nodes. One paper.</h2>
+      <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
+        Each node is a focused LLM call or a real Python subprocess. The graph checkpoints to SQLite, so a crash mid-quest doesn't lose work &mdash; <code class="font-mono text-cyan-accent">--resume</code> picks up where it died.
       </p>
-      <div class="features">
-        <div class="feature">
-          <div class="ico">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-          </div>
-          <h3>13-node pipeline</h3>
-          <p>clarify → ideate → literature → design → implement → execute → analyze → cross_check → write → review (loop) → paper.pdf.</p>
-        </div>
-        <div class="feature">
-          <div class="ico">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
-          </div>
-          <h3>Runs real Python</h3>
-          <p>Experiment node spawns a sandboxed venv subprocess. Figures come from real data, not LLM hallucinations.</p>
-        </div>
-        <div class="feature">
-          <div class="ico">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
-          </div>
-          <h3>Literature grounding</h3>
-          <p>Retrieves from arXiv / OpenAlex / Crossref / Axon. Cites by content, not by guessed DOI.</p>
-        </div>
-        <div class="feature">
-          <div class="ico">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-          </div>
-          <h3>Adversarial review</h3>
-          <p>Multi-persona reviewer panel + a separate critique pass that asks "what did the first reviewer miss?"</p>
-        </div>
-        <div class="feature">
-          <div class="ico">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-          </div>
-          <h3>Resumable + reproducible</h3>
-          <p>Every quest checkpoints to SQLite. The bundled <code>experiment.py</code> + manifest make the result a complete deliverable.</p>
-        </div>
-        <div class="feature">
-          <div class="ico">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-          </div>
-          <h3>Cost-aware</h3>
-          <p>Per-call cost logged to <code>.fi/cost.jsonl</code>. Pick per-call (Copilot) or per-token (OpenAI / Claude / Gemini) — UI shows the running total.</p>
+    </div>
+    <div class="flex flex-wrap justify-center gap-2 md:gap-3">
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">clarify</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">ideate</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">literature</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">design</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">implement</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-electric-lime/40 text-electric-lime">execute&nbsp;<span class="opacity-60">▶</span></span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">analyze</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">cross_check</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">write</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">review</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">critique</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">data_load</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-cyan-accent/40 text-cyan-accent">paper.pdf</span>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────── Features ───────────────── -->
+<section id="features" class="px-6 md:px-10 space-y-24 md:space-y-32 mb-24 md:mb-32">
+
+  <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
+    <div class="space-y-5">
+      <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
+        <span class="material-symbols-outlined text-[14px]">terminal</span> SANDBOXED PYTHON
+      </span>
+      <h3 class="font-display text-headline-lg text-on-surface">Runs your experiment. Doesn't hallucinate it.</h3>
+      <p class="text-body-lg text-on-surface-variant">
+        The <code class="font-mono text-cyan-accent">execute</code> node spawns a sandboxed venv subprocess. Figures are rendered from real numbers, not Markdown image links to imaginary files. The bundled <code class="font-mono text-cyan-accent">code/experiment.py</code> reproduces them on any machine with the requirements.
+      </p>
+      <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Subprocess isolation with a per-quest venv.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Auto-dataset adapters for arXiv, OpenAlex, S2, Crossref.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Re-execute lets you tweak <code class="font-mono">experiment.py</code> and re-run.</li>
+      </ul>
+    </div>
+    <div class="card-border-gradient p-6 md:p-7 min-h-[360px] flex flex-col overflow-hidden">
+      <div class="font-mono text-code-sm flex flex-col h-full">
+        <div class="text-on-surface-variant mb-3"># execute node — figures land on disk</div>
+        <div class="text-cyan-accent mb-2">$ python -m core.engine execute</div>
+        <div class="text-on-surface-variant mb-1">[execute] spawn pid=<span class="text-primary">3174</span> · venv=<span class="text-primary">.venv-quest</span></div>
+        <div class="text-on-surface-variant mb-1">[execute] running … <span class="text-cyan-accent">39.2s</span></div>
+        <div class="text-electric-lime mb-3">[execute] ● done · exit_code=0</div>
+        <div class="bg-surface-container-high border border-border-subtle p-4 rounded mt-auto">
+          <div class="text-electric-lime mb-2">figures/ (4)</div>
+          <div class="text-on-surface-variant">├─ fig1_iv_curve.png<br/>├─ fig2_coulomb_diamond.png<br/>├─ fig3_temperature_sweep.png<br/>└─ fig4_residuals.png</div>
         </div>
       </div>
     </div>
-  </section>
+  </div>
 
-  <!-- ───────── Why FI vs "just ask an LLM" ───────── -->
-  <section class="block">
-    <div class="wrap">
-      <h2>Why not just ask an LLM directly?</h2>
-      <p class="lede">An LLM with no plan, no experiment, and no review is a guess machine. FI is a research machine.</p>
-      <div class="compare">
-        <div class="col left">
-          <h3>Asking an LLM directly</h3>
-          <ul>
-            <li>One call. The model hallucinates.</li>
-            <li>No experiment — pure prose.</li>
-            <li>References are guessed or non-existent.</li>
-            <li>No review. No reproducibility.</li>
-            <li>Output is a chat reply.</li>
-          </ul>
+  <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
+    <div class="card-border-gradient order-2 md:order-1 p-6 md:p-7 min-h-[360px] flex flex-col">
+      <div class="font-mono text-code-sm flex flex-col gap-3 h-full">
+        <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
+          <div class="text-cyan-accent mb-1">@reviewer_1 (skeptic)</div>
+          <div class="text-on-surface-variant">"Sample size N=120 is borderline. Fisher's exact would be more honest than χ²."</div>
         </div>
-        <div class="col right">
-          <h3>Frontier Insight</h3>
-          <ul>
-            <li>13 nodes, each with focused prompt + grounded context.</li>
-            <li>Runs real Python in a sandboxed venv.</li>
-            <li>Retrieves from arXiv / OpenAlex / Crossref / Axon. Cites by content.</li>
-            <li>Multi-persona reviewer panel + adversarial critique.</li>
-            <li>Output is a quest directory with paper, code, figures, manifest.</li>
-          </ul>
+        <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
+          <div class="text-primary mb-1">@reviewer_2 (domain expert)</div>
+          <div class="text-on-surface-variant">"Figure 2 contradicts Eq. 4. Either the model is wrong or the units."</div>
+        </div>
+        <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
+          <div class="text-electric-lime mb-1">@moderator</div>
+          <div class="text-on-surface-variant">verdict: <span class="text-electric-lime font-semibold">revise</span> · iteration 2 of 3</div>
         </div>
       </div>
     </div>
-  </section>
+    <div class="order-1 md:order-2 space-y-5">
+      <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
+        <span class="material-symbols-outlined text-[14px]">forum</span> MULTI-PERSONA REVIEW
+      </span>
+      <h3 class="font-display text-headline-lg text-on-surface">Adversarial review, baked in.</h3>
+      <p class="text-body-lg text-on-surface-variant">
+        Three reviewer personas plus a separate critique pass that asks <i>"what did the first reviewer miss?"</i> Iterates until accept or N=3. Every verdict + score lands in the quest summary so you can grep across runs.
+      </p>
+      <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Configurable reviewer panel (skeptic / domain / methods).</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Score + verdict written to <code class="font-mono">frontier_insight_summary.json</code>.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Iterations diffable via <code class="font-mono">/compare</code>.</li>
+      </ul>
+    </div>
+  </div>
 
-  <!-- ───────── Three ways to run it ───────── -->
-  <section class="block" id="run">
-    <div class="wrap">
-      <h2>Run it where you already are</h2>
-      <p class="lede">Same pipeline, three frontends. The 14-question interview is identical across all three.</p>
-      <div class="surfaces">
-        <div class="surface">
-          <span class="badge">Terminal</span>
-          <h3>Headless CLI</h3>
-          <p>For CI, remote shells, overnight fleets.</p>
-          <pre>python launch.py --new
+  <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
+    <div class="space-y-5">
+      <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
+        <span class="material-symbols-outlined text-[14px]">save</span> CHECKPOINTED STATE
+      </span>
+      <h3 class="font-display text-headline-lg text-on-surface">Crashes don't cost you 40 minutes.</h3>
+      <p class="text-body-lg text-on-surface-variant">
+        Every node checkpoints to SQLite via LangGraph. Kill the process at <code class="font-mono text-cyan-accent">analyze</code>, restart with <code class="font-mono text-cyan-accent">--resume &lt;quest_id&gt;</code>, and you keep all the literature retrieval, the experiment output, and the figures. Reproducibility comes free.
+      </p>
+      <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Per-quest <code class="font-mono">.fi/state.sqlite</code>.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Soft-invalidate to re-run downstream nodes.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Cost ledger at <code class="font-mono">.fi/cost.jsonl</code> per call.</li>
+      </ul>
+    </div>
+    <div class="card-border-gradient p-6 md:p-7 min-h-[360px] flex flex-col">
+      <div class="font-mono text-code-sm flex flex-col h-full">
+        <div class="text-on-surface-variant mb-3"># outputs/&lt;quest_id&gt;/.fi/</div>
+        <div class="space-y-1">
+          <div><span class="text-cyan-accent">state.sqlite</span><span class="text-on-surface-variant">    &mdash; LangGraph checkpoint</span></div>
+          <div><span class="text-cyan-accent">cost.jsonl</span><span class="text-on-surface-variant">      &mdash; per-call usage + USD</span></div>
+          <div><span class="text-cyan-accent">run.log</span><span class="text-on-surface-variant">         &mdash; full stdout</span></div>
+          <div><span class="text-cyan-accent">labels.json</span><span class="text-on-surface-variant">     &mdash; user tags</span></div>
+          <div><span class="text-cyan-accent">interview.json</span><span class="text-on-surface-variant">  &mdash; the 14 answers</span></div>
+        </div>
+        <div class="mt-auto pt-4 border-t border-border-subtle/50">
+          <div class="text-electric-lime">$ python launch.py --resume 1778952003-coulomb</div>
+          <div class="text-on-surface-variant">[FI] resuming from node=<span class="text-primary">cross_check</span> · skipped 8 prior nodes</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────── Three surfaces ───────────────── -->
+<section class="px-6 md:px-10 mb-24 md:mb-32">
+  <div class="max-w-6xl mx-auto">
+    <div class="text-center mb-12">
+      <span class="font-mono text-label-caps text-cyan-accent">RUN IT WHERE YOU ARE</span>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Same pipeline. Three surfaces.</h2>
+    </div>
+    <div class="grid md:grid-cols-3 gap-5">
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="material-symbols-outlined text-cyan-accent">terminal</span>
+          <h4 class="font-display font-bold text-lg">Headless CLI</h4>
+        </div>
+        <p class="text-on-surface-variant text-body-md mb-4">For CI, remote shells, overnight fleets.</p>
+        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py --new
 python launch.py --proposal "..."
-python launch.py --fleet a.yaml b.yaml</pre>
+python launch.py --fleet a.yaml b.yaml</code></pre>
+      </div>
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="material-symbols-outlined text-cyan-accent">code_blocks</span>
+          <h4 class="font-display font-bold text-lg">VSCode Copilot</h4>
         </div>
-        <div class="surface">
-          <span class="badge">VSCode</span>
-          <h3>Copilot Chat</h3>
-          <p>Sanctioned <code>vscode.lm</code> bridge — your calls show up in your normal Copilot usage.</p>
-          <pre>@fi /new
+        <p class="text-on-surface-variant text-body-md mb-4">Sanctioned <code class="font-mono text-xs">vscode.lm</code> bridge &mdash; counts as your normal Copilot usage.</p>
+        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>@fi /new
 @fi /update &lt;quest_id&gt;
-@fi /proposal Compare RK4 vs Verlet</pre>
+@fi /proposal Compare RK4 vs Verlet</code></pre>
+      </div>
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="material-symbols-outlined text-cyan-accent">stream</span>
+          <h4 class="font-display font-bold text-lg">Local web UI</h4>
         </div>
-        <div class="surface">
-          <span class="badge">Browser</span>
-          <h3>Local web UI</h3>
-          <p>Dashboard · live quest detail · tools page for every CLI feature.</p>
-          <pre>python launch.py --serve
-# http://127.0.0.1:8765/</pre>
-        </div>
+        <p class="text-on-surface-variant text-body-md mb-4">Dashboard, live quest detail, tools page for every CLI feature.</p>
+        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py --serve
+# → http://127.0.0.1:8765/</code></pre>
       </div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <!-- ───────── Provider pricing ───────── -->
-  <section class="block" id="pricing">
-    <div class="wrap">
-      <h2>Choose your provider</h2>
-      <p class="lede">
-        Two billing models. Pick wisely — the wrong choice can be a 5–10× cost
-        difference. The web UI's per-quest cost chart works for token-priced
-        providers; Copilot is per-call so its budget is opaque to FI.
+<!-- ───────────────── Provider pricing ───────────────── -->
+<section id="providers" class="px-6 md:px-10 mb-24 md:mb-32">
+  <div class="max-w-6xl mx-auto">
+    <div class="text-center mb-12">
+      <span class="font-mono text-label-caps text-cyan-accent">COST-AWARE BY DEFAULT</span>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Pay per call, per token, or zero.</h2>
+      <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
+        Two billing models. The wrong pick can be a 5&ndash;10&times; cost difference on a long quest. Pricing is tracked per call in <code class="font-mono text-cyan-accent">.fi/cost.jsonl</code>.
       </p>
-      <div class="provider-table">
-        <div class="row head">
-          <div>Provider</div>
-          <div>Unit billed</div>
-          <div>Best for</div>
+    </div>
+    <div class="rounded-2xl border border-border-subtle overflow-hidden bg-surface-container-lowest/60">
+      <div class="grid grid-cols-12 gap-4 px-5 py-3 border-b border-border-subtle bg-surface-container/40 font-mono text-label-caps text-on-surface-variant">
+        <div class="col-span-4">PROVIDER</div>
+        <div class="col-span-3">UNIT BILLED</div>
+        <div class="col-span-5">BEST FOR</div>
+      </div>
+      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+        <div class="col-span-12 md:col-span-4">
+          <div class="font-display font-bold text-lg mb-1">GitHub Copilot</div>
+          <code class="font-mono text-xs text-on-surface-variant">vscode_extension · copilot_cli</code>
         </div>
-        <div class="row">
-          <div class="name">
-            <b>GitHub Copilot</b>
-            <code>vscode_extension</code> · <code>copilot_cli</code>
-          </div>
-          <div class="unit"><b>Premium request</b><br><small>1 call = 1 unit</small></div>
-          <div class="use">Bursty heavy quests. Flat-rate per-call wins when prompts are large.</div>
+        <div class="col-span-6 md:col-span-3">
+          <span class="font-display font-bold text-electric-lime">Premium request</span>
+          <div class="font-mono text-xs text-on-surface-variant mt-1">1 call = 1 unit</div>
         </div>
-        <div class="row">
-          <div class="name">
-            <b>OpenAI / Codex</b>
-            <code>openai</code> · <code>codex</code> · <code>codex_cli</code>
-          </div>
-          <div class="unit"><b>Per-token</b><br><small>prompt + completion</small></div>
-          <div class="use">Long-running automations. Skinny prompts win.</div>
+        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Bursty heavy quests. Flat-rate per-call wins when prompts are large.</div>
+      </div>
+      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+        <div class="col-span-12 md:col-span-4">
+          <div class="font-display font-bold text-lg mb-1">OpenAI / Codex</div>
+          <code class="font-mono text-xs text-on-surface-variant">openai · codex · codex_cli</code>
         </div>
-        <div class="row">
-          <div class="name">
-            <b>Claude</b>
-            <code>claude_cli</code>
-          </div>
-          <div class="unit"><b>Per-token</b></div>
-          <div class="use">Sonnet is the workhorse. Reserve Opus for <code>write</code> + <code>review</code> via <code>node_models</code>.</div>
+        <div class="col-span-6 md:col-span-3">
+          <span class="font-display font-bold text-cyan-accent">Per-token</span>
+          <div class="font-mono text-xs text-on-surface-variant mt-1">prompt + completion</div>
         </div>
-        <div class="row">
-          <div class="name">
-            <b>Gemini</b>
-            <code>gemini_cli</code>
-          </div>
-          <div class="unit"><b>Per-token</b></div>
-          <div class="use">Cheapest cloud option for long-context tasks.</div>
+        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Long-running automations. Wins when prompts stay lean.</div>
+      </div>
+      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+        <div class="col-span-12 md:col-span-4">
+          <div class="font-display font-bold text-lg mb-1">Claude</div>
+          <code class="font-mono text-xs text-on-surface-variant">claude_cli</code>
         </div>
-        <div class="row">
-          <div class="name">
-            <b>Ollama</b>
-            <code>ollama</code>
-          </div>
-          <div class="unit"><b>Free</b><br><small>local</small></div>
-          <div class="use">High-volume cheap nodes; airgapped runs.</div>
+        <div class="col-span-6 md:col-span-3">
+          <span class="font-display font-bold text-cyan-accent">Per-token</span>
         </div>
+        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Sonnet is the workhorse. Reserve Opus for <code class="font-mono">write</code> + <code class="font-mono">review</code> via <code class="font-mono">node_models</code>.</div>
+      </div>
+      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+        <div class="col-span-12 md:col-span-4">
+          <div class="font-display font-bold text-lg mb-1">Gemini</div>
+          <code class="font-mono text-xs text-on-surface-variant">gemini_cli</code>
+        </div>
+        <div class="col-span-6 md:col-span-3">
+          <span class="font-display font-bold text-cyan-accent">Per-token</span>
+        </div>
+        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Cheapest cloud option for long-context tasks.</div>
+      </div>
+      <div class="grid grid-cols-12 gap-4 px-5 py-5 items-start hover:bg-surface-container/30 transition-colors">
+        <div class="col-span-12 md:col-span-4">
+          <div class="font-display font-bold text-lg mb-1">Ollama</div>
+          <code class="font-mono text-xs text-on-surface-variant">ollama</code>
+        </div>
+        <div class="col-span-6 md:col-span-3">
+          <span class="font-display font-bold text-electric-lime">Free</span>
+          <div class="font-mono text-xs text-on-surface-variant mt-1">local</div>
+        </div>
+        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">High-volume cheap nodes; airgapped runs.</div>
       </div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <!-- ───────── What you get ───────── -->
-  <section class="block">
-    <div class="wrap">
-      <h2>What lands on disk</h2>
-      <p class="lede">Every quest produces a complete directory you can hand to a teammate.</p>
-      <div class="artifact-list">
-<span class="path">outputs/&lt;quest_id&gt;/</span>
-<span class="path">├─ paper/paper.md</span>          <span class="note"># the finished IMRAD paper</span>
-<span class="path">├─ paper/paper.pdf</span>         <span class="note"># pandoc + LaTeX (or tectonic)</span>
-<span class="path">├─ figures/*.png</span>           <span class="note"># every plot the experiment produced</span>
-<span class="path">├─ code/experiment.py</span>      <span class="note"># exact code that ran</span>
-<span class="path">├─ slides.md · slides.pptx</span> <span class="note"># optional deliverables</span>
-<span class="path">├─ poster.tex · talk.md</span>    <span class="note"># optional deliverables</span>
-<span class="path">├─ data/auto_collected/</span>    <span class="note"># Axon hits + dataset-adapter output</span>
-<span class="path">├─ .fi/run.log</span>             <span class="note"># full run log</span>
-<span class="path">├─ .fi/state.sqlite</span>        <span class="note"># resumable checkpoint</span>
-<span class="path">├─ .fi/cost.jsonl</span>          <span class="note"># per-call cost ledger</span>
-<span class="path">└─ frontier_insight_summary.json</span> <span class="note"># machine-readable index</span>
+<!-- ───────────────── Quote ───────────────── -->
+<section class="px-6 md:px-10 mb-24 md:mb-32">
+  <div class="max-w-3xl mx-auto text-center">
+    <div class="font-display text-headline-md md:text-headline-lg text-on-surface italic leading-snug mb-6">
+      <span class="text-cyan-accent">&ldquo;</span>
+      An LLM with no plan, no experiment, and no review is a guess machine. FI is a research machine.
+      <span class="text-cyan-accent">&rdquo;</span>
+    </div>
+    <div class="font-mono text-label-caps text-on-surface-variant">DESIGN PRINCIPLE · README.md</div>
+  </div>
+</section>
+
+<!-- ───────────────── Final CTA ───────────────── -->
+<section class="relative px-6 md:px-10 py-20 md:py-28 text-center overflow-hidden">
+  <div class="absolute inset-0 -z-10 opacity-80"
+       style="background: radial-gradient(800px 360px at 50% 50%, rgba(79, 70, 229, 0.35) 0%, transparent 60%), radial-gradient(700px 300px at 70% 80%, rgba(6, 182, 212, 0.25) 0%, transparent 65%);"></div>
+  <h2 class="font-display text-display-xl-mobile md:text-[64px] leading-[1.05] tracking-tight mb-6 max-w-4xl mx-auto">
+    Stop writing literature reviews. <span class="text-gradient-cool">Run experiments.</span>
+  </h2>
+  <p class="text-body-lg text-on-surface-variant max-w-xl mx-auto mb-10">
+    Open source. Self-hosted. <code class="font-mono text-cyan-accent">pip install -r requirements.txt</code> and you're done.
+  </p>
+  <div class="flex flex-col sm:flex-row gap-4 justify-center">
+    <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
+      Start your first quest <span class="material-symbols-outlined">arrow_forward</span>
+    </a>
+    <a class="bg-surface-charcoal border border-border-subtle text-on-surface hover:border-outline hover:text-white transition-all font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight#readme">
+      Read the README
+    </a>
+  </div>
+</section>
+
+</main>
+
+<!-- ───────────────── Footer ───────────────── -->
+<footer class="bg-surface-obsidian border-t border-border-subtle">
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-8 px-6 md:px-12 py-16 max-w-[1440px] mx-auto">
+    <div class="col-span-2 md:col-span-1 flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <svg viewBox="0 0 512 512" class="w-7 h-7" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="none">
+          <rect width="512" height="512" rx="96" fill="#13121b"/>
+          <g stroke="url(#footerG)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M256 100V412" stroke-width="48"/>
+            <path d="M256 160L320 160L350 130L400 180"/>
+            <path d="M256 260H360"/>
+            <path d="M140 180C180 200 220 240 256 260" opacity="0.3" stroke-width="32"/>
+            <path d="M140 340C180 320 220 280 256 260" opacity="0.3" stroke-width="32"/>
+            <circle cx="256" cy="260" r="12" fill="white" stroke="none"/>
+          </g>
+          <defs>
+            <linearGradient id="footerG" x1="256" y1="100" x2="256" y2="412" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#4f46e5"/>
+              <stop offset="1" stop-color="#06b6d4"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span class="font-display font-extrabold text-headline-md tracking-tight">Frontier Insight</span>
       </div>
+      <p class="text-on-surface-variant opacity-80 max-w-xs">An open-source research-automation framework. Built in Python on LangGraph + Axon.</p>
     </div>
-  </section>
-
-  <!-- ───────── Final CTA ───────── -->
-  <section class="final-cta">
-    <h2>Open source. Self-hosted. Ready in <code>pip install -r requirements.txt</code>.</h2>
-    <p>Built with LangGraph, Python, and a deep respect for reproducibility.</p>
-    <div class="cta-row">
-      <a class="btn primary" href="https://github.com/jyunming/FrontierInsight">
-        Get started on GitHub
-        <span class="arrow">→</span>
-      </a>
-      <a class="btn secondary" href="https://github.com/jyunming/FrontierInsight#readme">Read the docs</a>
+    <div class="flex flex-col gap-3">
+      <span class="font-mono text-label-caps text-on-surface mb-1">Product</span>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#pipeline">Pipeline</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#features">Features</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#providers">Providers</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="https://github.com/jyunming/FrontierInsight#readme">Docs</a>
     </div>
-  </section>
-
-  <footer>
-    <p>
-      Frontier Insight · open source on
-      <a href="https://github.com/jyunming/FrontierInsight">GitHub</a> ·
-      MIT licensed
-    </p>
-  </footer>
+    <div class="flex flex-col gap-3">
+      <span class="font-mono text-label-caps text-on-surface mb-1">Code</span>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="https://github.com/jyunming/FrontierInsight">GitHub</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="https://github.com/jyunming/FrontierInsight/releases">Releases</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="https://github.com/jyunming/FrontierInsight/issues">Issues</a>
+    </div>
+    <div class="flex flex-col gap-3">
+      <span class="font-mono text-label-caps text-on-surface mb-1">Legal</span>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="https://github.com/jyunming/FrontierInsight/blob/main/LICENSE">Apache License 2.0</a>
+    </div>
+  </div>
+  <div class="border-t border-border-subtle">
+    <div class="px-6 md:px-12 py-6 max-w-[1440px] mx-auto flex flex-col md:flex-row justify-between gap-4 items-center">
+      <p class="font-mono text-xs text-on-surface-variant/70">© 2026 Frontier Insight · Apache 2.0 licensed · Built for the future of engineering.</p>
+      <p class="font-mono text-xs text-on-surface-variant/70">obsidian frontier · v0.1</p>
+    </div>
+  </div>
+</footer>
 </body>
 </html>

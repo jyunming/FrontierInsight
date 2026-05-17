@@ -1,245 +1,284 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight — Settings</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/header.js"></script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Settings — Frontier Insight</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>tailwind.config = window._fiConfig;</script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
 </head>
-<body>
-  <div id="fi-header-root" data-breadcrumb="Settings"></div>
-  <main>
-    <section class="fi-page-hero">
-      <h1>Settings</h1>
-      <p class="fi-subtitle">Inspect this server's configuration and run system tasks.</p>
-    </section>
+<body class="bg-background text-on-background min-h-screen flex flex-col font-body-md selection:bg-primary-container selection:text-on-primary-container">
 
-    <h2>Provider availability</h2>
-    <p class="fi-subtitle">Which LLM providers have working auth on this machine right now. ✓ = ready; ⚠ = needs setup.</p>
-    <div id="providers"></div>
+<div id="fi-header-root"></div>
 
-    <h2>AxonStore knowledge base</h2>
-    <p class="fi-subtitle">Where prior-work retrieval lives. Quests with <code class="fi-mono">knowledge.enabled: true</code> read + write here. The interview default is <i>disabled</i>; quests started with that setting won't appear in the corpus until you re-ingest them below.</p>
-    <div id="axon-info" class="fi-card">Loading…</div>
-    <div class="fi-card" id="reingest-card" style="margin-top:0.5rem; display:none">
-      <div class="fi-card-title">
-        <h3>Re-ingest existing quests</h3>
+<main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop py-section-gap flex flex-col gap-section-gap">
+
+  <section class="flex flex-col gap-4">
+    <h1 class="font-headline-xl text-headline-xl md:text-headline-xl text-headline-lg-mobile font-headline-lg-mobile text-on-surface">Settings</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
+      Inspect this server's configuration, the LLM provider availability on this machine, and run system tasks like installing tectonic for PDF rendering.
+    </p>
+  </section>
+
+  <section class="flex flex-col gap-6">
+    <div class="flex items-center justify-between border-b border-surface-high pb-4">
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">Provider availability</h2>
+    </div>
+    <div id="providers" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter"></div>
+  </section>
+
+  <section class="flex flex-col gap-6">
+    <div class="flex items-center justify-between border-b border-surface-high pb-4">
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">AxonStore knowledge base</h2>
+    </div>
+    <div id="axon-info" class="gradient-border rounded-lg p-6 flex flex-col gap-6">Loading…</div>
+    <div id="reingest-card" class="hidden gradient-border rounded-lg p-6 flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <div>
+        <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">Re-ingest existing quests</h3>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">Walk <code class="font-code-md text-secondary">outputs/</code> and feed every quest's <code class="font-code-md text-secondary">paper/paper.md</code> into Axon. Idempotent — re-ingesting the same quest updates the existing doc.</p>
       </div>
-      <p class="fi-card-meta">Walk <code class="fi-mono">outputs/</code> and feed every quest's <code class="fi-mono">paper/paper.md</code> into Axon as <code class="fi-mono">kind=fi_quest_paper</code>. Idempotent — re-ingesting the same quest updates the existing doc.</p>
-      <button class="fi-btn fi-btn-primary" id="reingest-btn" onclick="reingest()">Re-ingest all quests</button>
-      <span id="reingest-status" class="fi-card-meta" style="margin-left:1rem"></span>
-    </div>
-
-    <h2>System tasks</h2>
-    <div class="fi-card">
-      <div class="fi-card-title">
-        <h3>Tectonic LaTeX</h3>
-        <span id="tectonic-badge" class="fi-badge">checking…</span>
+      <div class="flex items-center gap-4 flex-wrap shrink-0">
+        <button id="reingest-btn" onclick="reingest()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-4 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity whitespace-nowrap">
+          Re-ingest all quests
+        </button>
+        <span id="reingest-status" class="font-label-sm text-label-sm text-on-surface-variant"></span>
       </div>
-      <p class="fi-card-meta">
-        Downloads tectonic (~70 MB) into <code class="fi-mono">tools/</code> so <code class="fi-mono">paper.pdf</code> works without an admin install of MiKTeX. Self-bootstrapping — fetches CTAN packages on first compile.
-      </p>
-      <button class="fi-btn fi-btn-primary" id="tectonic-btn" onclick="installTectonic()">Install tectonic</button>
-      <span id="tectonic-status" class="fi-card-meta" style="margin-left:1rem"></span>
     </div>
+  </section>
 
-    <h2>Cost-aware provider choice</h2>
-    <p class="fi-subtitle">FI talks to two billing models. Pick wisely:</p>
-    <div class="fi-card">
-      <p><b>Per-call (Copilot)</b> — every LLM call is one "premium request" regardless of token count. <i>Best for:</i> bursty, heavy single quests where a few large prompts dominate.</p>
-      <p><b>Per-token (OpenAI / Codex / Claude / Gemini)</b> — prompt and completion tokens are priced separately. <i>Best for:</i> long-running automations where you can keep prompts skinny. Cost charts on each quest show the running total.</p>
-      <p><b>Free (Ollama, local)</b> — runs on your machine. Quality varies; use for high-volume cheap nodes or airgapped runs.</p>
+  <section class="flex flex-col gap-6">
+    <div class="flex items-center justify-between border-b border-surface-high pb-4">
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">System tasks</h2>
     </div>
-  </main>
+    <div class="gradient-border-neutral rounded-lg p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <div class="flex flex-col gap-2">
+        <div class="flex items-center gap-3 flex-wrap">
+          <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">Tectonic LaTeX Compiler</h3>
+          <span id="tectonic-badge" class="font-label-sm text-label-sm px-2 py-1 rounded bg-surface-high text-on-surface-variant border border-surface-variant">CHECKING…</span>
+        </div>
+        <p class="font-body-md text-body-md text-on-surface-variant">Required for <code class="font-code-md text-secondary">paper.pdf</code> generation without an admin install of MiKTeX. ~70 MB download into <code class="font-code-md text-secondary">tools/</code>. Self-bootstrapping — fetches CTAN packages on first compile.</p>
+        <span id="tectonic-status" class="font-label-sm text-label-sm text-on-surface-variant mt-2"></span>
+      </div>
+      <button id="tectonic-btn" onclick="installTectonic()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-4 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity whitespace-nowrap">
+        Install Tectonic
+      </button>
+    </div>
+  </section>
 
-  <script>
-    async function loadProviders() {
-      const res = await fetch('/api/providers/availability');
+</main>
+
+<footer class="bg-surface-low/60 backdrop-blur-[20px] font-label-sm text-label-sm full-width bottom-0 border-t border-white/10 mt-section-gap">
+  <div class="flex flex-col gap-8 w-full px-margin-desktop py-component-padding-md max-w-max-width mx-auto">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-gutter py-6 border-b border-surface-high">
+      <div class="flex flex-col gap-2">
+        <span class="text-on-surface-variant uppercase">Per-call (Copilot)</span>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-status-success"></div>
+          <span class="text-status-success font-code-md text-code-md">1 LLM call = 1 premium request</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-2">
+        <span class="text-on-surface-variant uppercase">Per-token (cloud)</span>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-secondary"></div>
+          <span class="text-secondary font-code-md text-code-md">OpenAI · Codex · Claude · Gemini</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-2">
+        <span class="text-on-surface-variant uppercase">Free (Ollama)</span>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-status-success"></div>
+          <span class="text-status-success font-code-md text-code-md">Local, self-hosted</span>
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-col md:flex-row justify-between items-center gap-4">
+      <span class="text-label-sm font-bold text-on-surface">© 2026 Frontier Insight · Apache 2.0</span>
+      <div class="flex items-center gap-4">
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/">Dashboard</a>
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/trash">Trash</a>
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight#readme" target="_blank" rel="noopener">Docs</a>
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+  async function loadProviders() {
+    const res = await fetch('/api/providers/availability');
+    const data = await res.json();
+    const html = (data.providers || []).map(p => `
+      <div class="gradient-border-neutral rounded-lg p-6 flex flex-col gap-4">
+        <div class="flex justify-between items-start gap-3">
+          <span class="font-code-md text-code-md uppercase text-on-surface break-words">${escapeHtml(p.label)}</span>
+          <span class="font-label-sm text-label-sm px-2 py-1 rounded ${p.available ? 'bg-status-success/10 text-status-success border border-status-success/20' : 'bg-status-warning/10 text-status-warning border border-status-warning/20'} whitespace-nowrap">
+            ${p.available ? 'READY' : 'SETUP REQUIRED'}
+          </span>
+        </div>
+        <p class="font-body-md text-body-md text-on-surface-variant">${escapeHtml(p.description)}</p>
+      </div>`).join('');
+    document.getElementById('providers').innerHTML = html;
+  }
+
+  async function checkTectonic() {
+    try {
+      const res = await fetch('/api/system/tectonic');
       const data = await res.json();
-      const html = data.providers.map(p => `
-        <div class="fi-card" style="margin-bottom:0.5rem">
-          <div class="fi-card-title">
-            <h3>${escapeHtml(p.label)}</h3>
-            <span class="fi-badge ${p.available ? 'fi-badge-done' : 'fi-badge-paused'}">${p.available ? '✓ ready' : '⚠ needs setup'}</span>
-          </div>
-          <p class="fi-card-meta">${escapeHtml(p.description)}</p>
-        </div>`).join('');
-      document.getElementById('providers').innerHTML = html;
-    }
+      const badge = document.getElementById('tectonic-badge');
+      const btn = document.getElementById('tectonic-btn');
+      const status = document.getElementById('tectonic-status');
+      if (data.installed) {
+        badge.textContent = 'INSTALLED';
+        badge.className = 'font-label-sm text-label-sm px-2 py-1 rounded bg-status-success/10 text-status-success border border-status-success/20';
+        btn.disabled = true;
+        btn.classList.add('opacity-50','cursor-not-allowed');
+        btn.textContent = 'Already installed';
+        status.textContent = `at ${data.location} (${data.source})`;
+      } else {
+        badge.textContent = 'NOT INSTALLED';
+        badge.className = 'font-label-sm text-label-sm px-2 py-1 rounded bg-status-warning/10 text-status-warning border border-status-warning/20';
+        btn.disabled = false;
+        status.textContent = '';
+      }
+    } catch (_) {}
+  }
 
-    async function checkTectonic() {
-      // Probe on page load so the badge accurately reflects whether
-      // tectonic is already on disk. Updates the button + badge so
-      // the user doesn't click "Install" on something already there.
+  async function installTectonic() {
+    const status = document.getElementById('tectonic-status');
+    const btn = document.getElementById('tectonic-btn');
+    btn.disabled = true;
+    status.textContent = 'starting…';
+    const res = await fetch('/api/system/install-tectonic', {method: 'POST'});
+    if (!res.ok) { status.textContent = 'failed: ' + await res.text(); btn.disabled = false; return; }
+    const body = await res.json();
+    if (body.already_present) { status.textContent = `already installed at ${body.location}; no action taken.`; btn.disabled = true; return; }
+    const jobId = body.job_id;
+    status.innerHTML = `started (job <code class="font-code-md">${escapeHtml(jobId)}</code>, pid ${body.pid}). Polling…`;
+    let tries = 0;
+    const poller = setInterval(async () => {
+      tries += 1;
+      if (tries > 100) { clearInterval(poller); status.textContent = 'gave up after 5 minutes — check outputs/_logs/ for the install log.'; btn.disabled = false; return; }
       try {
-        const res = await fetch('/api/system/tectonic');
-        const data = await res.json();
-        const badge = document.getElementById('tectonic-badge');
-        const btn = document.getElementById('tectonic-btn');
-        const status = document.getElementById('tectonic-status');
-        if (data.installed) {
-          badge.textContent = '✓ installed';
-          badge.className = 'fi-badge fi-badge-done';
-          btn.disabled = true;
-          btn.textContent = 'Already installed';
-          status.textContent = `at ${data.location} (${data.source})`;
-        } else {
-          badge.textContent = 'not installed';
-          badge.className = 'fi-badge fi-badge-paused';
-          btn.disabled = false;
-          btn.textContent = 'Install tectonic';
-          status.textContent = '';
+        const r = await fetch(`/api/system/tectonic?job_id=${encodeURIComponent(jobId)}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (d.installed) { clearInterval(poller); checkTectonic(); return; }
+        const js = d.job_status || {};
+        if (js.alive === false && js.exit_code != null) {
+          clearInterval(poller); btn.disabled = false;
+          let html = `<b class="text-error">Install failed</b> (exit ${js.exit_code}).`;
+          if (js.log_tail?.length) html += `<pre class="mt-2 max-h-60 overflow-auto">${escapeHtml(js.log_tail.join('\n'))}</pre>`;
+          status.innerHTML = html;
+        } else if (js.alive) {
+          status.textContent = `running (pid ${js.pid}, ${Math.round(js.age_seconds)}s)…`;
         }
       } catch (_) {}
-    }
+    }, 3000);
+  }
 
-    async function installTectonic() {
-      const status = document.getElementById('tectonic-status');
-      const btn = document.getElementById('tectonic-btn');
-      btn.disabled = true;
-      status.textContent = 'starting…';
-      const res = await fetch('/api/system/install-tectonic', {method: 'POST'});
-      if (!res.ok) {
-        status.textContent = 'failed: ' + await res.text();
-        btn.disabled = false;
-        return;
-      }
-      const body = await res.json();
-      if (body.already_present) {
-        status.textContent = `already installed at ${body.location}; no action taken.`;
-        btn.disabled = true;
-        return;
-      }
-      const jobId = body.job_id;
-      status.innerHTML = `started (job <code class="fi-mono">${escapeHtml(jobId)}</code>, pid ${body.pid}). Polling for completion…`;
-      // Poll until tectonic shows up OR the subprocess exits.
-      // When the subprocess exits with non-zero, show the log tail
-      // so the user can see what actually failed instead of waiting
-      // forever on a silent install error.
-      let tries = 0;
-      const poller = setInterval(async () => {
-        tries += 1;
-        if (tries > 100) {
-          clearInterval(poller);
-          status.textContent = 'gave up after 5 minutes — check outputs/_logs/ for the install log.';
-          btn.disabled = false;
-          return;
-        }
-        try {
-          const r = await fetch(`/api/system/tectonic?job_id=${encodeURIComponent(jobId)}`);
-          if (!r.ok) return;
-          const d = await r.json();
-          if (d.installed) {
-            clearInterval(poller);
-            checkTectonic();
-            return;
-          }
-          const js = d.job_status || {};
-          if (js.alive === false && js.exit_code != null) {
-            // Subprocess died without producing the binary.
-            clearInterval(poller);
-            btn.disabled = false;
-            const code = js.exit_code;
-            let html = `<b>Install failed</b> (subprocess exited with code ${code}).`;
-            if (js.log_tail && js.log_tail.length) {
-              html += `<pre style="margin-top:0.5rem; max-height:240px; overflow:auto">${escapeHtml(js.log_tail.join('\n'))}</pre>`;
-            } else {
-              html += `<br>Check <code class="fi-mono">outputs/_logs/${escapeHtml(jobId)}.log</code> for details.`;
-            }
-            status.innerHTML = html;
-          } else if (js.alive) {
-            status.textContent = `running (pid ${js.pid}, ${Math.round(js.age_seconds)}s)…`;
-          }
-        } catch (_) {}
-      }, 3000);
-    }
-
-    function escapeHtml(s) {
-      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
-    async function loadAxonInfo() {
-      try {
-        const res = await fetch('/api/knowledge/info');
-        const data = await res.json();
-        const el = document.getElementById('axon-info');
-        const reingestCard = document.getElementById('reingest-card');
-        if (!data.available) {
-          el.innerHTML = `
-            <div class="fi-card-title">
-              <h3>Axon not available</h3>
-              <span class="fi-badge fi-badge-paused">⚠ not configured</span>
-            </div>
-            <p class="fi-card-meta">${escapeHtml(data.reason || '(no reason given)')}</p>`;
-          reingestCard.style.display = 'none';
-          return;
-        }
-        reingestCard.style.display = '';
-        const storePath = data.store_path || '(not exposed by this Axon version)';
-        const bm25 = data.bm25_path;
-        const bySource = data.doc_counts_by_source || {};
-        const totalDocs = data.total_documents;
-        const totalChunks = data.total_chunks;
-        const countsError = data.counts_error;
-        const countsNote = data.counts_note;
-        const sourceRows = Object.keys(bySource).sort().map(s => `
-          <tr>
-            <td class="fi-mono" style="padding:0.25rem 0.75rem 0.25rem 0">${escapeHtml(s)}</td>
-            <td style="padding:0.25rem 0">${escapeHtml(String(bySource[s]))} chunks</td>
-          </tr>`).join('');
+  async function loadAxonInfo() {
+    try {
+      const res = await fetch('/api/knowledge/info');
+      const data = await res.json();
+      const el = document.getElementById('axon-info');
+      const reingestCard = document.getElementById('reingest-card');
+      if (!data.available) {
         el.innerHTML = `
-          <div class="fi-card-title">
-            <h3>Axon corpus</h3>
-            <span class="fi-badge fi-badge-done">✓ available</span>
+          <div class="flex justify-between items-center flex-wrap gap-3">
+            <div>
+              <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">Axon not available</h3>
+              <p class="font-body-md text-body-md text-on-surface-variant mt-1">${escapeHtml(data.reason || '(no reason given)')}</p>
+            </div>
+            <span class="font-label-sm text-label-sm px-2 py-1 rounded bg-status-warning/10 text-status-warning border border-status-warning/20">NOT CONFIGURED</span>
+          </div>`;
+        reingestCard.classList.add('hidden');
+        return;
+      }
+      reingestCard.classList.remove('hidden');
+      reingestCard.classList.add('flex');
+      const bySource = data.doc_counts_by_source || {};
+      el.innerHTML = `
+        <div class="flex justify-between items-center flex-wrap gap-3">
+          <div>
+            <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">${escapeHtml(data.project || '(default)')}</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant mt-1">${escapeHtml(data.store_path || 'Axon vector store')}</p>
           </div>
-          <p><b>Project:</b> <code class="fi-mono">${escapeHtml(data.project || '(default)')}</code> ${data.project_error ? `<span style="color:var(--fi-warn)">(${escapeHtml(data.project_error)})</span>` : ''}</p>
-          <p><b>Store base:</b> <code class="fi-mono">${escapeHtml(storePath)}</code></p>
-          ${bm25 ? `<p><b>BM25 index:</b> <code class="fi-mono">${escapeHtml(bm25)}</code></p>` : ''}
-          <p>
-            <b>Documents:</b> ${totalDocs != null ? escapeHtml(String(totalDocs)) : '?'} ·
-            <b>Chunks:</b> ${totalChunks != null ? escapeHtml(String(totalChunks)) : '?'}
-          </p>
-          <details>
-            <summary>AxonConfig (secrets redacted)</summary>
-            <pre style="margin-top:0.5rem; max-height:300px; overflow:auto">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
-          </details>
-          <h4 style="margin-top:1rem">Chunks by source</h4>
-          ${countsError ? `<p class="fi-card-meta" style="color:var(--fi-warn)">${escapeHtml(countsError)}</p>` : ''}
-          ${Object.keys(bySource).length === 0 ? '<p class="fi-card-meta">Empty corpus. Run a quest with <code class="fi-mono">knowledge.enabled: true</code>, or click "Re-ingest" below to backfill from existing quest outputs.</p>' : `<table style="font-size:0.875rem"><tbody>${sourceRows}</tbody></table>`}
-          ${countsNote ? `<p class="fi-card-meta" style="margin-top:0.5rem; font-style:italic">${escapeHtml(countsNote)}</p>` : ''}`;
-      } catch (e) {
-        document.getElementById('axon-info').textContent = `Error: ${e}`;
-      }
+          <span class="font-label-sm text-label-sm px-2 py-1 rounded bg-status-success/10 text-status-success border border-status-success/20">AVAILABLE</span>
+        </div>
+        <div class="grid grid-cols-3 gap-4 border-y border-surface-high py-4">
+          <div class="flex flex-col">
+            <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Total Chunks</span>
+            <span class="font-code-md text-code-md text-on-surface mt-1">${data.total_chunks ?? '?'}</span>
+          </div>
+          <div class="flex flex-col">
+            <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Documents</span>
+            <span class="font-code-md text-code-md text-on-surface mt-1">${data.total_documents ?? '?'}</span>
+          </div>
+          <div class="flex flex-col">
+            <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Sources</span>
+            <span class="font-code-md text-code-md text-on-surface mt-1">${Object.keys(bySource).length}</span>
+          </div>
+        </div>
+        ${Object.keys(bySource).length > 0 ? `
+        <details class="group">
+          <summary class="font-label-sm text-label-sm uppercase text-primary cursor-pointer hover:text-secondary transition-colors select-none flex items-center gap-2">
+            <span class="material-symbols-outlined text-[16px] group-open:rotate-90 transition-transform">chevron_right</span>
+            Chunks by source
+          </summary>
+          <table class="mt-3 w-full text-sm">
+            <tbody>
+              ${Object.keys(bySource).sort().map(s => `
+                <tr class="border-b border-surface-high">
+                  <td class="font-code-md py-2 pr-6 text-secondary">${escapeHtml(s)}</td>
+                  <td class="py-2 text-on-surface-variant">${escapeHtml(String(bySource[s]))} chunks</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </details>` : ''}
+        <details class="group">
+          <summary class="font-label-sm text-label-sm uppercase text-primary cursor-pointer hover:text-secondary transition-colors select-none flex items-center gap-2">
+            <span class="material-symbols-outlined text-[16px] group-open:rotate-90 transition-transform">chevron_right</span>
+            View AxonConfig (secrets redacted)
+          </summary>
+          <div class="mt-4 p-4 bg-surface-low rounded border border-surface-high overflow-x-auto">
+            <pre class="font-code-md text-code-md text-on-surface-variant text-sm">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
+          </div>
+        </details>
+        ${data.counts_error ? `<p class="text-error text-body-sm">${escapeHtml(data.counts_error)}</p>` : ''}
+        ${data.counts_note ? `<p class="text-on-surface-variant text-body-sm italic">${escapeHtml(data.counts_note)}</p>` : ''}`;
+    } catch (e) {
+      document.getElementById('axon-info').textContent = `Error: ${e}`;
     }
+  }
 
-    async function reingest() {
-      const btn = document.getElementById('reingest-btn');
-      const status = document.getElementById('reingest-status');
-      btn.disabled = true;
-      status.textContent = 'walking outputs/…';
-      try {
-        const res = await fetch('/api/knowledge/reingest', {method: 'POST'});
-        if (!res.ok) {
-          status.textContent = 'failed: ' + await res.text();
-          btn.disabled = false;
-          return;
-        }
-        const data = await res.json();
-        status.textContent = `ingested ${data.ingested} of ${data.total} quest${data.total === 1 ? '' : 's'}. Reload to see new counts.`;
-        // Refresh the doc counts.
-        loadAxonInfo();
-      } catch (e) {
-        status.textContent = 'error: ' + e;
-      } finally {
-        btn.disabled = false;
-      }
-    }
+  async function reingest() {
+    const btn = document.getElementById('reingest-btn');
+    const status = document.getElementById('reingest-status');
+    btn.disabled = true;
+    status.textContent = 'walking outputs/…';
+    try {
+      const res = await fetch('/api/knowledge/reingest', {method: 'POST'});
+      if (!res.ok) { status.textContent = 'failed: ' + await res.text(); btn.disabled = false; return; }
+      const data = await res.json();
+      status.textContent = `ingested ${data.ingested} of ${data.total} quest${data.total === 1 ? '' : 's'}.`;
+      loadAxonInfo();
+    } catch (e) { status.textContent = 'error: ' + e; }
+    finally { btn.disabled = false; }
+  }
 
-    loadProviders();
-    loadAxonInfo();
-    checkTectonic();
-  </script>
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  loadProviders();
+  loadAxonInfo();
+  checkTectonic();
+</script>
 </body>
 </html>

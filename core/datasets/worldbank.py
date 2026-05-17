@@ -1,4 +1,4 @@
-"""World Bank Open Data adapter for the Phase D2 auto-collect path.
+"""World Bank Open Data adapter for the auto-collect path.
 
 The World Bank publishes a free, key-less JSON API at
 ``https://api.worldbank.org/v2/`` covering ~1500 indicators across

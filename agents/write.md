@@ -80,15 +80,41 @@ End with `## References` in numbered-list style citing concrete sources from the
 
 Every reference MUST carry **author(s) + year + title + venue + DOI/URL** drawn from the prior-work block (each `[i]` entry there now includes author/year/venue/DOI on its second line). Do NOT emit references as bare titles — readers can't look up "Stratonovich-type integral with respect to a general stochastic measure." with no author or year.
 
-Format examples (numbered list, one paragraph per entry):
+Format examples — the `<…>` placeholders illustrate the **shape**; never copy them verbatim, and never invent stand-in author names (no Smith / Lee / Doe / Jane Doe / John Smith etc.):
 
-- `1. Smith, J. & Lee, M. (2021). Title of the paper. *Journal Name*. DOI: 10.xxxx/xxxxx.`
-- `2. Doe, J. et al. (2024). Another title. *Conference Proceedings*. arXiv:2401.12345.`
-- `3. Author One (2019). Solo author paper. *Venue*. https://example.com/paper`
+- `1. <Author 1 lastname>, <initial> & <Author 2 lastname>, <initial> (<year>). <Title>. *<Journal>*. DOI: <doi>.`
+- `2. <Author 1 lastname>, <initial> et al. (<year>). <Title>. *<Conference>*. arXiv:<id>.`
+- `3. <Author lastname> (<year>). <Title>. *<Venue>*. <url>`
+
+Every `<…>` slot must be filled from the prior-work block above. Do not emit a citation that contains literal angle brackets, "Smith", "Doe", or any other example token shown here.
 
 If the prior-work block lacks one of these fields for a particular entry, omit just that field for that entry — never fabricate an author name or DOI to pad out a partial citation. Do NOT repeat the title twice; the prior-work entry's header line already gives you the title once.
 
 When the entire prior-work block is empty or unusable (the engine surfaces `"(no prior work surfaced from the knowledge base)"`), prefer to **cite no sources** rather than invent any. If the persona / venue genuinely requires at least one reference (e.g. a Discussion section that engages with prior work), cite well-known canonical sources for the field with their **real** DOIs — never fabricate a DOI or author. If you cannot recall a real DOI, omit it rather than guess.
+
+**Forbidden placeholder words.** Under NO circumstances may a citation contain any of these tokens as an author, venue, or title field:
+
+- `Placeholder`, `Placeholder, A.`, `Placeholder and Placeholder`
+- `Example`, `Example, B.`
+- `Author unspecified`, `Date unspecified`, `Venue unspecified`
+- `(unknown)`, `(unpublished)` for fabricated entries
+- `Anonymous` when used to hide that the author is invented
+- `Smith, J.`, `Smith and Lee`, `Doe, J.`, `Doe et al.`, `Jane Doe`, `John Smith`, `Lee, M.` — these are common stand-in names; if the prior-work block doesn't contain the real author, do NOT substitute one of these.
+- Any author surname you cannot trace back to a `[i]` entry in the prior-work block above.
+- `Prior work`, `Item-N`, `item-N`, `Reference N`, `Source N` — these are placeholder labels emitted by the literature formatter when the source had no usable title or author. **If you see an entry whose header looks like `[i] item-4` or `[i] (no title)`, skip that entry entirely — do not turn the slug into a fake author or title.**
+
+**No URL or DOI fabrication.** A citation's URL/DOI/arXiv-id MUST appear on the prior-work entry's second line as `DOI: 10.x/x` or `arXiv:NNNN.NNNNN` or `https://example.org/...`. If the prior-work entry has no URL/DOI, the citation goes out WITHOUT one — never invent:
+
+- A `frontierinsight.internal/...`, `internal-docs.*`, or similar internal-looking URL.
+- A `10.xxxx/xxxxx`-shaped placeholder DOI.
+- An `arXiv:2401.12345`-shaped placeholder ID (that specific ID was an example in an earlier prompt; treat any arXiv ID you didn't see in the prior-work block as fabricated).
+- A `https://example.com/...` or `https://doi.org/10....` URL constructed from the title.
+
+If you find yourself needing to "make the citation look complete", that's the signal to drop the citation, not pad it.
+
+If you find yourself reaching for any of the above to fill a slot, that is a signal to **delete the entire citation** instead. A shorter, honest References section beats one padded with placeholders. The Discussion can still engage with prior work in prose ("Earlier studies on EUV stochastic LER have generally established that ...") without naming a specific fabricated source.
+
+If your References section ends up empty, that's acceptable — the post-process review will flag fabricated citations and reject the paper anyway, so honesty is the only durable option.
 
 ## No raw code blocks in the body
 

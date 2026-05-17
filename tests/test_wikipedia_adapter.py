@@ -1,4 +1,4 @@
-"""Unit tests for the Phase D3 Wikipedia adapter.
+"""Unit tests for the Wikipedia dataset adapter.
 
 All HTTP calls are mocked at the ``_http_get_text`` / ``_http_get_json_sync``
 boundary so the test suite runs with no network access.

@@ -34,15 +34,29 @@ function isOnPath(binary: string): boolean {
     }
 }
 
+// Prose paper formats — their tier-2 no_simulation default is `true`.
+const PROSE_FORMATS = new Set(["essay", "report", "policy_brief", "whitepaper"]);
+
 /**
  * Run the interview. Returns the answers, or `undefined` if the user
  * cancelled at any step (Esc on a modal, or empty topic).
+ *
+ * Flow:
+ *   1. Tier-1 — four modals (topic, paper_format, output_kinds, study_depth).
+ *      Provider + model are pinned silently by the extension (provider =
+ *      vscode_extension, model = whatever the chat picker showed).
+ *   2. Tier-2 — derive title / no_simulation / clarify_mode / review_panel /
+ *      knowledge_enabled / audience from the tier-1 answers + smart defaults.
+ *      Show the derived values as markdown in the chat.
+ *   3. Action picker — Launch / Edit defaults / Show advanced / Cancel.
+ *      "Edit defaults" loops back to a per-field picker; "Show advanced"
+ *      surfaces the tier-3 slots (baseline / metric / budget / top_k).
  */
 export async function runInterview(
     stream: vscode.ChatResponseStream,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** I'll ask a few quick questions; press Esc on any modal to cancel.\n\n",
+        "🧪 **Let's set up a new research quest.** Four quick questions, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
@@ -61,16 +75,10 @@ export async function runInterview(
     }
     stream.markdown(`  **Topic:** ${truncate(topic, 200)}\n\n`);
 
-    // 2. Title — auto-suggest from topic.
+    // 2. Title — auto-slugged from topic (no modal). The user can
+    // override it from the review screen below if they want a
+    // different folder name.
     const suggestedTitle = slugify(topic).slice(0, 40) || "quest";
-    const title = await vscode.window.showInputBox({
-        title: "Frontier Insight — quest title (short slug)",
-        prompt: "Short identifier for this quest. Used in folder names.",
-        value: suggestedTitle,
-        ignoreFocusOut: true,
-    });
-    if (title === undefined) return undefined;
-    stream.markdown(`  **Title:** \`${title || suggestedTitle}\`\n\n`);
 
     // 3. Output kinds — multi-select.
     const outputChoice = await vscode.window.showQuickPick(
@@ -212,64 +220,15 @@ export async function runInterview(
     const paperFormat: PaperFormat = paperFormatChoice.value;
     stream.markdown(`  **Paper format:** \`${paperFormat}\`\n\n`);
 
-    // 5. Research approach — computational vs. observational.
-    // Maps to ``engine.no_simulation`` in YAML. Pre-setting this
-    // bypasses the clarify-auto-detect path: when True the engine
-    // skips implement → execute and routes to wait_for_data /
-    // auto_collect_data instead. The clarify agent calls this
-    // ``simulatability``; we surface it under a name a non-technical
-    // user can answer without reading the engine docs.
-    //
-    // Auto-hint the default off the paper_format choice the user
-    // just made — non-scientific formats almost always want
-    // no_simulation=true. Saves the user one extra click in the
-    // typical case while leaving the gate fully overridable.
-    const isProseFormat = ["essay", "report", "policy_brief", "whitepaper"].includes(paperFormat);
-    const simulatableLabel = "$(zap) Computational — a Python script can produce the data";
-    const observationalLabel = "$(eye) Observational — needs real-world data the engine can't simulate";
-    const noSimChoice = await vscode.window.showQuickPick(
-        [
-            isProseFormat
-                ? {
-                    label: `${observationalLabel} (recommended for ${paperFormat})`,
-                    description: "Skip implement/execute; route to wait_for_data + auto_collect_data. For cultural / historical / qualitative / policy topics.",
-                    value: true,
-                }
-                : {
-                    label: `${simulatableLabel} (recommended for ${paperFormat})`,
-                    description: "Run normal implement → execute pipeline. For physics / ML / algorithmic / benchmark topics.",
-                    value: false,
-                },
-            isProseFormat
-                ? {
-                    label: simulatableLabel,
-                    description: "Override: run the implement/execute pipeline even though the paper format is prose.",
-                    value: false,
-                }
-                : {
-                    label: observationalLabel,
-                    description: "Override: skip simulation even though the paper format is scientific.",
-                    value: true,
-                },
-        ],
-        {
-            title: "Frontier Insight — research approach?",
-            placeHolder:
-                "Decides whether the engine runs a Python experiment or waits for real-world data. Matches the clarify agent's 'simulatability' slot.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!noSimChoice) return undefined;
-    const noSimulation = noSimChoice.value as boolean;
-    stream.markdown(
-        `  **Research approach:** ${noSimulation ? "observational (no_simulation=true)" : "computational (no_simulation=false)"}\n\n`,
-    );
+    // 5. Research approach — auto-derived in tier-2 (PROSE_FORMATS
+    // → no_simulation=true). The user can override it from the
+    // review screen.
 
     // 6. Study depth — drives paper length + citation depth.
     //    Smart-defaulted off the chosen paper_format: policy_brief
     //    is by definition 2-4 pages, so we default it to "brief
     //    preprint"; other formats default to "journal-length"
-    //    unless the topic looks survey-shaped. Matches Phase R in
+    //    unless the topic looks survey-shaped. Matches
     //    core/interview.py:smart_default_study_depth.
     const isPolicyBrief = paperFormat === "policy_brief";
     const looksSurvey = /\b(survey|review of|compar)/i.test(topic);
@@ -323,147 +282,228 @@ export async function runInterview(
     const studyDepth = studyDepthChoice.value;
     stream.markdown(`  **Study depth:** \`${studyDepth}\`\n\n`);
 
-    // 7-9. Topic-tuned clarify slots. The Python frontends make ONE
-    // LLM call here (via agents/clarify_preflight.md) to suggest
-    // topic-tuned defaults; in VSCode, the user has already picked
-    // a model and we *could* fire it, but staying simple for the
-    // initial parity ship: prompt with static placeholders. The
-    // engine's clarify-overrides path still honors whatever the
-    // user types here.
-    stream.markdown(
-        "ℹ️ The next 3 questions sharpen the agent's framing. Press Enter to accept the bracketed placeholder.\n\n",
-    );
-    const comparativeBaseline = await vscode.window.showInputBox({
-        title: "Frontier Insight — comparative baseline",
-        prompt: "What existing method / dataset / regime should this study be compared against?",
-        placeHolder: "e.g. RandomForest baseline on the same features",
-        ignoreFocusOut: true,
-    });
-    if (comparativeBaseline === undefined) return undefined;
-
-    const successMetric = await vscode.window.showInputBox({
-        title: "Frontier Insight — success metric",
-        prompt: "What number changing in what direction = headline result?",
-        placeHolder: "e.g. AUC ≥ 0.9 on held-out test set",
-        ignoreFocusOut: true,
-    });
-    if (successMetric === undefined) return undefined;
-
-    const budget = await vscode.window.showInputBox({
-        title: "Frontier Insight — time / compute budget",
-        prompt: "Soft cap on wall-clock for the experiment.",
-        placeHolder: "e.g. a few minutes on a laptop CPU",
-        ignoreFocusOut: true,
-    });
-    if (budget === undefined) return undefined;
-
-    // 10. Clarify mode — does the agent ask follow-up questions before starting?
-    const clarifyChoice = await vscode.window.showQuickPick(
-        [
-            {
-                label: "$(zap) Agent self-clarifies (recommended)",
-                description: "Agent generates 7 questions AND answers them itself — study_depth/paper_venue flow through to write+review",
-                value: "auto" as const,
-            },
-            {
-                label: "$(question) Ask me 7 questions",
-                description: "Pauses after generating questions; you fill in answers — highest quality, most interruption",
-                value: "interactive" as const,
-            },
-            {
-                label: "$(rocket) Just run it",
-                description: "Agent picks everything from the topic alone (no clarify; paper may be shallower)",
-                value: "off" as const,
-            },
-        ],
-        {
-            title: "Frontier Insight — pre-flight clarification?",
-            placeHolder:
-                "Helps the agent narrow scope before designing the experiment. 'Just run it' is fastest.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!clarifyChoice) return undefined;
-    stream.markdown(`  **Clarify mode:** \`${clarifyChoice.value}\`\n\n`);
-
-    // 7. Reviewer panel — debate or single reviewer?
-    const panelChoice = await vscode.window.showQuickPick(
-        [
-            {
-                label: "$(person) Single reviewer",
-                description: "1 LLM call per review pass (default, cheapest)",
-                value: [] as string[],
-            },
-            {
-                label: "$(organization) 3-persona panel",
-                description:
-                    "Methodologist + Statistician + Devil's-advocate, then moderator. ~4× the review cost.",
-                value: ["methodologist", "statistician", "devil_advocate"] as string[],
-            },
-            {
-                label: "$(organization) 4-persona panel",
-                description: "Adds Reproducibility reviewer. ~5× the review cost.",
-                value: ["methodologist", "statistician", "devil_advocate", "reproducibility"] as string[],
-            },
-        ],
-        {
-            title: "Frontier Insight — reviewer panel?",
-            placeHolder:
-                "Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!panelChoice) return undefined;
-    const panel = panelChoice.value as string[];
-    stream.markdown(
-        `  **Reviewer panel:** ${panel.length === 0 ? "single reviewer" : panel.join(", ")}\n\n`,
-    );
-
-    // 8. Knowledge layer — opt in only if Axon is set up.
-    const knowledgeChoice = await vscode.window.showQuickPick(
-        [
-            {
-                label: "$(circle-slash) Disabled (recommended for first runs)",
-                description:
-                    "Literature retrieval falls back to free public sources (arXiv, OpenAlex, Crossref) when needed.",
-                value: false,
-            },
-            {
-                label: "$(database) Enabled (requires Axon installed)",
-                description:
-                    "Use your Axon corpus for retrieval + write-back. Skip if you haven't set Axon up.",
-                value: true,
-            },
-        ],
-        {
-            title: "Frontier Insight — Axon knowledge layer?",
-            placeHolder: "Most first-time users should leave this disabled.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!knowledgeChoice) return undefined;
-    stream.markdown(
-        `  **Knowledge layer:** ${knowledgeChoice.value ? "Axon (enabled)" : "disabled (public-source fallback)"}\n\n`,
-    );
-
-    return {
+    // ─── Tier-2 derivation (mirrors core/interview.py SMART_DEFAULTS) ───
+    // title — slug from topic; no_simulation — prose vs scientific;
+    // others are static or auto-probed.
+    const answers: InterviewAnswers = {
         topic: topic.trim(),
-        title: (title || suggestedTitle).trim(),
+        title: suggestedTitle,
         output_kinds: outputChoice.value as string[],
         paper_format: paperFormat,
-        clarify_mode: clarifyChoice.value,
-        review_panel: panel,
-        knowledge_enabled: knowledgeChoice.value,
-        no_simulation: noSimulation,
-        // Phase R — research-shaping fields.
+        clarify_mode: "auto",
+        review_panel: [],
+        knowledge_enabled: await probeAxonReachable(),
+        no_simulation: PROSE_FORMATS.has(paperFormat),
         study_depth: studyDepth,
-        comparative_baseline: (comparativeBaseline || "").trim(),
-        success_metric: (successMetric || "").trim(),
-        budget: (budget || "").trim(),
-        // ``runInterview`` is called from extension.ts which knows the
-        // active Copilot model. It overrides this stub with
-        // ``userPickedModel.family`` before invoking writeInterviewYaml.
+        comparative_baseline: "",
+        success_metric: "",
+        budget: "",
         provider_model: "",
         max_iterations: 2,
+        audience: "external",
+        knowledge_top_k: 5,
     };
+
+    // ─── Review block + action picker loop ──────────────────────────
+    while (true) {
+        stream.markdown(reviewBlockMarkdown(answers));
+        const action = await vscode.window.showQuickPick(
+            [
+                { label: "$(rocket) Launch quest", value: "launch" },
+                { label: "$(edit) Edit a default", value: "edit_default" },
+                { label: "$(settings-gear) Edit an advanced field", value: "edit_advanced" },
+                { label: "$(x) Cancel", value: "cancel" },
+            ],
+            {
+                title: "Frontier Insight — ready to launch?",
+                placeHolder:
+                    "Launch with the defaults above, edit one, expose the advanced fields, or cancel.",
+                ignoreFocusOut: true,
+            },
+        );
+        if (!action || action.value === "cancel") {
+            stream.markdown("\n— interview cancelled.\n");
+            return undefined;
+        }
+        if (action.value === "launch") {
+            return answers;
+        }
+        if (action.value === "edit_default") {
+            await editTier2Field(answers);
+            continue;
+        }
+        if (action.value === "edit_advanced") {
+            await editTier3Field(answers);
+            continue;
+        }
+    }
+}
+
+/**
+ * Probe the Axon API sidecar on 127.0.0.1:8000 — if reachable, the
+ * knowledge layer defaults to enabled. Otherwise off. Matches
+ * core/interview.py:smart_default_knowledge_enabled.
+ */
+async function probeAxonReachable(): Promise<boolean> {
+    const host = process.env.AXON_HOST || "127.0.0.1";
+    const port = process.env.AXON_PORT || "8000";
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 1500);
+        const res = await fetch(`http://${host}:${port}/health/live`, { signal: ctrl.signal });
+        clearTimeout(timer);
+        return res.ok;
+    } catch {
+        return false;
+    }
+}
+
+function reviewBlockMarkdown(a: InterviewAnswers): string {
+    const lines: string[] = [];
+    lines.push("\n### Review before launch\n");
+    lines.push("| Field | Value |");
+    lines.push("|---|---|");
+    lines.push(`| Title (auto-slug) | \`${a.title}\` |`);
+    lines.push(`| Research approach | ${a.no_simulation ? "observational" : "computational"} |`);
+    lines.push(`| Clarify mode | \`${a.clarify_mode}\` |`);
+    lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
+    lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
+    lines.push(`| Paper audience | \`${a.audience}\` |`);
+    // Tier-3 fields are only worth printing if the user has set them.
+    if (a.comparative_baseline || a.success_metric || a.budget || a.knowledge_top_k !== 5) {
+        lines.push("\n_Advanced overrides:_");
+        if (a.comparative_baseline) lines.push(`  • baseline: ${a.comparative_baseline}`);
+        if (a.success_metric) lines.push(`  • metric: ${a.success_metric}`);
+        if (a.budget) lines.push(`  • budget: ${a.budget}`);
+        if (a.knowledge_top_k !== 5) lines.push(`  • top_k: ${a.knowledge_top_k}`);
+    }
+    lines.push("");
+    return lines.join("\n");
+}
+
+/** Inline editor for the six tier-2 defaults. */
+async function editTier2Field(a: InterviewAnswers): Promise<void> {
+    const which = await vscode.window.showQuickPick(
+        [
+            { label: "Title (folder slug)", value: "title" },
+            { label: "Research approach (no_simulation)", value: "no_simulation" },
+            { label: "Clarify mode", value: "clarify_mode" },
+            { label: "Reviewer panel", value: "review_panel" },
+            { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
+            { label: "Paper audience", value: "audience" },
+        ],
+        { title: "Edit which default?", ignoreFocusOut: true },
+    );
+    if (!which) return;
+    switch (which.value) {
+        case "title": {
+            const v = await vscode.window.showInputBox({ title: "Title", value: a.title, ignoreFocusOut: true });
+            if (v !== undefined && v.trim()) a.title = v.trim();
+            return;
+        }
+        case "no_simulation": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(zap) Computational (Python script produces data)", value: false },
+                    { label: "$(eye) Observational (needs real-world data)", value: true },
+                ],
+                { title: "Research approach", ignoreFocusOut: true },
+            );
+            if (v) a.no_simulation = v.value;
+            return;
+        }
+        case "clarify_mode": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(zap) auto — agent self-clarifies", value: "auto" as const },
+                    { label: "$(question) interactive — pause for me", value: "interactive" as const },
+                    { label: "$(rocket) off — just run it", value: "off" as const },
+                ],
+                { title: "Clarify mode", ignoreFocusOut: true },
+            );
+            if (v) a.clarify_mode = v.value;
+            return;
+        }
+        case "review_panel": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(person) Single reviewer", value: [] as string[] },
+                    {
+                        label: "$(organization) 3-persona panel",
+                        value: ["methodologist", "statistician", "devil_advocate"] as string[],
+                    },
+                    {
+                        label: "$(organization) 4-persona panel",
+                        value: ["methodologist", "statistician", "devil_advocate", "reproducibility"] as string[],
+                    },
+                ],
+                { title: "Reviewer panel", ignoreFocusOut: true },
+            );
+            if (v) a.review_panel = v.value;
+            return;
+        }
+        case "knowledge_enabled": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(circle-slash) Disabled", value: false },
+                    { label: "$(database) Enabled (needs Axon)", value: true },
+                ],
+                { title: "Knowledge layer", ignoreFocusOut: true },
+            );
+            if (v) a.knowledge_enabled = v.value;
+            return;
+        }
+        case "audience": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    {
+                        label: "$(globe) external — journal / open web",
+                        description: "Drop FI-internal entries from References",
+                        value: "external" as const,
+                    },
+                    {
+                        label: "$(briefcase) internal — team report / memo",
+                        description: "Keep everything in Axon as citable prior work",
+                        value: "internal" as const,
+                    },
+                ],
+                { title: "Paper audience", ignoreFocusOut: true },
+            );
+            if (v) a.audience = v.value;
+            return;
+        }
+    }
+}
+
+/** Inline editor for the four tier-3 advanced fields. */
+async function editTier3Field(a: InterviewAnswers): Promise<void> {
+    const which = await vscode.window.showQuickPick(
+        [
+            { label: "Comparative baseline", value: "comparative_baseline" },
+            { label: "Success metric", value: "success_metric" },
+            { label: "Time / compute budget", value: "budget" },
+            { label: "Prior-work retrievals per quest (top_k)", value: "knowledge_top_k" },
+        ],
+        { title: "Edit which advanced field?", ignoreFocusOut: true },
+    );
+    if (!which) return;
+    if (which.value === "knowledge_top_k") {
+        const v = await vscode.window.showInputBox({
+            title: "Prior-work retrievals per quest",
+            value: String(a.knowledge_top_k),
+            placeHolder: "5",
+            ignoreFocusOut: true,
+            validateInput: (s) => (s && /^\d+$/.test(s.trim()) ? null : "must be a positive integer"),
+        });
+        if (v !== undefined) a.knowledge_top_k = parseInt(v.trim(), 10) || 5;
+        return;
+    }
+    const aBag = a as unknown as Record<string, unknown>;
+    const v = await vscode.window.showInputBox({
+        title: which.label,
+        value: (aBag[which.value] as string) || "",
+        ignoreFocusOut: true,
+    });
+    if (v === undefined) return;
+    aBag[which.value] = v.trim();
 }

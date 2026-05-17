@@ -1,4 +1,4 @@
-"""Phase P — TypeScript compile-check for the FI VSCode extension.
+"""TypeScript compile-check for the FI VSCode extension.
 
 This test was added in response to a real bug: the TypeScript source
 was committed without ever running ``npm run compile``, and two type
@@ -242,10 +242,10 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         assert cfg.output.kinds == ["paper_md", "slides"]
         assert cfg.knowledge.enabled is False
         assert cfg.provider.name == "vscode_extension"
-        # COST DISCIPLINE — Phase O+L+M default-ON features are
-        # explicitly turned OFF by the interview. A real-world quest
-        # burned 25%+ of a 1500-req/month Copilot allotment on ONE run
-        # because these defaults silently piled up. The interview must
+        # COST DISCIPLINE — default-ON engine features (ideate_reflect,
+        # cross_check, analyze_reroute) are explicitly turned OFF by
+        # the interview. With them ON, a single quest can burn 25%+ of
+        # a 1500-req/month Copilot allotment. The interview must
         # generate the cost-bounded values.
         assert cfg.engine.ideate_reflect is False, (
             "ideate_reflect on by default fires one extra LLM call per quest"

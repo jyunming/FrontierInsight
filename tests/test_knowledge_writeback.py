@@ -1,4 +1,4 @@
-"""Phase F validation: cross-quest memory write-back.
+"""Cross-quest memory write-back validation.
 
 Replaces the in-engine Knowledge with a stub that records every
 add_quest_artifacts call, then runs a fake-LLM quest and confirms the

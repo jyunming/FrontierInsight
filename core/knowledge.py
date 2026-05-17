@@ -1373,7 +1373,7 @@ class Knowledge:
         else:
             ac = AxonConfig.model_validate(yaml.safe_load(yaml.safe_dump(cfg.axon_config)))  # type: ignore[union-attr]
             brain = AxonBrain(ac)  # type: ignore[misc]
-        # Phase J — pin the FI corpus to its own project so quest
+        # Pin the FI corpus to its own project so quest
         # write-back / retrieval doesn't mingle with whatever else
         # the user does in Axon. `default` is where AxonBrain
         # initially lands; create the FI project if it doesn't
@@ -1584,7 +1584,7 @@ class Knowledge:
         # use. Composite keys (kind + most-specific-id + most-
         # specific-discriminator) prevent the "two docs collide
         # under one id and the later one overwrites the earlier"
-        # failure mode the bot review on PR #94 flagged.
+        # failure mode.
         primary_keys = (
             "id", "quest_id", "proposal_id", "critique_id",
             "digest_id", "summary_id", "portfolio_id",

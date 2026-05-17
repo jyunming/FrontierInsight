@@ -1,6 +1,6 @@
 """Frontier Insight research engine — async LangGraph DAG.
 
-Phase B: real LLM-driven nodes, code generation + execution in a per-quest
+Real LLM-driven nodes, code generation + execution in a per-quest
 venv, Axon-backed knowledge retrieval, and SQLite-checkpointed state for
 resumability after stalls (LLM quotas, OS sleep, manual interrupt).
 
@@ -69,7 +69,7 @@ class QuestState(TypedDict, total=False):
     topic: str
     title: str
     iteration: int
-    # Phase I clarify-node state. Both dicts share the same 5 keys
+    # Clarify-node state. Both dicts share the same 5 keys
     # (`comparative_baseline`, `empirical_vs_theoretical`,
     # `success_metric`, `budget`, `output_kinds`); `clarify_questions`
     # carries `{question, default}` per slot, `clarify_answers` carries
@@ -79,10 +79,10 @@ class QuestState(TypedDict, total=False):
     clarify_done: bool
     ideas: list[dict[str, Any]]
     chosen_idea: dict[str, Any]
-    # Phase M — ideate self-reflection result. Optional; describes what
+    # Ideate self-reflection result. Optional; describes what
     # the agent considered before locking in `chosen_idea`.
     ideate_critique: dict[str, Any]
-    # Phase O — ideate tournament result. Optional; present only when
+    # Ideate tournament result. Optional; present only when
     # `engine.ideate_tournament: true`. Carries the match table, win
     # counts, and outcome label ("confirmed" / "swapped" /
     # "inconclusive_fallback") for visibility + future Axon write-back.
@@ -101,7 +101,7 @@ class QuestState(TypedDict, total=False):
     exec_result: dict[str, Any]
     figures: list[str]
     result_json: dict[str, Any]
-    # Phase K — execute-repair loop counter + history. The reflect
+    # Execute-repair loop counter + history. The reflect
     # node increments `exec_reflect_iter` and appends a one-line
     # record per attempt, so analyze/write/review can describe what
     # was fixed.
@@ -109,12 +109,12 @@ class QuestState(TypedDict, total=False):
     exec_reflect_history: list[dict[str, Any]]
     exec_give_up_reason: str
     analysis: dict[str, Any]
-    # Phase L — cross-paper check per finding. List of per-finding
+    # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
     paper_md: str
     review: dict[str, Any]
-    # Phase N — per-persona reviews from the panel, before moderation.
+    # Per-persona reviews from the panel, before moderation.
     # One entry per `engine.review_panel` member, each with the same
     # JSON shape the single reviewer produces plus a `persona` field.
     review_panel: list[dict[str, Any]]
@@ -131,7 +131,7 @@ class QuestState(TypedDict, total=False):
     # The data_load node walks them, classifies, and synthesizes a
     # result_json compatible with downstream nodes (analyze, write).
     data_files: list[str]
-    # Phase D1 — number of docs the auto_collect_data node successfully
+    # Number of docs the auto_collect_data node successfully
     # wrote into `<quest_root>/data/auto_collected/`. 0 means the node
     # was a passthrough (auto-collect disabled, knowledge disabled, or
     # Axon returned no hits), in which case wait_for_data falls back
@@ -365,8 +365,8 @@ class Engine:
     # ---- graph topology --------------------------------------------------
 
     def _build_graph(self) -> StateGraph:
-        # Phase G hook: subclassing `Engine` and overriding `_build_graph`
-        # is the supported way to ship a domain-specific pipeline (e.g.,
+        # Subclassing `Engine` and overriding `_build_graph` is the
+        # supported way to ship a domain-specific pipeline (e.g.,
         # a lithography graph) without forking the full Engine class.
         # The QuestState TypedDict is the contract — keep field names
         # backwards-compatible if you add a graph here.
@@ -377,10 +377,10 @@ class Engine:
         g.add_node("design", self._node_design)
         g.add_node("implement", self._node_implement)
         g.add_node("execute", self._node_execute)
-        # Phase K: execute → execute_reflect (loops back to execute on failure)
+        # execute → execute_reflect (loops back to execute on failure)
         g.add_node("execute_reflect", self._node_execute_reflect)
         g.add_node("analyze", self._node_analyze)
-        # Phase L: analyze → cross_check (always) → write OR design
+        # analyze → cross_check (always) → write OR design
         g.add_node("cross_check", self._node_cross_check)
         g.add_node("write", self._node_write)
         g.add_node("review", self._node_review)
@@ -411,7 +411,7 @@ class Engine:
             self._route_after_execute_reflect,
             {"retry": "execute", "proceed": "analyze"},
         )
-        # auto_collect_data: Phase D1. Best-effort Axon retrieval that
+        # auto_collect_data: best-effort Axon retrieval that
         # writes hits into <quest_root>/data/auto_collected/<idx>_<slug>.md
         # so wait_for_data's rglob walk picks them up. Always proceeds —
         # if Axon is disabled, returns zero docs, or the feature flag
@@ -466,7 +466,7 @@ class Engine:
         return "implement"
 
     def _route_after_execute_reflect(self, state: QuestState) -> str:
-        """Phase K: route based on whether the reflect node patched the
+        """Route based on whether the reflect node patched the
         code (→ retry execute) or accepted the failure / success
         (→ proceed to analyze)."""
         result = state.get("exec_result") or {}
@@ -527,7 +527,7 @@ class Engine:
     # ---- nodes -----------------------------------------------------------
 
     async def _node_clarify(self, state: QuestState) -> QuestState:
-        """Phase I pre-flight clarification.
+        """Pre-flight clarification.
 
         Three modes, controlled by `engine.clarify_mode`:
 
@@ -826,7 +826,7 @@ class Engine:
         ideas = parsed.get("ideas") or []
         chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
 
-        # Phase O — pairwise tournament. When enabled AND there are
+        # Pairwise tournament. When enabled AND there are
         # at least 2 ideas to compare, REPLACES the single critique
         # call below with C(N, 2) parallel pairwise comparisons and
         # picks the highest-win-count idea. See
@@ -845,7 +845,7 @@ class Engine:
                     "[ideate] tournament failed: %s — falling through "
                     "to ideate_reflect if enabled", e,
                 )
-        # Phase M — self-reflection. Single extra LLM call that may
+        # Self-reflection. Single extra LLM call that may
         # swap chosen_idea to a different entry from the brainstormed
         # list. Skipped ONLY when the tournament actually ran (its
         # pick subsumes the critique's purpose). If the tournament
@@ -1101,7 +1101,7 @@ class Engine:
         return {"design": design}
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
-        """Phase D1 — agent-side data collection via Axon, run BEFORE
+        """Agent-side data collection via Axon, run BEFORE
         the wait_for_data pause in no-simulation mode.
 
         Why this exists: the user said *"data can be collected by
@@ -1150,7 +1150,7 @@ class Engine:
         query = f"{topic} {hypothesis}".strip() or topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
-        # ---- Axon retrieval (Phase D1) -----------------------------
+        # ---- Axon retrieval ----------------------------------------
         # Independent failure mode from dataset adapters — when Axon
         # is disabled / raises / returns nothing, we still want
         # dataset adapters to run (a user who configured
@@ -1159,7 +1159,7 @@ class Engine:
         # short-circuits here only skip the AXON branch.
         axon_written = await self._axon_collect_step(query, auto_dir)
 
-        # ---- Dataset adapters (Phase D2+D3) ------------------------
+        # ---- Dataset adapters --------------------------------------
         adapter_written = await self._run_dataset_adapters(query, auto_dir)
 
         written = axon_written + adapter_written
@@ -1181,7 +1181,7 @@ class Engine:
         return {"auto_collected_count": written}
 
     async def _axon_collect_step(self, query: str, auto_dir: Path) -> int:
-        """Phase D1 retrieval against the Axon corpus. Returns the
+        """Axon-backed retrieval. Returns the
         count of files written under ``auto_dir`` (not in a
         sub-directory). Returns 0 on any of: knowledge disabled,
         asearch raised, zero hits, or every write failed. The
@@ -1236,7 +1236,7 @@ class Engine:
     async def _run_dataset_adapters(
         self, query: str, auto_dir: Path,
     ) -> int:
-        """Phase D2 — iterate the user's enabled
+        """Iterate the user's enabled
         ``engine.dataset_adapters``, ask each for up to
         ``engine.dataset_adapter_top_k`` rows, and render each row as
         a Markdown file under ``<auto_dir>/<adapter_name>/``.
@@ -1577,7 +1577,7 @@ class Engine:
         }
 
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
-        """Phase K: post-execute repair node.
+        """Post-execute repair node.
 
         If the experiment ran cleanly (rc==0 AND RESULT_JSON parsed),
         this is a no-op pass-through. Otherwise we read the traceback,
@@ -1701,7 +1701,7 @@ class Engine:
         return {"analysis": analysis}
 
     async def _node_cross_check(self, state: QuestState) -> QuestState:
-        """Phase L: for each key finding, search literature with the
+        """For each key finding, search literature with the
         finding text as the query, then classify hits as supporting /
         conflicting / neutral. Results land in ``state['cross_check']``
         and are surfaced in the write prompt's ``$cross_check_block``."""
@@ -1769,7 +1769,7 @@ class Engine:
             })
         self._log.info("[cross_check] checked %d findings", len(out))
         patch: QuestState = {"cross_check": out}
-        # Phase L iteration accounting: if analyze flagged a re-route AND
+        # Cross-check iteration accounting: if analyze flagged a re-route AND
         # there's budget left, bump the shared iteration counter here so
         # the design node sees the new iteration on its next visit. This
         # mirrors how `_node_review` bumps on `verdict=revise`.
@@ -1830,7 +1830,14 @@ class Engine:
             title=state.get("title", "Untitled"),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
-            literature_block=_format_lit_from_state(state),
+            # Write node is the ONE place audience filtering applies:
+            # this is the literature block that flows into the paper's
+            # References. ideate/design/cross_check still see the full
+            # pull because those nodes are about choosing what to do,
+            # not what to publish.
+            literature_block=_format_lit_from_state(
+                state, audience=self.config.output.audience,
+            ),
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
@@ -2018,12 +2025,13 @@ class Engine:
         # the function level is the same cost path most stdlib code
         # uses. The provider module is the source of `estimate_cost_usd`.
         from core.provider import estimate_cost_usd
-        # Tolerate test stubs that pre-date Phase S — engine + test
-        # suite share dozens of fake LLMClient implementations, and
-        # patching each one to add ``last_usage`` is mechanical work
-        # that doesn't add coverage. ``getattr(..., None)`` returns
-        # the new field when the real LLMClient is in play, or skips
-        # the cost-log row entirely when a stub is used.
+        # Tolerate test stubs that pre-date the cost-tracking fields —
+        # engine + test suite share dozens of fake LLMClient
+        # implementations, and patching each one to add ``last_usage``
+        # is mechanical work that doesn't add coverage.
+        # ``getattr(..., None)`` returns the new field when the real
+        # LLMClient is in play, or skips the cost-log row entirely
+        # when a stub is used.
         usage = getattr(self._client, "last_usage", None)
         model = getattr(self._client, "last_model", None) or ""
         cost = None
@@ -2055,7 +2063,7 @@ class Engine:
         """Resolve the effective model for a node — empty string when
         the lookup misses so the transport falls through to the
         endpoint default. Accepts hierarchical keys like
-        ``"review_panel.methodologist"`` (Phase N panel personas)."""
+        ``"review_panel.methodologist"`` (review-panel personas)."""
         if not node:
             return None
         node_models = self.config.provider.node_models or {}
@@ -2275,7 +2283,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "implement", "execute_reflect", "analyze",
         "cross_check", "write", "review",
-        "review_moderate",  # Phase N — panel-moderator prompt
+        "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
     )
@@ -2381,30 +2389,101 @@ def _format_lit_excerpt(content: str, title: str) -> str:
     return excerpt
 
 
-def _format_lit(docs: list[RetrievedDoc]) -> str:
+def _is_citable(meta: dict[str, Any]) -> bool:
+    """An entry is citable if it has at least a real title AND
+    one identifying field (authors, year, venue, doi/url/arxiv).
+
+    Filters out partial loader output where only a path/slug exists
+    — those entries would render as ``[i] item-i`` or ``[i] (no title)``
+    and the LLM tends to fabricate author names / URLs to complete
+    the slot. Honesty > completeness on a thin retrieval pull.
+    """
+    title = (meta.get("title") or "").strip()
+    if not title:
+        return False
+    has_id = bool(
+        meta.get("authors")
+        or meta.get("year")
+        or meta.get("published")
+        or meta.get("venue")
+        or meta.get("publisher")
+        or meta.get("doi")
+        or meta.get("arxiv_id")
+        or meta.get("url")
+    )
+    return has_id
+
+
+# FI-internal kinds that are cross-quest memory artifacts — NOT public
+# sources. When the paper's audience is "external" (a journal, the open
+# web), the writer must not cite these because the reader cannot look
+# them up. ``fi_local_paper`` is intentionally OMITTED: that kind is
+# how the user feeds real (paywalled or local) papers into Axon; whether
+# such an entry survives depends on its own metadata (real DOI/URL).
+_FI_INTERNAL_KINDS = frozenset({
+    "fi_critique",
+    "fi_digest",
+    "fi_portfolio",
+    "fi_proposal",
+    "fi_summary",
+    "fi_summary_input",
+    "fi_source_catalog",
+    "fi_paper_spine",
+})
+
+
+def _is_audience_appropriate(meta: dict[str, Any], audience: str) -> bool:
+    """When the paper is external-facing, drop cross-quest memory
+    artifacts so the References section only contains sources an
+    outside reader could actually look up. Internal-facing papers
+    keep everything (the audience expects to see prior internal work).
+    """
+    if audience == "internal":
+        return True
+    kind = (meta.get("kind") or "").strip()
+    return kind not in _FI_INTERNAL_KINDS
+
+
+def _format_lit(docs: list[RetrievedDoc], audience: str = "external") -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
-    for i, d in enumerate(docs, start=1):
+    keep_idx = 0
+    for d in docs:
         meta = d.metadata or {}
-        title = meta.get("title") or meta.get("source") or f"item-{i}"
-        header = _format_lit_header(meta, i)
+        if not _is_citable(meta):
+            continue
+        if not _is_audience_appropriate(meta, audience):
+            continue
+        keep_idx += 1
+        title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
+        header = _format_lit_header(meta, keep_idx)
         excerpt = _format_lit_excerpt(d.content, title)
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
+    if not lines:
+        return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
 
 
-def _format_lit_from_state(state: QuestState) -> str:
+def _format_lit_from_state(state: QuestState, audience: str = "external") -> str:
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
-    for i, item in enumerate(items, start=1):
+    keep_idx = 0
+    for item in items:
         meta = item.get("metadata") or {}
-        title = meta.get("title") or meta.get("source") or f"item-{i}"
-        header = _format_lit_header(meta, i)
+        if not _is_citable(meta):
+            continue
+        if not _is_audience_appropriate(meta, audience):
+            continue
+        keep_idx += 1
+        title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
+        header = _format_lit_header(meta, keep_idx)
         excerpt = _format_lit_excerpt(item.get("content", "") or "", title)
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
+    if not lines:
+        return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
 
 
@@ -2474,7 +2553,7 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
 
 
 def _format_reflect_history(history: list[dict[str, Any]]) -> str:
-    """Phase K: render the per-iteration repair history for the reflect
+    """Render the per-iteration repair history for the reflect
     prompt — keeps the LLM from re-trying patches that already failed."""
     if not history:
         return "(no prior repair attempts on this experiment)"
@@ -2495,8 +2574,8 @@ _PERSONA_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 def _load_persona_prefix(name: str, *, category: str = "review") -> str:
     """Load a persona-specific prefix from
-    ``agents/<category>_persona_<name>.md`` (Phase N for ``review``;
-    Phase Q for ``write``). Falls back to a generic prefix when no
+    ``agents/<category>_persona_<name>.md`` (used by both ``review``
+    and ``write`` categories). Falls back to a generic prefix when no
     per-persona file exists so users can declare a custom persona
     name in YAML without shipping a new file. The fallback path only
     applies to the ``review`` category — write personas without a
@@ -2523,7 +2602,7 @@ def _load_persona_prefix(name: str, *, category: str = "review") -> str:
 def _aggregate_panel_reviews(
     panel: list[dict[str, Any]], *, fallback_verdict: str = "accept",
 ) -> dict[str, Any]:
-    """Phase N: deterministic aggregator the moderator prompt is also
+    """Deterministic aggregator the moderator prompt is also
     instructed to follow. We compute the canonical answer programmatically
     so tests can pin the rules even when the LLM moderator is unavailable
     or produces malformed JSON. The moderator's output, when usable, is
@@ -2638,7 +2717,7 @@ def _aggregate_panel_reviews(
 
 
 def _format_cross_check(state: QuestState) -> str:
-    """Phase L: render the per-finding cross-paper-check results as a
+    """Render the per-finding cross-paper-check results as a
     bulleted block for the write prompt's `$cross_check_block`."""
     checks = state.get("cross_check") or []
     if not checks:
@@ -3045,7 +3124,7 @@ def _slugify(s: str) -> str:
 
 def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:
     """Render an Axon retrieval hit as a Markdown file with YAML front
-    matter. Used by ``_node_auto_collect_data`` (Phase D1).
+    matter. Used by ``_node_auto_collect_data``.
 
     Why a proper YAML dump (not Python ``repr``): a metadata value
     containing single quotes (``"O'Brien"``), backslashes, or non-ASCII
@@ -3197,10 +3276,9 @@ def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
     Pair this with ``_close_quest_logger`` (below) in
     ``Engine.run``'s outer ``try/finally`` so the file lock is released
     on every exit path — normal completion, exception from any node,
-    artifact-collection failure, OR the no-simulation pause-exit
-    added in Phase B. (Earlier revisions of this fix only closed the
-    handler on the success path; the outer try/finally is the version
-    that actually delivers the cleanup invariant.)
+    artifact-collection failure, OR the no-simulation pause-exit.
+    The outer try/finally is what delivers the cleanup invariant
+    (closing the handler only on the success path is not enough).
     """
     fi_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"frontier_insight.{quest_id}")
@@ -3247,9 +3325,8 @@ def _close_quest_logger(quest_id: str) -> None:
     quest directory will fail with ``PermissionError: [WinError 32]
     The process cannot access the file because it is being used by
     another process``. We've hit that cascade across several test
-    sessions; Phase B's no-simulation pause-exit adds another return
-    path where the same leak would happen, so the fix lands here
-    first."""
+    sessions; the no-simulation pause-exit adds another return path
+    where the same leak would happen, so the fix lands here."""
     logger = logging.getLogger(f"frontier_insight.{quest_id}")
     for handler in list(logger.handlers):
         try:

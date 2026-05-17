@@ -259,6 +259,23 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         raise TypeError(
             f"provider_model must be str or null, got {type(pm).__name__}"
         )
+    # Optional tier-2 / tier-3 fields. The frontend always sends them
+    # in the new flow, but tolerate missing keys for backwards compat
+    # with anything still posting the old 13-field shape.
+    audience = body.get("audience", "external")
+    if not isinstance(audience, str) or audience not in ("external", "internal"):
+        raise ValueError(
+            f"audience must be 'external' or 'internal', got {audience!r}"
+        )
+    top_k = body.get("knowledge_top_k", 5)
+    try:
+        top_k = int(top_k)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"knowledge_top_k must be an int, got {type(top_k).__name__}"
+        )
+    if top_k < 1:
+        raise ValueError(f"knowledge_top_k must be >= 1, got {top_k}")
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -274,4 +291,6 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         knowledge_enabled=body["knowledge_enabled"],
         provider=body["provider"],
         provider_model=pm if pm else None,
+        audience=audience,
+        knowledge_top_k=top_k,
     )

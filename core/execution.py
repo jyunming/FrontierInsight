@@ -5,7 +5,7 @@ agent-generated code runs as a child process of the FI engine. Cross-
 platform: the venv's Python lives at `Scripts/python.exe` on Windows and
 `bin/python` on POSIX.
 
-`DockerExecutor` is the opt-in (Phase D) that builds an ephemeral image,
+`DockerExecutor` is the opt-in that builds an ephemeral image,
 mounts the quest_root, and runs commands inside the container.
 
 Both expose the same async `execute(cmd, cwd, timeout_s) -> ExecutionResult`.
@@ -49,7 +49,7 @@ class VenvExecutor:
     """Runs commands in a per-quest venv; no sandbox.
 
     Suitable for personal / trusted-topic use. For untrusted code, prefer
-    `DockerExecutor` (Phase D).
+    `DockerExecutor`.
     """
 
     def __init__(self, *, python_version: str = "3.11") -> None:

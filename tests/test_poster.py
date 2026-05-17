@@ -1,4 +1,4 @@
-"""Phase E-3 validation: poster generator (beamerposter wrapper).
+"""Poster generator (beamerposter wrapper) validation.
 
 Covers:
 - LLM JSON -> 3-column poster.tex substitution path with no real LLM calls.

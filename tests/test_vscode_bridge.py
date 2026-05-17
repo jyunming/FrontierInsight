@@ -1,4 +1,4 @@
-"""Phase P — Python side of the VSCode-extension bridge.
+"""Python side of the VSCode-extension bridge.
 
 Tests run against an in-process mock TCP server that speaks the wire
 protocol described in `core/vscode_bridge.py`. No real VSCode required.
@@ -12,7 +12,7 @@ Covered:
   - Provider integration: a `vscode_extension` ResolvedEndpoint with
     vscode_bridge_port set routes LLMClient.chat through the bridge.
   - Engine-side per-call model routing flows model_hint into the wire
-    payload (Phase O still works through the new transport).
+    payload (per-node routing works through this transport).
 """
 
 from __future__ import annotations
@@ -540,9 +540,10 @@ def test_is_bridge_error_transient_classification() -> None:
     assert _is_bridge_error_transient("rate limit exceeded")
     assert _is_bridge_error_transient("bridge connection dropped")
     assert _is_bridge_error_transient("ECONNRESET on chunked body")
-    # New: TS-side stall-detection (no chunk for 180 s) surfaces this
-    # error and must be retried, not propagated immediately. The user's
-    # 12-minute hang on 2026-05-13 motivated adding this path.
+    # TS-side stall-detection (no chunk for 180 s) surfaces this
+    # error and must be retried, not propagated immediately —
+    # otherwise the bridge can hang for many minutes on a silent
+    # model.
     assert _is_bridge_error_transient(
         "bridge stalled: no chunk for 180 s (received 0 chunks / 0 chars before stall)"
     )
@@ -651,8 +652,8 @@ async def test_llmclient_chat_retries_up_to_six_then_friendly_error() -> None:
 async def test_llmclient_chat_routes_vscode_bridge_transport() -> None:
     """End-to-end: a ResolvedEndpoint with transport=vscode_bridge
     sends the chat over the bridge, and the per-call `model` kwarg
-    surfaces as `model_hint` on the wire. This is Phase O × Phase P
-    composed."""
+    surfaces as `model_hint` on the wire — per-node model routing
+    composes with the bridge transport."""
     server = _MockBridgeServer()
     captured: list[dict[str, Any]] = []
 
@@ -669,7 +670,7 @@ async def test_llmclient_chat_routes_vscode_bridge_transport() -> None:
     try:
         out = await client.chat(
             [{"role": "user", "content": "hi"}],
-            model="claude-opus-4-7",  # Phase O per-call override
+            model="claude-opus-4-7",  # per-call override
         )
         assert out == "from-bridge"
         wire = captured[0]

@@ -1,6 +1,9 @@
 # Frontier Insight
 
-<img src="vscode-frontier-insight/images/icon.png" alt="Frontier Insight icon" width="96" align="left" style="margin-right: 16px;"/>
+<picture>
+  <source srcset="web/static/favicon.svg" type="image/svg+xml"/>
+  <img src="vscode-frontier-insight/images/icon.png" alt="Frontier Insight icon" width="96" align="left" style="margin-right: 16px;"/>
+</picture>
 
 **Give it a research topic. Get back a paper, the experiment that produced it, and the figures — all auto-generated, all reproducible.**
 
@@ -41,6 +44,7 @@ Concretely: **per-node model routing** lets you spend cheap on `clarify` and exp
 - **Python 3.11+** (Windows / macOS / Linux — no WSL needed).
 - An LLM provider: a Copilot subscription via VSCode, OpenAI / Anthropic / Gemini API key, or local Ollama. Pick one in the quickstart below.
 - *Optional:* `pandoc` + a LaTeX engine for `paper.pdf` output. If you can't install MiKTeX / TeX Live (no admin, corporate laptop), run `python launch.py --install-tectonic` after install — it drops a 70 MB self-contained LaTeX binary into `tools/` and FI picks it up automatically.
+- *Optional:* `pip install axon` for the knowledge layer (literature retrieval + cross-quest memory). When present, FI auto-launches the Axon API as a sidecar on `127.0.0.1:8000` so the embedding model + vector indexes stay warm across quests instead of cold-loading per quest (saves ~5-15 s per `/start`). Skip the auto-launch with `--no-axon-sidecar` or `FI_NO_AXON_SIDECAR=1`.
 - *Optional, network only:* the WorldBank + Wikipedia dataset adapters (`engine.dataset_adapters: [worldbank, wikipedia]`, opt-in) use stdlib `urllib` against `api.worldbank.org` and `en.wikipedia.org` — no extra `pip install` needed, but the runtime needs outbound HTTPS to those hosts when the adapters are enabled.
 
 ---
@@ -261,6 +265,30 @@ python launch.py --config outputs/<quest_id>/config.yaml \
 ```
 
 The YAML's `provider` block is honored on resume; everything else (topic, design, literature, analysis) is loaded from the sqlite checkpoint, so you can edit the YAML between runs to change which model handles which node.
+
+### Pull more (or fewer) prior-work citations
+
+Each quest's literature step retrieves `knowledge.top_k` documents from Axon (+ the external router fallback when Axon is empty), and those are what end up in the paper's References. The default is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
+
+```yaml
+knowledge:
+  enabled: true
+  top_k: 12        # pull more — costs ~5K extra tokens per LLM call that uses the block
+```
+
+Trade-offs: higher `top_k` gives the writer + cross-check nodes more sources to draw on but inflates every prompt that includes the literature block (`ideate`, `design`, `write`, `cross_check`, `review`), which means more tokens billed AND more chance of the model losing focus across a sprawling context. 5–10 is the sweet spot for a journal-length paper; bump to 15–20 only for a `comprehensive review` study depth.
+
+### Keep internal docs out of an externally-published paper
+
+By default, FI's writer treats every quest as externally-facing (journal submission, open-web release): the References section excludes cross-quest memory artifacts (`kind=fi_critique` / `fi_digest` / `fi_portfolio` / `fi_proposal` / `fi_summary` / `fi_source_catalog`) because an outside reader can't look them up. Real external literature (arxiv / openalex / etc.) and `fi_local_paper` entries you ingested yourself are kept.
+
+If the paper is internal-facing — a project report, onboarding doc, memo for your own team — flip the flag so FI's own prior work can be cited:
+
+```yaml
+output:
+  paper_format: report
+  audience: internal   # default is "external"
+```
 
 ### Watch progress in a browser instead of the terminal
 

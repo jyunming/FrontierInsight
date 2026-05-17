@@ -1,11 +1,11 @@
-"""Phase D3 — Wikipedia adapter for free-form web-fetch data collection.
+"""Wikipedia adapter for free-form web-fetch data collection.
 
-Where this fits: PR γ added Axon retrieval (corpus-shaped queries),
-PR δ added structured-data adapters (WorldBank macros). Many
-no-simulation topics fall in NEITHER bucket — *"compare the 1968
-student protests in Paris and Mexico City"* isn't in the user's
-Axon corpus by default and isn't tabular data. Wikipedia is the
-realistic free, key-less, well-covered source for that long-tail.
+Where this fits: Axon retrieval covers corpus-shaped queries and
+the structured-data adapters (WorldBank etc.) cover tabular macros.
+Many no-simulation topics fall in NEITHER bucket — *"compare the
+1968 student protests in Paris and Mexico City"* isn't in the
+user's Axon corpus by default and isn't tabular data. Wikipedia is
+the realistic free, key-less, well-covered source for that long-tail.
 
 API surface used (both key-less, anonymous-friendly):
 

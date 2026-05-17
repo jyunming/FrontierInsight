@@ -1,4 +1,4 @@
-"""Phase K — execute-repair loop tests.
+"""Execute-repair loop tests.
 
 Validates the `_node_execute_reflect` node's three branches:
   - script succeeded → pass-through, no LLM call

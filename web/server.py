@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import re
 import shutil
 import time
@@ -53,7 +55,7 @@ class _QuestRegistry:
     answers; the registry resolves the matching future so the
     Engine's clarify callback returns and the graph proceeds.
 
-    Phase N: also tracks the in-memory `Engine` reference so the
+    Also tracks the in-memory `Engine` reference so the
     detail endpoint can surface the most-recent `review_panel`
     snapshot from `final_state` (when the quest has finished) or
     from the SqliteSaver checkpoint (mid-quest). For now we just
@@ -318,6 +320,40 @@ def make_app(
     # marketing/index.html and is meant for external deployment
     # (GitHub Pages etc.), not inside the operational --serve UI.
 
+    @app.get("/jobs", response_class=HTMLResponse)
+    async def jobs_page() -> HTMLResponse:
+        """Live job-tracking page. Shows running + recent tool / system /
+        quest subprocess jobs the launcher knows about, with a live
+        log-tail view. Hit by the tools form after submit so the user can
+        watch their proposal/critique/etc. actually run."""
+        page = static_dir / "jobs.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Jobs UI not installed</h1>", status_code=500,
+            )
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    async def job_detail_page(job_id: str) -> HTMLResponse:
+        """Single-job detail page. Reuses jobs.html and lets the client
+        JS pick up the job_id from window.__fi_job_id."""
+        if not _QUEST_ID_RE.match(job_id):
+            raise HTTPException(400, f"bad job_id format: {job_id!r}")
+        page = static_dir / "jobs.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Jobs UI not installed</h1>", status_code=500,
+            )
+        # Same trick as /quest/{id}: inject the job_id into a global so
+        # the client can target this single job.
+        html = page.read_text(encoding="utf-8")
+        injected = html.replace(
+            "</head>",
+            f'<script>window.__fi_job_id = {json.dumps(job_id)};</script></head>',
+            1,
+        )
+        return HTMLResponse(injected)
+
     @app.get("/compare", response_class=HTMLResponse)
     async def compare_page() -> HTMLResponse:
         page = static_dir / "compare.html"
@@ -326,6 +362,24 @@ def make_app(
                 "<h1>Compare UI not installed</h1>", status_code=500,
             )
         return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/api/axon/status")
+    async def axon_status_endpoint() -> JSONResponse:
+        """Health-probe the Axon sidecar (``python -m axon.api`` on
+        ``127.0.0.1:8000`` by default). The /settings page polls
+        this so the user can see the sidecar is hot before kicking
+        off a quest. Cheap — one HTTP HEAD-equivalent probe."""
+        from core.axon_sidecar import axon_status as _probe
+        return JSONResponse(dict(_probe()))
+
+    @app.post("/api/axon/launch")
+    async def axon_launch_endpoint() -> JSONResponse:
+        """Idempotent: spawn an Axon API sidecar if one isn't already
+        listening. Used by the Settings page's 'Start Axon' button
+        for users who launched FI with ``--no-axon-sidecar`` and
+        changed their mind later."""
+        from core.axon_sidecar import ensure_axon_up
+        return JSONResponse(dict(ensure_axon_up()))
 
     @app.get("/api/knowledge/info")
     async def knowledge_info() -> JSONResponse:
@@ -606,9 +660,8 @@ def make_app(
         the most recent install attempt's exit state + log tail when
         a ``job_id`` is passed. Without the log path, a failing
         install (network error, GitHub asset 404, etc.) shows
-        "starting…" forever in the UI; the user reported this exact
-        symptom on PR #102. Now the Settings page can poll the job
-        and surface the actual error."""
+        "starting…" forever in the UI. With it, the Settings page
+        can poll the job and surface the actual error."""
         import sys as _sys
         import shutil as _shutil
         repo_root = Path(__file__).resolve().parent.parent
@@ -638,6 +691,207 @@ def make_app(
         if lines is None:
             raise HTTPException(404, f"no log for job {job_id}")
         return JSONResponse({"job_id": job_id, "lines": lines})
+
+    def _classify_job(job_id: str) -> str:
+        """Categorize a launcher job by inspecting its job_id prefix.
+        Used by the /api/jobs response so the UI can render different
+        icons / link targets per job kind:
+          tool   → /api/tools/<name> jobs (job_id starts with `<tool>-`)
+          system → install-tectonic etc.
+          quest  → CLI/--new/--update launches (timestamp-prefixed)
+        """
+        from web.tools_routes import TOOLS_BY_NAME
+        for name in TOOLS_BY_NAME:
+            if job_id.startswith(f"{name}-"):
+                return "tool"
+        if job_id.startswith("tectonic-"):
+            return "system"
+        return "quest"
+
+    @app.get("/api/jobs")
+    async def list_jobs() -> JSONResponse:
+        """List all subprocess jobs the launcher has spawned (tools,
+        --install-tectonic, --new/--update/--proposal quest launches),
+        merging:
+          (1) the launcher's live registry (alive jobs with pid/age)
+          (2) outputs/_logs/<job_id>.log files (everything ever logged
+              — alive *or* exited).
+        Each entry the dashboard's "Jobs" tab consumes:
+          {job_id, kind, alive, exit_code?, age_seconds, log_mtime}.
+        """
+        out_root = app.state.output_root
+        logs_dir = Path(__file__).resolve().parent.parent / "outputs" / "_logs"
+        live = {q.quest_id: q for q in app.state.launcher.list_alive()}
+        seen: dict[str, dict[str, Any]] = {}
+        # 1. Files on disk = every job that was ever logged.
+        if logs_dir.is_dir():
+            for p in sorted(
+                logs_dir.glob("*.log"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )[:200]:
+                jid = p.stem
+                seen[jid] = {
+                    "job_id": jid,
+                    "kind": _classify_job(jid),
+                    "alive": jid in live,
+                    "log_mtime": p.stat().st_mtime,
+                    "log_size": p.stat().st_size,
+                }
+        # 2. Live registry entries (may include jobs that haven't
+        #    written a log file yet — rare but possible during startup).
+        for jid, entry in live.items():
+            if jid not in seen:
+                seen[jid] = {
+                    "job_id": jid,
+                    "kind": _classify_job(jid),
+                    "alive": True,
+                    "log_mtime": entry.started_at,
+                    "log_size": 0,
+                }
+            seen[jid]["pid"] = entry.pid
+            seen[jid]["age_seconds"] = entry.age_seconds()
+        # 3. For exited jobs, pull exit_code if the launcher still
+        #    remembers them (within the recent-reap window).
+        for jid, info in seen.items():
+            if not info["alive"]:
+                st = app.state.launcher.status_for(jid)
+                if st and st.get("exit_code") is not None:
+                    info["exit_code"] = st["exit_code"]
+        return JSONResponse({
+            "jobs": sorted(
+                seen.values(),
+                key=lambda j: j.get("age_seconds", 0) if j["alive"] else -j.get("log_mtime", 0),
+                reverse=False,
+            ),
+        })
+
+    @app.get("/api/drafts")
+    async def list_drafts() -> JSONResponse:
+        """List draft quest YAMLs the proposal tool dropped in
+        ``outputs/_drafts/``. Each entry includes the parsed topic
+        + title so the /interview UI can show a one-click picker
+        for "continue this proposal as a new quest." Most-recent
+        first."""
+        drafts_dir = app.state.output_root / "_drafts"
+        if not drafts_dir.is_dir():
+            return JSONResponse({"drafts": []})
+        items: list[dict[str, Any]] = []
+        for p in sorted(
+            drafts_dir.glob("*.yaml"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:40]:
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            # Parse JUST the fields the picker needs — topic + title.
+            # Doing a full YAML load here is fine; the files are tiny.
+            try:
+                import yaml as _yaml
+                doc = _yaml.safe_load(txt) or {}
+            except Exception:
+                doc = {}
+            items.append({
+                "filename": p.name,
+                "mtime": p.stat().st_mtime,
+                "size": p.stat().st_size,
+                "topic": (doc.get("topic") or "").strip()[:200],
+                "title": (doc.get("title") or "").strip()[:200],
+                "provider": (doc.get("provider") or {}).get("name") if isinstance(doc.get("provider"), dict) else None,
+                "companion_md": str(p.with_name(p.stem + "-proposal.md").name)
+                    if (drafts_dir / (p.stem + "-proposal.md")).is_file() else None,
+            })
+        return JSONResponse({"drafts": items})
+
+    @app.get("/api/drafts/{filename}")
+    async def get_draft(filename: str) -> JSONResponse:
+        """Return the parsed contents of a single draft YAML so the
+        /interview page can pre-fill its form fields when the user
+        clicks "Load draft" on a proposal output.
+
+        Also returns the companion proposal markdown (``<stem>-proposal.md``)
+        when present, so the interview page can render the full
+        background/hypothesis/plan/risks alongside the form. The YAML
+        alone only holds the *runnable* config (topic, title, provider,
+        execution params, …); the rich proposal text lives in the MD.
+        """
+        # Path-traversal guard: only allow simple filenames inside
+        # outputs/_drafts/, never path components like '..'.
+        if "/" in filename or "\\" in filename or filename.startswith(".") or not filename.endswith(".yaml"):
+            raise HTTPException(400, f"bad filename: {filename!r}")
+        draft = app.state.output_root / "_drafts" / filename
+        if not draft.is_file():
+            raise HTTPException(404, f"draft {filename!r} not found")
+        try:
+            txt = draft.read_text(encoding="utf-8", errors="replace")
+            import yaml as _yaml
+            doc = _yaml.safe_load(txt) or {}
+        except Exception as e:
+            raise HTTPException(500, f"could not parse draft: {e}")
+        # Companion proposal markdown (same stem with -proposal.md suffix)
+        # — bundled in the response so the picker only does one round
+        # trip to load both the YAML config + the readable plan.
+        proposal_md = draft.with_name(draft.stem + "-proposal.md")
+        md_text: str | None = None
+        if proposal_md.is_file():
+            try:
+                md_text = proposal_md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                md_text = None
+        return JSONResponse({
+            "filename": filename,
+            "raw": txt,
+            "parsed": doc,
+            "proposal_md": md_text,
+            "proposal_md_filename": proposal_md.name if md_text else None,
+        })
+
+    @app.get("/api/jobs/{job_id}")
+    async def get_job(job_id: str, n: int = 400) -> JSONResponse:
+        """Status + log tail for a single subprocess job. The tools
+        page polls this every 2s after submitting so the user sees
+        live output instead of staring at a frozen "Job started"
+        banner. Returns 404 only when neither the launcher nor any
+        log file knows about this job_id."""
+        if not _QUEST_ID_RE.match(job_id):
+            raise HTTPException(400, f"bad job_id format: {job_id!r}")
+        logs_dir = Path(__file__).resolve().parent.parent / "outputs" / "_logs"
+        log_path = logs_dir / f"{job_id}.log"
+        st = app.state.launcher.status_for(job_id)
+        log_lines: list[str] = []
+        log_mtime = None
+        log_size = None
+        if log_path.is_file():
+            try:
+                lines = log_path.read_text(
+                    encoding="utf-8", errors="replace",
+                ).splitlines()
+                log_lines = lines[-n:]
+                log_mtime = log_path.stat().st_mtime
+                log_size = log_path.stat().st_size
+            except OSError:
+                pass
+        if st is None and log_size is None:
+            raise HTTPException(404, f"no job {job_id} tracked or logged")
+        out: dict[str, Any] = {
+            "job_id": job_id,
+            "kind": _classify_job(job_id),
+            "log_tail": log_lines,
+            "log_mtime": log_mtime,
+            "log_size": log_size,
+        }
+        if st is not None:
+            out["alive"] = bool(st.get("alive"))
+            out["pid"] = st.get("pid")
+            out["age_seconds"] = st.get("age_seconds")
+            out["started_at"] = st.get("started_at")
+            if "exit_code" in st:
+                out["exit_code"] = st["exit_code"]
+        else:
+            out["alive"] = False  # known only via log file → already finished
+        return JSONResponse(out)
 
     @app.post("/api/system/install-tectonic")
     async def install_tectonic() -> JSONResponse:
@@ -813,7 +1067,39 @@ def make_app(
     @app.get("/api/quests/{quest_id}")
     async def get_quest(quest_id: str) -> JSONResponse:
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        # Race window: a quest just submitted via
+        # POST /api/interview/submit?launch=true has had its quest_id
+        # minted and its subprocess spawned, but the child engine has
+        # not yet created `.fi/` (LangGraph init takes a few seconds —
+        # model loading, ADC, env, …). Without this fallback the user
+        # gets a hard 404 the instant the form redirects to /quest/<id>.
+        # When the launcher is tracking the id, surface a "starting"
+        # response with the subprocess pid + age so the UI shows
+        # progress instead of a dead-end error.
+        launcher_status = app.state.launcher.status_for(quest_id)
         if not (quest_root / ".fi").is_dir():
+            if launcher_status and (launcher_status.get("alive") or launcher_status.get("age_seconds", 0) < 60):
+                return JSONResponse({
+                    "quest_id": quest_id,
+                    "quest_root": str(quest_root),
+                    "current_node": "starting",
+                    "log_tail": [
+                        f"[FI] subprocess pid={launcher_status.get('pid')} spawned "
+                        f"{int(launcher_status.get('age_seconds') or 0)}s ago — waiting for "
+                        ".fi/run.log to appear (Engine init takes ~5–15s on first start).",
+                    ],
+                    "figures": [],
+                    "paper_preview": None,
+                    "summary": None,
+                    "alive": bool(launcher_status.get("alive")),
+                    "pending_clarify": False,
+                    "review": None,
+                    "review_panel": None,
+                    "pid": launcher_status.get("pid"),
+                    "started_at": launcher_status.get("started_at"),
+                    "age_seconds": launcher_status.get("age_seconds"),
+                    "exit_code": launcher_status.get("exit_code"),
+                })
             raise HTTPException(404, f"quest {quest_id} not found")
         log_lines = _read_log_tail(quest_root / ".fi" / "run.log", n=20)
         paper_md = quest_root / "paper" / "paper.md"
@@ -828,10 +1114,10 @@ def make_app(
             if summary_path.exists() else None
         )
         final_state = registry.final_state(quest_id) or {}
-        # Phase N — expose the panel reviews to the GUI when present.
+        # Expose the panel reviews to the GUI when present.
         review = final_state.get("review")
         review_panel = final_state.get("review_panel")
-        # Phase R — merge launcher state so quests spawned via the
+        # Merge launcher state so quests spawned via the
         # web UI's POST /api/interview/submit?launch=true also report
         # ``alive: true`` while their child process is running.
         # Without this, the in-process registry's `alive(quest_id)`
@@ -841,7 +1127,8 @@ def make_app(
         # incorrectly show "idle" and the Cancel button would stay
         # disabled. registry.alive(...) OR launcher.alive covers both
         # transports.
-        launcher_status = app.state.launcher.status_for(quest_id) or {}
+        # Already fetched above for the spawning-race fallback; reuse it.
+        launcher_status = launcher_status or {}
         return JSONResponse({
             "quest_id": quest_id,
             "quest_root": str(quest_root),
@@ -911,9 +1198,7 @@ def make_app(
                 # subprocess-launched quest (those are tracked by
                 # `app.state.launcher`, not the registry). Without the
                 # OR-merge below, the stream would close on the FIRST
-                # appended chunk for every web-launched quest. Same
-                # bug pattern the GET /api/quests/<id> endpoint had
-                # before the Phase R fix.
+                # appended chunk for every web-launched quest.
                 launcher_alive = bool(
                     (app.state.launcher.status_for(quest_id) or {}).get("alive")
                 )
@@ -975,9 +1260,19 @@ def make_app(
     async def get_quest_file(quest_id: str, path: str) -> FileResponse:
         """Serve a single file from the quest_root by relative path.
         Path-traversal guarded: resolves and confirms the final
-        path stays inside quest_root."""
+        path stays inside quest_root.
+
+        Some clients (VS Code Live Server, certain browser extensions)
+        naively append ``?preventCache=<unix-ms>`` to URLs without
+        checking whether a query string already exists, producing
+        ``?path=paper.md?preventCache=...`` — FastAPI then reads the
+        path value as the literal ``paper.md?preventCache=...``.
+        Strip everything after the first ``?``/``#`` so the file
+        actually resolves instead of 404-ing.
+        """
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-        target = (quest_root / path).resolve()
+        cleaned = path.split("?", 1)[0].split("#", 1)[0]
+        target = (quest_root / cleaned).resolve()
         try:
             target.relative_to(quest_root.resolve())
         except ValueError:
@@ -1069,9 +1364,9 @@ def make_app(
     async def get_paper_iterations(quest_id: str) -> JSONResponse:
         """List paper.md snapshots across review iterations for the
         diff viewer. Looks for ``paper/paper.md.iter-N.md`` files
-        the engine could write (Phase E follow-up — for now just
-        returns the current paper.md as a single iteration when
-        the rolled-snapshot machinery isn't in place yet)."""
+        the engine could write — for now just returns the current
+        paper.md as a single iteration when the rolled-snapshot
+        machinery isn't in place yet."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         paper_dir = quest_root / "paper"
         iterations: list[dict[str, Any]] = []
@@ -1226,7 +1521,7 @@ def make_app(
         async def driver():
             try:
                 art = await engine.run(clarify_callback=gui_clarify_callback)
-                # Phase N — snapshot review_panel + final review so the
+                # Snapshot review_panel + final review so the
                 # detail endpoint can render the per-persona reviews
                 # without re-reading the SqliteSaver checkpoint.
                 registry.record_final_state(quest_id, art.raw_state or {})
@@ -1284,6 +1579,7 @@ async def serve_async(
     bridge the dashboard inherits. Both forwarded to ``make_app``."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
+    _ensure_axon_sidecar()
     app = make_app(
         output_root.resolve(),
         max_concurrent=max_concurrent,
@@ -1305,9 +1601,23 @@ def serve(
     """Blocking entry point invoked when run standalone (no event loop)."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
+    _ensure_axon_sidecar()
     app = make_app(
         output_root.resolve(),
         max_concurrent=max_concurrent,
         vscode_bridge_port=vscode_bridge_port,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+def _ensure_axon_sidecar() -> None:
+    """Boot the Axon API sidecar so the knowledge layer is hot when
+    the first quest runs. Idempotent — does nothing if Axon is
+    already listening, or if ``FI_NO_AXON_SIDECAR=1`` is set."""
+    if os.environ.get("FI_NO_AXON_SIDECAR"):
+        return
+    try:
+        from core.axon_sidecar import ensure_axon_up
+        ensure_axon_up()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("fi.web").warning("axon sidecar bootstrap failed: %s", e)

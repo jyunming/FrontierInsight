@@ -1,4 +1,4 @@
-"""Phase J FastAPI server smoke tests.
+"""FastAPI server smoke tests.
 
 Uses FastAPI's TestClient (no real network). The server reads quest
 state from disk and routes clarify-resume via an in-process registry;
@@ -273,18 +273,18 @@ def test_app_index_html_loads(tmp_path: Path) -> None:
     assert r.status_code == 200
     assert "Frontier Insight" in r.text
     assert "quest-list" in r.text  # quest cards land here
-    # Phase R — the dashboard delegates per-quest detail (paper preview,
-    # review panel rendering, log tail) to the new /quest/<id> page.
-    # The dashboard now just shows a list + a "+ New Quest" CTA so it
-    # stays simple. The renderReviewPanel function moved into the
-    # quest detail page; the test there pins it.
+    # The dashboard delegates per-quest detail (paper preview,
+    # review panel rendering, log tail) to the /quest/<id> page.
+    # The dashboard itself just shows a list + a "+ New Quest" CTA
+    # so it stays simple. The renderReviewPanel function lives in
+    # the quest detail page; the test there pins it.
     assert "New Quest" in r.text, "dashboard must surface the New Quest CTA"
 
 
 def test_app_detail_endpoint_surfaces_review_panel_when_recorded(
     tmp_path: Path,
 ) -> None:
-    """Phase N: when the in-process registry has recorded a final_state
+    """When the in-process registry has recorded a final_state
     with `review_panel`, the detail endpoint exposes both `review`
     (moderator output) and `review_panel` (per-persona). When no
     panel was recorded, both fields are null."""

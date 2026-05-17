@@ -8,6 +8,12 @@
 \usepackage[utf8]{inputenc}
 \usepackage[margin=1.4in,top=1.2in,bottom=1.2in]{geometry}
 \usepackage{graphicx}
+% Required for pandoc-rendered markdown tables (pandoc emits egin{longtable}).
+\usepackage{longtable}
+\usepackage{array}
+% pandoc emits \def\LTcaptype{none} for caption-less tables; longtable
+% then calls \refstepcounter{none} internally, so the counter must exist.
+\newcounter{none}
 \usepackage{hyperref}
 \usepackage{setspace}
 \usepackage{microtype}

@@ -1,4 +1,4 @@
-"""Phase H validation: two Engines run concurrently with a fake LLM.
+"""Fleet validation: two Engines run concurrently with a fake LLM.
 
 Verifies (a) N parallel engines can coexist in one process, (b) each gets
 a distinct quest_id and quest_root, (c) per-quest venvs do not collide,

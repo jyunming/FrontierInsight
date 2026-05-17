@@ -1,5 +1,5 @@
-"""Tests for Phase C — resume + tectonic install + clarify-resume +
-trash bin endpoints."""
+"""Tests for the web UI's static / utility endpoints: resume,
+tectonic install, clarify-resume, trash bin, knowledge info."""
 
 from __future__ import annotations
 
@@ -243,6 +243,41 @@ def test_static_pages_render(tmp_path: Path) -> None:
     assert res.status_code == 404
 
 
+def test_dashboard_quest_card_escapes_label_to_prevent_xss() -> None:
+    """The status pill on each quest card renders `${s.label}`,
+    where `s.label = String(q.verdict || 'idle')`. The verdict
+    is engine-generated text (LLM review output), so a hostile
+    LLM could embed HTML/JS. The renderer MUST escape it.
+    Caught by Copilot bot review on PR #103."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "web" / "static" / "index.html"
+    text = page.read_text(encoding="utf-8")
+    # The pill's label substitution must go through escapeHtml.
+    assert "${escapeHtml(s.label)}" in text, (
+        "quest card pill label must escape s.label to defend against "
+        "LLM-generated verdicts containing HTML/script"
+    )
+    # And the raw-html slot (pillIcon) must still be inline so the
+    # animated dot for running quests renders.
+    assert "${s.pillIcon}" in text, "pillIcon stays raw — it's a trusted span literal"
+
+
+def test_dashboard_surfaces_loadquests_failure_instead_of_silent() -> None:
+    """loadQuests() previously swallowed every error. When the server
+    was down, the page just looked empty. After the bot's review we
+    surface a banner + auto-retry."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "web" / "static" / "index.html"
+    text = page.read_text(encoding="utf-8")
+    # The /* silent */ tombstone is gone…
+    assert "/* silent */" not in text, (
+        "the silent-swallow comment marks dead UX; replace with a banner"
+    )
+    # …replaced with a console.warn + an inline retry.
+    assert "console.warn('[fi] /api/quests failed:'" in text
+    assert "setTimeout(loadQuests, 5000)" in text
+
+
 def test_marketing_landing_page_is_self_contained() -> None:
     """marketing/index.html is intended to be deployed separately
     (GitHub Pages, Netlify, etc.) as a marketing page. It must
@@ -260,7 +295,7 @@ def test_marketing_landing_page_is_self_contained() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase E — fancy features
+# Labels / fancy features
 # ---------------------------------------------------------------------------
 
 
@@ -396,14 +431,14 @@ def test_quest_zip_download(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase I + PR #102 bot-comment fixes
+# Knowledge endpoint + dir-existence guards
 # ---------------------------------------------------------------------------
 
 
 def test_labels_refuses_when_quest_doesnt_exist(tmp_path: Path) -> None:
-    """Bot comment: PUT /labels for a nonexistent quest used to
-    auto-create <output_root>/<id>/.fi/, which made _scan_quests
-    surface it as a "quest". Now 404 when no .fi/ exists."""
+    """PUT /labels for a nonexistent quest must NOT auto-create
+    <output_root>/<id>/.fi/ (that would let _scan_quests surface
+    a phantom quest). Returns 404 when no .fi/ exists."""
     client = _client(tmp_path)
     res = client.put("/api/quests/never-existed/labels",
                      json={"labels": ["x"]})
@@ -413,9 +448,9 @@ def test_labels_refuses_when_quest_doesnt_exist(tmp_path: Path) -> None:
 def test_trash_refuses_when_quest_alive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bot comment: moving the quest dir while the subprocess is
-    still writing into it causes engine I/O errors. Refuse with
-    409 + a hint to cancel first."""
+    """Moving the quest dir while the subprocess is still writing
+    into it causes engine I/O errors. Refuse with 409 + a hint to
+    cancel first."""
     client = _client(tmp_path)
     output_root = client.app.state.output_root  # type: ignore[attr-defined]
     (output_root / "q-alive").mkdir()
@@ -429,9 +464,9 @@ def test_trash_refuses_when_quest_alive(
 
 
 def test_knowledge_info_endpoint_returns_payload(tmp_path: Path) -> None:
-    """Phase I — /api/knowledge/info surfaces AxonStore location.
-    When Axon isn't installed (the typical local dev path on CI),
-    returns available=False with a clear reason."""
+    """/api/knowledge/info surfaces AxonStore location. When Axon
+    isn't installed (the typical local dev path on CI), returns
+    available=False with a clear reason."""
     client = _client(tmp_path)
     res = client.get("/api/knowledge/info")
     assert res.status_code == 200
@@ -504,3 +539,77 @@ def test_tectonic_status_endpoint_reports_not_installed(tmp_path: Path) -> None:
     assert res.status_code == 200
     body = res.json()
     assert "installed" in body
+
+
+# ---------------------------------------------------------------------------
+# /api/quests/{id}/file URL-cache-buster tolerance
+# ---------------------------------------------------------------------------
+
+
+def _make_quest_with_file(output_root: Path, quest_id: str, rel: str, body: str) -> Path:
+    """Build a minimal valid quest under output_root and return its dir."""
+    qd = output_root / quest_id
+    (qd / ".fi").mkdir(parents=True)
+    (qd / ".fi" / "state.sqlite").write_bytes(b"")
+    target = qd / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return qd
+
+
+def test_get_quest_file_strips_preventcache_suffix(tmp_path: Path) -> None:
+    """VS Code Live Server (and similar) naively appends
+    ?preventCache=<unix-ms> without checking for an existing query
+    string, producing ?path=paper.md?preventCache=1779035013387.
+    FastAPI reads the ``path`` value as the literal
+    ``paper.md?preventCache=...``. The handler must strip the suffix
+    so the file still resolves."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-cache", "paper/paper.md", "real body")
+
+    # Baseline: clean URL works.
+    clean = client.get("/api/quests/q-cache/file", params={"path": "paper/paper.md"})
+    assert clean.status_code == 200
+    assert clean.text == "real body"
+
+    # The pathological case the user reported: path value carries a
+    # spurious ?preventCache= suffix (no encoding, just literal '?').
+    dirty = client.get(
+        "/api/quests/q-cache/file",
+        params={"path": "paper/paper.md?preventCache=1779035013387"},
+    )
+    assert dirty.status_code == 200, (
+        f"expected 200 with stripped suffix, got {dirty.status_code} {dirty.text}"
+    )
+    assert dirty.text == "real body"
+
+
+def test_get_quest_file_strips_fragment_suffix(tmp_path: Path) -> None:
+    """The same defensive strip should also handle a stray ``#anchor``
+    appended to the path value — same class of misbehaving client."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-frag", "paper/paper.md", "real body")
+
+    res = client.get(
+        "/api/quests/q-frag/file",
+        params={"path": "paper/paper.md#anchor-from-some-link"},
+    )
+    assert res.status_code == 200
+    assert res.text == "real body"
+
+
+def test_get_quest_file_404_when_real_file_truly_missing(tmp_path: Path) -> None:
+    """The strip mustn't accidentally make 404s disappear: a request
+    for a file that doesn't exist still 404s, even with a cache-buster
+    appended."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-404", "paper/paper.md", "x")
+
+    res = client.get(
+        "/api/quests/q-404/file",
+        params={"path": "paper/missing.md?preventCache=12345"},
+    )
+    assert res.status_code == 404

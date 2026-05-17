@@ -1,10 +1,9 @@
 """Pins the shape of the VSCode extension icon assets.
 
-Phase Q+1: the extension shipped without an icon for the first 80
-PRs; the marketplace gallery rendered the default placeholder
-square. This module asserts the icon contract so a future asset
-rework can't silently drop the file or break the package.json
-wiring without a test failure.
+Asserts the icon contract so a future asset rework can't silently
+drop the file or break the package.json wiring without a test
+failure (the marketplace gallery falls back to a default placeholder
+square when the icon is missing).
 """
 
 from __future__ import annotations

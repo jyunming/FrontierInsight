@@ -15,78 +15,8 @@
         "vscode",
         "serve"
       ],
-      "allow_other": false
-    },
-    {
-      "id": "title",
-      "label": "Title (short slug)",
-      "prompt": "Short identifier for this quest. Used in folder names. Auto-suggested from your topic.",
-      "kind": "text",
-      "choices": [],
-      "placeholder": "",
-      "default": null,
-      "mid_quest_editable": false,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
-    },
-    {
-      "id": "output_kinds",
-      "label": "Outputs",
-      "prompt": "Which deliverables matter? PDF gracefully degrades to MD if pandoc isn't installed.",
-      "kind": "single",
-      "choices": [
-        {
-          "value": [
-            "paper_md",
-            "paper_pdf"
-          ],
-          "label": "paper + PDF (recommended)",
-          "description": "Markdown + rendered PDF; needs pandoc + LaTeX on PATH. Falls back to MD-only when missing."
-        },
-        {
-          "value": [
-            "paper_md",
-            "paper_pdf",
-            "slides",
-            "poster",
-            "speech"
-          ],
-          "label": "everything",
-          "description": "paper, PDF, slides, poster, talk script. Maximum tooling needed (pandoc + LaTeX + marp + Beamer)."
-        },
-        {
-          "value": [
-            "paper_md",
-            "paper_pdf",
-            "slides"
-          ],
-          "label": "paper + PDF + slides",
-          "description": "PDF via pandoc + LaTeX; slides via Marp; .pptx via pandoc."
-        },
-        {
-          "value": [
-            "paper_md"
-          ],
-          "label": "paper only (Markdown)",
-          "description": "Fastest path; no extra system tools needed."
-        }
-      ],
-      "placeholder": "",
-      "default": [
-        "paper_md",
-        "paper_pdf"
-      ],
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
+      "allow_other": false,
+      "tier": 1
     },
     {
       "id": "paper_format",
@@ -148,34 +78,64 @@
         "vscode",
         "serve"
       ],
-      "allow_other": false
+      "allow_other": false,
+      "tier": 1
     },
     {
-      "id": "no_simulation",
-      "label": "Research approach",
-      "prompt": "Decides whether the engine runs a Python experiment or waits for real-world data. Smart-defaults off the paper format.",
+      "id": "output_kinds",
+      "label": "Outputs",
+      "prompt": "Which deliverables matter? PDF gracefully degrades to MD if pandoc isn't installed.",
       "kind": "single",
       "choices": [
         {
-          "value": false,
-          "label": "Computational — a Python script can produce the data",
-          "description": "Run normal implement → execute pipeline. For physics / ML / algorithmic / benchmark topics."
+          "value": [
+            "paper_md",
+            "paper_pdf"
+          ],
+          "label": "paper + PDF (recommended)",
+          "description": "Markdown + rendered PDF; needs pandoc + LaTeX on PATH. Falls back to MD-only when missing."
         },
         {
-          "value": true,
-          "label": "Observational — needs real-world data the engine can't simulate",
-          "description": "Skip implement / execute; route to wait_for_data + auto_collect_data. For cultural / historical / qualitative / policy topics."
+          "value": [
+            "paper_md",
+            "paper_pdf",
+            "slides",
+            "poster",
+            "speech"
+          ],
+          "label": "everything",
+          "description": "paper, PDF, slides, poster, talk script. Maximum tooling needed (pandoc + LaTeX + marp + Beamer)."
+        },
+        {
+          "value": [
+            "paper_md",
+            "paper_pdf",
+            "slides"
+          ],
+          "label": "paper + PDF + slides",
+          "description": "PDF via pandoc + LaTeX; slides via Marp; .pptx via pandoc."
+        },
+        {
+          "value": [
+            "paper_md"
+          ],
+          "label": "paper only (Markdown)",
+          "description": "Fastest path; no extra system tools needed."
         }
       ],
       "placeholder": "",
-      "default": false,
-      "mid_quest_editable": false,
+      "default": [
+        "paper_md",
+        "paper_pdf"
+      ],
+      "mid_quest_editable": true,
       "frontends": [
         "cli",
         "vscode",
         "serve"
       ],
-      "allow_other": false
+      "allow_other": false,
+      "tier": 1
     },
     {
       "id": "study_depth",
@@ -207,155 +167,8 @@
         "vscode",
         "serve"
       ],
-      "allow_other": false
-    },
-    {
-      "id": "comparative_baseline",
-      "label": "Comparative baseline",
-      "prompt": "What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
-      "kind": "text",
-      "choices": [],
-      "placeholder": "e.g. RandomForest baseline on the same features",
-      "default": null,
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
-    },
-    {
-      "id": "success_metric",
-      "label": "Success metric",
-      "prompt": "What number changing in what direction = headline result?",
-      "kind": "text",
-      "choices": [],
-      "placeholder": "e.g. AUC ≥ 0.9 on held-out test set",
-      "default": null,
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
-    },
-    {
-      "id": "budget",
-      "label": "Time / compute budget",
-      "prompt": "Soft cap on wall-clock for the experiment.",
-      "kind": "text",
-      "choices": [],
-      "placeholder": "e.g. a few minutes on a laptop CPU",
-      "default": null,
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
-    },
-    {
-      "id": "clarify_mode",
-      "label": "Pre-flight clarification mode",
-      "prompt": "Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
-      "kind": "single",
-      "choices": [
-        {
-          "value": "auto",
-          "label": "Agent self-clarifies (recommended)",
-          "description": "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."
-        },
-        {
-          "value": "interactive",
-          "label": "Pause for me to answer",
-          "description": "Engine pauses; you confirm/edit each clarify slot. Highest quality, most interruption."
-        },
-        {
-          "value": "off",
-          "label": "Just run it",
-          "description": "Skip the clarify node entirely. Engine relies on the interview answers + topic alone."
-        }
-      ],
-      "placeholder": "",
-      "default": "auto",
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
-    },
-    {
-      "id": "review_panel",
-      "label": "Reviewer panel",
-      "prompt": "Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
-      "kind": "single",
-      "choices": [
-        {
-          "value": [],
-          "label": "Single reviewer (cheapest)",
-          "description": "1 LLM call per review pass."
-        },
-        {
-          "value": [
-            "methodologist",
-            "statistician",
-            "devil_advocate"
-          ],
-          "label": "3-persona panel",
-          "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."
-        },
-        {
-          "value": [
-            "methodologist",
-            "statistician",
-            "devil_advocate",
-            "reproducibility"
-          ],
-          "label": "4-persona panel",
-          "description": "Adds Reproducibility reviewer. ~5× the review cost."
-        }
-      ],
-      "placeholder": "",
-      "default": [],
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
-    },
-    {
-      "id": "knowledge_enabled",
-      "label": "Knowledge layer (Axon)",
-      "prompt": "Most first-time users should leave this disabled. Mid-quest changes warn — Axon retrievals are one-shot.",
-      "kind": "single",
-      "choices": [
-        {
-          "value": false,
-          "label": "Disabled (recommended for first runs)",
-          "description": "Literature retrieval falls back to free public sources (arXiv, OpenAlex, Crossref) when needed."
-        },
-        {
-          "value": true,
-          "label": "Enabled (requires Axon installed)",
-          "description": "Use the Axon corpus for retrieval + write-back. Skip if you haven't set Axon up."
-        }
-      ],
-      "placeholder": "",
-      "default": false,
-      "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false
+      "allow_other": false,
+      "tier": 1
     },
     {
       "id": "provider",
@@ -406,7 +219,8 @@
         "cli",
         "serve"
       ],
-      "allow_other": false
+      "allow_other": false,
+      "tier": 1
     },
     {
       "id": "provider_model",
@@ -421,7 +235,252 @@
         "cli",
         "serve"
       ],
-      "allow_other": true
+      "allow_other": true,
+      "tier": 1
+    },
+    {
+      "id": "title",
+      "label": "Title (short slug)",
+      "prompt": "Short identifier for this quest. Used in folder names. Auto-slugged from your topic; edit if you want something different.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "",
+      "default": null,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
+      "id": "no_simulation",
+      "label": "Research approach",
+      "prompt": "Decides whether the engine runs a Python experiment or waits for real-world data. Auto-derived from paper format.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "Computational — a Python script can produce the data",
+          "description": "Run normal implement → execute pipeline. For physics / ML / algorithmic / benchmark topics."
+        },
+        {
+          "value": true,
+          "label": "Observational — needs real-world data the engine can't simulate",
+          "description": "Skip implement / execute; route to wait_for_data + auto_collect_data. For cultural / historical / qualitative / policy topics."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
+      "id": "clarify_mode",
+      "label": "Pre-flight clarification mode",
+      "prompt": "Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "auto",
+          "label": "Agent self-clarifies (recommended)",
+          "description": "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."
+        },
+        {
+          "value": "interactive",
+          "label": "Pause for me to answer",
+          "description": "Engine pauses; you confirm/edit each clarify slot. Highest quality, most interruption."
+        },
+        {
+          "value": "off",
+          "label": "Just run it",
+          "description": "Skip the clarify node entirely. Engine relies on the interview answers + topic alone."
+        }
+      ],
+      "placeholder": "",
+      "default": "auto",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
+      "id": "review_panel",
+      "label": "Reviewer panel",
+      "prompt": "Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": [],
+          "label": "Single reviewer (cheapest)",
+          "description": "1 LLM call per review pass."
+        },
+        {
+          "value": [
+            "methodologist",
+            "statistician",
+            "devil_advocate"
+          ],
+          "label": "3-persona panel",
+          "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."
+        },
+        {
+          "value": [
+            "methodologist",
+            "statistician",
+            "devil_advocate",
+            "reproducibility"
+          ],
+          "label": "4-persona panel",
+          "description": "Adds Reproducibility reviewer. ~5× the review cost."
+        }
+      ],
+      "placeholder": "",
+      "default": [],
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
+      "id": "knowledge_enabled",
+      "label": "Knowledge layer (Axon)",
+      "prompt": "Auto-detected from the Axon sidecar status. Override only if you have a specific reason.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "Disabled (recommended for first runs)",
+          "description": "Literature retrieval falls back to free public sources (arXiv, OpenAlex, Crossref) when needed."
+        },
+        {
+          "value": true,
+          "label": "Enabled (requires Axon installed)",
+          "description": "Use the Axon corpus for retrieval + write-back. Skip if you haven't set Axon up."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
+      "id": "audience",
+      "label": "Paper audience",
+      "prompt": "External-facing (journal, open web) drops FI-internal cross-quest entries from the References; internal-facing keeps everything (good for project reports, memos, onboarding docs).",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "external",
+          "label": "External — journal / open web (recommended)",
+          "description": "FI's own cross-quest memory (fi_critique / fi_digest / fi_portfolio / fi_proposal / fi_summary) is dropped from References; an outside reader can't look those up. Real external sources + your own ingested papers are kept."
+        },
+        {
+          "value": "internal",
+          "label": "Internal — team report / memo / onboarding",
+          "description": "Cite anything in Axon, including FI's own cross-quest summaries. Use for write-ups your team will read."
+        }
+      ],
+      "placeholder": "",
+      "default": "external",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
+      "id": "comparative_baseline",
+      "label": "Comparative baseline",
+      "prompt": "What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. RandomForest baseline on the same features",
+      "default": null,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
+      "id": "success_metric",
+      "label": "Success metric",
+      "prompt": "What number changing in what direction = headline result?",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. AUC ≥ 0.9 on held-out test set",
+      "default": null,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
+      "id": "budget",
+      "label": "Time / compute budget",
+      "prompt": "Soft cap on wall-clock for the experiment.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. a few minutes on a laptop CPU",
+      "default": null,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
+      "id": "knowledge_top_k",
+      "label": "Prior-work retrievals per quest",
+      "prompt": "How many Axon hits to feed into the writer. Higher = more sources but bigger prompt = slower + costlier. 5 default, 12 for comprehensive reviews.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "5",
+      "default": 5,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
     }
   ],
   "paper_formats": [
@@ -535,6 +594,18 @@
       ],
       "label": "4-persona panel",
       "description": "Adds Reproducibility reviewer. ~5× the review cost."
+    }
+  ],
+  "audience_choices": [
+    {
+      "value": "external",
+      "label": "External — journal / open web (recommended)",
+      "description": "FI's own cross-quest memory (fi_critique / fi_digest / fi_portfolio / fi_proposal / fi_summary) is dropped from References; an outside reader can't look those up. Real external sources + your own ingested papers are kept."
+    },
+    {
+      "value": "internal",
+      "label": "Internal — team report / memo / onboarding",
+      "description": "Cite anything in Axon, including FI's own cross-quest summaries. Use for write-ups your team will read."
     }
   ],
   "providers": [
@@ -686,10 +757,12 @@
     ]
   },
   "editable_fields": [
+    "audience",
     "budget",
     "clarify_mode",
     "comparative_baseline",
     "knowledge_enabled",
+    "knowledge_top_k",
     "output_kinds",
     "paper_format",
     "review_panel",

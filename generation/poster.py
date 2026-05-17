@@ -1,4 +1,4 @@
-"""Poster generator (Phase E-3).
+"""Poster generator.
 
 LLM populates 3 columns of a fixed 36"x48" beamerposter template; we
 compile via pdflatex. If pdflatex is missing, only `poster.tex` is

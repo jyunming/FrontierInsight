@@ -10,9 +10,8 @@ If pandoc or a LaTeX engine is unavailable, PDF generation is skipped
 with a warning — the markdown is still produced. The generator also
 writes a ``paper/paper_pdf_skipped.md`` file when a PDF was requested
 (via ``output.kinds``) but couldn't be produced, so the user discovers
-the failure without grepping run logs. Closes the silent-skip gap
-that hit ``outputs/1778751621-belgium-culture-vs-taiwan-cultur-32f2ff/``
-in 2026-05-14 when the host had no pandoc/pdflatex/tectonic installed.
+the failure without grepping run logs. Without this, a host missing
+pandoc/pdflatex/tectonic silently produces no PDF.
 """
 
 from __future__ import annotations
@@ -183,9 +182,8 @@ def _count_sanitized_glyphs(markdown: str) -> int:
 # title out of `# Title` and into a YAML metadata block so pandoc
 # populates `\title{}` (and `\maketitle` actually renders it) instead
 # of letting the H1 land as a numbered `\section{1 Title}` while
-# `\title{}` stays empty — which is exactly what produced the
-# "Frontier Insight / 1 A Lightweight..." double-stacked header in
-# the user-reported 2026-05-16 PDF.
+# `\title{}` stays empty — that produces a "Frontier Insight /
+# 1 A Lightweight..." double-stacked header in the PDF.
 _FIRST_H1_RE = re.compile(r"^# +(.+?)\s*$", re.MULTILINE)
 
 # Existing YAML frontmatter at the top of the file. If the upstream
@@ -571,9 +569,9 @@ class PaperGenerator:
             # Lift the first `# H1` to YAML frontmatter so `\title{}`
             # in the template gets populated. Without this, pandoc
             # leaves `\title{}` empty and re-emits the H1 as a
-            # numbered `\section{}` — producing the
+            # numbered `\section{}` — producing a
             # "Frontier Insight" + "1 A Lightweight ..." stacked
-            # header reported in the 2026-05-16 PDF.
+            # header in the PDF.
             title, sanitized_md = _extract_title_and_strip(sanitized_md)
             # Lift `## Abstract` body to YAML metadata so the template
             # can wrap it in `\begin{abstract}…\end{abstract}` instead
@@ -618,8 +616,7 @@ class PaperGenerator:
             # blank line in between. Pandoc's default markdown reader
             # requires the blank line and otherwise jams the entire
             # list into the paragraph as inline text ("Foo - a - b -
-            # c."), which is exactly the bullets-rendered-as-prose bug
-            # in the 2026-05-16 user-reported PDF.
+            # c.") — the bullets-rendered-as-prose failure mode.
             "--from=markdown+lists_without_preceding_blankline",
             # The first H1 is lifted into the YAML title above, so the
             # remaining H2/H3/... headings should shift up one level —

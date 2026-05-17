@@ -1,4 +1,4 @@
-"""Speech-script generator (Phase E-4).
+"""Speech-script generator.
 
 One LLM call from `paper.md` (and optionally a slides outline) to a
 ~10-minute spoken script. No external tools needed.

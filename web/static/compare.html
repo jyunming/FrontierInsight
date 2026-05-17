@@ -1,134 +1,145 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight — Compare</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/header.js"></script>
-  <script defer src="/static/md_lite.js"></script>
-  <style>
-    .compare-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-    }
-    @media (max-width: 800px) {
-      .compare-grid { grid-template-columns: 1fr; }
-    }
-    .compare-pane {
-      border: 1px solid var(--fi-border);
-      border-radius: var(--fi-radius);
-      padding: 1rem;
-      background: var(--fi-bg-elev);
-      max-height: 70vh;
-      overflow-y: auto;
-    }
-    .picker-row {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      margin-bottom: 1rem;
-      flex-wrap: wrap;
-    }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Compare two quests — Frontier Insight</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>tailwind.config = window._fiConfig;</script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
+<script defer src="/static/md_lite.js"></script>
 </head>
-<body>
-  <div id="fi-header-root" data-breadcrumb="Compare"></div>
-  <main>
-    <section class="fi-page-hero">
-      <h1>Compare two quests</h1>
-      <p class="fi-subtitle">Side-by-side paper preview, verdict, and cost. Useful for "did my tweak help?"</p>
-    </section>
+<body class="bg-background text-on-background font-body-md min-h-screen flex flex-col">
 
-    <div class="picker-row">
-      <label>A:</label>
-      <select id="pick-a" onchange="loadBoth()"></select>
-      <span style="color:var(--fi-text-subtle)">vs</span>
-      <label>B:</label>
-      <select id="pick-b" onchange="loadBoth()"></select>
-    </div>
+<div id="fi-header-root"></div>
 
-    <div class="compare-grid">
-      <div class="compare-pane" id="pane-a">
-        <h3 id="title-a" class="fi-mono"></h3>
-        <p class="fi-card-meta" id="meta-a"></p>
-        <h4>Paper</h4>
-        <div class="fi-md-body" id="paper-a"></div>
-      </div>
-      <div class="compare-pane" id="pane-b">
-        <h3 id="title-b" class="fi-mono"></h3>
-        <p class="fi-card-meta" id="meta-b"></p>
-        <h4>Paper</h4>
-        <div class="fi-md-body" id="paper-b"></div>
+<main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop py-section-gap flex flex-col gap-component-padding-md">
+
+  <header class="flex flex-col gap-component-padding-sm mb-component-padding-md">
+    <h1 class="font-headline-xl text-headline-xl text-on-surface">Compare two quests</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
+      Side-by-side paper preview, verdict, and cost. Useful for "did my tweak help?" — pick two quests from the dropdowns or pass <code class="font-code-md text-secondary">?a=…&amp;b=…</code> in the URL.
+    </p>
+  </header>
+
+  <div class="flex flex-col md:flex-row items-center gap-gutter bg-surface-mid p-component-padding-md rounded-xl border border-white/10 mb-component-padding-md">
+    <div class="flex-1 flex items-center gap-component-padding-sm w-full">
+      <span class="font-label-sm text-label-sm text-outline uppercase whitespace-nowrap">Quest A</span>
+      <div class="relative flex-1">
+        <select id="pick-a" onchange="loadBoth()" class="bg-surface-low border border-white/10 text-on-surface font-code-md text-code-md rounded p-component-padding-sm pr-8 focus:border-primary focus:ring-1 focus:ring-primary w-full appearance-none"></select>
+        <span class="material-symbols-outlined text-outline pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">arrow_drop_down</span>
       </div>
     </div>
-  </main>
+    <div class="flex-1 flex items-center gap-component-padding-sm w-full">
+      <span class="font-label-sm text-label-sm text-outline uppercase whitespace-nowrap">Quest B</span>
+      <div class="relative flex-1">
+        <select id="pick-b" onchange="loadBoth()" class="bg-surface-low border border-white/10 text-on-surface font-code-md text-code-md rounded p-component-padding-sm pr-8 focus:border-primary focus:ring-1 focus:ring-primary w-full appearance-none"></select>
+        <span class="material-symbols-outlined text-outline pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">arrow_drop_down</span>
+      </div>
+    </div>
+  </div>
 
-  <script>
-    async function init() {
-      const res = await fetch('/api/quests');
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-gutter h-[716px] min-h-[500px]">
+    <div class="bg-surface-container rounded-xl border border-white/10 flex flex-col overflow-hidden">
+      <div class="bg-surface-high p-component-padding-md border-b border-white/10 flex flex-col gap-component-padding-xs">
+        <h3 id="title-a" class="font-code-md text-code-md text-primary break-all">—</h3>
+        <div id="meta-a" class="flex items-center gap-component-padding-sm font-label-sm text-label-sm text-on-surface-variant uppercase flex-wrap">(pick a quest)</div>
+      </div>
+      <div class="flex-grow overflow-y-auto p-component-padding-md font-body-md text-body-md text-on-surface fi-md-body" id="paper-a"></div>
+    </div>
+    <div class="bg-surface-container rounded-xl border border-gradient-to-b from-primary/30 to-secondary/30 flex flex-col overflow-hidden shadow-[0_0_40px_rgba(195,192,255,0.05)]">
+      <div class="bg-surface-high p-component-padding-md border-b border-white/10 flex flex-col gap-component-padding-xs">
+        <h3 id="title-b" class="font-code-md text-code-md text-secondary break-all">—</h3>
+        <div id="meta-b" class="flex items-center gap-component-padding-sm font-label-sm text-label-sm text-on-surface-variant uppercase flex-wrap">(pick a quest)</div>
+      </div>
+      <div class="flex-grow overflow-y-auto p-component-padding-md font-body-md text-body-md text-on-surface fi-md-body" id="paper-b"></div>
+    </div>
+  </div>
+
+</main>
+
+<footer class="bg-surface-low/60 backdrop-blur-[20px] font-label-sm text-label-sm full-width bottom-0 border-t border-white/10 mt-section-gap">
+  <div class="flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto">
+    <div class="text-label-sm font-bold text-on-surface mb-component-padding-sm md:mb-0">© 2026 Frontier Insight · Apache 2.0</div>
+    <div class="flex gap-gutter">
+      <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/">Dashboard</a>
+      <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/settings">Settings</a>
+      <a class="text-on-surface-variant hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  async function init() {
+    const res = await fetch('/api/quests');
+    const data = await res.json();
+    const quests = data.quests || [];
+    const a = document.getElementById('pick-a');
+    const b = document.getElementById('pick-b');
+    for (const sel of [a, b]) {
+      sel.innerHTML = '<option value="">(pick a quest)</option>'
+        + quests.map(q => `<option value="${escapeHtml(q.quest_id)}">${escapeHtml(q.quest_id)}</option>`).join('');
+    }
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('a')) a.value = params.get('a');
+    if (params.get('b')) b.value = params.get('b');
+    if (a.value || b.value) loadBoth();
+  }
+
+  async function loadBoth() {
+    const a = document.getElementById('pick-a').value;
+    const b = document.getElementById('pick-b').value;
+    if (a) loadOne(a, 'a');
+    if (b) loadOne(b, 'b');
+  }
+
+  async function loadOne(qid, side) {
+    const title = document.getElementById(`title-${side}`);
+    const meta = document.getElementById(`meta-${side}`);
+    const paper = document.getElementById(`paper-${side}`);
+    title.textContent = qid;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(qid)}`);
+      if (!res.ok) { meta.textContent = `Error ${res.status}`; paper.innerHTML = ''; return; }
       const data = await res.json();
-      const quests = data.quests || [];
-      const a = document.getElementById('pick-a');
-      const b = document.getElementById('pick-b');
-      for (const sel of [a, b]) {
-        sel.innerHTML = '<option value="">(pick a quest)</option>'
-          + quests.map(q => `<option value="${q.quest_id}">${q.quest_id}</option>`).join('');
+      const verdict = data.review?.verdict || data.summary?.verdict || '(no review)';
+      const score = data.review?.score ?? '?';
+      const cost = await fetchCost(qid);
+      const pillColor = verdict === 'accept' || verdict === 'complete' ? 'text-status-success'
+                       : verdict === 'revise' ? 'text-status-warning' : 'text-on-surface-variant';
+      const icon = verdict === 'accept' || verdict === 'complete' ? 'check_circle'
+                  : verdict === 'revise' ? 'warning' : 'help';
+      meta.innerHTML = `
+        <span class="${pillColor} flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">${icon}</span> ${escapeHtml(verdict)}</span>
+        <span>•</span><span>Score: ${escapeHtml(String(score))}</span>
+        <span>•</span><span>Cost: $${cost.toFixed(4)}</span>
+      `;
+      if (data.paper_preview && window.fi_renderMarkdown) {
+        paper.innerHTML = window.fi_renderMarkdown(data.paper_preview);
+      } else {
+        paper.textContent = data.paper_preview || '(no paper yet)';
       }
-      // Pre-fill from query string ?a=...&b=...
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('a')) a.value = params.get('a');
-      if (params.get('b')) b.value = params.get('b');
-      if (a.value || b.value) loadBoth();
-    }
+    } catch (e) { meta.textContent = `Error: ${e}`; paper.innerHTML = ''; }
+  }
 
-    async function loadBoth() {
-      const a = document.getElementById('pick-a').value;
-      const b = document.getElementById('pick-b').value;
-      if (a) loadOne(a, 'a');
-      if (b) loadOne(b, 'b');
-    }
+  async function fetchCost(qid) {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(qid)}/cost`);
+      if (!res.ok) return 0;
+      const data = await res.json();
+      return (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
+    } catch (_) { return 0; }
+  }
 
-    async function loadOne(qid, side) {
-      const title = document.getElementById(`title-${side}`);
-      const meta = document.getElementById(`meta-${side}`);
-      const paper = document.getElementById(`paper-${side}`);
-      title.textContent = qid;
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(qid)}`);
-        if (!res.ok) {
-          meta.textContent = `Error ${res.status}`;
-          paper.innerHTML = '';
-          return;
-        }
-        const data = await res.json();
-        const verdict = data.review?.verdict || data.summary?.verdict || '(no review)';
-        const score = data.review?.score ?? '?';
-        const cost = await fetchCost(qid);
-        meta.textContent = `verdict: ${verdict} · score ${score} · cost \$${cost.toFixed(4)}`;
-        if (data.paper_preview && window.fi_renderMarkdown) {
-          paper.innerHTML = window.fi_renderMarkdown(data.paper_preview);
-        } else {
-          paper.textContent = data.paper_preview || '(no paper yet)';
-        }
-      } catch (e) {
-        meta.textContent = `Error: ${e}`;
-        paper.innerHTML = '';
-      }
-    }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
 
-    async function fetchCost(qid) {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(qid)}/cost`);
-        if (!res.ok) return 0;
-        const data = await res.json();
-        return (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
-      } catch (_) { return 0; }
-    }
-
-    init();
-  </script>
+  init();
+</script>
 </body>
 </html>

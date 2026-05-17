@@ -259,7 +259,7 @@ export class Bridge {
 
     /**
      * Translate one `lm_request` into a real `vscode.lm` call. The
-     * model is selected by `model_hint` (Phase O per-node routing) —
+     * model is selected by `model_hint` for per-node routing —
      * we map common Copilot family names to selectChatModels filters.
      * Empty hint = use the user's currently-selected chat model.
      *
@@ -349,9 +349,9 @@ export class Bridge {
             let chars = 0;
             let thinkingChars = 0;
             // Buffer thinking fragments and flush at most once per
-            // heartbeat — bot review on PR #31 noted that emitting a
-            // markdown entry per ThinkingPart can flood the chat and
-            // slow VSCode when models stream many small fragments.
+            // heartbeat — emitting a markdown entry per ThinkingPart
+            // can flood the chat and slow VSCode when models stream
+            // many small fragments.
             let thinkingBuf = "";
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
@@ -360,9 +360,9 @@ export class Bridge {
             // Sanitize a free-text fragment so it renders as plain prose
             // in the chat panel — strip / escape markdown that would
             // otherwise be interpreted (headings, fences, links, bold,
-            // backticks, blockquote markers). Bot review on PR #31
-            // flagged this as a real risk: reasoning content can include
-            // arbitrary content the model is processing.
+            // backticks, blockquote markers). Reasoning content can
+            // include arbitrary text the model is processing, so the
+            // markdown escape here is load-bearing for safety.
             const escapeMd = (s: string): string => s
                 .replace(/[`*_~|<>\[\]]/g, (c) => `\\${c}`)
                 .replace(/\r/g, "")
@@ -531,7 +531,7 @@ export class Bridge {
     }
 
     /**
-     * Map FI's per-node `model_hint` (Phase O strings like "gpt-5",
+     * Map FI's per-node `model_hint` (strings like "gpt-5",
      * "claude-opus-4-7", "gemini-2.5-pro") to a `selectChatModels`
      * family filter. Conservative: when in doubt, fall through to
      * vendor=copilot with no family filter and let VSCode pick.
@@ -633,7 +633,7 @@ export class Bridge {
      * model (Claude Opus at 5× vs gpt-5.4-mini at 0.33× per request).
      *
      * When `model_hint` is set, we try `selectChatModels({family: hint})`
-     * to honor per-node routing (Phase O). If nothing matches, fall
+     * to honor per-node routing. If nothing matches, fall
      * back to the user's chat-picker selection so the quest keeps
      * running — and tell them which model was used.
      */

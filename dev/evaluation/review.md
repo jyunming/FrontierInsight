@@ -1,6 +1,6 @@
 # Review-node rubric
 
-The review node grades each paper on a 1–5 scale and returns a verdict of either `accept` or `revise`. It is intentionally **strict on null/negative results being honestly reported** and lenient on prose polish — Phase E formatting will smooth surface issues.
+The review node grades each paper on a 1–5 scale and returns a verdict of either `accept` or `revise`. It is intentionally **strict on null/negative results being honestly reported** and lenient on prose polish — downstream formatting will smooth surface issues.
 
 ## Score guide
 

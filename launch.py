@@ -3,7 +3,7 @@
 Single quest:
     python launch.py --config examples/integrator_bakeoff/config.yaml
 
-Fleet (Phase H):
+Fleet:
     python launch.py --fleet a.yaml b.yaml c.yaml --max-concurrent 4
 
 Optional fleet hardening:
@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument(
         "--serve",
         action="store_true",
-        help="Start the Phase J status GUI (FastAPI server + HTMX frontend). "
+        help="Start the status GUI (FastAPI server + HTMX frontend). "
              "Use --output-root to point at the quest output directory, "
              "and --host / --port to bind elsewhere than 127.0.0.1:8765. "
              "Requires FastAPI + uvicorn installed.",
@@ -149,6 +149,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "the user's home dir (~30 s, no GUI prompts). Picks the "
              "right asset for your OS+arch from GitHub Releases and "
              "verifies the SHA-256 from the release's SHA256SUMS file.",
+    )
+    mode.add_argument(
+        "--list-drafts",
+        action="store_true",
+        help="List proposal drafts (YAML companions) that ``--proposal`` "
+             "previously wrote to ``outputs/_drafts/``. Pairs with "
+             "``--config <yaml>`` to launch the chosen quest. Web UI "
+             "exposes the same surface as the 'Continue a draft' "
+             "picker on /interview; VSCode chat as ``@fi /drafts``.",
     )
     mode.add_argument(
         "--new",
@@ -329,11 +338,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--vscode-bridge-port",
         type=int,
         default=0,
-        help="Phase P — TCP port the FI VSCode extension is listening on for "
+        help="TCP port the FI VSCode extension is listening on for "
              "the LLM bridge. The extension passes this when it spawns FI; "
              "setting it forces provider.name=vscode_extension regardless of "
              "what the YAML says. Do not pass this from a regular terminal "
              "run — use copilot_cli or similar for headless Copilot usage.",
+    )
+    p.add_argument(
+        "--no-axon-sidecar",
+        action="store_true",
+        help="Skip the Axon sidecar health check + auto-launch. By default, "
+             "every FI launch ensures a long-lived ``python -m axon.api`` "
+             "process is running on AXON_HOST:AXON_PORT (default "
+             "127.0.0.1:8000) so the embedding model + vector indexes "
+             "stay hot across quests. Pass this in CI / tests where the "
+             "sidecar isn't wanted, or when running an Axon API server "
+             "manually with non-default flags.",
     )
     args = p.parse_args(argv)
     if args.fleet and args.output is not None:
@@ -405,7 +425,7 @@ def _validate_resume_quest_id(quest_id: str, output_dir: Path) -> str | None:
 
 
 def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
-    """Phase P — when launched with ``--vscode-bridge-port N``, force
+    """When launched with ``--vscode-bridge-port N``, force
     every quest's provider to route through the FI VSCode extension's
     ``vscode.lm.*`` bridge on that port. Overrides whatever ``provider``
     block the YAML carried (the YAML can still set ``provider.model``,
@@ -766,6 +786,17 @@ async def run_fleet(
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    # Ensure Axon sidecar is up before anything that touches the
+    # knowledge layer. Idempotent: returns fast if already running.
+    # Skipped for the install-tectonic / list-drafts modes that
+    # never touch Axon, plus when --no-axon-sidecar is passed.
+    _axon_inert_modes = bool(
+        getattr(args, "install_tectonic", False)
+        or getattr(args, "list_drafts", False)
+    )
+    if not args.no_axon_sidecar and not _axon_inert_modes:
+        from core.axon_sidecar import ensure_axon_up
+        ensure_axon_up()
     supervisor = ProxySupervisor()
     try:
         if args.serve:
@@ -789,6 +820,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.install_tectonic:
             return _install_tectonic()
+
+        if args.list_drafts:
+            return _list_drafts(args.output_root)
 
         if args.new:
             return await _run_new(
@@ -1246,7 +1280,8 @@ async def _run_new(
     # imports its own (smart_defaults + model_choices_for).
     from core.interview import (
         QUESTIONS, InterviewAnswers, answers_to_yaml,
-        preflight_clarify, slugify,
+        derive_tier2, derive_tier3, preflight_clarify,
+        questions_for_tier, slugify,
     )
 
     # Choice labels include em-dashes / arrows / Unicode math. Windows
@@ -1270,68 +1305,107 @@ async def _run_new(
     print()
 
     partial: dict[str, object] = {}
-    # Which frontend identifier QUESTIONS care about — used to filter
-    # the question list down to the CLI subset (drops provider/model
-    # questions in VSCode, keeps them here).
     frontend = "cli"
 
-    # Cache the preflight result so we only call once even if the
-    # user goes back over the questions.
-    preflight_cache: dict[str, str] | None = None
+    tier1 = questions_for_tier(1, frontend)
+    tier2_qs = questions_for_tier(2, frontend)
+    tier3_qs = questions_for_tier(3, frontend)
 
+    # ---- Stage 1: ask tier-1 sequentially ----
     try:
-        # Walk questions in declaration order; skip any whose
-        # ``frontends`` list excludes "cli".
-        for q in QUESTIONS:
-            if frontend not in q.frontends:
-                continue
-
-            # Run preflight after the user has answered the first 5
-            # (topic, title, output_kinds, paper_format, no_simulation)
-            # — that's when we have enough context for a useful LLM
-            # call. Only call once.
-            if q.id == "comparative_baseline" and preflight_cache is None:
-                print()
-                print("⏳ Calling clarify-preflight to suggest topic-tuned defaults...")
-                preflight_cache = await preflight_clarify(
-                    topic=str(partial.get("topic", "")),
-                    paper_format=str(partial.get("paper_format", "generic")),
-                    provider_name=str(partial.get("provider") or "openai"),
-                    provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
-                )
-                print("✓ done")
-                print()
-
-            answer = _cli_prompt_for(q, partial, preflight_cache or {})
+        for q in tier1:
+            answer = _cli_prompt_for(q, partial, {})
             if answer is None:
                 print()
                 print("— interview cancelled.")
                 return 1
             partial[q.id] = answer
-
     except (KeyboardInterrupt, EOFError):
         print()
         print("— interview cancelled (Ctrl-C / EOF).")
         return 1
 
-    # Build the final answers object. Smart defaults already applied
-    # during the walk — partial[k] is whatever the user entered (or
-    # the default they accepted).
+    # ---- Stage 2: preflight LLM + derive tier-2 + tier-3 ----
+    print()
+    print("⏳ Calling clarify-preflight to suggest topic-tuned defaults...")
+    try:
+        preflight_cache = await preflight_clarify(
+            topic=str(partial.get("topic", "")),
+            paper_format=str(partial.get("paper_format", "generic")),
+            provider_name=str(partial.get("provider") or "openai"),
+            provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
+        )
+        print("✓ done")
+    except Exception as e:
+        print(f"⚠ preflight failed ({e}); proceeding with empty advanced defaults.")
+        preflight_cache = {}
+    print()
+
+    derived = derive_tier2(partial)
+    advanced = derive_tier3(partial)
+    # Overlay preflight-suggested values onto tier-3 placeholders so
+    # the user sees the LLM's suggestions in the review screen.
+    for k in ("comparative_baseline", "success_metric", "budget"):
+        if preflight_cache.get(k):
+            advanced[k] = preflight_cache[k]
+
+    # ---- Stage 3: review-and-edit loop ----
+    show_advanced = False
+    try:
+        while True:
+            rows = _build_review_rows(derived, advanced, tier2_qs, tier3_qs, show_advanced)
+            _print_review(rows, show_advanced=show_advanced)
+            choice = input(
+                "\nEdit which? [number to edit, "
+                + ("'h' to hide" if show_advanced else "'a' to show advanced")
+                + ", Enter to launch] > "
+            ).strip().lower()
+            if choice == "":
+                break
+            if choice == "a" and not show_advanced:
+                show_advanced = True
+                continue
+            if choice == "h" and show_advanced:
+                show_advanced = False
+                continue
+            if not choice.isdigit():
+                print(f"  ⚠ unrecognized input {choice!r}; press Enter or pick a number.")
+                continue
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(rows):
+                print(f"  ⚠ number out of range; pick 1-{len(rows)}.")
+                continue
+            row = rows[idx]
+            new_val = _cli_prompt_for(row["question"], {**partial, **derived, **advanced}, preflight_cache)
+            if new_val is None:
+                continue  # user aborted single-field edit; stay in review
+            if row["tier"] == 2:
+                derived[row["id"]] = new_val
+            else:
+                advanced[row["id"]] = new_val
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print("— interview cancelled at review screen (Ctrl-C / EOF).")
+        return 1
+
+    # ---- Build final answers ----
     answers = InterviewAnswers(
         topic=str(partial["topic"]),
-        title=str(partial["title"]),
+        title=str(derived["title"]),
         output_kinds=list(partial["output_kinds"]),  # type: ignore[arg-type]
         paper_format=str(partial["paper_format"]),
-        no_simulation=bool(partial["no_simulation"]),
+        no_simulation=bool(derived["no_simulation"]),
         study_depth=str(partial["study_depth"]),
-        comparative_baseline=str(partial["comparative_baseline"]),
-        success_metric=str(partial["success_metric"]),
-        budget=str(partial["budget"]),
-        clarify_mode=str(partial["clarify_mode"]),
-        review_panel=list(partial["review_panel"]),  # type: ignore[arg-type]
-        knowledge_enabled=bool(partial["knowledge_enabled"]),
+        comparative_baseline=str(advanced.get("comparative_baseline") or ""),
+        success_metric=str(advanced.get("success_metric") or ""),
+        budget=str(advanced.get("budget") or ""),
+        clarify_mode=str(derived["clarify_mode"]),
+        review_panel=list(derived["review_panel"]),  # type: ignore[arg-type]
+        knowledge_enabled=bool(derived["knowledge_enabled"]),
         provider=str(partial.get("provider", "openai")),
         provider_model=str(partial.get("provider_model")) if partial.get("provider_model") else None,
+        audience=str(derived.get("audience", "external")),
+        knowledge_top_k=int(advanced.get("knowledge_top_k", 5) or 5),
     )
 
     yaml_text = answers_to_yaml(answers, frontend="cli")
@@ -1371,6 +1445,56 @@ async def _run_new(
     except Exception as e:
         print(f"[FI] quest failed: {e!r}", file=sys.stderr)
         return 1
+
+
+def _build_review_rows(
+    derived: dict[str, object],
+    advanced: dict[str, object],
+    tier2_qs: tuple,  # type: ignore[type-arg]
+    tier3_qs: tuple,  # type: ignore[type-arg]
+    show_advanced: bool,
+) -> list[dict[str, object]]:
+    """Pack tier-2 (always) + tier-3 (when ``show_advanced``) into a
+    numbered list the review screen prints. Each row carries the
+    Question so the edit handler can re-prompt that exact slot."""
+    rows: list[dict[str, object]] = []
+    for q in tier2_qs:
+        rows.append({
+            "id": q.id, "tier": 2, "label": q.label,
+            "value": derived.get(q.id), "question": q,
+        })
+    if show_advanced:
+        for q in tier3_qs:
+            rows.append({
+                "id": q.id, "tier": 3, "label": q.label,
+                "value": advanced.get(q.id), "question": q,
+            })
+    return rows
+
+
+def _print_review(rows: list[dict[str, object]], *, show_advanced: bool) -> None:
+    """Render the numbered review table. Tier-2 rows always show;
+    tier-3 rows appear under an "Advanced" subheading when the user
+    toggled them on with `a`."""
+    print()
+    print("─── Review before launch ──────────────────────────────")
+    in_advanced_section = False
+    for i, r in enumerate(rows, 1):
+        if r["tier"] == 3 and not in_advanced_section:
+            print()
+            print("  ── Advanced (preflight-LLM suggested) ──")
+            in_advanced_section = True
+        val = r["value"]
+        if isinstance(val, list):
+            val_str = f"[{', '.join(str(v) for v in val)}]" if val else "(none)"
+        elif val == "":
+            val_str = "(empty)"
+        else:
+            val_str = str(val)
+        print(f"  {i:>2}. {r['label']:<28} {val_str}")
+    if not show_advanced:
+        print()
+        print("      (type 'a' to show advanced fields)")
 
 
 def _cli_prompt_for(
@@ -1651,12 +1775,10 @@ def _install_tectonic() -> int:
                 archive.write_bytes(r.read())
 
             # Verification: tectonic releases publish per-asset
-            # archives but NOT a SHA256SUMS aggregation file (verified
-            # 2026-05-16 against tectonic@0.16.9 — only the .zip /
-            # .tar.gz / .AppImage assets are present in the release).
-            # Earlier versions of this code fetched a SHA256SUMS file
-            # that never existed; the request 404'd and the entire
-            # install bailed out without ever extracting the binary.
+            # archives but NOT a SHA256SUMS aggregation file — only
+            # the .zip / .tar.gz / .AppImage assets are present in
+            # the release. Fetching a SHA256SUMS file would 404 and
+            # bail the install before extracting the binary.
             #
             # We fall back to TLS-only verification: github.com's
             # certificate authenticates the asset. That's the same
@@ -1791,6 +1913,50 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
         print("[FI ingest] no files loaded — check paths / file types.", file=sys.stderr)
         return 1
     print(f"[FI ingest] ingested {len(loaded)} file(s) into Axon: {loaded}")
+    return 0
+
+
+def _list_drafts(output_root: Path) -> int:
+    """Top-level handler for ``python launch.py --list-drafts``.
+
+    Prints a table of proposal YAMLs in ``outputs/_drafts/`` so the
+    user can pick one to feed into ``--config`` without remembering
+    paths. Mirrors the Web `/api/drafts` + /interview drafts picker
+    and the VSCode `@fi /drafts` chat command.
+    """
+    drafts_dir = output_root / "_drafts"
+    if not drafts_dir.is_dir():
+        print(f"[FI] no drafts directory at {drafts_dir}", file=sys.stderr)
+        print("    Run `--proposal \"<topic>\"` to create one.")
+        return 0
+    files = sorted(
+        drafts_dir.glob("*.yaml"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    if not files:
+        print(f"[FI] no proposal drafts in {drafts_dir}")
+        print("    Run `--proposal \"<topic>\"` to create one.")
+        return 0
+    print(f"[FI] {len(files)} proposal draft(s) in {drafts_dir}:\n")
+    import yaml as _yaml
+    for p in files[:40]:
+        try:
+            doc = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            doc = {}
+        title = (doc.get("title") or "").strip() or "(no title)"
+        topic = (doc.get("topic") or "").strip().replace("\n", " ")
+        topic_short = topic[:80] + ("…" if len(topic) > 80 else "")
+        mtime = time.strftime(
+            "%Y-%m-%d %H:%M",
+            time.localtime(p.stat().st_mtime),
+        )
+        print(f"  {mtime}  {title}")
+        if topic_short:
+            print(f"              {topic_short}")
+        print(f"              python launch.py --config {p}")
+        print()
     return 0
 
 

@@ -43,6 +43,13 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     participant.iconPath = new vscode.ThemeIcon("beaker");
     context.subscriptions.push(participant);
+
+    // Probe the Axon sidecar on activation. We don't auto-launch from
+    // the extension — VSCode users are expected to keep an Axon
+    // process running in their workspace — but we surface a one-time
+    // notification if it's down so the first /start of the session
+    // doesn't pay the cold-init cost silently.
+    void probeAxonOnActivate(context);
 }
 
 export function deactivate(): void {
@@ -110,7 +117,7 @@ async function handleRequest(
         return;
     }
     if (cmd === "update") {
-        // Phase R — mid-quest re-entry. Routes to the same
+        // Mid-quest re-entry. Routes to the same
         // `launch.py --update <quest_id>` flow the CLI uses.
         // ``prompt`` should be the quest_id; the Python side
         // validates it exists and refuses gracefully if not.
@@ -118,7 +125,7 @@ async function handleRequest(
         return;
     }
     if (cmd === "ingest") {
-        // Phase T — Axon literature ingest. The user's prompt is
+        // Axon literature ingest. The user's prompt is
         // space-separated paths; quote each one before passing to
         // the shell so paths with spaces / metacharacters don't
         // break (or run unintended commands).
@@ -134,8 +141,20 @@ async function handleRequest(
         );
         return;
     }
+    if (cmd === "drafts") {
+        // List proposal-draft YAMLs in outputs/_drafts/ so the user
+        // can pick one to /start without remembering paths. Mirrors
+        // the CLI `--list-drafts` flag and the Web /interview
+        // drafts picker. Three-interface parity.
+        await runListDrafts(stream, token);
+        return;
+    }
+    if (cmd === "axon-status" || cmd === "axon") {
+        await runAxonStatus(stream);
+        return;
+    }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
-        // Phase T — no-admin LaTeX install for paper_pdf support.
+        // No-admin LaTeX install for paper_pdf support.
         await runTerminalCommand(
             "tectonic", "--install-tectonic",
             stream, "Opening a terminal to install tectonic (~70 MB) " +
@@ -167,6 +186,8 @@ function helpText(): string {
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
+        "- `@fi /drafts` — list proposal drafts you've made (most-recent first) with a one-click `/start` command for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.",
+        "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api` on `127.0.0.1:8000`) is reachable. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
         "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",
         "All LLM calls go through your Copilot subscription via the",
@@ -1309,6 +1330,175 @@ async function runCritique(
  * for path-like arguments and accepts free-form topic strings with
  * spaces, punctuation, newlines pasted from chat.
  */
+/**
+ * Probe the Axon sidecar (``python -m axon.api`` on ``127.0.0.1:8000``)
+ * once when the extension activates. If it's not reachable, show an
+ * info notification with a one-click "Open instructions" action. We
+ * deliberately do NOT auto-launch the sidecar from the extension —
+ * users running FI from VSCode are expected to keep an Axon process
+ * around themselves (or just live with the cold-init cost on the
+ * first quest). The check is informational only.
+ *
+ * Mirrors `core.axon_sidecar.axon_status` (CLI/web auto-launch path).
+ * Three-interface parity for Axon health visibility.
+ */
+async function probeAxonOnActivate(
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    const host = process.env.AXON_HOST || "127.0.0.1";
+    const port = process.env.AXON_PORT || "8000";
+    const url = `http://${host}:${port}/health/live`;
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 1500);
+        const res = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (res.ok) return;  // sidecar is up, nothing to surface
+    } catch {
+        // fallthrough — sidecar unreachable
+    }
+    const action = await vscode.window.showInformationMessage(
+        `Frontier Insight: Axon sidecar not detected at ${host}:${port}. ` +
+        `Starting it now keeps the knowledge layer hot across quests ` +
+        `(saves ~5-15 s per /start).`,
+        "Start in terminal",
+        "Show /axon-status",
+        "Dismiss",
+    );
+    if (action === "Start in terminal") {
+        const term = vscode.window.createTerminal({ name: "Axon" });
+        term.show();
+        term.sendText("python -m axon.api");
+    } else if (action === "Show /axon-status") {
+        await vscode.commands.executeCommand(
+            "workbench.action.chat.open",
+            { query: "@fi /axon-status" },
+        );
+    }
+    void context;  // reserved for future state.update("axon-prompted", true)
+}
+
+/**
+ * Chat-command handler for `@fi /axon-status`. Fetches the same
+ * ``/health/live`` + ``/health/ready`` endpoints as the Python
+ * ``axon_status()`` helper and prints a short markdown verdict.
+ */
+async function runAxonStatus(stream: vscode.ChatResponseStream): Promise<void> {
+    const host = process.env.AXON_HOST || "127.0.0.1";
+    const port = process.env.AXON_PORT || "8000";
+    const base = `http://${host}:${port}`;
+    const probe = async (path: string): Promise<boolean> => {
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 1500);
+            const res = await fetch(`${base}${path}`, { signal: ctrl.signal });
+            clearTimeout(timer);
+            return res.ok;
+        } catch {
+            return false;
+        }
+    };
+    const live = await probe("/health/live");
+    const ready = live ? await probe("/health/ready") : false;
+    if (!live) {
+        stream.markdown(
+            `**Axon sidecar:** \`${base}\` — _not running_\n\n` +
+            `Start it from a terminal so quests reuse the warm model + indexes:\n\n` +
+            `\`\`\`\npython -m axon.api\n\`\`\`\n`,
+        );
+        return;
+    }
+    if (!ready) {
+        stream.markdown(
+            `**Axon sidecar:** \`${base}\` — _running, brain still initializing_\n\n` +
+            `Give it a few seconds; the embedding model + vector index load on first request.\n`,
+        );
+        return;
+    }
+    stream.markdown(
+        `**Axon sidecar:** \`${base}\` — _up + ready_\n\n` +
+        `The next \`@fi /start\` will reuse this warm process.\n`,
+    );
+}
+
+/**
+ * Implementation of `@fi /drafts`. Walks ``<workspaceRoot>/outputs/_drafts/``
+ * for ``*.yaml`` files (proposal companions) and renders them as a
+ * markdown table with a clickable ``/start <path>`` hint for each.
+ * Mirrors `python launch.py --list-drafts` (CLI) and the
+ * "Continue a draft" picker on /interview (Web). Three-interface
+ * parity for the drafts-discovery feature.
+ */
+async function runListDrafts(
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+    const fs = require("node:fs") as typeof import("node:fs");
+    const pathMod = require("node:path") as typeof import("node:path");
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!ws) {
+        stream.markdown("Open a folder in VSCode first (the workspace root is where `outputs/_drafts/` lives).\n");
+        return;
+    }
+    const draftsDir = pathMod.join(ws, "outputs", "_drafts");
+    if (!fs.existsSync(draftsDir)) {
+        stream.markdown(`No \`outputs/_drafts/\` directory yet. Run \`@fi /proposal "<topic>"\` to create one.\n`);
+        return;
+    }
+    let entries: string[];
+    try {
+        entries = fs.readdirSync(draftsDir).filter((f) => f.endsWith(".yaml"));
+    } catch (e: any) {
+        stream.markdown(`Failed to read \`${draftsDir}\`: ${e?.message ?? String(e)}\n`);
+        return;
+    }
+    if (entries.length === 0) {
+        stream.markdown("No proposal drafts in `outputs/_drafts/` yet. Run `@fi /proposal \"<topic>\"` to create one.\n");
+        return;
+    }
+    // Sort by mtime descending. Parse each YAML's `topic:` + `title:`
+    // for preview — we keep it dependency-free (no js-yaml) by line
+    // scanning, which is enough for the top-level scalar fields the
+    // proposal generator writes.
+    const items = entries
+        .map((name) => {
+            const full = pathMod.join(draftsDir, name);
+            const stat = fs.statSync(full);
+            let title = "";
+            let topic = "";
+            try {
+                const text = fs.readFileSync(full, "utf-8");
+                const titleMatch = text.match(/^title:\s*(.+)$/m);
+                if (titleMatch) title = titleMatch[1].trim();
+                // ``topic:`` is often a block scalar (``|``); grab the
+                // next non-blank line of the body when so.
+                const topicMatch = text.match(/^topic:\s*(?:\|[+-]?\s*)?\n((?:  .*\n)+)/m);
+                if (topicMatch) {
+                    topic = topicMatch[1].split("\n").map(l => l.trim()).filter(Boolean).join(" ").trim();
+                } else {
+                    const inline = text.match(/^topic:\s*(.+)$/m);
+                    if (inline) topic = inline[1].trim();
+                }
+            } catch (_) {}
+            return { name, full, mtime: stat.mtimeMs, title, topic };
+        })
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, 40);
+
+    stream.markdown(`📂 **${items.length} proposal draft(s) in \`outputs/_drafts/\`:**\n\n`);
+    for (const it of items) {
+        const when = new Date(it.mtime).toLocaleString();
+        const titleShown = it.title || it.name.replace(/\.yaml$/, "");
+        const topicShown = it.topic ? (it.topic.length > 120 ? it.topic.slice(0, 120) + "…" : it.topic) : "";
+        stream.markdown(`### ${titleShown}\n`);
+        stream.markdown(`*${when}*\n\n`);
+        if (topicShown) stream.markdown(`> ${topicShown}\n\n`);
+        stream.markdown(`Run: \`@fi /start ${it.full}\`\n\n`);
+        stream.markdown(`---\n\n`);
+    }
+}
+
 async function runProposal(
     promptArgs: string,
     stream: vscode.ChatResponseStream,

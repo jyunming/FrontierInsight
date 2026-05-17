@@ -1,4 +1,4 @@
-"""Unit tests for the Phase D2 dataset adapters (core/datasets/*).
+"""Unit tests for the dataset adapters (core/datasets/*).
 
 All adapters are HTTP-mocked at the ``_http_get_json_sync`` boundary
 so no real network call is ever made. The engine-level integration
@@ -22,9 +22,9 @@ from core.datasets.base import DatasetAdapter, DatasetRow
 
 def test_adapter_registry_exposes_worldbank() -> None:
     """The registry is the single source of truth for which adapter
-    names can appear in ``engine.dataset_adapters``. Phase D2 ships
-    with ``"worldbank"`` only — adding new adapters in follow-up
-    PRs is a one-line registry edit."""
+    names can appear in ``engine.dataset_adapters``. The current
+    registry ships ``"worldbank"`` only — adding new adapters is a
+    one-line registry edit."""
     assert "worldbank" in ADAPTER_REGISTRY
     assert ADAPTER_REGISTRY["worldbank"] is WorldBankAdapter
     # All registered adapters must inherit from DatasetAdapter so the
@@ -272,12 +272,11 @@ async def test_worldbank_render_row_shows_no_data_message_when_empty(
 async def test_worldbank_does_not_cache_failed_indicator_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PR #61 bot fix: a failed catalog fetch MUST NOT poison the
-    in-process cache. Previously a single network blip cached
-    ``[]`` forever, permanently disabling the adapter for the rest
-    of the process (a long-running VSCode session would never
-    recover until restart). Now the failure is logged and the next
-    call retries."""
+    """A failed catalog fetch MUST NOT poison the in-process cache.
+    Caching ``[]`` after a transient network blip would permanently
+    disable the adapter for the rest of the process (a long-running
+    VSCode session would never recover until restart). Instead the
+    failure is logged and the next call retries."""
     # Reset cache so the test starts clean.
     monkeypatch.setattr(wb_mod, "_indicator_cache", None)
 
@@ -335,8 +334,8 @@ async def test_worldbank_does_not_cache_empty_indicator_response(
 async def test_worldbank_fetches_indicators_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PR #61 bot fix: per-indicator data fetches must dispatch
-    concurrently via ``asyncio.gather``, not serially. With
+    """Per-indicator data fetches must dispatch concurrently via
+    ``asyncio.gather``, not serially. With
     top_k=3 and an 8 s per-call timeout, serial worst case is 24 s
     — way over the documented <5 s budget.
 

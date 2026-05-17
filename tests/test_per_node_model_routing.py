@@ -1,4 +1,4 @@
-"""Phase O — per-node model routing tests.
+"""Per-node model routing tests.
 
 Verifies that ``provider.node_models`` actually routes per-call model
 selection through both transports:

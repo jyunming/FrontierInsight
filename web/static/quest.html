@@ -1,600 +1,520 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight — Quest</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/header.js"></script>
-  <script defer src="/static/md_lite.js"></script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Quest — Frontier Insight</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>tailwind.config = window._fiConfig;</script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
+<script defer src="/static/md_lite.js"></script>
 </head>
-<body>
-  <div id="fi-header-root" data-breadcrumb="Quest"></div>
-  <main>
-    <section class="fi-page-hero" id="quest-header">
-      <h1 id="quest-title">Quest <span class="fi-mono" id="quest-id">…</span></h1>
-      <p class="fi-subtitle">
-        <span class="fi-badge" id="status-badge">loading…</span>
-        <span id="current-node" style="margin-left:0.5rem"></span>
-      </p>
-      <div class="fi-actions" id="actions" style="margin-top:1rem">
-        <a class="fi-btn fi-btn-secondary" href="/" id="back-link">← Dashboard</a>
-        <a class="fi-btn fi-btn-secondary" id="update-link" href="#">Update settings</a>
-        <button class="fi-btn fi-btn-primary" id="resume-btn" onclick="resumeQuest()" style="display:none">Resume</button>
-        <a class="fi-btn fi-btn-secondary" id="download-link" href="#">Download .zip</a>
-        <button class="fi-btn fi-btn-danger" id="cancel-btn" onclick="cancelQuest()">Cancel quest</button>
-        <button class="fi-btn fi-btn-danger" id="trash-btn" onclick="trashQuest()">Move to trash</button>
-      </div>
-    </section>
+<body class="bg-background text-on-surface font-body-md min-h-screen flex flex-col">
 
-    <section class="fi-section" id="tags-section">
-      <h2>Tags</h2>
-      <div id="tags-display" style="margin-bottom:0.5rem"></div>
-      <form onsubmit="return saveTags(event)" style="display:flex; gap:0.5rem; flex-wrap:wrap">
-        <input type="text" id="tags-input" placeholder="comma-separated tags (e.g. euv, baseline, deep-dive)"
-               style="flex:1; min-width:200px; padding:0.4rem 0.75rem; border:1px solid var(--fi-border); border-radius:var(--fi-radius); background:var(--fi-bg); color:var(--fi-text); font-family:inherit; font-size:0.875rem">
-        <button type="submit" class="fi-btn fi-btn-secondary">Save tags</button>
+<div id="fi-header-root"></div>
+
+<main class="flex-grow flex flex-col px-margin-mobile md:px-margin-desktop max-w-max-width mx-auto w-full pt-24 pb-section-gap gap-section-gap">
+
+  <!-- Hero -->
+  <header class="flex flex-col gap-6">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-6">
+      <div class="flex flex-col gap-2">
+        <h1 class="font-code-md text-headline-xl text-primary tracking-tight break-all" id="quest-title">Quest <span id="quest-id">…</span></h1>
+        <div class="flex items-center gap-4 flex-wrap">
+          <span id="status-badge" class="flex items-center gap-2 bg-surface-mid cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase text-on-surface-variant">loading…</span>
+          <span id="current-node" class="font-label-sm text-label-sm text-outline uppercase"></span>
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-wrap gap-3" id="actions">
+      <a href="/" id="back-link" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-mid transition-colors flex items-center gap-2">
+        <span class="material-symbols-outlined text-[16px]">arrow_back</span> Dashboard
+      </a>
+      <button id="resume-btn" onclick="resumeQuest()" class="hidden cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume</button>
+      <a id="update-link" href="#" class="bg-surface-mid cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Update settings</a>
+      <a id="download-link" href="#" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-mid transition-colors">Download .zip</a>
+      <button id="cancel-btn" onclick="cancelQuest()" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Cancel</button>
+      <button id="trash-btn" onclick="trashQuest()" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Trash</button>
+    </div>
+  </header>
+
+  <!-- Bento Grid -->
+  <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter">
+    <!-- Tags (Col 1-4) -->
+    <div id="tags-section" class="col-span-1 md:col-span-4 bg-surface-mid cyber-border p-6 rounded-xl flex flex-col gap-4">
+      <h3 class="font-label-sm text-label-sm text-outline uppercase">Tags</h3>
+      <div id="tags-display" class="flex flex-wrap gap-2 min-h-[2rem]"></div>
+      <form onsubmit="return saveTags(event)" class="mt-auto pt-4 border-t border-white/5">
+        <input id="tags-input" type="text" placeholder="ADD TAG…" class="w-full bg-surface-low border border-white/10 rounded p-3 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none transition-colors uppercase placeholder:text-outline"/>
       </form>
-    </section>
-
-    <section class="fi-section" id="cost-section" style="display:none">
-      <h2>Cost &amp; runtime</h2>
-      <div id="cost-summary" class="fi-card-meta"></div>
-      <div id="cost-chart" style="margin-top:0.5rem"></div>
-    </section>
-
-    <section class="fi-section" id="files-section">
-      <h2>Files</h2>
-      <div id="files-tree" class="fi-mono" style="font-size:0.8125rem"></div>
-    </section>
-
-    <section class="fi-section" id="iterations-section" style="display:none">
-      <h2>Paper iterations</h2>
-      <p class="fi-subtitle">Compare paper.md across review iterations.</p>
-      <div id="iterations-list"></div>
-    </section>
-
-    <section class="fi-section" id="code-section" style="display:none">
-      <h2>Experiment code</h2>
-      <p class="fi-subtitle" id="code-hint">View <code class="fi-mono">code/experiment.py</code>. Re-execute requires the server's <code class="fi-mono">FI_WEB_ALLOW_EXEC_EDIT=1</code> env var.</p>
-      <textarea id="code-editor" rows="20"
-                style="width:100%; font-family:'JetBrains Mono', monospace; font-size:0.8125rem;
-                       padding:0.75rem; border:1px solid var(--fi-border); border-radius:var(--fi-radius);
-                       background:var(--fi-bg-elev); color:var(--fi-text);"></textarea>
-      <div style="margin-top:0.5rem">
-        <button class="fi-btn fi-btn-primary" onclick="rerunCode()">Save &amp; re-execute</button>
-      </div>
-    </section>
-
-    <section id="clarify-section" style="display:none">
-      <div class="fi-banner fi-banner-info">
-        <p><b>Paused for clarification.</b> Fill in the answers below to resume.</p>
-      </div>
-      <form id="clarify-form" class="fi-form" onsubmit="return submitClarify(event)"></form>
-    </section>
-
-    <section id="paper-section" style="display:none">
-      <div style="display:flex; align-items:baseline; justify-content:space-between">
-        <h2>Paper preview</h2>
-        <label style="font-size:0.875rem; color:var(--fi-text-muted)">
-          <input type="checkbox" id="raw-md-toggle" onchange="renderPaperPreview()">
-          show raw markdown
+    </div>
+    <!-- Cost & Runtime (Col 5-12) -->
+    <div id="cost-section" class="hidden col-span-1 md:col-span-8 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <h3 class="font-label-sm text-label-sm text-outline uppercase flex justify-between items-center">
+        <span>Cost &amp; Runtime</span>
+        <span id="cost-summary" class="text-secondary text-right normal-case"></span>
+      </h3>
+      <div id="cost-chart" class="flex-grow flex flex-col justify-center gap-4"></div>
+    </div>
+    <!-- Files (Col 1-3) -->
+    <div id="files-section" class="col-span-1 md:col-span-3 bg-surface-mid cyber-border p-6 rounded-xl flex flex-col gap-4 overflow-hidden">
+      <h3 class="font-label-sm text-label-sm text-outline uppercase">Workspace</h3>
+      <div id="files-tree" class="font-code-md text-code-md text-on-surface flex flex-col gap-2"></div>
+    </div>
+    <!-- Paper Preview (Col 4-12) -->
+    <div id="paper-section" class="hidden col-span-1 md:col-span-9 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <div class="flex justify-between items-center border-b border-white/5 pb-4">
+        <h3 class="font-label-sm text-label-sm text-outline uppercase">Paper Preview</h3>
+        <label class="flex items-center gap-2 text-on-surface-variant font-label-sm text-label-sm uppercase cursor-pointer">
+          <input type="checkbox" id="raw-md-toggle" onchange="renderPaperPreview()" class="w-4 h-4"/>
+          <span>Show raw</span>
         </label>
       </div>
       <div id="paper-preview" class="fi-md-body"></div>
-    </section>
-
-    <section id="figures-section" style="display:none">
-      <h2>Figures</h2>
-      <div class="fi-figures" id="figures"></div>
-    </section>
-
-    <section id="review-section" style="display:none">
-      <h2>Review</h2>
+    </div>
+    <!-- Iterations -->
+    <div id="iterations-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <h3 class="font-label-sm text-label-sm text-outline uppercase">Paper iterations</h3>
+      <p class="font-body-md text-body-md text-on-surface-variant">Compare <code class="font-code-md text-secondary">paper.md</code> across review iterations.</p>
+      <div id="iterations-list"></div>
+    </div>
+    <!-- Code editor -->
+    <div id="code-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <h3 class="font-label-sm text-label-sm text-outline uppercase">Experiment code</h3>
+      <p id="code-hint" class="font-body-md text-body-md text-on-surface-variant">View <code class="font-code-md text-secondary">code/experiment.py</code>. Re-execute requires the server's <code class="font-code-md text-secondary">FI_WEB_ALLOW_EXEC_EDIT=1</code> env var.</p>
+      <textarea id="code-editor" rows="20" class="w-full bg-surface-low border border-white/10 rounded p-4 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none min-h-[400px]"></textarea>
+      <div>
+        <button onclick="rerunCode()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity flex items-center gap-2">
+          <span class="material-symbols-outlined text-[16px]">play_arrow</span> Save &amp; re-execute
+        </button>
+      </div>
+    </div>
+    <!-- Clarify panel -->
+    <div id="clarify-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <div class="fi-banner fi-banner-info"><b>Paused for clarification.</b> Fill in the answers below to resume.</div>
+      <form id="clarify-form" class="fi-form" onsubmit="return submitClarify(event)"></form>
+    </div>
+    <!-- Figures -->
+    <div id="figures-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <h3 class="font-label-sm text-label-sm text-outline uppercase">Generated Figures</h3>
+      <div id="figures" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+    </div>
+    <!-- Review -->
+    <div id="review-section" class="hidden col-span-1 md:col-span-12 flex-col gap-6 mt-8">
+      <h2 class="font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface border-b border-white/10 pb-4">Adversarial Review Panel</h2>
       <div id="review"></div>
-    </section>
+    </div>
+  </section>
 
-    <section id="log-section">
-      <h2>Log</h2>
-      <pre class="fi-log" id="log"></pre>
-    </section>
-  </main>
+  <!-- SSE Log -->
+  <section id="log-section" class="flex flex-col">
+    <h3 class="font-label-sm text-label-sm text-outline uppercase mb-2 pl-2">System Log</h3>
+    <pre id="log" class="bg-[#090909] border border-white/10 rounded-xl p-4 font-code-md text-code-md h-64 overflow-y-auto relative shadow-[inset_0_0_40px_rgba(0,0,0,0.8)] text-on-surface-variant whitespace-pre-wrap"></pre>
+  </section>
 
-  <script>
-    const questId = window.__fi_quest_id;
-    let pollHandle = null;
-    let logSource = null;  // EventSource for SSE log streaming
+</main>
 
-    document.getElementById('quest-id').textContent = questId;
-    document.getElementById('update-link').href = `/update/${encodeURIComponent(questId)}`;
-    document.getElementById('download-link').href = `/api/quests/${encodeURIComponent(questId)}/download`;
+<footer class="bg-surface-low/60 backdrop-blur-[20px] full-width bottom-0 border-t border-white/10 mt-auto">
+  <div class="flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto gap-4">
+    <span class="text-label-sm font-bold text-on-surface">Frontier Insight</span>
+    <div class="flex flex-wrap justify-center gap-6">
+      <a class="text-on-surface-variant font-label-sm text-label-sm hover:text-secondary transition-colors" href="/">Dashboard</a>
+      <a class="text-on-surface-variant font-label-sm text-label-sm hover:text-secondary transition-colors" href="/settings">Settings</a>
+      <a class="text-on-surface-variant font-label-sm text-label-sm hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
+    </div>
+    <span class="font-label-sm text-label-sm text-on-surface-variant">© 2026 Frontier Insight · Apache 2.0</span>
+  </div>
+</footer>
 
-    // Request notification permission once so we can fire a desktop
-    // ping when the quest reaches a terminal state. Silently ignored
-    // when the API isn't available (older browsers, headless tests).
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
+<script>
+  const questId = window.__fi_quest_id;
+  let pollHandle = null;
+  let logSource = null;
+
+  document.getElementById('quest-id').textContent = questId;
+  document.getElementById('update-link').href = `/update/${encodeURIComponent(questId)}`;
+  document.getElementById('download-link').href = `/api/quests/${encodeURIComponent(questId)}/download`;
+
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
+  let alreadyNotified = false;
+
+  async function refresh() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}`);
+      if (!res.ok) return showError(`Quest not found (${res.status}). It may not have started yet.`);
+      renderStatus(await res.json());
+    } catch (e) { showError(`Network error: ${e}`); }
+  }
+
+  function renderStatus(data) {
+    const badge = document.getElementById('status-badge');
+    const baseCls = 'flex items-center gap-2 cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase';
+    if (data.alive) {
+      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span><span class="text-status-success">Running</span>';
+      badge.className = baseCls + ' bg-surface-mid';
+    } else if (data.pending_clarify) {
+      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (clarify)</span>';
+      badge.className = baseCls + ' bg-surface-mid';
+    } else if (data.summary) {
+      const v = data.summary?.verdict || data.review?.verdict || 'complete';
+      badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-secondary"></span><span class="text-secondary">${escapeHtml(v)}</span>`;
+      badge.className = baseCls + ' bg-surface-mid';
+    } else {
+      badge.innerHTML = '<span class="text-on-surface-variant">idle</span>';
+      badge.className = baseCls + ' bg-surface-mid';
     }
-    let alreadyNotified = false;
+    document.getElementById('current-node').textContent = data.current_node ? `node: ${data.current_node}` : '';
 
-    async function refresh() {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}`);
-        if (!res.ok) {
-          showError(`Quest not found (${res.status}). It may not have started yet.`);
-          return;
-        }
-        const data = await res.json();
-        renderStatus(data);
-      } catch (e) {
-        showError(`Network error: ${e}`);
+    if (data.paper_preview) {
+      const sec = document.getElementById('paper-section');
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      window._fi_paper_md = data.paper_preview;
+      renderPaperPreview();
+    }
+    if (data.figures && data.figures.length) {
+      const sec = document.getElementById('figures-section');
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      const grid = document.getElementById('figures');
+      grid.innerHTML = '';
+      for (const fname of data.figures) {
+        const div = document.createElement('div');
+        div.className = 'aspect-square bg-surface-low rounded-lg cyber-border overflow-hidden';
+        const img = document.createElement('img');
+        img.src = `/api/quests/${encodeURIComponent(questId)}/figure/${encodeURIComponent(fname)}`;
+        img.alt = fname;
+        img.className = 'w-full h-full object-contain bg-white';
+        div.appendChild(img);
+        grid.appendChild(div);
       }
     }
-
-    function renderStatus(data) {
-      const badge = document.getElementById('status-badge');
-      if (data.alive) {
-        badge.textContent = 'running';
-        badge.className = 'fi-badge fi-badge-alive';
-      } else if (data.pending_clarify) {
-        badge.textContent = 'paused (clarify)';
-        badge.className = 'fi-badge fi-badge-paused';
-      } else if (data.summary) {
-        badge.textContent = 'done';
-        badge.className = 'fi-badge fi-badge-done';
+    if (data.review) {
+      const sec = document.getElementById('review-section');
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      const el = document.getElementById('review');
+      if (data.review_panel && data.review_panel.length) {
+        el.innerHTML = renderReviewPanel(data.review, data.review_panel);
+      } else if (typeof data.review === 'object') {
+        el.innerHTML = renderSingleReview(data.review);
       } else {
-        badge.textContent = 'idle';
-        badge.className = 'fi-badge';
-      }
-      document.getElementById('current-node').textContent =
-        data.current_node ? `node: ${data.current_node}` : '';
-
-      if (data.paper_preview) {
-        document.getElementById('paper-section').style.display = '';
-        window._fi_paper_md = data.paper_preview;
-        renderPaperPreview();
-      }
-      if (data.figures && data.figures.length) {
-        const sec = document.getElementById('figures-section');
-        sec.style.display = '';
-        const grid = document.getElementById('figures');
-        grid.innerHTML = '';
-        for (const fname of data.figures) {
-          const img = document.createElement('img');
-          // Figures live under <quest_root>/figures/. The server
-          // exposes them through the existing API; if /static-style
-          // serving for figures isn't wired, the image will simply
-          // 404 and the user gets a broken-icon (acceptable
-          // degradation, not a crash).
-          // The server route is /api/quests/{id}/figure/{name}
-          // (singular) — see web/server.py:_serve_figure.
-          img.src = `/api/quests/${encodeURIComponent(questId)}/figure/${encodeURIComponent(fname)}`;
-          img.alt = fname;
-          grid.appendChild(img);
-        }
-      }
-      if (data.review) {
-        document.getElementById('review-section').style.display = '';
-        const reviewEl = document.getElementById('review');
-        if (data.review_panel && data.review_panel.length) {
-          reviewEl.innerHTML = renderReviewPanel(data.review, data.review_panel);
-        } else if (typeof data.review === 'object') {
-          reviewEl.innerHTML = renderSingleReview(data.review);
-        } else {
-          reviewEl.textContent = String(data.review);
-        }
-      }
-      // Log content is now streamed via SSE (see startLogStream).
-      // The polling response's log_tail is used as the initial
-      // snapshot on first render; the SSE stream takes over after.
-      const logEl = document.getElementById('log');
-      if (!logEl.dataset.streamStarted && data.log_tail && data.log_tail.length) {
-        logEl.textContent = data.log_tail.join('\n');
-        startLogStream();
-      }
-
-      // Show the Resume button when the quest is NOT alive and NOT
-      // pending clarify (i.e. it crashed, was canceled, or paused
-      // for data). Resume reuses the existing config.yaml + state.sqlite.
-      const resumable = !data.alive && !data.pending_clarify && !data.summary;
-      document.getElementById('resume-btn').style.display = resumable ? '' : 'none';
-
-      // Render the clarify panel if the quest is paused at clarify.
-      if (data.pending_clarify) {
-        loadClarifyPanel();
-      } else {
-        document.getElementById('clarify-section').style.display = 'none';
-      }
-
-      // Refresh the file browser whenever new files might appear
-      // (figures land partway through; paper.md late in the run).
-      refreshFiles();
-
-      // Stop polling once the quest is terminal.
-      const terminal = !data.alive && data.summary;
-      document.getElementById('cancel-btn').disabled = terminal || !data.alive;
-      if (terminal && pollHandle) {
-        clearInterval(pollHandle);
-        pollHandle = null;
-        // Fire a one-time desktop notification when the quest
-        // finishes — handles the common "I started a 30-minute
-        // quest and tabbed away" UX.
-        if (!alreadyNotified && 'Notification' in window
-            && Notification.permission === 'granted') {
-          new Notification('Frontier Insight', {
-            body: `Quest ${questId} finished.`,
-            icon: '/static/favicon.svg',
-          });
-          alreadyNotified = true;
-        }
+        el.textContent = String(data.review);
       }
     }
-
-    async function refreshFiles() {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/files`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const tree = document.getElementById('files-tree');
-        if (!data.files || data.files.length === 0) {
-          tree.textContent = '(no files yet)';
-          return;
-        }
-        // Group by top-level directory for readability. Sort within.
-        const groups = {};
-        for (const f of data.files) {
-          const top = f.path.split('/')[0];
-          (groups[top] = groups[top] || []).push(f);
-        }
-        const html = Object.keys(groups).sort().map(top => `
-          <details ${top === 'figures' || top === 'paper' ? 'open' : ''}>
-            <summary><b>${escapeHtml(top)}/</b> <span style="color:var(--fi-text-subtle)">(${groups[top].length} file${groups[top].length === 1 ? '' : 's'})</span></summary>
-            <ul style="margin:0.25rem 0 0.5rem 1rem; padding:0; list-style:none">
-              ${groups[top].map(f => `
-                <li>
-                  <a href="/api/quests/${encodeURIComponent(questId)}/file?path=${encodeURIComponent(f.path)}" target="_blank">${escapeHtml(f.path.slice(top.length + 1) || f.path)}</a>
-                  <span style="color:var(--fi-text-subtle)">${formatBytes(f.size_bytes)}</span>
-                </li>`).join('')}
-            </ul>
-          </details>`).join('');
-        tree.innerHTML = html;
-      } catch (_) {}
+    const logEl = document.getElementById('log');
+    if (!logEl.dataset.streamStarted && data.log_tail && data.log_tail.length) {
+      logEl.textContent = data.log_tail.join('\n');
+      startLogStream();
     }
-
-    function formatBytes(n) {
-      if (n < 1024) return `${n} B`;
-      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-      return `${(n / 1024 / 1024).toFixed(1)} MB`;
-    }
-
-    function renderPaperPreview() {
-      const el = document.getElementById('paper-preview');
-      const md = window._fi_paper_md || '';
-      const raw = document.getElementById('raw-md-toggle')?.checked;
-      if (raw) {
-        const pre = document.createElement('pre');
-        pre.textContent = md;
-        el.replaceChildren(pre);
-      } else if (window.fi_renderMarkdown) {
-        el.innerHTML = window.fi_renderMarkdown(md);
-      } else {
-        // md_lite.js not loaded yet (e.g. fired before defer
-        // resolved). Fall back to plain text.
-        el.textContent = md;
-      }
-    }
-
-    // ---- Tags ----
-    async function loadTags() {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/labels`);
-        if (!res.ok) return;
-        const data = await res.json();
-        renderTags(data.labels || []);
-      } catch (_) {}
-    }
-    function renderTags(labels) {
-      const display = document.getElementById('tags-display');
-      display.innerHTML = labels.length
-        ? labels.map(l => `<span class="fi-badge" style="margin-right:0.25rem">${escapeHtml(l)}</span>`).join('')
-        : '<span class="fi-card-meta">(no tags)</span>';
-      document.getElementById('tags-input').value = labels.join(', ');
-    }
-    async function saveTags(ev) {
-      ev.preventDefault();
-      const raw = document.getElementById('tags-input').value;
-      const labels = raw.split(',').map(s => s.trim()).filter(Boolean);
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/labels`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ labels }),
-      });
-      if (res.ok) renderTags((await res.json()).labels || []);
-      return false;
-    }
-
-    // ---- Cost chart (inline SVG, no external lib) ----
-    async function loadCost() {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/cost`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!data.records || data.records.length === 0) return;
-        document.getElementById('cost-section').style.display = '';
-        renderCostChart(data.records);
-      } catch (_) {}
-    }
-    function renderCostChart(records) {
-      // Aggregate by node — sum tokens + cost per node, count calls.
-      const byNode = {};
-      let totalCost = 0;
-      let totalCalls = 0;
-      for (const r of records) {
-        const node = r.node || '(unknown)';
-        const cost = r.cost_usd || 0;
-        const tokens = r.usage?.total_tokens || 0;
-        if (!byNode[node]) byNode[node] = { calls: 0, cost: 0, tokens: 0 };
-        byNode[node].calls += 1;
-        byNode[node].cost += cost;
-        byNode[node].tokens += tokens;
-        totalCost += cost;
-        totalCalls += 1;
-      }
-      document.getElementById('cost-summary').textContent =
-        `${totalCalls} LLM call${totalCalls === 1 ? '' : 's'} · total cost ` +
-        `\$${totalCost.toFixed(4)} (token-priced providers only — Copilot calls are not priced)`;
-      const nodes = Object.keys(byNode).sort();
-      const maxCost = Math.max(...nodes.map(n => byNode[n].cost), 0.0001);
-      const rows = nodes.map(n => {
-        const v = byNode[n];
-        const w = Math.max(2, Math.round(v.cost / maxCost * 240));
-        return `
-          <div style="display:flex; align-items:center; gap:0.5rem; margin:0.25rem 0; font-size:0.8125rem">
-            <span class="fi-mono" style="width:120px; color:var(--fi-text-muted)">${escapeHtml(n)}</span>
-            <div style="background:var(--fi-accent); height:14px; width:${w}px; border-radius:3px"></div>
-            <span style="color:var(--fi-text-muted)">\$${v.cost.toFixed(4)} · ${v.calls} call${v.calls === 1 ? '' : 's'} · ${v.tokens} tok</span>
-          </div>`;
-      }).join('');
-      document.getElementById('cost-chart').innerHTML = rows;
-    }
-
-    // ---- Paper iterations diff ----
-    async function loadIterations() {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/iterations`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!data.iterations || data.iterations.length < 2) return;
-        document.getElementById('iterations-section').style.display = '';
-        const html = data.iterations.map((it, i) => `
-          <details ${i === data.iterations.length - 1 ? 'open' : ''}>
-            <summary>Iter ${it.iter}${it.label ? ` (${escapeHtml(it.label)})` : ''} · ${it.content.length} chars</summary>
-            <div class="fi-md-body" style="margin-top:0.5rem">${window.fi_renderMarkdown ? window.fi_renderMarkdown(it.content.slice(0, 4000)) : escapeHtml(it.content.slice(0, 4000))}</div>
-          </details>`).join('');
-        document.getElementById('iterations-list').innerHTML = html;
-      } catch (_) {}
-    }
-
-    // ---- Experiment code editor ----
-    async function loadCode() {
-      try {
-        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/file?path=code/experiment.py`);
-        if (!res.ok) return;
-        const code = await res.text();
-        document.getElementById('code-section').style.display = '';
-        document.getElementById('code-editor').value = code;
-      } catch (_) {}
-    }
-    async function rerunCode() {
-      if (!confirm('Save and re-execute the experiment? Re-runs from the execute node.')) return;
-      const code = document.getElementById('code-editor').value;
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/code/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code }),
-      });
-      if (!res.ok) {
-        const msg = await res.text();
-        alert(`Re-execute failed (${res.status}): ${msg}`);
-        return;
-      }
-      const body = await res.json();
-      alert(`Saved + re-running (pid ${body.rerun_pid}). The log will update as the engine progresses.`);
-      // Restart polling.
-      if (!pollHandle) pollHandle = setInterval(refresh, 3000);
-      refresh();
-    }
-
-    function startLogStream() {
-      // Replace 3s polling for the log tail with the existing
-      // /api/quests/<id>/log/stream Server-Sent Events endpoint.
-      // Cheaper + lower latency. Closes itself when the quest ends.
-      const logEl = document.getElementById('log');
-      logEl.dataset.streamStarted = '1';
-      if (logSource) logSource.close();
-      logSource = new EventSource(`/api/quests/${encodeURIComponent(questId)}/log/stream`);
-      logSource.onmessage = (ev) => {
-        // Auto-scroll to bottom UNLESS the user has scrolled away.
-        const wasNearBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
-        logEl.textContent += '\n' + ev.data;
-        if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
-      };
-      logSource.onerror = () => {
-        // Server closed the stream (quest finished or restart).
-        // Don't reconnect — the polling refresh() will pick up
-        // any final lines via log_tail.
-        logSource?.close();
-      };
-    }
-
-    async function loadClarifyPanel() {
+    const resumable = !data.alive && !data.pending_clarify && !data.summary;
+    document.getElementById('resume-btn').classList.toggle('hidden', !resumable);
+    if (data.pending_clarify) {
+      loadClarifyPanel();
+    } else {
       const sec = document.getElementById('clarify-section');
-      sec.style.display = '';
-      const form = document.getElementById('clarify-form');
-      if (form.dataset.loaded === '1') return;  // already rendered
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`);
+      sec.classList.add('hidden'); sec.classList.remove('flex');
+    }
+    refreshFiles();
+    const terminal = !data.alive && data.summary;
+    document.getElementById('cancel-btn').disabled = terminal || !data.alive;
+    if (terminal && pollHandle) {
+      clearInterval(pollHandle); pollHandle = null;
+      if (!alreadyNotified && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('Frontier Insight', { body: `Quest ${questId} finished.`, icon: '/static/favicon.svg' });
+        alreadyNotified = true;
+      }
+    }
+  }
+
+  async function refreshFiles() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/files`);
       if (!res.ok) return;
       const data = await res.json();
-      if (!data.pending) return;
-      const qs = data.questions || {};
-      form.innerHTML = '';
-      for (const [key, val] of Object.entries(qs)) {
-        const fs = document.createElement('fieldset');
-        const legend = document.createElement('legend');
-        legend.textContent = key;
-        fs.appendChild(legend);
-        const prompt = document.createElement('div');
-        prompt.className = 'prompt';
-        prompt.textContent = val.question || key;
-        fs.appendChild(prompt);
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.name = key;
-        input.dataset.islist = Array.isArray(val.default) ? '1' : '0';
-        input.value = Array.isArray(val.default) ? val.default.join(', ') : String(val.default ?? '');
-        fs.appendChild(input);
-        form.appendChild(fs);
+      const tree = document.getElementById('files-tree');
+      if (!data.files || data.files.length === 0) { tree.innerHTML = '<span class="text-outline">(no files yet)</span>'; return; }
+      const groups = {};
+      for (const f of data.files) {
+        const top = f.path.split('/')[0];
+        (groups[top] = groups[top] || []).push(f);
       }
-      const submit = document.createElement('div');
-      submit.innerHTML = '<button type="submit" class="fi-btn fi-btn-primary">Resume with these answers</button>';
-      form.appendChild(submit);
-      form.dataset.loaded = '1';
-    }
+      tree.innerHTML = Object.keys(groups).sort().map(top => `
+        <details ${top === 'figures' || top === 'paper' ? 'open' : ''} class="text-on-surface">
+          <summary class="cursor-pointer flex items-center gap-2 hover:text-primary"><span class="material-symbols-outlined text-[16px]">folder${top === 'figures' || top === 'paper' ? '_open' : ''}</span><span>${escapeHtml(top)}/</span><span class="text-outline ml-auto">(${groups[top].length})</span></summary>
+          <ul class="ml-6 mt-1 flex flex-col gap-1">
+            ${groups[top].map(f => `<li><a href="/api/quests/${encodeURIComponent(questId)}/file?path=${encodeURIComponent(f.path)}" target="_blank" class="flex items-center gap-2 text-on-surface-variant hover:text-primary"><span class="material-symbols-outlined text-[14px]">insert_drive_file</span><span class="truncate">${escapeHtml(f.path.slice(top.length + 1) || f.path)}</span><span class="text-outline ml-auto text-[10px]">${formatBytes(f.size_bytes)}</span></a></li>`).join('')}
+          </ul>
+        </details>`).join('');
+    } catch (_) {}
+  }
 
-    async function submitClarify(ev) {
-      ev.preventDefault();
-      const form = document.getElementById('clarify-form');
-      const answers = {};
-      for (const inp of form.querySelectorAll('input[name]')) {
-        const val = inp.value;
-        answers[inp.name] = inp.dataset.islist === '1'
-          ? val.split(',').map(s => s.trim()).filter(Boolean)
-          : val;
-      }
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answers }),
-      });
-      if (!res.ok) {
-        alert('Submit failed: ' + await res.text());
-        return false;
-      }
-      form.dataset.loaded = '0';
-      refresh();
-      return false;
-    }
+  function formatBytes(n) { if (n < 1024) return `${n} B`; if (n < 1024*1024) return `${(n/1024).toFixed(1)} KB`; return `${(n/1024/1024).toFixed(1)} MB`; }
 
-    async function resumeQuest() {
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, {method: 'POST'});
-      if (!res.ok) {
-        alert('Resume failed: ' + await res.text());
-        return;
-      }
-      // Restart polling.
-      if (!pollHandle) pollHandle = setInterval(refresh, 3000);
-      refresh();
-    }
+  function renderPaperPreview() {
+    const el = document.getElementById('paper-preview');
+    const md = window._fi_paper_md || '';
+    const raw = document.getElementById('raw-md-toggle')?.checked;
+    if (raw) { const pre = document.createElement('pre'); pre.textContent = md; el.replaceChildren(pre); }
+    else if (window.fi_renderMarkdown) el.innerHTML = window.fi_renderMarkdown(md);
+    else el.textContent = md;
+  }
 
-    async function trashQuest() {
-      if (!confirm(`Move quest ${questId} to trash? You can restore it from /trash.`)) return;
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}`, {method: 'DELETE'});
-      if (!res.ok) {
-        alert('Trash failed: ' + await res.text());
-        return;
-      }
-      window.location.href = '/';
-    }
+  async function loadTags() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/labels`);
+      if (!res.ok) return;
+      const data = await res.json();
+      renderTags(data.labels || []);
+    } catch (_) {}
+  }
+  function renderTags(labels) {
+    const display = document.getElementById('tags-display');
+    display.innerHTML = labels.length
+      ? labels.map(l => `<span class="bg-surface-high text-on-surface px-3 py-1 rounded-md font-code-md text-code-md cyber-border">${escapeHtml(l)}</span>`).join('')
+      : '<span class="text-outline font-body-md text-body-md">(no tags)</span>';
+    document.getElementById('tags-input').value = labels.join(', ');
+  }
+  async function saveTags(ev) {
+    ev.preventDefault();
+    const raw = document.getElementById('tags-input').value;
+    const labels = raw.split(',').map(s => s.trim()).filter(Boolean);
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/labels`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ labels }) });
+    if (res.ok) renderTags((await res.json()).labels || []);
+    return false;
+  }
 
-    // Phase N — per-persona panel + moderator synthesis. Ported
-    // from the old index.html dashboard so the polished card UI
-    // survives the dashboard simplification. When the engine
-    // produced a single-reviewer verdict instead of a panel, the
-    // renderSingleReview fallback below shows that cleanly.
-    function renderReviewPanel(finalReview, panel) {
-      const v = finalReview.verdict || '?';
-      const agreement = finalReview.agreement || 'unanimous';
-      const score = finalReview.score != null ? finalReview.score : '?';
-      const rationale = finalReview.rationale || '';
-      const cards = panel.map((r) => {
-        const weak = (r.weaknesses || []).slice(0, 4).map(w => `<li>${escapeHtml(w)}</li>`).join('');
-        const sugg = (r.suggestions || []).slice(0, 3).map(s => `<li>${escapeHtml(s)}</li>`).join('');
-        const strong = (r.strengths || []).slice(0, 3).map(s => `<li>${escapeHtml(s)}</li>`).join('');
-        return `
-          <div class="fi-card" style="margin-bottom:0">
-            <div class="fi-card-title">
-              <h3>${escapeHtml(r.persona || '?')}</h3>
-              <span class="fi-badge ${r.verdict === 'accept' ? 'fi-badge-done' : 'fi-badge-paused'}">${escapeHtml(r.verdict || '?')}</span>
-            </div>
-            <p class="fi-card-meta">score: ${r.score != null ? escapeHtml(String(r.score)) : '?'}</p>
-            ${strong ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>strengths</b></p><ul style="margin:0 0 0.5rem 1rem">${strong}</ul>` : ''}
-            ${weak ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>weaknesses</b></p><ul style="margin:0 0 0.5rem 1rem">${weak}</ul>` : ''}
-            ${sugg ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>suggestions</b></p><ul style="margin:0 0 0.5rem 1rem">${sugg}</ul>` : ''}
-          </div>`;
-      }).join('');
+  async function loadCost() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/cost`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.records || data.records.length === 0) return;
+      const sec = document.getElementById('cost-section');
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      renderCostChart(data.records);
+    } catch (_) {}
+  }
+  function renderCostChart(records) {
+    const byNode = {};
+    let totalCost = 0, totalCalls = 0;
+    for (const r of records) {
+      const node = r.node || '(unknown)';
+      const cost = r.cost_usd || 0;
+      const tokens = r.usage?.total_tokens || 0;
+      if (!byNode[node]) byNode[node] = { calls: 0, cost: 0, tokens: 0 };
+      byNode[node].calls += 1; byNode[node].cost += cost; byNode[node].tokens += tokens;
+      totalCost += cost; totalCalls += 1;
+    }
+    document.getElementById('cost-summary').textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} · $${totalCost.toFixed(4)}`;
+    const nodes = Object.keys(byNode).sort();
+    const maxCost = Math.max(...nodes.map(n => byNode[n].cost), 0.0001);
+    const html = nodes.map(n => {
+      const v = byNode[n];
+      const pct = Math.max(2, Math.round(v.cost / maxCost * 100));
       return `
-        <p class="fi-card-meta" style="margin-bottom:0.5rem">${panel.length} personas</p>
-        <div class="fi-card" style="margin-bottom:1rem">
-          <div class="fi-card-title">
-            <h3>Moderator verdict</h3>
-            <span class="fi-badge ${v === 'accept' ? 'fi-badge-done' : 'fi-badge-paused'}">${escapeHtml(v)}</span>
+        <div class="flex flex-col gap-2">
+          <div class="flex justify-between font-code-md text-code-md text-on-surface">
+            <span>${escapeHtml(n)}</span>
+            <span class="text-on-surface-variant">$${v.cost.toFixed(4)} · ${v.calls} call${v.calls===1?'':'s'} · ${v.tokens} tok</span>
           </div>
-          <p class="fi-card-meta">score ${escapeHtml(String(score))} · agreement: ${escapeHtml(agreement)}</p>
-          ${rationale ? `<p>${escapeHtml(rationale)}</p>` : ''}
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:0.75rem">${cards}</div>`;
-    }
-
-    function renderSingleReview(review) {
-      const v = review.verdict || '?';
-      const score = review.score != null ? review.score : '?';
-      const weak = (review.weaknesses || []).slice(0, 5).map(w => `<li>${escapeHtml(w)}</li>`).join('');
-      const sugg = (review.suggestions || []).slice(0, 5).map(s => `<li>${escapeHtml(s)}</li>`).join('');
-      return `
-        <div class="fi-card">
-          <div class="fi-card-title">
-            <h3>Reviewer verdict</h3>
-            <span class="fi-badge ${v === 'accept' ? 'fi-badge-done' : 'fi-badge-paused'}">${escapeHtml(v)}</span>
+          <div class="w-full h-2 bg-surface-low rounded-full overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-primary to-secondary" style="width:${pct}%"></div>
           </div>
-          <p class="fi-card-meta">score ${escapeHtml(String(score))}</p>
-          ${weak ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>weaknesses</b></p><ul style="margin:0 0 0.5rem 1rem">${weak}</ul>` : ''}
-          ${sugg ? `<p style="margin:0.25rem 0;font-size:0.8125rem;color:var(--fi-text-muted)"><b>suggestions</b></p><ul style="margin:0 0 0.5rem 1rem">${sugg}</ul>` : ''}
         </div>`;
-    }
+    }).join('');
+    document.getElementById('cost-chart').innerHTML = html;
+  }
 
-    function showError(msg) {
-      const badge = document.getElementById('status-badge');
-      badge.textContent = 'error';
-      badge.className = 'fi-badge';
-      document.getElementById('current-node').textContent = msg;
-    }
+  async function loadIterations() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/iterations`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.iterations || data.iterations.length < 2) return;
+      const sec = document.getElementById('iterations-section');
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      document.getElementById('iterations-list').innerHTML = data.iterations.map((it, i) => `
+        <details ${i === data.iterations.length - 1 ? 'open' : ''} class="my-2">
+          <summary class="cursor-pointer font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary">Iter ${it.iter}${it.label ? ` (${escapeHtml(it.label)})` : ''} · ${it.content.length} chars</summary>
+          <div class="fi-md-body mt-2">${window.fi_renderMarkdown ? window.fi_renderMarkdown(it.content.slice(0, 4000)) : escapeHtml(it.content.slice(0, 4000))}</div>
+        </details>`).join('');
+    } catch (_) {}
+  }
 
-    function escapeHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
-    async function cancelQuest() {
-      if (!confirm(`Cancel quest ${questId}? Sends SIGTERM to the running process.`)) return;
-      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/cancel`, {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        alert(`Cancel failed (${res.status}). The quest may have been started outside the web UI and isn't tracked.`);
-        return;
-      }
-      // Refresh once; the next poll will see the process gone.
-      refresh();
-    }
-
+  async function loadCode() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/file?path=code/experiment.py`);
+      if (!res.ok) return;
+      const code = await res.text();
+      const sec = document.getElementById('code-section');
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      document.getElementById('code-editor').value = code;
+    } catch (_) {}
+  }
+  async function rerunCode() {
+    if (!confirm('Save and re-execute the experiment? Re-runs from the execute node.')) return;
+    const code = document.getElementById('code-editor').value;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/code/execute`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+    if (!res.ok) { alert(`Re-execute failed (${res.status}): ${await res.text()}`); return; }
+    const body = await res.json();
+    alert(`Saved + re-running (pid ${body.rerun_pid}). The log will update as the engine progresses.`);
+    if (!pollHandle) pollHandle = setInterval(refresh, 3000);
     refresh();
-    pollHandle = setInterval(refresh, 3000);
-    loadTags();
-    loadCost();
-    loadIterations();
-    loadCode();
-  </script>
+  }
+
+  function startLogStream() {
+    const logEl = document.getElementById('log');
+    logEl.dataset.streamStarted = '1';
+    if (logSource) logSource.close();
+    logSource = new EventSource(`/api/quests/${encodeURIComponent(questId)}/log/stream`);
+    logSource.onmessage = (ev) => {
+      const wasNearBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+      logEl.textContent += '\n' + ev.data;
+      if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
+    };
+    logSource.onerror = () => { logSource?.close(); };
+  }
+
+  async function loadClarifyPanel() {
+    const sec = document.getElementById('clarify-section');
+    sec.classList.remove('hidden'); sec.classList.add('flex');
+    const form = document.getElementById('clarify-form');
+    if (form.dataset.loaded === '1') return;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.pending) return;
+    const qs = data.questions || {};
+    form.innerHTML = '';
+    for (const [key, val] of Object.entries(qs)) {
+      const fs = document.createElement('fieldset');
+      const legend = document.createElement('legend'); legend.textContent = key; fs.appendChild(legend);
+      const prompt = document.createElement('div'); prompt.className = 'prompt'; prompt.textContent = val.question || key; fs.appendChild(prompt);
+      const input = document.createElement('input'); input.type = 'text'; input.name = key;
+      input.dataset.islist = Array.isArray(val.default) ? '1' : '0';
+      input.value = Array.isArray(val.default) ? val.default.join(', ') : String(val.default ?? '');
+      fs.appendChild(input);
+      form.appendChild(fs);
+    }
+    const submit = document.createElement('div');
+    submit.innerHTML = '<button type="submit" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-3 rounded font-label-sm text-label-sm uppercase">Resume with these answers</button>';
+    form.appendChild(submit);
+    form.dataset.loaded = '1';
+  }
+  async function submitClarify(ev) {
+    ev.preventDefault();
+    const form = document.getElementById('clarify-form');
+    const answers = {};
+    for (const inp of form.querySelectorAll('input[name]')) {
+      const val = inp.value;
+      answers[inp.name] = inp.dataset.islist === '1' ? val.split(',').map(s => s.trim()).filter(Boolean) : val;
+    }
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers }) });
+    if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
+    form.dataset.loaded = '0'; refresh();
+    return false;
+  }
+
+  async function resumeQuest() {
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
+    if (!res.ok) { alert('Resume failed: ' + await res.text()); return; }
+    if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+    refresh();
+  }
+  async function trashQuest() {
+    if (!confirm(`Move quest ${questId} to trash? You can restore it from /trash.`)) return;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}`, { method: 'DELETE' });
+    if (!res.ok) { alert('Trash failed: ' + await res.text()); return; }
+    window.location.href = '/';
+  }
+  async function cancelQuest() {
+    if (!confirm(`Cancel quest ${questId}? Sends SIGTERM to the running process.`)) return;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/cancel`, { method: 'POST' });
+    if (!res.ok) { alert(`Cancel failed (${res.status}).`); return; }
+    refresh();
+  }
+
+  function renderReviewPanel(finalReview, panel) {
+    const v = finalReview.verdict || '?';
+    const agreement = finalReview.agreement || 'unanimous';
+    const score = finalReview.score != null ? finalReview.score : '?';
+    const rationale = finalReview.rationale || '';
+    const cards = panel.map((r) => {
+      const personaColor = r.persona === 'expert' ? 'text-secondary' : r.persona === 'skeptic' ? 'text-primary' : 'text-surface-tint';
+      const vClass = r.verdict === 'accept' ? 'bg-status-success/10 text-status-success border-status-success/20'
+                   : r.verdict === 'revise' ? 'bg-error-container/20 text-error border-error/20'
+                   : 'bg-surface-high text-on-surface border-white/10';
+      const strong = (r.strengths || []).slice(0,3).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+      const weak   = (r.weaknesses || []).slice(0,4).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+      const sugg   = (r.suggestions || []).slice(0,3).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+      return `
+        <div class="bg-surface-mid cyber-border p-6 rounded-xl flex flex-col gap-4">
+          <div class="flex justify-between items-start">
+            <div class="flex flex-col">
+              <span class="font-label-sm text-label-sm text-outline uppercase">Persona</span>
+              <h4 class="font-code-md text-lg ${personaColor}">${escapeHtml(r.persona || '?')}</h4>
+            </div>
+            <span class="${vClass} px-2 py-1 rounded font-label-sm text-[10px] uppercase border">${escapeHtml(r.verdict || '?')}</span>
+          </div>
+          ${strong ? `<div><div class="font-label-sm text-[10px] uppercase text-outline mb-1">Strengths</div><ul class="ml-4 text-sm text-on-surface-variant list-disc">${strong}</ul></div>` : ''}
+          ${weak   ? `<div><div class="font-label-sm text-[10px] uppercase text-outline mb-1">Weaknesses</div><ul class="ml-4 text-sm text-on-surface-variant list-disc">${weak}</ul></div>` : ''}
+          ${sugg   ? `<div><div class="font-label-sm text-[10px] uppercase text-outline mb-1">Suggestions</div><ul class="ml-4 text-sm text-on-surface-variant list-disc">${sugg}</ul></div>` : ''}
+          <div class="flex justify-between items-center border-t border-white/5 pt-4 mt-auto">
+            <span class="font-code-md text-code-md text-outline">Score</span>
+            <span class="font-code-md text-code-md text-on-surface">${r.score != null ? escapeHtml(String(r.score)) : '?'}</span>
+          </div>
+        </div>`;
+    }).join('');
+    return `
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-gutter">${cards}</div>
+      <div class="bg-surface-low cyber-border-active p-6 rounded-xl mt-4 flex flex-col md:flex-row items-center gap-6">
+        <div class="flex-shrink-0 flex flex-col items-center justify-center bg-surface p-4 rounded-full border border-white/10 w-24 h-24">
+          <span class="font-headline-xl text-3xl font-bold text-gradient">${escapeHtml(String(score))}</span>
+          <span class="font-label-sm text-[10px] text-outline uppercase">Overall</span>
+        </div>
+        <div class="flex flex-col gap-2 flex-grow">
+          <h4 class="font-label-sm text-label-sm text-primary uppercase tracking-widest">Moderator Verdict · ${escapeHtml(v)} · ${escapeHtml(agreement)}</h4>
+          ${rationale ? `<p class="font-body-md text-body-md text-on-surface">${escapeHtml(rationale)}</p>` : ''}
+        </div>
+      </div>`;
+  }
+
+  function renderSingleReview(review) {
+    const v = review.verdict || '?';
+    const score = review.score != null ? review.score : '?';
+    const weak = (review.weaknesses || []).slice(0, 5).map(w => `<li>${escapeHtml(w)}</li>`).join('');
+    const sugg = (review.suggestions || []).slice(0, 5).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+    const vClass = v === 'accept' ? 'bg-status-success/10 text-status-success border-status-success/20' : 'bg-error-container/20 text-error border-error/20';
+    return `
+      <div class="bg-surface-mid cyber-border p-6 rounded-xl">
+        <div class="flex justify-between items-start mb-4">
+          <h4 class="font-headline-md text-headline-md font-bold text-on-surface">Reviewer verdict</h4>
+          <span class="${vClass} px-2 py-1 rounded font-label-sm text-[10px] uppercase border">${escapeHtml(v)}</span>
+        </div>
+        <p class="font-code-md text-code-md text-on-surface-variant">Score ${escapeHtml(String(score))}</p>
+        ${weak ? `<p class="font-label-sm text-[10px] uppercase text-outline mt-3 mb-1">Weaknesses</p><ul class="ml-4 text-sm text-on-surface-variant list-disc">${weak}</ul>` : ''}
+        ${sugg ? `<p class="font-label-sm text-[10px] uppercase text-outline mt-3 mb-1">Suggestions</p><ul class="ml-4 text-sm text-on-surface-variant list-disc">${sugg}</ul>` : ''}
+      </div>`;
+  }
+
+  function showError(msg) {
+    document.getElementById('status-badge').textContent = 'error';
+    document.getElementById('current-node').textContent = msg;
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  refresh();
+  pollHandle = setInterval(refresh, 3000);
+  loadTags();
+  loadCost();
+  loadIterations();
+  loadCode();
+</script>
 </body>
 </html>

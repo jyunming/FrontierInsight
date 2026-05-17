@@ -1,4 +1,4 @@
-"""Tests for the Phase S cost-tracking instrumentation.
+"""Tests for the cost-tracking instrumentation.
 
 * :func:`core.provider.estimate_cost_usd` — pricing-table lookup.
 * :class:`core.provider.LLMClient.last_usage` — populated by the

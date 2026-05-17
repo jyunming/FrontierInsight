@@ -1,83 +1,107 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight — Trash</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/header.js"></script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Trash — Frontier Insight</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>tailwind.config = window._fiConfig;</script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
 </head>
-<body>
-  <div id="fi-header-root" data-breadcrumb="Trash"></div>
-  <main>
-    <section class="fi-page-hero">
-      <h1>Trash</h1>
-      <p class="fi-subtitle">Quests you deleted live here. Restore to put one back in the main outputs directory, or purge to delete it forever.</p>
-    </section>
-    <div id="trash-list"></div>
-    <div id="empty" class="fi-empty-rich" style="display:none">
-      <svg class="fi-empty-art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <polyline points="14,18 50,18"></polyline>
-        <path d="M18 18v32a4 4 0 0 0 4 4h20a4 4 0 0 0 4-4V18"></path>
-        <path d="M26 14a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4"></path>
-        <line x1="28" y1="28" x2="28" y2="46"></line>
-        <line x1="36" y1="28" x2="36" y2="46"></line>
-      </svg>
-      <h3>Trash is empty</h3>
-      <p>Quests you delete from the dashboard land here. Nothing to clean up.</p>
+<body class="bg-background text-on-background min-h-screen flex flex-col font-body-md">
+
+<div id="fi-header-root"></div>
+
+<main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop pt-12 pb-section-gap">
+
+  <header class="mb-section-gap">
+    <h1 class="font-headline-xl text-headline-xl text-on-background mb-4">Trash</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
+      Quests you deleted live here. Restore to put one back in <code class="font-code-md text-secondary">outputs/</code>, or purge to delete forever.
+    </p>
+  </header>
+
+  <div class="flex flex-col gap-4" id="trash-list"></div>
+
+  <div class="hidden flex-col items-center justify-center py-20 text-center" id="empty">
+    <span class="material-symbols-outlined text-6xl text-outline-variant mb-6" style="font-variation-settings:'FILL' 0;">delete</span>
+    <h2 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface-variant">Trash is empty</h2>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-2 max-w-md">Quests you delete from the dashboard land here. Nothing to clean up.</p>
+  </div>
+
+</main>
+
+<footer class="full-width bottom-0 bg-surface-low/60 backdrop-blur-[20px] border-t border-white/10 mt-auto">
+  <div class="flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto">
+    <div class="text-label-sm font-bold text-on-surface mb-4 md:mb-0">Frontier Insight</div>
+    <div class="font-label-sm text-label-sm text-on-surface-variant flex flex-wrap justify-center gap-4 md:gap-8 mb-4 md:mb-0">
+      <a class="hover:text-secondary transition-colors" href="/">Dashboard</a>
+      <a class="hover:text-secondary transition-colors" href="/settings">Settings</a>
+      <a class="hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight#readme" target="_blank" rel="noopener">Docs</a>
+      <a class="hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
     </div>
-  </main>
+    <div class="font-label-sm text-label-sm text-on-surface-variant opacity-70">© 2026 Frontier Insight · Apache 2.0</div>
+  </div>
+</footer>
 
-  <script>
-    async function load() {
-      const res = await fetch('/api/trash');
-      const data = await res.json();
-      const list = document.getElementById('trash-list');
-      const empty = document.getElementById('empty');
-      if (!data.items || data.items.length === 0) {
-        empty.style.display = '';
-        list.innerHTML = '';
-        return;
-      }
-      empty.style.display = 'none';
-      list.innerHTML = data.items.map(renderItem).join('');
+<script>
+  async function load() {
+    const res = await fetch('/api/trash');
+    const data = await res.json();
+    const list = document.getElementById('trash-list');
+    const empty = document.getElementById('empty');
+    if (!data.items || data.items.length === 0) {
+      empty.classList.remove('hidden');
+      empty.classList.add('flex');
+      list.innerHTML = '';
+      return;
     }
+    empty.classList.add('hidden');
+    empty.classList.remove('flex');
+    list.innerHTML = data.items.map(renderItem).join('');
+  }
 
-    function renderItem(it) {
-      const when = new Date(it.trashed_at * 1000).toLocaleString();
-      const mb = (it.size_bytes / 1024 / 1024).toFixed(1);
-      return `
-        <div class="fi-card">
-          <div class="fi-card-title">
-            <h3 class="fi-mono">${escapeHtml(it.bin_id)}</h3>
-            <span class="fi-card-meta">${mb} MB · trashed ${escapeHtml(when)}</span>
+  function renderItem(it) {
+    const when = new Date(it.trashed_at * 1000).toLocaleString();
+    const mb = (it.size_bytes / 1024 / 1024).toFixed(1);
+    return `
+      <div class="hairline-border bg-surface-mid rounded p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:bg-surface-high transition-colors">
+        <div>
+          <div class="font-code-md text-code-md text-primary mb-2 break-all">${escapeHtml(it.bin_id)}</div>
+          <div class="font-label-sm text-label-sm text-outline uppercase">
+            SIZE: ${mb} MB <span class="mx-2 opacity-50">·</span> TRASHED: ${escapeHtml(when)}
           </div>
-          <div style="margin-top:0.5rem; display:flex; gap:0.5rem">
-            <button class="fi-btn fi-btn-secondary" onclick="restore('${escapeHtml(it.bin_id)}')">Restore</button>
-            <button class="fi-btn fi-btn-danger" onclick="purge('${escapeHtml(it.bin_id)}')">Purge forever</button>
-          </div>
-        </div>`;
-    }
+        </div>
+        <div class="flex items-center space-x-3 w-full md:w-auto">
+          <button onclick="restore('${escapeHtml(it.bin_id)}')" class="flex-1 md:flex-none hairline-border bg-surface text-on-surface font-label-sm text-label-sm px-4 py-2 rounded uppercase hover:bg-surface-high transition-colors">
+            Restore
+          </button>
+          <button onclick="purge('${escapeHtml(it.bin_id)}')" class="flex-1 md:flex-none border border-error text-error font-label-sm text-label-sm px-4 py-2 rounded uppercase hover:bg-error/10 transition-colors">
+            Purge
+          </button>
+        </div>
+      </div>`;
+  }
 
-    async function restore(binId) {
-      const res = await fetch(`/api/trash/${encodeURIComponent(binId)}/restore`, {method: 'POST'});
-      if (!res.ok) { alert('Restore failed: ' + await res.text()); return; }
-      load();
-    }
-
-    async function purge(binId) {
-      if (!confirm(`Permanently delete ${binId}? This cannot be undone.`)) return;
-      const res = await fetch(`/api/trash/${encodeURIComponent(binId)}`, {method: 'DELETE'});
-      if (!res.ok) { alert('Purge failed: ' + await res.text()); return; }
-      load();
-    }
-
-    function escapeHtml(s) {
-      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
+  async function restore(binId) {
+    const res = await fetch(`/api/trash/${encodeURIComponent(binId)}/restore`, {method: 'POST'});
+    if (!res.ok) { alert('Restore failed: ' + await res.text()); return; }
     load();
-  </script>
+  }
+  async function purge(binId) {
+    if (!confirm(`Permanently delete ${binId}? This cannot be undone.`)) return;
+    const res = await fetch(`/api/trash/${encodeURIComponent(binId)}`, {method: 'DELETE'});
+    if (!res.ok) { alert('Purge failed: ' + await res.text()); return; }
+    load();
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  load();
+</script>
 </body>
 </html>

@@ -4,7 +4,7 @@ name: CI
 # tier (e2e tests that build a real venv per tmp_path, knowledge-
 # writeback flow, real `tenacity` waits, plus anything tagged
 # `@pytest.mark.slow`) runs only on push to main where wall-clock
-# budget is less tight. Audit #07 recommended this split.
+# budget is less tight.
 #
 # Extension-only PRs (touching just `vscode-frontier-insight/**`) get
 # their own TypeScript-compile job so they aren't merged blind — the
@@ -71,14 +71,10 @@ jobs:
   # ---- Python pytest (slow tier) -----------------------------------
   slow:
     # Runs on both PRs and pushes to main so the slow tier gates the
-    # merge. Earlier the gate only fired post-merge ("PRs get fast-
-    # tier feedback in ~1-2 min; main gets full coverage in ~5-10 min")
-    # — which let two slow-tier-only regressions land back-to-back on
-    # main: (a) the empirical/simulatability auto-mode-reducer mismatch
-    # fixed in PR #84, and (b) the rc=5 "no slow-tagged tests" exit
-    # fixed by this PR. Both would have been caught pre-merge if the
-    # slow tier ran on the PR. The wall-clock cost is +5-10 min per
-    # PR, accepted to keep main green by construction.
+    # merge. A post-merge-only gate misses regressions that only fail
+    # in the slow tier (e.g. mode-reducer mismatches, or the rc=5
+    # "no slow-tagged tests" exit). The wall-clock cost is +5-10 min
+    # per PR, accepted to keep main green by construction.
     name: pytest (slow tier, ubuntu only)
     runs-on: ubuntu-latest
     needs: [fast]
@@ -102,7 +98,7 @@ jobs:
       # be excluded by the fast tier's `-m "not slow"` filter AND
       # missed by the slow tier's file allowlist — never running
       # anywhere. Windows is excluded — the e2e venv-build tests
-      # have a known file-lock issue (audit #07) tracked separately.
+      # have a known file-lock issue tracked separately.
       - name: Run pytest (slow tier — e2e files)
         run: pytest -q tests/test_engine_smoke.py tests/test_self_correction_e2e.py tests/test_web_e2e.py
       # Treat pytest exit code 5 ("no tests collected") as success — the

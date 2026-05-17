@@ -1,4 +1,4 @@
-"""Abstract base for the Phase D2 dataset adapters.
+"""Abstract base for the auto-collect dataset adapters.
 
 A ``DatasetAdapter`` is a thin protocol over a structured-data API
 (World Bank, OECD SDMX, Eurostat, Pew CSV, etc.). The engine asks

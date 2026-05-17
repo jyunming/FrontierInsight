@@ -1,13 +1,13 @@
 """End-to-end self-correction smoke: broken script → reflect → fix → paper.
 
-The real proof that Phase K works. Sequence:
+The execute-repair loop end-to-end. Sequence:
   1. Implement node returns broken code on first call.
   2. Execute runs it; exits with rc != 0 and no RESULT_JSON.
   3. execute_reflect generates a patched code.
   4. Execute runs the patched code; succeeds.
   5. Analyze → cross_check → write → review → paper.md exists on disk.
 
-A separate test exercises Phase L's re-route: analyze returns
+A separate test exercises the cross-check re-route: analyze returns
 `next_step="re_experiment"` on iteration 0; the graph routes back to
 design; iteration 1 returns `publish`; quest reaches paper.md.
 """

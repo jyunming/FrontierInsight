@@ -85,6 +85,14 @@
             "description": "Install the tectonic LaTeX binary (~70 MB) into tools/ so paper.pdf works without an admin install of MiKTeX. Self-bootstrapping; runs `python launch.py --install-tectonic` in a terminal."
           },
           {
+            "name": "drafts",
+            "description": "List proposal-draft YAMLs in outputs/_drafts/ with a one-click /start hint for each. Mirrors `python launch.py --list-drafts` and the web /interview drafts picker."
+          },
+          {
+            "name": "axon-status",
+            "description": "Check whether the Axon sidecar (`python -m axon.api`) is reachable on 127.0.0.1:8000. The sidecar keeps the embedding model + vector index hot across quests; CLI/web launches auto-start it, but VSCode users run their own."
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }
