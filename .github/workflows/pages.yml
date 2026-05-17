@@ -6,10 +6,17 @@
 # or /api/ references — so the build step is just "stage marketing/
 # as the site root."
 #
-# Site root layout after deploy:
+# Site root layout after deploy: the ENTIRE marketing/ directory
+# becomes the published site, so:
 #   /                  → marketing/index.html
-#   (no other paths needed; the page is a single HTML file with
-#    inline SVG icons and CDN-linked assets.)
+#   /README.md         → marketing/README.md
+#   ... and any other files we drop into marketing/ later.
+#
+# Staging the whole directory (rather than cherry-picking
+# index.html) means future additions — logo PNGs, additional
+# subpages, robots.txt — go live without touching this workflow.
+# The README is harmless at /README.md; if you'd rather it stay
+# hidden, add a build step here that excludes it.
 #
 # Prereq: in the repo's Settings → Pages, set Source = "GitHub Actions".
 # That permits this workflow to call deploy-pages without the legacy

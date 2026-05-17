@@ -7,9 +7,15 @@ Pages, Netlify, Cloudflare Pages, S3 + CloudFront, etc.).
 ## Contents
 
 - `index.html` — the entire landing page. Single file. Inline SVG
-  logo. Tailwind v3 + Google Fonts (Fraunces / Geist / JetBrains
-  Mono) are pulled from public CDNs at view time — no build step,
-  but the deploy target does need outbound HTTPS to load assets.
+  logo. Pulled from public CDNs at view time (no build step, but the
+  deploy target does need outbound HTTPS):
+  - **Tailwind** via `https://cdn.tailwindcss.com?plugins=forms,container-queries`
+    — currently **unpinned**; Tailwind serves "latest" via that URL.
+    Acceptable for a marketing page that we control + retest manually;
+    revisit if Tailwind ships a breaking change.
+  - **Google Fonts**: Fraunces (display), Geist (body), JetBrains Mono
+    (code), Inter (body fallback), and **Material Symbols Outlined**
+    (icons).
 
 ## Deploy
 
