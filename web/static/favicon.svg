@@ -1,8 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <rect width="128" height="128" fill="#0B1729"/>
-  <rect x="0.5" y="0.5" width="127" height="127" fill="none" stroke="#1E293B" stroke-width="1"/>
-  <polygon points="64,64 58,70 33,95 70,58" fill="#475569"/>
-  <polygon points="64,64 58,70 95,33 70,58" fill="#22D3EE"/>
-  <polyline points="95,33 105,38 112,22 120,28" stroke="#22D3EE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <circle cx="64" cy="64" r="5" fill="#F8FAFC"/>
-</svg>
+<svg width="128" height="128" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="40" height="40" rx="8" fill="url(#paint0_linear)"/><path d="M12 10H28M12 20H24M12 30H20" stroke="white" stroke-width="3" stroke-linecap="round"/><defs><linearGradient id="paint0_linear" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse"><stop stop-color="#4F46E5"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs></svg>

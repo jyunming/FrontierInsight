@@ -31,15 +31,15 @@
         <div class="max-w-[1440px] mx-auto px-6 md:px-10 h-16 flex items-center justify-between">
           <div class="flex items-center gap-5">
             <a href="/" class="flex items-center gap-2 group" title="Frontier Insight dashboard">
-              <svg viewBox="0 0 32 32" class="w-8 h-8 rounded-lg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <svg viewBox="0 0 40 40" class="w-8 h-8 rounded-lg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                 <defs>
-                  <linearGradient id="hdrG" x1="0" y1="0" x2="1" y2="1">
+                  <linearGradient id="hdrG" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
                     <stop offset="0" stop-color="#4f46e5"/>
                     <stop offset="1" stop-color="#06b6d4"/>
                   </linearGradient>
                 </defs>
-                <rect width="32" height="32" rx="8" fill="#0a0a0a" stroke="rgba(255,255,255,0.08)"/>
-                <path d="M8 22V10h13M8 16h11" stroke="url(#hdrG)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+                <rect width="40" height="40" rx="8" fill="url(#hdrG)"/>
+                <path d="M12 10H28M12 20H24M12 30H20" stroke="white" stroke-width="3" stroke-linecap="round"/>
               </svg>
               <span class="font-display font-extrabold text-headline-md tracking-tight group-hover:text-primary transition-colors">Frontier Insight</span>
               <span class="font-mono text-label-mono px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant uppercase border border-border-subtle">beta</span>
