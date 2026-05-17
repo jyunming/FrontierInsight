@@ -55,7 +55,7 @@ class _QuestRegistry:
     answers; the registry resolves the matching future so the
     Engine's clarify callback returns and the graph proceeds.
 
-    Phase N: also tracks the in-memory `Engine` reference so the
+    Also tracks the in-memory `Engine` reference so the
     detail endpoint can surface the most-recent `review_panel`
     snapshot from `final_state` (when the quest has finished) or
     from the SqliteSaver checkpoint (mid-quest). For now we just
@@ -660,9 +660,8 @@ def make_app(
         the most recent install attempt's exit state + log tail when
         a ``job_id`` is passed. Without the log path, a failing
         install (network error, GitHub asset 404, etc.) shows
-        "starting…" forever in the UI; the user reported this exact
-        symptom on PR #102. Now the Settings page can poll the job
-        and surface the actual error."""
+        "starting…" forever in the UI. With it, the Settings page
+        can poll the job and surface the actual error."""
         import sys as _sys
         import shutil as _shutil
         repo_root = Path(__file__).resolve().parent.parent
@@ -1115,10 +1114,10 @@ def make_app(
             if summary_path.exists() else None
         )
         final_state = registry.final_state(quest_id) or {}
-        # Phase N — expose the panel reviews to the GUI when present.
+        # Expose the panel reviews to the GUI when present.
         review = final_state.get("review")
         review_panel = final_state.get("review_panel")
-        # Phase R — merge launcher state so quests spawned via the
+        # Merge launcher state so quests spawned via the
         # web UI's POST /api/interview/submit?launch=true also report
         # ``alive: true`` while their child process is running.
         # Without this, the in-process registry's `alive(quest_id)`
@@ -1199,9 +1198,7 @@ def make_app(
                 # subprocess-launched quest (those are tracked by
                 # `app.state.launcher`, not the registry). Without the
                 # OR-merge below, the stream would close on the FIRST
-                # appended chunk for every web-launched quest. Same
-                # bug pattern the GET /api/quests/<id> endpoint had
-                # before the Phase R fix.
+                # appended chunk for every web-launched quest.
                 launcher_alive = bool(
                     (app.state.launcher.status_for(quest_id) or {}).get("alive")
                 )
@@ -1367,9 +1364,9 @@ def make_app(
     async def get_paper_iterations(quest_id: str) -> JSONResponse:
         """List paper.md snapshots across review iterations for the
         diff viewer. Looks for ``paper/paper.md.iter-N.md`` files
-        the engine could write (Phase E follow-up — for now just
-        returns the current paper.md as a single iteration when
-        the rolled-snapshot machinery isn't in place yet)."""
+        the engine could write — for now just returns the current
+        paper.md as a single iteration when the rolled-snapshot
+        machinery isn't in place yet."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         paper_dir = quest_root / "paper"
         iterations: list[dict[str, Any]] = []
@@ -1524,7 +1521,7 @@ def make_app(
         async def driver():
             try:
                 art = await engine.run(clarify_callback=gui_clarify_callback)
-                # Phase N — snapshot review_panel + final review so the
+                # Snapshot review_panel + final review so the
                 # detail endpoint can render the per-persona reviews
                 # without re-reading the SqliteSaver checkpoint.
                 registry.record_final_state(quest_id, art.raw_state or {})

@@ -1,4 +1,4 @@
-"""Slide deck generator (Phase E-2).
+"""Slide deck generator.
 
 Runs only when ``config.output.kinds`` contains ``"slides"`` AND the
 quest produced a ``paper.md``. When those gates pass, three render

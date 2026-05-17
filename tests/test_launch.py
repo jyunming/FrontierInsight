@@ -187,8 +187,8 @@ def test_install_tectonic_rejects_sha_mismatch(
 
 
 def test_validate_resume_quest_id_rejects_path_separators(tmp_path: Path) -> None:
-    """Path-traversal hardening: the bot review on PR #26 flagged that any
-    string was accepted. Reject anything outside the strict alphabet."""
+    """Path-traversal hardening: reject anything outside the strict
+    alphabet so an attacker can't reach files outside outputs/."""
     for bad in ("../etc/passwd", "..\\windows", "a/b", "a\\b", "../sibling"):
         err = launch._validate_resume_quest_id(bad, tmp_path)
         assert err is not None, f"should reject {bad!r}"

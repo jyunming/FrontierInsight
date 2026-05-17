@@ -12,8 +12,8 @@ What it does:
   2. Wait for `GET /v1/models` to respond — that's our readiness probe.
   3. List the available models the user's VSCode Copilot has access to.
   4. Run one tiny chat completion with each of N selected models so we
-     KNOW the per-call `"model"` field override (Phase O) actually
-     hits different backends.
+     KNOW the per-call `"model"` field override actually hits
+     different backends.
 
 Cost: each model exercised burns ONE premium request. By default we
 run 2 (a known-cheap and a known-expensive model). The premium-request

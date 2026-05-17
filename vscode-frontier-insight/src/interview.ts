@@ -269,7 +269,7 @@ export async function runInterview(
     //    Smart-defaulted off the chosen paper_format: policy_brief
     //    is by definition 2-4 pages, so we default it to "brief
     //    preprint"; other formats default to "journal-length"
-    //    unless the topic looks survey-shaped. Matches Phase R in
+    //    unless the topic looks survey-shaped. Matches
     //    core/interview.py:smart_default_study_depth.
     const isPolicyBrief = paperFormat === "policy_brief";
     const looksSurvey = /\b(survey|review of|compar)/i.test(topic);
@@ -455,7 +455,7 @@ export async function runInterview(
         review_panel: panel,
         knowledge_enabled: knowledgeChoice.value,
         no_simulation: noSimulation,
-        // Phase R — research-shaping fields.
+        // Research-shaping fields.
         study_depth: studyDepth,
         comparative_baseline: (comparativeBaseline || "").trim(),
         success_metric: (successMetric || "").trim(),

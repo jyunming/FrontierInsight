@@ -1,4 +1,4 @@
-"""Phase N — reviewer panel tests.
+"""Reviewer panel tests.
 
 Validates:
   - `_load_persona_prefix`: built-in personas resolve to their prefix
@@ -304,7 +304,7 @@ async def test_review_panel_empty_preserves_single_reviewer_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`review_panel=[]` (the default) must NOT invoke the panel path —
-    exactly one LLM call, exact same JSON shape as before Phase N."""
+    exactly one LLM call, single-reviewer JSON shape preserved."""
     cfg = _mk_cfg(tmp_path, panel=[])
     eng = Engine(cfg)
     paper_path = eng.quest_root / "paper" / "paper.md"
@@ -384,10 +384,9 @@ async def test_review_panel_uses_per_persona_model_routing(
 
 
 def test_aggregate_carries_rigor_and_depth_medians_when_present() -> None:
-    """Regression for PR #34 review: the aggregator was returning a
-    fixed dict without rigor_score / depth_score, silently dropping
-    the per-persona depth signal that motivates a revise. Pin that
-    medians of both axes flow through."""
+    """The aggregator must return rigor_score / depth_score medians,
+    not a fixed dict — otherwise the per-persona depth signal that
+    motivates a revise is silently dropped."""
     panel = [
         {**_r("m", "accept", 4), "rigor_score": 5, "depth_score": 3},
         {**_r("s", "accept", 4), "rigor_score": 4, "depth_score": 2},

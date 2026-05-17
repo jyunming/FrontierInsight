@@ -1,4 +1,4 @@
-"""Phase M — ideate self-reflection tests.
+"""Ideate self-reflection tests.
 
 After ideate produces ideas + chosen, an inline second LLM call (gated
 by `engine.ideate_reflect`) may:

@@ -3,7 +3,7 @@
 Single quest:
     python launch.py --config examples/integrator_bakeoff/config.yaml
 
-Fleet (Phase H):
+Fleet:
     python launch.py --fleet a.yaml b.yaml c.yaml --max-concurrent 4
 
 Optional fleet hardening:
@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument(
         "--serve",
         action="store_true",
-        help="Start the Phase J status GUI (FastAPI server + HTMX frontend). "
+        help="Start the status GUI (FastAPI server + HTMX frontend). "
              "Use --output-root to point at the quest output directory, "
              "and --host / --port to bind elsewhere than 127.0.0.1:8765. "
              "Requires FastAPI + uvicorn installed.",
@@ -338,7 +338,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--vscode-bridge-port",
         type=int,
         default=0,
-        help="Phase P — TCP port the FI VSCode extension is listening on for "
+        help="TCP port the FI VSCode extension is listening on for "
              "the LLM bridge. The extension passes this when it spawns FI; "
              "setting it forces provider.name=vscode_extension regardless of "
              "what the YAML says. Do not pass this from a regular terminal "
@@ -425,7 +425,7 @@ def _validate_resume_quest_id(quest_id: str, output_dir: Path) -> str | None:
 
 
 def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
-    """Phase P — when launched with ``--vscode-bridge-port N``, force
+    """When launched with ``--vscode-bridge-port N``, force
     every quest's provider to route through the FI VSCode extension's
     ``vscode.lm.*`` bridge on that port. Overrides whatever ``provider``
     block the YAML carried (the YAML can still set ``provider.model``,
@@ -1685,12 +1685,10 @@ def _install_tectonic() -> int:
                 archive.write_bytes(r.read())
 
             # Verification: tectonic releases publish per-asset
-            # archives but NOT a SHA256SUMS aggregation file (verified
-            # 2026-05-16 against tectonic@0.16.9 — only the .zip /
-            # .tar.gz / .AppImage assets are present in the release).
-            # Earlier versions of this code fetched a SHA256SUMS file
-            # that never existed; the request 404'd and the entire
-            # install bailed out without ever extracting the binary.
+            # archives but NOT a SHA256SUMS aggregation file — only
+            # the .zip / .tar.gz / .AppImage assets are present in
+            # the release. Fetching a SHA256SUMS file would 404 and
+            # bail the install before extracting the binary.
             #
             # We fall back to TLS-only verification: github.com's
             # certificate authenticates the asset. That's the same

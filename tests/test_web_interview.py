@@ -260,10 +260,10 @@ def test_quest_detail_route_renders(tmp_path: Path) -> None:
 
 
 def test_quest_detail_page_carries_review_panel_renderer(tmp_path: Path) -> None:
-    """Phase N panel-renderer + single-reviewer renderer moved from
-    index.html into quest.html (the dashboard is now a list-only
-    surface). This test pins the move so the multi-persona UI
-    survives the simplification."""
+    """The panel-renderer + single-reviewer renderer live in
+    quest.html (the dashboard is a list-only surface). This pins
+    the location so the multi-persona UI doesn't drift back into
+    index.html."""
     client = _client(tmp_path)
     res = client.get("/quest/sample-id")
     assert res.status_code == 200

@@ -190,7 +190,7 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
 async def test_engine_runs_with_clarify_auto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase I end-to-end: full DAG including the clarify node firing
+    """End-to-end: full DAG including the clarify node firing
     in auto mode. The agent generates the questionnaire, self-answers
     from each slot's default, and the answers flow through into the
     ideate/design/write prompts via `_format_clarify`. Verifies the
@@ -228,7 +228,7 @@ async def test_engine_runs_with_clarify_auto(
 async def test_engine_runs_with_clarify_interactive_via_callback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase I end-to-end: full DAG with clarify_mode='interactive'.
+    """End-to-end: full DAG with clarify_mode='interactive'.
     The engine pauses at the clarify node via `interrupt()`; the
     test-supplied callback simulates a user answering the questions;
     the graph resumes and runs to completion."""

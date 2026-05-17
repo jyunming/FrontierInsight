@@ -1,4 +1,4 @@
-"""Phase P — Python side of the VSCode-extension bridge.
+"""Python side of the VSCode-extension bridge.
 
 The FI VSCode extension (TypeScript, `vscode-frontier-insight/`) spawns
 the Python engine with ``--vscode-bridge-port <N>`` and listens on a
@@ -129,7 +129,7 @@ class VSCodeBridgeClient:
         ``"review_panel.statistician"``, …) so the extension can render
         progress in the chat panel with the right tag.
 
-        ``model_hint`` is the resolved Phase O per-node model name; the
+        ``model_hint`` is the resolved per-node model name; the
         extension translates it into a ``selectChatModels`` filter.
         Empty string means "use whatever model the user has selected
         in the Chat picker."

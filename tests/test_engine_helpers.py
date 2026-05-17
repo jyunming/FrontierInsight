@@ -174,7 +174,7 @@ def test_parse_json_lenient_whitespace_only_does_not_log(caplog) -> None:
     after ``_strip_outer_fence(...).strip()``. Both must be treated as
     silent no-ops, NOT as parse failures — otherwise a model that
     happens to emit trailing whitespace would log WARNING noise on
-    every node. Regression for PR #54 bot comment."""
+    every node."""
     import logging
 
     # Cases that genuinely collapse to "" after _strip_outer_fence + strip:
@@ -414,8 +414,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     }
     assert expected_nodes.issubset(set(g.nodes))
 
-    # Linear edges that must be present. Phase I inserted `clarify`
-    # between START and `ideate`. The no-simulation mode turned
+    # Linear edges that must be present. `clarify` runs between
+    # START and `ideate`. The no-simulation mode turned
     # ``design → implement`` into a conditional edge (implement vs
     # wait_for_data) — see the branches check below.
     plain_edges = set(g.edges)
@@ -424,18 +424,18 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert ("ideate", "literature") in plain_edges
     assert ("literature", "design") in plain_edges
     assert ("implement", "execute") in plain_edges
-    # Phase K replaced `execute → analyze` with `execute → execute_reflect`
-    # plus a conditional `execute_reflect → execute | analyze` edge.
+    # `execute → execute_reflect` replaces the old `execute → analyze`
+    # edge, plus a conditional `execute_reflect → execute | analyze`.
     assert ("execute", "execute_reflect") in plain_edges
     # no-simulation chain: auto_collect_data → wait_for_data →
     # data_load → analyze. All three nodes feed analyze on the no-sim
-    # path. auto_collect_data is Phase D1 — agent-side Axon retrieval
+    # path. auto_collect_data is the agent-side Axon retrieval
     # that runs BEFORE the user-data pause.
     assert ("auto_collect_data", "wait_for_data") in plain_edges
     assert ("wait_for_data", "data_load") in plain_edges
     assert ("data_load", "analyze") in plain_edges
-    # Phase L replaced `analyze → write` with `analyze → cross_check` plus
-    # a conditional `cross_check → write | design` edge.
+    # `analyze → cross_check` replaces the old `analyze → write` edge,
+    # plus a conditional `cross_check → write | design` edge.
     assert ("analyze", "cross_check") in plain_edges
     assert ("write", "review") in plain_edges
 
@@ -544,10 +544,10 @@ def test_parse_implement_response_picks_first_fenced_block() -> None:
 
 
 def test_parse_implement_response_pep508_extras_are_preserved() -> None:
-    """Regression for PR #27 review: a naive ``raw.strip("[](){}")`` would
-    chew the trailing ``]`` off ``pandas[performance]``, producing the
-    broken spec ``pandas[performance`` that pip can't install. Only one
-    matched OUTER pair should be peeled."""
+    """A naive ``raw.strip("[](){}")`` would chew the trailing ``]``
+    off ``pandas[performance]``, producing the broken spec
+    ``pandas[performance`` that pip can't install. Only one matched
+    OUTER pair should be peeled."""
     text = (
         "```python\nimport pandas\n```\n"
         "DEPS: pandas[performance], numpy\n"
@@ -571,10 +571,9 @@ def test_parse_implement_response_pep508_extras_inside_brackets() -> None:
 
 
 def test_parse_implement_response_ignores_deps_assignment_inside_fence() -> None:
-    """Regression for PR #27 review: a Python statement like
-    ``deps = ["numpy"]`` inside the fenced experiment code must NOT be
-    misread as the metadata DEPS line. The parser only searches the
-    post-fence tail for DEPS."""
+    """A Python statement like ``deps = ["numpy"]`` inside the fenced
+    experiment code must NOT be misread as the metadata DEPS line.
+    The parser only searches the post-fence tail for DEPS."""
     text = (
         "```python\n"
         "deps = ['fake_inside_fence']\n"
@@ -589,8 +588,8 @@ def test_parse_implement_response_ignores_deps_assignment_inside_fence() -> None
 
 
 def test_parse_implement_response_legacy_deps_as_string() -> None:
-    """Regression for PR #27 review: legacy JSON shape with deps as a
-    string (``"deps": "numpy"``) — coerce to a single-element list, NOT
+    """Legacy JSON shape with deps as a string
+    (``"deps": "numpy"``) — coerce to a single-element list, NOT
     a per-character list."""
     text = '{"code": "print(1)", "deps": "numpy"}'
     code, deps = _parse_implement_response(text)
@@ -1001,10 +1000,9 @@ def test_resolve_no_simulation_simulatability_str_shape(tmp_path: Path) -> None:
     accepts the unit-test dict shape. Without this, an auto-mode
     quest with ``simulatability=yes`` falls through to the legacy
     ``empirical_vs_theoretical=empirical`` rule and incorrectly
-    routes to NO_SIMULATION — the slow-tier smoke test that broke
-    on the first main-branch CI run after PR #80.
+    routes to NO_SIMULATION.
 
-    Pinning both str values that should route to SIMULATE plus the
+    Pins both str values that should route to SIMULATE plus the
     str value that should route to NO_SIMULATION."""
     cfg = Config(
         topic="t",
@@ -1219,9 +1217,8 @@ def test_route_after_design_no_sim_flag_routes_to_auto_collect_data(
 ) -> None:
     """The routing function — the heart of the no-sim graph edge.
     When state carries ``no_simulation_resolved=True``, design must
-    route to ``auto_collect_data`` (Phase D1 inserted the auto-collect
-    node BEFORE wait_for_data; previously the edge went straight to
-    wait_for_data). Otherwise to ``implement``."""
+    route to ``auto_collect_data`` — the auto-collect node runs
+    BEFORE wait_for_data. Otherwise to ``implement``."""
     cfg = Config(
         topic="t",
         title="t",
@@ -1457,7 +1454,7 @@ async def test_engine_run_invokes_preflight_before_executor_setup_and_llm_calls(
     )
 
 
-# ---- _node_auto_collect_data (Phase D1) ----------------------------------
+# ---- _node_auto_collect_data --------------------------------------------
 #
 # Tests for the agent-side data collection node that runs BEFORE
 # wait_for_data in no-simulation mode. Mocks ``Knowledge.asearch``
@@ -1619,9 +1616,9 @@ async def test_node_auto_collect_data_front_matter_is_yaml_parseable(
     parses provenance) can round-trip metadata values containing
     quotes, backslashes, colons, and unicode without mangling.
 
-    Regression for PR #60 bot comment: front matter previously used
-    Python ``repr`` which is NOT YAML-safe (a value like ``"O'Brien"``
-    would parse back as ``"O\\'Brien"`` from a YAML reader)."""
+    Front matter must NOT use Python ``repr`` (which is not YAML-safe
+    — a value like ``"O'Brien"`` would parse back as ``"O\\'Brien"``
+    from a YAML reader)."""
     from unittest.mock import AsyncMock
     from core.knowledge import RetrievedDoc
     import yaml as _yaml
@@ -1665,7 +1662,7 @@ async def test_node_auto_collect_data_front_matter_is_yaml_parseable(
 async def test_node_auto_collect_data_cleans_up_dir_when_all_writes_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Edge case from PR #60 bot review: when EVERY write raises OSError
+    """Edge case: when EVERY write raises OSError
     (e.g. permissions or full disk after the mkdir succeeded), the
     node must NOT leave an empty ``auto_collected/`` directory behind
     — that would mislead the user into thinking auto-collection
@@ -1701,7 +1698,7 @@ async def test_node_auto_collect_data_cleans_up_dir_when_all_writes_fail(
     )
 
 
-# ---- _run_dataset_adapters (Phase D2) ------------------------------------
+# ---- _run_dataset_adapters ----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1709,7 +1706,8 @@ async def test_dataset_adapters_passthrough_when_list_empty(
     tmp_path: Path,
 ) -> None:
     """Default ``EngineConfig.dataset_adapters: []`` — no adapter
-    runs, no subdirs created. Phase D1 behavior unchanged."""
+    runs, no subdirs created. Axon-only auto-collect path is
+    preserved."""
     from unittest.mock import AsyncMock
     from core.knowledge import RetrievedDoc
 
@@ -1860,11 +1858,10 @@ async def test_dataset_adapters_exception_is_caught_and_logged(
 async def test_dataset_adapters_run_even_when_axon_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PR #61 bot fix: ``knowledge.enabled=False`` must NOT skip the
-    dataset adapter step. A user who opts in to ``dataset_adapters:
-    [worldbank]`` with no Axon configured still expects the adapter
-    to fire. Regression for the bug where the Axon short-circuit
-    returned early before adapters could run."""
+    """``knowledge.enabled=False`` must NOT skip the dataset adapter
+    step. A user who opts in to ``dataset_adapters: [worldbank]`` with
+    no Axon configured still expects the adapter to fire — the Axon
+    short-circuit must not return early before adapters can run."""
     from core.datasets import ADAPTER_REGISTRY
     from core.datasets.base import DatasetAdapter, DatasetRow
 
@@ -1923,7 +1920,7 @@ async def test_dataset_adapters_run_when_axon_returns_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Axon legitimately returned nothing; dataset adapters should
-    still run. Regression for PR #61 bot comment."""
+    still run."""
     from unittest.mock import AsyncMock
     from core.datasets import ADAPTER_REGISTRY
     from core.datasets.base import DatasetAdapter, DatasetRow
@@ -1948,8 +1945,8 @@ async def test_dataset_adapters_run_when_axon_returns_zero(
 async def test_render_auto_collected_md_coerces_non_scalar_metadata(
     tmp_path: Path,
 ) -> None:
-    """PR #61 bot fix: ``_render_auto_collected_md`` must coerce
-    list / dict values to YAML scalars (strings) so the front
+    """``_render_auto_collected_md`` must coerce list / dict values
+    to YAML scalars (strings) so the front
     matter stays flat. Without this, an adapter passing
     ``metadata={"tags": ["a", "b"]}`` would emit nested YAML
     that changes the file head shape downstream consumers expect."""
@@ -1995,9 +1992,9 @@ def test_dataset_adapter_top_k_rejects_zero_and_negative() -> None:
 
 
 def test_engine_config_dataset_adapters_default_empty() -> None:
-    """Default ``dataset_adapters: []`` preserves Phase D1 behavior
-    exactly. Opt-in only — no surprise external API calls when a
-    user upgrades from D1 to D2 without touching YAML."""
+    """Default ``dataset_adapters: []`` keeps auto-collect Axon-only.
+    Opt-in only — no surprise external API calls when a user upgrades
+    without touching YAML."""
     from core.config import EngineConfig
     assert EngineConfig().dataset_adapters == []
     assert EngineConfig().dataset_adapter_top_k == 3
@@ -2007,9 +2004,7 @@ def test_auto_collect_top_k_rejects_zero_and_negative() -> None:
     """``Field(default=5, ge=1)`` on ``auto_collect_top_k``: passing
     top_k=0 to Axon would mean "request zero hits" which is useless;
     a typo / negative value should fail at YAML parse time, not
-    silently pass through.
-
-    Regression for PR #60 bot comment."""
+    silently pass through."""
     from core.config import EngineConfig
     from pydantic import ValidationError
 
@@ -2129,9 +2124,9 @@ async def test_node_data_load_filters_readme_from_walked_entries(
     AS IF IT WERE user-supplied evidence, and the LLM might cite it
     as a primary source in key_findings.
 
-    Regression for PR #57 bot comment. ``_node_data_load`` must drop
-    the top-level README before rendering manifest / content blocks
-    so the LLM only sees the user's actual data."""
+    ``_node_data_load`` must drop the top-level README before
+    rendering manifest / content blocks so the LLM only sees the
+    user's actual data."""
     from unittest.mock import AsyncMock
 
     cfg = Config(
@@ -2252,8 +2247,7 @@ async def test_engine_run_closes_logger_on_exception_path(
     on the success path — exceptions leaked the file lock and broke
     Windows test cleanup.
 
-    Regression for PR #56 bot comment + the docstring claim of
-    'every exit path'."""
+    Pins the docstring claim of 'every exit path'."""
     import logging
     import shutil
     from core.engine import Engine
@@ -2295,7 +2289,7 @@ async def test_engine_run_closes_logger_on_exception_path(
     assert not engine.quest_root.exists()
 
 
-# ---- _run_ideate_tournament (Phase O) -----------------------------------
+# ---- _run_ideate_tournament ---------------------------------------------
 
 
 def _make_tournament_engine(tmp_path: Path) -> "Engine":
@@ -2422,9 +2416,9 @@ async def test_run_ideate_tournament_dispatches_matches_in_parallel(
     """3 pairwise matches with 200ms simulated latency each. Parallel
     dispatch → wall-clock ~200ms; serial would be 600ms. Threshold
     set well below the serial floor so the test stays unambiguous
-    even under CI scheduling jitter / GC pauses (per PR #77 bot
-    review — a tighter 130ms-with-50ms-sleeps threshold would flake
-    on constrained runners)."""
+    even under CI scheduling jitter / GC pauses (a tighter
+    130 ms-with-50 ms-sleeps threshold would flake on constrained
+    runners)."""
     import asyncio as _asyncio
     import time as _time
 
@@ -2451,20 +2445,20 @@ async def test_run_ideate_tournament_dispatches_matches_in_parallel(
     )
 
 
-# ---- non-scientific paper formats + write-persona (Phase Q) -------------
+# ---- non-scientific paper formats + write-persona ----------------------
 
 
 def test_paper_format_literal_includes_non_scientific_values() -> None:
-    """Phase Q extends PaperFormat with essay/report/policy_brief/
-    whitepaper. Regression guard so a future Literal edit can't
-    silently drop a format."""
+    """PaperFormat covers essay/report/policy_brief/whitepaper as
+    well as the scientific venues. Regression guard so a future
+    Literal edit can't silently drop a format."""
     from typing import get_args
     from core.config import PaperFormat
     values = set(get_args(PaperFormat))
     # Scientific (must remain — back-compat).
     for v in ("generic", "neurips", "iclr", "ieee_access", "nature_mi"):
         assert v in values, f"scientific format {v!r} was dropped"
-    # Non-scientific (Phase Q additions).
+    # Non-scientific formats.
     for v in ("essay", "report", "policy_brief", "whitepaper"):
         assert v in values, f"non-scientific format {v!r} missing"
 
@@ -2489,12 +2483,10 @@ def test_paper_format_subsets_partition_the_literal() -> None:
 
 def test_paper_format_templates_exist_with_body_placeholder() -> None:
     """Each non-scientific format must have a usable LaTeX template
-    that pandoc accepts — the prior stub-template venues (iclr,
-    ieee_access, nature_mi) shipped a one-line `%` comment and
-    failed at compile time (audit #05). Phase Q's templates must
-    have a `$body$` placeholder + a `\\begin{document}` block at
-    minimum so pandoc treats them as templates rather than
-    invalid documents."""
+    that pandoc accepts — stub templates (one-line `%` comment files)
+    would fail at compile time. Each template needs a `$body$`
+    placeholder + a `\\begin{document}` block at minimum so pandoc
+    treats them as templates rather than invalid documents."""
     import pathlib
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
@@ -2509,7 +2501,7 @@ def test_paper_format_templates_exist_with_body_placeholder() -> None:
         )
         assert "\\begin{document}" in body, (
             f"templates/paper/{fmt}/template.tex must be a complete "
-            f"LaTeX document (the stub-template trap from audit #05)"
+            f"LaTeX document (avoids the stub-template trap)"
         )
 
 

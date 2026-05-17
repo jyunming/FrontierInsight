@@ -39,7 +39,7 @@ Proxy spawn details:
   Both names route to the same proxy.
 
 `ProxySupervisor` is reference-counted so a fleet of N quests using the
-same proxy provider shares one proxy process — see Phase H.
+same proxy provider shares one proxy process.
 """
 
 from __future__ import annotations
@@ -241,7 +241,7 @@ class ResolvedEndpoint:
     # a human-readable display string for the Engine's startup log line
     # (e.g. "claude_cli (CLI default)") rather than going blank.
     cli_model_override: str = ""
-    # Phase P — VSCode-extension bridge. When transport == "vscode_bridge",
+    # VSCode-extension bridge. When transport == "vscode_bridge",
     # this is the localhost TCP port the FI extension is listening on;
     # the bridge client connects there for every chat call.
     vscode_bridge_port: int = 0
@@ -268,9 +268,9 @@ class _ProxyHandle:
 class ProxySupervisor:
     """Reference-counted lifecycle for proxy subprocesses.
 
-    Phase A leaves the spawn paths as `NotImplementedError`; Phase C fills
-    them in with the actual `claude-code-openai-wrapper` and `copilot-api`
-    invocations.
+    The spawn paths call out to `claude-code-openai-wrapper` /
+    `copilot-api` to start a localhost proxy and reuse it across
+    quests that share the same provider name.
     """
 
     _handles: dict[str, _ProxyHandle] = field(default_factory=dict)
@@ -671,7 +671,7 @@ def resolve_endpoint(
             f"provider {name!r} requires async resolution via resolve_endpoint_async"
         )
     if name == "vscode_extension":
-        # Phase P — the FI VSCode extension is the parent process;
+        # The FI VSCode extension is the parent process;
         # it spawned us with `--vscode-bridge-port N` and the port
         # lives in provider.extra["bridge_port"] (the launch.py flag
         # writes it there at config-load time).
@@ -742,8 +742,8 @@ async def resolve_endpoint_async(
 # Per-1k-token USD pricing for the model variants FI talks to. Used by
 # the cost-instrumentation hook in `Engine` to convert each chat
 # response's ``usage`` block into a $ figure for ``.fi/cost.jsonl``.
-# Numbers come from each provider's published rate card as of
-# 2026-05-16. Update opportunistically; missing entries fall through
+# Numbers come from each provider's published rate card; update
+# opportunistically when rates change. Missing entries fall through
 # to cost=None (we don't fabricate). All values are USD per 1000
 # tokens; downstream multiplies by token count and divides by 1000.
 #
@@ -834,11 +834,11 @@ class LLMClient:
         # than the typical 10–90 s per call but bounded so concurrent
         # fleet contention can't hang the whole quest indefinitely.
         self._cli_timeout_s = cli_timeout_s
-        # Phase P — lazily-built VSCode-extension bridge client. The
-        # bridge connection is shared across every chat call from this
+        # Lazily-built VSCode-extension bridge client. The bridge
+        # connection is shared across every chat call from this
         # LLMClient instance.
         self._bridge: Any | None = None
-        # Phase S — last chat call's usage info (prompt_tokens /
+        # Last chat call's usage info (prompt_tokens /
         # completion_tokens / total_tokens) parsed from the response
         # body, or ``None`` when the transport doesn't return one.
         # Engine reads this after each chat() call to write a
@@ -873,7 +873,7 @@ class LLMClient:
         node: str = "",
     ) -> str:
         """Run one chat completion. ``model`` is an optional per-call
-        override (Phase O: per-node model routing). When provided and
+        override for per-node model routing. When provided and
         non-empty, it replaces the endpoint's default model for THIS
         call only — useful for sending different nodes through different
         models on the same provider (most relevant on Copilot, where
@@ -943,7 +943,7 @@ class LLMClient:
     ) -> str:
         """The actual chat dispatch, split out from ``chat`` so the
         error-context note in ``chat`` wraps a single call site."""
-        # Phase S — reset cost-tracking state at the top of every
+        # Reset cost-tracking state at the top of every
         # call so a transport that DOESN'T return usage (CLI / bridge)
         # leaves last_usage = None rather than inheriting a previous
         # HTTP call's numbers. The Engine cost-logger reads this after
@@ -1016,7 +1016,7 @@ class LLMClient:
                 # 4xx surfaces immediately — no retry on auth/quota errors.
                 r.raise_for_status()
         data = r.json()
-        # Phase S — capture token usage when the upstream returned
+        # Capture token usage when the upstream returned
         # one. OpenAI-compatible servers (openai / codex / gemini /
         # ollama recent versions) include ``usage`` at the response
         # top level; older Ollama omits it. Missing → leave
@@ -1048,7 +1048,7 @@ class LLMClient:
         temperature: float = 0.2,
         node: str = "",
     ) -> str:
-        """Phase P: route the chat call through the FI VSCode extension
+        """Route the chat call through the FI VSCode extension
         via the localhost TCP bridge. The extension makes the actual
         ``vscode.lm`` call on the authenticated user's behalf so we
         never touch the Copilot HTTP API directly — that's the whole
@@ -1061,7 +1061,7 @@ class LLMClient:
                 host="127.0.0.1", port=self.endpoint.vscode_bridge_port,
             )
             await self._bridge.connect()
-        # Phase O per-call override wins; otherwise use the user's
+        # Per-call override wins; otherwise use the user's
         # YAML-pinned model (`vscode_model_override`). DO NOT fall
         # through to `self.endpoint.model` — that field carries a
         # human-readable display string ("(VSCode chat default)")
@@ -1154,7 +1154,7 @@ class LLMClient:
             reraise=True,
         ):
             with attempt:
-                # Per-call override (Phase O) takes precedence over the
+                # Per-call override takes precedence over the
                 # endpoint-level override set at resolve time. Empty
                 # string means "use the CLI's own default" — which is
                 # also what cli_model_override="" means, so consistent.

@@ -31,16 +31,16 @@ langgraph-checkpoint-sqlite>=2.0
 # https://github.com/jyunming/Axon
 axon-rag>=0.4
 
-# Phase J — FastAPI status GUI. Loaded lazily only when `launch.py --serve`
+# FastAPI status GUI. Loaded lazily only when `launch.py --serve`
 # is used; the rest of FI runs without invoking it.
 fastapi>=0.110
 uvicorn>=0.27
 
-# Optional sandbox executor (Phase D). Used when execution.sandbox=docker.
+# Optional sandbox executor. Used when execution.sandbox=docker.
 # Requires Docker Desktop on Windows/macOS or `dockerd` on Linux.
 docker>=7.1
 
-# Optional concurrency-aware extras (Phase H).
+# Optional concurrency-aware extras.
 # psutil enables `--memory-cap-mb` throttling in fleet mode.
 # viztracer enables `--profile` per-quest tracing.
 psutil>=5.9
@@ -60,7 +60,7 @@ pytest-mock>=3.14
 pytest-cov>=6.0
 pytest-testmon>=2.2
 
-# Optional knowledge-layer source adapter (Phase L source-router):
+# Optional knowledge-layer source adapter (source-router):
 #   scholarly  → Google Scholar (no official API; rate-limited; EXPERIMENTAL).
 # Skip install if you don't want to chance hitting Google's anti-bot
 # defences — other sources (arxiv/openalex/crossref) cover most queries.

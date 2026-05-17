@@ -33,12 +33,11 @@ export interface InterviewAnswers {
     review_panel: string[];           // empty = single reviewer
     knowledge_enabled: boolean;
     no_simulation: boolean;
-    // Phase R — study depth + three topic-tuned clarify slots that
-    // were previously LLM-only. The interview now collects them so
-    // the engine's clarify node short-circuits in auto mode (pinned
-    // values win over LLM-generated defaults). Must stay in sync
-    // with core/interview.py:InterviewAnswers (Python source of
-    // truth). The schema-parity test in
+    // Study depth + three topic-tuned clarify slots. The interview
+    // collects them so the engine's clarify node short-circuits in
+    // auto mode (pinned values win over LLM-generated defaults).
+    // Must stay in sync with core/interview.py:InterviewAnswers
+    // (Python source of truth). The schema-parity test in
     // tests/test_interview_schema_parity.py fails CI if these drift.
     study_depth: "brief preprint" | "journal-length" | "comprehensive review";
     comparative_baseline: string;
@@ -87,7 +86,7 @@ export function answersToYaml(answers: InterviewAnswers): string {
 
     lines.push("provider:");
     lines.push(`${indent}name: "vscode_extension"`);
-    // Phase R — pin the active Copilot model the user selected when
+    // Pin the active Copilot model the user selected when
     // they ran @fi /new. Empty string means "let the bridge decide
     // per call" (older flow); non-empty pins it for the whole quest.
     if (answers.provider_model) {
@@ -116,7 +115,7 @@ export function answersToYaml(answers: InterviewAnswers): string {
     } else {
         lines.push(`${indent}review_panel: []`);
     }
-    // Phase R — pin the interview's research-shaping answers into
+    // Pin the interview's research-shaping answers into
     // clarify_overrides so the engine's clarify node short-circuits
     // in auto mode (no LLM call needed). Mirrors the equivalent
     // block in core/interview.py:answers_to_yaml.

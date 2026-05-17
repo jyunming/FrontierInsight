@@ -14,7 +14,7 @@ THIS module:
                                         below) at extension activation
                                         so the TS UI renders identical
                                         questions to the CLI.
-* Phase J ``--serve`` web UI         — FastAPI endpoint that mounts
+* ``--serve`` web UI                 — FastAPI endpoint that mounts
                                         QUESTIONS as an HTMX form.
 
 Keeping all three frontends in lockstep is enforced by

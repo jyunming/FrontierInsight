@@ -484,9 +484,10 @@ def test_paper_pdf_skipped_md_written_when_pandoc_missing(
     generator must write ``paper_pdf_skipped.md`` next to ``paper.md``
     so the user discovers the failure without grepping ``run.log``.
 
-    Repro: outputs/1778751621-belgium-culture-vs-taiwan-cultur-32f2ff/
-    on 2026-05-14 — host had no pandoc / pdflatex / tectonic, and the
-    skip was completely invisible from the quest output."""
+    A host with none of pandoc / pdflatex / tectonic installed would
+    otherwise produce zero indication that the PDF was requested but
+    skipped — the marker file makes that visible from the quest
+    output without grepping run.log."""
     monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
@@ -618,9 +619,7 @@ def test_paper_pdf_skipped_md_removed_when_subsequent_run_succeeds(
     """If a previous run wrote ``paper_pdf_skipped.md`` (engine
     missing) and a later run succeeds (engine now installed), the
     stale diagnostic must be removed so the quest dir doesn't
-    simultaneously report a paper.pdf AND a 'skipped' marker.
-
-    Regression for PR #55 bot comment."""
+    simultaneously report a paper.pdf AND a 'skipped' marker."""
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     stale = out_dir / "paper_pdf_skipped.md"
@@ -683,7 +682,7 @@ def test_paper_pdf_skipped_md_overwritten_on_subsequent_failure(
 # is responsible for the AFTER-LLM half: when require_pdf=True and the
 # PDF still can't be compiled (timeout, nonzero LaTeX rc, missing
 # output despite rc=0), raise RuntimeError instead of silently writing
-# only paper_pdf_skipped.md. Bot comment on PR #58.
+# only paper_pdf_skipped.md.
 
 
 def _make_config_strict(tmp_path: Path) -> Config:
@@ -807,9 +806,9 @@ def test_require_pdf_false_keeps_silent_skip_behavior(
     assert (out_dir / "paper_pdf_skipped.md").exists()
 
 
-# ---- Template-substitution-leak regression (Phase Q hotfix) -------------
+# ---- Template-substitution-leak regression -------------------------------
 #
-# Two bugs hit the user post-#79: (a) paper.pdf compile failed with
+# Two bugs we guard against: (a) paper.pdf compile failed with
 # "Environment Shaded undefined" + "\\tightlist undefined" because
 # pandoc emits those commands but our custom templates didn't define
 # them; (b) poster.tex compile failed because the template's
@@ -919,8 +918,7 @@ def test_paper_templates_dont_spell_pandoc_vars_in_comments() -> None:
     template may spell out the pandoc variables we know wrap onto
     multiple lines. The matching note inside each template already
     warns future editors; this assertion makes the warning
-    enforceable. The 2026-05-16 user-reported PDF compile failure
-    is the exact regression this guards."""
+    enforceable."""
     repo = Path(__file__).resolve().parent.parent
     venues = (
         "generic", "neurips", "iclr", "ieee_access", "nature_mi",
@@ -954,13 +952,11 @@ def test_paper_templates_dont_spell_pandoc_vars_in_comments() -> None:
 
 
 def test_paper_venue_templates_are_real_not_stubs() -> None:
-    """The iclr/ieee_access/nature_mi templates used to ship as
-    1-line LaTeX-comment stubs that pandoc accepted as templates
-    and pdflatex rejected at compile (audit #05). The Phase-Q
-    hotfix deleted them so pandoc's built-in default ran instead.
-    They now ship as real, minimal venue-flavored templates — this
-    test pins the upgrade: each template must contain the placeholders
-    pandoc needs (``$title$``, ``$body$``) and at least one ``\\documentclass``
+    """The iclr/ieee_access/nature_mi templates must be real,
+    minimal venue-flavored templates — 1-line LaTeX-comment stubs
+    pass through pandoc but pdflatex rejects them at compile.
+    Each template must contain the placeholders pandoc needs
+    (``$title$``, ``$body$``) and at least one ``\\documentclass``
     line so it actually compiles. Future stub regressions (a 1-line
     comment-only template, an empty file) fail here loudly instead
     of silently producing an unreadable PDF."""
@@ -982,12 +978,12 @@ def test_paper_venue_templates_are_real_not_stubs() -> None:
                 f"templates/paper/{fmt}/template.tex is missing "
                 f"{needle!r} on a non-comment line — pandoc cannot "
                 f"render a paper without all three. A pure-comment "
-                f"file is the regression that caused audit #05."
+                f"file is the failure mode this guard prevents."
             )
 
 
 def test_poster_template_substitution_does_not_leak_into_preamble() -> None:
-    """Phase-Q hotfix regression guard. The poster template's top
+    """Regression guard. The poster template's top
     comment used to read
     ``% Substitutions (Python string.Template): $title, $left, ...``
     — and ``string.Template.safe_substitute`` happily expanded the
@@ -1158,10 +1154,9 @@ def test_compile_pdf_writes_sanitized_md_alongside_paper(
 
 def test_count_sanitized_glyphs_returns_source_count() -> None:
     """Honest counter: the INFO log reports source-glyph occurrences,
-    not length-deltas. The PR #93 bot review caught the original
-    implementation deriving the count from length deltas, which went
-    negative because LaTeX replacements (~20 chars) are longer than
-    the source glyphs (1 char each)."""
+    not length-deltas. Deriving the count from length deltas would
+    go negative because LaTeX replacements (~20 chars) are longer
+    than the source glyphs (1 char each)."""
     assert paper_mod._count_sanitized_glyphs("plain ASCII only") == 0
     # 3 distinct glyphs, each appearing once → 3.
     assert paper_mod._count_sanitized_glyphs("FNR ≈ x, ≥ y, × z") == 3
@@ -1253,8 +1248,7 @@ def test_generate_cleans_paper_pdf_source_when_pdf_not_in_kinds(
 
 # ----------------------------------------------------------------------
 # PDF preprocessor — title lift, abstract lift, list extension, heading
-# shift, and ref-line dedupe. These are the user-visible fixes from the
-# 2026-05-16 paper.pdf report; tests live here (not just unit tests on
+# shift, and ref-line dedupe. Tests live here (not just unit tests on
 # the helpers in isolation) so the full _compile_pdf code path is
 # exercised end-to-end with a fake pandoc and the contract of "what
 # pandoc consumes" is pinned against future regressions.

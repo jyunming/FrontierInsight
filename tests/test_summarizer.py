@@ -189,7 +189,7 @@ def test_render_file_manifest_table_shape(tmp_path: Path) -> None:
         FileEntry(ident=2, path=Path("/fake/b.md"), rel_path="b.md",
                   kind="paper", size_bytes=512),        # ceil → 1 KB
         FileEntry(ident=3, path=Path("/fake/c.md"), rel_path="c.md",
-                  kind="paper", size_bytes=1536),       # ceil → 2 KB (PR #37 bot)
+                  kind="paper", size_bytes=1536),       # ceil → 2 KB
         FileEntry(ident=4, path=Path("/fake/d.md"), rel_path="d.md",
                   kind="paper", size_bytes=0),          # empty → 0 KB
     ]
@@ -339,10 +339,9 @@ def test_ingest_to_axon_calls_add_text_per_file_and_summary() -> None:
 
 
 def test_ingest_to_axon_uses_full_axon_content_not_prompt_preview() -> None:
-    """Regression for PR #37 review: ingest must use the larger
-    ``axon_content`` field so Axon receives more than the 4 KB the
-    prompt saw. The preview / axon_content split is the whole point
-    of the two caps."""
+    """Ingest must use the larger ``axon_content`` field so Axon
+    receives more than the 4 KB the prompt saw. The preview /
+    axon_content split is the whole point of the two caps."""
     k = MagicMock()
     captured: list[str] = []
     k.add_text = MagicMock(

@@ -494,8 +494,8 @@ async def test_chat_error_includes_provider_and_node_in_note():
 
 
 async def test_chat_error_note_uses_model_override_when_passed():
-    """When the caller passes per-call ``model=...`` (Phase O: per-node
-    model routing), the error note should reflect the EFFECTIVE model
+    """When the caller passes per-call ``model=...`` for per-node
+    model routing, the error note should reflect the EFFECTIVE model
     used for the call, not the endpoint default."""
     import httpx
 

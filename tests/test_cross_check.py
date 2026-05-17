@@ -1,4 +1,4 @@
-"""Phase L — analyze-driven re-route + cross-paper check tests.
+"""Analyze-driven re-route + cross-paper check tests.
 
 Validates:
   - `_node_cross_check`: per-finding literature search + LLM classification.

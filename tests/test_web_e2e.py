@@ -1,4 +1,4 @@
-"""Phase J end-to-end smoke: full DAG through the FastAPI server.
+"""End-to-end smoke: full DAG through the FastAPI server.
 
 This is the validator that proves the GUI works:
   1. Start a quest via POST /api/quests/start with a fake-LLM config.
@@ -106,11 +106,11 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
 
         # 3. Submit answers via the clarify endpoint.
         # IMPORTANT — keep ``empirical_vs_theoretical`` AWAY from
-        # ``"empirical"`` here. PR #59 introduced the legacy
-        # ``empirical_vs_theoretical=="empirical"`` fallback that
-        # routes the quest into no-simulation mode (pauses for user
-        # data and exits rc=0 without writing paper.md). This test
-        # is an end-to-end SIMULATION smoke; we want the regular
+        # ``"empirical"`` here. The legacy
+        # ``empirical_vs_theoretical=="empirical"`` fallback routes
+        # the quest into no-simulation mode (pauses for user data
+        # and exits rc=0 without writing paper.md). This test is an
+        # end-to-end SIMULATION smoke; we want the regular
         # implement/execute path to run, which means the
         # simulatability resolver must NOT trigger. Either:
         # (a) leave the new ``simulatability`` slot absent AND set

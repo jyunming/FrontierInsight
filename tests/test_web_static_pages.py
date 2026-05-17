@@ -1,5 +1,5 @@
-"""Tests for Phase C — resume + tectonic install + clarify-resume +
-trash bin endpoints."""
+"""Tests for the web UI's static / utility endpoints: resume,
+tectonic install, clarify-resume, trash bin, knowledge info."""
 
 from __future__ import annotations
 
@@ -260,7 +260,7 @@ def test_marketing_landing_page_is_self_contained() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase E — fancy features
+# Labels / fancy features
 # ---------------------------------------------------------------------------
 
 
@@ -396,14 +396,14 @@ def test_quest_zip_download(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase I + PR #102 bot-comment fixes
+# Knowledge endpoint + dir-existence guards
 # ---------------------------------------------------------------------------
 
 
 def test_labels_refuses_when_quest_doesnt_exist(tmp_path: Path) -> None:
-    """Bot comment: PUT /labels for a nonexistent quest used to
-    auto-create <output_root>/<id>/.fi/, which made _scan_quests
-    surface it as a "quest". Now 404 when no .fi/ exists."""
+    """PUT /labels for a nonexistent quest must NOT auto-create
+    <output_root>/<id>/.fi/ (that would let _scan_quests surface
+    a phantom quest). Returns 404 when no .fi/ exists."""
     client = _client(tmp_path)
     res = client.put("/api/quests/never-existed/labels",
                      json={"labels": ["x"]})
@@ -413,9 +413,9 @@ def test_labels_refuses_when_quest_doesnt_exist(tmp_path: Path) -> None:
 def test_trash_refuses_when_quest_alive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bot comment: moving the quest dir while the subprocess is
-    still writing into it causes engine I/O errors. Refuse with
-    409 + a hint to cancel first."""
+    """Moving the quest dir while the subprocess is still writing
+    into it causes engine I/O errors. Refuse with 409 + a hint to
+    cancel first."""
     client = _client(tmp_path)
     output_root = client.app.state.output_root  # type: ignore[attr-defined]
     (output_root / "q-alive").mkdir()
@@ -429,9 +429,9 @@ def test_trash_refuses_when_quest_alive(
 
 
 def test_knowledge_info_endpoint_returns_payload(tmp_path: Path) -> None:
-    """Phase I — /api/knowledge/info surfaces AxonStore location.
-    When Axon isn't installed (the typical local dev path on CI),
-    returns available=False with a clear reason."""
+    """/api/knowledge/info surfaces AxonStore location. When Axon
+    isn't installed (the typical local dev path on CI), returns
+    available=False with a clear reason."""
     client = _client(tmp_path)
     res = client.get("/api/knowledge/info")
     assert res.status_code == 200

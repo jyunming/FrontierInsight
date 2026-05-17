@@ -26,7 +26,7 @@ ProviderName = Literal[
     "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude login`)
     "copilot_cli",    # local GitHub Copilot CLI (uses `gh auth login` Copilot Pro/Business)
     "gemini_cli",     # local @google/gemini-cli (uses `gemini` OAuth / Google AI Studio key)
-    # Phase P — the FI VSCode extension spawns Python with --vscode-bridge-port N
+    # The FI VSCode extension spawns Python with --vscode-bridge-port N
     # and routes every LLM call through VSCode's vscode.lm.* Language Model
     # API. Sanctioned by GitHub; calls show up in your normal Copilot usage.
     # Not selectable from a stand-alone YAML — the extension launches FI
@@ -35,16 +35,15 @@ ProviderName = Literal[
 ]
 EngineFramework = Literal["langgraph"]
 SandboxKind = Literal["venv", "docker"]
-# Five scientific venues + four non-scientific prose formats added
-# in Phase Q. The non-scientific formats are IMRAD-free — prose-
-# shaped output for cultural / historical / business / policy topics
-# where Methods → Results doesn't fit.
+# Five scientific venues + four non-scientific prose formats. The
+# non-scientific formats are IMRAD-free — prose-shaped output for
+# cultural / historical / business / policy topics where Methods →
+# Results doesn't fit.
 # ``Engine._resolve_write_persona`` (NOT the prompt itself) reads
 # the format and loads a per-format persona prefix from
 # ``agents/write_persona_<name>.md``, which the prompt then prepends
 # via ``$persona_block``. Scientific venues yield an empty persona
 # block, so ``write.md`` falls through to its built-in IMRAD voice.
-# Audit #12 Rec 3.
 PaperFormat = Literal[
     "generic", "neurips", "iclr", "ieee_access", "nature_mi",
     "essay", "report", "policy_brief", "whitepaper",
@@ -77,7 +76,7 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
-    # Phase O — per-node model routing. Maps an engine node name (or a
+    # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model
     # string this provider should use when that node fires a chat call.
     # When None or the lookup misses, falls back to `model` above.
@@ -93,8 +92,7 @@ class ProviderConfig(BaseModel):
     # Useful for picking a cheap model for low-value nodes (clarify,
     # cross_check) and a strong one for the demanding ones (write,
     # review). On `copilot_cli` and its proxy siblings, all three
-    # models share one OAuth and one premium-request budget — see
-    # docs/plan.md Phase O for the design rationale.
+    # models share one OAuth and one premium-request budget.
     node_models: dict[str, str] | None = None
 
 
@@ -105,7 +103,7 @@ class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = 2
     review_loop: bool = True
-    # Phase I — pre-flight clarification (`clarify` node before `ideate`).
+    # Pre-flight clarification (`clarify` node before `ideate`).
     #
     #   "off"         — skip the node entirely. Default for tests and fleet.
     #   "auto"        — agent generates the questionnaire AND auto-answers
@@ -117,46 +115,46 @@ class EngineConfig(BaseModel):
     #                   (`launch.py --interactive`) or the web UI's
     #                   clarify panel can collect answers from the user.
     clarify_mode: ClarifyMode = "off"
-    # Phase K — execute-repair loop (`execute_reflect` node between
+    # Execute-repair loop (`execute_reflect` node between
     # `execute` and `analyze`). When the experiment script returns
     # rc!=0 or no RESULT_JSON, the reflect node generates a patched
     # `code` from the traceback and routes back to `execute`, up to
     # this many times. Default 3 — covers typo / import-error / shape
     # mismatch / NaN bugs without runaway looping.
     exec_reflect_max_iterations: int = Field(default=3, ge=0)
-    # Phase L — cross-paper check after analyze. When a finding lands,
+    # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just
     # the original topic) and classify hits as supporting / conflicting
     # / neutral. Per-finding top-K passed to the knowledge layer.
     cross_check_per_finding_k: int = Field(default=3, ge=0)
-    # Phase L — also enables the `next_step` re-route emitted by analyze:
+    # Also enables the `next_step` re-route emitted by analyze:
     # `publish` (default) / `re_experiment` / `broaden_lit`. Both
     # non-default values route back to `design` (via cross_check first)
     # and consume from `max_iterations` like the review-loop `revise`.
     enable_analyze_reroute: bool = True
-    # Phase M — extra LLM call after `ideate` to self-critique the
+    # Extra LLM call after `ideate` to self-critique the
     # chosen idea. May swap `chosen_idea` to a different entry from
     # the brainstormed list. Cheap (one extra LLM call per quest).
     ideate_reflect: bool = True
-    # Phase O — pairwise tournament across the brainstormed ideas.
+    # Pairwise tournament across the brainstormed ideas.
     # When True, REPLACES the single ``ideate_reflect`` critique call
     # with ``C(N, 2)`` parallel pairwise comparisons (3 calls for the
     # default 3 ideas) and picks the highest-win-count idea. Borrowed
-    # from Google Co-Scientist's pairwise+Elo ranking pattern; audit
-    # #09's R2 recommendation. Costs 2 extra LLM calls vs. the single
-    # critique but produces a measurably better-ranked ``chosen_idea``
+    # from Google Co-Scientist's pairwise+Elo ranking pattern. Costs
+    # 2 extra LLM calls vs. the single critique but produces a
+    # measurably better-ranked ``chosen_idea``
     # on topics where the brainstormed alternatives are close in
     # quality. Off by default to keep the cost floor at 7-18 calls.
     # When True, ``ideate_reflect`` is ignored (tournament wins).
     ideate_tournament: bool = False
-    # Phase N — multi-persona reviewer panel on the `review` node.
+    # Multi-persona reviewer panel on the `review` node.
     # When empty (default), the review node behaves as before: one LLM
     # call producing one verdict. When non-empty, each entry runs in
     # parallel with a persona-specific system prefix prepended to
     # `agents/review.md`; a moderator LLM call then synthesizes a
     # single verdict (median score, union of weaknesses, intersection
     # of strengths, conservative verdict). Per-persona model selection
-    # uses `provider.node_models["review_panel.<name>"]` (Phase O).
+    # uses `provider.node_models["review_panel.<name>"]`.
     #
     # Built-in persona names: "methodologist", "statistician",
     # "devil_advocate", "reproducibility". Users can pass custom names
@@ -180,7 +178,7 @@ class EngineConfig(BaseModel):
     # ``empirical_vs_theoretical`` answer — auto-detection from
     # clarify is the second entry point. YAML flag wins when set.
     no_simulation: bool = False
-    # Phase D1 — when the engine enters no-simulation mode, an
+    # When the engine enters no-simulation mode, an
     # ``auto_collect_data`` node runs BEFORE ``wait_for_data`` and
     # tries to pull relevant docs from the Knowledge layer (Axon).
     # Successful hits land under ``<quest_root>/data/auto_collected/``
@@ -208,12 +206,12 @@ class EngineConfig(BaseModel):
     # Axon would request "zero hits" — a useless config that should
     # be a YAML error not silent passthrough.
     auto_collect_top_k: int = Field(default=5, ge=1)
-    # Phase D2 — structured dataset adapters that run alongside the
+    # Structured dataset adapters that run alongside the
     # Axon retrieval in the auto_collect_data node. Each name in the
     # list is looked up in ``core.datasets.ADAPTER_REGISTRY``;
     # unrecognized names are logged as a WARNING and skipped. Empty
-    # list (default) means "Axon only" — preserves Phase D1 behavior
-    # exactly. Available names: ``"worldbank"``.
+    # list (default) means "Axon only" — Axon-only auto-collect.
+    # Available names: ``"worldbank"``.
     #
     # Adapters write into ``<quest_root>/data/auto_collected/<source>/``
     # subdirectories so the manifest renders them grouped by origin

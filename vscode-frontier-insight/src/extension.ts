@@ -117,7 +117,7 @@ async function handleRequest(
         return;
     }
     if (cmd === "update") {
-        // Phase R — mid-quest re-entry. Routes to the same
+        // Mid-quest re-entry. Routes to the same
         // `launch.py --update <quest_id>` flow the CLI uses.
         // ``prompt`` should be the quest_id; the Python side
         // validates it exists and refuses gracefully if not.
@@ -125,7 +125,7 @@ async function handleRequest(
         return;
     }
     if (cmd === "ingest") {
-        // Phase T — Axon literature ingest. The user's prompt is
+        // Axon literature ingest. The user's prompt is
         // space-separated paths; quote each one before passing to
         // the shell so paths with spaces / metacharacters don't
         // break (or run unintended commands).
@@ -154,7 +154,7 @@ async function handleRequest(
         return;
     }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
-        // Phase T — no-admin LaTeX install for paper_pdf support.
+        // No-admin LaTeX install for paper_pdf support.
         await runTerminalCommand(
             "tectonic", "--install-tectonic",
             stream, "Opening a terminal to install tectonic (~70 MB) " +
