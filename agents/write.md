@@ -90,6 +90,19 @@ If the prior-work block lacks one of these fields for a particular entry, omit j
 
 When the entire prior-work block is empty or unusable (the engine surfaces `"(no prior work surfaced from the knowledge base)"`), prefer to **cite no sources** rather than invent any. If the persona / venue genuinely requires at least one reference (e.g. a Discussion section that engages with prior work), cite well-known canonical sources for the field with their **real** DOIs — never fabricate a DOI or author. If you cannot recall a real DOI, omit it rather than guess.
 
+**Forbidden placeholder words.** Under NO circumstances may a citation contain any of these tokens as an author, venue, or title field:
+
+- `Placeholder`, `Placeholder, A.`, `Placeholder and Placeholder`
+- `Example`, `Example, B.`
+- `Author unspecified`, `Date unspecified`, `Venue unspecified`
+- `(unknown)`, `(unpublished)` for fabricated entries
+- `Anonymous` when used to hide that the author is invented
+- `Doe, J.` / `Smith, J.` patterns when the entry isn't drawn from the prior-work block
+
+If you find yourself reaching for any of the above to fill a slot, that is a signal to **delete the entire citation** instead. A shorter, honest References section beats one padded with placeholders. The Discussion can still engage with prior work in prose ("Earlier studies on EUV stochastic LER have generally established that ...") without naming a specific fabricated source.
+
+If your References section ends up empty, that's acceptable — the post-process review will flag fabricated citations and reject the paper anyway, so honesty is the only durable option.
+
 ## No raw code blocks in the body
 
 Reproducibility lives in the bundled `experiment.py` (and `paper_bundle_manifest.json`) shipped alongside the paper, **not** in the body. Do NOT emit fenced ` ```python ` / ` ```bash ` / ` ```r ` blocks — they render as syntax-highlighted Pandoc listings that look out of place next to a real venue's typesetting (IEEE / NeurIPS / Nature never inline raw code in the body).

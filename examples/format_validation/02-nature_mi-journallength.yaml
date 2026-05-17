@@ -1,0 +1,48 @@
+# Format validation - nature_mi x journal-length
+# All format_validation/*.yaml share the same EUV-stochastics topic so
+# differences in the produced paper come from paper_format / study_depth
+# only. Run via:
+#   python launch.py --fleet examples/format_validation/*.yaml --max-concurrent 3
+
+topic: |
+  Predicting stochastic EUV contact failures from synthetic exposures.
+    Build a lightweight Python Monte Carlo simulator of EUV contact
+    printing (Poisson photon shot noise + Gaussian blur on 32x32 patches),
+    train a Random Forest classifier on simple intensity / contrast
+    features, and report whether such a model can predict NOK (failed)
+    contacts with ROC-AUC > 0.9 on held-out synthetic data. Discuss what
+    feature importances tell us about which physical sources of failure
+    matter most.
+
+title: euv-stochastics-nature_mi
+
+provider:
+  name: gemini_cli
+  model: gemini-3.1-flash-lite-preview
+
+engine:
+  framework: langgraph
+  max_iterations: 1
+  review_loop: false
+  clarify_mode: "off"
+  clarify_overrides:
+    study_depth: journal-length
+    paper_venue: nature_mi
+    output_kinds: ["paper_md", "paper_pdf"]
+    simulatability: "yes"
+    comparative_baseline: ""
+    success_metric: "ROC-AUC > 0.9"
+    budget: ""
+
+execution:
+  sandbox: venv
+  timeout_s: 600
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+
+output:
+  kinds: ["paper_md", "paper_pdf"]
+  paper_format: nature_mi
+  output_dir: ./outputs
