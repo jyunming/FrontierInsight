@@ -29,10 +29,26 @@
   </div>
 
   <!-- Hero Header -->
-  <header class="mb-16 max-w-3xl">
+  <header class="mb-12 max-w-3xl">
     <h1 id="page-title" class="font-headline-lg-mobile md:font-headline-xl text-headline-lg-mobile md:text-headline-xl text-on-surface mb-4">New Research Quest</h1>
     <p id="page-subtitle" class="font-body-lg text-body-lg text-on-surface-variant">Loading questions…</p>
   </header>
+
+  <!-- Drafts picker (proposal outputs from /tools/proposal land in
+       outputs/_drafts/ — surface them here so the user can one-click
+       continue a proposal as a real quest). Hidden when no drafts. -->
+  <section id="drafts-picker" class="hidden max-w-3xl mb-12 hairline-border bg-surface-mid rounded-xl p-6">
+    <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+      <h2 class="font-headline-md text-headline-md font-bold text-on-surface flex items-center gap-2">
+        <span class="material-symbols-outlined text-primary">drafts</span> Continue a draft
+      </h2>
+      <button onclick="toggleDrafts()" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors" id="drafts-toggle">Show 0</button>
+    </div>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-4">
+      Proposals you generated from <code class="font-code-md text-secondary">/tools/proposal</code> show up here. Click one to pre-fill this form with its topic, title, and provider.
+    </p>
+    <div id="drafts-list" class="hidden flex-col gap-2"></div>
+  </section>
 
   <!-- Interview Form (rendered dynamically from /api/interview/schema) -->
   <form id="interview-form" onsubmit="return submitForm(event);" class="space-y-12 max-w-3xl"></form>
@@ -70,9 +86,117 @@
     } else {
       title.textContent = 'New Research Quest';
       subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write draft YAML only).';
+      // Show the proposal-draft picker for new quests (skip on update flow).
+      loadDrafts();
     }
     renderForm();
+    // Honor ?draft=<filename> in URL: auto-load that draft into the form.
+    const params = new URLSearchParams(window.location.search);
+    const draftFilename = params.get('draft');
+    if (draftFilename && !isUpdate) loadDraftIntoForm(draftFilename);
   }
+
+  // ───── Proposal-draft picker ─────────────────────────────────
+  let draftsCache = [];
+  async function loadDrafts() {
+    try {
+      const res = await fetch('/api/drafts');
+      if (!res.ok) return;
+      const data = await res.json();
+      draftsCache = data.drafts || [];
+      if (draftsCache.length === 0) return;
+      const picker = document.getElementById('drafts-picker');
+      const toggle = document.getElementById('drafts-toggle');
+      picker.classList.remove('hidden');
+      toggle.textContent = `Show ${draftsCache.length}`;
+      renderDraftsList();
+    } catch (_) {}
+  }
+
+  function renderDraftsList() {
+    const listEl = document.getElementById('drafts-list');
+    listEl.innerHTML = draftsCache.map(d => {
+      const when = new Date(d.mtime * 1000).toLocaleString();
+      return `
+        <button type="button" onclick="loadDraftIntoForm('${escapeAttr(d.filename)}')" class="hairline-border bg-surface-low hover:bg-surface-high transition-colors rounded p-4 flex flex-col gap-2 text-left">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <span class="font-code-md text-code-md text-primary break-all">${escapeHtml(d.title || d.filename.replace(/\.yaml$/, ''))}</span>
+            <span class="font-label-sm text-label-sm text-outline uppercase whitespace-nowrap">${escapeHtml(when)}</span>
+          </div>
+          ${d.topic ? `<span class="font-body-md text-body-md text-on-surface-variant line-clamp-2">${escapeHtml(d.topic)}</span>` : ''}
+          <div class="font-label-sm text-label-sm text-outline uppercase">
+            ${d.provider ? `<span class="opacity-50">PROVIDER:</span> ${escapeHtml(d.provider)}` : ''}
+          </div>
+        </button>`;
+    }).join('');
+  }
+
+  // Helper toggle so the picker doesn't dominate the page when there
+  // are many drafts.
+  let draftsOpen = false;
+  window.toggleDrafts = function () {
+    draftsOpen = !draftsOpen;
+    const list = document.getElementById('drafts-list');
+    const toggle = document.getElementById('drafts-toggle');
+    list.classList.toggle('hidden', !draftsOpen);
+    list.classList.toggle('flex', draftsOpen);
+    toggle.textContent = draftsOpen ? 'Hide' : `Show ${draftsCache.length}`;
+  };
+
+  // Load a chosen draft's parsed YAML into the visible interview form
+  // fields. We only set fields that exist in the form (handles schema
+  // drift gracefully — extra keys in the YAML are ignored).
+  window.loadDraftIntoForm = async function (filename) {
+    try {
+      const res = await fetch(`/api/drafts/${encodeURIComponent(filename)}`);
+      if (!res.ok) { alert(`Could not load draft: HTTP ${res.status}`); return; }
+      const { parsed } = await res.json();
+      // Flatten the YAML's nested structure into question-id → value
+      // pairs the form expects.
+      const flat = {
+        topic: parsed.topic || '',
+        title: parsed.title || '',
+        provider: (parsed.provider || {}).name || '',
+        provider_model: (parsed.provider || {}).model || '',
+      };
+      // Add the rest of top-level keys (knowledge, execution, etc.)
+      // — many of the interview questions correspond 1:1.
+      for (const k of Object.keys(parsed)) {
+        if (!(k in flat) && typeof parsed[k] !== 'object') flat[k] = parsed[k];
+      }
+      for (const [qid, value] of Object.entries(flat)) {
+        const el = document.getElementById(`q-${qid}`);
+        if (!el) continue;
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+          el.value = String(value);
+        } else if (el.tagName === 'SELECT') {
+          // Try to find a matching option; fall back to text match.
+          const target = String(value);
+          let matched = false;
+          for (const opt of el.options) {
+            if (opt.value === target) { el.value = target; matched = true; break; }
+          }
+          if (!matched) {
+            for (const opt of el.options) {
+              if (opt.textContent.trim() === target) { el.value = opt.value; matched = true; break; }
+            }
+          }
+          // If provider was loaded, trigger the cascading model select.
+          if (qid === 'provider' && matched) populateProviderModel(el.value);
+        }
+      }
+      // Scroll the form into view + give visual feedback.
+      document.getElementById('interview-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const div = document.getElementById('result');
+      div.classList.remove('hidden');
+      div.className = 'fi-banner fi-banner-info max-w-3xl';
+      div.textContent = `Loaded draft ${filename}. Review the fields, edit as needed, then submit.`;
+    } catch (e) {
+      alert(`Error loading draft: ${e}`);
+    }
+  };
+
+  function escapeAttr(s) { return escapeHtml(s); }
 
   function renderForm() {
     const form = document.getElementById('interview-form');

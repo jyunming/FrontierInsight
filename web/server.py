@@ -747,6 +747,69 @@ def make_app(
             ),
         })
 
+    @app.get("/api/drafts")
+    async def list_drafts() -> JSONResponse:
+        """List draft quest YAMLs the proposal tool dropped in
+        ``outputs/_drafts/``. Each entry includes the parsed topic
+        + title so the /interview UI can show a one-click picker
+        for "continue this proposal as a new quest." Most-recent
+        first."""
+        drafts_dir = app.state.output_root / "_drafts"
+        if not drafts_dir.is_dir():
+            return JSONResponse({"drafts": []})
+        items: list[dict[str, Any]] = []
+        for p in sorted(
+            drafts_dir.glob("*.yaml"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:40]:
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            # Parse JUST the fields the picker needs — topic + title.
+            # Doing a full YAML load here is fine; the files are tiny.
+            try:
+                import yaml as _yaml
+                doc = _yaml.safe_load(txt) or {}
+            except Exception:
+                doc = {}
+            items.append({
+                "filename": p.name,
+                "mtime": p.stat().st_mtime,
+                "size": p.stat().st_size,
+                "topic": (doc.get("topic") or "").strip()[:200],
+                "title": (doc.get("title") or "").strip()[:200],
+                "provider": (doc.get("provider") or {}).get("name") if isinstance(doc.get("provider"), dict) else None,
+                "companion_md": str(p.with_name(p.stem + "-proposal.md").name)
+                    if (drafts_dir / (p.stem + "-proposal.md")).is_file() else None,
+            })
+        return JSONResponse({"drafts": items})
+
+    @app.get("/api/drafts/{filename}")
+    async def get_draft(filename: str) -> JSONResponse:
+        """Return the parsed contents of a single draft YAML so the
+        /interview page can pre-fill its form fields when the user
+        clicks "Load draft" on a proposal output."""
+        # Path-traversal guard: only allow simple filenames inside
+        # outputs/_drafts/, never path components like '..'.
+        if "/" in filename or "\\" in filename or filename.startswith(".") or not filename.endswith(".yaml"):
+            raise HTTPException(400, f"bad filename: {filename!r}")
+        draft = app.state.output_root / "_drafts" / filename
+        if not draft.is_file():
+            raise HTTPException(404, f"draft {filename!r} not found")
+        try:
+            txt = draft.read_text(encoding="utf-8", errors="replace")
+            import yaml as _yaml
+            doc = _yaml.safe_load(txt) or {}
+        except Exception as e:
+            raise HTTPException(500, f"could not parse draft: {e}")
+        return JSONResponse({
+            "filename": filename,
+            "raw": txt,
+            "parsed": doc,
+        })
+
     @app.get("/api/jobs/{job_id}")
     async def get_job(job_id: str, n: int = 400) -> JSONResponse:
         """Status + log tail for a single subprocess job. The tools

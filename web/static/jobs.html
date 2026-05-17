@@ -186,7 +186,8 @@
         </div>
         <div class="font-label-sm text-label-sm uppercase text-outline mb-2">Live log</div>
         <pre id="job-log" class="bg-[#090909] border border-white/10 rounded p-3 font-code-md text-code-md h-[480px] overflow-y-auto whitespace-pre-wrap text-on-surface-variant shadow-[inset_0_0_40px_rgba(0,0,0,0.8)]"></pre>
-        <div class="flex items-center gap-3 mt-4">
+        <div id="job-followup" class="hidden mt-4 p-4 bg-primary-container/10 border border-primary/30 rounded-xl"></div>
+        <div class="flex items-center gap-3 mt-4 flex-wrap">
           <a href="/jobs" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase bg-surface-mid cyber-border text-on-surface hover:bg-surface-high transition-colors">
             <span class="material-symbols-outlined text-[16px]">list</span> All jobs
           </a>
@@ -229,6 +230,9 @@
         label.textContent = `Done${j.exit_code === 0 ? ' (exit 0)' : ''}`;
         label.className = 'font-label-sm text-label-sm text-secondary uppercase tracking-wider';
         if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+        // Proposal-specific followup: parse the draft YAML filename
+        // from the log tail and offer "Continue in /interview".
+        maybeShowProposalFollowup(j);
       } else {
         dot.className = 'w-2 h-2 rounded-full bg-error';
         label.textContent = `Failed (exit ${j.exit_code})`;
@@ -240,6 +244,35 @@
         ? `${j.alive ? 'running for' : 'ran for'} ${formatAge(j.age_seconds)}`
         : (j.log_mtime ? `finished ${formatAgo(j.log_mtime)}` : '');
     } catch (_) {}
+  }
+
+  // When a proposal job finishes, scrape its log for the companion
+  // YAML filename and surface a one-click button into /interview
+  // with that draft pre-loaded. Saves the user from copy-pasting the
+  // path out of the terminal log.
+  function maybeShowProposalFollowup(j) {
+    if (j.kind !== 'tool' || !j.job_id.startsWith('proposal-')) return;
+    if (!j.log_tail || !j.log_tail.length) return;
+    // Look for either:
+    //   [FI] companion YAML -> .../_drafts/<filename>.yaml
+    //   To run this quest: python launch.py --config .../_drafts/<filename>.yaml
+    const joined = j.log_tail.join('\n');
+    const m = joined.match(/_drafts[\\/]([^\s\\\/'"]+\.yaml)/);
+    if (!m) return;
+    const filename = m[1];
+    const followup = document.getElementById('job-followup');
+    if (!followup) return;
+    followup.classList.remove('hidden');
+    followup.innerHTML = `
+      <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+        <div class="flex-1">
+          <h4 class="font-headline-md text-headline-md font-bold text-on-surface mb-1">Proposal ready</h4>
+          <p class="font-body-md text-body-md text-on-surface-variant">Draft YAML at <code class="font-code-md text-secondary break-all">outputs/_drafts/${escapeHtml(filename)}</code></p>
+        </div>
+        <a href="/interview?draft=${encodeURIComponent(filename)}" class="inline-flex items-center gap-2 px-5 py-3 rounded bg-gradient-to-r from-primary-container to-secondary-container text-white font-label-sm text-label-sm uppercase tracking-wider hover:opacity-90 transition-opacity whitespace-nowrap">
+          <span class="material-symbols-outlined text-[18px]">play_arrow</span> Continue in /interview
+        </a>
+      </div>`;
   }
 
   // ───── helpers ───────────────────────────────────────────────
