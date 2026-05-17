@@ -367,8 +367,30 @@ class OutputConfig(BaseModel):
     # immediately (~saves ~15 min of LLM cost on a doomed quest); if
     # require_pdf is False the engine logs a warning and continues
     # so the user still gets paper.md + the
-    # ``paper_pdf_skipped.md`` diagnostic from #55.
+    # ``paper_pdf_skipped.md`` diagnostic.
     require_pdf: bool = False
+    # Who will read this paper? Drives which Axon entries are eligible
+    # to appear in the References section.
+    #
+    #   "external" (default) — the paper is written for an audience
+    #       outside the user's organization (a journal, a venue, the
+    #       open web). The writer must NOT cite FI-internal entries
+    #       (kind=fi_critique / fi_digest / fi_portfolio / fi_proposal
+    #       / fi_summary / fi_source_catalog), because those are
+    #       cross-quest memory artifacts, not public sources an
+    #       external reader could look up. Entries from the open
+    #       literature (arxiv / openalex / crossref / semantic_scholar
+    #       / pubmed / core) and ``fi_local_paper`` entries that
+    #       carry a real DOI/URL are kept.
+    #
+    #   "internal" — the paper is an internal-facing write-up
+    #       (a project report, an onboarding doc, a memo). Everything
+    #       in Axon is fair game; FI-internal cross-quest summaries
+    #       and proposals can be cited as prior work.
+    #
+    # Default is "external" because that's the safer default for a
+    # one-shot paper produced by an automated pipeline.
+    audience: Literal["external", "internal"] = "external"
 
     @field_validator("output_dir", mode="before")
     @classmethod

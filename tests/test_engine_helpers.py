@@ -685,6 +685,83 @@ def test_format_lit_drops_unusable_entries_entirely() -> None:
     assert _format_lit(weak) == "(no prior work surfaced from the knowledge base)"
 
 
+def test_is_audience_appropriate_external_drops_fi_internal_kinds() -> None:
+    """External-facing papers must not cite cross-quest memory
+    artifacts (kind=fi_critique / fi_digest / fi_portfolio /
+    fi_proposal / fi_summary / fi_source_catalog) — an outside reader
+    can't look them up."""
+    from core.engine import _is_audience_appropriate
+    for kind in [
+        "fi_critique", "fi_digest", "fi_portfolio", "fi_proposal",
+        "fi_summary", "fi_summary_input", "fi_source_catalog",
+        "fi_paper_spine",
+    ]:
+        assert not _is_audience_appropriate({"kind": kind}, "external"), (
+            f"audience=external must drop kind={kind!r}"
+        )
+
+
+def test_is_audience_appropriate_external_keeps_real_papers() -> None:
+    """External literature (arxiv / openalex / crossref / etc.) and
+    fi_local_paper (the user's own real papers) are kept under
+    audience=external."""
+    from core.engine import _is_audience_appropriate
+    for kind in ["arxiv", "openalex", "crossref", "fi_local_paper", "", None]:
+        meta = {"kind": kind} if kind is not None else {}
+        assert _is_audience_appropriate(meta, "external"), (
+            f"audience=external must keep kind={kind!r}"
+        )
+
+
+def test_is_audience_appropriate_internal_keeps_everything() -> None:
+    """Internal-facing papers can cite anything in Axon."""
+    from core.engine import _is_audience_appropriate
+    for kind in [
+        "fi_critique", "fi_proposal", "arxiv", "fi_local_paper",
+        "fi_source_catalog",
+    ]:
+        assert _is_audience_appropriate({"kind": kind}, "internal"), (
+            f"audience=internal must keep kind={kind!r}"
+        )
+
+
+def test_format_lit_drops_internal_kinds_when_external() -> None:
+    """End-to-end: an Axon pull mixing real papers and FI-internal
+    cross-quest memory should produce a References section with only
+    the real papers when audience=external."""
+    from core.engine import _format_lit
+    from core.knowledge import RetrievedDoc
+    docs = [
+        # An external citation: kept.
+        RetrievedDoc(
+            content="External abstract.",
+            metadata={
+                "title": "Stochastic LER in EUV", "year": 2024,
+                "kind": "arxiv", "arxiv_id": "2404.12345",
+            },
+        ),
+        # An FI proposal: dropped for external audience.
+        RetrievedDoc(
+            content="A prior FI proposal.",
+            metadata={
+                "title": "Why simple intensity features fail",
+                "year": 2026, "kind": "fi_proposal",
+            },
+        ),
+    ]
+    external = _format_lit(docs, audience="external")
+    assert "Stochastic LER in EUV" in external
+    assert "Why simple intensity features fail" not in external, (
+        "fi_proposal must NOT appear in an external-audience paper"
+    )
+
+    internal = _format_lit(docs, audience="internal")
+    assert "Stochastic LER in EUV" in internal
+    assert "Why simple intensity features fail" in internal, (
+        "audience=internal keeps the cross-quest entry"
+    )
+
+
 def test_format_lit_renumbers_after_dropping() -> None:
     """When some entries get filtered, the kept entries should be
     renumbered [1], [2], ... — no gaps. Otherwise the writer sees

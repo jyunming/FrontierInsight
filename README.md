@@ -266,6 +266,30 @@ python launch.py --config outputs/<quest_id>/config.yaml \
 
 The YAML's `provider` block is honored on resume; everything else (topic, design, literature, analysis) is loaded from the sqlite checkpoint, so you can edit the YAML between runs to change which model handles which node.
 
+### Pull more (or fewer) prior-work citations
+
+Each quest's literature step retrieves `knowledge.top_k` documents from Axon (+ the external router fallback when Axon is empty), and those are what end up in the paper's References. The default is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
+
+```yaml
+knowledge:
+  enabled: true
+  top_k: 12        # pull more — costs ~5K extra tokens per LLM call that uses the block
+```
+
+Trade-offs: higher `top_k` gives the writer + cross-check nodes more sources to draw on but inflates every prompt that includes the literature block (`ideate`, `design`, `write`, `cross_check`, `review`), which means more tokens billed AND more chance of the model losing focus across a sprawling context. 5–10 is the sweet spot for a journal-length paper; bump to 15–20 only for a `comprehensive review` study depth.
+
+### Keep internal docs out of an externally-published paper
+
+By default, FI's writer treats every quest as externally-facing (journal submission, open-web release): the References section excludes cross-quest memory artifacts (`kind=fi_critique` / `fi_digest` / `fi_portfolio` / `fi_proposal` / `fi_summary` / `fi_source_catalog`) because an outside reader can't look them up. Real external literature (arxiv / openalex / etc.) and `fi_local_paper` entries you ingested yourself are kept.
+
+If the paper is internal-facing — a project report, onboarding doc, memo for your own team — flip the flag so FI's own prior work can be cited:
+
+```yaml
+output:
+  paper_format: report
+  audience: internal   # default is "external"
+```
+
 ### Watch progress in a browser instead of the terminal
 
 ```bash

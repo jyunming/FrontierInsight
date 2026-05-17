@@ -1830,7 +1830,14 @@ class Engine:
             title=state.get("title", "Untitled"),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
-            literature_block=_format_lit_from_state(state),
+            # Write node is the ONE place audience filtering applies:
+            # this is the literature block that flows into the paper's
+            # References. ideate/design/cross_check still see the full
+            # pull because those nodes are about choosing what to do,
+            # not what to publish.
+            literature_block=_format_lit_from_state(
+                state, audience=self.config.output.audience,
+            ),
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
@@ -2407,7 +2414,37 @@ def _is_citable(meta: dict[str, Any]) -> bool:
     return has_id
 
 
-def _format_lit(docs: list[RetrievedDoc]) -> str:
+# FI-internal kinds that are cross-quest memory artifacts — NOT public
+# sources. When the paper's audience is "external" (a journal, the open
+# web), the writer must not cite these because the reader cannot look
+# them up. ``fi_local_paper`` is intentionally OMITTED: that kind is
+# how the user feeds real (paywalled or local) papers into Axon; whether
+# such an entry survives depends on its own metadata (real DOI/URL).
+_FI_INTERNAL_KINDS = frozenset({
+    "fi_critique",
+    "fi_digest",
+    "fi_portfolio",
+    "fi_proposal",
+    "fi_summary",
+    "fi_summary_input",
+    "fi_source_catalog",
+    "fi_paper_spine",
+})
+
+
+def _is_audience_appropriate(meta: dict[str, Any], audience: str) -> bool:
+    """When the paper is external-facing, drop cross-quest memory
+    artifacts so the References section only contains sources an
+    outside reader could actually look up. Internal-facing papers
+    keep everything (the audience expects to see prior internal work).
+    """
+    if audience == "internal":
+        return True
+    kind = (meta.get("kind") or "").strip()
+    return kind not in _FI_INTERNAL_KINDS
+
+
+def _format_lit(docs: list[RetrievedDoc], audience: str = "external") -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
@@ -2415,6 +2452,8 @@ def _format_lit(docs: list[RetrievedDoc]) -> str:
     for d in docs:
         meta = d.metadata or {}
         if not _is_citable(meta):
+            continue
+        if not _is_audience_appropriate(meta, audience):
             continue
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
@@ -2426,7 +2465,7 @@ def _format_lit(docs: list[RetrievedDoc]) -> str:
     return "\n\n".join(lines)
 
 
-def _format_lit_from_state(state: QuestState) -> str:
+def _format_lit_from_state(state: QuestState, audience: str = "external") -> str:
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
@@ -2435,6 +2474,8 @@ def _format_lit_from_state(state: QuestState) -> str:
     for item in items:
         meta = item.get("metadata") or {}
         if not _is_citable(meta):
+            continue
+        if not _is_audience_appropriate(meta, audience):
             continue
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
