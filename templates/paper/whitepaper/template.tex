@@ -9,10 +9,16 @@
 \usepackage[utf8]{inputenc}
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
+% Required for pandoc-rendered markdown tables (pandoc emits egin{longtable}).
+\usepackage{longtable}
+\usepackage{array}
+% pandoc emits \def\LTcaptype{none} for caption-less tables; longtable
+% then calls \refstepcounter{none} internally, so the counter must exist.
+\newcounter{none}
 \usepackage{hyperref}
 % helvet is universally available in minimal TeX Live installs;
 % opensans (an earlier choice) is not, and tripped paper_pdf compile
-% on stripped containers per PR #79 review.
+% on stripped containers.
 \usepackage{helvet}
 \renewcommand{\familydefault}{\sfdefault}
 \usepackage{titlesec}
