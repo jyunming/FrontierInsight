@@ -1,1 +1,22 @@
-<svg width="128" height="128" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="40" height="40" rx="8" fill="url(#paint0_linear)"/><path d="M12 10H28M12 20H24M12 30H20" stroke="white" stroke-width="3" stroke-linecap="round"/><defs><linearGradient id="paint0_linear" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse"><stop stop-color="#4F46E5"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="96" fill="#13121b"/>
+  <g stroke="url(#grad)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+    <!-- I — central axis (Insight) -->
+    <path d="M256 100V412" stroke-width="48"/>
+    <!-- F — top arm, jagged peak -->
+    <path d="M256 160L320 160L350 130L400 180"/>
+    <!-- F — middle arm -->
+    <path d="M256 260H360"/>
+    <!-- left swoosh — complexity merging into clarity -->
+    <path d="M140 180C180 200 220 240 256 260" opacity="0.3" stroke-width="32"/>
+    <path d="M140 340C180 320 220 280 256 260" opacity="0.3" stroke-width="32"/>
+    <!-- synthesis node -->
+    <circle cx="256" cy="260" r="12" fill="white" stroke="none"/>
+  </g>
+  <defs>
+    <linearGradient id="grad" x1="256" y1="100" x2="256" y2="412" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+</svg>

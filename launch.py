@@ -151,6 +151,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "verifies the SHA-256 from the release's SHA256SUMS file.",
     )
     mode.add_argument(
+        "--list-drafts",
+        action="store_true",
+        help="List proposal drafts (YAML companions) that ``--proposal`` "
+             "previously wrote to ``outputs/_drafts/``. Pairs with "
+             "``--config <yaml>`` to launch the chosen quest. Web UI "
+             "exposes the same surface as the 'Continue a draft' "
+             "picker on /interview; VSCode chat as ``@fi /drafts``.",
+    )
+    mode.add_argument(
         "--new",
         action="store_true",
         help="Run the interactive interview to set up a new quest. "
@@ -789,6 +798,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.install_tectonic:
             return _install_tectonic()
+
+        if args.list_drafts:
+            return _list_drafts(args.output_root)
 
         if args.new:
             return await _run_new(
@@ -1791,6 +1803,50 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
         print("[FI ingest] no files loaded — check paths / file types.", file=sys.stderr)
         return 1
     print(f"[FI ingest] ingested {len(loaded)} file(s) into Axon: {loaded}")
+    return 0
+
+
+def _list_drafts(output_root: Path) -> int:
+    """Top-level handler for ``python launch.py --list-drafts``.
+
+    Prints a table of proposal YAMLs in ``outputs/_drafts/`` so the
+    user can pick one to feed into ``--config`` without remembering
+    paths. Mirrors the Web `/api/drafts` + /interview drafts picker
+    and the VSCode `@fi /drafts` chat command.
+    """
+    drafts_dir = output_root / "_drafts"
+    if not drafts_dir.is_dir():
+        print(f"[FI] no drafts directory at {drafts_dir}", file=sys.stderr)
+        print("    Run `--proposal \"<topic>\"` to create one.")
+        return 0
+    files = sorted(
+        drafts_dir.glob("*.yaml"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    if not files:
+        print(f"[FI] no proposal drafts in {drafts_dir}")
+        print("    Run `--proposal \"<topic>\"` to create one.")
+        return 0
+    print(f"[FI] {len(files)} proposal draft(s) in {drafts_dir}:\n")
+    import yaml as _yaml
+    for p in files[:40]:
+        try:
+            doc = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            doc = {}
+        title = (doc.get("title") or "").strip() or "(no title)"
+        topic = (doc.get("topic") or "").strip().replace("\n", " ")
+        topic_short = topic[:80] + ("…" if len(topic) > 80 else "")
+        mtime = time.strftime(
+            "%Y-%m-%d %H:%M",
+            time.localtime(p.stat().st_mtime),
+        )
+        print(f"  {mtime}  {title}")
+        if topic_short:
+            print(f"              {topic_short}")
+        print(f"              python launch.py --config {p}")
+        print()
     return 0
 
 

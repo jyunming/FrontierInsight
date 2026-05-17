@@ -28,15 +28,22 @@
         <div class="flex justify-between items-center w-full px-margin-mobile md:px-margin-desktop h-16 max-w-max-width mx-auto">
           <div class="flex items-center gap-8">
             <a href="/" class="flex items-center gap-3 group" title="Frontier Insight dashboard">
-              <svg viewBox="0 0 40 40" class="w-8 h-8 rounded-lg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <svg viewBox="0 0 512 512" class="w-8 h-8" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="none">
+                <rect width="512" height="512" rx="96" fill="#13121b"/>
+                <g stroke="url(#hdrG)" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M256 100V412" stroke-width="48"/>
+                  <path d="M256 160L320 160L350 130L400 180"/>
+                  <path d="M256 260H360"/>
+                  <path d="M140 180C180 200 220 240 256 260" opacity="0.3" stroke-width="32"/>
+                  <path d="M140 340C180 320 220 280 256 260" opacity="0.3" stroke-width="32"/>
+                  <circle cx="256" cy="260" r="12" fill="white" stroke="none"/>
+                </g>
                 <defs>
-                  <linearGradient id="hdrG" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-                    <stop offset="0" stop-color="#4f46e5"/>
+                  <linearGradient id="hdrG" x1="256" y1="100" x2="256" y2="412" gradientUnits="userSpaceOnUse">
+                    <stop stop-color="#4f46e5"/>
                     <stop offset="1" stop-color="#06b6d4"/>
                   </linearGradient>
                 </defs>
-                <rect width="40" height="40" rx="8" fill="url(#hdrG)"/>
-                <path d="M12 10H28M12 20H24M12 30H20" stroke="white" stroke-width="3" stroke-linecap="round"/>
               </svg>
               <span class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-gradient">Frontier Insight</span>
             </a>

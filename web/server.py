@@ -1029,7 +1029,39 @@ def make_app(
     @app.get("/api/quests/{quest_id}")
     async def get_quest(quest_id: str) -> JSONResponse:
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        # Race window: a quest just submitted via
+        # POST /api/interview/submit?launch=true has had its quest_id
+        # minted and its subprocess spawned, but the child engine has
+        # not yet created `.fi/` (LangGraph init takes a few seconds —
+        # model loading, ADC, env, …). Without this fallback the user
+        # gets a hard 404 the instant the form redirects to /quest/<id>.
+        # When the launcher is tracking the id, surface a "starting"
+        # response with the subprocess pid + age so the UI shows
+        # progress instead of a dead-end error.
+        launcher_status = app.state.launcher.status_for(quest_id)
         if not (quest_root / ".fi").is_dir():
+            if launcher_status and (launcher_status.get("alive") or launcher_status.get("age_seconds", 0) < 60):
+                return JSONResponse({
+                    "quest_id": quest_id,
+                    "quest_root": str(quest_root),
+                    "current_node": "starting",
+                    "log_tail": [
+                        f"[FI] subprocess pid={launcher_status.get('pid')} spawned "
+                        f"{int(launcher_status.get('age_seconds') or 0)}s ago — waiting for "
+                        ".fi/run.log to appear (Engine init takes ~5–15s on first start).",
+                    ],
+                    "figures": [],
+                    "paper_preview": None,
+                    "summary": None,
+                    "alive": bool(launcher_status.get("alive")),
+                    "pending_clarify": False,
+                    "review": None,
+                    "review_panel": None,
+                    "pid": launcher_status.get("pid"),
+                    "started_at": launcher_status.get("started_at"),
+                    "age_seconds": launcher_status.get("age_seconds"),
+                    "exit_code": launcher_status.get("exit_code"),
+                })
             raise HTTPException(404, f"quest {quest_id} not found")
         log_lines = _read_log_tail(quest_root / ".fi" / "run.log", n=20)
         paper_md = quest_root / "paper" / "paper.md"
@@ -1057,7 +1089,8 @@ def make_app(
         # incorrectly show "idle" and the Cancel button would stay
         # disabled. registry.alive(...) OR launcher.alive covers both
         # transports.
-        launcher_status = app.state.launcher.status_for(quest_id) or {}
+        # Already fetched above for the spawning-race fallback; reuse it.
+        launcher_status = launcher_status or {}
         return JSONResponse({
             "quest_id": quest_id,
             "quest_root": str(quest_root),

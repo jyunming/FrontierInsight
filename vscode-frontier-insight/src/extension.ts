@@ -134,6 +134,14 @@ async function handleRequest(
         );
         return;
     }
+    if (cmd === "drafts") {
+        // List proposal-draft YAMLs in outputs/_drafts/ so the user
+        // can pick one to /start without remembering paths. Mirrors
+        // the CLI `--list-drafts` flag and the Web /interview
+        // drafts picker. Three-interface parity.
+        await runListDrafts(stream, token);
+        return;
+    }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
         // Phase T — no-admin LaTeX install for paper_pdf support.
         await runTerminalCommand(
@@ -167,6 +175,7 @@ function helpText(): string {
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
+        "- `@fi /drafts` — list proposal drafts you've made (most-recent first) with a one-click `/start` command for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.",
         "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",
         "All LLM calls go through your Copilot subscription via the",
@@ -1309,6 +1318,84 @@ async function runCritique(
  * for path-like arguments and accepts free-form topic strings with
  * spaces, punctuation, newlines pasted from chat.
  */
+/**
+ * Implementation of `@fi /drafts`. Walks ``<workspaceRoot>/outputs/_drafts/``
+ * for ``*.yaml`` files (proposal companions) and renders them as a
+ * markdown table with a clickable ``/start <path>`` hint for each.
+ * Mirrors `python launch.py --list-drafts` (CLI) and the
+ * "Continue a draft" picker on /interview (Web). Three-interface
+ * parity for the drafts-discovery feature.
+ */
+async function runListDrafts(
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+    const fs = require("node:fs") as typeof import("node:fs");
+    const pathMod = require("node:path") as typeof import("node:path");
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!ws) {
+        stream.markdown("Open a folder in VSCode first (the workspace root is where `outputs/_drafts/` lives).\n");
+        return;
+    }
+    const draftsDir = pathMod.join(ws, "outputs", "_drafts");
+    if (!fs.existsSync(draftsDir)) {
+        stream.markdown(`No \`outputs/_drafts/\` directory yet. Run \`@fi /proposal "<topic>"\` to create one.\n`);
+        return;
+    }
+    let entries: string[];
+    try {
+        entries = fs.readdirSync(draftsDir).filter((f) => f.endsWith(".yaml"));
+    } catch (e: any) {
+        stream.markdown(`Failed to read \`${draftsDir}\`: ${e?.message ?? String(e)}\n`);
+        return;
+    }
+    if (entries.length === 0) {
+        stream.markdown("No proposal drafts in `outputs/_drafts/` yet. Run `@fi /proposal \"<topic>\"` to create one.\n");
+        return;
+    }
+    // Sort by mtime descending. Parse each YAML's `topic:` + `title:`
+    // for preview — we keep it dependency-free (no js-yaml) by line
+    // scanning, which is enough for the top-level scalar fields the
+    // proposal generator writes.
+    const items = entries
+        .map((name) => {
+            const full = pathMod.join(draftsDir, name);
+            const stat = fs.statSync(full);
+            let title = "";
+            let topic = "";
+            try {
+                const text = fs.readFileSync(full, "utf-8");
+                const titleMatch = text.match(/^title:\s*(.+)$/m);
+                if (titleMatch) title = titleMatch[1].trim();
+                // ``topic:`` is often a block scalar (``|``); grab the
+                // next non-blank line of the body when so.
+                const topicMatch = text.match(/^topic:\s*(?:\|[+-]?\s*)?\n((?:  .*\n)+)/m);
+                if (topicMatch) {
+                    topic = topicMatch[1].split("\n").map(l => l.trim()).filter(Boolean).join(" ").trim();
+                } else {
+                    const inline = text.match(/^topic:\s*(.+)$/m);
+                    if (inline) topic = inline[1].trim();
+                }
+            } catch (_) {}
+            return { name, full, mtime: stat.mtimeMs, title, topic };
+        })
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, 40);
+
+    stream.markdown(`📂 **${items.length} proposal draft(s) in \`outputs/_drafts/\`:**\n\n`);
+    for (const it of items) {
+        const when = new Date(it.mtime).toLocaleString();
+        const titleShown = it.title || it.name.replace(/\.yaml$/, "");
+        const topicShown = it.topic ? (it.topic.length > 120 ? it.topic.slice(0, 120) + "…" : it.topic) : "";
+        stream.markdown(`### ${titleShown}\n`);
+        stream.markdown(`*${when}*\n\n`);
+        if (topicShown) stream.markdown(`> ${topicShown}\n\n`);
+        stream.markdown(`Run: \`@fi /start ${it.full}\`\n\n`);
+        stream.markdown(`---\n\n`);
+    }
+}
+
 async function runProposal(
     promptArgs: string,
     stream: vscode.ChatResponseStream,
