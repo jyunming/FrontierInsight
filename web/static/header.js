@@ -45,7 +45,7 @@
                   </linearGradient>
                 </defs>
               </svg>
-              <span class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-gradient">Frontier Insight</span>
+              <span class="font-headline-lg text-[22px] md:text-[28px] leading-none tracking-tight text-gradient">Frontier Insight</span>
             </a>
             <div class="hidden md:flex items-center gap-6">
               <div class="fi-dropdown" id="fi-tools-dropdown">
