@@ -101,6 +101,16 @@ When the entire prior-work block is empty or unusable (the engine surfaces `"(no
 - `Anonymous` when used to hide that the author is invented
 - `Smith, J.`, `Smith and Lee`, `Doe, J.`, `Doe et al.`, `Jane Doe`, `John Smith`, `Lee, M.` — these are common stand-in names; if the prior-work block doesn't contain the real author, do NOT substitute one of these.
 - Any author surname you cannot trace back to a `[i]` entry in the prior-work block above.
+- `Prior work`, `Item-N`, `item-N`, `Reference N`, `Source N` — these are placeholder labels emitted by the literature formatter when the source had no usable title or author. **If you see an entry whose header looks like `[i] item-4` or `[i] (no title)`, skip that entry entirely — do not turn the slug into a fake author or title.**
+
+**No URL or DOI fabrication.** A citation's URL/DOI/arXiv-id MUST appear on the prior-work entry's second line as `DOI: 10.x/x` or `arXiv:NNNN.NNNNN` or `https://example.org/...`. If the prior-work entry has no URL/DOI, the citation goes out WITHOUT one — never invent:
+
+- A `frontierinsight.internal/...`, `internal-docs.*`, or similar internal-looking URL.
+- A `10.xxxx/xxxxx`-shaped placeholder DOI.
+- An `arXiv:2401.12345`-shaped placeholder ID (that specific ID was an example in an earlier prompt; treat any arXiv ID you didn't see in the prior-work block as fabricated).
+- A `https://example.com/...` or `https://doi.org/10....` URL constructed from the title.
+
+If you find yourself needing to "make the citation look complete", that's the signal to drop the citation, not pad it.
 
 If you find yourself reaching for any of the above to fill a slot, that is a signal to **delete the entire citation** instead. A shorter, honest References section beats one padded with placeholders. The Discussion can still engage with prior work in prose ("Earlier studies on EUV stochastic LER have generally established that ...") without naming a specific fabricated source.
 

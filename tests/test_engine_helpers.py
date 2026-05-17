@@ -619,9 +619,12 @@ def test_format_lit_uses_2000_char_window() -> None:
 
     long_body = "A" * 5000
     from core.knowledge import RetrievedDoc
-    docs = [RetrievedDoc(
-        content=long_body, metadata={"title": "huge paper"},
-    )]
+    # Include a year so the entry passes _is_citable (title alone is
+    # not enough — title-only entries get filtered upstream so the
+    # writer LLM never sees "[i] item-i" stubs that would tempt it to
+    # invent an author).
+    cite_meta = {"title": "huge paper", "year": 2024}
+    docs = [RetrievedDoc(content=long_body, metadata=cite_meta)]
     rendered = _format_lit(docs)
     # We render `[i] title\n<2000 chars of content>`; the content slice
     # is exactly _LIT_EXCERPT_CHARS, not the full body.
@@ -629,9 +632,7 @@ def test_format_lit_uses_2000_char_window() -> None:
     assert "A" * (_LIT_EXCERPT_CHARS + 1) not in rendered
 
     # Same invariant on the from-state path used during checkpoint resume.
-    state = {"literature": [{
-        "content": long_body, "metadata": {"title": "huge paper"},
-    }]}
+    state = {"literature": [{"content": long_body, "metadata": cite_meta}]}
     rendered_state = _format_lit_from_state(state)  # type: ignore[arg-type]
     assert "A" * _LIT_EXCERPT_CHARS in rendered_state
     assert "A" * (_LIT_EXCERPT_CHARS + 1) not in rendered_state

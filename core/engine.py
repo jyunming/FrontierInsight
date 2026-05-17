@@ -2382,16 +2382,47 @@ def _format_lit_excerpt(content: str, title: str) -> str:
     return excerpt
 
 
+def _is_citable(meta: dict[str, Any]) -> bool:
+    """An entry is citable if it has at least a real title AND
+    one identifying field (authors, year, venue, doi/url/arxiv).
+
+    Filters out partial loader output where only a path/slug exists
+    — those entries would render as ``[i] item-i`` or ``[i] (no title)``
+    and the LLM tends to fabricate author names / URLs to complete
+    the slot. Honesty > completeness on a thin retrieval pull.
+    """
+    title = (meta.get("title") or "").strip()
+    if not title:
+        return False
+    has_id = bool(
+        meta.get("authors")
+        or meta.get("year")
+        or meta.get("published")
+        or meta.get("venue")
+        or meta.get("publisher")
+        or meta.get("doi")
+        or meta.get("arxiv_id")
+        or meta.get("url")
+    )
+    return has_id
+
+
 def _format_lit(docs: list[RetrievedDoc]) -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
-    for i, d in enumerate(docs, start=1):
+    keep_idx = 0
+    for d in docs:
         meta = d.metadata or {}
-        title = meta.get("title") or meta.get("source") or f"item-{i}"
-        header = _format_lit_header(meta, i)
+        if not _is_citable(meta):
+            continue
+        keep_idx += 1
+        title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
+        header = _format_lit_header(meta, keep_idx)
         excerpt = _format_lit_excerpt(d.content, title)
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
+    if not lines:
+        return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
 
 
@@ -2400,12 +2431,18 @@ def _format_lit_from_state(state: QuestState) -> str:
     if not items:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
-    for i, item in enumerate(items, start=1):
+    keep_idx = 0
+    for item in items:
         meta = item.get("metadata") or {}
-        title = meta.get("title") or meta.get("source") or f"item-{i}"
-        header = _format_lit_header(meta, i)
+        if not _is_citable(meta):
+            continue
+        keep_idx += 1
+        title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
+        header = _format_lit_header(meta, keep_idx)
         excerpt = _format_lit_excerpt(item.get("content", "") or "", title)
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
+    if not lines:
+        return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
 
 
