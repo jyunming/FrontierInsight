@@ -1382,6 +1382,11 @@ def test_preflight_pdf_raises_on_missing_latex_only(
         return "/fake/pandoc" if name == "pandoc" else None
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
     monkeypatch.setattr(engine_mod.shutil, "which", fake_which)
+    # paper_mod._find_pdf_engine ALSO probes REPO_ROOT/tools/tectonic.*
+    # as a fallback. On a dev box where `--install-tectonic` has run,
+    # that file exists and the test thinks the engine IS reachable.
+    # Point REPO_ROOT at a clean tmp dir so the probe misses.
+    monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)
 
     engine = _make_engine_for_preflight(
         tmp_path, kinds=["paper_md", "paper_pdf"], require_pdf=True,

@@ -528,6 +528,12 @@ def test_paper_pdf_skipped_md_written_when_no_latex_engine(
     def fake_which(name):  # type: ignore[no-untyped-def]
         return "/fake/pandoc" if name == "pandoc" else None
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+    # ``_find_pdf_engine`` also checks REPO_ROOT/tools/tectonic.exe
+    # as a fallback (the path populated by `--install-tectonic`).
+    # If a real tectonic happens to be sitting there on the dev box,
+    # the test thinks pandoc-only is fine and skips the diagnostic.
+    # Repoint REPO_ROOT at a clean tmp dir so the lookup misses.
+    monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
@@ -657,6 +663,9 @@ def test_paper_pdf_skipped_md_overwritten_on_subsequent_failure(
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
+    # Repoint the repo-local tectonic lookup at a clean dir so a real
+    # `tools/tectonic.exe` on the dev box can't shadow the test.
+    monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
 
     # Run 1: no pandoc → no_pandoc reason.
