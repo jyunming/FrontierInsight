@@ -5,113 +5,105 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Frontier Insight — Research Quests</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Inter:wght@800;900&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script src="/static/theme.js"></script>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
 </head>
-<body class="font-body text-on-surface min-h-screen selection:bg-indigo-accent/40 selection:text-on-surface antialiased">
+<body class="bg-background text-on-surface min-h-screen flex flex-col font-body-md">
 
-<div id="fi-header-root" data-breadcrumb="Quests"></div>
+<div id="fi-header-root"></div>
 
-<main class="max-w-[1440px] mx-auto px-6 md:px-10 pt-28 pb-24">
+<main class="flex-grow flex flex-col px-margin-mobile md:px-margin-desktop max-w-max-width mx-auto w-full pt-24 pb-section-gap">
 
-<!-- Hero -->
-<section class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
-  <div>
-    <span class="font-mono text-label-mono text-cyan-accent uppercase">Dashboard</span>
-    <h1 class="font-display text-display-lg-mobile md:text-display-lg text-on-surface mt-2 mb-3 tracking-tight">Research Quests</h1>
-    <p class="text-on-surface-variant font-body text-body-lg max-w-xl">Every quest in this output directory. Click one for live status, paper preview, figures, and cost.</p>
-  </div>
-  <a href="/interview" class="btn-gradient text-white font-semibold text-body-md px-6 py-3 rounded-xl inline-flex items-center gap-2 self-start md:self-auto">
-    <span class="material-symbols-outlined">add</span>
-    <span>New Quest</span>
-  </a>
-</section>
-
-<!-- Stats -->
-<section id="quest-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10" style="display:none">
-  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
-    <span class="font-mono text-label-mono text-on-surface-variant uppercase">Total</span>
-    <div class="font-display text-4xl font-black mt-2 tabular-nums" id="stat-total">0</div>
-  </div>
-  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
-    <div class="flex justify-between items-start">
-      <span class="font-mono text-label-mono text-on-surface-variant uppercase">In progress</span>
-      <div class="w-2 h-2 rounded-full bg-tertiary pulse-lime mt-1"></div>
+  <!-- Hero -->
+  <header class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-section-gap">
+    <div>
+      <h1 class="font-headline-xl text-headline-lg-mobile md:text-headline-xl text-on-surface tracking-tighter">Research Quests</h1>
+      <p class="font-body-lg text-body-lg text-on-surface-variant max-w-xl mt-2">
+        Every quest in this output directory. Click one for live status, paper preview, figures, and per-call cost.
+      </p>
     </div>
-    <div class="font-display text-4xl font-black mt-2 tabular-nums text-tertiary" id="stat-running">0</div>
-  </div>
-  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
-    <span class="font-mono text-label-mono text-on-surface-variant uppercase">Complete</span>
-    <div class="font-display text-4xl font-black mt-2 tabular-nums text-secondary" id="stat-complete">0</div>
-  </div>
-  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
-    <span class="font-mono text-label-mono text-on-surface-variant uppercase">Needs revision</span>
-    <div class="font-display text-4xl font-black mt-2 tabular-nums text-primary" id="stat-revise">0</div>
-  </div>
-</section>
+    <a href="/interview" class="flex items-center gap-2 px-8 py-4 rounded-full bg-gradient-to-r from-primary-container to-secondary-container text-white font-bold shadow-[0_0_20px_rgba(79,70,229,0.3)] hover:shadow-[0_0_30px_rgba(79,70,229,0.5)] transition-all transform hover:-translate-y-1 active:scale-95 self-start md:self-auto">
+      <span class="material-symbols-outlined">add</span>
+      <span>New Quest</span>
+    </a>
+  </header>
 
-<!-- Filter toolbar -->
-<section class="flex flex-col md:flex-row items-stretch md:items-center gap-3 mb-6 px-4 py-3 bg-surface-container-lowest/70 rounded-full border border-border-subtle">
-  <div class="flex items-center gap-2 text-on-surface-variant bg-surface-container rounded-full px-4 py-2 border border-border-subtle focus-within:border-primary/50 transition-colors flex-1 max-w-md">
-    <span class="material-symbols-outlined text-[18px]">search</span>
-    <input id="search" type="text" placeholder="Search quest_id or provider…" class="bg-transparent border-none focus:ring-0 outline-none font-mono text-body-sm w-full text-on-surface placeholder:text-on-surface-variant/60 p-0" oninput="applyFilter()" style="background:transparent; border:none; padding:0; width:100%"/>
-  </div>
-  <div class="flex items-center gap-2">
-    <div class="relative">
-      <select id="status-filter" onchange="applyFilter()" class="appearance-none bg-surface-container-high text-on-surface font-mono text-label-mono uppercase pl-4 pr-8 py-2 rounded-full hover:bg-surface-container transition-colors" style="border:1px solid rgba(255,255,255,0.08); padding:0.5rem 2rem 0.5rem 1rem; width:auto">
-        <option value="">All statuses</option>
-        <option value="complete">Complete</option>
-        <option value="(running)">In progress</option>
-        <option value="revise">Needs revision</option>
-      </select>
-      <span class="material-symbols-outlined text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant">filter_list</span>
+  <!-- Stats -->
+  <section id="quest-stats" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-gutter mb-component-padding-md" style="display:none">
+    <div class="bg-surface-mid cyber-border p-6 rounded-xl hover:bg-surface-high transition-colors">
+      <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">Total</span>
+      <div class="font-headline-xl text-3xl font-black mt-2" id="stat-total">0</div>
     </div>
-    <div class="relative">
-      <select id="sort-by" onchange="applyFilter()" class="appearance-none bg-surface-container-high text-on-surface font-mono text-label-mono uppercase pl-4 pr-8 py-2 rounded-full hover:bg-surface-container transition-colors" style="border:1px solid rgba(255,255,255,0.08); padding:0.5rem 2rem 0.5rem 1rem; width:auto">
-        <option value="newest">Newest</option>
-        <option value="oldest">Oldest</option>
-        <option value="alpha">A → Z</option>
-      </select>
-      <span class="material-symbols-outlined text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant">swap_vert</span>
+    <div class="bg-surface-mid cyber-border p-6 rounded-xl hover:bg-surface-high transition-colors relative overflow-hidden">
+      <div class="flex justify-between items-start">
+        <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">In Progress</span>
+        <div class="w-2 h-2 rounded-full bg-status-success glow-pulse mt-1"></div>
+      </div>
+      <div class="font-headline-xl text-3xl font-black mt-2 text-status-success" id="stat-running">0</div>
     </div>
-  </div>
-  <div id="result-count" class="md:ml-auto font-mono text-label-mono text-on-surface-variant text-center md:text-right"></div>
-</section>
+    <div class="bg-surface-mid cyber-border p-6 rounded-xl hover:bg-surface-high transition-colors">
+      <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">Complete</span>
+      <div class="font-headline-xl text-3xl font-black mt-2 text-secondary" id="stat-complete">0</div>
+    </div>
+    <div class="bg-surface-mid cyber-border p-6 rounded-xl hover:bg-surface-high transition-colors">
+      <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">Needs Revision</span>
+      <div class="font-headline-xl text-3xl font-black mt-2 text-primary" id="stat-revise">0</div>
+    </div>
+  </section>
 
-<!-- Empty state -->
-<section id="empty-banner" class="hidden bg-surface-container-low/60 border border-dashed border-outline-variant rounded-2xl p-12 text-center my-8">
-  <svg class="empty-art mx-auto mb-4" style="width:64px;height:64px;color:rgba(199,196,216,0.4)" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <rect x="10" y="14" width="44" height="36" rx="3"></rect>
-    <line x1="10" y1="24" x2="54" y2="24"></line>
-    <circle cx="16" cy="19" r="1.2"></circle>
-    <circle cx="20" cy="19" r="1.2"></circle>
-    <path d="M22 38l6-6 6 6 12-12"></path>
-  </svg>
-  <h3 class="font-display font-bold text-headline-md mb-2">No quests yet</h3>
-  <p class="text-on-surface-variant text-body-md mb-6 max-w-md mx-auto">Run an end-to-end quest from the 14-question interview. It clarifies your topic, runs the experiment, and writes the paper.</p>
-  <a href="/interview" class="btn-gradient text-white font-semibold text-body-md px-6 py-3 rounded-xl inline-flex items-center gap-2">
-    <span class="material-symbols-outlined">add</span>
-    Start your first quest
-  </a>
-</section>
+  <!-- Filter bar -->
+  <section class="flex flex-col md:flex-row items-center gap-gutter bg-surface-mid p-component-padding-md rounded-xl border border-white/10 mb-component-padding-md">
+    <div class="flex items-center gap-2 text-on-surface-variant bg-surface-low rounded-full px-4 py-2 border border-white/10 focus-within:border-primary/50 transition-colors flex-1">
+      <span class="material-symbols-outlined text-[20px]">search</span>
+      <input id="search" type="text" placeholder="Search quest_id or provider…" class="bg-transparent border-none focus:ring-0 font-code-md text-code-md w-full text-on-surface placeholder:text-outline" oninput="applyFilter()" style="background:transparent;border:none;padding:0;width:100%"/>
+    </div>
+    <div class="hidden md:flex items-center gap-2">
+      <div class="relative">
+        <select id="status-filter" onchange="applyFilter()" class="appearance-none px-4 py-2 pr-8 rounded-full bg-surface-high border border-white/10 font-label-sm text-label-sm text-on-surface uppercase hover:bg-surface-container transition-colors" style="border:1px solid rgba(255,255,255,0.1);padding:0.5rem 2rem 0.5rem 1rem;width:auto">
+          <option value="">All statuses</option>
+          <option value="complete">Complete</option>
+          <option value="(running)">In progress</option>
+          <option value="revise">Needs revision</option>
+        </select>
+        <span class="material-symbols-outlined text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-outline">filter_list</span>
+      </div>
+      <div class="relative">
+        <select id="sort-by" onchange="applyFilter()" class="appearance-none px-4 py-2 pr-8 rounded-full bg-surface-high border border-white/10 font-label-sm text-label-sm text-on-surface uppercase hover:bg-surface-container transition-colors" style="border:1px solid rgba(255,255,255,0.1);padding:0.5rem 2rem 0.5rem 1rem;width:auto">
+          <option value="newest">Newest</option>
+          <option value="oldest">Oldest</option>
+          <option value="alpha">A → Z</option>
+        </select>
+        <span class="material-symbols-outlined text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-outline">swap_vert</span>
+      </div>
+    </div>
+    <div class="font-label-sm text-label-sm text-on-surface-variant" id="result-count"></div>
+  </section>
 
-<!-- Quest list -->
-<section id="quest-list" class="flex flex-col gap-3 mb-16"></section>
+  <!-- Empty state -->
+  <section id="empty-banner" class="hidden bg-surface-mid border border-dashed border-white/10 rounded-2xl p-12 text-center my-component-padding-md">
+    <span class="material-symbols-outlined text-6xl text-outline-variant mb-4">science</span>
+    <h3 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">No quests yet</h3>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-6 max-w-md mx-auto">Run an end-to-end quest from the 14-question interview. It clarifies your topic, runs the experiment, and writes the paper.</p>
+    <a href="/interview" class="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-gradient-to-r from-primary-container to-secondary-container text-white font-bold shadow-[0_0_20px_rgba(79,70,229,0.3)] hover:shadow-[0_0_30px_rgba(79,70,229,0.5)] transition-all">
+      <span class="material-symbols-outlined">add</span>
+      <span>Start your first quest</span>
+    </a>
+  </section>
+
+  <!-- Quest list -->
+  <section id="quest-list" class="flex flex-col gap-4 mb-section-gap"></section>
 
 </main>
 
 <!-- Footer -->
-<footer class="border-t border-border-subtle mt-20">
-  <div class="max-w-[1440px] mx-auto px-6 md:px-10 py-6 flex flex-col md:flex-row justify-between items-center gap-3">
-    <div class="font-mono text-label-mono text-on-surface-variant">
-      Frontier Insight · <span class="text-tertiary">live</span> · Apache 2.0
-    </div>
-    <div class="flex items-center gap-6 font-mono text-label-mono">
+<footer class="full-width bottom-0 bg-surface-low/60 backdrop-blur-[20px] border-t border-white/10 mt-auto">
+  <div class="flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto gap-4">
+    <div class="font-label-sm text-label-sm font-bold text-on-surface">© 2026 Frontier Insight · Apache 2.0</div>
+    <div class="flex items-center gap-8 font-label-sm text-label-sm">
       <a href="/settings" class="text-on-surface-variant hover:text-secondary transition-colors">Settings</a>
       <a href="/trash" class="text-on-surface-variant hover:text-secondary transition-colors">Trash</a>
       <a href="https://github.com/jyunming/FrontierInsight#readme" target="_blank" rel="noopener" class="text-on-surface-variant hover:text-secondary transition-colors">Docs</a>
@@ -144,9 +136,9 @@
       else if (q.verdict === 'revise') revise += 1;
     }
     document.getElementById('stat-total').textContent = allQuests.length;
-    document.getElementById('stat-running').textContent = running;
-    document.getElementById('stat-complete').textContent = complete;
-    document.getElementById('stat-revise').textContent = revise;
+    document.getElementById('stat-running').textContent = String(running).padStart(2, '0');
+    document.getElementById('stat-complete').textContent = String(complete).padStart(2, '0');
+    document.getElementById('stat-revise').textContent = String(revise).padStart(2, '0');
   }
 
   function applyFilter() {
@@ -172,41 +164,34 @@
     else filtered.sort((a, b) => (a.age_s || 0) - (b.age_s || 0));
     empty.classList.add('hidden');
     list.innerHTML = filtered.map(renderQuestCard).join('') ||
-      '<div class="text-center text-on-surface-variant py-12 font-body">No quests match the filter.</div>';
+      '<div class="text-center text-on-surface-variant py-12 font-body-md">No quests match the filter.</div>';
     count.textContent = `${filtered.length} of ${allQuests.length} quest${allQuests.length === 1 ? '' : 's'}`;
   }
 
   function renderQuestCard(q) {
     const s = describeState(q);
-    const provider = q.provider
-      ? `<span class="flex items-center gap-1"><span class="opacity-50">PROVIDER:</span><span>${escapeHtml(q.provider)}</span></span>`
-      : '';
-    const age = q.age_s != null
-      ? `<span class="flex items-center gap-1"><span class="opacity-50">AGE:</span><span>${formatAge(q.age_s)}</span></span>`
-      : '';
-    const score = q.score != null
-      ? `<span class="flex items-center gap-1"><span class="opacity-50">SCORE:</span><span class="${s.scoreCls}">${escapeHtml(String(q.score))}</span></span>`
-      : '';
+    const meta = [];
+    if (q.provider) meta.push(`<div class="flex items-center gap-1"><span class="opacity-50">PROVIDER:</span><span>${escapeHtml(q.provider)}</span></div>`);
+    if (q.age_s != null) meta.push(`<div class="flex items-center gap-1"><span class="opacity-50">AGE:</span><span>${formatAge(q.age_s)}</span></div>`);
+    if (q.score != null) meta.push(`<div class="flex items-center gap-1"><span class="opacity-50">SCORE:</span><span class="${s.scoreCls}">${escapeHtml(String(q.score))}</span></div>`);
     const paperChip = q.has_paper
-      ? `<span class="flex items-center gap-1 px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant font-mono text-[10px] border border-border-subtle uppercase">paper.md</span>`
+      ? `<span class="flex items-center gap-1 px-2 py-0.5 rounded bg-surface-high text-on-surface-variant font-label-sm text-[10px] border border-white/10 uppercase">paper.md</span>`
       : '';
     return `
-      <a href="/quest/${encodeURIComponent(q.quest_id)}" class="hairline-gradient p-5 rounded-xl flex items-center justify-between gap-4 cursor-pointer group block text-on-surface no-underline">
+      <a href="/quest/${encodeURIComponent(q.quest_id)}" class="hairline-border bg-surface-mid p-6 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:bg-surface-high transition-colors cursor-pointer group no-underline">
         <div class="flex flex-col gap-2 min-w-0 flex-1">
-          <div class="flex flex-wrap items-center gap-2.5">
-            <h3 class="font-mono text-headline-md text-on-surface truncate">${escapeHtml(q.quest_id)}</h3>
-            <span class="flex items-center gap-1.5 px-3 py-1 rounded-full ${s.pillBg} ${s.pillText} border ${s.pillBorder} font-mono text-[10px] uppercase tracking-wider">
+          <div class="flex items-center gap-3 flex-wrap">
+            <h3 class="font-code-md text-code-md text-primary break-all">${escapeHtml(q.quest_id)}</h3>
+            <span class="flex items-center gap-1.5 px-3 py-1 rounded-full ${s.pillBg} ${s.pillText} border ${s.pillBorder} font-label-sm text-[10px] uppercase tracking-wider">
               ${s.pillIcon}${s.label}
             </span>
             ${paperChip}
           </div>
-          <div class="flex flex-wrap items-center gap-x-6 gap-y-1 font-mono text-[11px] text-on-surface-variant uppercase tracking-wider">
-            ${provider}
-            ${age}
-            ${score}
+          <div class="flex items-center gap-6 font-label-sm text-label-sm text-outline uppercase flex-wrap">
+            ${meta.join('')}
           </div>
         </div>
-        <div class="opacity-0 group-hover:opacity-100 transition-opacity text-on-surface-variant">
+        <div class="opacity-0 group-hover:opacity-100 transition-opacity text-on-surface-variant pl-4">
           <span class="material-symbols-outlined">arrow_forward_ios</span>
         </div>
       </a>
@@ -214,16 +199,20 @@
   }
 
   function describeState(q) {
-    if (q.verdict === 'complete' || q.verdict === 'accept') {
-      return { label: 'Complete', pillBg: 'bg-secondary/10', pillText: 'text-secondary', pillBorder: 'border-secondary/30', pillIcon: '', scoreCls: 'text-secondary' };
-    }
-    if (q.verdict === 'revise') {
-      return { label: 'Revise', pillBg: 'bg-primary/10', pillText: 'text-primary', pillBorder: 'border-primary/30', pillIcon: '', scoreCls: 'text-primary' };
-    }
-    if (q.verdict === '(running)') {
-      return { label: 'Running', pillBg: 'bg-tertiary/10', pillText: 'text-tertiary', pillBorder: 'border-tertiary/30', pillIcon: '<span class="w-1.5 h-1.5 rounded-full bg-tertiary pulse-lime"></span>', scoreCls: 'text-tertiary' };
-    }
-    return { label: String(q.verdict || 'idle'), pillBg: 'bg-surface-container-highest', pillText: 'text-on-surface-variant', pillBorder: 'border-border-subtle', pillIcon: '', scoreCls: 'text-on-surface-variant' };
+    if (q.verdict === 'complete' || q.verdict === 'accept') return {
+      label: 'Complete', pillBg: 'bg-secondary/10', pillText: 'text-secondary', pillBorder: 'border-secondary/30', pillIcon: '', scoreCls: 'text-secondary',
+    };
+    if (q.verdict === 'revise') return {
+      label: 'Revise', pillBg: 'bg-status-warning/10', pillText: 'text-status-warning', pillBorder: 'border-status-warning/30', pillIcon: '', scoreCls: 'text-status-warning',
+    };
+    if (q.verdict === '(running)') return {
+      label: 'Running', pillBg: 'bg-status-success/10', pillText: 'text-status-success', pillBorder: 'border-status-success/30',
+      pillIcon: '<span class="w-1.5 h-1.5 rounded-full bg-status-success glow-pulse"></span>',
+      scoreCls: 'text-status-success',
+    };
+    return {
+      label: String(q.verdict || 'idle'), pillBg: 'bg-surface-high', pillText: 'text-on-surface-variant', pillBorder: 'border-white/10', pillIcon: '', scoreCls: 'text-on-surface-variant',
+    };
   }
 
   function formatAge(s) {

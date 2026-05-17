@@ -3,94 +3,125 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Frontier Insight — Settings</title>
+<title>Settings — Frontier Insight</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Inter:wght@800;900&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script src="/static/theme.js"></script>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
 </head>
-<body class="font-body text-on-surface min-h-screen antialiased">
-<div id="fi-header-root" data-breadcrumb="Settings"></div>
-<main class="max-w-[1080px] mx-auto px-6 md:px-10 pt-28 pb-24">
+<body class="bg-background text-on-background min-h-screen flex flex-col font-body-md selection:bg-primary-container selection:text-on-primary-container">
 
-<section class="fi-page-hero">
-  <h1>Settings</h1>
-  <p class="fi-subtitle">Inspect this server's configuration, the LLM provider availability on this machine, and run system tasks like installing Tectonic for PDF rendering.</p>
-</section>
+<div id="fi-header-root"></div>
 
-<h2 class="font-display text-2xl font-bold mt-12 mb-2">Provider availability</h2>
-<p class="fi-subtitle mb-4">Which LLM providers have working auth on this machine right now. <span class="text-tertiary">●</span> = ready; <span class="text-error">●</span> = needs setup.</p>
-<div id="providers" class="flex flex-col gap-3"></div>
+<main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop py-section-gap flex flex-col gap-section-gap">
 
-<h2 class="font-display text-2xl font-bold mt-12 mb-2">AxonStore knowledge base</h2>
-<p class="fi-subtitle mb-4">Where prior-work retrieval lives. Quests with <code class="font-mono text-cyan-accent">knowledge.enabled: true</code> read and write here. The interview default is <i>disabled</i>; quests started with that setting won't appear in the corpus until you re-ingest them below.</p>
-<div id="axon-info" class="hairline-gradient p-6 rounded-xl">Loading…</div>
-<div class="hairline-gradient p-6 rounded-xl mt-3 hidden" id="reingest-card">
-  <div class="flex items-center justify-between gap-4 mb-3">
-    <h3 class="font-display font-bold text-headline-md">Re-ingest existing quests</h3>
-  </div>
-  <p class="fi-subtitle mb-4">Walk <code class="font-mono text-cyan-accent">outputs/</code> and feed every quest's <code class="font-mono text-cyan-accent">paper/paper.md</code> into Axon as <code class="font-mono text-cyan-accent">kind=fi_quest_paper</code>. Idempotent — re-ingesting the same quest updates the existing doc.</p>
-  <div class="flex items-center gap-4">
-    <button class="btn-gradient text-white font-semibold text-body-sm px-5 py-2.5 rounded-lg" id="reingest-btn" onclick="reingest()">Re-ingest all quests</button>
-    <span id="reingest-status" class="font-mono text-label-mono text-on-surface-variant"></span>
-  </div>
-</div>
+  <section class="flex flex-col gap-4">
+    <h1 class="font-headline-xl text-headline-xl md:text-headline-xl text-headline-lg-mobile font-headline-lg-mobile text-on-surface">Settings</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
+      Inspect this server's configuration, the LLM provider availability on this machine, and run system tasks like installing tectonic for PDF rendering.
+    </p>
+  </section>
 
-<h2 class="font-display text-2xl font-bold mt-12 mb-2">System tasks</h2>
-<div class="hairline-gradient p-6 rounded-xl">
-  <div class="flex items-center justify-between gap-4 mb-3 flex-wrap">
-    <h3 class="font-display font-bold text-headline-md flex items-center gap-3">
-      <span class="material-symbols-outlined text-cyan-accent">picture_as_pdf</span>
-      Tectonic LaTeX
-    </h3>
-    <span id="tectonic-badge" class="fi-badge">checking…</span>
-  </div>
-  <p class="fi-subtitle mb-4">Downloads tectonic (~70 MB) into <code class="font-mono text-cyan-accent">tools/</code> so <code class="font-mono text-cyan-accent">paper.pdf</code> works without an admin install of MiKTeX. Self-bootstrapping — fetches CTAN packages on first compile.</p>
-  <div class="flex items-center gap-4 flex-wrap">
-    <button class="btn-gradient text-white font-semibold text-body-sm px-5 py-2.5 rounded-lg" id="tectonic-btn" onclick="installTectonic()">Install tectonic</button>
-    <span id="tectonic-status" class="font-mono text-label-mono text-on-surface-variant"></span>
-  </div>
-</div>
+  <section class="flex flex-col gap-6">
+    <div class="flex items-center justify-between border-b border-surface-high pb-4">
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">Provider availability</h2>
+    </div>
+    <div id="providers" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter"></div>
+  </section>
 
-<h2 class="font-display text-2xl font-bold mt-12 mb-2">Cost-aware provider choice</h2>
-<p class="fi-subtitle mb-4">FI talks to two billing models. The wrong pick can be a 5–10× cost difference on a long quest.</p>
-<div class="grid md:grid-cols-3 gap-4">
-  <div class="hairline-gradient p-5 rounded-xl">
-    <div class="font-mono text-label-mono text-tertiary uppercase mb-2">Per-call</div>
-    <h4 class="font-display font-bold text-lg mb-2">Copilot</h4>
-    <p class="text-on-surface-variant text-body-sm">Every LLM call is one "premium request" regardless of token count. Best for bursty heavy quests where a few large prompts dominate.</p>
-  </div>
-  <div class="hairline-gradient p-5 rounded-xl">
-    <div class="font-mono text-label-mono text-cyan-accent uppercase mb-2">Per-token</div>
-    <h4 class="font-display font-bold text-lg mb-2">OpenAI / Codex / Claude / Gemini</h4>
-    <p class="text-on-surface-variant text-body-sm">Prompt and completion tokens are priced separately. Best for long-running automations where you can keep prompts skinny. Cost charts on each quest show the running total.</p>
-  </div>
-  <div class="hairline-gradient p-5 rounded-xl">
-    <div class="font-mono text-label-mono text-electric-lime uppercase mb-2">Free</div>
-    <h4 class="font-display font-bold text-lg mb-2">Ollama</h4>
-    <p class="text-on-surface-variant text-body-sm">Runs on your machine. Quality varies; use for high-volume cheap nodes or airgapped runs.</p>
-  </div>
-</div>
+  <section class="flex flex-col gap-6">
+    <div class="flex items-center justify-between border-b border-surface-high pb-4">
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">AxonStore knowledge base</h2>
+    </div>
+    <div id="axon-info" class="gradient-border rounded-lg p-6 flex flex-col gap-6">Loading…</div>
+    <div id="reingest-card" class="hidden gradient-border rounded-lg p-6 flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <div>
+        <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">Re-ingest existing quests</h3>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">Walk <code class="font-code-md text-secondary">outputs/</code> and feed every quest's <code class="font-code-md text-secondary">paper/paper.md</code> into Axon. Idempotent — re-ingesting the same quest updates the existing doc.</p>
+      </div>
+      <div class="flex items-center gap-4 flex-wrap shrink-0">
+        <button id="reingest-btn" onclick="reingest()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-4 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity whitespace-nowrap">
+          Re-ingest all quests
+        </button>
+        <span id="reingest-status" class="font-label-sm text-label-sm text-on-surface-variant"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="flex flex-col gap-6">
+    <div class="flex items-center justify-between border-b border-surface-high pb-4">
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">System tasks</h2>
+    </div>
+    <div class="gradient-border-neutral rounded-lg p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <div class="flex flex-col gap-2">
+        <div class="flex items-center gap-3 flex-wrap">
+          <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">Tectonic LaTeX Compiler</h3>
+          <span id="tectonic-badge" class="font-label-sm text-label-sm px-2 py-1 rounded bg-surface-high text-on-surface-variant border border-surface-variant">CHECKING…</span>
+        </div>
+        <p class="font-body-md text-body-md text-on-surface-variant">Required for <code class="font-code-md text-secondary">paper.pdf</code> generation without an admin install of MiKTeX. ~70 MB download into <code class="font-code-md text-secondary">tools/</code>. Self-bootstrapping — fetches CTAN packages on first compile.</p>
+        <span id="tectonic-status" class="font-label-sm text-label-sm text-on-surface-variant mt-2"></span>
+      </div>
+      <button id="tectonic-btn" onclick="installTectonic()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-4 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity whitespace-nowrap">
+        Install Tectonic
+      </button>
+    </div>
+  </section>
 
 </main>
+
+<footer class="bg-surface-low/60 backdrop-blur-[20px] font-label-sm text-label-sm full-width bottom-0 border-t border-white/10 mt-section-gap">
+  <div class="flex flex-col gap-8 w-full px-margin-desktop py-component-padding-md max-w-max-width mx-auto">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-gutter py-6 border-b border-surface-high">
+      <div class="flex flex-col gap-2">
+        <span class="text-on-surface-variant uppercase">Per-call (Copilot)</span>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-status-success"></div>
+          <span class="text-status-success font-code-md text-code-md">1 LLM call = 1 premium request</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-2">
+        <span class="text-on-surface-variant uppercase">Per-token (cloud)</span>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-secondary"></div>
+          <span class="text-secondary font-code-md text-code-md">OpenAI · Codex · Claude · Gemini</span>
+        </div>
+      </div>
+      <div class="flex flex-col gap-2">
+        <span class="text-on-surface-variant uppercase">Free (Ollama)</span>
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-status-success"></div>
+          <span class="text-status-success font-code-md text-code-md">Local, self-hosted</span>
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-col md:flex-row justify-between items-center gap-4">
+      <span class="text-label-sm font-bold text-on-surface">© 2026 Frontier Insight · Apache 2.0</span>
+      <div class="flex items-center gap-4">
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/">Dashboard</a>
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/trash">Trash</a>
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight#readme" target="_blank" rel="noopener">Docs</a>
+        <a class="text-on-surface-variant hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </div>
+</footer>
 
 <script>
   async function loadProviders() {
     const res = await fetch('/api/providers/availability');
     const data = await res.json();
-    const html = data.providers.map(p => `
-      <div class="hairline-gradient p-5 rounded-xl">
-        <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
-          <h3 class="font-display font-bold text-lg flex items-center gap-2">
-            <span class="font-mono text-on-surface">${escapeHtml(p.label)}</span>
-          </h3>
-          <span class="fi-badge ${p.available ? 'fi-badge-done' : 'fi-badge-paused'}">${p.available ? '✓ ready' : '⚠ needs setup'}</span>
+    const html = (data.providers || []).map(p => `
+      <div class="gradient-border-neutral rounded-lg p-6 flex flex-col gap-4">
+        <div class="flex justify-between items-start gap-3">
+          <span class="font-code-md text-code-md uppercase text-on-surface break-words">${escapeHtml(p.label)}</span>
+          <span class="font-label-sm text-label-sm px-2 py-1 rounded ${p.available ? 'bg-status-success/10 text-status-success border border-status-success/20' : 'bg-status-warning/10 text-status-warning border border-status-warning/20'} whitespace-nowrap">
+            ${p.available ? 'READY' : 'SETUP REQUIRED'}
+          </span>
         </div>
-        <p class="text-on-surface-variant text-body-sm">${escapeHtml(p.description)}</p>
+        <p class="font-body-md text-body-md text-on-surface-variant">${escapeHtml(p.description)}</p>
       </div>`).join('');
     document.getElementById('providers').innerHTML = html;
   }
@@ -103,16 +134,16 @@
       const btn = document.getElementById('tectonic-btn');
       const status = document.getElementById('tectonic-status');
       if (data.installed) {
-        badge.textContent = '✓ installed';
-        badge.className = 'fi-badge fi-badge-done';
+        badge.textContent = 'INSTALLED';
+        badge.className = 'font-label-sm text-label-sm px-2 py-1 rounded bg-status-success/10 text-status-success border border-status-success/20';
         btn.disabled = true;
+        btn.classList.add('opacity-50','cursor-not-allowed');
         btn.textContent = 'Already installed';
         status.textContent = `at ${data.location} (${data.source})`;
       } else {
-        badge.textContent = 'not installed';
-        badge.className = 'fi-badge fi-badge-paused';
+        badge.textContent = 'NOT INSTALLED';
+        badge.className = 'font-label-sm text-label-sm px-2 py-1 rounded bg-status-warning/10 text-status-warning border border-status-warning/20';
         btn.disabled = false;
-        btn.textContent = 'Install tectonic';
         status.textContent = '';
       }
     } catch (_) {}
@@ -124,28 +155,15 @@
     btn.disabled = true;
     status.textContent = 'starting…';
     const res = await fetch('/api/system/install-tectonic', {method: 'POST'});
-    if (!res.ok) {
-      status.textContent = 'failed: ' + await res.text();
-      btn.disabled = false;
-      return;
-    }
+    if (!res.ok) { status.textContent = 'failed: ' + await res.text(); btn.disabled = false; return; }
     const body = await res.json();
-    if (body.already_present) {
-      status.textContent = `already installed at ${body.location}; no action taken.`;
-      btn.disabled = true;
-      return;
-    }
+    if (body.already_present) { status.textContent = `already installed at ${body.location}; no action taken.`; btn.disabled = true; return; }
     const jobId = body.job_id;
-    status.innerHTML = `started (job <code class="font-mono">${escapeHtml(jobId)}</code>, pid ${body.pid}). Polling for completion…`;
+    status.innerHTML = `started (job <code class="font-code-md">${escapeHtml(jobId)}</code>, pid ${body.pid}). Polling…`;
     let tries = 0;
     const poller = setInterval(async () => {
       tries += 1;
-      if (tries > 100) {
-        clearInterval(poller);
-        status.textContent = 'gave up after 5 minutes — check outputs/_logs/ for the install log.';
-        btn.disabled = false;
-        return;
-      }
+      if (tries > 100) { clearInterval(poller); status.textContent = 'gave up after 5 minutes — check outputs/_logs/ for the install log.'; btn.disabled = false; return; }
       try {
         const r = await fetch(`/api/system/tectonic?job_id=${encodeURIComponent(jobId)}`);
         if (!r.ok) return;
@@ -153,25 +171,15 @@
         if (d.installed) { clearInterval(poller); checkTectonic(); return; }
         const js = d.job_status || {};
         if (js.alive === false && js.exit_code != null) {
-          clearInterval(poller);
-          btn.disabled = false;
-          const code = js.exit_code;
-          let html = `<b class="text-error">Install failed</b> (subprocess exited with code ${code}).`;
-          if (js.log_tail && js.log_tail.length) {
-            html += `<pre class="mt-2 max-h-60 overflow-auto">${escapeHtml(js.log_tail.join('\n'))}</pre>`;
-          } else {
-            html += `<br>Check <code class="font-mono">outputs/_logs/${escapeHtml(jobId)}.log</code> for details.`;
-          }
+          clearInterval(poller); btn.disabled = false;
+          let html = `<b class="text-error">Install failed</b> (exit ${js.exit_code}).`;
+          if (js.log_tail?.length) html += `<pre class="mt-2 max-h-60 overflow-auto">${escapeHtml(js.log_tail.join('\n'))}</pre>`;
           status.innerHTML = html;
         } else if (js.alive) {
           status.textContent = `running (pid ${js.pid}, ${Math.round(js.age_seconds)}s)…`;
         }
       } catch (_) {}
     }, 3000);
-  }
-
-  function escapeHtml(s) {
-    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   async function loadAxonInfo() {
@@ -182,46 +190,68 @@
       const reingestCard = document.getElementById('reingest-card');
       if (!data.available) {
         el.innerHTML = `
-          <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
-            <h3 class="font-display font-bold text-headline-md">Axon not available</h3>
-            <span class="fi-badge fi-badge-paused">⚠ not configured</span>
-          </div>
-          <p class="fi-subtitle">${escapeHtml(data.reason || '(no reason given)')}</p>`;
+          <div class="flex justify-between items-center flex-wrap gap-3">
+            <div>
+              <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">Axon not available</h3>
+              <p class="font-body-md text-body-md text-on-surface-variant mt-1">${escapeHtml(data.reason || '(no reason given)')}</p>
+            </div>
+            <span class="font-label-sm text-label-sm px-2 py-1 rounded bg-status-warning/10 text-status-warning border border-status-warning/20">NOT CONFIGURED</span>
+          </div>`;
         reingestCard.classList.add('hidden');
         return;
       }
       reingestCard.classList.remove('hidden');
-      const storePath = data.store_path || '(not exposed by this Axon version)';
-      const bm25 = data.bm25_path;
+      reingestCard.classList.add('flex');
       const bySource = data.doc_counts_by_source || {};
-      const totalDocs = data.total_documents;
-      const totalChunks = data.total_chunks;
-      const countsError = data.counts_error;
-      const countsNote = data.counts_note;
-      const sourceRows = Object.keys(bySource).sort().map(s => `
-        <tr class="border-b border-border-subtle">
-          <td class="font-mono py-1.5 pr-6 text-cyan-accent">${escapeHtml(s)}</td>
-          <td class="py-1.5 text-on-surface-variant">${escapeHtml(String(bySource[s]))} chunks</td>
-        </tr>`).join('');
       el.innerHTML = `
-        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-          <h3 class="font-display font-bold text-headline-md">Axon corpus</h3>
-          <span class="fi-badge fi-badge-done">✓ available</span>
+        <div class="flex justify-between items-center flex-wrap gap-3">
+          <div>
+            <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">${escapeHtml(data.project || '(default)')}</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant mt-1">${escapeHtml(data.store_path || 'Axon vector store')}</p>
+          </div>
+          <span class="font-label-sm text-label-sm px-2 py-1 rounded bg-status-success/10 text-status-success border border-status-success/20">AVAILABLE</span>
         </div>
-        <div class="space-y-1 mb-3 text-body-sm">
-          <p><span class="text-on-surface-variant">Project:</span> <code class="font-mono text-cyan-accent">${escapeHtml(data.project || '(default)')}</code> ${data.project_error ? `<span class="text-error">(${escapeHtml(data.project_error)})</span>` : ''}</p>
-          <p><span class="text-on-surface-variant">Store base:</span> <code class="font-mono text-cyan-accent">${escapeHtml(storePath)}</code></p>
-          ${bm25 ? `<p><span class="text-on-surface-variant">BM25 index:</span> <code class="font-mono text-cyan-accent">${escapeHtml(bm25)}</code></p>` : ''}
-          <p><span class="text-on-surface-variant">Documents:</span> ${totalDocs != null ? escapeHtml(String(totalDocs)) : '?'} · <span class="text-on-surface-variant">Chunks:</span> ${totalChunks != null ? escapeHtml(String(totalChunks)) : '?'}</p>
+        <div class="grid grid-cols-3 gap-4 border-y border-surface-high py-4">
+          <div class="flex flex-col">
+            <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Total Chunks</span>
+            <span class="font-code-md text-code-md text-on-surface mt-1">${data.total_chunks ?? '?'}</span>
+          </div>
+          <div class="flex flex-col">
+            <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Documents</span>
+            <span class="font-code-md text-code-md text-on-surface mt-1">${data.total_documents ?? '?'}</span>
+          </div>
+          <div class="flex flex-col">
+            <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Sources</span>
+            <span class="font-code-md text-code-md text-on-surface mt-1">${Object.keys(bySource).length}</span>
+          </div>
         </div>
-        <details class="mb-3">
-          <summary class="cursor-pointer text-on-surface-variant hover:text-secondary text-body-sm">AxonConfig (secrets redacted)</summary>
-          <pre class="mt-2 max-h-72 overflow-auto text-xs">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
+        ${Object.keys(bySource).length > 0 ? `
+        <details class="group">
+          <summary class="font-label-sm text-label-sm uppercase text-primary cursor-pointer hover:text-secondary transition-colors select-none flex items-center gap-2">
+            <span class="material-symbols-outlined text-[16px] group-open:rotate-90 transition-transform">chevron_right</span>
+            Chunks by source
+          </summary>
+          <table class="mt-3 w-full text-sm">
+            <tbody>
+              ${Object.keys(bySource).sort().map(s => `
+                <tr class="border-b border-surface-high">
+                  <td class="font-code-md py-2 pr-6 text-secondary">${escapeHtml(s)}</td>
+                  <td class="py-2 text-on-surface-variant">${escapeHtml(String(bySource[s]))} chunks</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </details>` : ''}
+        <details class="group">
+          <summary class="font-label-sm text-label-sm uppercase text-primary cursor-pointer hover:text-secondary transition-colors select-none flex items-center gap-2">
+            <span class="material-symbols-outlined text-[16px] group-open:rotate-90 transition-transform">chevron_right</span>
+            View AxonConfig (secrets redacted)
+          </summary>
+          <div class="mt-4 p-4 bg-surface-low rounded border border-surface-high overflow-x-auto">
+            <pre class="font-code-md text-code-md text-on-surface-variant text-sm">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
+          </div>
         </details>
-        <h4 class="font-display font-bold mb-2">Chunks by source</h4>
-        ${countsError ? `<p class="text-error text-body-sm mb-2">${escapeHtml(countsError)}</p>` : ''}
-        ${Object.keys(bySource).length === 0 ? '<p class="text-on-surface-variant text-body-sm">Empty corpus. Run a quest with <code class="font-mono">knowledge.enabled: true</code>, or click "Re-ingest" below to backfill from existing quest outputs.</p>' : `<table class="w-full text-body-sm"><tbody>${sourceRows}</tbody></table>`}
-        ${countsNote ? `<p class="text-on-surface-variant text-body-sm mt-3 italic">${escapeHtml(countsNote)}</p>` : ''}`;
+        ${data.counts_error ? `<p class="text-error text-body-sm">${escapeHtml(data.counts_error)}</p>` : ''}
+        ${data.counts_note ? `<p class="text-on-surface-variant text-body-sm italic">${escapeHtml(data.counts_note)}</p>` : ''}`;
     } catch (e) {
       document.getElementById('axon-info').textContent = `Error: ${e}`;
     }
@@ -234,19 +264,16 @@
     status.textContent = 'walking outputs/…';
     try {
       const res = await fetch('/api/knowledge/reingest', {method: 'POST'});
-      if (!res.ok) {
-        status.textContent = 'failed: ' + await res.text();
-        btn.disabled = false;
-        return;
-      }
+      if (!res.ok) { status.textContent = 'failed: ' + await res.text(); btn.disabled = false; return; }
       const data = await res.json();
-      status.textContent = `ingested ${data.ingested} of ${data.total} quest${data.total === 1 ? '' : 's'}. Reload to see new counts.`;
+      status.textContent = `ingested ${data.ingested} of ${data.total} quest${data.total === 1 ? '' : 's'}.`;
       loadAxonInfo();
-    } catch (e) {
-      status.textContent = 'error: ' + e;
-    } finally {
-      btn.disabled = false;
-    }
+    } catch (e) { status.textContent = 'error: ' + e; }
+    finally { btn.disabled = false; }
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   loadProviders();

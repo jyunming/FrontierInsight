@@ -3,10 +3,9 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Frontier Insight — Compare</title>
+<title>Compare two quests — Frontier Insight</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Inter:wght@800;900&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script src="/static/theme.js"></script>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script>tailwind.config = window._fiConfig;</script>
@@ -14,39 +13,65 @@
 <script defer src="/static/header.js"></script>
 <script defer src="/static/md_lite.js"></script>
 </head>
-<body class="font-body text-on-surface min-h-screen antialiased">
-<div id="fi-header-root" data-breadcrumb="Compare"></div>
-<main class="max-w-[1440px] mx-auto px-6 md:px-10 pt-28 pb-24">
+<body class="bg-background text-on-background font-body-md min-h-screen flex flex-col">
 
-<section class="fi-page-hero">
-  <h1>Compare two quests</h1>
-  <p class="fi-subtitle">Side-by-side paper preview, verdict, and cost. Useful for "did my tweak help?" — pick two quests from the dropdowns or pass <code class="font-mono text-cyan-accent">?a=…&amp;b=…</code> in the URL.</p>
-</section>
+<div id="fi-header-root"></div>
 
-<div class="flex items-center gap-3 mb-6 flex-wrap">
-  <label class="font-mono text-label-mono text-on-surface-variant uppercase">A:</label>
-  <select id="pick-a" onchange="loadBoth()" class="max-w-md"></select>
-  <span class="text-on-surface-variant font-mono text-label-mono uppercase">vs</span>
-  <label class="font-mono text-label-mono text-on-surface-variant uppercase">B:</label>
-  <select id="pick-b" onchange="loadBoth()" class="max-w-md"></select>
-</div>
+<main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop py-section-gap flex flex-col gap-component-padding-md">
 
-<div class="grid lg:grid-cols-2 gap-4">
-  <div class="hairline-gradient p-6 rounded-xl max-h-[70vh] overflow-y-auto">
-    <h3 id="title-a" class="font-mono text-headline-md text-on-surface mb-1 truncate"></h3>
-    <p id="meta-a" class="font-mono text-label-mono text-on-surface-variant uppercase mb-4"></p>
-    <h4 class="font-display font-bold mb-2">Paper</h4>
-    <div class="fi-md-body" id="paper-a"></div>
+  <header class="flex flex-col gap-component-padding-sm mb-component-padding-md">
+    <h1 class="font-headline-xl text-headline-xl text-on-surface">Compare two quests</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
+      Side-by-side paper preview, verdict, and cost. Useful for "did my tweak help?" — pick two quests from the dropdowns or pass <code class="font-code-md text-secondary">?a=…&amp;b=…</code> in the URL.
+    </p>
+  </header>
+
+  <div class="flex flex-col md:flex-row items-center gap-gutter bg-surface-mid p-component-padding-md rounded-xl border border-white/10 mb-component-padding-md">
+    <div class="flex-1 flex items-center gap-component-padding-sm w-full">
+      <span class="font-label-sm text-label-sm text-outline uppercase whitespace-nowrap">Quest A</span>
+      <div class="relative flex-1">
+        <select id="pick-a" onchange="loadBoth()" class="bg-surface-low border border-white/10 text-on-surface font-code-md text-code-md rounded p-component-padding-sm pr-8 focus:border-primary focus:ring-1 focus:ring-primary w-full appearance-none"></select>
+        <span class="material-symbols-outlined text-outline pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">arrow_drop_down</span>
+      </div>
+    </div>
+    <div class="flex-1 flex items-center gap-component-padding-sm w-full">
+      <span class="font-label-sm text-label-sm text-outline uppercase whitespace-nowrap">Quest B</span>
+      <div class="relative flex-1">
+        <select id="pick-b" onchange="loadBoth()" class="bg-surface-low border border-white/10 text-on-surface font-code-md text-code-md rounded p-component-padding-sm pr-8 focus:border-primary focus:ring-1 focus:ring-primary w-full appearance-none"></select>
+        <span class="material-symbols-outlined text-outline pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">arrow_drop_down</span>
+      </div>
+    </div>
   </div>
-  <div class="hairline-gradient p-6 rounded-xl max-h-[70vh] overflow-y-auto">
-    <h3 id="title-b" class="font-mono text-headline-md text-on-surface mb-1 truncate"></h3>
-    <p id="meta-b" class="font-mono text-label-mono text-on-surface-variant uppercase mb-4"></p>
-    <h4 class="font-display font-bold mb-2">Paper</h4>
-    <div class="fi-md-body" id="paper-b"></div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-gutter h-[716px] min-h-[500px]">
+    <div class="bg-surface-container rounded-xl border border-white/10 flex flex-col overflow-hidden">
+      <div class="bg-surface-high p-component-padding-md border-b border-white/10 flex flex-col gap-component-padding-xs">
+        <h3 id="title-a" class="font-code-md text-code-md text-primary break-all">—</h3>
+        <div id="meta-a" class="flex items-center gap-component-padding-sm font-label-sm text-label-sm text-on-surface-variant uppercase flex-wrap">(pick a quest)</div>
+      </div>
+      <div class="flex-grow overflow-y-auto p-component-padding-md font-body-md text-body-md text-on-surface fi-md-body" id="paper-a"></div>
+    </div>
+    <div class="bg-surface-container rounded-xl border border-gradient-to-b from-primary/30 to-secondary/30 flex flex-col overflow-hidden shadow-[0_0_40px_rgba(195,192,255,0.05)]">
+      <div class="bg-surface-high p-component-padding-md border-b border-white/10 flex flex-col gap-component-padding-xs">
+        <h3 id="title-b" class="font-code-md text-code-md text-secondary break-all">—</h3>
+        <div id="meta-b" class="flex items-center gap-component-padding-sm font-label-sm text-label-sm text-on-surface-variant uppercase flex-wrap">(pick a quest)</div>
+      </div>
+      <div class="flex-grow overflow-y-auto p-component-padding-md font-body-md text-body-md text-on-surface fi-md-body" id="paper-b"></div>
+    </div>
   </div>
-</div>
 
 </main>
+
+<footer class="bg-surface-low/60 backdrop-blur-[20px] font-label-sm text-label-sm full-width bottom-0 border-t border-white/10 mt-section-gap">
+  <div class="flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto">
+    <div class="text-label-sm font-bold text-on-surface mb-component-padding-sm md:mb-0">© 2026 Frontier Insight · Apache 2.0</div>
+    <div class="flex gap-gutter">
+      <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/">Dashboard</a>
+      <a class="text-on-surface-variant hover:text-secondary transition-colors" href="/settings">Settings</a>
+      <a class="text-on-surface-variant hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
 
 <script>
   async function init() {
@@ -57,7 +82,7 @@
     const b = document.getElementById('pick-b');
     for (const sel of [a, b]) {
       sel.innerHTML = '<option value="">(pick a quest)</option>'
-        + quests.map(q => `<option value="${q.quest_id}">${q.quest_id}</option>`).join('');
+        + quests.map(q => `<option value="${escapeHtml(q.quest_id)}">${escapeHtml(q.quest_id)}</option>`).join('');
     }
     const params = new URLSearchParams(window.location.search);
     if (params.get('a')) a.value = params.get('a');
@@ -79,25 +104,26 @@
     title.textContent = qid;
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(qid)}`);
-      if (!res.ok) {
-        meta.textContent = `Error ${res.status}`;
-        paper.innerHTML = '';
-        return;
-      }
+      if (!res.ok) { meta.textContent = `Error ${res.status}`; paper.innerHTML = ''; return; }
       const data = await res.json();
       const verdict = data.review?.verdict || data.summary?.verdict || '(no review)';
       const score = data.review?.score ?? '?';
       const cost = await fetchCost(qid);
-      meta.textContent = `verdict: ${verdict} · score ${score} · cost $${cost.toFixed(4)}`;
+      const pillColor = verdict === 'accept' || verdict === 'complete' ? 'text-status-success'
+                       : verdict === 'revise' ? 'text-status-warning' : 'text-on-surface-variant';
+      const icon = verdict === 'accept' || verdict === 'complete' ? 'check_circle'
+                  : verdict === 'revise' ? 'warning' : 'help';
+      meta.innerHTML = `
+        <span class="${pillColor} flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">${icon}</span> ${escapeHtml(verdict)}</span>
+        <span>•</span><span>Score: ${escapeHtml(String(score))}</span>
+        <span>•</span><span>Cost: $${cost.toFixed(4)}</span>
+      `;
       if (data.paper_preview && window.fi_renderMarkdown) {
         paper.innerHTML = window.fi_renderMarkdown(data.paper_preview);
       } else {
         paper.textContent = data.paper_preview || '(no paper yet)';
       }
-    } catch (e) {
-      meta.textContent = `Error: ${e}`;
-      paper.innerHTML = '';
-    }
+    } catch (e) { meta.textContent = `Error: ${e}`; paper.innerHTML = ''; }
   }
 
   async function fetchCost(qid) {
@@ -107,6 +133,10 @@
       const data = await res.json();
       return (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
     } catch (_) { return 0; }
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   init();

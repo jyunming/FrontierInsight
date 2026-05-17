@@ -1,16 +1,14 @@
-// Frontier Insight — shared glass-blur top nav (Obsidian Frontier theme).
+// Frontier Insight — shared top nav, ported from Stitch's UI Framework
+// markup verbatim. Every web app page embeds <div id="fi-header-root">
+// and loads this script with `defer`; we replace that node with:
 //
-// Every page embeds <div id="fi-header-root" data-breadcrumb="..."> and
-// loads this script with `defer`. We replace that node with the sticky
-// nav: FI logo wordmark + beta tag + breadcrumb + Tools dropdown +
-// Compare/Trash/Settings/GitHub icons.
+//   <nav class="docked full-width top-0 sticky bg-surface-low/60 backdrop-blur-[20px] border-b border-white/10 z-50">
+//     [FI gradient wordmark]    [Tools dropdown] [Compare]    [+ New Quest gradient CTA] [trash/settings/github icons]
 //
 // Tools dropdown items are fetched from /api/tools/schema so the menu
 // stays in sync with web/tools_routes.py without re-touching this file.
 
 (function () {
-  // Fallback list if /api/tools/schema is unreachable. Matches the
-  // names in web/tools_routes.py::TOOL_SPECS — keep them aligned.
   const TOOLS_FALLBACK = [
     { name: 'proposal',  label: 'Proposal'  },
     { name: 'critique',  label: 'Critique'  },
@@ -25,12 +23,11 @@
   function renderHeader() {
     const root = document.getElementById('fi-header-root');
     if (!root) return;
-    const breadcrumb = root.dataset.breadcrumb || '';
     root.outerHTML = `
-      <nav class="fixed top-0 left-0 right-0 z-50 glass-panel border-b border-border-subtle">
-        <div class="max-w-[1440px] mx-auto px-6 md:px-10 h-16 flex items-center justify-between">
-          <div class="flex items-center gap-5">
-            <a href="/" class="flex items-center gap-2 group" title="Frontier Insight dashboard">
+      <nav class="full-width top-0 sticky bg-surface-low/60 backdrop-blur-[20px] border-b border-white/10 z-50">
+        <div class="flex justify-between items-center w-full px-margin-mobile md:px-margin-desktop h-16 max-w-max-width mx-auto">
+          <div class="flex items-center gap-8">
+            <a href="/" class="flex items-center gap-3 group" title="Frontier Insight dashboard">
               <svg viewBox="0 0 40 40" class="w-8 h-8 rounded-lg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                 <defs>
                   <linearGradient id="hdrG" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
@@ -41,43 +38,41 @@
                 <rect width="40" height="40" rx="8" fill="url(#hdrG)"/>
                 <path d="M12 10H28M12 20H24M12 30H20" stroke="white" stroke-width="3" stroke-linecap="round"/>
               </svg>
-              <span class="font-display font-extrabold text-headline-md tracking-tight group-hover:text-primary transition-colors">Frontier Insight</span>
-              <span class="font-mono text-label-mono px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant uppercase border border-border-subtle">beta</span>
+              <span class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-gradient">Frontier Insight</span>
             </a>
-            <div class="hidden md:flex items-center gap-4 text-on-surface-variant">
-              <span class="opacity-30 font-mono">/</span>
-              <span class="text-primary font-mono text-label-mono uppercase border-b border-primary pb-1">${escapeHtml(breadcrumb || 'Quests')}</span>
+            <div class="hidden md:flex items-center gap-6">
               <div class="fi-dropdown" id="fi-tools-dropdown">
-                <button class="fi-dropdown-toggle" type="button" onclick="window._fiToggleTools(event)">
-                  Tools <span class="material-symbols-outlined text-[14px] -mr-1">expand_more</span>
+                <button class="fi-dropdown-toggle text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" type="button" onclick="window._fiToggleTools(event)">
+                  <span>Tools</span>
+                  <span class="material-symbols-outlined text-[18px]">expand_more</span>
                 </button>
                 <div class="fi-dropdown-menu" role="menu" id="fi-tools-menu">
                   ${renderToolsItems(TOOLS_FALLBACK)}
                 </div>
               </div>
-              <a href="/compare" class="font-mono text-label-mono uppercase hover:text-primary transition-colors">Compare</a>
+              <a class="text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" href="/compare">Compare</a>
             </div>
           </div>
-          <div class="flex items-center gap-1.5">
-            <a href="/interview" class="hidden sm:inline-flex btn-gradient text-white font-semibold text-body-sm px-4 py-2 rounded-lg items-center gap-1.5">
-              <span class="material-symbols-outlined text-[18px]">add</span>
-              <span class="hidden md:inline">New Quest</span>
+          <div class="flex items-center gap-4">
+            <a href="/interview" class="hidden md:inline-flex items-center gap-1 bg-gradient-to-r from-primary-container to-secondary-container text-on-primary-container font-label-sm text-label-sm px-4 py-2 rounded uppercase tracking-wider hover:opacity-90 transition-opacity">
+              <span class="material-symbols-outlined text-[16px]">add</span>
+              <span>New Quest</span>
             </a>
-            <a href="/trash" class="p-2 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-primary" title="Trash">
-              <span class="material-symbols-outlined text-[20px]">delete</span>
-            </a>
-            <a href="/settings" class="p-2 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-primary" title="Settings">
-              <span class="material-symbols-outlined text-[20px]">settings</span>
-            </a>
-            <a href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener" class="p-2 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-primary" title="GitHub">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.63 22.41c.58.1.79-.25.79-.56v-2c-3.22.7-3.9-1.39-3.9-1.39-.53-1.35-1.3-1.71-1.3-1.71-1.06-.72.08-.7.08-.7 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.75.41-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.74 0-1.27.46-2.31 1.2-3.12-.12-.3-.52-1.49.11-3.1 0 0 .98-.31 3.2 1.19a11.04 11.04 0 0 1 5.83 0c2.22-1.5 3.2-1.19 3.2-1.19.63 1.61.23 2.8.11 3.1.75.81 1.2 1.85 1.2 3.12 0 4.46-2.71 5.45-5.29 5.74.42.36.79 1.06.79 2.15v3.19c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>
-            </a>
+            <div class="flex items-center gap-3 text-on-surface-variant">
+              <a href="/trash" class="hover:text-primary transition-colors duration-200" title="Trash">
+                <span class="material-symbols-outlined">delete</span>
+              </a>
+              <a href="/settings" class="hover:text-primary transition-colors duration-200" title="Settings">
+                <span class="material-symbols-outlined">settings</span>
+              </a>
+              <a href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener" class="hover:text-primary transition-colors duration-200" title="GitHub">
+                <span class="material-symbols-outlined">terminal</span>
+              </a>
+            </div>
           </div>
         </div>
       </nav>
     `;
-    // Refresh the Tools menu from the live API so it stays in sync
-    // with web/tools_routes.py without redeploying the JS bundle.
     refreshToolsMenu();
   }
 

@@ -1,97 +1,151 @@
-/* Frontier Insight — Obsidian Frontier shared stylesheet.
+/* Frontier Insight — shared stylesheet, lifted from Stitch's UI Framework.
  *
- * Companion to /static/theme.js (which sets the Tailwind config).
- * This file holds the bits Tailwind utilities can't express cleanly:
- *  - Body background (dot-grid radial pattern on obsidian black).
- *  - Glassmorphism utility (.glass-panel) used by the sticky nav.
- *  - Gradient hairline border (.hairline-gradient) used by quest cards
- *    and feature blocks — needs background-clip trickery.
- *  - Pulsing animation (.pulse-lime) for live-status dots.
- *  - Gradient button (.btn-gradient) — the primary CTA across the app.
- *  - Markdown body styling (.fi-md-body) used by the paper preview.
+ * The custom utility classes (`hairline-border`, `cyber-border`,
+ * `text-gradient`, `glow-pulse`, `glass-nav`) come from Stitch's own
+ * generation across the 6 web app screens. Every page reuses the same
+ * Tailwind config in /static/theme.js and the same classes here so
+ * the visual language stays unified.
  *
- * Loaded by every page; works alongside Tailwind utilities so pages
- * can mix and match: `class="glass-panel border-b border-border-subtle"`.
+ * Legacy `.fi-*` classes (used by quest.html's existing JS — review
+ * panels, badges, log tail, paper preview) are mapped onto the same
+ * Stitch tokens so the old markup keeps rendering in the new theme.
  */
 
 /* ─────────────────────────────────────────────────────────────────
- * Reset / base
+ * Stitch UI-framework utilities (verbatim from generation)
  * ───────────────────────────────────────────────────────────────── */
 
-* { box-sizing: border-box; }
-
-html, body {
-  margin: 0;
-  padding: 0;
-  background-color: #0a0a0a;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
-  background-size: 24px 24px;
-  color: #e5e2e1;
-  font-family: 'Geist', 'Inter', system-ui, -apple-system, sans-serif;
-  font-size: 15px;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: "ss01", "cv11";
+.hairline-border { position: relative; }
+.hairline-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+}
+.hairline-border-active::before {
+  background: linear-gradient(to bottom right, #c3c0ff, #4cd7f6);
 }
 
-/* ─────────────────────────────────────────────────────────────────
- * Shared utility classes (referenced from page templates)
- * ───────────────────────────────────────────────────────────────── */
-
-.glass-panel {
-  background: rgba(10, 10, 10, 0.7);
-  backdrop-filter: blur(28px) saturate(140%);
-  -webkit-backdrop-filter: blur(28px) saturate(140%);
-}
-
-.hairline-gradient {
+/* Older synonym (quest_detail uses cyber-border / cyber-border-active) */
+.cyber-border { border: 1px solid rgba(255, 255, 255, 0.1); }
+.cyber-border-active {
   border: 1px solid transparent;
-  background-image:
-    linear-gradient(#121212, #121212),
-    linear-gradient(135deg, #4f46e5, #4cd7f6, transparent 70%);
-  background-origin: border-box;
-  background-clip: padding-box, border-box;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-.hairline-gradient:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 12px 32px -16px rgba(79, 70, 229, 0.4);
+  background:
+    linear-gradient(to right, #131313, #131313) padding-box,
+    linear-gradient(to right, #c3c0ff, #4cd7f6) border-box;
 }
 
-.btn-gradient {
-  background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
-    0 8px 24px -8px rgba(79, 70, 229, 0.55);
-  transition: box-shadow 0.15s ease, transform 0.05s ease;
-}
-.btn-gradient:hover {
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.3),
-    0 12px 32px -8px rgba(79, 70, 229, 0.75);
-}
-.btn-gradient:active { transform: translateY(1px); }
-
-.pulse-lime {
-  box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.6);
-  animation: fi-pulse 2s infinite;
-}
-@keyframes fi-pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.6); }
-  70%  { box-shadow: 0 0 0 8px rgba(228, 242, 34, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0); }
-}
-
-.text-gradient-cool {
-  background: linear-gradient(90deg, #c3c0ff 0%, #4cd7f6 100%);
+.text-gradient {
+  background: linear-gradient(to bottom right, #c3c0ff, #4cd7f6);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
+.glow-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+
+.glass-nav {
+  background: rgba(13, 28, 45, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* `gradient-border` + `gradient-border-neutral` — used by settings + other
+ * subpages. Same idea as hairline-border but rendered via ::before with
+ * a gradient/neutral background. Hex values inlined since plain CSS
+ * can't call `theme()`. */
+.gradient-border {
+  position: relative;
+  background: #122131;             /* surface-mid */
+  background-clip: padding-box;
+  border: 1px solid transparent;
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  z-index: -1;
+  margin: -1px;
+  border-radius: inherit;
+  background: linear-gradient(to right, #c3c0ff, #4cd7f6);  /* primary → secondary */
+  opacity: 0.2;
+  transition: opacity 0.2s ease-in-out;
+}
+.gradient-border:hover::before { opacity: 0.6; }
+
+.gradient-border-neutral {
+  position: relative;
+  background: #122131;
+  background-clip: padding-box;
+  border: 1px solid transparent;
+}
+.gradient-border-neutral::before {
+  content: '';
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  z-index: -1;
+  margin: -1px;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* `hairline-gradient` (+ `hairline-gradient-active`) — used by the tool
+ * form fieldsets. Same masking technique as hairline-border but in a
+ * diagonal direction. */
+.hairline-gradient { position: relative; }
+.hairline-gradient::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(to bottom right, rgba(255,255,255,0.1), rgba(255,255,255,0.02));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+}
+.hairline-gradient-active::before {
+  background: linear-gradient(to bottom right, #c3c0ff, #4cd7f6);
+}
+
+/* Glowing focus state for inputs inside `.input-glow` containers. */
+.input-glow:focus-within {
+  box-shadow: 0 0 15px -3px rgba(195, 192, 255, 0.3);
+  border-color: #c3c0ff;
+}
+
+/* Subtle radial gradient backdrop used on the tool form page. */
+.bg-cyber-gradient {
+  background:
+    radial-gradient(circle at top right,   rgba(195, 192, 255, 0.05) 0%, transparent 40%),
+    radial-gradient(circle at bottom left, rgba(76, 215, 246, 0.05) 0%, transparent 40%);
+}
+
+/* Diff highlighting (compare page) */
+.diff-added   { background-color: rgba(164, 214, 76, 0.1);  border-left: 2px solid #a4d64c; }
+.diff-removed { background-color: rgba(255, 180, 171, 0.1); border-left: 2px solid #ffb4ab; text-decoration: line-through; color: #918fa1; }
+
+/* Body reset to match Stitch markup (`body class="bg-background ..."`).
+ * Tailwind utilities handle most of this, but ensure no leftover margin. */
+html, body {
+  margin: 0;
+  padding: 0;
+}
+* { box-sizing: border-box; }
+
 /* ─────────────────────────────────────────────────────────────────
- * Form controls — dark theme override for native elements
+ * Form controls — dark theme overrides for native elements
  * ───────────────────────────────────────────────────────────────── */
 
 input[type="text"],
@@ -101,42 +155,35 @@ input[type="password"],
 input[type="search"],
 textarea,
 select {
-  background: #1c1b1b;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #122131;             /* surface-mid */
+  border: 1px solid rgba(255, 255, 255, 0.1);
   color: #e5e2e1;
-  border-radius: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  font-family: inherit;
+  border-radius: 0.25rem;
+  padding: 0.55rem 0.75rem;
+  font-family: 'Geist', sans-serif;
   font-size: 0.9375rem;
-  line-height: 1.45;
+  line-height: 1.5;
   transition: border-color 0.12s, box-shadow 0.12s;
   width: 100%;
 }
-input[type="text"]:focus,
-input[type="number"]:focus,
-input[type="email"]:focus,
-input[type="password"]:focus,
-input[type="search"]:focus,
-textarea:focus,
-select:focus {
+input:focus, textarea:focus, select:focus {
   outline: none;
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.2);
+  border-color: #c3c0ff;           /* primary */
+  box-shadow: 0 0 0 3px rgba(195, 192, 255, 0.18);
 }
 textarea { min-height: 4rem; resize: vertical; }
-
-input[type="checkbox"], input[type="radio"] {
-  accent-color: #4f46e5;
-}
+input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
 
 /* ─────────────────────────────────────────────────────────────────
- * Cards + containers (legacy + new naming kept side by side)
+ * Legacy `.fi-*` — quest.html's dynamic JS writes these class names
+ * for review panels, badges, banners, log tail, paper preview.
+ * Mapped onto Stitch tokens so the old JS keeps working.
  * ───────────────────────────────────────────────────────────────── */
 
 .fi-card {
-  background: #1c1b1b;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.75rem;
+  background: #122131;             /* surface-mid */
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.5rem;
   padding: 1.25rem;
   margin-bottom: 1rem;
 }
@@ -151,7 +198,7 @@ input[type="checkbox"], input[type="radio"] {
   margin: 0;
   font-family: 'Inter', sans-serif;
   font-size: 1.05rem;
-  font-weight: 600;
+  font-weight: 700;
   color: #e5e2e1;
 }
 .fi-card-meta {
@@ -159,26 +206,25 @@ input[type="checkbox"], input[type="radio"] {
   font-size: 0.875rem;
 }
 
-/* Status badges */
 .fi-badge {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.2rem 0.7rem;
+  padding: 0.25rem 0.7rem;
   border-radius: 999px;
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  background: #2a2a2a;
+  background: rgba(28, 43, 60, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #c7c4d8;
 }
 .fi-badge-alive {
-  background: rgba(228, 242, 34, 0.1);
-  border-color: rgba(228, 242, 34, 0.3);
-  color: #E4F222;
+  background: rgba(164, 214, 76, 0.12);
+  border-color: rgba(164, 214, 76, 0.35);
+  color: #a4d64c;
 }
 .fi-badge-paused {
   background: rgba(255, 180, 171, 0.1);
@@ -187,84 +233,84 @@ input[type="checkbox"], input[type="radio"] {
 }
 .fi-badge-done {
   background: rgba(76, 215, 246, 0.1);
-  border-color: rgba(76, 215, 246, 0.3);
+  border-color: rgba(76, 215, 246, 0.35);
   color: #4cd7f6;
 }
-
-/* ─────────────────────────────────────────────────────────────────
- * Buttons (legacy .fi-btn naming kept for back-compat with quest.html)
- * ───────────────────────────────────────────────────────────────── */
 
 .fi-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.6rem 1.1rem;
-  font-family: 'Inter', sans-serif;
-  font-size: 0.9rem;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
   font-weight: 600;
-  border-radius: 0.5rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 0.25rem;
   border: 1px solid transparent;
   cursor: pointer;
   text-decoration: none;
-  transition: background 0.12s, border-color 0.12s, transform 0.05s;
-  line-height: 1.2;
+  transition: all 0.15s ease;
 }
 .fi-btn:active { transform: translateY(1px); }
 .fi-btn-primary {
-  background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
-  color: white;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  background: linear-gradient(to right, #4f46e5, #03b5d4);
+  color: #dad7ff;
+  font-weight: 700;
+  box-shadow: 0 0 16px rgba(79, 70, 229, 0.3);
 }
-.fi-btn-primary:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3), 0 6px 20px -6px rgba(79, 70, 229, 0.6); }
+.fi-btn-primary:hover {
+  box-shadow: 0 0 28px rgba(79, 70, 229, 0.5);
+  transform: translateY(-1px);
+}
 .fi-btn-secondary {
-  background: #2a2a2a;
+  background: #122131;
   color: #e5e2e1;
-  border-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
 }
-.fi-btn-secondary:hover { border-color: rgba(255, 255, 255, 0.24); }
+.fi-btn-secondary:hover { background: #1c2b3c; }
 .fi-btn-danger {
   background: transparent;
   color: #ffb4ab;
-  border-color: rgba(255, 180, 171, 0.3);
+  border-color: rgba(255, 180, 171, 0.5);
 }
-.fi-btn-danger:hover { background: rgba(255, 180, 171, 0.08); }
+.fi-btn-danger:hover { background: rgba(255, 180, 171, 0.1); }
 .fi-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* ─────────────────────────────────────────────────────────────────
- * Form helpers (interview, tool form)
- * ───────────────────────────────────────────────────────────────── */
-
+/* Form helpers — fieldset / legend look (interview, tool form) */
 .fi-form fieldset {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.5rem;
   margin: 0 0 1.25rem;
   padding: 1.25rem 1.5rem;
-  background: #1c1b1b;
+  background: #122131;
 }
 .fi-form legend {
   font-family: 'Inter', sans-serif;
-  font-weight: 600;
+  font-weight: 700;
   color: #e5e2e1;
   padding: 0 0.5rem;
+  font-size: 0.95rem;
 }
 .fi-form .prompt {
   color: #c7c4d8;
+  font-family: 'Geist', sans-serif;
   font-size: 0.875rem;
-  margin: 0.25rem 0 0.85rem;
-  line-height: 1.5;
+  margin: 0.3rem 0 0.9rem;
+  line-height: 1.55;
 }
 .fi-form input.pinned,
 .fi-form textarea.pinned,
 .fi-form select.pinned {
-  background: rgba(79, 70, 229, 0.08);
+  background: rgba(79, 70, 229, 0.1);
   color: #c7c4d8;
   cursor: not-allowed;
 }
 .fi-form .fi-checkbox-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.6rem;
   margin: 1.25rem 0;
 }
 .fi-form .fi-checkbox-row input[type="checkbox"] {
@@ -272,51 +318,47 @@ input[type="checkbox"], input[type="radio"] {
   height: auto;
 }
 
-/* ─────────────────────────────────────────────────────────────────
- * Code + monospace
- * ───────────────────────────────────────────────────────────────── */
-
+/* Code + monospace */
 pre, code, .fi-mono {
-  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
 }
 pre {
-  background: #0e0e0e;
+  background: #0d1c2d;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.5rem;
-  padding: 0.85rem 1rem;
+  border-radius: 0.25rem;
+  padding: 0.9rem 1.1rem;
   overflow-x: auto;
   font-size: 0.8125rem;
-  line-height: 1.5;
+  line-height: 1.55;
   color: #e5e2e1;
 }
 code {
-  background: #2a2a2a;
+  background: rgba(28, 43, 60, 0.6);
   padding: 0.1em 0.4em;
   border-radius: 0.25rem;
   font-size: 0.85em;
+  color: #e5e2e1;
 }
 
-/* Log tail */
+/* Log tail (quest.html) */
 .fi-log {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.8125rem;
-  line-height: 1.55;
-  background: #050505;
+  line-height: 1.6;
+  background: #0d1c2d;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.75rem;
+  border-radius: 0.5rem;
   padding: 1rem;
-  max-height: 400px;
+  max-height: 420px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
   color: #c7c4d8;
 }
 
-/* ─────────────────────────────────────────────────────────────────
- * Rendered Markdown (paper preview)
- * ───────────────────────────────────────────────────────────────── */
-
+/* Rendered Markdown (paper preview, compare) */
 .fi-md-body {
+  font-family: 'Geist', sans-serif;
   font-size: 0.9375rem;
   line-height: 1.65;
   color: #e5e2e1;
@@ -333,15 +375,15 @@ code {
 .fi-md-body h3 { font-size: 1.1em; font-weight: 600; }
 .fi-md-body p { margin: 0.5em 0; }
 .fi-md-body code {
-  background: #2a2a2a;
+  background: rgba(28, 43, 60, 0.6);
   padding: 0.1em 0.35em;
   border-radius: 0.25rem;
   font-size: 0.85em;
 }
 .fi-md-body pre {
-  background: #0e0e0e;
+  background: #0d1c2d;
   padding: 0.9em 1.1em;
-  border-radius: 0.5rem;
+  border-radius: 0.25rem;
   overflow-x: auto;
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -359,26 +401,17 @@ code {
 }
 .fi-md-body table.fi-md-table th,
 .fi-md-body table.fi-md-table td {
-  padding: 0.55em 0.8em;
+  padding: 0.6em 0.85em;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   text-align: left;
 }
-.fi-md-body table.fi-md-table th {
-  font-weight: 600;
-  background: #1c1b1b;
-}
-.fi-md-body ul, .fi-md-body ol {
-  margin: 0.5em 0;
-  padding-left: 1.5em;
-}
-.fi-md-body img { max-width: 100%; border-radius: 0.5rem; }
+.fi-md-body table.fi-md-table th { font-weight: 700; background: #0d1c2d; }
+.fi-md-body ul, .fi-md-body ol { margin: 0.5em 0; padding-left: 1.5em; }
+.fi-md-body img { max-width: 100%; border-radius: 0.25rem; }
 .fi-md-body a { color: #4cd7f6; text-decoration: underline; }
 .fi-md-body a:hover { color: #c3c0ff; }
 
-/* ─────────────────────────────────────────────────────────────────
- * Figures grid
- * ───────────────────────────────────────────────────────────────── */
-
+/* Figures grid */
 .fi-figures {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -388,24 +421,22 @@ code {
 .fi-figures img {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.5rem;
+  border-radius: 0.25rem;
   background: white;
 }
 
-/* ─────────────────────────────────────────────────────────────────
- * Banners (info / error)
- * ───────────────────────────────────────────────────────────────── */
-
+/* Banners */
 .fi-banner {
-  padding: 0.85rem 1.1rem;
-  border-radius: 0.5rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: 0.25rem;
   margin-bottom: 1rem;
+  font-family: 'Geist', sans-serif;
   font-size: 0.9rem;
   border: 1px solid;
 }
 .fi-banner-info {
   background: rgba(76, 215, 246, 0.08);
-  border-color: rgba(76, 215, 246, 0.3);
+  border-color: rgba(76, 215, 246, 0.35);
   color: #4cd7f6;
 }
 .fi-banner-error {
@@ -414,14 +445,11 @@ code {
   color: #ffb4ab;
 }
 
-/* ─────────────────────────────────────────────────────────────────
- * File browser tree (quest.html)
- * ───────────────────────────────────────────────────────────────── */
-
+/* File browser tree */
 #files-tree details {
   margin: 0.25rem 0;
   padding: 0.25rem 0.5rem;
-  border-radius: 0.4rem;
+  border-radius: 0.25rem;
 }
 #files-tree details:hover { background: rgba(255, 255, 255, 0.04); }
 #files-tree summary { cursor: pointer; user-select: none; }
@@ -429,180 +457,107 @@ code {
 #files-tree a { color: #4cd7f6; text-decoration: none; }
 #files-tree a:hover { text-decoration: underline; }
 
-/* ─────────────────────────────────────────────────────────────────
- * Section blocks (used on quest detail to group content)
- * ───────────────────────────────────────────────────────────────── */
-
+/* Section blocks (used on quest detail for the bento grid items) */
 section.fi-section {
-  background: #1c1b1b;
+  background: #122131;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.75rem;
+  border-radius: 0.5rem;
   padding: 1.5rem 1.75rem;
   margin: 1.5rem 0;
 }
-section.fi-section h2 {
+section.fi-section > h2 {
   font-family: 'Inter', sans-serif;
   margin: 0 0 0.8rem;
-  font-size: 1.2rem;
+  font-size: 1.25rem;
   font-weight: 700;
   color: #e5e2e1;
+  letter-spacing: -0.01em;
 }
-section.fi-section p.fi-subtitle {
+section.fi-section > p.fi-subtitle {
   color: #c7c4d8;
+  font-family: 'Geist', sans-serif;
   font-size: 0.9rem;
   margin: 0 0 0.85rem;
 }
 
-/* Page hero (used by every secondary page) */
-.fi-page-hero {
-  position: relative;
-  padding: 2rem 2rem 2.25rem;
-  margin-bottom: 1.75rem;
-  border-radius: 1rem;
-  background:
-    radial-gradient(ellipse 480px 220px at 5% 0%, rgba(79, 70, 229, 0.15) 0%, transparent 60%),
-    #1c1b1b;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-.fi-page-hero h1 {
-  font-family: 'Inter', sans-serif;
-  font-size: clamp(1.75rem, 3vw, 2.25rem);
-  font-weight: 900;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.4rem;
-  color: #e5e2e1;
-}
-.fi-page-hero p.fi-subtitle {
-  margin: 0;
-  color: #c7c4d8;
-  font-size: 0.95rem;
-  max-width: 64ch;
-}
-.fi-page-hero-actions {
-  position: absolute;
-  top: 2rem;
-  right: 2rem;
-  display: inline-flex;
-  gap: 0.5rem;
-}
-@media (max-width: 640px) {
-  .fi-page-hero { padding: 1.5rem 1.25rem; }
-  .fi-page-hero-actions { position: static; margin-top: 1rem; }
-}
-
-/* ─────────────────────────────────────────────────────────────────
- * Empty states
- * ───────────────────────────────────────────────────────────────── */
-
-.fi-empty {
-  text-align: center;
-  padding: 3rem 1rem;
-  color: #c7c4d8;
-  font-size: 0.95rem;
-}
-.fi-empty-rich {
-  text-align: center;
-  padding: 3.5rem 1rem;
-  background: rgba(28, 27, 27, 0.6);
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-  border-radius: 1rem;
-  color: #c7c4d8;
-}
-.fi-empty-rich .fi-empty-art {
-  width: 64px; height: 64px;
-  margin: 0 auto 1rem;
-  color: rgba(199, 196, 216, 0.4);
-}
-.fi-empty-rich h3 {
-  font-family: 'Inter', sans-serif;
-  margin: 0 0 0.4rem;
-  color: #e5e2e1;
-  font-size: 1.1rem;
-  font-weight: 700;
-}
-.fi-empty-rich p {
-  margin: 0 0 1.2rem;
-  font-size: 0.9rem;
-}
-
-/* ─────────────────────────────────────────────────────────────────
- * Subtitle (used outside hero too)
- * ───────────────────────────────────────────────────────────────── */
-
 .fi-subtitle {
   color: #c7c4d8;
+  font-family: 'Geist', sans-serif;
   font-size: 0.95rem;
 }
 
-/* Progress indicator (interview) */
+/* Progress chip (interview) */
 .fi-progress {
   position: sticky;
-  top: 80px;
-  background: rgba(10, 10, 10, 0.85);
+  top: 90px;
+  background: rgba(13, 28, 45, 0.85);
   backdrop-filter: blur(12px);
   padding: 0.6rem 1rem;
-  margin-bottom: 1rem;
-  color: #c7c4d8;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  z-index: 30;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.5rem;
-}
-
-/* ─────────────────────────────────────────────────────────────────
- * Tools dropdown (header)
- * ───────────────────────────────────────────────────────────────── */
-
-.fi-dropdown { position: relative; display: inline-block; }
-.fi-dropdown-toggle {
-  background: none;
-  border: none;
+  margin-bottom: 1.25rem;
   color: #c7c4d8;
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  padding: 0.3rem 0.5rem;
+  z-index: 30;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  display: inline-block;
+}
+
+/* Empty state */
+.fi-empty {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: #c7c4d8;
+  font-family: 'Geist', sans-serif;
+  font-size: 0.95rem;
+}
+
+/* Tools dropdown (used in header.js) */
+.fi-dropdown { position: relative; display: inline-block; }
+.fi-dropdown-toggle {
+  background: none;
+  border: none;
+  color: #c7c4d8;
+  font-family: 'Geist', sans-serif;
+  font-weight: 500;
+  padding: 0.25rem 0;
   cursor: pointer;
-  border-radius: 0.35rem;
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  transition: color 0.12s, background 0.12s;
+  transition: color 0.12s;
 }
-.fi-dropdown-toggle:hover { color: #c3c0ff; background: rgba(255, 255, 255, 0.04); }
+.fi-dropdown-toggle:hover { color: #c3c0ff; }
 .fi-dropdown-menu {
   display: none;
   position: absolute;
   top: 100%;
   left: 0;
-  margin-top: 0.4rem;
-  background: rgba(20, 20, 20, 0.95);
+  margin-top: 0.6rem;
+  background: rgba(13, 28, 45, 0.95);
   backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 0.6rem;
-  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.7);
-  min-width: 220px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.5rem;
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.8);
+  min-width: 200px;
   padding: 0.4rem;
   z-index: 100;
 }
 .fi-dropdown.open .fi-dropdown-menu { display: block; }
 .fi-dropdown-menu a {
   display: block;
-  padding: 0.5rem 0.8rem;
+  padding: 0.5rem 0.85rem;
   color: #e5e2e1;
   text-decoration: none;
-  font-size: 0.85rem;
+  font-size: 0.875rem;
   font-family: 'Geist', sans-serif;
-  border-radius: 0.4rem;
+  border-radius: 0.25rem;
   transition: background 0.1s;
 }
-.fi-dropdown-menu a:hover { background: rgba(79, 70, 229, 0.15); color: #c3c0ff; }
+.fi-dropdown-menu a:hover { background: rgba(79, 70, 229, 0.18); color: #c3c0ff; }
 .fi-dropdown-menu hr {
   margin: 0.3rem 0;
   border: none;

@@ -3,33 +3,53 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Frontier Insight — New Quest</title>
+<title>New Quest — Frontier Insight</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Inter:wght@800;900&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script src="/static/theme.js"></script>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
 </head>
-<body class="font-body text-on-surface min-h-screen antialiased">
-<div id="fi-header-root" data-breadcrumb="New Quest"></div>
-<main class="max-w-[860px] mx-auto px-6 md:px-10 pt-28 pb-24">
+<body class="bg-background text-on-background antialiased selection:bg-primary-container selection:text-on-primary-container min-h-screen flex flex-col font-body-md text-body-md">
 
-<section class="fi-page-hero">
-  <h1 id="page-title">New Research Quest</h1>
-  <p class="fi-subtitle" id="page-subtitle">Loading questions…</p>
-</section>
+<div id="fi-header-root"></div>
 
-<div class="fi-progress hidden" id="progress">
-  Question <span id="progress-current">1</span> of <span id="progress-total">14</span>
-</div>
+<main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop py-section-gap relative">
 
-<form class="fi-form" id="interview-form" onsubmit="return submitForm(event);"></form>
-<div id="result" class="hidden"></div>
+  <!-- Sticky Progress Pill -->
+  <div id="progress-pill" class="hidden fixed top-24 right-margin-mobile md:right-margin-desktop z-40">
+    <div class="bg-surface-high border border-white/10 rounded-full px-4 py-2 flex items-center gap-2 shadow-[0_0_40px_rgba(195,192,255,0.1)] backdrop-blur-md">
+      <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+      <span class="font-label-sm text-label-sm uppercase text-on-surface tracking-wider">
+        Question <span id="progress-current">1</span> of <span id="progress-total">14</span>
+      </span>
+    </div>
+  </div>
+
+  <!-- Hero Header -->
+  <header class="mb-16 max-w-3xl">
+    <h1 id="page-title" class="font-headline-lg-mobile md:font-headline-xl text-headline-lg-mobile md:text-headline-xl text-on-surface mb-4">New Research Quest</h1>
+    <p id="page-subtitle" class="font-body-lg text-body-lg text-on-surface-variant">Loading questions…</p>
+  </header>
+
+  <!-- Interview Form (rendered dynamically from /api/interview/schema) -->
+  <form id="interview-form" onsubmit="return submitForm(event);" class="space-y-12 max-w-3xl"></form>
+
+  <div id="result" class="hidden max-w-3xl"></div>
 
 </main>
+
+<footer class="bg-surface-low/60 backdrop-blur-[20px] font-label-sm text-label-sm text-on-surface-variant full-width bottom-0 border-t border-white/10 flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto mt-section-gap">
+  <div class="text-label-sm font-bold text-on-surface mb-4 md:mb-0">Frontier Insight</div>
+  <div class="flex flex-wrap justify-center gap-4 md:gap-8 mb-4 md:mb-0">
+    <a class="hover:text-secondary transition-colors" href="/">Dashboard</a>
+    <a class="hover:text-secondary transition-colors" href="/settings">Settings</a>
+    <a class="hover:text-secondary transition-colors" href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener">GitHub</a>
+  </div>
+  <div class="text-center md:text-right">© 2026 Frontier Insight · Apache 2.0</div>
+</footer>
 
 <script>
   // Web interview — drives the same 14-question schema the CLI and
@@ -37,7 +57,6 @@
 
   const updateQuestId = window.__fi_update_quest_id || null;
   const isUpdate = !!updateQuestId;
-
   let schema = null;
 
   async function loadSchema() {
@@ -47,10 +66,10 @@
     const subtitle = document.getElementById('page-subtitle');
     if (isUpdate) {
       title.textContent = `Update Quest`;
-      subtitle.innerHTML = `Editing <code class="font-mono text-cyan-accent">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned to the existing YAML.`;
+      subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
     } else {
       title.textContent = 'New Research Quest';
-      subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write a draft YAML only).';
+      subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write draft YAML only).';
     }
     renderForm();
   }
@@ -60,50 +79,80 @@
     form.innerHTML = '';
     const visibleQs = schema.questions.filter((q) => q.frontends.includes('serve'));
     document.getElementById('progress-total').textContent = visibleQs.length;
-    let questionIdx = 0;
+    document.getElementById('progress-pill').classList.remove('hidden');
+    let idx = 0;
     for (const q of visibleQs) {
+      idx += 1;
       const editable = !isUpdate || schema.editable_fields.includes(q.id);
       const fs = document.createElement('fieldset');
-      const lg = document.createElement('legend');
-      lg.textContent = `${++questionIdx}. ${q.label}${editable ? '' : ' (pinned)'}`;
-      fs.appendChild(lg);
-      const prompt = document.createElement('div');
-      prompt.className = 'prompt';
-      prompt.textContent = q.prompt;
-      fs.appendChild(prompt);
-      const input = makeInput(q, editable);
-      fs.appendChild(input);
+      fs.className = editable
+        ? 'relative bg-surface-mid/80 border border-primary/30 p-8 rounded-lg group transition-all duration-300 shadow-[0_0_40px_rgba(195,192,255,0.04)]'
+        : 'relative bg-surface-mid border border-white/10 p-8 rounded-lg opacity-60 group transition-all duration-300';
+      const legend = document.createElement('legend');
+      legend.className = 'absolute -top-3 left-6 px-2 bg-surface-mid font-label-sm text-label-sm uppercase tracking-wider flex items-center gap-2 ' + (editable ? 'text-primary' : 'text-on-surface-variant');
+      legend.innerHTML = `${idx}. ${escapeHtml(q.label)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
+      fs.appendChild(legend);
+      const inner = document.createElement('div');
+      inner.className = 'space-y-4 relative z-10' + (editable ? '' : ' pointer-events-none');
+      // Field prompt
+      if (q.prompt) {
+        const p = document.createElement('p');
+        p.className = 'font-body-md text-body-md text-on-surface-variant italic opacity-80';
+        p.textContent = q.prompt;
+        inner.appendChild(p);
+      }
+      inner.appendChild(makeInput(q, editable));
+      fs.appendChild(inner);
       form.appendChild(fs);
     }
+    // Launch immediately checkbox (only for new quests).
     if (!isUpdate) {
       const row = document.createElement('div');
-      row.className = 'fi-checkbox-row';
+      row.className = 'pt-8 border-t border-white/10 flex flex-col gap-6';
       row.innerHTML = `
-        <input type="checkbox" id="launch-now" checked>
-        <label for="launch-now" class="text-on-surface-variant text-body-sm">Launch the quest immediately after submit (uncheck to write draft YAML only)</label>
+        <label class="flex items-start gap-3 cursor-pointer group">
+          <div class="relative flex items-center justify-center w-5 h-5 mt-1">
+            <input id="launch-now" checked class="peer appearance-none w-5 h-5 border border-white/20 rounded bg-surface-low checked:bg-primary checked:border-primary transition-colors cursor-pointer" type="checkbox"/>
+            <span class="material-symbols-outlined absolute text-surface text-[16px] opacity-0 peer-checked:opacity-100 pointer-events-none transition-opacity">check</span>
+          </div>
+          <span class="font-body-md text-body-md text-on-surface-variant group-hover:text-on-surface transition-colors">
+            Launch the quest immediately after submit (uncheck to write draft YAML only).
+          </span>
+        </label>
       `;
       form.appendChild(row);
     }
+    // Submit button.
     const submitRow = document.createElement('div');
-    submitRow.innerHTML = `<button type="submit" class="btn-gradient text-white font-semibold text-body-md px-6 py-3 rounded-lg inline-flex items-center gap-2"><span class="material-symbols-outlined">${isUpdate ? 'edit' : 'rocket_launch'}</span>${isUpdate ? 'Update Quest' : 'Create Quest'}</button>`;
+    submitRow.innerHTML = `
+      <button type="submit" class="w-full md:w-auto self-start bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
+        <span>${isUpdate ? 'Update Quest' : 'Launch Quest'}</span>
+        <span class="material-symbols-outlined text-[20px]">${isUpdate ? 'edit' : 'rocket_launch'}</span>
+      </button>
+    `;
     form.appendChild(submitRow);
-    document.getElementById('progress').classList.remove('hidden');
   }
 
   function makeInput(q, editable) {
     const id = `q-${q.id}`;
+    const base = 'w-full bg-surface-low border border-white/10 rounded p-4 text-on-surface font-body-md text-body-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors placeholder:text-on-surface-variant/50';
     if (q.kind === 'text') {
       const el = document.createElement('textarea');
       el.id = id; el.name = q.id;
+      el.className = base + ' resize-none';
+      el.rows = 4;
       if (q.placeholder) el.placeholder = q.placeholder;
       if (q.default !== null && q.default !== undefined) el.value = q.default;
-      if (!editable) { el.disabled = true; el.classList.add('pinned'); }
+      if (!editable) el.disabled = true;
       return el;
     }
     if (q.kind === 'single') {
+      const wrap = document.createElement('div');
+      wrap.className = 'relative';
       const sel = document.createElement('select');
       sel.id = id; sel.name = q.id;
-      if (!editable) { sel.disabled = true; sel.classList.add('pinned'); }
+      sel.className = base + ' appearance-none cursor-pointer pr-10';
+      if (!editable) sel.disabled = true;
       let choices = q.choices;
       if (q.id === 'provider_model') choices = [];
       const blank = document.createElement('option');
@@ -113,21 +162,25 @@
       const defaultEncoded = (q.default !== null && typeof q.default === 'object') ? JSON.stringify(q.default) : q.default;
       for (const c of choices) {
         const opt = document.createElement('option');
-        const valueEncoded = typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value);
-        opt.value = valueEncoded;
+        const ve = typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value);
+        opt.value = ve;
         opt.textContent = c.label;
         if (c.description) opt.title = c.description;
-        if (valueEncoded === String(defaultEncoded)) opt.selected = true;
+        if (ve === String(defaultEncoded)) opt.selected = true;
         sel.appendChild(opt);
       }
-      if (q.id === 'provider') {
-        sel.addEventListener('change', () => populateProviderModel(sel.value));
-      }
+      if (q.id === 'provider') sel.addEventListener('change', () => populateProviderModel(sel.value));
       sel.addEventListener('change', () => handleOtherSelection(sel, q));
-      return sel;
+      wrap.appendChild(sel);
+      const arrow = document.createElement('span');
+      arrow.className = 'material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-outline pointer-events-none';
+      arrow.textContent = 'expand_more';
+      wrap.appendChild(arrow);
+      return wrap;
     }
     const el = document.createElement('input');
     el.type = 'text'; el.id = id; el.name = q.id;
+    el.className = base;
     return el;
   }
 
@@ -137,11 +190,10 @@
     if (sel.value === '__OTHER__') {
       if (!other) {
         other = document.createElement('input');
-        other.type = 'text';
-        other.id = otherId;
-        other.placeholder = `type a value for ${q.label}…`;
-        other.style.marginTop = '0.5rem';
-        sel.insertAdjacentElement('afterend', other);
+        other.type = 'text'; other.id = otherId;
+        other.placeholder = `Type a value for ${q.label}…`;
+        other.className = 'w-full bg-surface-low border border-white/10 rounded p-4 text-on-surface font-body-md text-body-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors mt-2';
+        sel.parentElement.insertAdjacentElement('afterend', other);
       }
       other.style.display = '';
       other.focus();
@@ -157,8 +209,8 @@
     if (!sel) return;
     if (sel.tagName !== 'SELECT') {
       const replacement = document.createElement('select');
-      replacement.id = sel.id;
-      replacement.name = sel.name;
+      replacement.id = sel.id; replacement.name = sel.name;
+      replacement.className = sel.className || 'w-full bg-surface-low border border-white/10 rounded p-4 text-on-surface font-body-md text-body-md appearance-none cursor-pointer pr-10';
       sel.replaceWith(replacement);
       sel = replacement;
     }
@@ -194,7 +246,7 @@
         const other = document.getElementById(`q-${q.id}-other`);
         value = (other && other.value.trim()) || '';
         if (!value) {
-          alert(`Please type a value for "${q.label}" in the box that appeared, or pick one of the listed options.`);
+          alert(`Please type a value for "${q.label}", or pick one of the listed options.`);
           other && other.focus();
           return false;
         }
@@ -205,10 +257,7 @@
       out[q.id] = value;
     }
     if (!isUpdate) {
-      if (!out.topic || !String(out.topic).trim()) {
-        alert('Topic is required.');
-        return false;
-      }
+      if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
       if (!out.title || !String(out.title).trim()) {
         out.title = String(out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
       }
@@ -219,15 +268,12 @@
       if (!out.provider_model) out.provider_model = '';
     }
     const launchNow = !isUpdate && document.getElementById('launch-now')?.checked;
-    let endpoint;
-    if (isUpdate) {
-      endpoint = `/api/interview/update/${encodeURIComponent(updateQuestId)}`;
-    } else {
-      endpoint = launchNow ? '/api/interview/submit?launch=true' : '/api/interview/submit';
-    }
+    const endpoint = isUpdate
+      ? `/api/interview/update/${encodeURIComponent(updateQuestId)}`
+      : (launchNow ? '/api/interview/submit?launch=true' : '/api/interview/submit');
     const div = document.getElementById('result');
     div.classList.remove('hidden');
-    div.className = 'fi-banner fi-banner-info';
+    div.className = 'fi-banner fi-banner-info max-w-3xl';
     div.textContent = launchNow ? 'Submitting + launching…' : 'Writing draft YAML…';
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -235,9 +281,8 @@
       body: JSON.stringify(out),
     });
     if (!res.ok) {
-      const err = await res.text();
-      div.className = 'fi-banner fi-banner-error';
-      div.textContent = `Error ${res.status}: ${err}`;
+      div.className = 'fi-banner fi-banner-error max-w-3xl';
+      div.textContent = `Error ${res.status}: ${await res.text()}`;
       return false;
     }
     const body = await res.json();
@@ -250,9 +295,7 @@
   }
 
   function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   loadSchema();
