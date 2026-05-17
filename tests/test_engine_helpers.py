@@ -638,6 +638,72 @@ def test_format_lit_uses_2000_char_window() -> None:
     assert "A" * (_LIT_EXCERPT_CHARS + 1) not in rendered_state
 
 
+# ---- _is_citable: drop weak Axon entries so the writer can't fabricate ----
+
+
+def test_is_citable_drops_title_only_entries() -> None:
+    """An entry with only a title (no year/author/venue/doi/url) is
+    not enough for a real citation — the writer LLM previously invented
+    "Prior work (2026)" and bogus URLs to fill the missing slots. Drop
+    such entries upstream so the writer never sees them."""
+    from core.engine import _is_citable
+    assert not _is_citable({"title": "huge paper"})
+    assert not _is_citable({"title": "", "year": 2024})  # no real title
+    assert not _is_citable({})
+
+
+def test_is_citable_keeps_entries_with_one_id_field() -> None:
+    """Title + ANY one of (authors / year / venue / doi / url / arxiv_id)
+    is enough — the citation will at least be traceable."""
+    from core.engine import _is_citable
+    for field, value in [
+        ("authors", ["Mack, C."]),
+        ("year", 2024),
+        ("published", "2024-04-01"),
+        ("venue", "J. Micro/Nanolith."),
+        ("publisher", "SPIE"),
+        ("doi", "10.1117/12.1234567"),
+        ("arxiv_id", "2403.12345"),
+        ("url", "https://example.org/p.pdf"),
+    ]:
+        meta = {"title": "Stochastic LER", field: value}
+        assert _is_citable(meta), f"entry with {field} should be citable: {meta}"
+
+
+def test_format_lit_drops_unusable_entries_entirely() -> None:
+    """When the Axon pull is all weak metadata, _format_lit should
+    emit the empty-knowledge-base sentinel rather than a numbered
+    list of stub entries (which the writer would treat as real and
+    fabricate authors/URLs for)."""
+    from core.engine import _format_lit
+    from core.knowledge import RetrievedDoc
+    weak = [
+        RetrievedDoc(content="...", metadata={"title": "x"}),     # no id
+        RetrievedDoc(content="...", metadata={}),                  # nothing
+        RetrievedDoc(content="...", metadata={"title": ""}),       # blank title
+    ]
+    assert _format_lit(weak) == "(no prior work surfaced from the knowledge base)"
+
+
+def test_format_lit_renumbers_after_dropping() -> None:
+    """When some entries get filtered, the kept entries should be
+    renumbered [1], [2], ... — no gaps. Otherwise the writer sees
+    "[1] huge paper" then "[3] another paper" and may think [2]
+    exists but was hidden, prompting a hallucinated citation."""
+    from core.engine import _format_lit
+    from core.knowledge import RetrievedDoc
+    docs = [
+        RetrievedDoc(content="ignore me", metadata={"title": "stub"}),  # dropped
+        RetrievedDoc(content="A" * 50, metadata={"title": "kept-1", "year": 2024}),
+        RetrievedDoc(content="ignore me", metadata={}),                 # dropped
+        RetrievedDoc(content="B" * 50, metadata={"title": "kept-2", "doi": "10.x/y"}),
+    ]
+    rendered = _format_lit(docs)
+    assert "[1] kept-1" in rendered or "[1]" in rendered and "kept-1" in rendered
+    assert "[2] kept-2" in rendered or "[2]" in rendered and "kept-2" in rendered
+    assert "[3]" not in rendered, "should not leave a gap after drops"
+
+
 # ---- Prompt-template shape: review + analyze receive $clarify_block ----
 
 

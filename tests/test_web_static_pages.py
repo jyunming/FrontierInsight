@@ -504,3 +504,77 @@ def test_tectonic_status_endpoint_reports_not_installed(tmp_path: Path) -> None:
     assert res.status_code == 200
     body = res.json()
     assert "installed" in body
+
+
+# ---------------------------------------------------------------------------
+# /api/quests/{id}/file URL-cache-buster tolerance
+# ---------------------------------------------------------------------------
+
+
+def _make_quest_with_file(output_root: Path, quest_id: str, rel: str, body: str) -> Path:
+    """Build a minimal valid quest under output_root and return its dir."""
+    qd = output_root / quest_id
+    (qd / ".fi").mkdir(parents=True)
+    (qd / ".fi" / "state.sqlite").write_bytes(b"")
+    target = qd / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return qd
+
+
+def test_get_quest_file_strips_preventcache_suffix(tmp_path: Path) -> None:
+    """VS Code Live Server (and similar) naively appends
+    ?preventCache=<unix-ms> without checking for an existing query
+    string, producing ?path=paper.md?preventCache=1779035013387.
+    FastAPI reads the ``path`` value as the literal
+    ``paper.md?preventCache=...``. The handler must strip the suffix
+    so the file still resolves."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-cache", "paper/paper.md", "real body")
+
+    # Baseline: clean URL works.
+    clean = client.get("/api/quests/q-cache/file", params={"path": "paper/paper.md"})
+    assert clean.status_code == 200
+    assert clean.text == "real body"
+
+    # The pathological case the user reported: path value carries a
+    # spurious ?preventCache= suffix (no encoding, just literal '?').
+    dirty = client.get(
+        "/api/quests/q-cache/file",
+        params={"path": "paper/paper.md?preventCache=1779035013387"},
+    )
+    assert dirty.status_code == 200, (
+        f"expected 200 with stripped suffix, got {dirty.status_code} {dirty.text}"
+    )
+    assert dirty.text == "real body"
+
+
+def test_get_quest_file_strips_fragment_suffix(tmp_path: Path) -> None:
+    """The same defensive strip should also handle a stray ``#anchor``
+    appended to the path value — same class of misbehaving client."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-frag", "paper/paper.md", "real body")
+
+    res = client.get(
+        "/api/quests/q-frag/file",
+        params={"path": "paper/paper.md#anchor-from-some-link"},
+    )
+    assert res.status_code == 200
+    assert res.text == "real body"
+
+
+def test_get_quest_file_404_when_real_file_truly_missing(tmp_path: Path) -> None:
+    """The strip mustn't accidentally make 404s disappear: a request
+    for a file that doesn't exist still 404s, even with a cache-buster
+    appended."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-404", "paper/paper.md", "x")
+
+    res = client.get(
+        "/api/quests/q-404/file",
+        params={"path": "paper/missing.md?preventCache=12345"},
+    )
+    assert res.status_code == 404
