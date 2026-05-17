@@ -24,7 +24,7 @@
     <div class="bg-surface-high border border-white/10 rounded-full px-4 py-2 flex items-center gap-2 shadow-[0_0_40px_rgba(195,192,255,0.1)] backdrop-blur-md">
       <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
       <span class="font-label-sm text-label-sm uppercase text-on-surface tracking-wider">
-        Question <span id="progress-current">1</span> of <span id="progress-total">14</span>
+        Question <span id="progress-current">1</span> of <span id="progress-total">6</span>
       </span>
     </div>
   </div>
@@ -66,8 +66,15 @@
     <div id="proposal-preview-body" class="fi-md-body max-h-[480px] overflow-y-auto bg-surface-low rounded p-4 border border-white/10"></div>
   </section>
 
-  <!-- Interview Form (rendered dynamically from /api/interview/schema) -->
+  <!-- Interview Form (tier-1 questions only for new quests; all editable
+       fields for the update flow). Rendered dynamically from
+       /api/interview/schema. -->
   <form id="interview-form" onsubmit="return submitForm(event);" class="space-y-12 max-w-3xl"></form>
+
+  <!-- Review section — hidden until the user submits tier-1. Lists every
+       auto-derived tier-2 value with an inline [edit] button, and an
+       expandable [Show advanced] block for tier-3 fields. -->
+  <section id="review-section" class="hidden space-y-6 max-w-3xl mt-12"></section>
 
   <div id="result" class="hidden max-w-3xl"></div>
 
@@ -101,7 +108,7 @@
       subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
     } else {
       title.textContent = 'New Research Quest';
-      subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write draft YAML only).';
+      subtitle.textContent = 'Six questions, then a review of the auto-derived defaults. Edit anything before you launch.';
       // Show the proposal-draft picker for new quests (skip on update flow).
       loadDrafts();
     }
@@ -287,7 +294,14 @@
   function renderForm() {
     const form = document.getElementById('interview-form');
     form.innerHTML = '';
-    const visibleQs = schema.questions.filter((q) => q.frontends.includes('serve'));
+    // New quests render TIER-1 ONLY (6 questions). Tier-2 / tier-3 values
+    // get derived + shown in the review section once the user clicks
+    // "Continue to Review". Update flow keeps the existing "all editable
+    // fields" rendering because the user is patching an existing quest,
+    // not building a fresh one from scratch.
+    const visibleQs = isUpdate
+      ? schema.questions.filter((q) => q.frontends.includes('serve'))
+      : schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
     document.getElementById('progress-total').textContent = visibleQs.length;
     document.getElementById('progress-pill').classList.remove('hidden');
     let idx = 0;
@@ -315,29 +329,14 @@
       fs.appendChild(inner);
       form.appendChild(fs);
     }
-    // Launch immediately checkbox (only for new quests).
-    if (!isUpdate) {
-      const row = document.createElement('div');
-      row.className = 'pt-8 border-t border-white/10 flex flex-col gap-6';
-      row.innerHTML = `
-        <label class="flex items-start gap-3 cursor-pointer group">
-          <div class="relative flex items-center justify-center w-5 h-5 mt-1">
-            <input id="launch-now" checked class="peer appearance-none w-5 h-5 border border-white/20 rounded bg-surface-low checked:bg-primary checked:border-primary transition-colors cursor-pointer" type="checkbox"/>
-            <span class="material-symbols-outlined absolute text-surface text-[16px] opacity-0 peer-checked:opacity-100 pointer-events-none transition-opacity">check</span>
-          </div>
-          <span class="font-body-md text-body-md text-on-surface-variant group-hover:text-on-surface transition-colors">
-            Launch the quest immediately after submit (uncheck to write draft YAML only).
-          </span>
-        </label>
-      `;
-      form.appendChild(row);
-    }
-    // Submit button.
+    // Submit button. For new quests, this advances to the review
+    // step rather than launching directly. The update flow still
+    // submits the patch immediately.
     const submitRow = document.createElement('div');
     submitRow.innerHTML = `
       <button type="submit" class="w-full md:w-auto self-start bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
-        <span>${isUpdate ? 'Update Quest' : 'Launch Quest'}</span>
-        <span class="material-symbols-outlined text-[20px]">${isUpdate ? 'edit' : 'rocket_launch'}</span>
+        <span>${isUpdate ? 'Update Quest' : 'Continue to Review'}</span>
+        <span class="material-symbols-outlined text-[20px]">${isUpdate ? 'edit' : 'arrow_forward'}</span>
       </button>
     `;
     form.appendChild(submitRow);
@@ -444,11 +443,61 @@
     }
   }
 
+  // Tier-1 + tier-2 + tier-3 answers, accumulated as the user moves
+  // from the form through the review screen. Stays in scope between
+  // `submitForm` (which fills it from the tier-1 form) and the review
+  // section's edit handlers (which mutate individual keys).
+  let pendingAnswers = {};
+  let reviewShowAdvanced = false;
+
+  // ─── Tier-2/3 derivation, mirroring core/interview.py SMART_DEFAULTS.
+  // Web doesn't call the preflight LLM for tier-3 (that's a CLI luxury);
+  // tier-3 fields default to empty/static values and the user can fill
+  // them in the review screen before launch.
+  const PROSE_FORMATS = new Set(['essay', 'report', 'policy_brief', 'whitepaper']);
+
+  function slugifyTopic(t) {
+    return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'quest';
+  }
+
+  async function probeAxonReachable() {
+    try {
+      const res = await fetch('/api/axon/status', { method: 'GET' });
+      if (!res.ok) return false;
+      const body = await res.json();
+      return !!body.running;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function deriveTier2(tier1) {
+    return {
+      title: slugifyTopic(tier1.topic),
+      no_simulation: PROSE_FORMATS.has(tier1.paper_format),
+      clarify_mode: 'auto',
+      review_panel: [],
+      knowledge_enabled: await probeAxonReachable(),
+      audience: 'external',
+    };
+  }
+
+  function deriveTier3(_tier1) {
+    return {
+      comparative_baseline: '',
+      success_metric: '',
+      budget: '',
+      knowledge_top_k: 5,
+    };
+  }
+
   async function submitForm(ev) {
     ev.preventDefault();
+    const visibleQs = isUpdate
+      ? schema.questions.filter((q) => q.frontends.includes('serve'))
+      : schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
     const out = {};
-    for (const q of schema.questions) {
-      if (!q.frontends.includes('serve')) continue;
+    for (const q of visibleQs) {
       const el = document.getElementById(`q-${q.id}`);
       if (!el) continue;
       let value = el.value;
@@ -466,29 +515,200 @@
       }
       out[q.id] = value;
     }
-    if (!isUpdate) {
-      if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
-      if (!out.title || !String(out.title).trim()) {
-        out.title = String(out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
-      }
-    } else {
+
+    if (isUpdate) {
+      // Update flow keeps the old direct-submit behavior.
       if (!out.topic) out.topic = '(unchanged)';
       if (!out.title) out.title = '(unchanged)';
       if (!out.provider) out.provider = 'vscode_extension';
       if (!out.provider_model) out.provider_model = '';
+      return submitToServer(out, isUpdate);
     }
-    const launchNow = !isUpdate && document.getElementById('launch-now')?.checked;
-    const endpoint = isUpdate
+
+    // New-quest flow: validate tier-1, derive tier-2/3, render review.
+    if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
+    pendingAnswers = { ...out };
+    const derived = await deriveTier2(out);
+    const advanced = deriveTier3(out);
+    pendingAnswers = { ...pendingAnswers, ...derived, ...advanced };
+
+    // Hide the form, render the review section. Submit button rerenders
+    // when the user edits something below — they don't go back to the form.
+    document.getElementById('interview-form').classList.add('hidden');
+    document.getElementById('progress-pill').classList.add('hidden');
+    renderReview();
+    document.getElementById('review-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return false;
+  }
+
+  // ─── Review screen ─────────────────────────────────────────────
+  function renderReview() {
+    const sec = document.getElementById('review-section');
+    sec.innerHTML = '';
+
+    // Tier-1 summary card (read-only, click "Edit" to go back to form).
+    const tier1 = schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
+    const t1Card = document.createElement('div');
+    t1Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+    t1Card.innerHTML = `
+      <div class="flex items-center justify-between gap-3 mb-4">
+        <h2 class="font-headline-md text-headline-md font-bold text-on-surface">Your answers</h2>
+        <button type="button" onclick="backToForm()" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1">
+          <span class="material-symbols-outlined text-[16px]">edit</span> Edit
+        </button>
+      </div>
+      <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+        ${tier1.map((q) => `
+          <div>
+            <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">${escapeHtml(q.label)}</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(formatReviewValue(pendingAnswers[q.id]))}</dd>
+          </div>
+        `).join('')}
+      </dl>
+    `;
+    sec.appendChild(t1Card);
+
+    // Tier-2 derived defaults — each row has an inline [edit] button.
+    const tier2 = schema.questions.filter((q) => q.tier === 2);
+    const t2Card = document.createElement('div');
+    t2Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+    t2Card.innerHTML = `
+      <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">Defaults (auto-derived)</h2>
+      <p class="font-body-md text-body-md text-on-surface-variant mb-4">
+        FI picked these from your topic + format. Click <strong>Edit</strong> on any row to override.
+      </p>
+      <div class="space-y-1">
+        ${tier2.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
+      </div>
+    `;
+    sec.appendChild(t2Card);
+
+    // Tier-3 advanced (toggle).
+    const tier3 = schema.questions.filter((q) => q.tier === 3);
+    const t3Card = document.createElement('div');
+    t3Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+    t3Card.innerHTML = `
+      <button type="button" onclick="toggleAdvanced()" class="w-full flex items-center justify-between font-headline-md text-headline-md font-bold text-on-surface hover:text-primary transition-colors">
+        <span>Advanced</span>
+        <span class="material-symbols-outlined text-[24px]">${reviewShowAdvanced ? 'expand_less' : 'expand_more'}</span>
+      </button>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-2 mb-4">
+        Topic-tuned slots the engine's clarify pass will fill at quest start. Override here only if you want to lock a specific value upfront.
+      </p>
+      <div class="space-y-1 ${reviewShowAdvanced ? '' : 'hidden'}">
+        ${tier3.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
+      </div>
+    `;
+    sec.appendChild(t3Card);
+
+    // Launch button.
+    const launchRow = document.createElement('div');
+    launchRow.innerHTML = `
+      <button type="button" onclick="launchFromReview()" class="w-full md:w-auto bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
+        <span>Launch quest</span>
+        <span class="material-symbols-outlined text-[20px]">rocket_launch</span>
+      </button>
+    `;
+    sec.appendChild(launchRow);
+    sec.classList.remove('hidden');
+  }
+
+  function renderReviewRow(q, value) {
+    return `
+      <div class="flex items-center justify-between gap-4 py-2 border-b border-white/5 last:border-0" id="review-row-${q.id}">
+        <div class="flex-grow min-w-0">
+          <div class="font-body-md text-body-md text-on-surface">${escapeHtml(q.label)}</div>
+          <div class="font-code-md text-code-md text-on-surface-variant truncate" id="review-val-${q.id}">${escapeHtml(formatReviewValue(value))}</div>
+        </div>
+        <button type="button" onclick="editReviewField('${q.id}')" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 flex-shrink-0">
+          <span class="material-symbols-outlined text-[16px]">edit</span> Edit
+        </button>
+      </div>
+      <div id="review-edit-${q.id}" class="hidden py-3 px-4 bg-surface-low rounded mt-2 mb-2"></div>
+    `;
+  }
+
+  function formatReviewValue(v) {
+    if (v === null || v === undefined) return '(unset)';
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (Array.isArray(v)) return v.length ? `[${v.join(', ')}]` : '(none)';
+    if (v === '') return '(empty)';
+    return String(v);
+  }
+
+  window.editReviewField = function (id) {
+    const q = schema.questions.find((x) => x.id === id);
+    if (!q) return;
+    const slot = document.getElementById(`review-edit-${id}`);
+    slot.classList.remove('hidden');
+    slot.innerHTML = `
+      <p class="font-body-md text-body-md text-on-surface-variant mb-2">${escapeHtml(q.prompt || '')}</p>
+      <div id="review-edit-input-${id}"></div>
+      <div class="flex gap-2 mt-3">
+        <button type="button" onclick="saveReviewField('${id}')" class="bg-primary-container text-on-primary-container font-label-sm text-label-sm uppercase px-4 py-2 rounded">Save</button>
+        <button type="button" onclick="cancelReviewEdit('${id}')" class="bg-surface-high text-on-surface font-label-sm text-label-sm uppercase px-4 py-2 rounded">Cancel</button>
+      </div>
+    `;
+    const inputHost = document.getElementById(`review-edit-input-${id}`);
+    const inputEl = makeInput(q, /*editable*/ true);
+    // Pre-populate with the current value so the user can tweak vs. retype.
+    const cur = pendingAnswers[id];
+    if (cur !== undefined && cur !== null) {
+      if (inputEl.tagName === 'SELECT') {
+        const match = [...inputEl.options].find((o) => o.value === String(cur)
+          || (() => { try { return JSON.parse(o.value) === cur || JSON.stringify(JSON.parse(o.value)) === JSON.stringify(cur); } catch (_) { return false; } })());
+        if (match) inputEl.value = match.value;
+      } else {
+        inputEl.value = typeof cur === 'object' ? JSON.stringify(cur) : String(cur);
+      }
+    }
+    inputHost.appendChild(inputEl);
+  };
+
+  window.saveReviewField = function (id) {
+    const inputEl = document.querySelector(`#review-edit-input-${id} *[id^="q-"]`);
+    if (!inputEl) return;
+    let value = inputEl.value;
+    if (typeof value === 'string' && (value.startsWith('[') || value === 'true' || value === 'false')) {
+      try { value = JSON.parse(value); } catch (_) {}
+    }
+    pendingAnswers[id] = value;
+    document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value);
+    document.getElementById(`review-edit-${id}`).classList.add('hidden');
+  };
+
+  window.cancelReviewEdit = function (id) {
+    document.getElementById(`review-edit-${id}`).classList.add('hidden');
+  };
+
+  window.toggleAdvanced = function () {
+    reviewShowAdvanced = !reviewShowAdvanced;
+    renderReview();
+  };
+
+  window.backToForm = function () {
+    document.getElementById('review-section').classList.add('hidden');
+    document.getElementById('interview-form').classList.remove('hidden');
+    document.getElementById('progress-pill').classList.remove('hidden');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  async function launchFromReview() {
+    return submitToServer(pendingAnswers, /*isUpdate=*/ false);
+  }
+
+  async function submitToServer(payload, asUpdate) {
+    const endpoint = asUpdate
       ? `/api/interview/update/${encodeURIComponent(updateQuestId)}`
-      : (launchNow ? '/api/interview/submit?launch=true' : '/api/interview/submit');
+      : '/api/interview/submit?launch=true';
     const div = document.getElementById('result');
     div.classList.remove('hidden');
     div.className = 'fi-banner fi-banner-info max-w-3xl';
-    div.textContent = launchNow ? 'Submitting + launching…' : 'Writing draft YAML…';
+    div.textContent = asUpdate ? 'Submitting update…' : 'Launching quest…';
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(out),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       div.className = 'fi-banner fi-banner-error max-w-3xl';
@@ -496,7 +716,7 @@
       return false;
     }
     const body = await res.json();
-    if (launchNow && body.quest_id) {
+    if (!asUpdate && body.quest_id) {
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;
     }
