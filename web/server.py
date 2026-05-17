@@ -790,7 +790,14 @@ def make_app(
     async def get_draft(filename: str) -> JSONResponse:
         """Return the parsed contents of a single draft YAML so the
         /interview page can pre-fill its form fields when the user
-        clicks "Load draft" on a proposal output."""
+        clicks "Load draft" on a proposal output.
+
+        Also returns the companion proposal markdown (``<stem>-proposal.md``)
+        when present, so the interview page can render the full
+        background/hypothesis/plan/risks alongside the form. The YAML
+        alone only holds the *runnable* config (topic, title, provider,
+        execution params, …); the rich proposal text lives in the MD.
+        """
         # Path-traversal guard: only allow simple filenames inside
         # outputs/_drafts/, never path components like '..'.
         if "/" in filename or "\\" in filename or filename.startswith(".") or not filename.endswith(".yaml"):
@@ -804,10 +811,22 @@ def make_app(
             doc = _yaml.safe_load(txt) or {}
         except Exception as e:
             raise HTTPException(500, f"could not parse draft: {e}")
+        # Companion proposal markdown (same stem with -proposal.md suffix)
+        # — bundled in the response so the picker only does one round
+        # trip to load both the YAML config + the readable plan.
+        proposal_md = draft.with_name(draft.stem + "-proposal.md")
+        md_text: str | None = None
+        if proposal_md.is_file():
+            try:
+                md_text = proposal_md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                md_text = None
         return JSONResponse({
             "filename": filename,
             "raw": txt,
             "parsed": doc,
+            "proposal_md": md_text,
+            "proposal_md_filename": proposal_md.name if md_text else None,
         })
 
     @app.get("/api/jobs/{job_id}")

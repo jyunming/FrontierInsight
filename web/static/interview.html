@@ -11,6 +11,7 @@
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
+<script defer src="/static/md_lite.js"></script>
 </head>
 <body class="bg-background text-on-background antialiased selection:bg-primary-container selection:text-on-primary-container min-h-screen flex flex-col font-body-md text-body-md">
 
@@ -48,6 +49,21 @@
       Proposals you generated from <code class="font-code-md text-secondary">/tools/proposal</code> show up here. Click one to pre-fill this form with its topic, title, and provider.
     </p>
     <div id="drafts-list" class="hidden flex-col gap-2"></div>
+  </section>
+
+  <!-- Loaded proposal preview — shown once a draft is selected so
+       the user can read the full background/hypothesis/plan while
+       filling out the form. Hidden until loadDraftIntoForm() runs. -->
+  <section id="proposal-preview-card" class="hidden max-w-3xl mb-12 hairline-border bg-surface-mid rounded-xl p-6 flex-col gap-4">
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <h2 class="font-headline-md text-headline-md font-bold text-on-surface flex items-center gap-2">
+        <span class="material-symbols-outlined text-secondary">description</span>
+        <span id="proposal-preview-title">Loaded proposal</span>
+      </h2>
+      <button onclick="toggleProposalPreview()" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors" id="proposal-preview-toggle">Collapse</button>
+    </div>
+    <p class="font-body-md text-body-md text-on-surface-variant" id="proposal-preview-meta"></p>
+    <div id="proposal-preview-body" class="fi-md-body max-h-[480px] overflow-y-auto bg-surface-low rounded p-4 border border-white/10"></div>
   </section>
 
   <!-- Interview Form (rendered dynamically from /api/interview/schema) -->
@@ -143,35 +159,71 @@
     toggle.textContent = draftsOpen ? 'Hide' : `Show ${draftsCache.length}`;
   };
 
+  // Walk a nested YAML doc and emit question_id → value pairs the
+  // form can consume. Handles two patterns the proposal YAML uses:
+  //   (a) top-level scalars: ``topic: ...``, ``title: ...`` → set
+  //       directly.
+  //   (b) nested objects (``provider: {name, model}``,
+  //       ``knowledge: {enabled, sources}``, …) → flatten using
+  //       conventional aliases — `provider.name` → `q-provider`,
+  //       `provider.model` → `q-provider_model`. For other nested
+  //       keys we also try `<parent>_<child>` (e.g. `execution.sandbox`
+  //       → `q-execution_sandbox`). Fields the form doesn't have are
+  //       silently dropped (schema drift survives).
+  function flattenDraft(parsed) {
+    const out = {};
+    const NESTED_ALIASES = {
+      'provider.name':  'provider',
+      'provider.model': 'provider_model',
+    };
+    for (const [k, v] of Object.entries(parsed || {})) {
+      if (v === null || v === undefined) continue;
+      if (Array.isArray(v) || typeof v !== 'object') {
+        out[k] = v;
+        continue;
+      }
+      // Nested object — apply known aliases first, then fall back to
+      // <parent>_<child> joins.
+      for (const [child, val] of Object.entries(v)) {
+        if (val === null || val === undefined) continue;
+        const dotted = `${k}.${child}`;
+        const alias = NESTED_ALIASES[dotted];
+        if (alias) {
+          out[alias] = val;
+        } else {
+          out[`${k}_${child}`] = val;
+          // Also expose the leaf under its bare name as a last-resort
+          // (some interview ids don't carry the parent prefix).
+          if (!(child in out)) out[child] = val;
+        }
+      }
+    }
+    return out;
+  }
+
   // Load a chosen draft's parsed YAML into the visible interview form
-  // fields. We only set fields that exist in the form (handles schema
-  // drift gracefully — extra keys in the YAML are ignored).
+  // fields AND render its companion proposal markdown in the preview
+  // panel so the user can read the full plan while filling fields.
   window.loadDraftIntoForm = async function (filename) {
     try {
       const res = await fetch(`/api/drafts/${encodeURIComponent(filename)}`);
       if (!res.ok) { alert(`Could not load draft: HTTP ${res.status}`); return; }
-      const { parsed } = await res.json();
-      // Flatten the YAML's nested structure into question-id → value
-      // pairs the form expects.
-      const flat = {
-        topic: parsed.topic || '',
-        title: parsed.title || '',
-        provider: (parsed.provider || {}).name || '',
-        provider_model: (parsed.provider || {}).model || '',
-      };
-      // Add the rest of top-level keys (knowledge, execution, etc.)
-      // — many of the interview questions correspond 1:1.
-      for (const k of Object.keys(parsed)) {
-        if (!(k in flat) && typeof parsed[k] !== 'object') flat[k] = parsed[k];
-      }
+      const { parsed, proposal_md, proposal_md_filename } = await res.json();
+
+      const flat = flattenDraft(parsed);
+      // Track how many fields we actually pre-filled so the banner can
+      // tell the user exactly what landed.
+      const filled = [];
       for (const [qid, value] of Object.entries(flat)) {
         const el = document.getElementById(`q-${qid}`);
         if (!el) continue;
+        const target = Array.isArray(value)
+          ? JSON.stringify(value)
+          : String(typeof value === 'object' ? JSON.stringify(value) : value);
         if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-          el.value = String(value);
+          el.value = target;
+          filled.push(qid);
         } else if (el.tagName === 'SELECT') {
-          // Try to find a matching option; fall back to text match.
-          const target = String(value);
           let matched = false;
           for (const opt of el.options) {
             if (opt.value === target) { el.value = target; matched = true; break; }
@@ -181,19 +233,53 @@
               if (opt.textContent.trim() === target) { el.value = opt.value; matched = true; break; }
             }
           }
-          // If provider was loaded, trigger the cascading model select.
-          if (qid === 'provider' && matched) populateProviderModel(el.value);
+          if (matched) {
+            filled.push(qid);
+            if (qid === 'provider') populateProviderModel(el.value);
+          }
         }
       }
-      // Scroll the form into view + give visual feedback.
+
+      // Render the proposal MD preview if present.
+      const preview = document.getElementById('proposal-preview-card');
+      if (proposal_md) {
+        preview.classList.remove('hidden');
+        preview.classList.add('flex');
+        document.getElementById('proposal-preview-title').textContent = parsed.title || filename;
+        document.getElementById('proposal-preview-meta').textContent =
+          `${proposal_md_filename} · ${proposal_md.length.toLocaleString()} chars — the full proposal text, for reference while you fill out the interview below.`;
+        const body = document.getElementById('proposal-preview-body');
+        if (window.fi_renderMarkdown) {
+          body.innerHTML = window.fi_renderMarkdown(proposal_md);
+        } else {
+          // Fallback: raw text. md_lite.js is `defer`-loaded so on
+          // very fast clicks it might not be ready yet.
+          body.innerHTML = `<pre class="whitespace-pre-wrap font-body-md text-body-md text-on-surface">${escapeHtml(proposal_md)}</pre>`;
+        }
+      } else {
+        preview.classList.add('hidden');
+        preview.classList.remove('flex');
+      }
+
       document.getElementById('interview-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       const div = document.getElementById('result');
       div.classList.remove('hidden');
       div.className = 'fi-banner fi-banner-info max-w-3xl';
-      div.textContent = `Loaded draft ${filename}. Review the fields, edit as needed, then submit.`;
+      div.textContent = proposal_md
+        ? `Loaded draft ${filename}. Pre-filled ${filled.length} field${filled.length === 1 ? '' : 's'} (${filled.join(', ')}). The full proposal text is in the preview above — review, edit, then submit.`
+        : `Loaded draft ${filename}. Pre-filled ${filled.length} field${filled.length === 1 ? '' : 's'} (${filled.join(', ')}).`;
     } catch (e) {
       alert(`Error loading draft: ${e}`);
     }
+  };
+
+  let proposalPreviewOpen = true;
+  window.toggleProposalPreview = function () {
+    proposalPreviewOpen = !proposalPreviewOpen;
+    const body = document.getElementById('proposal-preview-body');
+    const toggle = document.getElementById('proposal-preview-toggle');
+    body.classList.toggle('hidden', !proposalPreviewOpen);
+    toggle.textContent = proposalPreviewOpen ? 'Collapse' : 'Expand';
   };
 
   function escapeAttr(s) { return escapeHtml(s); }
