@@ -88,6 +88,24 @@ class Question:
     # When the user picks a value not in ``choices`` is allowed via a
     # free-text fallback. Today used only for ``provider_model``.
     allow_other: bool = False
+    # Interview presentation tier. Frontends consult this to decide
+    # which questions to show by default:
+    #
+    #   tier=1 — always-ask. The handful of slots that genuinely need a
+    #            user decision (topic, paper_format, outputs, depth,
+    #            and on CLI/web also provider + model).
+    #
+    #   tier=2 — auto-derive. Smart defaults populate these from tier-1
+    #            answers (title from slug, no_simulation from format,
+    #            knowledge from Axon-sidecar status, etc.). Frontends
+    #            still SHOW them on a review screen so the user can
+    #            click-to-edit before launch.
+    #
+    #   tier=3 — advanced. Topic-tuned slots whose default is good
+    #            enough for 95% of quests (the preflight LLM call
+    #            suggests baselines / metrics / budgets). Hidden behind
+    #            a "Show advanced" toggle on each frontend.
+    tier: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +214,14 @@ NO_SIMULATION_CHOICES: tuple[Choice, ...] = (
 )
 
 
+AUDIENCE_CHOICES: tuple[Choice, ...] = (
+    Choice("external", "External — journal / open web (recommended)",
+           "FI's own cross-quest memory (fi_critique / fi_digest / fi_portfolio / fi_proposal / fi_summary) is dropped from References; an outside reader can't look those up. Real external sources + your own ingested papers are kept."),
+    Choice("internal", "Internal — team report / memo / onboarding",
+           "Cite anything in Axon, including FI's own cross-quest summaries. Use for write-ups your team will read."),
+)
+
+
 # Providers. The ``model_options`` table below carries one curated
 # model list per provider; ``provider_model`` reuses these at runtime.
 # vscode_extension is intentionally absent from the user-facing list —
@@ -263,6 +289,7 @@ PROVIDER_MODEL_OPTIONS: dict[str, tuple[Choice, ...]] = {
 # ---------------------------------------------------------------------------
 
 QUESTIONS: tuple[Question, ...] = (
+    # ─── Tier 1 — always-ask ──────────────────────────────────────────
     Question(
         id="topic",
         label="Topic",
@@ -270,22 +297,7 @@ QUESTIONS: tuple[Question, ...] = (
         kind="text",
         placeholder="e.g. Compare three numerical integrators on a damped harmonic oscillator and report energy drift.",
         mid_quest_editable=False,
-    ),
-    Question(
-        id="title",
-        label="Title (short slug)",
-        prompt="Short identifier for this quest. Used in folder names. Auto-suggested from your topic.",
-        kind="text",
-        mid_quest_editable=False,
-    ),
-    Question(
-        id="output_kinds",
-        label="Outputs",
-        prompt="Which deliverables matter? PDF gracefully degrades to MD if pandoc isn't installed.",
-        kind="single",  # bundles are pre-defined combos, not per-kind multi-select.
-        choices=OUTPUT_BUNDLES,
-        default=["paper_md", "paper_pdf"],
-        mid_quest_editable=True,
+        tier=1,
     ),
     Question(
         id="paper_format",
@@ -295,18 +307,17 @@ QUESTIONS: tuple[Question, ...] = (
         choices=PAPER_FORMATS,
         default="generic",
         mid_quest_editable=True,
+        tier=1,
     ),
     Question(
-        id="no_simulation",
-        label="Research approach",
-        prompt="Decides whether the engine runs a Python experiment or waits for real-world data. Smart-defaults off the paper format.",
-        kind="single",
-        choices=NO_SIMULATION_CHOICES,
-        default=False,
-        # Mid-quest editing of this is dangerous: the engine routes
-        # divergently in the two branches. interview_update.py
-        # refuses the flip with a clear message.
-        mid_quest_editable=False,
+        id="output_kinds",
+        label="Outputs",
+        prompt="Which deliverables matter? PDF gracefully degrades to MD if pandoc isn't installed.",
+        kind="single",  # bundles are pre-defined combos, not per-kind multi-select.
+        choices=OUTPUT_BUNDLES,
+        default=["paper_md", "paper_pdf"],
+        mid_quest_editable=True,
+        tier=1,
     ),
     Question(
         id="study_depth",
@@ -316,57 +327,7 @@ QUESTIONS: tuple[Question, ...] = (
         choices=STUDY_DEPTHS,
         default="journal-length",
         mid_quest_editable=True,
-    ),
-    Question(
-        id="comparative_baseline",
-        label="Comparative baseline",
-        prompt="What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
-        kind="text",
-        placeholder="e.g. RandomForest baseline on the same features",
-        mid_quest_editable=True,
-    ),
-    Question(
-        id="success_metric",
-        label="Success metric",
-        prompt="What number changing in what direction = headline result?",
-        kind="text",
-        placeholder="e.g. AUC ≥ 0.9 on held-out test set",
-        mid_quest_editable=True,
-    ),
-    Question(
-        id="budget",
-        label="Time / compute budget",
-        prompt="Soft cap on wall-clock for the experiment.",
-        kind="text",
-        placeholder="e.g. a few minutes on a laptop CPU",
-        mid_quest_editable=True,
-    ),
-    Question(
-        id="clarify_mode",
-        label="Pre-flight clarification mode",
-        prompt="Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
-        kind="single",
-        choices=CLARIFY_MODES,
-        default="auto",
-        mid_quest_editable=True,
-    ),
-    Question(
-        id="review_panel",
-        label="Reviewer panel",
-        prompt="Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
-        kind="single",
-        choices=REVIEW_PANELS,
-        default=[],
-        mid_quest_editable=True,
-    ),
-    Question(
-        id="knowledge_enabled",
-        label="Knowledge layer (Axon)",
-        prompt="Most first-time users should leave this disabled. Mid-quest changes warn — Axon retrievals are one-shot.",
-        kind="single",
-        choices=KNOWLEDGE_CHOICES,
-        default=False,
-        mid_quest_editable=True,
+        tier=1,
     ),
     Question(
         id="provider",
@@ -380,6 +341,7 @@ QUESTIONS: tuple[Question, ...] = (
         default=None,
         mid_quest_editable=False,
         frontends=("cli", "serve"),
+        tier=1,
     ),
     Question(
         id="provider_model",
@@ -393,6 +355,107 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=False,
         frontends=("cli", "serve"),
         allow_other=True,
+        tier=1,
+    ),
+    # ─── Tier 2 — auto-derive, shown in review screen ────────────────
+    Question(
+        id="title",
+        label="Title (short slug)",
+        prompt="Short identifier for this quest. Used in folder names. Auto-slugged from your topic; edit if you want something different.",
+        kind="text",
+        mid_quest_editable=False,
+        tier=2,
+    ),
+    Question(
+        id="no_simulation",
+        label="Research approach",
+        prompt="Decides whether the engine runs a Python experiment or waits for real-world data. Auto-derived from paper format.",
+        kind="single",
+        choices=NO_SIMULATION_CHOICES,
+        default=False,
+        # Mid-quest editing of this is dangerous: the engine routes
+        # divergently in the two branches. interview_update.py
+        # refuses the flip with a clear message.
+        mid_quest_editable=False,
+        tier=2,
+    ),
+    Question(
+        id="clarify_mode",
+        label="Pre-flight clarification mode",
+        prompt="Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
+        kind="single",
+        choices=CLARIFY_MODES,
+        default="auto",
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    Question(
+        id="review_panel",
+        label="Reviewer panel",
+        prompt="Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
+        kind="single",
+        choices=REVIEW_PANELS,
+        default=[],
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    Question(
+        id="knowledge_enabled",
+        label="Knowledge layer (Axon)",
+        prompt="Auto-detected from the Axon sidecar status. Override only if you have a specific reason.",
+        kind="single",
+        choices=KNOWLEDGE_CHOICES,
+        default=False,
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    Question(
+        id="audience",
+        label="Paper audience",
+        prompt="External-facing (journal, open web) drops FI-internal cross-quest entries from the References; internal-facing keeps everything (good for project reports, memos, onboarding docs).",
+        kind="single",
+        choices=AUDIENCE_CHOICES,
+        default="external",
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    # ─── Tier 3 — advanced, behind a [Show advanced] toggle ──────────
+    Question(
+        id="comparative_baseline",
+        label="Comparative baseline",
+        prompt="What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
+        kind="text",
+        placeholder="e.g. RandomForest baseline on the same features",
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
+        id="success_metric",
+        label="Success metric",
+        prompt="What number changing in what direction = headline result?",
+        kind="text",
+        placeholder="e.g. AUC ≥ 0.9 on held-out test set",
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
+        id="budget",
+        label="Time / compute budget",
+        prompt="Soft cap on wall-clock for the experiment.",
+        kind="text",
+        placeholder="e.g. a few minutes on a laptop CPU",
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
+        id="knowledge_top_k",
+        label="Prior-work retrievals per quest",
+        prompt="How many Axon hits to feed into the writer. Higher = more sources but bigger prompt = slower + costlier. 5 default, 12 for comprehensive reviews.",
+        kind="text",
+        default=5,
+        placeholder="5",
+        mid_quest_editable=True,
+        tier=3,
     ),
 )
 
@@ -473,6 +536,45 @@ def smart_default_title(partial: dict[str, Any]) -> str:
     return slugify(topic)[:40] or "quest"
 
 
+def smart_default_clarify_mode(_partial: dict[str, Any]) -> str:
+    """Auto-clarify covers ~95% of cases — the engine self-generates
+    AND auto-answers the clarify questionnaire from the topic, with
+    interview-pinned slots winning."""
+    return "auto"
+
+
+def smart_default_review_panel(_partial: dict[str, Any]) -> list[str]:
+    """Single reviewer (empty panel list) is the cost-conscious
+    default. Multi-persona panels cost ~4× per review pass; users
+    who want them flip the slot consciously."""
+    return []
+
+
+def smart_default_audience(_partial: dict[str, Any]) -> str:
+    """External by default — safer for a one-shot paper, since FI's
+    cross-quest memory artifacts (fi_critique / fi_digest / ...)
+    aren't lookups an outside reader can resolve. Internal-facing
+    users flip to "internal" for project reports / memos."""
+    return "external"
+
+
+def smart_default_knowledge_enabled(_partial: dict[str, Any]) -> bool:
+    """Probe the Axon API sidecar; enable the knowledge layer when
+    it's reachable, otherwise leave it off. Saves the user from
+    flipping a switch that requires Axon anyway."""
+    try:
+        from core.axon_sidecar import axon_status
+        return bool(axon_status(timeout=0.8)["running"])
+    except Exception:
+        return False
+
+
+def smart_default_knowledge_top_k(_partial: dict[str, Any]) -> int:
+    """5 is the default that balances prior-work breadth against
+    prompt size. Bump to 12-15 for `study_depth: comprehensive review`."""
+    return 5
+
+
 # Map of question id → smart-default callable. Frontends call
 # ``build_smart_defaults(partial)`` to get a {id: default} dict that
 # considers what's already answered.
@@ -480,6 +582,11 @@ SMART_DEFAULTS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "title": smart_default_title,
     "no_simulation": smart_default_no_simulation,
     "study_depth": smart_default_study_depth,
+    "clarify_mode": smart_default_clarify_mode,
+    "review_panel": smart_default_review_panel,
+    "audience": smart_default_audience,
+    "knowledge_enabled": smart_default_knowledge_enabled,
+    "knowledge_top_k": smart_default_knowledge_top_k,
 }
 
 
@@ -493,6 +600,68 @@ def build_smart_defaults(partial: dict[str, Any]) -> dict[str, Any]:
             out[q.id] = SMART_DEFAULTS[q.id](partial)
         elif q.default is not None:
             out[q.id] = q.default
+    return out
+
+
+def questions_for_tier(tier: int, frontend: str = "cli") -> tuple[Question, ...]:
+    """Return the tier-N questions that apply to ``frontend``.
+
+    Frontends call ``questions_for_tier(1, frontend)`` to get the
+    always-ask list, ``questions_for_tier(2, frontend)`` for the
+    auto-derived review-screen fields, and ``questions_for_tier(3,
+    frontend)`` for what to show behind a 'Show advanced' toggle.
+
+    The ``frontend`` filter respects each question's ``frontends``
+    tuple — VSCode skips provider/provider_model because the
+    extension pins both silently.
+    """
+    return tuple(
+        q for q in QUESTIONS
+        if q.tier == tier and frontend in q.frontends
+    )
+
+
+def derive_tier2(tier1_answers: dict[str, Any]) -> dict[str, Any]:
+    """Given the user's tier-1 answers (topic / paper_format / outputs
+    / depth / provider / model), compute every tier-2 default through
+    the SMART_DEFAULTS pipeline.
+
+    Frontends show the returned dict on a 'Review before launch'
+    screen with click-to-edit per field, then submit the combined
+    tier-1 + tier-2 dict as the final interview answers.
+    """
+    merged = dict(tier1_answers)
+    out: dict[str, Any] = {}
+    for q in QUESTIONS:
+        if q.tier != 2:
+            continue
+        if q.id in SMART_DEFAULTS:
+            out[q.id] = SMART_DEFAULTS[q.id](merged)
+        elif q.default is not None:
+            out[q.id] = q.default
+        else:
+            out[q.id] = None
+    return out
+
+
+def derive_tier3(tier1_answers: dict[str, Any]) -> dict[str, Any]:
+    """Same shape as ``derive_tier2`` but for the tier-3 advanced
+    slots. These are usually empty strings (topic-tuned slots that
+    only the preflight clarify LLM call can suggest) — the frontend
+    shows them under a 'Show advanced' toggle so the user can
+    type a value before launch instead of waiting for the engine
+    to suggest one mid-quest."""
+    merged = dict(tier1_answers)
+    out: dict[str, Any] = {}
+    for q in QUESTIONS:
+        if q.tier != 3:
+            continue
+        if q.id in SMART_DEFAULTS:
+            out[q.id] = SMART_DEFAULTS[q.id](merged)
+        elif q.default is not None:
+            out[q.id] = q.default
+        else:
+            out[q.id] = ""
     return out
 
 
@@ -805,6 +974,7 @@ def export_schema_json() -> dict[str, Any]:
         "study_depths": [_choice(c) for c in STUDY_DEPTHS],
         "clarify_modes": [_choice(c) for c in CLARIFY_MODES],
         "review_panels": [_choice(c) for c in REVIEW_PANELS],
+        "audience_choices": [_choice(c) for c in AUDIENCE_CHOICES],
         "providers": [_choice(c) for c in PROVIDER_CHOICES],
         "provider_models": {
             name: [_choice(c) for c in opts]
