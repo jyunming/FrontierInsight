@@ -1314,7 +1314,7 @@ async def _run_new(
     # ---- Stage 1: ask tier-1 sequentially ----
     try:
         for q in tier1:
-            answer = _cli_prompt_for(q, partial, preflight_cache={})
+            answer = _cli_prompt_for(q, partial, {})
             if answer is None:
                 print()
                 print("— interview cancelled.")

@@ -109,3 +109,100 @@ def test_prose_formats_set_drives_no_simulation_default(html: str) -> None:
     assert "PROSE_FORMATS" in html
     for fmt in ("essay", "report", "policy_brief", "whitepaper"):
         assert f"'{fmt}'" in html, f"prose format {fmt!r} missing from PROSE_FORMATS set"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end POST: the new tier-2/3 fields must round-trip into the YAML.
+# ---------------------------------------------------------------------------
+
+
+def test_submit_round_trips_audience_and_top_k(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The /api/interview/submit endpoint must accept audience +
+    knowledge_top_k in the payload and persist them into the
+    generated YAML. The prior code paths silently dropped both
+    fields because _parse_answers wasn't extracting them."""
+    from fastapi.testclient import TestClient
+    from web.server import make_app
+
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    payload = {
+        "topic": "Round-trip test",
+        "title": "rt",
+        "output_kinds": ["paper_md", "paper_pdf"],
+        "paper_format": "report",
+        "study_depth": "journal-length",
+        "provider": "ollama", "provider_model": "qwen2.5:32b",
+        "no_simulation": True, "clarify_mode": "auto",
+        "review_panel": [], "knowledge_enabled": False,
+        "comparative_baseline": "", "success_metric": "", "budget": "",
+        # The two new tier-2/3 fields the audit caught.
+        "audience": "internal",
+        "knowledge_top_k": 12,
+    }
+    r = client.post("/api/interview/submit", json=payload)
+    assert r.status_code == 200, r.text
+    from pathlib import Path
+    yaml_path = Path(r.json()["yaml_path"])
+    text = yaml_path.read_text(encoding="utf-8")
+    assert 'audience: "internal"' in text, (
+        "audience didn't land in the generated YAML — _parse_answers "
+        "may have stopped extracting it"
+    )
+    assert "top_k: 12" in text, (
+        "knowledge.top_k didn't land in the generated YAML"
+    )
+
+
+def test_submit_omits_audience_at_default_for_compact_yaml(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """When audience == 'external' (the default), the emitter omits
+    the line entirely. Keeps the generated YAML small for the common
+    case. Same for top_k == 5."""
+    from fastapi.testclient import TestClient
+    from web.server import make_app
+
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    payload = {
+        "topic": "Default-audience test", "title": "def",
+        "output_kinds": ["paper_md"],
+        "paper_format": "generic",
+        "study_depth": "journal-length",
+        "provider": "ollama", "provider_model": "qwen2.5:32b",
+        "no_simulation": False, "clarify_mode": "auto",
+        "review_panel": [], "knowledge_enabled": False,
+        "comparative_baseline": "", "success_metric": "", "budget": "",
+        "audience": "external", "knowledge_top_k": 5,
+    }
+    r = client.post("/api/interview/submit", json=payload)
+    assert r.status_code == 200, r.text
+    from pathlib import Path
+    text = Path(r.json()["yaml_path"]).read_text(encoding="utf-8")
+    assert "audience:" not in text, (
+        "audience=external is the default and shouldn't be emitted"
+    )
+    assert "top_k:" not in text, (
+        "top_k=5 is the default and shouldn't be emitted"
+    )
+
+
+def test_submit_rejects_bad_audience(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Defensive — invalid audience strings get a 400."""
+    from fastapi.testclient import TestClient
+    from web.server import make_app
+
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    payload = {
+        "topic": "x", "title": "x",
+        "output_kinds": ["paper_md"], "paper_format": "generic",
+        "study_depth": "journal-length",
+        "provider": "ollama", "provider_model": "x",
+        "no_simulation": False, "clarify_mode": "auto",
+        "review_panel": [], "knowledge_enabled": False,
+        "comparative_baseline": "", "success_metric": "", "budget": "",
+        "audience": "third-party",   # bogus
+        "knowledge_top_k": 5,
+    }
+    r = client.post("/api/interview/submit", json=payload)
+    assert r.status_code == 400
