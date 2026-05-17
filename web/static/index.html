@@ -118,11 +118,22 @@
   async function loadQuests() {
     try {
       const res = await fetch('/api/quests');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       allQuests = data.quests || [];
       renderStats();
       applyFilter();
-    } catch (e) { /* silent */ }
+    } catch (e) {
+      // Surface the failure rather than swallowing — without this the
+      // dashboard just looks empty when the server is down / warming up.
+      console.warn('[fi] /api/quests failed:', e);
+      const empty = document.getElementById('empty-banner');
+      if (empty && allQuests.length === 0) {
+        empty.classList.remove('hidden');
+        empty.textContent = `Couldn't reach /api/quests (${e?.message || e}). Is the server up? Retrying in 5 s…`;
+        setTimeout(loadQuests, 5000);
+      }
+    }
   }
 
   function renderStats() {
@@ -183,7 +194,7 @@
           <div class="flex items-center gap-3 flex-wrap">
             <h3 class="font-code-md text-code-md text-primary break-all">${escapeHtml(q.quest_id)}</h3>
             <span class="flex items-center gap-1.5 px-3 py-1 rounded-full ${s.pillBg} ${s.pillText} border ${s.pillBorder} font-label-sm text-[10px] uppercase tracking-wider">
-              ${s.pillIcon}${s.label}
+              ${s.pillIcon}${escapeHtml(s.label)}
             </span>
             ${paperChip}
           </div>

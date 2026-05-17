@@ -243,6 +243,41 @@ def test_static_pages_render(tmp_path: Path) -> None:
     assert res.status_code == 404
 
 
+def test_dashboard_quest_card_escapes_label_to_prevent_xss() -> None:
+    """The status pill on each quest card renders `${s.label}`,
+    where `s.label = String(q.verdict || 'idle')`. The verdict
+    is engine-generated text (LLM review output), so a hostile
+    LLM could embed HTML/JS. The renderer MUST escape it.
+    Caught by Copilot bot review on PR #103."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "web" / "static" / "index.html"
+    text = page.read_text(encoding="utf-8")
+    # The pill's label substitution must go through escapeHtml.
+    assert "${escapeHtml(s.label)}" in text, (
+        "quest card pill label must escape s.label to defend against "
+        "LLM-generated verdicts containing HTML/script"
+    )
+    # And the raw-html slot (pillIcon) must still be inline so the
+    # animated dot for running quests renders.
+    assert "${s.pillIcon}" in text, "pillIcon stays raw — it's a trusted span literal"
+
+
+def test_dashboard_surfaces_loadquests_failure_instead_of_silent() -> None:
+    """loadQuests() previously swallowed every error. When the server
+    was down, the page just looked empty. After the bot's review we
+    surface a banner + auto-retry."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "web" / "static" / "index.html"
+    text = page.read_text(encoding="utf-8")
+    # The /* silent */ tombstone is gone…
+    assert "/* silent */" not in text, (
+        "the silent-swallow comment marks dead UX; replace with a banner"
+    )
+    # …replaced with a console.warn + an inline retry.
+    assert "console.warn('[fi] /api/quests failed:'" in text
+    assert "setTimeout(loadQuests, 5000)" in text
+
+
 def test_marketing_landing_page_is_self_contained() -> None:
     """marketing/index.html is intended to be deployed separately
     (GitHub Pages, Netlify, etc.) as a marketing page. It must
