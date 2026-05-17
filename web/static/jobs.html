@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Jobs — Frontier Insight</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Inter:wght@800;900&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>tailwind.config = window._fiConfig;</script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
+</head>
+<body class="bg-background text-on-surface min-h-screen flex flex-col font-body-md">
+
+<div id="fi-header-root"></div>
+
+<main class="flex-grow flex flex-col px-margin-mobile md:px-margin-desktop max-w-max-width mx-auto w-full pt-24 pb-section-gap">
+
+  <!-- Hero -->
+  <header class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-section-gap">
+    <div>
+      <h1 id="page-title" class="font-headline-xl text-headline-lg-mobile md:text-headline-xl text-on-surface tracking-tighter">Jobs</h1>
+      <p id="page-subtitle" class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl mt-2">
+        Every subprocess the web launcher has spawned — tools (proposal, critique, …), system installs (tectonic), and quest launches. Click one for the live log.
+      </p>
+    </div>
+    <a href="/" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase bg-surface-mid cyber-border text-on-surface hover:bg-surface-high transition-colors self-start md:self-auto">
+      <span class="material-symbols-outlined text-[16px]">arrow_back</span> Dashboard
+    </a>
+  </header>
+
+  <!-- Single-job detail view (shown when window.__fi_job_id is set) -->
+  <section id="detail-view" class="hidden flex-col gap-6"></section>
+
+  <!-- List view (shown when no specific job_id is in URL) -->
+  <section id="list-view" class="hidden flex-col gap-4 mb-section-gap">
+    <div id="jobs-stats" class="grid grid-cols-1 sm:grid-cols-3 gap-gutter mb-component-padding-md" style="display:none">
+      <div class="bg-surface-mid cyber-border p-6 rounded-xl">
+        <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">Running</span>
+        <div class="font-headline-xl text-3xl font-black mt-2 text-status-success flex items-center gap-3" id="stat-running">
+          <span class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span>
+          <span>0</span>
+        </div>
+      </div>
+      <div class="bg-surface-mid cyber-border p-6 rounded-xl">
+        <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">Recent (logged)</span>
+        <div class="font-headline-xl text-3xl font-black mt-2 text-secondary" id="stat-recent">0</div>
+      </div>
+      <div class="bg-surface-mid cyber-border p-6 rounded-xl">
+        <span class="font-label-sm text-label-sm text-outline uppercase tracking-widest">Failed</span>
+        <div class="font-headline-xl text-3xl font-black mt-2 text-error" id="stat-failed">0</div>
+      </div>
+    </div>
+    <div id="jobs-list" class="flex flex-col gap-3"></div>
+    <div id="empty-state" class="hidden bg-surface-mid border border-dashed border-white/10 rounded-2xl p-12 text-center">
+      <span class="material-symbols-outlined text-6xl text-outline-variant mb-4">terminal</span>
+      <h3 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">No jobs yet</h3>
+      <p class="font-body-md text-body-md text-on-surface-variant max-w-md mx-auto">Run a tool from <a class="text-primary hover:text-secondary" href="/tools/proposal">/tools</a> or launch a quest from <a class="text-primary hover:text-secondary" href="/interview">/interview</a> to see them here.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="full-width bottom-0 bg-surface-low/60 backdrop-blur-[20px] border-t border-white/10 mt-auto">
+  <div class="flex flex-col md:flex-row justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-component-padding-md max-w-max-width mx-auto gap-4">
+    <div class="font-label-sm text-label-sm font-bold text-on-surface">© 2026 Frontier Insight · Apache 2.0</div>
+    <div class="flex items-center gap-8 font-label-sm text-label-sm">
+      <a href="/" class="text-on-surface-variant hover:text-secondary transition-colors">Dashboard</a>
+      <a href="/settings" class="text-on-surface-variant hover:text-secondary transition-colors">Settings</a>
+      <a href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener" class="text-on-surface-variant hover:text-secondary transition-colors">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const singleJobId = window.__fi_job_id || null;
+  let pollHandle = null;
+
+  if (singleJobId) {
+    document.getElementById('detail-view').classList.remove('hidden');
+    document.getElementById('detail-view').classList.add('flex');
+    document.getElementById('page-title').textContent = 'Job';
+    document.getElementById('page-subtitle').innerHTML = `Live status + log for <code class="font-code-md text-secondary">${escapeHtml(singleJobId)}</code>.`;
+    renderDetailShell(singleJobId);
+    pollDetail();
+    pollHandle = setInterval(pollDetail, 2000);
+  } else {
+    document.getElementById('list-view').classList.remove('hidden');
+    document.getElementById('list-view').classList.add('flex');
+    loadJobs();
+    pollHandle = setInterval(loadJobs, 3000);
+  }
+
+  // ───── List view ─────────────────────────────────────────────
+  async function loadJobs() {
+    try {
+      const res = await fetch('/api/jobs');
+      if (!res.ok) return;
+      const data = await res.json();
+      const jobs = data.jobs || [];
+      const running = jobs.filter(j => j.alive).length;
+      const failed = jobs.filter(j => !j.alive && j.exit_code && j.exit_code !== 0).length;
+      const statsEl = document.getElementById('jobs-stats');
+      const emptyEl = document.getElementById('empty-state');
+      const listEl = document.getElementById('jobs-list');
+      if (jobs.length === 0) {
+        statsEl.style.display = 'none';
+        emptyEl.classList.remove('hidden');
+        listEl.innerHTML = '';
+        return;
+      }
+      statsEl.style.display = '';
+      emptyEl.classList.add('hidden');
+      document.getElementById('stat-running').lastElementChild.textContent = running;
+      document.getElementById('stat-recent').textContent = jobs.length;
+      document.getElementById('stat-failed').textContent = failed;
+      // Live jobs first, then most-recently-finished.
+      const sorted = [...jobs].sort((a, b) => {
+        if (a.alive !== b.alive) return a.alive ? -1 : 1;
+        return (b.log_mtime || 0) - (a.log_mtime || 0);
+      });
+      listEl.innerHTML = sorted.map(renderJobRow).join('');
+    } catch (_) {}
+  }
+
+  function renderJobRow(j) {
+    const kindStyle = {
+      tool:   { bg: 'bg-primary/10',   text: 'text-primary',   border: 'border-primary/30',   icon: 'build' },
+      quest:  { bg: 'bg-secondary/10', text: 'text-secondary', border: 'border-secondary/30', icon: 'science' },
+      system: { bg: 'bg-status-warning/10', text: 'text-status-warning', border: 'border-status-warning/30', icon: 'settings' },
+    }[j.kind] || { bg: 'bg-surface-high', text: 'text-on-surface-variant', border: 'border-white/10', icon: 'terminal' };
+    let statusPill;
+    if (j.alive) {
+      statusPill = `<span class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-status-success/10 text-status-success border border-status-success/30 font-label-sm text-[10px] uppercase tracking-wider">
+        <span class="w-1.5 h-1.5 rounded-full bg-status-success glow-pulse"></span>Running
+      </span>`;
+    } else if (j.exit_code === 0 || j.exit_code === undefined) {
+      statusPill = `<span class="px-3 py-1 rounded-full bg-secondary/10 text-secondary border border-secondary/30 font-label-sm text-[10px] uppercase tracking-wider">Done${j.exit_code === 0 ? ' · 0' : ''}</span>`;
+    } else {
+      statusPill = `<span class="px-3 py-1 rounded-full bg-error/10 text-error border border-error/30 font-label-sm text-[10px] uppercase tracking-wider">Failed · ${j.exit_code}</span>`;
+    }
+    const ageOrWhen = j.alive
+      ? `<span class="opacity-50">RUNNING FOR:</span><span>${formatAge(j.age_seconds || 0)}</span>`
+      : j.log_mtime
+        ? `<span class="opacity-50">FINISHED:</span><span>${formatAgo(j.log_mtime)}</span>`
+        : '';
+    const size = j.log_size != null
+      ? `<span class="opacity-50">LOG:</span><span>${formatBytes(j.log_size)}</span>`
+      : '';
+    return `
+      <a href="/jobs/${encodeURIComponent(j.job_id)}" class="hairline-border bg-surface-mid p-6 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:bg-surface-high transition-colors cursor-pointer group no-underline">
+        <div class="flex flex-col gap-2 min-w-0 flex-1">
+          <div class="flex items-center gap-3 flex-wrap">
+            <span class="flex items-center gap-1.5 px-2.5 py-0.5 rounded ${kindStyle.bg} ${kindStyle.text} border ${kindStyle.border} font-label-sm text-[10px] uppercase tracking-wider">
+              <span class="material-symbols-outlined text-[14px]">${kindStyle.icon}</span>${escapeHtml(j.kind || '')}
+            </span>
+            <h3 class="font-code-md text-code-md text-on-surface break-all">${escapeHtml(j.job_id)}</h3>
+            ${statusPill}
+          </div>
+          <div class="flex items-center gap-6 font-label-sm text-label-sm text-outline uppercase flex-wrap">
+            ${ageOrWhen}
+            ${size}
+            ${j.pid ? `<div class="flex items-center gap-1"><span class="opacity-50">PID:</span><span>${j.pid}</span></div>` : ''}
+          </div>
+        </div>
+        <span class="material-symbols-outlined text-on-surface-variant opacity-0 group-hover:opacity-100 transition-opacity">arrow_forward_ios</span>
+      </a>`;
+  }
+
+  // ───── Detail view ───────────────────────────────────────────
+  function renderDetailShell(jobId) {
+    document.getElementById('detail-view').innerHTML = `
+      <div class="bg-surface-mid cyber-border rounded-xl p-6">
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-white/10">
+          <div class="flex items-center gap-3">
+            <span id="job-status-dot" class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span>
+            <span id="job-status-label" class="font-label-sm text-label-sm text-status-success uppercase tracking-wider">Loading…</span>
+            <span id="job-kind-badge" class="px-2.5 py-0.5 rounded bg-surface-high text-on-surface-variant border border-white/10 font-label-sm text-[10px] uppercase"></span>
+          </div>
+          <div class="flex items-center gap-2 font-label-sm text-label-sm text-outline uppercase flex-wrap">
+            <span id="job-pid"></span>
+            <span id="job-age"></span>
+          </div>
+        </div>
+        <div class="font-label-sm text-label-sm uppercase text-outline mb-2">Live log</div>
+        <pre id="job-log" class="bg-[#090909] border border-white/10 rounded p-3 font-code-md text-code-md h-[480px] overflow-y-auto whitespace-pre-wrap text-on-surface-variant shadow-[inset_0_0_40px_rgba(0,0,0,0.8)]"></pre>
+        <div class="flex items-center gap-3 mt-4">
+          <a href="/jobs" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase bg-surface-mid cyber-border text-on-surface hover:bg-surface-high transition-colors">
+            <span class="material-symbols-outlined text-[16px]">list</span> All jobs
+          </a>
+          <a href="/api/jobs/${encodeURIComponent(jobId)}" target="_blank" rel="noopener" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors">Open raw JSON →</a>
+        </div>
+      </div>`;
+  }
+
+  async function pollDetail() {
+    try {
+      const res = await fetch(`/api/jobs/${encodeURIComponent(singleJobId)}`);
+      if (!res.ok) return;
+      const j = await res.json();
+      const dot = document.getElementById('job-status-dot');
+      const label = document.getElementById('job-status-label');
+      const logEl = document.getElementById('job-log');
+      const ageEl = document.getElementById('job-age');
+      const pidEl = document.getElementById('job-pid');
+      const kindBadge = document.getElementById('job-kind-badge');
+      if (kindBadge && j.kind) {
+        kindBadge.textContent = j.kind;
+        const m = { tool: 'bg-primary/10 text-primary border-primary/30',
+                    quest: 'bg-secondary/10 text-secondary border-secondary/30',
+                    system: 'bg-status-warning/10 text-status-warning border-status-warning/30' };
+        kindBadge.className = `px-2.5 py-0.5 rounded ${m[j.kind] || 'bg-surface-high text-on-surface-variant border-white/10'} border font-label-sm text-[10px] uppercase`;
+      }
+      if (j.log_tail && j.log_tail.length) {
+        const wasNearBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+        logEl.textContent = j.log_tail.join('\n');
+        if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
+      } else if (!logEl.textContent) {
+        logEl.textContent = '(no output yet — process is starting)';
+      }
+      if (j.alive) {
+        dot.className = 'w-2 h-2 rounded-full bg-status-success glow-pulse';
+        label.textContent = 'Running';
+        label.className = 'font-label-sm text-label-sm text-status-success uppercase tracking-wider';
+      } else if (j.exit_code === 0 || j.exit_code === undefined) {
+        dot.className = 'w-2 h-2 rounded-full bg-secondary';
+        label.textContent = `Done${j.exit_code === 0 ? ' (exit 0)' : ''}`;
+        label.className = 'font-label-sm text-label-sm text-secondary uppercase tracking-wider';
+        if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+      } else {
+        dot.className = 'w-2 h-2 rounded-full bg-error';
+        label.textContent = `Failed (exit ${j.exit_code})`;
+        label.className = 'font-label-sm text-label-sm text-error uppercase tracking-wider';
+        if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+      }
+      pidEl.textContent = j.pid ? `pid ${j.pid}` : '';
+      ageEl.textContent = typeof j.age_seconds === 'number'
+        ? `${j.alive ? 'running for' : 'ran for'} ${formatAge(j.age_seconds)}`
+        : (j.log_mtime ? `finished ${formatAgo(j.log_mtime)}` : '');
+    } catch (_) {}
+  }
+
+  // ───── helpers ───────────────────────────────────────────────
+  function formatAge(s) {
+    if (s < 60) return `${Math.round(s)}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+    return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+  }
+  function formatAgo(mtime) {
+    const ago = (Date.now() / 1000) - mtime;
+    if (ago < 60) return `${Math.round(ago)}s ago`;
+    if (ago < 3600) return `${Math.round(ago / 60)}m ago`;
+    if (ago < 86400) return `${Math.round(ago / 3600)}h ago`;
+    return `${Math.round(ago / 86400)}d ago`;
+  }
+  function formatBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+</script>
+</body>
+</html>

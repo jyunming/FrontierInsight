@@ -227,14 +227,82 @@
       return false;
     }
     const body = await res.json();
-    result.className = 'w-full max-w-4xl fi-banner fi-banner-info';
+    // Switch the banner into a live status panel and start polling.
+    result.className = 'w-full max-w-4xl bg-surface-mid cyber-border rounded-xl p-6 mt-6';
     result.innerHTML = `
-      <p class="mb-2"><b>Job started.</b> Job ID: <code class="font-code-md">${escapeHtml(body.job_id)}</code> · pid ${body.pid}</p>
-      <p class="mb-2 text-on-surface-variant">argv: <code class="font-code-md">${escapeHtml(JSON.stringify(body.argv_tail))}</code></p>
-      ${body.artifact_dir ? `<p class="mb-3 text-on-surface-variant">Output will land under <code class="font-code-md">${escapeHtml(body.artifact_dir)}</code> when the job finishes.</p>` : ''}
-      <a href="/" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase bg-surface-mid border border-white/10 text-on-surface hover:bg-surface-high transition-colors">← Dashboard</a>
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-white/10">
+        <div class="flex items-center gap-3">
+          <span id="job-status-dot" class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span>
+          <span id="job-status-label" class="font-label-sm text-label-sm text-status-success uppercase tracking-wider">Running</span>
+          <span class="font-code-md text-code-md text-on-surface-variant break-all">${escapeHtml(body.job_id)}</span>
+        </div>
+        <div class="flex items-center gap-2 font-label-sm text-label-sm text-outline uppercase">
+          <span>pid ${body.pid}</span><span>·</span>
+          <span id="job-age">0s</span>
+        </div>
+      </div>
+      ${body.artifact_dir ? `<p class="mb-3 text-on-surface-variant text-body-md">Output → <code class="font-code-md text-secondary">${escapeHtml(body.artifact_dir)}</code></p>` : ''}
+      <details class="mb-3"><summary class="cursor-pointer font-label-sm text-label-sm uppercase text-outline hover:text-primary">argv</summary><pre class="mt-2 max-h-32 overflow-auto font-code-md text-code-md text-on-surface-variant">${escapeHtml(JSON.stringify(body.argv_tail, null, 2))}</pre></details>
+      <div class="font-label-sm text-label-sm uppercase text-outline mb-2">Live log</div>
+      <pre id="job-log" class="bg-[#090909] border border-white/10 rounded p-3 font-code-md text-code-md h-72 overflow-y-auto whitespace-pre-wrap text-on-surface-variant shadow-[inset_0_0_40px_rgba(0,0,0,0.8)]"></pre>
+      <div class="flex items-center gap-3 mt-4 flex-wrap">
+        <a href="/" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase bg-surface-mid cyber-border text-on-surface hover:bg-surface-high transition-colors">← Dashboard</a>
+        <a href="/jobs/${encodeURIComponent(body.job_id)}" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase bg-gradient-to-r from-primary-container to-secondary-container text-white hover:opacity-90 transition-opacity">
+          <span class="material-symbols-outlined text-[16px]">open_in_new</span> Open in /jobs
+        </a>
+        <a href="/jobs" class="inline-flex items-center gap-2 px-4 py-2 rounded font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors">All jobs →</a>
+      </div>
     `;
+    pollJob(body.job_id);
     return false;
+  }
+
+  // Live job-status poller. After a tool submit we hit /api/jobs/<id>
+  // every 2s to refresh the in-page log tail and status pill, so the
+  // user can actually see whether the proposal/critique/etc. is making
+  // progress instead of staring at a static "Job started" message.
+  function pollJob(jobId) {
+    const logEl = document.getElementById('job-log');
+    const dot = document.getElementById('job-status-dot');
+    const label = document.getElementById('job-status-label');
+    const ageEl = document.getElementById('job-age');
+    let stopped = false;
+    async function tick() {
+      if (stopped) return;
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (!res.ok) return setTimeout(tick, 2000);
+        const j = await res.json();
+        if (j.log_tail && j.log_tail.length) {
+          const wasNearBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+          logEl.textContent = j.log_tail.join('\n');
+          if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
+        } else if (!logEl.textContent) {
+          logEl.textContent = '(no output yet — process is starting)';
+        }
+        if (typeof j.age_seconds === 'number') ageEl.textContent = formatAge(j.age_seconds);
+        if (j.alive) {
+          dot.className = 'w-2 h-2 rounded-full bg-status-success glow-pulse';
+          label.textContent = 'Running';
+          label.className = 'font-label-sm text-label-sm text-status-success uppercase tracking-wider';
+        } else {
+          const ok = j.exit_code === 0 || j.exit_code === undefined;
+          dot.className = `w-2 h-2 rounded-full ${ok ? 'bg-secondary' : 'bg-error'}`;
+          label.textContent = ok ? `Done${j.exit_code === 0 ? ' (exit 0)' : ''}` : `Failed (exit ${j.exit_code})`;
+          label.className = `font-label-sm text-label-sm ${ok ? 'text-secondary' : 'text-error'} uppercase tracking-wider`;
+          stopped = true;
+          return;
+        }
+      } catch (_) {}
+      setTimeout(tick, 2000);
+    }
+    tick();
+  }
+
+  function formatAge(s) {
+    if (s < 60) return `${Math.round(s)}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m ${Math.round(s % 60)}s`;
+    return `${Math.round(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
   }
 
   function escapeHtml(s) {

@@ -318,6 +318,40 @@ def make_app(
     # marketing/index.html and is meant for external deployment
     # (GitHub Pages etc.), not inside the operational --serve UI.
 
+    @app.get("/jobs", response_class=HTMLResponse)
+    async def jobs_page() -> HTMLResponse:
+        """Live job-tracking page. Shows running + recent tool / system /
+        quest subprocess jobs the launcher knows about, with a live
+        log-tail view. Hit by the tools form after submit so the user can
+        watch their proposal/critique/etc. actually run."""
+        page = static_dir / "jobs.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Jobs UI not installed</h1>", status_code=500,
+            )
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    async def job_detail_page(job_id: str) -> HTMLResponse:
+        """Single-job detail page. Reuses jobs.html and lets the client
+        JS pick up the job_id from window.__fi_job_id."""
+        if not _QUEST_ID_RE.match(job_id):
+            raise HTTPException(400, f"bad job_id format: {job_id!r}")
+        page = static_dir / "jobs.html"
+        if not page.exists():
+            return HTMLResponse(
+                "<h1>Jobs UI not installed</h1>", status_code=500,
+            )
+        # Same trick as /quest/{id}: inject the job_id into a global so
+        # the client can target this single job.
+        html = page.read_text(encoding="utf-8")
+        injected = html.replace(
+            "</head>",
+            f'<script>window.__fi_job_id = {json.dumps(job_id)};</script></head>',
+            1,
+        )
+        return HTMLResponse(injected)
+
     @app.get("/compare", response_class=HTMLResponse)
     async def compare_page() -> HTMLResponse:
         page = static_dir / "compare.html"
@@ -638,6 +672,125 @@ def make_app(
         if lines is None:
             raise HTTPException(404, f"no log for job {job_id}")
         return JSONResponse({"job_id": job_id, "lines": lines})
+
+    def _classify_job(job_id: str) -> str:
+        """Categorize a launcher job by inspecting its job_id prefix.
+        Used by the /api/jobs response so the UI can render different
+        icons / link targets per job kind:
+          tool   → /api/tools/<name> jobs (job_id starts with `<tool>-`)
+          system → install-tectonic etc.
+          quest  → CLI/--new/--update launches (timestamp-prefixed)
+        """
+        from web.tools_routes import TOOLS_BY_NAME
+        for name in TOOLS_BY_NAME:
+            if job_id.startswith(f"{name}-"):
+                return "tool"
+        if job_id.startswith("tectonic-"):
+            return "system"
+        return "quest"
+
+    @app.get("/api/jobs")
+    async def list_jobs() -> JSONResponse:
+        """List all subprocess jobs the launcher has spawned (tools,
+        --install-tectonic, --new/--update/--proposal quest launches),
+        merging:
+          (1) the launcher's live registry (alive jobs with pid/age)
+          (2) outputs/_logs/<job_id>.log files (everything ever logged
+              — alive *or* exited).
+        Each entry the dashboard's "Jobs" tab consumes:
+          {job_id, kind, alive, exit_code?, age_seconds, log_mtime}.
+        """
+        out_root = app.state.output_root
+        logs_dir = Path(__file__).resolve().parent.parent / "outputs" / "_logs"
+        live = {q.quest_id: q for q in app.state.launcher.list_alive()}
+        seen: dict[str, dict[str, Any]] = {}
+        # 1. Files on disk = every job that was ever logged.
+        if logs_dir.is_dir():
+            for p in sorted(
+                logs_dir.glob("*.log"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )[:200]:
+                jid = p.stem
+                seen[jid] = {
+                    "job_id": jid,
+                    "kind": _classify_job(jid),
+                    "alive": jid in live,
+                    "log_mtime": p.stat().st_mtime,
+                    "log_size": p.stat().st_size,
+                }
+        # 2. Live registry entries (may include jobs that haven't
+        #    written a log file yet — rare but possible during startup).
+        for jid, entry in live.items():
+            if jid not in seen:
+                seen[jid] = {
+                    "job_id": jid,
+                    "kind": _classify_job(jid),
+                    "alive": True,
+                    "log_mtime": entry.started_at,
+                    "log_size": 0,
+                }
+            seen[jid]["pid"] = entry.pid
+            seen[jid]["age_seconds"] = entry.age_seconds()
+        # 3. For exited jobs, pull exit_code if the launcher still
+        #    remembers them (within the recent-reap window).
+        for jid, info in seen.items():
+            if not info["alive"]:
+                st = app.state.launcher.status_for(jid)
+                if st and st.get("exit_code") is not None:
+                    info["exit_code"] = st["exit_code"]
+        return JSONResponse({
+            "jobs": sorted(
+                seen.values(),
+                key=lambda j: j.get("age_seconds", 0) if j["alive"] else -j.get("log_mtime", 0),
+                reverse=False,
+            ),
+        })
+
+    @app.get("/api/jobs/{job_id}")
+    async def get_job(job_id: str, n: int = 400) -> JSONResponse:
+        """Status + log tail for a single subprocess job. The tools
+        page polls this every 2s after submitting so the user sees
+        live output instead of staring at a frozen "Job started"
+        banner. Returns 404 only when neither the launcher nor any
+        log file knows about this job_id."""
+        if not _QUEST_ID_RE.match(job_id):
+            raise HTTPException(400, f"bad job_id format: {job_id!r}")
+        logs_dir = Path(__file__).resolve().parent.parent / "outputs" / "_logs"
+        log_path = logs_dir / f"{job_id}.log"
+        st = app.state.launcher.status_for(job_id)
+        log_lines: list[str] = []
+        log_mtime = None
+        log_size = None
+        if log_path.is_file():
+            try:
+                lines = log_path.read_text(
+                    encoding="utf-8", errors="replace",
+                ).splitlines()
+                log_lines = lines[-n:]
+                log_mtime = log_path.stat().st_mtime
+                log_size = log_path.stat().st_size
+            except OSError:
+                pass
+        if st is None and log_size is None:
+            raise HTTPException(404, f"no job {job_id} tracked or logged")
+        out: dict[str, Any] = {
+            "job_id": job_id,
+            "kind": _classify_job(job_id),
+            "log_tail": log_lines,
+            "log_mtime": log_mtime,
+            "log_size": log_size,
+        }
+        if st is not None:
+            out["alive"] = bool(st.get("alive"))
+            out["pid"] = st.get("pid")
+            out["age_seconds"] = st.get("age_seconds")
+            out["started_at"] = st.get("started_at")
+            if "exit_code" in st:
+                out["exit_code"] = st["exit_code"]
+        else:
+            out["alive"] = False  # known only via log file → already finished
+        return JSONResponse(out)
 
     @app.post("/api/system/install-tectonic")
     async def install_tectonic() -> JSONResponse:

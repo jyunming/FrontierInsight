@@ -50,6 +50,7 @@
                   ${renderToolsItems(TOOLS_FALLBACK)}
                 </div>
               </div>
+              <a class="text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" href="/jobs">Jobs</a>
               <a class="text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" href="/compare">Compare</a>
             </div>
           </div>
