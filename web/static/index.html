@@ -1,196 +1,438 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/header.js"></script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Frontier Insight — Research Quests</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "surface-obsidian": "#0a0a0a",
+          "surface-charcoal": "#171717",
+          "surface-dim": "#121212",
+          "surface-container-lowest": "#0e0e0e",
+          "surface-container-low": "#1c1b1b",
+          "surface-container": "#201f1f",
+          "surface-container-high": "#2a2a2a",
+          "surface-container-highest": "#353534",
+          "on-surface": "#e5e2e1",
+          "on-surface-variant": "#c7c4d8",
+          "outline": "#918fa1",
+          "outline-variant": "#464555",
+          "border-subtle": "rgba(255, 255, 255, 0.08)",
+          "primary": "#c3c0ff",
+          "primary-container": "#4f46e5",
+          "secondary": "#4cd7f6",
+          "tertiary": "#E4F222",
+          "indigo-accent": "#4f46e5",
+          "cyan-accent": "#06b6d4",
+          "electric-lime": "#E4F222",
+          "error": "#ffb4ab",
+        },
+        fontFamily: {
+          display: ["Inter", "system-ui", "sans-serif"],
+          body: ["Geist", "Inter", "system-ui", "sans-serif"],
+          mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+        },
+        fontSize: {
+          "display-lg":         ["56px", { lineHeight: "1.05", letterSpacing: "-0.035em", fontWeight: "900" }],
+          "display-lg-mobile":  ["36px", { lineHeight: "1.1",  letterSpacing: "-0.03em",  fontWeight: "900" }],
+          "headline-lg":        ["32px", { lineHeight: "1.2",  letterSpacing: "-0.02em",  fontWeight: "800" }],
+          "headline-md":        ["22px", { lineHeight: "1.3",  letterSpacing: "-0.01em",  fontWeight: "700" }],
+          "body-lg":            ["18px", { lineHeight: "1.6",  fontWeight: "400" }],
+          "body-md":            ["15px", { lineHeight: "1.6",  fontWeight: "400" }],
+          "body-sm":            ["13px", { lineHeight: "1.5",  fontWeight: "400" }],
+          "label-mono":         ["11px", { lineHeight: "1",    letterSpacing: "0.12em",   fontWeight: "600" }],
+          "code-sm":            ["13px", { lineHeight: "1.5",  fontWeight: "400" }],
+        },
+        spacing: {
+          "container-max": "1440px",
+          "margin-desktop": "40px",
+          "stack-xs": "4px",
+          "stack-sm": "12px",
+          "stack-md": "24px",
+          "stack-lg": "48px",
+          "stack-xl": "80px",
+          "gutter": "20px",
+        },
+      },
+    },
+  };
+</script>
+<style>
+  body {
+    background-color: #0a0a0a;
+    background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .glass-panel {
+    background: rgba(10, 10, 10, 0.7);
+    backdrop-filter: blur(28px) saturate(140%);
+    -webkit-backdrop-filter: blur(28px) saturate(140%);
+  }
+  .hairline-gradient {
+    border: 1px solid transparent;
+    background-image: linear-gradient(#121212, #121212), linear-gradient(135deg, #4f46e5, #4cd7f6, transparent 70%);
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .hairline-gradient:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 12px 32px -16px rgba(79, 70, 229, 0.4);
+  }
+  .btn-gradient {
+    background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2), 0 8px 24px -8px rgba(79, 70, 229, 0.55);
+  }
+  .btn-gradient:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3), 0 12px 32px -8px rgba(79, 70, 229, 0.75); }
+  .pulse-lime {
+    box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.6);
+    animation: fi-pulse 2s infinite;
+  }
+  @keyframes fi-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.6); }
+    70%  { box-shadow: 0 0 0 8px rgba(228, 242, 34, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0); }
+  }
+  .empty-art {
+    width: 64px; height: 64px;
+    color: rgba(199, 196, 216, 0.4);
+    margin: 0 auto 16px;
+  }
+</style>
 </head>
-<body>
-  <div id="fi-header-root"></div>
-  <main>
-    <!-- Page hero: gives the dashboard a deliberate top with the CTA
-         pinned top-right. Subtitle stays short. -->
-    <section class="fi-page-hero">
-      <h1>Research Quests</h1>
-      <p class="fi-subtitle">Every quest in this output directory. Click one for live status, paper preview, figures, and cost.</p>
-      <div class="fi-page-hero-actions">
-        <a class="fi-btn fi-btn-primary" href="/interview">+ New Quest</a>
-      </div>
-    </section>
+<body class="font-body text-on-surface min-h-screen selection:bg-indigo-accent/40 selection:text-on-surface antialiased">
 
-    <!-- Status summary cards. Filled in by renderStats(). -->
-    <div class="fi-stats" id="quest-stats" style="display:none">
-      <div class="fi-stat">
-        <span class="fi-stat-label">Total</span>
-        <span class="fi-stat-value" id="stat-total">0</span>
-      </div>
-      <div class="fi-stat fi-stat-running">
-        <span class="fi-stat-label">In progress</span>
-        <span class="fi-stat-value" id="stat-running">0</span>
-      </div>
-      <div class="fi-stat fi-stat-accent">
-        <span class="fi-stat-label">Complete</span>
-        <span class="fi-stat-value" id="stat-complete">0</span>
-      </div>
-      <div class="fi-stat fi-stat-warn">
-        <span class="fi-stat-label">Needs revision</span>
-        <span class="fi-stat-value" id="stat-revise">0</span>
+<!-- Top nav -->
+<nav class="fixed top-0 left-0 right-0 z-50 glass-panel border-b border-border-subtle">
+  <div class="max-w-[1440px] mx-auto px-6 md:px-10 h-16 flex items-center justify-between">
+    <div class="flex items-center gap-6">
+      <a href="/" class="flex items-center gap-2 group">
+        <svg viewBox="0 0 32 32" class="w-8 h-8 rounded-lg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="navG" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#4f46e5"/>
+              <stop offset="1" stop-color="#06b6d4"/>
+            </linearGradient>
+          </defs>
+          <rect width="32" height="32" rx="8" fill="#0a0a0a" stroke="rgba(255,255,255,0.08)"/>
+          <path d="M8 22V10h13M8 16h11" stroke="url(#navG)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        </svg>
+        <span class="font-display font-extrabold text-headline-md tracking-tight group-hover:text-primary transition-colors">Frontier Insight</span>
+        <span class="font-mono text-label-mono px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant uppercase border border-border-subtle">beta</span>
+      </a>
+      <div class="hidden md:flex items-center gap-5 text-on-surface-variant font-mono text-label-mono">
+        <span class="opacity-30">/</span>
+        <span class="text-primary border-b border-primary pb-1">Quests</span>
+        <div id="tools-menu" class="relative">
+          <button id="tools-toggle" class="flex items-center gap-1 hover:text-primary transition-colors">
+            <span>Tools</span>
+            <span class="material-symbols-outlined text-[16px]">expand_more</span>
+          </button>
+          <div id="tools-dropdown" class="hidden absolute top-full left-0 mt-2 w-56 rounded-xl border border-border-subtle bg-surface-container-low shadow-xl backdrop-blur p-2"></div>
+        </div>
+        <a href="/compare" class="hover:text-primary transition-colors">Compare</a>
       </div>
     </div>
+    <div class="flex items-center gap-2">
+      <a href="/trash" class="p-2 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-primary" title="Trash">
+        <span class="material-symbols-outlined text-[20px]">delete</span>
+      </a>
+      <a href="/settings" class="p-2 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-primary" title="Settings">
+        <span class="material-symbols-outlined text-[20px]">settings</span>
+      </a>
+      <a href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener" class="p-2 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant hover:text-primary" title="GitHub">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.63 22.41c.58.1.79-.25.79-.56v-2c-3.22.7-3.9-1.39-3.9-1.39-.53-1.35-1.3-1.71-1.3-1.71-1.06-.72.08-.7.08-.7 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.75.41-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.74 0-1.27.46-2.31 1.2-3.12-.12-.3-.52-1.49.11-3.1 0 0 .98-.31 3.2 1.19a11.04 11.04 0 0 1 5.83 0c2.22-1.5 3.2-1.19 3.2-1.19.63 1.61.23 2.8.11 3.1.75.81 1.2 1.85 1.2 3.12 0 4.46-2.71 5.45-5.29 5.74.42.36.79 1.06.79 2.15v3.19c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>
+      </a>
+    </div>
+  </div>
+</nav>
 
-    <!-- Encapsulated filter toolbar. Same controls as before, scoped
-         into .fi-toolbar so it reads as one component. -->
-    <div class="fi-toolbar" id="filter-bar">
-      <input type="text" id="search" placeholder="Search by quest_id or provider…" oninput="applyFilter()">
-      <select id="status-filter" onchange="applyFilter()">
+<main class="max-w-[1440px] mx-auto px-6 md:px-10 pt-28 pb-24">
+
+<!-- Hero -->
+<section class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
+  <div>
+    <span class="font-mono text-label-mono text-cyan-accent uppercase">DASHBOARD</span>
+    <h1 class="font-display text-display-lg-mobile md:text-display-lg text-on-surface mt-2 mb-3 tracking-tight">Research Quests</h1>
+    <p class="text-on-surface-variant font-body text-body-lg max-w-xl">Every quest in this output directory. Click one for live status, paper preview, figures, and cost.</p>
+  </div>
+  <a href="/interview" class="btn-gradient text-white font-semibold text-body-md px-6 py-3 rounded-xl inline-flex items-center gap-2 self-start md:self-auto">
+    <span class="material-symbols-outlined">add</span>
+    <span>New Quest</span>
+  </a>
+</section>
+
+<!-- Stats -->
+<section id="quest-stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10" style="display:none">
+  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
+    <span class="font-mono text-label-mono text-on-surface-variant uppercase">Total</span>
+    <div class="font-display text-4xl font-black mt-2 tabular-nums" id="stat-total">0</div>
+  </div>
+  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
+    <div class="flex justify-between items-start">
+      <span class="font-mono text-label-mono text-on-surface-variant uppercase">In progress</span>
+      <div class="w-2 h-2 rounded-full bg-tertiary pulse-lime mt-1"></div>
+    </div>
+    <div class="font-display text-4xl font-black mt-2 tabular-nums text-tertiary" id="stat-running">0</div>
+  </div>
+  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
+    <span class="font-mono text-label-mono text-on-surface-variant uppercase">Complete</span>
+    <div class="font-display text-4xl font-black mt-2 tabular-nums text-secondary" id="stat-complete">0</div>
+  </div>
+  <div class="bg-surface-container-low border border-border-subtle p-5 rounded-xl hover:border-outline-variant transition-colors">
+    <span class="font-mono text-label-mono text-on-surface-variant uppercase">Needs revision</span>
+    <div class="font-display text-4xl font-black mt-2 tabular-nums text-primary" id="stat-revise">0</div>
+  </div>
+</section>
+
+<!-- Filter toolbar -->
+<section class="flex flex-col md:flex-row items-stretch md:items-center gap-3 mb-6 px-4 py-3 bg-surface-container-lowest/70 rounded-full border border-border-subtle">
+  <div class="flex items-center gap-2 text-on-surface-variant bg-surface-container rounded-full px-4 py-2 border border-border-subtle focus-within:border-primary/50 transition-colors flex-1 max-w-md">
+    <span class="material-symbols-outlined text-[18px]">search</span>
+    <input id="search" type="text" placeholder="Search quest_id or provider…" class="bg-transparent border-none focus:ring-0 outline-none font-mono text-body-sm w-full text-on-surface placeholder:text-on-surface-variant/60" oninput="applyFilter()"/>
+  </div>
+  <div class="flex items-center gap-2">
+    <div class="relative">
+      <select id="status-filter" onchange="applyFilter()" class="appearance-none bg-surface-container-high border border-border-subtle text-on-surface font-mono text-label-mono uppercase px-4 py-2 pr-8 rounded-full hover:bg-surface-container transition-colors focus:outline-none focus:border-primary/50">
         <option value="">All statuses</option>
         <option value="complete">Complete</option>
         <option value="(running)">In progress</option>
         <option value="revise">Needs revision</option>
       </select>
-      <select id="sort-by" onchange="applyFilter()">
-        <option value="newest">Newest first</option>
-        <option value="oldest">Oldest first</option>
-        <option value="alpha">By quest_id (A–Z)</option>
+      <span class="material-symbols-outlined text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant">filter_list</span>
+    </div>
+    <div class="relative">
+      <select id="sort-by" onchange="applyFilter()" class="appearance-none bg-surface-container-high border border-border-subtle text-on-surface font-mono text-label-mono uppercase px-4 py-2 pr-8 rounded-full hover:bg-surface-container transition-colors focus:outline-none focus:border-primary/50">
+        <option value="newest">Newest</option>
+        <option value="oldest">Oldest</option>
+        <option value="alpha">A → Z</option>
       </select>
-      <span class="fi-card-meta" id="result-count" style="margin-left:auto"></span>
+      <span class="material-symbols-outlined text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant">swap_vert</span>
     </div>
+  </div>
+  <div id="result-count" class="md:ml-auto font-mono text-label-mono text-on-surface-variant text-center md:text-right"></div>
+</section>
 
-    <!-- Richer empty state when there are no quests at all. -->
-    <div id="empty-banner" class="fi-empty-rich" style="display:none">
-      <svg class="fi-empty-art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="10" y="14" width="44" height="36" rx="3"></rect>
-        <line x1="10" y1="24" x2="54" y2="24"></line>
-        <circle cx="16" cy="19" r="1.2"></circle>
-        <circle cx="20" cy="19" r="1.2"></circle>
-        <path d="M22 38l6-6 6 6 12-12"></path>
-      </svg>
-      <h3>No quests yet</h3>
-      <p>Run an end-to-end quest from the 14-question interview. It clarifies your topic, runs the experiment, and writes the paper.</p>
-      <a class="fi-btn fi-btn-primary" href="/interview">Start your first quest</a>
+<!-- Empty state -->
+<section id="empty-banner" class="hidden bg-surface-container-low/60 border border-dashed border-outline-variant rounded-2xl p-12 text-center my-8">
+  <svg class="empty-art" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="10" y="14" width="44" height="36" rx="3"></rect>
+    <line x1="10" y1="24" x2="54" y2="24"></line>
+    <circle cx="16" cy="19" r="1.2"></circle>
+    <circle cx="20" cy="19" r="1.2"></circle>
+    <path d="M22 38l6-6 6 6 12-12"></path>
+  </svg>
+  <h3 class="font-display font-bold text-headline-md mb-2">No quests yet</h3>
+  <p class="text-on-surface-variant text-body-md mb-6 max-w-md mx-auto">Run an end-to-end quest from the 14-question interview. It clarifies your topic, runs the experiment, and writes the paper.</p>
+  <a href="/interview" class="btn-gradient text-white font-semibold text-body-md px-6 py-3 rounded-xl inline-flex items-center gap-2">
+    <span class="material-symbols-outlined">add</span>
+    Start your first quest
+  </a>
+</section>
+
+<!-- Quest list -->
+<section id="quest-list" class="flex flex-col gap-3 mb-16"></section>
+
+</main>
+
+<!-- Footer -->
+<footer class="border-t border-border-subtle mt-20">
+  <div class="max-w-[1440px] mx-auto px-6 md:px-10 py-6 flex flex-col md:flex-row justify-between items-center gap-3">
+    <div class="font-mono text-label-mono text-on-surface-variant">
+      Frontier Insight · <span class="text-tertiary">live</span> · Apache 2.0
     </div>
+    <div class="flex items-center gap-6 font-mono text-label-mono">
+      <a href="/settings" class="text-on-surface-variant hover:text-secondary transition-colors">Settings</a>
+      <a href="/trash" class="text-on-surface-variant hover:text-secondary transition-colors">Trash</a>
+      <a href="https://github.com/jyunming/FrontierInsight#readme" target="_blank" rel="noopener" class="text-on-surface-variant hover:text-secondary transition-colors">Docs</a>
+      <a href="https://github.com/jyunming/FrontierInsight" target="_blank" rel="noopener" class="text-on-surface-variant hover:text-secondary transition-colors">GitHub</a>
+    </div>
+  </div>
+</footer>
 
-    <div id="quest-list"></div>
-  </main>
+<script>
+  let allQuests = [];
 
-  <script>
-    let allQuests = [];
-
-    async function loadQuests() {
+  async function loadQuests() {
+    try {
       const res = await fetch('/api/quests');
       const data = await res.json();
       allQuests = data.quests || [];
       renderStats();
       applyFilter();
-    }
+    } catch (e) { /* silent: header refresh handled separately */ }
+  }
 
-    function renderStats() {
-      // Roll up counts by verdict so the user gets a one-glance status
-      // summary without parsing the list. Hidden until at least one
-      // quest exists so the empty state stays clean.
-      const statsRow = document.getElementById('quest-stats');
-      if (allQuests.length === 0) {
-        statsRow.style.display = 'none';
-        return;
-      }
-      statsRow.style.display = '';
-      let running = 0, complete = 0, revise = 0;
-      for (const q of allQuests) {
-        if (q.verdict === '(running)') running += 1;
-        else if (q.verdict === 'complete' || q.verdict === 'accept') complete += 1;
-        else if (q.verdict === 'revise') revise += 1;
-      }
-      document.getElementById('stat-total').textContent = allQuests.length;
-      document.getElementById('stat-running').textContent = running;
-      document.getElementById('stat-complete').textContent = complete;
-      document.getElementById('stat-revise').textContent = revise;
+  function renderStats() {
+    const statsRow = document.getElementById('quest-stats');
+    if (allQuests.length === 0) { statsRow.style.display = 'none'; return; }
+    statsRow.style.display = '';
+    let running = 0, complete = 0, revise = 0;
+    for (const q of allQuests) {
+      if (q.verdict === '(running)') running += 1;
+      else if (q.verdict === 'complete' || q.verdict === 'accept') complete += 1;
+      else if (q.verdict === 'revise') revise += 1;
     }
+    document.getElementById('stat-total').textContent = allQuests.length;
+    document.getElementById('stat-running').textContent = running;
+    document.getElementById('stat-complete').textContent = complete;
+    document.getElementById('stat-revise').textContent = revise;
+  }
 
-    function applyFilter() {
-      const empty = document.getElementById('empty-banner');
-      const list = document.getElementById('quest-list');
-      const count = document.getElementById('result-count');
-      if (allQuests.length === 0) {
-        empty.style.display = '';
-        list.innerHTML = '';
-        count.textContent = '';
-        return;
-      }
-      const search = (document.getElementById('search').value || '').toLowerCase();
-      const status = document.getElementById('status-filter').value || '';
-      const sortBy = document.getElementById('sort-by').value || 'newest';
-      let filtered = allQuests.filter(q => {
-        if (search && !`${q.quest_id} ${q.provider || ''}`.toLowerCase().includes(search)) return false;
-        if (status && q.verdict !== status) return false;
-        return true;
-      });
-      if (sortBy === 'oldest') filtered.sort((a, b) => (b.age_s || 0) - (a.age_s || 0));
-      else if (sortBy === 'alpha') filtered.sort((a, b) => a.quest_id.localeCompare(b.quest_id));
-      else filtered.sort((a, b) => (a.age_s || 0) - (b.age_s || 0));
-      empty.style.display = 'none';
-      list.innerHTML = filtered.map(renderQuestCard).join('') ||
-        '<div class="fi-empty">No quests match the filter.</div>';
-      count.textContent = `${filtered.length} of ${allQuests.length} quest${allQuests.length === 1 ? '' : 's'}`;
+  function applyFilter() {
+    const empty = document.getElementById('empty-banner');
+    const list = document.getElementById('quest-list');
+    const count = document.getElementById('result-count');
+    if (allQuests.length === 0) {
+      empty.classList.remove('hidden');
+      list.innerHTML = '';
+      count.textContent = '';
+      return;
     }
+    const search = (document.getElementById('search').value || '').toLowerCase();
+    const status = document.getElementById('status-filter').value || '';
+    const sortBy = document.getElementById('sort-by').value || 'newest';
+    let filtered = allQuests.filter(q => {
+      if (search && !`${q.quest_id} ${q.provider || ''}`.toLowerCase().includes(search)) return false;
+      if (status && q.verdict !== status) return false;
+      return true;
+    });
+    if (sortBy === 'oldest') filtered.sort((a, b) => (b.age_s || 0) - (a.age_s || 0));
+    else if (sortBy === 'alpha') filtered.sort((a, b) => a.quest_id.localeCompare(b.quest_id));
+    else filtered.sort((a, b) => (a.age_s || 0) - (b.age_s || 0));
+    empty.classList.add('hidden');
+    list.innerHTML = filtered.map(renderQuestCard).join('') ||
+      '<div class="text-center text-on-surface-variant py-12 font-body">No quests match the filter.</div>';
+    count.textContent = `${filtered.length} of ${allQuests.length} quest${allQuests.length === 1 ? '' : 's'}`;
+  }
 
-    function renderQuestCard(q) {
-      // The /api/quests scan endpoint returns: quest_id, quest_root,
-      // verdict, score, provider, has_paper, age_s. Cards link to the
-      // detail page; the ::after arrow on .fi-card-link gives the
-      // affordance that the whole card is clickable.
-      const state = describeState(q);
-      const provider = q.provider
-        ? `<span class="fi-mono">${escapeHtml(q.provider)}</span>`
-        : '';
-      const ageHint = q.age_s != null ? `${formatAge(q.age_s)} ago` : '';
-      const paperHint = q.has_paper ? '<span class="fi-badge fi-badge-done">paper.md</span>' : '';
-      const icon = state.badgeClass === 'fi-badge-alive' ? '<span class="fi-badge-icon"></span>' : '';
-      return `
-        <a class="fi-card fi-card-link" href="/quest/${encodeURIComponent(q.quest_id)}">
-          <div class="fi-card-title">
-            <h3>${escapeHtml(q.quest_id)}</h3>
-            <span class="fi-badge ${state.badgeClass}">${icon}${escapeHtml(state.label)}</span>
+  function renderQuestCard(q) {
+    const s = describeState(q);
+    const provider = q.provider
+      ? `<span class="flex items-center gap-1"><span class="opacity-50">PROVIDER:</span><span>${escapeHtml(q.provider)}</span></span>`
+      : '';
+    const age = q.age_s != null
+      ? `<span class="flex items-center gap-1"><span class="opacity-50">AGE:</span><span>${formatAge(q.age_s)}</span></span>`
+      : '';
+    const score = q.score != null
+      ? `<span class="flex items-center gap-1"><span class="opacity-50">SCORE:</span><span class="${s.scoreCls}">${escapeHtml(String(q.score))}</span></span>`
+      : '';
+    const paperChip = q.has_paper
+      ? `<span class="flex items-center gap-1 px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant font-mono text-[10px] border border-border-subtle uppercase">paper.md</span>`
+      : '';
+    return `
+      <a href="/quest/${encodeURIComponent(q.quest_id)}" class="hairline-gradient p-5 rounded-xl flex items-center justify-between gap-4 cursor-pointer group block text-on-surface no-underline">
+        <div class="flex flex-col gap-2 min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-2.5">
+            <h3 class="font-mono text-headline-md text-on-surface truncate">${escapeHtml(q.quest_id)}</h3>
+            <span class="flex items-center gap-1.5 px-3 py-1 rounded-full ${s.pillBg} ${s.pillText} border ${s.pillBorder} font-mono text-[10px] uppercase tracking-wider">
+              ${s.pillIcon}${s.label}
+            </span>
+            ${paperChip}
           </div>
-          <div class="fi-card-meta">
-            ${provider}${provider && ageHint ? ' · ' : ''}${ageHint}
-            ${q.score != null ? ' · score ' + escapeHtml(String(q.score)) : ''}
+          <div class="flex flex-wrap items-center gap-x-6 gap-y-1 font-mono text-[11px] text-on-surface-variant uppercase tracking-wider">
+            ${provider}
+            ${age}
+            ${score}
           </div>
-          <div style="margin-top:0.4rem">${paperHint}</div>
-        </a>
-      `;
-    }
+        </div>
+        <div class="opacity-0 group-hover:opacity-100 transition-opacity text-on-surface-variant">
+          <span class="material-symbols-outlined">arrow_forward_ios</span>
+        </div>
+      </a>
+    `;
+  }
 
-    function describeState(q) {
-      if (q.verdict === 'complete' || q.verdict === 'accept') {
-        return { label: 'complete', badgeClass: 'fi-badge-done' };
-      }
-      if (q.verdict === 'revise') {
-        return { label: 'revise', badgeClass: 'fi-badge-paused' };
-      }
-      if (q.verdict === '(running)') {
-        return { label: 'in progress', badgeClass: 'fi-badge-alive' };
-      }
-      return { label: String(q.verdict || 'idle'), badgeClass: '' };
+  function describeState(q) {
+    if (q.verdict === 'complete' || q.verdict === 'accept') {
+      return {
+        label: 'Complete',
+        pillBg: 'bg-secondary/10',
+        pillText: 'text-secondary',
+        pillBorder: 'border-secondary/30',
+        pillIcon: '',
+        scoreCls: 'text-secondary',
+      };
     }
-
-    function formatAge(s) {
-      if (s < 60) return `${s}s`;
-      if (s < 3600) return `${Math.round(s / 60)}m`;
-      if (s < 86400) return `${Math.round(s / 3600)}h`;
-      return `${Math.round(s / 86400)}d`;
+    if (q.verdict === 'revise') {
+      return {
+        label: 'Revise',
+        pillBg: 'bg-primary/10',
+        pillText: 'text-primary',
+        pillBorder: 'border-primary/30',
+        pillIcon: '',
+        scoreCls: 'text-primary',
+      };
     }
-
-    function escapeHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    if (q.verdict === '(running)') {
+      return {
+        label: 'Running',
+        pillBg: 'bg-tertiary/10',
+        pillText: 'text-tertiary',
+        pillBorder: 'border-tertiary/30',
+        pillIcon: '<span class="w-1.5 h-1.5 rounded-full bg-tertiary pulse-lime"></span>',
+        scoreCls: 'text-tertiary',
+      };
     }
+    return {
+      label: String(q.verdict || 'idle'),
+      pillBg: 'bg-surface-container-highest',
+      pillText: 'text-on-surface-variant',
+      pillBorder: 'border-border-subtle',
+      pillIcon: '',
+      scoreCls: 'text-on-surface-variant',
+    };
+  }
 
-    loadQuests();
-    setInterval(loadQuests, 5000);
-  </script>
+  function formatAge(s) {
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86400) return `${Math.round(s / 3600)}h`;
+    return `${Math.round(s / 86400)}d`;
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // Tools dropdown — fetched from /api/tools/schema so it stays in sync.
+  async function loadToolsDropdown() {
+    try {
+      const res = await fetch('/api/tools/schema');
+      if (!res.ok) return;
+      const data = await res.json();
+      const dd = document.getElementById('tools-dropdown');
+      dd.innerHTML = (data.tools || []).map(t =>
+        `<a href="/tools/${encodeURIComponent(t.name)}" class="block px-3 py-2 rounded-lg hover:bg-surface-container-high text-on-surface font-body text-body-sm transition-colors">
+          ${escapeHtml(t.label || t.name)}
+        </a>`
+      ).join('');
+    } catch (_) {}
+  }
+
+  document.getElementById('tools-toggle').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const dd = document.getElementById('tools-dropdown');
+    dd.classList.toggle('hidden');
+  });
+  document.addEventListener('click', () => {
+    document.getElementById('tools-dropdown').classList.add('hidden');
+  });
+
+  loadQuests();
+  loadToolsDropdown();
+  setInterval(loadQuests, 5000);
+</script>
 </body>
 </html>
