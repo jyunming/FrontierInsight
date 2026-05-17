@@ -841,6 +841,14 @@ class InterviewAnswers:
     provider: str = "vscode_extension"
     provider_model: str | None = None
     max_iterations: int = 2
+    # Audience for the published paper. "external" drops FI-internal
+    # cross-quest memory from the References section; "internal"
+    # keeps everything. Default external for safe one-shot quests.
+    audience: str = "external"
+    # How many prior-work entries the literature node retrieves into
+    # the writer's context block. 5 is the prompt-size sweet spot;
+    # bump to 12-15 for comprehensive reviews.
+    knowledge_top_k: int = 5
 
 
 def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
@@ -931,6 +939,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
 
     lines.append("knowledge:")
     lines.append(f"{indent}enabled: {'true' if answers.knowledge_enabled else 'false'}")
+    if answers.knowledge_top_k != 5:
+        lines.append(f"{indent}top_k: {answers.knowledge_top_k}")
     if not answers.knowledge_enabled:
         lines.append(f"{indent}external_fallback: [\"openalex\", \"arxiv\", \"crossref\"]")
         lines.append(f"{indent}source_routing: \"manual\"")
@@ -940,6 +950,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     quoted = ", ".join(json.dumps(k) for k in answers.output_kinds)
     lines.append(f"{indent}kinds: [{quoted}]")
     lines.append(f"{indent}paper_format: {json.dumps(answers.paper_format)}")
+    if answers.audience != "external":
+        lines.append(f"{indent}audience: {json.dumps(answers.audience)}")
     lines.append(f"{indent}output_dir: \"./outputs\"")
     lines.append("")
 
