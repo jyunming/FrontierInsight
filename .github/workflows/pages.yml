@@ -1,0 +1,76 @@
+# Publishes marketing/index.html (the standalone landing page) to
+# GitHub Pages at https://<owner>.github.io/FrontierInsight/.
+#
+# The marketing page is intentionally self-contained — it pulls
+# fonts + Tailwind from public CDNs at view time and has no /static/
+# or /api/ references — so the build step is just "stage marketing/
+# as the site root."
+#
+# Site root layout after deploy: the ENTIRE marketing/ directory
+# becomes the published site, so:
+#   /                  → marketing/index.html
+#   /README.md         → marketing/README.md
+#   ... and any other files we drop into marketing/ later.
+#
+# Staging the whole directory (rather than cherry-picking
+# index.html) means future additions — logo PNGs, additional
+# subpages, robots.txt — go live without touching this workflow.
+# The README is harmless at /README.md; if you'd rather it stay
+# hidden, add a build step here that excludes it.
+#
+# Prereq: in the repo's Settings → Pages, set Source = "GitHub Actions".
+# That permits this workflow to call deploy-pages without the legacy
+# branch-based setup.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "marketing/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Minimum permissions for actions/deploy-pages. id-token is required
+# for the OIDC token deploy-pages requests; pages: write is the
+# actual deploy permission.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy at a time. If a second push lands mid-deploy,
+# queue it instead of cancelling — losing a deploy because two
+# marketing edits raced is worse than waiting an extra minute.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Stage marketing/ as site root
+        run: |
+          mkdir -p _site
+          cp -r marketing/. _site/
+          # Sanity check: index.html must exist at the root.
+          test -f _site/index.html
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
