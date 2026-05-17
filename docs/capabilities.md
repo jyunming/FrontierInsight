@@ -51,6 +51,7 @@ Three feedback loops:
 | Ideate self-reflection — extra LLM call may swap chosen idea | ✅ |
 | Reviewer panel — N personas in parallel + moderator synthesis (`rigor_score` + `depth_score` axes) | ✅ |
 | Axon-backed knowledge layer: literature retrieval + cross-quest memory write-back | ✅ |
+| Axon sidecar auto-launch — every CLI / `--serve` invocation idempotently boots `python -m axon.api` on `127.0.0.1:8000` if it's not already listening, so the embedding model + vector indexes stay warm across quests instead of paying a 5-15 s cold-init per quest. Skip with `--no-axon-sidecar` or `FI_NO_AXON_SIDECAR=1`. Web UI surfaces status at `GET /api/axon/status`; VSCode probes on activate and offers a one-click "Start in terminal" if the sidecar is down, plus `@fi /axon-status` for explicit checks. | ✅ |
 | Multi-source literature router when Axon is empty: arXiv / OpenAlex / Crossref / Semantic Scholar / PubMed / CORE / Google Scholar in parallel, DOI-dedup | ✅ |
 | Topic-aware LLM source routing — agent picks which venues to query from a 12-entry catalog | ✅ |
 | Local paper feed — drop paywalled PDFs / MD into `knowledge.local_papers`, pinned to retrieval head | ✅ |
