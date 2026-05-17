@@ -51,6 +51,13 @@ export interface InterviewAnswers {
     // resolves per-call.
     provider_model: string;
     max_iterations: number;
+    // Citation audience for the published paper. "external" drops
+    // FI-internal cross-quest memory from References; "internal"
+    // keeps everything (project reports, internal memos).
+    audience: "external" | "internal";
+    // Prior-work retrievals per quest. 5 default; bump for
+    // comprehensive reviews.
+    knowledge_top_k: number;
 }
 
 /**
@@ -137,6 +144,10 @@ export function answersToYaml(answers: InterviewAnswers): string {
 
     lines.push("knowledge:");
     lines.push(`${indent}enabled: ${answers.knowledge_enabled ? "true" : "false"}`);
+    // Emit top_k only when it differs from the engine default (5).
+    if (answers.knowledge_top_k && answers.knowledge_top_k !== 5) {
+        lines.push(`${indent}top_k: ${answers.knowledge_top_k}`);
+    }
     if (!answers.knowledge_enabled) {
         lines.push(`${indent}external_fallback: ["openalex", "arxiv", "crossref"]`);
         // `source_routing: manual` skips the LLM-driven catalog source
@@ -151,6 +162,10 @@ export function answersToYaml(answers: InterviewAnswers): string {
     const quotedKinds = answers.output_kinds.map((k) => `"${yamlEscape(k)}"`).join(", ");
     lines.push(`${indent}kinds: [${quotedKinds}]`);
     lines.push(`${indent}paper_format: "${yamlEscape(answers.paper_format)}"`);
+    // Emit audience only when it differs from the safer default ("external").
+    if (answers.audience && answers.audience !== "external") {
+        lines.push(`${indent}audience: "${yamlEscape(answers.audience)}"`);
+    }
     lines.push(`${indent}output_dir: "./outputs"`);
     lines.push("");
 
@@ -181,7 +196,11 @@ export function writeInterviewYaml(
  * and the closing double-quote. (Tabs/newlines aren't possible here
  * because our inputs come from `showInputBox`, which is one-line.)
  */
-export function yamlEscape(s: string): string {
+export function yamlEscape(s: string | null | undefined): string {
+    // Tolerate undefined / null — callers may pass an optional field
+    // that the answers object hasn't populated yet. Treat missing as
+    // empty string instead of crashing with a .replace TypeError.
+    if (s === null || s === undefined) return "";
     return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
