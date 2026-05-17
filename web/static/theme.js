@@ -1,26 +1,24 @@
 /* Frontier Insight — Obsidian Frontier shared Tailwind config.
  *
- * This file MUST load BEFORE the Tailwind CDN script. Tailwind CDN
- * reads `window.tailwind.config` synchronously when it boots. If you
- * `defer` this or load it after the CDN, your custom tokens disappear.
+ * Tailwind v3 CDN reads `tailwind.config` AFTER it boots, so the
+ * recommended pattern is:
  *
- * Why a shared file at all: every page (dashboard, quest detail,
- * settings, trash, compare, interview, tools) needs the exact same
- * color + typography + spacing scale. Duplicating ~120 lines of
- * `tailwind.config = {...}` per page drifts and bloats. Loading from
- * /static/theme.js means changing a token rolls out everywhere.
+ *   <script src="/static/theme.js"></script>     // sets window._fiConfig
+ *   <script src="https://cdn.tailwindcss.com?..."></script>
+ *   <script>tailwind.config = window._fiConfig;</script>
  *
- * Design system: "Obsidian Frontier" — dark mode primary, deep obsidian
- * background (#0a0a0a), indigo→cyan gradient accents (#4f46e5 → #06b6d4),
- * electric-lime tertiary (#E4F222) for live-status signals.
+ * That order: theme.js loads → tailwind script loads (creates
+ * window.tailwind) → inline script assigns config from the
+ * pre-loaded blob. Centralizing the config object here means every
+ * page (dashboard, quest, settings, trash, compare, tools, interview)
+ * gets the same tokens without ~120 lines of duplication.
+ *
+ * Design system: "Obsidian Frontier" — dark-mode-first developer-tool
+ * aesthetic, deep obsidian background (#0a0a0a), indigo→cyan gradient
+ * accents (#4f46e5 → #06b6d4), electric-lime tertiary (#E4F222).
  */
 
-// `window.tailwind` may not exist yet when this file runs (it's
-// created by the CDN script). Defining `tailwind` here makes the
-// CDN script pick up our config when it initializes.
-if (!window.tailwind) { window.tailwind = {}; }
-
-window.tailwind.config = {
+window._fiConfig = {
   darkMode: "class",
   theme: {
     extend: {
