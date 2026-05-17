@@ -196,7 +196,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
 }
 .fi-card-title h3 {
   margin: 0;
-  font-family: 'Inter', sans-serif;
+  font-family: 'Fraunces', 'Inter', serif;
   font-size: 1.05rem;
   font-weight: 700;
   color: #e5e2e1;
@@ -287,7 +287,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
   background: #122131;
 }
 .fi-form legend {
-  font-family: 'Inter', sans-serif;
+  font-family: 'Fraunces', 'Inter', serif;
   font-weight: 700;
   color: #e5e2e1;
   padding: 0 0.5rem;
@@ -364,7 +364,7 @@ code {
   color: #e5e2e1;
 }
 .fi-md-body h1, .fi-md-body h2, .fi-md-body h3 {
-  font-family: 'Inter', sans-serif;
+  font-family: 'Fraunces', 'Inter', serif;
   margin-top: 1.5em;
   margin-bottom: 0.3em;
   color: #e5e2e1;
@@ -466,7 +466,7 @@ section.fi-section {
   margin: 1.5rem 0;
 }
 section.fi-section > h2 {
-  font-family: 'Inter', sans-serif;
+  font-family: 'Fraunces', 'Inter', serif;
   margin: 0 0 0.8rem;
   font-size: 1.25rem;
   font-weight: 700;

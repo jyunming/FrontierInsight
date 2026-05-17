@@ -10,7 +10,7 @@
 <meta property="og:type" content="website"/>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' fill='none'><rect width='512' height='512' rx='96' fill='%2313121b'/><g stroke='url(%23g)' stroke-width='40' stroke-linecap='round' stroke-linejoin='round'><path d='M256 100V412' stroke-width='48'/><path d='M256 160L320 160L350 130L400 180'/><path d='M256 260H360'/><path d='M140 180C180 200 220 240 256 260' opacity='0.3' stroke-width='32'/><path d='M140 340C180 320 220 280 256 260' opacity='0.3' stroke-width='32'/><circle cx='256' cy='260' r='12' fill='white' stroke='none'/></g><defs><linearGradient id='g' x1='256' y1='100' x2='256' y2='412' gradientUnits='userSpaceOnUse'><stop stop-color='%234f46e5'/><stop offset='1' stop-color='%2306b6d4'/></linearGradient></defs></svg>"/>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;family=Geist:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script>
   tailwind.config = {
@@ -41,19 +41,22 @@
           "electric-lime": "#E4F222",
         },
         fontFamily: {
-          display: ["Inter", "system-ui", "sans-serif"],
-          body: ["Geist", "Inter", "system-ui", "sans-serif"],
-          mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+          // Display — Fraunces (variable serif, opsz 9..144, wght 400..900).
+          // Editorial gravitas for a research tool; falls back to Inter while loading.
+          display: ["Fraunces", "Inter", "system-ui", "serif"],
+          body:    ["Geist", "Inter", "system-ui", "sans-serif"],
+          mono:    ["JetBrains Mono", "ui-monospace", "monospace"],
         },
         fontSize: {
-          "display-xl-mobile": ["48px", { lineHeight: "1.1", letterSpacing: "-0.03em", fontWeight: "800" }],
-          "display-xl":        ["88px", { lineHeight: "1.0", letterSpacing: "-0.045em", fontWeight: "800" }],
-          "headline-lg":       ["40px", { lineHeight: "1.15", letterSpacing: "-0.02em", fontWeight: "700" }],
-          "headline-md":       ["24px", { lineHeight: "1.3",  fontWeight: "600" }],
+          // Fraunces tops out at 900; tighten tracking for big display sizes.
+          "display-xl-mobile": ["56px", { lineHeight: "1.0",  letterSpacing: "-0.035em", fontWeight: "700" }],
+          "display-xl":        ["104px",{ lineHeight: "0.95", letterSpacing: "-0.045em", fontWeight: "700" }],
+          "headline-lg":       ["48px", { lineHeight: "1.1",  letterSpacing: "-0.025em", fontWeight: "700" }],
+          "headline-md":       ["28px", { lineHeight: "1.25", letterSpacing: "-0.01em",  fontWeight: "600" }],
           "body-lg":           ["18px", { lineHeight: "1.6",  fontWeight: "400" }],
           "body-md":           ["16px", { lineHeight: "1.6",  fontWeight: "400" }],
           "code-sm":           ["13px", { lineHeight: "1.5",  fontWeight: "400" }],
-          "label-caps":        ["12px", { lineHeight: "1",    letterSpacing: "0.12em", fontWeight: "600" }],
+          "label-caps":        ["12px", { lineHeight: "1",    letterSpacing: "0.14em", fontWeight: "600" }],
         },
         borderRadius: { lg: "0.5rem", xl: "0.75rem", "2xl": "1rem" },
         backgroundImage: {

@@ -1,6 +1,9 @@
 # Frontier Insight
 
-<img src="vscode-frontier-insight/images/icon.png" alt="Frontier Insight icon" width="96" align="left" style="margin-right: 16px;"/>
+<picture>
+  <source srcset="web/static/favicon.svg" type="image/svg+xml"/>
+  <img src="vscode-frontier-insight/images/icon.png" alt="Frontier Insight icon" width="96" align="left" style="margin-right: 16px;"/>
+</picture>
 
 **Give it a research topic. Get back a paper, the experiment that produced it, and the figures — all auto-generated, all reproducible.**
 

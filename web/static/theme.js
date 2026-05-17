@@ -107,22 +107,27 @@ window._fiConfig = {
         "component-padding-sm": "8px",
       },
       fontFamily: {
-        "body-lg":            ["Geist"],
-        "body-md":            ["Geist"],
-        "headline-xl":        ["Inter"],
-        "headline-lg":        ["Inter"],
-        "headline-lg-mobile": ["Inter"],
-        "code-md":            ["JetBrains Mono"],
-        "label-sm":           ["JetBrains Mono"],
+        // Body — Geist (modern grotesque sans)
+        "body-lg":            ["Geist", "Inter", "sans-serif"],
+        "body-md":            ["Geist", "Inter", "sans-serif"],
+        // Display — Fraunces (variable serif, opsz 9..144 + wght 400..900)
+        // Editorial gravitas for a research tool; falls back to Inter if loading.
+        "headline-xl":        ["Fraunces", "Inter", "serif"],
+        "headline-lg":        ["Fraunces", "Inter", "serif"],
+        "headline-lg-mobile": ["Fraunces", "Inter", "serif"],
+        // Mono — JetBrains Mono for code; labels in same to keep terminal vibe.
+        "code-md":            ["JetBrains Mono", "ui-monospace", "monospace"],
+        "label-sm":           ["JetBrains Mono", "ui-monospace", "monospace"],
       },
       fontSize: {
         "body-lg":            ["18px", { lineHeight: "1.6", fontWeight: "400" }],
         "body-md":            ["16px", { lineHeight: "1.6", fontWeight: "400" }],
-        "headline-xl":        ["64px", { lineHeight: "1.1", letterSpacing: "-0.04em", fontWeight: "900" }],
-        "headline-lg":        ["40px", { lineHeight: "1.2", letterSpacing: "-0.03em", fontWeight: "800" }],
-        "headline-lg-mobile": ["32px", { lineHeight: "1.2", letterSpacing: "-0.02em", fontWeight: "800" }],
+        // Fraunces is heaviest at 900; tighten tracking for display sizes.
+        "headline-xl":        ["72px", { lineHeight: "1.0", letterSpacing: "-0.04em", fontWeight: "700" }],
+        "headline-lg":        ["44px", { lineHeight: "1.1", letterSpacing: "-0.03em", fontWeight: "700" }],
+        "headline-lg-mobile": ["34px", { lineHeight: "1.1", letterSpacing: "-0.02em", fontWeight: "700" }],
         "code-md":            ["14px", { lineHeight: "1.5", fontWeight: "500" }],
-        "label-sm":           ["12px", { lineHeight: "1",   letterSpacing: "0.05em", fontWeight: "600" }],
+        "label-sm":           ["12px", { lineHeight: "1",   letterSpacing: "0.08em", fontWeight: "600" }],
       },
     },
   },
