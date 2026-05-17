@@ -1,186 +1,355 @@
-/* Frontier Insight — shared dashboard + interview stylesheet.
+/* Frontier Insight — Obsidian Frontier shared stylesheet.
  *
- * Clean modern dashboard look: Inter sans-serif when available
- * (falls back through the system-ui stack so `--serve` works fully
- * offline without a Google Fonts round-trip), single blue accent
- * (#1F3A5F), white background, JetBrains Mono for code. Dark mode
- * via prefers-color-scheme media query — flips background + text +
- * accent intensity. No third-party CSS framework; we lean on CSS
- * custom properties + clamp() typography.
+ * Companion to /static/theme.js (which sets the Tailwind config).
+ * This file holds the bits Tailwind utilities can't express cleanly:
+ *  - Body background (dot-grid radial pattern on obsidian black).
+ *  - Glassmorphism utility (.glass-panel) used by the sticky nav.
+ *  - Gradient hairline border (.hairline-gradient) used by quest cards
+ *    and feature blocks — needs background-clip trickery.
+ *  - Pulsing animation (.pulse-lime) for live-status dots.
+ *  - Gradient button (.btn-gradient) — the primary CTA across the app.
+ *  - Markdown body styling (.fi-md-body) used by the paper preview.
  *
- * (No `@import` here: the original draft pulled Inter from
- * fonts.googleapis.com, which breaks privacy + offline use. Users
- * who install Inter system-wide still get it via the font-family
- * stack below; everyone else gets system-ui, which is fine.)
+ * Loaded by every page; works alongside Tailwind utilities so pages
+ * can mix and match: `class="glass-panel border-b border-border-subtle"`.
  */
 
-:root {
-  /* Brand */
-  --fi-accent: #1F3A5F;          /* deep academic blue */
-  --fi-accent-hover: #16294A;
-  --fi-accent-soft: #E8EEF7;      /* tinted backgrounds */
+/* ─────────────────────────────────────────────────────────────────
+ * Reset / base
+ * ───────────────────────────────────────────────────────────────── */
 
-  /* Surface */
-  --fi-bg: #FFFFFF;
-  --fi-bg-elev: #F8FAFC;
-  --fi-border: #E2E8F0;
-  --fi-border-strong: #CBD5E1;
+* { box-sizing: border-box; }
 
-  /* Text */
-  --fi-text: #0F172A;
-  --fi-text-muted: #475569;
-  --fi-text-subtle: #94A3B8;
-
-  /* Signal */
-  --fi-success: #16A34A;
-  --fi-warn: #D97706;
-  --fi-danger: #DC2626;
-
-  /* Layout */
-  --fi-max-width: 1080px;
-  --fi-radius: 8px;
-  --fi-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
-  --fi-shadow-elev: 0 4px 12px rgba(15, 23, 42, 0.10);
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: #0a0a0a;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+  color: #e5e2e1;
+  font-family: 'Geist', 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11";
 }
 
-/* Dark-mode tokens — applied either via prefers-color-scheme (auto)
- * OR via [data-theme="dark"] (manual toggle from header.js). The
- * manual override always wins; light-mode toggle uses
- * [data-theme="light"] to neutralize a system-dark preference. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fi-accent: #60A5FA;
-    --fi-accent-hover: #3B82F6;
-    --fi-accent-soft: #1E293B;
-    --fi-bg: #0F172A;
-    --fi-bg-elev: #1E293B;
-    --fi-border: #334155;
-    --fi-border-strong: #475569;
-    --fi-text: #F1F5F9;
-    --fi-text-muted: #94A3B8;
-    --fi-text-subtle: #64748B;
-    --fi-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-    --fi-shadow-elev: 0 4px 12px rgba(0, 0, 0, 0.5);
-  }
+/* ─────────────────────────────────────────────────────────────────
+ * Shared utility classes (referenced from page templates)
+ * ───────────────────────────────────────────────────────────────── */
+
+.glass-panel {
+  background: rgba(10, 10, 10, 0.7);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
 }
 
-:root[data-theme="dark"] {
-  --fi-accent: #60A5FA;
-  --fi-accent-hover: #3B82F6;
-  --fi-accent-soft: #1E293B;
-  --fi-bg: #0F172A;
-  --fi-bg-elev: #1E293B;
-  --fi-border: #334155;
-  --fi-border-strong: #475569;
-  --fi-text: #F1F5F9;
-  --fi-text-muted: #94A3B8;
-  --fi-text-subtle: #64748B;
-  --fi-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  --fi-shadow-elev: 0 4px 12px rgba(0, 0, 0, 0.5);
+.hairline-gradient {
+  border: 1px solid transparent;
+  background-image:
+    linear-gradient(#121212, #121212),
+    linear-gradient(135deg, #4f46e5, #4cd7f6, transparent 70%);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.hairline-gradient:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 32px -16px rgba(79, 70, 229, 0.4);
 }
 
-:root[data-theme="light"] {
-  /* Forces the light palette even when prefers-color-scheme: dark.
-   * Variables match the :root defaults at the top of this file. */
-  --fi-accent: #1F3A5F;
-  --fi-accent-hover: #16294A;
-  --fi-accent-soft: #E8EEF7;
-  --fi-bg: #FFFFFF;
-  --fi-bg-elev: #F8FAFC;
-  --fi-border: #E2E8F0;
-  --fi-border-strong: #CBD5E1;
-  --fi-text: #0F172A;
-  --fi-text-muted: #475569;
-  --fi-text-subtle: #94A3B8;
-  --fi-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
-  --fi-shadow-elev: 0 4px 12px rgba(15, 23, 42, 0.10);
+.btn-gradient {
+  background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+    0 8px 24px -8px rgba(79, 70, 229, 0.55);
+  transition: box-shadow 0.15s ease, transform 0.05s ease;
+}
+.btn-gradient:hover {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3),
+    0 12px 32px -8px rgba(79, 70, 229, 0.75);
+}
+.btn-gradient:active { transform: translateY(1px); }
+
+.pulse-lime {
+  box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.6);
+  animation: fi-pulse 2s infinite;
+}
+@keyframes fi-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.6); }
+  70%  { box-shadow: 0 0 0 8px rgba(228, 242, 34, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(228, 242, 34, 0); }
 }
 
-/* Tools dropdown */
-.fi-dropdown {
-  position: relative;
-  display: inline-block;
+.text-gradient-cool {
+  background: linear-gradient(90deg, #c3c0ff 0%, #4cd7f6 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
-.fi-dropdown-toggle {
-  background: none;
-  border: none;
-  color: var(--fi-text-muted);
+
+/* ─────────────────────────────────────────────────────────────────
+ * Form controls — dark theme override for native elements
+ * ───────────────────────────────────────────────────────────────── */
+
+input[type="text"],
+input[type="number"],
+input[type="email"],
+input[type="password"],
+input[type="search"],
+textarea,
+select {
+  background: #1c1b1b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e5e2e1;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
   font-family: inherit;
-  font-size: 0.9rem;
-  font-weight: 500;
-  padding: 0.25rem 0.5rem;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: color 0.15s, background 0.15s;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  transition: border-color 0.12s, box-shadow 0.12s;
+  width: 100%;
 }
-.fi-dropdown-toggle:hover { color: var(--fi-accent); background: var(--fi-bg-elev); }
-.fi-dropdown-menu {
-  display: none;
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 0.25rem;
-  background: var(--fi-bg);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  box-shadow: var(--fi-shadow-elev);
-  min-width: 180px;
-  padding: 0.25rem 0;
-  z-index: 100;
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="email"]:focus,
+input[type="password"]:focus,
+input[type="search"]:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.2);
 }
-.fi-dropdown.open .fi-dropdown-menu { display: block; }
-.fi-dropdown-menu a {
-  display: block;
-  padding: 0.4rem 0.9rem;
-  color: var(--fi-text);
-  text-decoration: none;
-  font-size: 0.875rem;
-  transition: background 0.1s;
-}
-.fi-dropdown-menu a:hover { background: var(--fi-accent-soft); color: var(--fi-accent); }
-.fi-dropdown-menu hr {
-  margin: 0.25rem 0;
-  border: none;
-  border-top: 1px solid var(--fi-border);
+textarea { min-height: 4rem; resize: vertical; }
+
+input[type="checkbox"], input[type="radio"] {
+  accent-color: #4f46e5;
 }
 
-/* Rendered Markdown body (paper preview, about page) */
+/* ─────────────────────────────────────────────────────────────────
+ * Cards + containers (legacy + new naming kept side by side)
+ * ───────────────────────────────────────────────────────────────── */
+
+.fi-card {
+  background: #1c1b1b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+.fi-card-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+.fi-card-title h3 {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #e5e2e1;
+}
+.fi-card-meta {
+  color: #c7c4d8;
+  font-size: 0.875rem;
+}
+
+/* Status badges */
+.fi-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.7rem;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: #2a2a2a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c7c4d8;
+}
+.fi-badge-alive {
+  background: rgba(228, 242, 34, 0.1);
+  border-color: rgba(228, 242, 34, 0.3);
+  color: #E4F222;
+}
+.fi-badge-paused {
+  background: rgba(255, 180, 171, 0.1);
+  border-color: rgba(255, 180, 171, 0.3);
+  color: #ffb4ab;
+}
+.fi-badge-done {
+  background: rgba(76, 215, 246, 0.1);
+  border-color: rgba(76, 215, 246, 0.3);
+  color: #4cd7f6;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Buttons (legacy .fi-btn naming kept for back-compat with quest.html)
+ * ───────────────────────────────────────────────────────────────── */
+
+.fi-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 1.1rem;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s, transform 0.05s;
+  line-height: 1.2;
+}
+.fi-btn:active { transform: translateY(1px); }
+.fi-btn-primary {
+  background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+  color: white;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+.fi-btn-primary:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3), 0 6px 20px -6px rgba(79, 70, 229, 0.6); }
+.fi-btn-secondary {
+  background: #2a2a2a;
+  color: #e5e2e1;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.fi-btn-secondary:hover { border-color: rgba(255, 255, 255, 0.24); }
+.fi-btn-danger {
+  background: transparent;
+  color: #ffb4ab;
+  border-color: rgba(255, 180, 171, 0.3);
+}
+.fi-btn-danger:hover { background: rgba(255, 180, 171, 0.08); }
+.fi-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ─────────────────────────────────────────────────────────────────
+ * Form helpers (interview, tool form)
+ * ───────────────────────────────────────────────────────────────── */
+
+.fi-form fieldset {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.75rem;
+  margin: 0 0 1.25rem;
+  padding: 1.25rem 1.5rem;
+  background: #1c1b1b;
+}
+.fi-form legend {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  color: #e5e2e1;
+  padding: 0 0.5rem;
+}
+.fi-form .prompt {
+  color: #c7c4d8;
+  font-size: 0.875rem;
+  margin: 0.25rem 0 0.85rem;
+  line-height: 1.5;
+}
+.fi-form input.pinned,
+.fi-form textarea.pinned,
+.fi-form select.pinned {
+  background: rgba(79, 70, 229, 0.08);
+  color: #c7c4d8;
+  cursor: not-allowed;
+}
+.fi-form .fi-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.25rem 0;
+}
+.fi-form .fi-checkbox-row input[type="checkbox"] {
+  width: auto;
+  height: auto;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Code + monospace
+ * ───────────────────────────────────────────────────────────────── */
+
+pre, code, .fi-mono {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+pre {
+  background: #0e0e0e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.5rem;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: #e5e2e1;
+}
+code {
+  background: #2a2a2a;
+  padding: 0.1em 0.4em;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+}
+
+/* Log tail */
+.fi-log {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  background: #050505;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #c7c4d8;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Rendered Markdown (paper preview)
+ * ───────────────────────────────────────────────────────────────── */
+
 .fi-md-body {
   font-size: 0.9375rem;
-  line-height: 1.6;
-  color: var(--fi-text);
+  line-height: 1.65;
+  color: #e5e2e1;
 }
 .fi-md-body h1, .fi-md-body h2, .fi-md-body h3 {
+  font-family: 'Inter', sans-serif;
   margin-top: 1.5em;
   margin-bottom: 0.3em;
+  color: #e5e2e1;
+  letter-spacing: -0.01em;
 }
-.fi-md-body h1 { font-size: 1.4em; }
-.fi-md-body h2 { font-size: 1.2em; }
-.fi-md-body h3 { font-size: 1.05em; }
+.fi-md-body h1 { font-size: 1.5em; font-weight: 800; }
+.fi-md-body h2 { font-size: 1.25em; font-weight: 700; }
+.fi-md-body h3 { font-size: 1.1em; font-weight: 600; }
 .fi-md-body p { margin: 0.5em 0; }
 .fi-md-body code {
-  background: var(--fi-bg-elev);
+  background: #2a2a2a;
   padding: 0.1em 0.35em;
-  border-radius: 4px;
-  font-family: 'JetBrains Mono', monospace;
+  border-radius: 0.25rem;
   font-size: 0.85em;
 }
 .fi-md-body pre {
-  background: var(--fi-bg-elev);
-  padding: 0.75em 1em;
-  border-radius: var(--fi-radius);
+  background: #0e0e0e;
+  padding: 0.9em 1.1em;
+  border-radius: 0.5rem;
   overflow-x: auto;
-  border: 1px solid var(--fi-border);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
-.fi-md-body pre code {
-  background: transparent;
-  padding: 0;
-  font-size: 0.8125rem;
-}
+.fi-md-body pre code { background: transparent; padding: 0; }
 .fi-md-body blockquote {
-  border-left: 3px solid var(--fi-border-strong);
-  padding: 0 0 0 1em;
-  color: var(--fi-text-muted);
+  border-left: 3px solid #4f46e5;
+  padding: 0 0 0 1.1em;
+  color: #c7c4d8;
   margin: 1em 0;
 }
 .fi-md-body table.fi-md-table {
@@ -190,554 +359,252 @@
 }
 .fi-md-body table.fi-md-table th,
 .fi-md-body table.fi-md-table td {
-  padding: 0.5em 0.75em;
-  border-bottom: 1px solid var(--fi-border);
+  padding: 0.55em 0.8em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   text-align: left;
 }
 .fi-md-body table.fi-md-table th {
   font-weight: 600;
-  background: var(--fi-bg-elev);
+  background: #1c1b1b;
 }
 .fi-md-body ul, .fi-md-body ol {
   margin: 0.5em 0;
   padding-left: 1.5em;
 }
-.fi-md-body img { max-width: 100%; }
+.fi-md-body img { max-width: 100%; border-radius: 0.5rem; }
+.fi-md-body a { color: #4cd7f6; text-decoration: underline; }
+.fi-md-body a:hover { color: #c3c0ff; }
 
-/* File browser tree */
-#files-tree details {
-  margin: 0.25rem 0;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-}
-#files-tree details:hover { background: var(--fi-bg-elev); }
-#files-tree summary {
-  cursor: pointer;
-  user-select: none;
-}
-#files-tree ul li {
-  padding: 0.15rem 0;
-}
-#files-tree a {
-  color: var(--fi-accent);
-  text-decoration: none;
-}
-#files-tree a:hover { text-decoration: underline; }
+/* ─────────────────────────────────────────────────────────────────
+ * Figures grid
+ * ───────────────────────────────────────────────────────────────── */
 
-/* Theme toggle button */
-.fi-theme-toggle {
-  background: none;
-  border: 1px solid var(--fi-border);
-  color: var(--fi-text-muted);
-  cursor: pointer;
-  font-size: 1rem;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--fi-radius);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s, border-color 0.12s;
-}
-.fi-theme-toggle:hover {
-  background: var(--fi-bg-elev);
-  border-color: var(--fi-border-strong);
-}
-
-* { box-sizing: border-box; }
-
-html, body {
-  margin: 0;
-  padding: 0;
-  background: var(--fi-bg);
-  color: var(--fi-text);
-  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  font-size: 15px;
-  line-height: 1.55;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-/* Header bar — injected by header.js into both pages. */
-.fi-header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: var(--fi-bg);
-  border-bottom: 1px solid var(--fi-border);
-  padding: 0.75rem 1.5rem;
-}
-.fi-header-inner {
-  max-width: var(--fi-max-width);
-  margin: 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-.fi-logo {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  text-decoration: none;
-  color: var(--fi-text);
-  font-weight: 600;
-  font-size: 1.0625rem;
-  letter-spacing: -0.01em;
-}
-.fi-logo img { width: 28px; height: 28px; }
-.fi-breadcrumb {
-  color: var(--fi-text-muted);
-  font-size: 0.875rem;
-}
-.fi-breadcrumb::before { content: "/"; margin: 0 0.5rem; color: var(--fi-text-subtle); }
-.fi-nav {
-  margin-left: auto;
-  display: flex;
-  gap: 1.25rem;
-  align-items: center;
-}
-.fi-nav a {
-  color: var(--fi-text-muted);
-  text-decoration: none;
-  font-size: 0.9rem;
-  font-weight: 500;
-  transition: color 0.15s;
-}
-.fi-nav a:hover { color: var(--fi-accent); }
-
-/* Page container */
-main, .fi-main {
-  max-width: var(--fi-max-width);
-  margin: 0 auto;
-  padding: 2rem 1.5rem 4rem;
-}
-
-/* Typography */
-h1, h2, h3, h4 {
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  margin: 1.5em 0 0.5em;
-  color: var(--fi-text);
-}
-h1 { font-size: clamp(1.5rem, 2.5vw, 1.875rem); margin-top: 0; }
-h2 { font-size: 1.25rem; }
-h3 { font-size: 1.05rem; }
-p { margin: 0.5em 0 1em; }
-.fi-subtitle {
-  color: var(--fi-text-muted);
-  font-size: 0.95rem;
-  margin-top: -0.25rem;
-}
-
-/* Buttons */
-.fi-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.55rem 1rem;
-  font-family: inherit;
-  font-size: 0.9375rem;
-  font-weight: 500;
-  border-radius: var(--fi-radius);
-  border: 1px solid transparent;
-  cursor: pointer;
-  text-decoration: none;
-  transition: background 0.12s, border-color 0.12s, transform 0.05s;
-  line-height: 1.2;
-}
-.fi-btn:active { transform: translateY(1px); }
-.fi-btn-primary {
-  background: var(--fi-accent);
-  color: white;
-}
-.fi-btn-primary:hover { background: var(--fi-accent-hover); }
-.fi-btn-secondary {
-  background: var(--fi-bg-elev);
-  color: var(--fi-text);
-  border-color: var(--fi-border);
-}
-.fi-btn-secondary:hover { border-color: var(--fi-border-strong); }
-.fi-btn-danger {
-  background: transparent;
-  color: var(--fi-danger);
-  border-color: var(--fi-border);
-}
-.fi-btn-danger:hover { background: rgba(220, 38, 38, 0.08); }
-.fi-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* Cards */
-.fi-card {
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  padding: 1rem 1.25rem;
-  margin-bottom: 1rem;
-  box-shadow: var(--fi-shadow);
-  transition: box-shadow 0.15s, transform 0.05s;
-}
-.fi-card:hover { box-shadow: var(--fi-shadow-elev); }
-.fi-card-title {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.5rem;
-}
-.fi-card-title h3 { margin: 0; font-size: 1rem; font-weight: 600; }
-.fi-card-meta {
-  color: var(--fi-text-muted);
-  font-size: 0.8125rem;
-}
-
-/* Form */
-.fi-form fieldset {
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  margin: 0 0 1rem;
-  padding: 1rem 1.25rem;
-  background: var(--fi-bg-elev);
-}
-.fi-form legend {
-  font-weight: 600;
-  color: var(--fi-text);
-  padding: 0 0.4rem;
-}
-.fi-form .prompt {
-  color: var(--fi-text-muted);
-  font-size: 0.875rem;
-  margin: 0.25rem 0 0.75rem;
-  line-height: 1.5;
-}
-.fi-form input[type="text"],
-.fi-form textarea,
-.fi-form select {
-  width: 100%;
-  padding: 0.55rem 0.75rem;
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  background: var(--fi-bg);
-  color: var(--fi-text);
-  font-family: inherit;
-  font-size: 0.9375rem;
-  line-height: 1.45;
-  transition: border-color 0.12s, box-shadow 0.12s;
-}
-.fi-form input[type="text"]:focus,
-.fi-form textarea:focus,
-.fi-form select:focus {
-  outline: none;
-  border-color: var(--fi-accent);
-  box-shadow: 0 0 0 3px var(--fi-accent-soft);
-}
-.fi-form textarea { min-height: 4rem; resize: vertical; }
-.fi-form input.pinned,
-.fi-form textarea.pinned,
-.fi-form select.pinned {
-  background: var(--fi-accent-soft);
-  color: var(--fi-text-muted);
-  cursor: not-allowed;
-}
-
-.fi-form .fi-checkbox-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 1.25rem 0;
-}
-.fi-form .fi-checkbox-row input[type="checkbox"] {
-  width: 1rem; height: 1rem;
-}
-
-/* Progress indicator */
-.fi-progress {
-  position: sticky;
-  top: 4rem;
-  background: var(--fi-bg);
-  padding: 0.5rem 0;
-  margin-bottom: 1rem;
-  color: var(--fi-text-muted);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  z-index: 5;
-  border-bottom: 1px solid var(--fi-border);
-}
-
-/* Code blocks + monospace */
-pre, code, .fi-mono {
-  font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
-}
-pre {
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  padding: 0.75rem 1rem;
-  overflow-x: auto;
-  font-size: 0.8125rem;
-  line-height: 1.5;
-}
-
-/* Log tail */
-.fi-log {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.8125rem;
-  line-height: 1.5;
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  padding: 0.75rem;
-  max-height: 320px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--fi-text);
-}
-
-/* Status badges */
-.fi-badge {
-  display: inline-block;
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  color: var(--fi-text-muted);
-}
-.fi-badge.fi-badge-alive { background: rgba(22, 163, 74, 0.12); border-color: rgba(22, 163, 74, 0.3); color: var(--fi-success); }
-.fi-badge.fi-badge-paused { background: rgba(217, 119, 6, 0.12); border-color: rgba(217, 119, 6, 0.3); color: var(--fi-warn); }
-.fi-badge.fi-badge-done { background: rgba(31, 58, 95, 0.12); border-color: rgba(31, 58, 95, 0.3); color: var(--fi-accent); }
-
-/* Figures grid */
 .fi-figures {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.85rem;
   margin: 1rem 0;
 }
 .fi-figures img {
   width: 100%;
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.5rem;
   background: white;
 }
 
-/* Empty / error states */
-.fi-empty {
-  text-align: center;
-  padding: 3rem 1rem;
-  color: var(--fi-text-muted);
-  font-size: 0.9375rem;
-}
-
-/* Toast / banner */
-.fi-banner {
-  padding: 0.75rem 1rem;
-  border-radius: var(--fi-radius);
-  margin-bottom: 1rem;
-  font-size: 0.875rem;
-  border: 1px solid;
-}
-.fi-banner.fi-banner-info { background: var(--fi-accent-soft); border-color: var(--fi-accent); color: var(--fi-accent); }
-.fi-banner.fi-banner-error { background: rgba(220, 38, 38, 0.08); border-color: var(--fi-danger); color: var(--fi-danger); }
-
 /* ─────────────────────────────────────────────────────────────────
- * Polish utilities (Phase R+ web UI redesign)
+ * Banners (info / error)
  * ───────────────────────────────────────────────────────────────── */
 
-/* Page hero — used on dashboard + settings to give each page a more
- * deliberate "top" instead of a bare H1. The subtle radial gradient
- * comes from --fi-accent-soft to transparent so it tints into the
- * surface without dominating. */
+.fi-banner {
+  padding: 0.85rem 1.1rem;
+  border-radius: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  border: 1px solid;
+}
+.fi-banner-info {
+  background: rgba(76, 215, 246, 0.08);
+  border-color: rgba(76, 215, 246, 0.3);
+  color: #4cd7f6;
+}
+.fi-banner-error {
+  background: rgba(255, 180, 171, 0.08);
+  border-color: rgba(255, 180, 171, 0.3);
+  color: #ffb4ab;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * File browser tree (quest.html)
+ * ───────────────────────────────────────────────────────────────── */
+
+#files-tree details {
+  margin: 0.25rem 0;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.4rem;
+}
+#files-tree details:hover { background: rgba(255, 255, 255, 0.04); }
+#files-tree summary { cursor: pointer; user-select: none; }
+#files-tree ul li { padding: 0.18rem 0; }
+#files-tree a { color: #4cd7f6; text-decoration: none; }
+#files-tree a:hover { text-decoration: underline; }
+
+/* ─────────────────────────────────────────────────────────────────
+ * Section blocks (used on quest detail to group content)
+ * ───────────────────────────────────────────────────────────────── */
+
+section.fi-section {
+  background: #1c1b1b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.75rem;
+  padding: 1.5rem 1.75rem;
+  margin: 1.5rem 0;
+}
+section.fi-section h2 {
+  font-family: 'Inter', sans-serif;
+  margin: 0 0 0.8rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #e5e2e1;
+}
+section.fi-section p.fi-subtitle {
+  color: #c7c4d8;
+  font-size: 0.9rem;
+  margin: 0 0 0.85rem;
+}
+
+/* Page hero (used by every secondary page) */
 .fi-page-hero {
   position: relative;
-  padding: 1.5rem 1.5rem 1.75rem;
-  margin: -0.5rem -1.5rem 1.5rem;
-  border-radius: calc(var(--fi-radius) + 2px);
+  padding: 2rem 2rem 2.25rem;
+  margin-bottom: 1.75rem;
+  border-radius: 1rem;
   background:
-    radial-gradient(ellipse 480px 220px at 5% 0%, var(--fi-accent-soft) 0%, transparent 65%),
-    var(--fi-bg);
-  border: 1px solid var(--fi-border);
-  box-shadow: var(--fi-shadow);
+    radial-gradient(ellipse 480px 220px at 5% 0%, rgba(79, 70, 229, 0.15) 0%, transparent 60%),
+    #1c1b1b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
-.fi-page-hero h1 { margin: 0 0 0.25rem; }
-.fi-page-hero p.fi-subtitle { margin: 0 0 0; max-width: 64ch; }
+.fi-page-hero h1 {
+  font-family: 'Inter', sans-serif;
+  font-size: clamp(1.75rem, 3vw, 2.25rem);
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.4rem;
+  color: #e5e2e1;
+}
+.fi-page-hero p.fi-subtitle {
+  margin: 0;
+  color: #c7c4d8;
+  font-size: 0.95rem;
+  max-width: 64ch;
+}
 .fi-page-hero-actions {
   position: absolute;
-  top: 1.5rem;
-  right: 1.5rem;
+  top: 2rem;
+  right: 2rem;
   display: inline-flex;
   gap: 0.5rem;
 }
 @media (max-width: 640px) {
-  .fi-page-hero { margin: -0.25rem -1rem 1rem; padding: 1.25rem 1rem; }
-  .fi-page-hero-actions { position: static; margin-top: 0.75rem; }
+  .fi-page-hero { padding: 1.5rem 1.25rem; }
+  .fi-page-hero-actions { position: static; margin-top: 1rem; }
 }
 
-/* Stats row — compact summary cards above lists */
-.fi-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 0.6rem;
-  margin: 0 0 1.25rem;
-}
-.fi-stat {
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  padding: 0.6rem 0.85rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-.fi-stat .fi-stat-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--fi-text-subtle);
-  text-transform: uppercase;
-}
-.fi-stat .fi-stat-value {
-  font-size: 1.4rem;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  color: var(--fi-text);
-  font-variant-numeric: tabular-nums;
-}
-.fi-stat.fi-stat-accent .fi-stat-value { color: var(--fi-accent); }
-.fi-stat.fi-stat-running .fi-stat-value { color: var(--fi-success); }
-.fi-stat.fi-stat-warn .fi-stat-value { color: var(--fi-warn); }
+/* ─────────────────────────────────────────────────────────────────
+ * Empty states
+ * ───────────────────────────────────────────────────────────────── */
 
-/* Quest card lift — applies to anchor-cards in the dashboard list.
- * Larger hit area + nice hover. */
-.fi-card-link {
-  display: block;
-  text-decoration: none;
-  color: inherit;
-  position: relative;
-}
-.fi-card-link:hover {
-  transform: translateY(-1px);
-  border-color: var(--fi-border-strong);
-}
-.fi-card-link::after {
-  content: "→";
-  position: absolute;
-  top: 1rem;
-  right: 1.1rem;
-  color: var(--fi-text-subtle);
+.fi-empty {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: #c7c4d8;
   font-size: 0.95rem;
-  opacity: 0;
-  transition: opacity 0.15s, transform 0.15s;
 }
-.fi-card-link:hover::after {
-  opacity: 1;
-  transform: translateX(2px);
-}
-
-/* Inline status icons (single-glyph inside a badge). Sized to badge. */
-.fi-badge .fi-badge-icon {
-  width: 0.65rem;
-  height: 0.65rem;
-  display: inline-block;
-  border-radius: 50%;
-  margin-right: 0.35rem;
-  vertical-align: middle;
-  background: currentColor;
-}
-.fi-badge.fi-badge-alive .fi-badge-icon {
-  background: var(--fi-success);
-  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18);
-  animation: fi-pulse 1.4s ease-in-out infinite;
-}
-@keyframes fi-pulse {
-  0%, 100% { box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18); }
-  50%      { box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.08); }
-}
-
-/* Filter toolbar — encapsulates the search/sort row on the dashboard
- * so it reads as a single component rather than three loose inputs. */
-.fi-toolbar {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  flex-wrap: wrap;
-  padding: 0.55rem 0.7rem;
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  margin-bottom: 1rem;
-}
-.fi-toolbar input[type="text"],
-.fi-toolbar select {
-  padding: 0.4rem 0.7rem;
-  border: 1px solid var(--fi-border);
-  border-radius: 6px;
-  background: var(--fi-bg);
-  color: var(--fi-text);
-  font-family: inherit;
-  font-size: 0.875rem;
-  transition: border-color 0.12s, box-shadow 0.12s;
-}
-.fi-toolbar input[type="text"]:focus,
-.fi-toolbar select:focus {
-  outline: none;
-  border-color: var(--fi-accent);
-  box-shadow: 0 0 0 3px var(--fi-accent-soft);
-}
-.fi-toolbar input[type="text"] { flex: 1; min-width: 200px; }
-
-/* Empty state with illustration */
 .fi-empty-rich {
   text-align: center;
   padding: 3.5rem 1rem;
-  background: var(--fi-bg-elev);
-  border: 1px dashed var(--fi-border-strong);
-  border-radius: calc(var(--fi-radius) + 2px);
-  color: var(--fi-text-muted);
+  background: rgba(28, 27, 27, 0.6);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 1rem;
+  color: #c7c4d8;
 }
 .fi-empty-rich .fi-empty-art {
   width: 64px; height: 64px;
-  margin: 0 auto 0.85rem;
-  color: var(--fi-text-subtle);
-  opacity: 0.7;
+  margin: 0 auto 1rem;
+  color: rgba(199, 196, 216, 0.4);
 }
 .fi-empty-rich h3 {
-  margin: 0 0 0.35rem;
-  color: var(--fi-text);
-  font-size: 1.05rem;
-}
-.fi-empty-rich p { margin: 0 0 1rem; font-size: 0.9rem; }
-
-/* Section blocks on quest detail — softer separators */
-section.fi-section {
-  margin: 1.75rem 0;
-  padding: 1.25rem 1.5rem;
-  background: var(--fi-bg-elev);
-  border: 1px solid var(--fi-border);
-  border-radius: var(--fi-radius);
-  box-shadow: var(--fi-shadow);
-}
-section.fi-section h2 {
-  margin: 0 0 0.6rem;
+  font-family: 'Inter', sans-serif;
+  margin: 0 0 0.4rem;
+  color: #e5e2e1;
   font-size: 1.1rem;
+  font-weight: 700;
 }
-section.fi-section > p.fi-subtitle { margin: 0 0 0.85rem; }
+.fi-empty-rich p {
+  margin: 0 0 1.2rem;
+  font-size: 0.9rem;
+}
 
-/* Action bar (sticky toolbar for quest detail) */
-.fi-actions {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+/* ─────────────────────────────────────────────────────────────────
+ * Subtitle (used outside hero too)
+ * ───────────────────────────────────────────────────────────────── */
+
+.fi-subtitle {
+  color: #c7c4d8;
+  font-size: 0.95rem;
+}
+
+/* Progress indicator (interview) */
+.fi-progress {
+  position: sticky;
+  top: 80px;
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(12px);
+  padding: 0.6rem 1rem;
+  margin-bottom: 1rem;
+  color: #c7c4d8;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  z-index: 30;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.5rem;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Tools dropdown (header)
+ * ───────────────────────────────────────────────────────────────── */
+
+.fi-dropdown { position: relative; display: inline-block; }
+.fi-dropdown-toggle {
+  background: none;
+  border: none;
+  color: #c7c4d8;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+  border-radius: 0.35rem;
+  display: inline-flex;
   align-items: center;
+  gap: 0.25rem;
+  transition: color 0.12s, background 0.12s;
 }
-
-/* Small screen */
-@media (max-width: 640px) {
-  main, .fi-main { padding: 1.25rem 1rem 3rem; }
-  .fi-header { padding: 0.5rem 1rem; }
-  .fi-nav { gap: 0.75rem; }
-  .fi-nav a { font-size: 0.85rem; }
+.fi-dropdown-toggle:hover { color: #c3c0ff; background: rgba(255, 255, 255, 0.04); }
+.fi-dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 0.4rem;
+  background: rgba(20, 20, 20, 0.95);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.6rem;
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.7);
+  min-width: 220px;
+  padding: 0.4rem;
+  z-index: 100;
+}
+.fi-dropdown.open .fi-dropdown-menu { display: block; }
+.fi-dropdown-menu a {
+  display: block;
+  padding: 0.5rem 0.8rem;
+  color: #e5e2e1;
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-family: 'Geist', sans-serif;
+  border-radius: 0.4rem;
+  transition: background 0.1s;
+}
+.fi-dropdown-menu a:hover { background: rgba(79, 70, 229, 0.15); color: #c3c0ff; }
+.fi-dropdown-menu hr {
+  margin: 0.3rem 0;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }

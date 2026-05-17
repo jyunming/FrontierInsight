@@ -1,287 +1,260 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frontier Insight — New Quest</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/header.js"></script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Frontier Insight — New Quest</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
 </head>
-<body>
-  <div id="fi-header-root" data-breadcrumb="New Quest"></div>
-  <main>
-    <section class="fi-page-hero">
-      <h1 id="page-title">New Research Quest</h1>
-      <p class="fi-subtitle" id="page-subtitle">Loading questions…</p>
-    </section>
+<body class="font-body text-on-surface min-h-screen antialiased">
+<div id="fi-header-root" data-breadcrumb="New Quest"></div>
+<main class="max-w-[860px] mx-auto px-6 md:px-10 pt-28 pb-24">
 
-    <div class="fi-progress" id="progress" style="display:none">
-      Question <span id="progress-current">1</span> of <span id="progress-total">14</span>
-    </div>
+<section class="fi-page-hero">
+  <h1 id="page-title">New Research Quest</h1>
+  <p class="fi-subtitle" id="page-subtitle">Loading questions…</p>
+</section>
 
-    <form class="fi-form" id="interview-form" onsubmit="return submitForm(event);"></form>
+<div class="fi-progress hidden" id="progress">
+  Question <span id="progress-current">1</span> of <span id="progress-total">14</span>
+</div>
 
-    <div id="result" style="display:none"></div>
-  </main>
+<form class="fi-form" id="interview-form" onsubmit="return submitForm(event);"></form>
+<div id="result" class="hidden"></div>
 
-  <script>
-    // Frontier Insight web interview — drives the same 14-question
-    // schema the CLI and VSCode flows use. Schema fetched from
-    // /api/interview/schema (exported from core/interview.py).
+</main>
 
-    const updateQuestId = window.__fi_update_quest_id || null;
-    const isUpdate = !!updateQuestId;
+<script>
+  // Web interview — drives the same 14-question schema the CLI and
+  // VSCode flows use. Schema fetched from /api/interview/schema.
 
-    let schema = null;
+  const updateQuestId = window.__fi_update_quest_id || null;
+  const isUpdate = !!updateQuestId;
 
-    async function loadSchema() {
-      const res = await fetch('/api/interview/schema');
-      schema = await res.json();
-      const title = document.getElementById('page-title');
-      const subtitle = document.getElementById('page-subtitle');
-      if (isUpdate) {
-        title.textContent = `Update Quest`;
-        subtitle.innerHTML = `Editing <code class="fi-mono">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned to the existing YAML.`;
-      } else {
-        title.textContent = 'New Research Quest';
-        subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write a draft YAML only).';
-      }
-      renderForm();
+  let schema = null;
+
+  async function loadSchema() {
+    const res = await fetch('/api/interview/schema');
+    schema = await res.json();
+    const title = document.getElementById('page-title');
+    const subtitle = document.getElementById('page-subtitle');
+    if (isUpdate) {
+      title.textContent = `Update Quest`;
+      subtitle.innerHTML = `Editing <code class="font-mono text-cyan-accent">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned to the existing YAML.`;
+    } else {
+      title.textContent = 'New Research Quest';
+      subtitle.textContent = 'Same 14 questions the CLI and VSCode flows use. Submit launches the quest immediately (uncheck the box below to write a draft YAML only).';
     }
+    renderForm();
+  }
 
-    function renderForm() {
-      const form = document.getElementById('interview-form');
-      form.innerHTML = '';
-      const visibleQs = schema.questions.filter((q) => q.frontends.includes('serve'));
-      document.getElementById('progress-total').textContent = visibleQs.length;
-      let questionIdx = 0;
-      for (const q of visibleQs) {
-        const editable = !isUpdate || schema.editable_fields.includes(q.id);
-        const fs = document.createElement('fieldset');
-        const lg = document.createElement('legend');
-        lg.textContent = `${++questionIdx}. ${q.label}${editable ? '' : ' (pinned)'}`;
-        fs.appendChild(lg);
-        const prompt = document.createElement('div');
-        prompt.className = 'prompt';
-        prompt.textContent = q.prompt;
-        fs.appendChild(prompt);
-        const input = makeInput(q, editable);
-        fs.appendChild(input);
-        form.appendChild(fs);
-      }
-      // Launch-immediately checkbox — only meaningful for new quests,
-      // not updates (updates always resume in-place).
-      if (!isUpdate) {
-        const row = document.createElement('div');
-        row.className = 'fi-checkbox-row';
-        row.innerHTML = `
-          <input type="checkbox" id="launch-now" checked>
-          <label for="launch-now">Launch the quest immediately after submit (uncheck to write draft YAML only)</label>
-        `;
-        form.appendChild(row);
-      }
-      const submitRow = document.createElement('div');
-      submitRow.innerHTML = `<button type="submit" class="fi-btn fi-btn-primary">${isUpdate ? 'Update Quest' : 'Create Quest'}</button>`;
-      form.appendChild(submitRow);
-      document.getElementById('progress').style.display = '';
+  function renderForm() {
+    const form = document.getElementById('interview-form');
+    form.innerHTML = '';
+    const visibleQs = schema.questions.filter((q) => q.frontends.includes('serve'));
+    document.getElementById('progress-total').textContent = visibleQs.length;
+    let questionIdx = 0;
+    for (const q of visibleQs) {
+      const editable = !isUpdate || schema.editable_fields.includes(q.id);
+      const fs = document.createElement('fieldset');
+      const lg = document.createElement('legend');
+      lg.textContent = `${++questionIdx}. ${q.label}${editable ? '' : ' (pinned)'}`;
+      fs.appendChild(lg);
+      const prompt = document.createElement('div');
+      prompt.className = 'prompt';
+      prompt.textContent = q.prompt;
+      fs.appendChild(prompt);
+      const input = makeInput(q, editable);
+      fs.appendChild(input);
+      form.appendChild(fs);
     }
+    if (!isUpdate) {
+      const row = document.createElement('div');
+      row.className = 'fi-checkbox-row';
+      row.innerHTML = `
+        <input type="checkbox" id="launch-now" checked>
+        <label for="launch-now" class="text-on-surface-variant text-body-sm">Launch the quest immediately after submit (uncheck to write draft YAML only)</label>
+      `;
+      form.appendChild(row);
+    }
+    const submitRow = document.createElement('div');
+    submitRow.innerHTML = `<button type="submit" class="btn-gradient text-white font-semibold text-body-md px-6 py-3 rounded-lg inline-flex items-center gap-2"><span class="material-symbols-outlined">${isUpdate ? 'edit' : 'rocket_launch'}</span>${isUpdate ? 'Update Quest' : 'Create Quest'}</button>`;
+    form.appendChild(submitRow);
+    document.getElementById('progress').classList.remove('hidden');
+  }
 
-    function makeInput(q, editable) {
-      const id = `q-${q.id}`;
-      if (q.kind === 'text') {
-        const el = document.createElement('textarea');
-        el.id = id;
-        el.name = q.id;
-        if (q.placeholder) el.placeholder = q.placeholder;
-        if (q.default !== null && q.default !== undefined) el.value = q.default;
-        if (!editable) {
-          el.disabled = true;
-          el.classList.add('pinned');
-        }
-        return el;
-      }
-      if (q.kind === 'single') {
-        const sel = document.createElement('select');
-        sel.id = id;
-        sel.name = q.id;
-        if (!editable) {
-          sel.disabled = true;
-          sel.classList.add('pinned');
-        }
-        let choices = q.choices;
-        if (q.id === 'provider_model') choices = [];
-        const blank = document.createElement('option');
-        blank.value = '';
-        blank.textContent = q.id === 'provider_model'
-          ? '(pick a provider first)' : '(pick one)';
-        sel.appendChild(blank);
-        const defaultEncoded = (q.default !== null && typeof q.default === 'object')
-          ? JSON.stringify(q.default) : q.default;
-        for (const c of choices) {
-          const opt = document.createElement('option');
-          const valueEncoded = typeof c.value === 'object'
-            ? JSON.stringify(c.value) : String(c.value);
-          opt.value = valueEncoded;
-          opt.textContent = c.label;
-          if (c.description) opt.title = c.description;
-          if (valueEncoded === String(defaultEncoded)) opt.selected = true;
-          sel.appendChild(opt);
-        }
-        if (q.id === 'provider') {
-          sel.addEventListener('change', () => populateProviderModel(sel.value));
-        }
-        // When the picked option is the "Other (type your own)"
-        // escape hatch, expose an inline text input so the user
-        // can type their answer immediately. Done with a sibling
-        // <input> rather than a confirm() dialog so the value is
-        // visible and editable.
-        sel.addEventListener('change', () => handleOtherSelection(sel, q));
-        return sel;
-      }
-      const el = document.createElement('input');
-      el.type = 'text';
-      el.id = id;
-      el.name = q.id;
+  function makeInput(q, editable) {
+    const id = `q-${q.id}`;
+    if (q.kind === 'text') {
+      const el = document.createElement('textarea');
+      el.id = id; el.name = q.id;
+      if (q.placeholder) el.placeholder = q.placeholder;
+      if (q.default !== null && q.default !== undefined) el.value = q.default;
+      if (!editable) { el.disabled = true; el.classList.add('pinned'); }
       return el;
     }
-
-    function handleOtherSelection(sel, q) {
-      // The "Other (type your own)" option's value is the sentinel
-      // "__OTHER__". When the user picks it, append (or unhide) a
-      // sibling <input type="text"> with id "<sel.id>-other" so
-      // the user can type. When they pick anything else, hide it.
-      const otherId = `${sel.id}-other`;
-      let other = document.getElementById(otherId);
-      if (sel.value === '__OTHER__') {
-        if (!other) {
-          other = document.createElement('input');
-          other.type = 'text';
-          other.id = otherId;
-          other.placeholder = `type a value for ${q.label}…`;
-          other.style.marginTop = '0.5rem';
-          // Insert directly after the select.
-          sel.insertAdjacentElement('afterend', other);
-        }
-        other.style.display = '';
-        other.focus();
-      } else if (other) {
-        other.style.display = 'none';
-        other.value = '';
-      }
-    }
-
-    function populateProviderModel(providerName) {
-      const models = (schema.provider_models || {})[providerName] || [];
-      let sel = document.getElementById('q-provider_model');
-      if (!sel) return;
-      if (sel.tagName !== 'SELECT') {
-        const replacement = document.createElement('select');
-        replacement.id = sel.id;
-        replacement.name = sel.name;
-        sel.replaceWith(replacement);
-        sel = replacement;
-      }
-      sel.innerHTML = '';
+    if (q.kind === 'single') {
+      const sel = document.createElement('select');
+      sel.id = id; sel.name = q.id;
+      if (!editable) { sel.disabled = true; sel.classList.add('pinned'); }
+      let choices = q.choices;
+      if (q.id === 'provider_model') choices = [];
       const blank = document.createElement('option');
       blank.value = '';
-      blank.textContent = models.length ? '(pick a model)' : '(pick a provider first)';
+      blank.textContent = q.id === 'provider_model' ? '(pick a provider first)' : '(pick one)';
       sel.appendChild(blank);
-      for (const m of models) {
+      const defaultEncoded = (q.default !== null && typeof q.default === 'object') ? JSON.stringify(q.default) : q.default;
+      for (const c of choices) {
         const opt = document.createElement('option');
-        opt.value = String(m.value);
-        opt.textContent = m.label;
-        if (m.description) opt.title = m.description;
+        const valueEncoded = typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value);
+        opt.value = valueEncoded;
+        opt.textContent = c.label;
+        if (c.description) opt.title = c.description;
+        if (valueEncoded === String(defaultEncoded)) opt.selected = true;
         sel.appendChild(opt);
       }
-      if (models.length) {
-        const other = document.createElement('option');
-        other.value = '__OTHER__';
-        other.textContent = 'Other (type your own)';
-        sel.appendChild(other);
+      if (q.id === 'provider') {
+        sel.addEventListener('change', () => populateProviderModel(sel.value));
       }
+      sel.addEventListener('change', () => handleOtherSelection(sel, q));
+      return sel;
     }
+    const el = document.createElement('input');
+    el.type = 'text'; el.id = id; el.name = q.id;
+    return el;
+  }
 
-    async function submitForm(ev) {
-      ev.preventDefault();
-      const out = {};
-      for (const q of schema.questions) {
-        if (!q.frontends.includes('serve')) continue;
-        const el = document.getElementById(`q-${q.id}`);
-        if (!el) continue;
-        let value = el.value;
-        // If "Other (type your own)" is picked, the sibling
-        // <input id="q-<id>-other"> carries the user's typed
-        // value (see handleOtherSelection). Read from there.
-        if (value === '__OTHER__') {
-          const other = document.getElementById(`q-${q.id}-other`);
-          value = (other && other.value.trim()) || '';
-          if (!value) {
-            alert(`Please type a value for "${q.label}" in the box that appeared, or pick one of the listed options.`);
-            other && other.focus();
-            return false;
-          }
-        }
-        if (typeof value === 'string' && (value.startsWith('[') || value === 'true' || value === 'false')) {
-          try { value = JSON.parse(value); } catch (_) {}
-        }
-        out[q.id] = value;
+  function handleOtherSelection(sel, q) {
+    const otherId = `${sel.id}-other`;
+    let other = document.getElementById(otherId);
+    if (sel.value === '__OTHER__') {
+      if (!other) {
+        other = document.createElement('input');
+        other.type = 'text';
+        other.id = otherId;
+        other.placeholder = `type a value for ${q.label}…`;
+        other.style.marginTop = '0.5rem';
+        sel.insertAdjacentElement('afterend', other);
       }
-      if (!isUpdate) {
-        if (!out.topic || !String(out.topic).trim()) {
-          alert('Topic is required.');
+      other.style.display = '';
+      other.focus();
+    } else if (other) {
+      other.style.display = 'none';
+      other.value = '';
+    }
+  }
+
+  function populateProviderModel(providerName) {
+    const models = (schema.provider_models || {})[providerName] || [];
+    let sel = document.getElementById('q-provider_model');
+    if (!sel) return;
+    if (sel.tagName !== 'SELECT') {
+      const replacement = document.createElement('select');
+      replacement.id = sel.id;
+      replacement.name = sel.name;
+      sel.replaceWith(replacement);
+      sel = replacement;
+    }
+    sel.innerHTML = '';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = models.length ? '(pick a model)' : '(pick a provider first)';
+    sel.appendChild(blank);
+    for (const m of models) {
+      const opt = document.createElement('option');
+      opt.value = String(m.value);
+      opt.textContent = m.label;
+      if (m.description) opt.title = m.description;
+      sel.appendChild(opt);
+    }
+    if (models.length) {
+      const other = document.createElement('option');
+      other.value = '__OTHER__';
+      other.textContent = 'Other (type your own)';
+      sel.appendChild(other);
+    }
+  }
+
+  async function submitForm(ev) {
+    ev.preventDefault();
+    const out = {};
+    for (const q of schema.questions) {
+      if (!q.frontends.includes('serve')) continue;
+      const el = document.getElementById(`q-${q.id}`);
+      if (!el) continue;
+      let value = el.value;
+      if (value === '__OTHER__') {
+        const other = document.getElementById(`q-${q.id}-other`);
+        value = (other && other.value.trim()) || '';
+        if (!value) {
+          alert(`Please type a value for "${q.label}" in the box that appeared, or pick one of the listed options.`);
+          other && other.focus();
           return false;
         }
-        if (!out.title || !String(out.title).trim()) {
-          out.title = String(out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
-        }
-      } else {
-        if (!out.topic) out.topic = '(unchanged)';
-        if (!out.title) out.title = '(unchanged)';
-        if (!out.provider) out.provider = 'vscode_extension';
-        if (!out.provider_model) out.provider_model = '';
       }
-      const launchNow = !isUpdate && document.getElementById('launch-now')?.checked;
-      let endpoint;
-      if (isUpdate) {
-        endpoint = `/api/interview/update/${encodeURIComponent(updateQuestId)}`;
-      } else {
-        endpoint = launchNow
-          ? '/api/interview/submit?launch=true'
-          : '/api/interview/submit';
+      if (typeof value === 'string' && (value.startsWith('[') || value === 'true' || value === 'false')) {
+        try { value = JSON.parse(value); } catch (_) {}
       }
-      const div = document.getElementById('result');
-      div.style.display = 'block';
-      div.className = 'fi-banner fi-banner-info';
-      div.textContent = launchNow ? 'Submitting + launching…' : 'Writing draft YAML…';
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(out),
-      });
-      if (!res.ok) {
-        const err = await res.text();
-        div.className = 'fi-banner fi-banner-error';
-        div.textContent = `Error ${res.status}: ${err}`;
+      out[q.id] = value;
+    }
+    if (!isUpdate) {
+      if (!out.topic || !String(out.topic).trim()) {
+        alert('Topic is required.');
         return false;
       }
-      const body = await res.json();
-      if (launchNow && body.quest_id) {
-        // Redirect to the quest detail page.
-        window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
-        return false;
+      if (!out.title || !String(out.title).trim()) {
+        out.title = String(out.topic || 'quest').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
       }
-      div.textContent = JSON.stringify(body, null, 2);
+    } else {
+      if (!out.topic) out.topic = '(unchanged)';
+      if (!out.title) out.title = '(unchanged)';
+      if (!out.provider) out.provider = 'vscode_extension';
+      if (!out.provider_model) out.provider_model = '';
+    }
+    const launchNow = !isUpdate && document.getElementById('launch-now')?.checked;
+    let endpoint;
+    if (isUpdate) {
+      endpoint = `/api/interview/update/${encodeURIComponent(updateQuestId)}`;
+    } else {
+      endpoint = launchNow ? '/api/interview/submit?launch=true' : '/api/interview/submit';
+    }
+    const div = document.getElementById('result');
+    div.classList.remove('hidden');
+    div.className = 'fi-banner fi-banner-info';
+    div.textContent = launchNow ? 'Submitting + launching…' : 'Writing draft YAML…';
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(out),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      div.className = 'fi-banner fi-banner-error';
+      div.textContent = `Error ${res.status}: ${err}`;
       return false;
     }
-
-    function escapeHtml(s) {
-      return String(s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const body = await res.json();
+    if (launchNow && body.quest_id) {
+      window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
+      return false;
     }
+    div.innerHTML = `<pre class="max-h-96 overflow-auto">${escapeHtml(JSON.stringify(body, null, 2))}</pre>`;
+    return false;
+  }
 
-    loadSchema();
-  </script>
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  loadSchema();
+</script>
 </body>
 </html>
