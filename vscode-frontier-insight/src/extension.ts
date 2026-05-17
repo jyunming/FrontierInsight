@@ -43,6 +43,13 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     participant.iconPath = new vscode.ThemeIcon("beaker");
     context.subscriptions.push(participant);
+
+    // Probe the Axon sidecar on activation. We don't auto-launch from
+    // the extension — VSCode users are expected to keep an Axon
+    // process running in their workspace — but we surface a one-time
+    // notification if it's down so the first /start of the session
+    // doesn't pay the cold-init cost silently.
+    void probeAxonOnActivate(context);
 }
 
 export function deactivate(): void {
@@ -142,6 +149,10 @@ async function handleRequest(
         await runListDrafts(stream, token);
         return;
     }
+    if (cmd === "axon-status" || cmd === "axon") {
+        await runAxonStatus(stream);
+        return;
+    }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
         // Phase T — no-admin LaTeX install for paper_pdf support.
         await runTerminalCommand(
@@ -176,6 +187,7 @@ function helpText(): string {
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
         "- `@fi /drafts` — list proposal drafts you've made (most-recent first) with a one-click `/start` command for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.",
+        "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api` on `127.0.0.1:8000`) is reachable. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
         "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",
         "All LLM calls go through your Copilot subscription via the",
@@ -1318,6 +1330,97 @@ async function runCritique(
  * for path-like arguments and accepts free-form topic strings with
  * spaces, punctuation, newlines pasted from chat.
  */
+/**
+ * Probe the Axon sidecar (``python -m axon.api`` on ``127.0.0.1:8000``)
+ * once when the extension activates. If it's not reachable, show an
+ * info notification with a one-click "Open instructions" action. We
+ * deliberately do NOT auto-launch the sidecar from the extension —
+ * users running FI from VSCode are expected to keep an Axon process
+ * around themselves (or just live with the cold-init cost on the
+ * first quest). The check is informational only.
+ *
+ * Mirrors `core.axon_sidecar.axon_status` (CLI/web auto-launch path).
+ * Three-interface parity for Axon health visibility.
+ */
+async function probeAxonOnActivate(
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    const host = process.env.AXON_HOST || "127.0.0.1";
+    const port = process.env.AXON_PORT || "8000";
+    const url = `http://${host}:${port}/health/live`;
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 1500);
+        const res = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (res.ok) return;  // sidecar is up, nothing to surface
+    } catch {
+        // fallthrough — sidecar unreachable
+    }
+    const action = await vscode.window.showInformationMessage(
+        `Frontier Insight: Axon sidecar not detected at ${host}:${port}. ` +
+        `Starting it now keeps the knowledge layer hot across quests ` +
+        `(saves ~5-15 s per /start).`,
+        "Start in terminal",
+        "Show /axon-status",
+        "Dismiss",
+    );
+    if (action === "Start in terminal") {
+        const term = vscode.window.createTerminal({ name: "Axon" });
+        term.show();
+        term.sendText("python -m axon.api");
+    } else if (action === "Show /axon-status") {
+        await vscode.commands.executeCommand(
+            "workbench.action.chat.open",
+            { query: "@fi /axon-status" },
+        );
+    }
+    void context;  // reserved for future state.update("axon-prompted", true)
+}
+
+/**
+ * Chat-command handler for `@fi /axon-status`. Fetches the same
+ * ``/health/live`` + ``/health/ready`` endpoints as the Python
+ * ``axon_status()`` helper and prints a short markdown verdict.
+ */
+async function runAxonStatus(stream: vscode.ChatResponseStream): Promise<void> {
+    const host = process.env.AXON_HOST || "127.0.0.1";
+    const port = process.env.AXON_PORT || "8000";
+    const base = `http://${host}:${port}`;
+    const probe = async (path: string): Promise<boolean> => {
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 1500);
+            const res = await fetch(`${base}${path}`, { signal: ctrl.signal });
+            clearTimeout(timer);
+            return res.ok;
+        } catch {
+            return false;
+        }
+    };
+    const live = await probe("/health/live");
+    const ready = live ? await probe("/health/ready") : false;
+    if (!live) {
+        stream.markdown(
+            `**Axon sidecar:** \`${base}\` — _not running_\n\n` +
+            `Start it from a terminal so quests reuse the warm model + indexes:\n\n` +
+            `\`\`\`\npython -m axon.api\n\`\`\`\n`,
+        );
+        return;
+    }
+    if (!ready) {
+        stream.markdown(
+            `**Axon sidecar:** \`${base}\` — _running, brain still initializing_\n\n` +
+            `Give it a few seconds; the embedding model + vector index load on first request.\n`,
+        );
+        return;
+    }
+    stream.markdown(
+        `**Axon sidecar:** \`${base}\` — _up + ready_\n\n` +
+        `The next \`@fi /start\` will reuse this warm process.\n`,
+    );
+}
+
 /**
  * Implementation of `@fi /drafts`. Walks ``<workspaceRoot>/outputs/_drafts/``
  * for ``*.yaml`` files (proposal companions) and renders them as a

@@ -344,6 +344,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "what the YAML says. Do not pass this from a regular terminal "
              "run — use copilot_cli or similar for headless Copilot usage.",
     )
+    p.add_argument(
+        "--no-axon-sidecar",
+        action="store_true",
+        help="Skip the Axon sidecar health check + auto-launch. By default, "
+             "every FI launch ensures a long-lived ``python -m axon.api`` "
+             "process is running on AXON_HOST:AXON_PORT (default "
+             "127.0.0.1:8000) so the embedding model + vector indexes "
+             "stay hot across quests. Pass this in CI / tests where the "
+             "sidecar isn't wanted, or when running an Axon API server "
+             "manually with non-default flags.",
+    )
     args = p.parse_args(argv)
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
@@ -775,6 +786,17 @@ async def run_fleet(
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    # Ensure Axon sidecar is up before anything that touches the
+    # knowledge layer. Idempotent: returns fast if already running.
+    # Skipped for the install-tectonic / list-drafts modes that
+    # never touch Axon, plus when --no-axon-sidecar is passed.
+    _axon_inert_modes = bool(
+        getattr(args, "install_tectonic", False)
+        or getattr(args, "list_drafts", False)
+    )
+    if not args.no_axon_sidecar and not _axon_inert_modes:
+        from core.axon_sidecar import ensure_axon_up
+        ensure_axon_up()
     supervisor = ProxySupervisor()
     try:
         if args.serve:

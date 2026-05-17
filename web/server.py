@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import re
 import shutil
 import time
@@ -360,6 +362,24 @@ def make_app(
                 "<h1>Compare UI not installed</h1>", status_code=500,
             )
         return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @app.get("/api/axon/status")
+    async def axon_status_endpoint() -> JSONResponse:
+        """Health-probe the Axon sidecar (``python -m axon.api`` on
+        ``127.0.0.1:8000`` by default). The /settings page polls
+        this so the user can see the sidecar is hot before kicking
+        off a quest. Cheap — one HTTP HEAD-equivalent probe."""
+        from core.axon_sidecar import axon_status as _probe
+        return JSONResponse(dict(_probe()))
+
+    @app.post("/api/axon/launch")
+    async def axon_launch_endpoint() -> JSONResponse:
+        """Idempotent: spawn an Axon API sidecar if one isn't already
+        listening. Used by the Settings page's 'Start Axon' button
+        for users who launched FI with ``--no-axon-sidecar`` and
+        changed their mind later."""
+        from core.axon_sidecar import ensure_axon_up
+        return JSONResponse(dict(ensure_axon_up()))
 
     @app.get("/api/knowledge/info")
     async def knowledge_info() -> JSONResponse:
@@ -1243,9 +1263,19 @@ def make_app(
     async def get_quest_file(quest_id: str, path: str) -> FileResponse:
         """Serve a single file from the quest_root by relative path.
         Path-traversal guarded: resolves and confirms the final
-        path stays inside quest_root."""
+        path stays inside quest_root.
+
+        Some clients (VS Code Live Server, certain browser extensions)
+        naively append ``?preventCache=<unix-ms>`` to URLs without
+        checking whether a query string already exists, producing
+        ``?path=paper.md?preventCache=...`` — FastAPI then reads the
+        path value as the literal ``paper.md?preventCache=...``.
+        Strip everything after the first ``?``/``#`` so the file
+        actually resolves instead of 404-ing.
+        """
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-        target = (quest_root / path).resolve()
+        cleaned = path.split("?", 1)[0].split("#", 1)[0]
+        target = (quest_root / cleaned).resolve()
         try:
             target.relative_to(quest_root.resolve())
         except ValueError:
@@ -1552,6 +1582,7 @@ async def serve_async(
     bridge the dashboard inherits. Both forwarded to ``make_app``."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
+    _ensure_axon_sidecar()
     app = make_app(
         output_root.resolve(),
         max_concurrent=max_concurrent,
@@ -1573,9 +1604,23 @@ def serve(
     """Blocking entry point invoked when run standalone (no event loop)."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
+    _ensure_axon_sidecar()
     app = make_app(
         output_root.resolve(),
         max_concurrent=max_concurrent,
         vscode_bridge_port=vscode_bridge_port,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+def _ensure_axon_sidecar() -> None:
+    """Boot the Axon API sidecar so the knowledge layer is hot when
+    the first quest runs. Idempotent — does nothing if Axon is
+    already listening, or if ``FI_NO_AXON_SIDECAR=1`` is set."""
+    if os.environ.get("FI_NO_AXON_SIDECAR"):
+        return
+    try:
+        from core.axon_sidecar import ensure_axon_up
+        ensure_axon_up()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("fi.web").warning("axon sidecar bootstrap failed: %s", e)
