@@ -3448,8 +3448,24 @@ def mint_quest_id(seed: str) -> str:
 
 
 def _slugify(s: str) -> str:
-    s = s.lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
+    """Quest-id slug. Preserves Unicode letters (CJK / Cyrillic / etc.)
+    so a Traditional Chinese topic like ``近視的遺傳影響`` produces a
+    real slug instead of the constant ``untitled``. ASCII letters are
+    lowercased; everything outside the Unicode-letter + digit class
+    collapses to ``-``; runs of separators collapse to a single dash.
+    """
+    s = s.strip()
+    # Lowercase first so ASCII A-Z folds to a-z. CJK has no case, so
+    # lowercase is a no-op there.
+    s = s.lower()
+    # \w with re.UNICODE (default) matches Unicode letters + digits +
+    # underscore. Replace everything else with a dash.
+    s = re.sub(r"[^\w]+", "-", s, flags=re.UNICODE)
+    # Underscore is filesystem-safe but visually noisy in quest_ids;
+    # fold to dash.
+    s = s.replace("_", "-")
+    # Collapse repeats.
+    s = re.sub(r"-+", "-", s)
     return s.strip("-") or "untitled"
 
 

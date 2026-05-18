@@ -764,17 +764,27 @@ def derive_tier3(tier1_answers: dict[str, Any]) -> dict[str, Any]:
 # Slugify (shared with vscode-frontier-insight; mirrored by the TS half)
 # ---------------------------------------------------------------------------
 
-_SLUG_STRIP = re.compile(r"[^a-z0-9\s-]")
+# Anything outside Unicode-letter + digit + whitespace + dash gets
+# stripped. Using ``[^\w\s-]`` with the (default) re.UNICODE flag
+# preserves CJK / Cyrillic / Greek so a Traditional Chinese topic
+# yields a real slug instead of an empty string.
+_SLUG_STRIP = re.compile(r"[^\w\s-]", re.UNICODE)
 _SLUG_SPACE = re.compile(r"\s+")
 _SLUG_DUP_DASH = re.compile(r"-+")
+_SLUG_UNDERSCORE = re.compile(r"_+")
 
 
 def slugify(s: str) -> str:
     """Lowercase + remove non-alphanum + collapse spaces to dashes.
+    Preserves Unicode letters (CJK / Cyrillic / Greek / etc.) so topics
+    in non-Latin scripts produce a real slug, not an empty string.
     Mirrors ``vscode-frontier-insight/src/interview-core.ts:slugify``."""
     lowered = s.lower()
     stripped = _SLUG_STRIP.sub("", lowered)
-    dashed = _SLUG_SPACE.sub("-", stripped)
+    # ``\w`` accepts underscores; fold to dash so quest_ids visually
+    # match the dash-separated style.
+    no_underscores = _SLUG_UNDERSCORE.sub("-", stripped)
+    dashed = _SLUG_SPACE.sub("-", no_underscores)
     collapsed = _SLUG_DUP_DASH.sub("-", dashed)
     return collapsed.strip("-")
 

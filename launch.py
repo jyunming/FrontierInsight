@@ -1387,9 +1387,18 @@ async def _run_new(
     # + stderr to UTF-8 so the prompts render and don't crash with
     # ``UnicodeEncodeError: 'charmap' codec can't encode character``.
     # No-op on POSIX (already UTF-8).
+    #
+    # ``sys.stdin`` also gets reconfigured to UTF-8 so users can TYPE
+    # non-ASCII topics — e.g. Traditional Chinese — at the interactive
+    # interview prompt. Without this, Windows console reads through the
+    # legacy code page (cp950 on zh-TW, cp936 on zh-CN, cp932 on ja-JP,
+    # ...) and ``input()`` either errors or mangles the bytes before
+    # Python sees them. ``errors="replace"`` keeps a partial-decode
+    # answer over a hard crash.
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         # Older Pythons / unusual stream wrappers — fall through;
         # the print calls below will still error on a non-UTF8

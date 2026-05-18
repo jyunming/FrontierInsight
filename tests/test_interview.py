@@ -185,6 +185,49 @@ def test_slugify_examples(inp: str, out: str) -> None:
     assert slugify(inp) == out
 
 
+@pytest.mark.parametrize("inp,expected_nonempty", [
+    # Traditional Chinese — the user-reported failing case.
+    ("近視的遺傳影響", True),
+    # Simplified Chinese.
+    ("近视的遗传影响", True),
+    # Japanese — hiragana + katakana + kanji mix.
+    ("日本語のテスト", True),
+    # Korean.
+    ("한국어 테스트", True),
+    # Cyrillic.
+    ("Тестовая тема", True),
+    # Greek.
+    ("Δοκιμή", True),
+    # Mixed CJK + ASCII keeps both.
+    ("Genetic 遺傳 impact", True),
+])
+def test_slugify_preserves_non_latin_scripts(inp: str, expected_nonempty: bool) -> None:
+    """Pre-fix bug: CJK / Cyrillic / Greek topics produced an empty
+    slug because ``[^a-z0-9\\s-]`` stripped every non-Latin codepoint.
+    Post-fix: ``[^\\w\\s-]`` (Unicode-aware) keeps them."""
+    out = slugify(inp)
+    if expected_nonempty:
+        assert out, f"slugify({inp!r}) returned empty — non-Latin chars must survive"
+    # Underscore folded to dash so quest_ids stay dash-separated.
+    assert "_" not in out
+
+
+def test_engine_slugify_preserves_non_latin_scripts() -> None:
+    """The engine has its own ``_slugify`` for quest_id generation.
+    Bug parity with the interview helper: a CJK topic must NOT collapse
+    to the constant ``untitled`` (which would make every CJK quest
+    share an id prefix and collide)."""
+    from core.engine import _slugify
+    assert _slugify("近視的遺傳影響") not in ("", "untitled")
+    assert _slugify("日本語のテスト") not in ("", "untitled")
+    assert _slugify("genetic 近視 impact") not in ("", "untitled")
+    # ASCII path unchanged.
+    assert _slugify("Hello World") == "hello-world"
+    # Truly empty / pure-punctuation still falls back to untitled.
+    assert _slugify("") == "untitled"
+    assert _slugify("!!!---!!!") == "untitled"
+
+
 # ---------------------------------------------------------------------------
 # YAML emitter — round-trip through Config validation
 # ---------------------------------------------------------------------------
