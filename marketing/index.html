@@ -155,7 +155,7 @@
         </defs>
       </svg>
       <span class="font-display font-extrabold text-headline-md tracking-tight">Frontier Insight</span>
-      <span class="bg-surface-container-high text-electric-lime font-mono text-label-caps px-2 py-1 rounded border border-border-subtle">BETA</span>
+      <span class="hidden sm:inline-flex bg-surface-container-high text-electric-lime font-mono text-label-caps px-2 py-1 rounded border border-border-subtle">BETA</span>
     </div>
     <div class="hidden md:flex items-center gap-8">
       <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#pipeline">Pipeline</a>
@@ -176,7 +176,7 @@
 <main class="max-w-[1440px] mx-auto overflow-hidden relative">
 
 <!-- ───────────────── Hero ───────────────── -->
-<section class="relative pt-28 md:pt-36 pb-20 md:pb-24 px-6 md:px-10 flex flex-col items-center text-center">
+<section class="relative pt-20 md:pt-32 pb-14 md:pb-20 px-6 md:px-10 flex flex-col items-center text-center">
   <div class="hero-glow"></div>
   <span class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-on-surface-variant relative z-10">
     <span class="pulse-dot"></span>
@@ -185,10 +185,10 @@
   <h1 class="font-display text-display-xl-mobile md:text-display-xl glow-text max-w-5xl mb-6 relative z-10">
     Research, <span class="text-gradient-cool">automated.</span>
   </h1>
-  <p class="font-body text-body-lg md:text-xl text-on-surface-variant max-w-2xl mb-12 relative z-10">
+  <p class="font-body text-body-lg md:text-xl text-on-surface-variant max-w-2xl mb-8 md:mb-12 relative z-10">
     From one sentence to a peer-reviewable paper. Frontier Insight plans the experiment, retrieves prior work, runs the code, writes the IMRAD draft, and survives adversarial review &mdash; producing a PDF, the figures, and the experiment.py that made them.
   </p>
-  <div class="flex flex-col sm:flex-row gap-4 mb-20 relative z-10">
+  <div class="flex flex-col sm:flex-row gap-4 mb-12 md:mb-20 relative z-10">
     <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
       Get started <span class="material-symbols-outlined">arrow_forward</span>
     </a>
@@ -205,7 +205,7 @@
       <div class="w-3 h-3 rounded-full bg-[#28c840]/70"></div>
       <span class="ml-3 font-mono text-xs text-on-surface-variant">~/research/frontier_insight</span>
     </div>
-    <div class="p-5 md:p-7 font-mono text-code-sm leading-relaxed">
+    <div class="p-4 md:p-7 font-mono text-[11px] md:text-code-sm leading-relaxed overflow-x-auto">
       <div class="terminal-line" style="animation-delay:0ms">
         <span class="text-cyan-accent font-semibold">$</span>
         <span class="text-on-surface"> python launch.py --new</span>
@@ -225,23 +225,8 @@
   </div>
 </section>
 
-<!-- ───────────────── Provider strip ───────────────── -->
-<section class="py-10 border-y border-border-subtle/40 bg-surface-container-lowest/40 mb-24 md:mb-32">
-  <div class="px-6 md:px-10 max-w-5xl mx-auto">
-    <p class="text-center font-mono text-label-caps text-on-surface-variant/60 mb-6">TALKS TO EVERY FRONTIER MODEL</p>
-    <div class="flex flex-wrap justify-center items-center gap-8 md:gap-14 opacity-70">
-      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Anthropic</span>
-      <span class="font-display font-bold text-lg md:text-xl tracking-tight">OpenAI</span>
-      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Google&nbsp;Gemini</span>
-      <span class="font-display font-bold text-lg md:text-xl tracking-tight">GitHub&nbsp;Copilot</span>
-      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Codex</span>
-      <span class="font-display font-bold text-lg md:text-xl tracking-tight">Ollama</span>
-    </div>
-  </div>
-</section>
-
 <!-- ───────────────── Interactive pipeline ───────────────── -->
-<section id="pipeline" class="px-6 md:px-10 mb-24 md:mb-32">
+<section id="pipeline" class="px-6 md:px-10 mb-16 md:mb-28">
   <div class="max-w-6xl mx-auto">
     <div class="text-center mb-12">
       <span class="font-mono text-label-caps text-cyan-accent">THE PIPELINE</span>
@@ -269,7 +254,7 @@
 </section>
 
 <!-- ───────────────── Features ───────────────── -->
-<section id="features" class="px-6 md:px-10 space-y-24 md:space-y-32 mb-24 md:mb-32">
+<section id="features" class="px-6 md:px-10 space-y-16 md:space-y-24 mb-16 md:mb-28">
 
   <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
     <div class="space-y-5">
@@ -334,42 +319,10 @@
     </div>
   </div>
 
-  <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
-    <div class="space-y-5">
-      <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
-        <span class="material-symbols-outlined text-[14px]">save</span> CHECKPOINTED STATE
-      </span>
-      <h3 class="font-display text-headline-lg text-on-surface">Crashes don't cost you 40 minutes.</h3>
-      <p class="text-body-lg text-on-surface-variant">
-        Every node checkpoints to SQLite via LangGraph. Kill the process at <code class="font-mono text-cyan-accent">analyze</code>, restart with <code class="font-mono text-cyan-accent">--resume &lt;quest_id&gt;</code>, and you keep all the literature retrieval, the experiment output, and the figures. Reproducibility comes free.
-      </p>
-      <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Per-quest <code class="font-mono">.fi/state.sqlite</code>.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Soft-invalidate to re-run downstream nodes.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Cost ledger at <code class="font-mono">.fi/cost.jsonl</code> per call.</li>
-      </ul>
-    </div>
-    <div class="card-border-gradient p-6 md:p-7 min-h-[360px] flex flex-col">
-      <div class="font-mono text-code-sm flex flex-col h-full">
-        <div class="text-on-surface-variant mb-3"># outputs/&lt;quest_id&gt;/.fi/</div>
-        <div class="space-y-1">
-          <div><span class="text-cyan-accent">state.sqlite</span><span class="text-on-surface-variant">    &mdash; LangGraph checkpoint</span></div>
-          <div><span class="text-cyan-accent">cost.jsonl</span><span class="text-on-surface-variant">      &mdash; per-call usage + USD</span></div>
-          <div><span class="text-cyan-accent">run.log</span><span class="text-on-surface-variant">         &mdash; full stdout</span></div>
-          <div><span class="text-cyan-accent">labels.json</span><span class="text-on-surface-variant">     &mdash; user tags</span></div>
-          <div><span class="text-cyan-accent">interview.json</span><span class="text-on-surface-variant">  &mdash; the 14 answers</span></div>
-        </div>
-        <div class="mt-auto pt-4 border-t border-border-subtle/50">
-          <div class="text-electric-lime">$ python launch.py --resume 1778952003-coulomb</div>
-          <div class="text-on-surface-variant">[FI] resuming from node=<span class="text-primary">cross_check</span> · skipped 8 prior nodes</div>
-        </div>
-      </div>
-    </div>
-  </div>
 </section>
 
 <!-- ───────────────── Three surfaces ───────────────── -->
-<section class="px-6 md:px-10 mb-24 md:mb-32">
+<section class="px-6 md:px-10 mb-16 md:mb-28">
   <div class="max-w-6xl mx-auto">
     <div class="text-center mb-12">
       <span class="font-mono text-label-caps text-cyan-accent">RUN IT WHERE YOU ARE</span>
@@ -410,7 +363,7 @@ python launch.py --fleet a.yaml b.yaml</code></pre>
 </section>
 
 <!-- ───────────────── Provider pricing ───────────────── -->
-<section id="providers" class="px-6 md:px-10 mb-24 md:mb-32">
+<section id="providers" class="px-6 md:px-10 mb-16 md:mb-28">
   <div class="max-w-6xl mx-auto">
     <div class="text-center mb-12">
       <span class="font-mono text-label-caps text-cyan-accent">COST-AWARE BY DEFAULT</span>
@@ -420,82 +373,70 @@ python launch.py --fleet a.yaml b.yaml</code></pre>
       </p>
     </div>
     <div class="rounded-2xl border border-border-subtle overflow-hidden bg-surface-container-lowest/60">
-      <div class="grid grid-cols-12 gap-4 px-5 py-3 border-b border-border-subtle bg-surface-container/40 font-mono text-label-caps text-on-surface-variant">
+      <div class="hidden md:grid grid-cols-12 gap-4 px-5 py-3 border-b border-border-subtle bg-surface-container/40 font-mono text-label-caps text-on-surface-variant">
         <div class="col-span-4">PROVIDER</div>
         <div class="col-span-3">UNIT BILLED</div>
         <div class="col-span-5">BEST FOR</div>
       </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
         <div class="col-span-12 md:col-span-4">
           <div class="font-display font-bold text-lg mb-1">GitHub Copilot</div>
           <code class="font-mono text-xs text-on-surface-variant">vscode_extension · copilot_cli</code>
         </div>
-        <div class="col-span-6 md:col-span-3">
+        <div class="col-span-12 md:col-span-3">
           <span class="font-display font-bold text-electric-lime">Premium request</span>
           <div class="font-mono text-xs text-on-surface-variant mt-1">1 call = 1 unit</div>
         </div>
-        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Bursty heavy quests. Flat-rate per-call wins when prompts are large.</div>
+        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Bursty heavy quests. Flat-rate per-call wins when prompts are large.</div>
       </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
         <div class="col-span-12 md:col-span-4">
           <div class="font-display font-bold text-lg mb-1">OpenAI / Codex</div>
           <code class="font-mono text-xs text-on-surface-variant">openai · codex · codex_cli</code>
         </div>
-        <div class="col-span-6 md:col-span-3">
+        <div class="col-span-12 md:col-span-3">
           <span class="font-display font-bold text-cyan-accent">Per-token</span>
           <div class="font-mono text-xs text-on-surface-variant mt-1">prompt + completion</div>
         </div>
-        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Long-running automations. Wins when prompts stay lean.</div>
+        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Long-running automations. Wins when prompts stay lean.</div>
       </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
         <div class="col-span-12 md:col-span-4">
           <div class="font-display font-bold text-lg mb-1">Claude</div>
           <code class="font-mono text-xs text-on-surface-variant">claude_cli</code>
         </div>
-        <div class="col-span-6 md:col-span-3">
+        <div class="col-span-12 md:col-span-3">
           <span class="font-display font-bold text-cyan-accent">Per-token</span>
         </div>
-        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Sonnet is the workhorse. Reserve Opus for <code class="font-mono">write</code> + <code class="font-mono">review</code> via <code class="font-mono">node_models</code>.</div>
+        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Sonnet is the workhorse. Reserve Opus for <code class="font-mono">write</code> + <code class="font-mono">review</code> via <code class="font-mono">node_models</code>.</div>
       </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
+      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
         <div class="col-span-12 md:col-span-4">
           <div class="font-display font-bold text-lg mb-1">Gemini</div>
           <code class="font-mono text-xs text-on-surface-variant">gemini_cli</code>
         </div>
-        <div class="col-span-6 md:col-span-3">
+        <div class="col-span-12 md:col-span-3">
           <span class="font-display font-bold text-cyan-accent">Per-token</span>
         </div>
-        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">Cheapest cloud option for long-context tasks.</div>
+        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Cheapest cloud option for long-context tasks.</div>
       </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-5 items-start hover:bg-surface-container/30 transition-colors">
+      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 items-start hover:bg-surface-container/30 transition-colors">
         <div class="col-span-12 md:col-span-4">
           <div class="font-display font-bold text-lg mb-1">Ollama</div>
           <code class="font-mono text-xs text-on-surface-variant">ollama</code>
         </div>
-        <div class="col-span-6 md:col-span-3">
+        <div class="col-span-12 md:col-span-3">
           <span class="font-display font-bold text-electric-lime">Free</span>
           <div class="font-mono text-xs text-on-surface-variant mt-1">local</div>
         </div>
-        <div class="col-span-6 md:col-span-5 text-on-surface-variant text-body-md">High-volume cheap nodes; airgapped runs.</div>
+        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">High-volume cheap nodes; airgapped runs.</div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ───────────────── Quote ───────────────── -->
-<section class="px-6 md:px-10 mb-24 md:mb-32">
-  <div class="max-w-3xl mx-auto text-center">
-    <div class="font-display text-headline-md md:text-headline-lg text-on-surface italic leading-snug mb-6">
-      <span class="text-cyan-accent">&ldquo;</span>
-      An LLM with no plan, no experiment, and no review is a guess machine. FI is a research machine.
-      <span class="text-cyan-accent">&rdquo;</span>
-    </div>
-    <div class="font-mono text-label-caps text-on-surface-variant">DESIGN PRINCIPLE · README.md</div>
-  </div>
-</section>
-
 <!-- ───────────────── Final CTA ───────────────── -->
-<section class="relative px-6 md:px-10 py-20 md:py-28 text-center overflow-hidden">
+<section class="relative px-6 md:px-10 py-14 md:py-24 text-center overflow-hidden">
   <div class="absolute inset-0 -z-10 opacity-80"
        style="background: radial-gradient(800px 360px at 50% 50%, rgba(79, 70, 229, 0.35) 0%, transparent 60%), radial-gradient(700px 300px at 70% 80%, rgba(6, 182, 212, 0.25) 0%, transparent 65%);"></div>
   <h2 class="font-display text-display-xl-mobile md:text-[64px] leading-[1.05] tracking-tight mb-6 max-w-4xl mx-auto">
