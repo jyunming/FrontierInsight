@@ -481,6 +481,44 @@
       ],
       "allow_other": false,
       "tier": 3
+    },
+    {
+      "id": "ensemble_profile",
+      "label": "Multi-model ensemble",
+      "prompt": "Run the same node across multiple LLMs and merge their answers. Cost multiplies; agreement signal increases. Pick 'off' for single-model (cheapest) or one of the fan-out profiles for higher-stakes work.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "off",
+          "label": "Single model (default, cheapest)",
+          "description": "One LLM call per node. Cost baseline = 1×."
+        },
+        {
+          "value": "cross_check_only",
+          "label": "Fan out cross_check only (~1.3× cost)",
+          "description": "3 models vote per finding; catches issues the writer might miss. Minimal extra spend."
+        },
+        {
+          "value": "ideate_and_check",
+          "label": "Fan out ideate + cross_check (~2.0× cost)",
+          "description": "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding."
+        },
+        {
+          "value": "full",
+          "label": "Fan out ideate + analyze + cross_check (~2.5× cost)",
+          "description": "Multi-model on the three highest-leverage nodes. Best signal; highest cost."
+        }
+      ],
+      "placeholder": "",
+      "default": "off",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
     }
   ],
   "paper_formats": [
@@ -608,6 +646,76 @@
       "description": "Cite anything in Axon, including FI's own cross-quest summaries. Use for write-ups your team will read."
     }
   ],
+  "ensemble_profiles": [
+    {
+      "value": "off",
+      "label": "Single model (default, cheapest)",
+      "description": "One LLM call per node. Cost baseline = 1×."
+    },
+    {
+      "value": "cross_check_only",
+      "label": "Fan out cross_check only (~1.3× cost)",
+      "description": "3 models vote per finding; catches issues the writer might miss. Minimal extra spend."
+    },
+    {
+      "value": "ideate_and_check",
+      "label": "Fan out ideate + cross_check (~2.0× cost)",
+      "description": "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding."
+    },
+    {
+      "value": "full",
+      "label": "Fan out ideate + analyze + cross_check (~2.5× cost)",
+      "description": "Multi-model on the three highest-leverage nodes. Best signal; highest cost."
+    }
+  ],
+  "ensemble_cost_multipliers": {
+    "off": 1.0,
+    "cross_check_only": 1.3,
+    "ideate_and_check": 2.0,
+    "full": 2.5
+  },
+  "ensemble_model_trios": {
+    "openai": [
+      "gpt-4o",
+      "gpt-4o-mini",
+      "o1-mini"
+    ],
+    "codex": [
+      "gpt-5",
+      "gpt-4o",
+      "gpt-4o-mini"
+    ],
+    "claude_cli": [
+      "claude-opus-4-7",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001"
+    ],
+    "codex_cli": [
+      "gpt-5",
+      "gpt-4o",
+      "gpt-4o-mini"
+    ],
+    "copilot_cli": [
+      "gpt-4o",
+      "claude-3-5-sonnet",
+      "o1-mini"
+    ],
+    "gemini_cli": [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.5-pro"
+    ],
+    "ollama": [
+      "llama3.1:70b",
+      "qwen2.5:32b",
+      "llama3.1:8b"
+    ],
+    "vscode_extension": [
+      "gpt-4o",
+      "claude-3-5-sonnet",
+      "gemini-2.0-flash"
+    ]
+  },
   "providers": [
     {
       "value": "openai",
@@ -761,6 +869,7 @@
     "budget",
     "clarify_mode",
     "comparative_baseline",
+    "ensemble_profile",
     "knowledge_enabled",
     "knowledge_top_k",
     "output_kinds",

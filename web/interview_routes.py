@@ -276,6 +276,15 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         )
     if top_k < 1:
         raise ValueError(f"knowledge_top_k must be >= 1, got {top_k}")
+    ensemble_profile = body.get("ensemble_profile", "off")
+    if not isinstance(ensemble_profile, str) or ensemble_profile not in (
+        "off", "cross_check_only", "ideate_and_check", "full",
+    ):
+        raise ValueError(
+            f"ensemble_profile must be one of "
+            f"'off' / 'cross_check_only' / 'ideate_and_check' / 'full'; "
+            f"got {ensemble_profile!r}"
+        )
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -293,4 +302,5 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         provider_model=pm if pm else None,
         audience=audience,
         knowledge_top_k=top_k,
+        ensemble_profile=ensemble_profile,
     )

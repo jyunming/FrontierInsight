@@ -156,6 +156,25 @@ provider:
     write:         claude-3-5-sonnet
     review:        gpt-5
 
+  # Multi-model ensemble per node. Fans out a node's chat call across
+  # `models` in parallel and merges with `merge`. Supported on
+  # ideate / analyze / cross_check. Cost: N + 1 calls per ensembled
+  # node (N fan-out + 1 moderator), except `merge: vote` which is N
+  # (no moderator — pure tally). The interview's `ensemble_profile`
+  # slot writes this block for you; edit by hand when you want a
+  # custom trio or non-default merger.
+  node_ensemble:
+    ideate:
+      models: [gpt-4o, claude-3-5-sonnet, gemini-2.5-pro]
+      merge: tournament          # tournament | synthesize | vote
+      moderator: claude-3-5-sonnet
+    cross_check:
+      models: [gpt-4o, claude-3-5-sonnet, gemini-2.5-pro]
+      merge: vote                # pure majority tally — no moderator
+    # analyze accepts tournament or vote — never synthesize: the
+    # analyze parser expects JSON, but synthesize emits markdown, so
+    # the ProviderConfig validator rejects that combination at load.
+
 engine:
   framework: langgraph              # the only value supported today
   max_iterations: 2                 # design-revise loop budget

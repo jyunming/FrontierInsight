@@ -141,16 +141,18 @@ def test_smart_default_audience_and_clarify_are_static() -> None:
 # ---- Tier-3 contract ----
 
 
-def test_tier3_covers_the_four_advanced_fields() -> None:
+def test_tier3_covers_the_advanced_fields() -> None:
     """Tier-3 hides behind a 'Show advanced' toggle on each frontend.
-    Three of the four are topic-tuned (preflight LLM call suggests
-    a value); knowledge_top_k is the lone numeric knob."""
+    Three are topic-tuned (preflight LLM call suggests a value);
+    ``knowledge_top_k`` is a numeric knob; ``ensemble_profile`` is
+    the multi-model preset picker."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "comparative_baseline",
         "success_metric",
         "budget",
         "knowledge_top_k",
+        "ensemble_profile",
     }
 
 

@@ -58,6 +58,74 @@ export interface InterviewAnswers {
     // Prior-work retrievals per quest. 5 default; bump for
     // comprehensive reviews.
     knowledge_top_k: number;
+    // Multi-model ensemble preset. "off" (default) keeps single-call
+    // semantics; other values expand into provider.node_ensemble via
+    // the Python `expand_ensemble_profile` helper at YAML emit time.
+    ensemble_profile?: "off" | "cross_check_only" | "ideate_and_check" | "full";
+}
+
+
+/**
+ * Per-provider model trios used by every ensemble profile. Mirrors
+ * ``_ENSEMBLE_MODEL_TRIOS`` in core/interview.py.
+ *
+ * Drift between the two definitions is caught by
+ * ``test_ts_ensemble_model_trios_match_python`` in
+ * ``tests/test_interview_schema_parity.py`` — that test parses this
+ * record out of the TS file and compares it to the JSON snapshot.
+ */
+export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
+    "vscode_extension": ["gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"],
+    "openai": ["gpt-4o", "gpt-4o-mini", "o1-mini"],
+    "codex": ["gpt-5", "gpt-4o", "gpt-4o-mini"],
+    "claude_cli": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+    "codex_cli": ["gpt-5", "gpt-4o", "gpt-4o-mini"],
+    "copilot_cli": ["gpt-4o", "claude-3-5-sonnet", "o1-mini"],
+    "gemini_cli": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
+    "ollama": ["llama3.1:70b", "qwen2.5:32b", "llama3.1:8b"],
+};
+
+
+/**
+ * Expand the ensemble profile into a node_ensemble dict shape.
+ * Returns null for "off" — and also for any unrecognized profile —
+ * so the YAML emitter can skip the block entirely instead of writing
+ * a dangling ``node_ensemble:`` line with no children.
+ */
+type EnsembleProfile = "off" | "cross_check_only" | "ideate_and_check" | "full";
+
+export function expandEnsembleProfile(
+    profile: string,
+    provider: string,
+    providerModel: string | undefined,
+): Record<string, {models: string[]; merge: string; moderator?: string}> | null {
+    const known: ReadonlySet<EnsembleProfile> = new Set([
+        "off", "cross_check_only", "ideate_and_check", "full",
+    ]);
+    if (!profile || profile === "off" || !known.has(profile as EnsembleProfile)) {
+        return null;
+    }
+    const trio = ENSEMBLE_MODEL_TRIOS[provider]
+        ?? [providerModel || "default", providerModel || "default", providerModel || "default"];
+    const moderator = trio[0];
+    const out: Record<string, {models: string[]; merge: string; moderator?: string}> = {};
+    if (profile === "cross_check_only" || profile === "ideate_and_check" || profile === "full") {
+        out["cross_check"] = { models: [...trio], merge: "vote" };
+    }
+    if (profile === "ideate_and_check" || profile === "full") {
+        out["ideate"] = { models: [...trio], merge: "tournament", moderator };
+    }
+    if (profile === "full") {
+        // analyze MUST be tournament — the ProviderConfig validator
+        // rejects analyze.merge: synthesize because the analyze node
+        // parses output as JSON, which only tournament preserves verbatim.
+        out["analyze"] = { models: [...trio], merge: "tournament", moderator };
+    }
+    // Defensive: if no branches matched (future profile name added on
+    // the Python side and not yet here), prefer returning null so the
+    // YAML emitter skips the block instead of writing ``node_ensemble:``
+    // with no children.
+    return Object.keys(out).length > 0 ? out : null;
 }
 
 /**
@@ -98,6 +166,24 @@ export function answersToYaml(answers: InterviewAnswers): string {
     // per call" (older flow); non-empty pins it for the whole quest.
     if (answers.provider_model) {
         lines.push(`${indent}model: "${yamlEscape(answers.provider_model)}"`);
+    }
+    // Multi-model ensemble preset. Only emit when non-"off".
+    const nodeEnsemble = expandEnsembleProfile(
+        answers.ensemble_profile ?? "off",
+        "vscode_extension",
+        answers.provider_model,
+    );
+    if (nodeEnsemble) {
+        lines.push(`${indent}node_ensemble:`);
+        for (const [node, cfg] of Object.entries(nodeEnsemble)) {
+            lines.push(`${indent}${indent}${node}:`);
+            const quoted = cfg.models.map((m) => `"${yamlEscape(m)}"`).join(", ");
+            lines.push(`${indent}${indent}${indent}models: [${quoted}]`);
+            lines.push(`${indent}${indent}${indent}merge: "${cfg.merge}"`);
+            if (cfg.moderator) {
+                lines.push(`${indent}${indent}${indent}moderator: "${yamlEscape(cfg.moderator)}"`);
+            }
+        }
     }
     lines.push("");
 
