@@ -84,6 +84,25 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         except (KeyError, TypeError, ValueError) as e:
             raise HTTPException(400, f"invalid answers payload: {e}")
 
+        # Guard: ``vscode_extension`` quests need a live bridge port.
+        # Without one the engine would crash at first LLM call with a
+        # cryptic ``vscode_extension provider requires extra['bridge_port']``
+        # message; 400-fail-fast at submit time so the user sees the
+        # context up front (and a path to fix it).
+        if (
+            answers.provider == "vscode_extension"
+            and not getattr(app.state, "vscode_bridge_port", 0)
+        ):
+            raise HTTPException(
+                400,
+                "vscode_extension provider requires a live bridge — "
+                "start --serve from a VSCode terminal so "
+                "FI_VSCODE_BRIDGE_PORT is exposed, or pass "
+                "--vscode-bridge-port N on the command line. Other "
+                "providers (openai, claude_cli, copilot_cli, ...) work "
+                "from a plain terminal without a bridge.",
+            )
+
         yaml_text = answers_to_yaml(answers, frontend="serve")
         drafts = output_root / "_drafts"
         drafts.mkdir(parents=True, exist_ok=True)

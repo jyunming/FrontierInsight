@@ -262,6 +262,12 @@ def make_app(
     app.state.registry = registry
     app.state.output_root = output_root
     app.state.supervisor = ProxySupervisor()
+    # Stash the bridge port on app.state so request handlers can guard
+    # against a user picking ``vscode_extension`` when no bridge is
+    # available — the engine would error mid-quest with a cryptic
+    # ``vscode_extension provider requires extra['bridge_port']``;
+    # better to 400 at submit time with a clear message.
+    app.state.vscode_bridge_port = vscode_bridge_port
 
     # Subprocess launcher for quests spawned from the web UI.
     # The launcher lives on the app so request handlers can share it.

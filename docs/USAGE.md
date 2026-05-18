@@ -88,6 +88,12 @@ fi --ingest paper1.pdf paper2.md
 # Local web UI:
 fi --serve --output-root ./outputs
 
+# Local web UI routing LLM calls through VSCode Copilot — start FI's
+# integrated terminal (which exposes FI_VSCODE_BRIDGE_PORT), then:
+fi --serve --output-root ./outputs
+# …or pass the port directly:
+fi --serve --vscode-bridge-port 12345 --output-root ./outputs
+
 # One-time tectonic install for corporate envs:
 fi --install-tectonic
 ```

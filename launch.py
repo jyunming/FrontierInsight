@@ -414,6 +414,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "manually with non-default flags.",
     )
     args = p.parse_args(argv)
+    # Env-var fallback for the bridge port. The VSCode extension can
+    # expose ``FI_VSCODE_BRIDGE_PORT`` to a terminal session it spawns,
+    # which lets the user run ``python launch.py --serve`` (or any
+    # other mode) without re-passing the port on the command line.
+    # Useful when the user wants the web UI to share the same Copilot
+    # session the extension already authenticated.
+    if not args.vscode_bridge_port:
+        env_port = os.environ.get("FI_VSCODE_BRIDGE_PORT", "").strip()
+        if env_port.isdigit() and int(env_port) > 0:
+            args.vscode_bridge_port = int(env_port)
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
     if args.ingest and args.output is not None:
