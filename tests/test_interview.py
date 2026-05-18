@@ -584,3 +584,30 @@ def test_answers_to_yaml_omits_node_ensemble_for_default_off() -> None:
         provider="openai", ensemble_profile="off",
     )
     assert "node_ensemble" not in answers_to_yaml(answers)
+
+
+def test_max_iterations_question_is_tier_3_default_2() -> None:
+    """User-reported: 'i cannot define iterations in interview questions'.
+    The hard cap on the design-revise loop now appears as a Tier-3
+    question — visible behind 'Show advanced', default 2 to preserve
+    existing behaviour for users who don't touch it."""
+    q = next(q for q in QUESTIONS if q.id == "max_iterations")
+    assert q.tier == 3
+    assert q.default == 2
+    assert q.mid_quest_editable is True
+
+
+def test_answers_to_yaml_respects_max_iterations_override() -> None:
+    """A user-supplied ``max_iterations`` carries through to the
+    rendered YAML's ``engine.max_iterations`` field — pinning the new
+    Tier-3 question actually changes the YAML, not just the dataclass."""
+    answers = InterviewAnswers(
+        topic="t", title="t", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="b", success_metric="m", budget="b",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="openai", max_iterations=4,
+    )
+    out = answers_to_yaml(answers)
+    parsed = yaml.safe_load(out)
+    assert parsed["engine"]["max_iterations"] == 4

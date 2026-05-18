@@ -539,6 +539,16 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=True,
         tier=3,
     ),
+    Question(
+        id="max_iterations",
+        label="Design-revise iteration budget",
+        prompt="Hard cap on the design → review → revise loop (and the cross_check redirects to design / literature). Lower = cheaper + faster; higher = more chances to fix issues review caught. 2 default — bump to 3-4 only when you specifically want extra revise passes.",
+        kind="text",
+        default=2,
+        placeholder="2",
+        mid_quest_editable=True,
+        tier=3,
+    ),
 )
 
 
@@ -580,6 +590,11 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # knowledge changes are warned, not invalidated: Axon retrievals
     # already happened (or didn't). Future calls use the new setting.
     "knowledge_enabled": (),
+    # max_iterations is the design/review-loop hard cap. Lowering it
+    # mid-quest just means the next review-revise iteration won't fire;
+    # raising it gives the loop more attempts. Either way no node
+    # needs to re-run — the iteration counter in QuestState decides.
+    "max_iterations": (),
 }
 
 
