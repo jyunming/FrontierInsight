@@ -83,8 +83,9 @@ detects the tectonic binary at `<repo>/tools/tectonic` (or
 `tools/tectonic.exe` on Windows) and uses it as the LaTeX engine
 whenever `pdflatex` isn't on PATH. The very first quest takes ~30 s
 extra while tectonic downloads required CTAN packages into
-`%LOCALAPPDATA%/TectonicProject/Tectonic/` (or `~/.cache/Tectonic/`
-on POSIX). Subsequent quests reuse the cache and complete in seconds.
+`%LOCALAPPDATA%/TectonicProject/Tectonic/` (or
+`~/.cache/TectonicProject/Tectonic/` on POSIX). Subsequent quests
+reuse the cache and complete in seconds.
 
 ### Prerequisites for `--install-tectonic`
 

@@ -103,7 +103,21 @@
       const data = await res.json();
       const tools = (data.tools || []).map(t => ({ name: t.name, label: t.label || t.name }));
       const menu = document.getElementById('fi-tools-menu');
-      if (menu && tools.length) menu.innerHTML = renderToolsItems(tools);
+      if (!menu || !tools.length) return;
+      // Focus preservation: when the user opens the menu BEFORE this
+      // async fetch resolves, ``setToolsOpen`` will have already
+      // focused the first menuitem. Replacing innerHTML removes that
+      // node and drops focus — bad for keyboard / screen-reader users.
+      // Detect that case and restore focus to the new first menuitem
+      // (which is the same conceptual position).
+      const hadFocusInside = (
+        document.activeElement &&
+        menu.contains(document.activeElement)
+      );
+      menu.innerHTML = renderToolsItems(tools);
+      if (hadFocusInside) {
+        menu.querySelector('[role="menuitem"]')?.focus();
+      }
     } catch (_) { /* keep fallback */ }
   }
 
@@ -117,13 +131,29 @@
     drop.classList.toggle('open', open);
     toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open) {
-      // Move keyboard focus into the menu so arrow-key / Enter
-      // interaction works without a mouse. First menuitem only —
-      // arrow keys are an accessibility nice-to-have that vanilla
-      // browser focus order doesn't supply.
+      // Move keyboard focus into the menu so Enter activates the
+      // first item and ArrowUp/ArrowDown can step through siblings
+      // (the keydown handler below implements roving focus across
+      // the menuitems, matching the WAI-ARIA menu pattern).
       const firstItem = document.querySelector('#fi-tools-menu [role="menuitem"]');
       if (firstItem) firstItem.focus();
     }
+  }
+
+  function focusMenuitemBy(delta) {
+    // Roving-tabindex-style focus movement for the Tools menu.
+    // ``delta`` is +1 for ArrowDown, -1 for ArrowUp. Wraps at the
+    // ends so a user pressing ArrowUp from the first item lands on
+    // the last (and vice-versa) — matches macOS / Linux menu UX.
+    const items = Array.from(
+      document.querySelectorAll('#fi-tools-menu [role="menuitem"]'),
+    );
+    if (items.length === 0) return;
+    const current = document.activeElement;
+    let idx = items.indexOf(current);
+    if (idx === -1) idx = delta > 0 ? -1 : 0;
+    const next = items[(idx + delta + items.length) % items.length];
+    next?.focus();
   }
 
   window._fiToggleTools = function (ev) {
@@ -146,6 +176,19 @@
       setToolsOpen(false);
       // Return focus to the toggle so the user knows where they are.
       document.getElementById('fi-tools-toggle')?.focus();
+    } else if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      focusMenuitemBy(+1);
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      focusMenuitemBy(-1);
+    } else if (ev.key === 'Home') {
+      ev.preventDefault();
+      document.querySelector('#fi-tools-menu [role="menuitem"]')?.focus();
+    } else if (ev.key === 'End') {
+      ev.preventDefault();
+      const items = document.querySelectorAll('#fi-tools-menu [role="menuitem"]');
+      items[items.length - 1]?.focus();
     }
   });
 

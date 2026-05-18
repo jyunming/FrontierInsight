@@ -148,9 +148,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "first compile it downloads required CTAN packages into "
              "the user's home dir (~30 s, no GUI prompts). Picks the "
              "right asset for your OS+arch from GitHub Releases and "
-             "verifies the SHA-256 from the release's SHA256SUMS file. "
-             "For airgapped hosts that can't reach github.com, see "
-             "--install-tectonic-from.",
+             "verifies the SHA-256 against the release's SHA256SUMS "
+             "file when published (best-effort — falls back to "
+             "TLS-only trust if SHA256SUMS isn't available, e.g. some "
+             "older releases don't publish it). For airgapped hosts "
+             "that can't reach github.com, see --install-tectonic-from.",
     )
     mode.add_argument(
         "--install-tectonic-from",
@@ -2099,13 +2101,28 @@ def _install_tectonic_from_local(src: Path) -> int:
         print(f"[FI] --install-tectonic-from: path not found: {src}", file=sys.stderr)
         return 1
 
-    # Resolve directory → archive / binary inside.
+    # Resolve directory → archive / binary inside. Sort first so the
+    # pick is deterministic across platforms / filesystems (POSIX +
+    # NTFS give different iterdir order). Prefer the exact binary
+    # (already-extracted) over an archive when both are present —
+    # avoids re-doing the unzip step the user already did manually.
     if src.is_dir():
-        for candidate in src.iterdir():
-            n = candidate.name
-            if n == exe_name or n.endswith((".tar.gz", ".tgz", ".zip")):
-                src = candidate
-                break
+        entries = sorted(src.iterdir(), key=lambda p: p.name)
+        bare_binary = next(
+            (p for p in entries if p.name == exe_name and p.is_file()),
+            None,
+        )
+        archive = next(
+            (
+                p for p in entries
+                if p.is_file() and p.name.endswith((".tar.gz", ".tgz", ".zip"))
+            ),
+            None,
+        )
+        if bare_binary is not None:
+            src = bare_binary
+        elif archive is not None:
+            src = archive
         else:
             print(
                 f"[FI] --install-tectonic-from: directory {src} has no "

@@ -12,9 +12,7 @@ it with synthetic archives + fake binaries to pin the four contracts:
 
 from __future__ import annotations
 
-import importlib
 import io
-import os
 import sys
 import tarfile
 import zipfile
@@ -79,7 +77,7 @@ def test_missing_path_returns_error(install_helper, tmp_path: Path) -> None:
     assert rc == 1
 
 
-def test_extract_from_tarball(install_helper, tmp_path: Path, capsys) -> None:
+def test_extract_from_tarball(install_helper, tmp_path: Path) -> None:
     """The .tar.gz path mirrors what ``_install_tectonic`` downloads from
     GitHub — same archive shape, just locally sourced. The helper
     extracts the binary and atomic-replaces into ``tools/``."""

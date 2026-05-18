@@ -299,15 +299,64 @@ def test_marketing_page_respects_prefers_reduced_motion() -> None:
     and the status pulse can trigger motion sensitivity. PR 103
     review flagged this; the fix adds a ``prefers-reduced-motion``
     block that disables the animations. Pin it here so a future edit
-    can't quietly drop the rule."""
+    can't quietly drop the rule.
+
+    Strong check: parse the actual ``@media (prefers-reduced-motion:
+    reduce) {...}`` block and assert that both animated selectors
+    declare ``animation: none`` inside it. A weaker "string appears
+    somewhere in file" check would pass even if the media query was
+    deleted but the selectors remained, which would silently regress
+    the contract."""
+    import re as _re
     from pathlib import Path as _P
     page = _P(__file__).resolve().parent.parent / "marketing" / "index.html"
     text = page.read_text(encoding="utf-8")
-    assert "prefers-reduced-motion" in text, (
-        "marketing page must honour OS-level Reduce Motion preference"
+    # Find the @media (prefers-reduced-motion: reduce) header, then
+    # capture its body by walking brace depth. Regex .*? stops at the
+    # FIRST inner ``}`` (each nested rule has one), which would mis-
+    # parse a block with multiple sub-selectors — walking the braces
+    # explicitly handles arbitrary nesting.
+    header = _re.search(
+        r"@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{",
+        text,
     )
-    # Both animated classes must be neutralised inside the media query.
-    assert ".terminal-line" in text and ".pulse-dot" in text
+    assert header, (
+        "marketing page must honour OS-level Reduce Motion preference — "
+        "no @media (prefers-reduced-motion: reduce) block found"
+    )
+    depth = 1
+    i = header.end()
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, (
+        "reduced-motion @media block has unbalanced braces"
+    )
+    block = text[header.end():i - 1]
+    # Both animated selectors must explicitly turn animation off
+    # inside the block; a static fallback alone isn't enough because
+    # the per-row ``animation-delay: 880ms`` style attrs would keep
+    # the elements invisible if we only set opacity.
+    for selector in (".terminal-line", ".pulse-dot"):
+        assert selector in block, (
+            f"reduced-motion media query must reference {selector}"
+        )
+    # ``animation: none`` (with optional ``!important``) must appear
+    # for the terminal-line + pulse-dot rules. We don't enforce ordering
+    # — just that the override is in the block.
+    assert _re.search(r"animation\s*:\s*none", block), (
+        "reduced-motion block must neutralise animation via "
+        "'animation: none' on the affected selectors"
+    )
+    # Static fallback: terminal lines must be opaque under reduced
+    # motion (otherwise the staged animation-delay leaves them hidden).
+    assert _re.search(r"opacity\s*:\s*1", block), (
+        "reduced-motion block must set opacity: 1 on terminal-line so "
+        "the per-line animation-delay doesn't leave them invisible"
+    )
 
 
 def test_tools_dropdown_has_aria_semantics() -> None:

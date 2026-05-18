@@ -6,29 +6,41 @@ is the YAML schema; this file is the breadth catalogue.
 
 ## The 14-node DAG
 
+> Simplified happy path below — see ``core/engine.py:_build_graph``
+> for the authoritative edge set. Conditional branches that aren't
+> drawn: the design→implement vs design→auto_collect_data fork (no-
+> simulation mode), and the ``broaden_lit`` arc from cross_check back
+> to literature when analyze asks for a wider sweep.
+
 ```
-START → clarify → ideate → literature → design → implement → execute
-                                                       ↓
-                                                execute_reflect ──┐
-                                                       │           │
-                                                  (retry)│  (proceed)
-                                                       ↓           ↓
-                                                    execute      analyze
-                                                                   ↓
-                                                              cross_check
-                                                       ┌── (redesign) │ (write)
-                                                       │              ↓
-                                                      design        write
-                                                                      ↓
-                                                                    review → END
-                                                                      │ (revise)
-                                                                      ↓
-                                                                    design
+START → clarify → ideate → literature ←─────┐ (broaden_lit)
+                                │             │
+                                ↓             │
+                              design ─────────┘
+                                │
+            ┌───────────────────┴───────────────────┐
+            ↓ (computational)                       ↓ (no_simulation)
+        implement ──→ execute ──┐         auto_collect_data
+                                │                   ↓
+                          execute_reflect ←─(retry) wait_for_data
+                                │                   ↓
+                                ↓ (proceed)     data_load
+                              analyze ←──────────────┘
+                                ↓
+                          cross_check ──┐ (re_experiment → design)
+                                │       │ (broaden_lit → literature)
+                                ↓ (write)
+                              write
+                                ↓
+                              review ──→ END (accept)
+                                │
+                                ↓ (revise → design)
 ```
 
-The no-simulation path replaces `implement → execute → execute_reflect`
-with `auto_collect_data → wait_for_data → data_load`. Authoritative
-edges live in `core/engine.py:_build_graph`.
+Feedback loops in this diagram: `execute_reflect → execute` (retry),
+`cross_check → design` or `cross_check → literature` (analyze re-
+route), `review → design` (revise). The human-feedback gate, when
+enabled, inserts a `human_feedback` node between review and END.
 
 Feedback loops:
 
