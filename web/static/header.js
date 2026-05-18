@@ -49,11 +49,17 @@
             </a>
             <div class="hidden md:flex items-center gap-6">
               <div class="fi-dropdown" id="fi-tools-dropdown">
-                <button class="fi-dropdown-toggle text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" type="button" onclick="window._fiToggleTools(event)">
+                <button class="fi-dropdown-toggle text-on-surface-variant font-medium hover:text-primary transition-colors duration-200"
+                        type="button"
+                        id="fi-tools-toggle"
+                        aria-haspopup="menu"
+                        aria-expanded="false"
+                        aria-controls="fi-tools-menu"
+                        onclick="window._fiToggleTools(event)">
                   <span>Tools</span>
-                  <span class="material-symbols-outlined text-[18px]">expand_more</span>
+                  <span class="material-symbols-outlined text-[18px]" aria-hidden="true">expand_more</span>
                 </button>
-                <div class="fi-dropdown-menu" role="menu" id="fi-tools-menu">
+                <div class="fi-dropdown-menu" role="menu" id="fi-tools-menu" aria-labelledby="fi-tools-toggle">
                   ${renderToolsItems(TOOLS_FALLBACK)}
                 </div>
               </div>
@@ -101,18 +107,45 @@
     } catch (_) { /* keep fallback */ }
   }
 
+  // ARIA-aware open/close. ``aria-expanded`` on the toggle button is
+  // the source of truth screen readers consult; we keep the ``.open``
+  // class on the wrapper in sync so CSS still drives visibility.
+  function setToolsOpen(open) {
+    const drop = document.getElementById('fi-tools-dropdown');
+    const toggle = document.getElementById('fi-tools-toggle');
+    if (!drop || !toggle) return;
+    drop.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      // Move keyboard focus into the menu so arrow-key / Enter
+      // interaction works without a mouse. First menuitem only —
+      // arrow keys are an accessibility nice-to-have that vanilla
+      // browser focus order doesn't supply.
+      const firstItem = document.querySelector('#fi-tools-menu [role="menuitem"]');
+      if (firstItem) firstItem.focus();
+    }
+  }
+
   window._fiToggleTools = function (ev) {
     ev?.stopPropagation();
-    document.getElementById('fi-tools-dropdown')?.classList.toggle('open');
+    const drop = document.getElementById('fi-tools-dropdown');
+    const willOpen = drop && !drop.classList.contains('open');
+    setToolsOpen(Boolean(willOpen));
   };
 
   document.addEventListener('click', (ev) => {
     const drop = document.getElementById('fi-tools-dropdown');
-    if (drop && !drop.contains(ev.target)) drop.classList.remove('open');
+    if (drop && drop.classList.contains('open') && !drop.contains(ev.target)) {
+      setToolsOpen(false);
+    }
   });
   document.addEventListener('keydown', (ev) => {
+    const drop = document.getElementById('fi-tools-dropdown');
+    if (!drop || !drop.classList.contains('open')) return;
     if (ev.key === 'Escape') {
-      document.getElementById('fi-tools-dropdown')?.classList.remove('open');
+      setToolsOpen(false);
+      // Return focus to the toggle so the user knows where they are.
+      document.getElementById('fi-tools-toggle')?.focus();
     }
   });
 

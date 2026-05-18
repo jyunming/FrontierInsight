@@ -294,6 +294,40 @@ def test_marketing_landing_page_is_self_contained() -> None:
     assert "<svg" in text and "viewBox=" in text
 
 
+def test_marketing_page_respects_prefers_reduced_motion() -> None:
+    """Accessibility contract: the hero terminal's fade-in animation
+    and the status pulse can trigger motion sensitivity. PR 103
+    review flagged this; the fix adds a ``prefers-reduced-motion``
+    block that disables the animations. Pin it here so a future edit
+    can't quietly drop the rule."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "marketing" / "index.html"
+    text = page.read_text(encoding="utf-8")
+    assert "prefers-reduced-motion" in text, (
+        "marketing page must honour OS-level Reduce Motion preference"
+    )
+    # Both animated classes must be neutralised inside the media query.
+    assert ".terminal-line" in text and ".pulse-dot" in text
+
+
+def test_tools_dropdown_has_aria_semantics() -> None:
+    """Accessibility contract for the dashboard header's Tools menu
+    (PR 103 review). The toggle button must declare ``aria-haspopup``,
+    ``aria-controls``, and a synchronised ``aria-expanded`` so screen
+    readers can announce the menu state. The handler in header.js
+    flips ``aria-expanded`` in ``setToolsOpen``."""
+    from pathlib import Path as _P
+    page = _P(__file__).resolve().parent.parent / "web" / "static" / "header.js"
+    text = page.read_text(encoding="utf-8")
+    assert 'aria-haspopup="menu"' in text
+    assert 'aria-controls="fi-tools-menu"' in text
+    # The handler must toggle aria-expanded (start false, set true on open).
+    assert 'aria-expanded' in text
+    assert "setAttribute('aria-expanded'" in text
+    # Escape returns focus to the toggle — required for keyboard navs.
+    assert "fi-tools-toggle')?.focus()" in text
+
+
 # ---------------------------------------------------------------------------
 # Labels / fancy features
 # ---------------------------------------------------------------------------
