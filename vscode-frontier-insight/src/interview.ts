@@ -405,6 +405,28 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     return lines.join("\n");
 }
 
+
+// Strict decimal-integer parse. The Python schema uses ``int(s)`` which
+// rejects ``2.0``, ``1e2``, ``0x10``; ``Number(s)`` accepts all three.
+// We match a trimmed ``+? digits`` regex and parse with base 10 so the
+// VSCode validator behaves the same as Python's int().
+const POSITIVE_INT_RE = /^\+?\d+$/;
+
+function parsePositiveInt(s: string): number | null {
+    const trimmed = s.trim();
+    if (!POSITIVE_INT_RE.test(trimmed)) return null;
+    const n = parseInt(trimmed, 10);
+    if (!Number.isSafeInteger(n) || n < 1) return null;
+    return n;
+}
+
+function validatePositiveInt(s: string): string | null {
+    return parsePositiveInt(s) === null
+        ? "must be a positive decimal integer (>= 1)"
+        : null;
+}
+
+
 /** Inline editor for the six tier-2 defaults. */
 async function editTier2Field(a: InterviewAnswers): Promise<void> {
     const which = await vscode.window.showQuickPick(
@@ -426,17 +448,11 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             value: String(a.knowledge_top_k),
             placeHolder: "8",
             ignoreFocusOut: true,
-            validateInput: (s) => {
-                const n = Number(s);
-                if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-                    return "must be a positive integer (>= 1)";
-                }
-                return null;
-            },
+            validateInput: validatePositiveInt,
         });
-        if (v !== undefined && v.trim()) {
-            const n = Number(v);
-            if (Number.isInteger(n) && n >= 1) a.knowledge_top_k = n;
+        if (v !== undefined) {
+            const n = parsePositiveInt(v);
+            if (n !== null) a.knowledge_top_k = n;
         }
         return;
     }
@@ -538,21 +554,17 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             value: String(a.knowledge_external_top_k ?? 20),
             placeHolder: "20",
             ignoreFocusOut: true,
-            // ``isdigit``-only check used to accept ``0``; explicit
-            // ``>= 1`` rejects it. Same predicate gates the save path
-            // below so an accepted value never silently falls back to
-            // the old hard-coded default.
-            validateInput: (s) => {
-                const n = Number(s);
-                if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-                    return "must be a positive integer (>= 1)";
-                }
-                return null;
-            },
+            // Use the strict decimal-integer parser so the validator
+            // accepts the same set of strings Python's ``int(...)``
+            // would — rejects ``2.0`` / ``1e2`` / ``0x10`` / ``0`` /
+            // negatives. The save path uses the same predicate so a
+            // value the validator marked invalid can never land
+            // silently (no fallback to a stale hard-coded default).
+            validateInput: validatePositiveInt,
         });
-        if (v !== undefined && v.trim()) {
-            const n = Number(v);
-            if (Number.isInteger(n) && n >= 1) a.knowledge_external_top_k = n;
+        if (v !== undefined) {
+            const n = parsePositiveInt(v);
+            if (n !== null) a.knowledge_external_top_k = n;
         }
         return;
     }
