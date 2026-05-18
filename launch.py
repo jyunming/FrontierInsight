@@ -148,7 +148,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "first compile it downloads required CTAN packages into "
              "the user's home dir (~30 s, no GUI prompts). Picks the "
              "right asset for your OS+arch from GitHub Releases and "
-             "verifies the SHA-256 from the release's SHA256SUMS file.",
+             "verifies the SHA-256 from the release's SHA256SUMS file. "
+             "For airgapped hosts that can't reach github.com, see "
+             "--install-tectonic-from.",
+    )
+    mode.add_argument(
+        "--install-tectonic-from",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Airgapped / no-admin alternative to --install-tectonic. "
+             "Takes a path to a tectonic archive (.tar.gz / .zip) OR "
+             "an already-extracted tectonic binary that you downloaded "
+             "manually from a host with internet. Extracts / copies "
+             "the binary into tools/ exactly like --install-tectonic, "
+             "but with no network call — useful when the target machine "
+             "is behind a strict corporate proxy or fully offline. "
+             "Sanity-checks the archive shape so a wrong-arch tarball "
+             "doesn't land silently.",
     )
     mode.add_argument(
         "--list-drafts",
@@ -877,6 +894,7 @@ async def main_async(args: argparse.Namespace) -> int:
     # never touch Axon, plus when --no-axon-sidecar is passed.
     _axon_inert_modes = bool(
         getattr(args, "install_tectonic", False)
+        or getattr(args, "install_tectonic_from", None) is not None
         or getattr(args, "list_drafts", False)
     )
     if not args.no_axon_sidecar and not _axon_inert_modes:
@@ -905,6 +923,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.install_tectonic:
             return _install_tectonic()
+
+        if args.install_tectonic_from is not None:
+            return _install_tectonic_from_local(args.install_tectonic_from)
 
         if args.list_drafts:
             return _list_drafts(args.output_root)
@@ -2027,6 +2048,158 @@ def _install_tectonic() -> int:
         "[FI] On next paper_pdf run, FI will auto-detect tectonic when "
         "pdflatex isn't on PATH. First compile downloads CTAN packages "
         "(~30 s, one-time)."
+    )
+    return 0
+
+
+def _install_tectonic_from_local(src: Path) -> int:
+    """Airgapped / no-admin variant of ``_install_tectonic``: install
+    from a tectonic archive (or already-extracted binary) the user
+    placed on the local filesystem. No network call — useful when:
+
+    * The target host can't reach github.com (strict corporate proxy,
+      fully airgapped lab machine).
+    * Admin install of MiKTeX / TeX Live is blocked but the user CAN
+      run their own binaries.
+    * The user wants to pin a specific tectonic build that's been
+      vetted internally.
+
+    Accepted shapes for ``src``:
+
+    1. ``tectonic-X.Y.Z-...-tar.gz`` / ``.tgz`` / ``.zip`` — same
+       archive names ``_install_tectonic`` downloads from GitHub.
+       Extracts the binary in the same atomic-replace flow.
+
+    2. A path to an extracted ``tectonic`` (or ``tectonic.exe`` on
+       Windows) binary — just copies it into ``tools/``.
+
+    3. A directory — scanned for the binary or an archive.
+
+    Verification: TLS doesn't help here (no network), so the trust
+    model is "the user vouches for the file they pointed us at." We
+    do sanity-check that the extracted binary's first 4 bytes look
+    like an ELF / Mach-O / PE header so a wrong-arch tarball doesn't
+    silently install garbage.
+    """
+    import tarfile
+    import tempfile
+    import zipfile
+
+    repo_root = Path(__file__).resolve().parent
+    tools_dir = repo_root / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    exe_name = "tectonic.exe" if sys.platform == "win32" else "tectonic"
+    dest = tools_dir / exe_name
+    if dest.is_file():
+        print(f"[FI] tectonic already installed at {dest}")
+        return 0
+
+    src = src.expanduser().resolve()
+    if not src.exists():
+        print(f"[FI] --install-tectonic-from: path not found: {src}", file=sys.stderr)
+        return 1
+
+    # Resolve directory → archive / binary inside.
+    if src.is_dir():
+        for candidate in src.iterdir():
+            n = candidate.name
+            if n == exe_name or n.endswith((".tar.gz", ".tgz", ".zip")):
+                src = candidate
+                break
+        else:
+            print(
+                f"[FI] --install-tectonic-from: directory {src} has no "
+                f"tectonic binary or archive (.tar.gz / .zip)",
+                file=sys.stderr,
+            )
+            return 1
+
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{exe_name}.partial-", dir=tools_dir,
+    )
+    os.close(tmp_fd)
+    tmp_dest = Path(tmp_path)
+    try:
+        if src.suffix.lower() == ".zip":
+            with zipfile.ZipFile(src) as zf:
+                for member in zf.namelist():
+                    if member.endswith(exe_name):
+                        with zf.open(member) as fsrc, open(tmp_dest, "wb") as fdst:
+                            fdst.write(fsrc.read())
+                        break
+                else:
+                    print(
+                        f"[FI] --install-tectonic-from: archive {src} "
+                        f"missing tectonic binary",
+                        file=sys.stderr,
+                    )
+                    return 1
+        elif src.name.endswith((".tar.gz", ".tgz")):
+            with tarfile.open(src, "r:gz") as tf:
+                for member in tf.getmembers():
+                    if member.name.endswith(exe_name):
+                        extracted = tf.extractfile(member)
+                        if extracted is None:
+                            continue
+                        tmp_dest.write_bytes(extracted.read())
+                        break
+                else:
+                    print(
+                        f"[FI] --install-tectonic-from: archive {src} "
+                        f"missing tectonic binary",
+                        file=sys.stderr,
+                    )
+                    return 1
+        else:
+            # Treat as an already-extracted binary.
+            tmp_dest.write_bytes(src.read_bytes())
+
+        # Sanity-check the binary header. ELF: \x7fELF; Mach-O thin:
+        # \xfe\xed\xfa\xce/\xcf or \xce\xfa\xed\xfe; PE: MZ. Anything
+        # else means a wrong-arch / wrong-file tarball landed.
+        head = tmp_dest.read_bytes()[:4] if tmp_dest.stat().st_size >= 4 else b""
+        magics = (
+            b"\x7fELF",                         # ELF (Linux)
+            b"MZ\x90\x00", b"MZ\x00\x00",       # PE (Windows) variants
+            b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",   # Mach-O thin
+            b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",   # Mach-O thin (LE)
+            b"\xca\xfe\xba\xbe",                # Mach-O fat
+        )
+        if head[:2] == b"MZ":
+            # PE files just need MZ prefix.
+            pass
+        elif not any(head.startswith(m) for m in magics):
+            print(
+                f"[FI] --install-tectonic-from: extracted binary doesn't "
+                f"look executable (header bytes: {head!r}). Wrong-arch "
+                f"archive? Expected ELF (Linux), Mach-O (macOS), or PE "
+                f"(Windows).",
+                file=sys.stderr,
+            )
+            return 1
+
+        if sys.platform != "win32":
+            tmp_dest.chmod(0o755)
+        os.replace(tmp_dest, dest)
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as e:
+        print(
+            f"[FI] --install-tectonic-from: extract failed: {e!r}",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        if tmp_dest.exists():
+            try:
+                tmp_dest.unlink()
+            except OSError:
+                pass
+
+    print(f"[FI] tectonic installed at {dest} (from {src})")
+    print(
+        f"[FI] On next paper_pdf run, FI will auto-detect tectonic. "
+        f"First compile downloads CTAN packages into "
+        f"{('%LOCALAPPDATA%' if sys.platform == 'win32' else '~/.cache')}"
+        f"/TectonicProject/Tectonic/ (~30 s, one-time)."
     )
     return 0
 

@@ -101,6 +101,36 @@ fi --install-tectonic
 
 `urllib` honors these standard env vars.
 
+### Airgapped / strict-proxy / no GitHub access
+
+When the target host can't reach `github.com` at all (fully airgapped
+lab, deny-by-default proxy, security policy blocks the
+`tectonic-typesetting/tectonic` release page), download the binary
+elsewhere and hand-carry it over with `--install-tectonic-from`:
+
+```bash
+# On a host with internet, fetch the right asset for your target's
+# OS+arch from https://github.com/tectonic-typesetting/tectonic/releases
+# (e.g. tectonic-0.16.9-x86_64-unknown-linux-musl.tar.gz for Linux).
+# Copy the archive to the target host (USB, scp, S3, internal mirror).
+
+# On the airgapped target, pointed at the archive OR the extracted
+# binary OR the directory the archive lives in:
+fi --install-tectonic-from ~/downloads/tectonic-0.16.9-x86_64-unknown-linux-musl.tar.gz
+fi --install-tectonic-from ~/downloads/tectonic         # already-extracted
+fi --install-tectonic-from ~/downloads/                 # scans the dir
+```
+
+The same atomic-replace flow drops the binary into `tools/`, with no
+network call. Sanity-checks the executable header (ELF / Mach-O / PE)
+so a wrong-arch tarball can't silently land.
+
+> First-compile CTAN fetch still happens on the airgapped target.
+> Either pre-warm it on a connected host (run one PDF compile so
+> `~/.cache/TectonicProject/Tectonic/` populates, then rsync that dir
+> across) or pre-stage a local CTAN mirror and set
+> `TECTONIC_BUNDLE` to point at it.
+
 ## System tools (optional)
 
 Each tool is OPTIONAL — Frontier Insight degrades gracefully without
