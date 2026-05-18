@@ -278,6 +278,7 @@ async def generate_critique(
     supervisor: ProxySupervisor | None = None,
     knowledge: Knowledge | None = None,
     now: datetime | None = None,
+    ensemble: "NodeEnsembleConfig | None" = None,  # noqa: F821 — forward ref
 ) -> CritiqueArtifacts:
     """Produce an adversarial critique of a previously-run quest.
     Writes ``outputs/<quest_id>/critique.md`` and (optionally) ingests
@@ -308,14 +309,64 @@ async def generate_critique(
     endpoint = await resolve_endpoint_async(provider, sup)
     client = LLMClient(endpoint)
     try:
-        markdown = await client.chat(
-            [{"role": "user", "content": prompt}],
-            # Slightly higher than digest/portfolio — adversarial
-            # critique benefits from a wider exploration of failure
-            # modes than 0.2-temperature consensus-seeking.
-            temperature=0.4,
-            node="critique",
-        )
+        if ensemble is not None:
+            # Multi-model critique: N independent critics + the
+            # moderator merges them (default ``synthesize``) so
+            # disagreement gets explicitly surfaced rather than
+            # averaged away. The whole point of critique is "find
+            # what the in-quest reviewer missed" — diversity of
+            # critic perspectives is exactly the lever.
+            from core.ensemble import (
+                EnsembleError, fanout_chat,
+                merge_synthesize, merge_tournament,
+            )
+
+            async def _chat_fn(messages, *, temperature=0.4, model=None, node=""):
+                return await client.chat(
+                    messages, temperature=temperature, model=model, node=node,
+                )
+
+            try:
+                raw = await fanout_chat(
+                    [{"role": "user", "content": prompt}],
+                    ensemble.models, chat_fn=_chat_fn, node="critique",
+                    temperature=0.4,
+                )
+                moderator = ensemble.moderator or ensemble.models[0]
+                if ensemble.merge == "tournament":
+                    result = await merge_tournament(
+                        raw, moderator_model=moderator,
+                        chat_fn=_chat_fn, node="critique",
+                        prompt_summary=f"critique of quest {quest_id}",
+                    )
+                else:
+                    # Default synthesize — preserves disagreement signal
+                    # which matters more for adversarial review than
+                    # "pick the best one."
+                    result = await merge_synthesize(
+                        raw, moderator_model=moderator,
+                        chat_fn=_chat_fn, node="critique",
+                        prompt_summary=f"critique of quest {quest_id}",
+                    )
+                markdown = result.merged if isinstance(result.merged, str) else str(result.merged)
+            except EnsembleError as e:
+                import logging
+                logging.getLogger("frontier_insight.critique").warning(
+                    "ensemble all-failed (%s); falling back to single-call", e,
+                )
+                markdown = await client.chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.4, node="critique",
+                )
+        else:
+            markdown = await client.chat(
+                [{"role": "user", "content": prompt}],
+                # Slightly higher than digest/portfolio — adversarial
+                # critique benefits from a wider exploration of failure
+                # modes than 0.2-temperature consensus-seeking.
+                temperature=0.4,
+                node="critique",
+            )
     finally:
         await client.aclose()
         if provider.name in PROXY_PROVIDERS:
