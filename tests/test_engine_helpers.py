@@ -283,13 +283,21 @@ def test_slugify_all_non_alnum_returns_untitled() -> None:
     assert _slugify("!!!---???") == "untitled"
 
 
-def test_slugify_unicode_falls_back_to_untitled() -> None:
-    # The regex keeps only ASCII a-z0-9, so pure non-ASCII becomes empty.
-    assert _slugify("日本語") == "untitled"
+def test_slugify_preserves_non_latin_letters() -> None:
+    """Pre-fix: pure non-ASCII fell back to "untitled" because the
+    regex only kept ASCII. Post-fix: Unicode letters (\\w with re.UNICODE)
+    survive, so CJK / Cyrillic / Greek topics produce real slugs and
+    every CJK quest no longer shares the ``untitled`` prefix."""
+    assert _slugify("日本語") == "日本語"
+    assert _slugify("近視的遺傳影響") == "近視的遺傳影響"
+    assert _slugify("Тестовая") == "тестовая"
 
 
-def test_slugify_unicode_mixed_keeps_ascii_run() -> None:
-    assert _slugify("hello 日本 world") == "hello-world"
+def test_slugify_unicode_mixed_keeps_both_runs() -> None:
+    """Pre-fix the CJK middle was stripped, leaving ``hello-world``;
+    now Unicode letters survive so both runs end up in the slug,
+    dash-separated."""
+    assert _slugify("hello 日本 world") == "hello-日本-world"
 
 
 def test_slugify_strips_leading_trailing_dashes() -> None:
