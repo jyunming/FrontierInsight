@@ -67,8 +67,12 @@ export interface InterviewAnswers {
 
 /**
  * Per-provider model trios used by every ensemble profile. Mirrors
- * ``_ENSEMBLE_MODEL_TRIOS`` in core/interview.py. The schema-parity
- * test compares this against the JSON snapshot to catch drift.
+ * ``_ENSEMBLE_MODEL_TRIOS`` in core/interview.py.
+ *
+ * Drift between the two definitions is caught by
+ * ``test_ts_ensemble_model_trios_match_python`` in
+ * ``tests/test_interview_schema_parity.py`` — that test parses this
+ * record out of the TS file and compares it to the JSON snapshot.
  */
 export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
     "vscode_extension": ["gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"],
@@ -84,14 +88,23 @@ export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
 
 /**
  * Expand the ensemble profile into a node_ensemble dict shape.
- * Returns null for "off" so the YAML emitter can skip the block.
+ * Returns null for "off" — and also for any unrecognized profile —
+ * so the YAML emitter can skip the block entirely instead of writing
+ * a dangling ``node_ensemble:`` line with no children.
  */
+type EnsembleProfile = "off" | "cross_check_only" | "ideate_and_check" | "full";
+
 export function expandEnsembleProfile(
     profile: string,
     provider: string,
     providerModel: string | undefined,
 ): Record<string, {models: string[]; merge: string; moderator?: string}> | null {
-    if (!profile || profile === "off") return null;
+    const known: ReadonlySet<EnsembleProfile> = new Set([
+        "off", "cross_check_only", "ideate_and_check", "full",
+    ]);
+    if (!profile || profile === "off" || !known.has(profile as EnsembleProfile)) {
+        return null;
+    }
     const trio = ENSEMBLE_MODEL_TRIOS[provider]
         ?? [providerModel || "default", providerModel || "default", providerModel || "default"];
     const moderator = trio[0];
@@ -108,7 +121,11 @@ export function expandEnsembleProfile(
         // parses output as JSON, which only tournament preserves verbatim.
         out["analyze"] = { models: [...trio], merge: "tournament", moderator };
     }
-    return out;
+    // Defensive: if no branches matched (future profile name added on
+    // the Python side and not yet here), prefer returning null so the
+    // YAML emitter skips the block instead of writing ``node_ensemble:``
+    // with no children.
+    return Object.keys(out).length > 0 ? out : null;
 }
 
 /**
