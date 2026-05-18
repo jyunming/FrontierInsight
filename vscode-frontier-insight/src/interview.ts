@@ -349,11 +349,20 @@ async function probeAxonReachable(): Promise<boolean> {
     const port = process.env.AXON_PORT || "8000";
     try {
         const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 1500);
+        const timer = setTimeout(() => ctrl.abort(), 5000);
         const res = await fetch(`http://${host}:${port}/health/live`, { signal: ctrl.signal });
         clearTimeout(timer);
         return res.ok;
-    } catch {
+    } catch (e) {
+        // Mirror the diagnostic probe in extension.ts so reviewers can
+        // see WHY this fell back to disabled when the user expected
+        // Axon to be detected. The original silent catch made
+        // "axon is up but the interview defaulted to disabled" reports
+        // impossible to debug.
+        console.warn(
+            `[fi] axon probe failed at http://${host}:${port}/health/live: `,
+            e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+        );
         return false;
     }
 }

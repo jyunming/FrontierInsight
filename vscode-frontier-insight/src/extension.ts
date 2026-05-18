@@ -1347,20 +1347,21 @@ async function probeAxonOnActivate(
 ): Promise<void> {
     const host = process.env.AXON_HOST || "127.0.0.1";
     const port = process.env.AXON_PORT || "8000";
-    const url = `http://${host}:${port}/health/live`;
-    try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 1500);
-        const res = await fetch(url, { signal: ctrl.signal });
-        clearTimeout(timer);
-        if (res.ok) return;  // sidecar is up, nothing to surface
-    } catch {
-        // fallthrough — sidecar unreachable
-    }
+    const status = await probeAxonHealth(host, port);
+    if (status.live) return;  // sidecar is up, nothing to surface
+
+    // Log the actual failure so the user can see it in the extension
+    // output channel — the original probe swallowed errors silently
+    // which made "axon is up but extension says it isn't" impossible
+    // to diagnose.
+    console.warn(
+        `[fi] axon probe failed at http://${host}:${port}/health/live: ${status.error}`,
+    );
+    const detail = status.error ? ` (probe error: ${status.error})` : "";
     const action = await vscode.window.showInformationMessage(
-        `Frontier Insight: Axon sidecar not detected at ${host}:${port}. ` +
-        `Starting it now keeps the knowledge layer hot across quests ` +
-        `(saves ~5-15 s per /start).`,
+        `Frontier Insight: Axon sidecar not detected at ${host}:${port}${detail}. ` +
+        `If Axon IS running, it may be on a different host/port — set the ` +
+        `AXON_HOST / AXON_PORT environment variables before launching VS Code.`,
         "Start in terminal",
         "Show /axon-status",
         "Dismiss",
@@ -1375,7 +1376,46 @@ async function probeAxonOnActivate(
             { query: "@fi /axon-status" },
         );
     }
-    void context;  // reserved for future state.update("axon-prompted", true)
+    void context;
+}
+
+/**
+ * Single-source probe of the Axon sidecar's two health endpoints.
+ * Returns `{live, ready, error?}`. ``error`` is the stringified
+ * fetch/abort error when the live probe didn't return 200 — exposed
+ * so callers can show the user WHY the probe failed instead of
+ * "we couldn't tell."
+ *
+ * 5 s timeout (up from the original 1.5 s) — VS Code's bundled Node
+ * cold-starts the first fetch noticeably slower than a hot REPL,
+ * and a tight timeout was the most common cause of "axon is running
+ * but the extension says it isn't" reports.
+ */
+interface AxonHealthResult {
+    live: boolean;
+    ready: boolean;
+    error?: string;
+}
+async function probeAxonHealth(host: string, port: string): Promise<AxonHealthResult> {
+    const probe = async (path: string): Promise<{ ok: boolean; error?: string }> => {
+        const url = `http://${host}:${port}${path}`;
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 5000);
+            const res = await fetch(url, { signal: ctrl.signal });
+            clearTimeout(timer);
+            return { ok: res.ok, error: res.ok ? undefined : `HTTP ${res.status}` };
+        } catch (e) {
+            const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            return { ok: false, error: msg };
+        }
+    };
+    const live = await probe("/health/live");
+    if (!live.ok) {
+        return { live: false, ready: false, error: live.error };
+    }
+    const ready = await probe("/health/ready");
+    return { live: true, ready: ready.ok };
 }
 
 /**
@@ -1387,28 +1427,19 @@ async function runAxonStatus(stream: vscode.ChatResponseStream): Promise<void> {
     const host = process.env.AXON_HOST || "127.0.0.1";
     const port = process.env.AXON_PORT || "8000";
     const base = `http://${host}:${port}`;
-    const probe = async (path: string): Promise<boolean> => {
-        try {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 1500);
-            const res = await fetch(`${base}${path}`, { signal: ctrl.signal });
-            clearTimeout(timer);
-            return res.ok;
-        } catch {
-            return false;
-        }
-    };
-    const live = await probe("/health/live");
-    const ready = live ? await probe("/health/ready") : false;
-    if (!live) {
+    const status = await probeAxonHealth(host, port);
+    if (!status.live) {
         stream.markdown(
             `**Axon sidecar:** \`${base}\` — _not running_\n\n` +
-            `Start it from a terminal so quests reuse the warm model + indexes:\n\n` +
+            (status.error ? `_Probe error:_ \`${status.error}\`\n\n` : "") +
+            `If Axon IS running, the probe may be hitting the wrong host/port. ` +
+            `Set \`AXON_HOST\` and \`AXON_PORT\` env vars before launching VS Code, ` +
+            `or start it on the default host:port:\n\n` +
             `\`\`\`\npython -m axon.api\n\`\`\`\n`,
         );
         return;
     }
-    if (!ready) {
+    if (!status.ready) {
         stream.markdown(
             `**Axon sidecar:** \`${base}\` — _running, brain still initializing_\n\n` +
             `Give it a few seconds; the embedding model + vector index load on first request.\n`,
