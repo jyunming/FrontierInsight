@@ -3448,25 +3448,38 @@ def mint_quest_id(seed: str) -> str:
 
 
 def _slugify(s: str) -> str:
-    """Quest-id slug. Preserves Unicode letters (CJK / Cyrillic / etc.)
-    so a Traditional Chinese topic like ``近視的遺傳影響`` produces a
-    real slug instead of the constant ``untitled``. ASCII letters are
-    lowercased; everything outside the Unicode-letter + digit class
-    collapses to ``-``; runs of separators collapse to a single dash.
+    """Quest-id slug. ASCII-only by contract — the quest_id regex used
+    by digest / critique / --resume / interview_update is
+    ``^\\d{10}-[a-z0-9-]+-[0-9a-f]{6}$``, so a non-ASCII slug would
+    create a quest directory that those downstream paths can't see.
+
+    Policy for a topic in a non-Latin script (Traditional Chinese,
+    Cyrillic, ...):
+    1. Lowercase + extract the ASCII-letter / digit runs (handles
+       mixed-script topics like ``Genetic 遺傳 impact`` → ``genetic-impact``).
+    2. If nothing ASCII survives, fall back to a stable 8-hex digest of
+       the original string so every distinct CJK topic still gets a
+       distinct quest_id (instead of every CJK quest colliding on the
+       constant ``"untitled"``).
+
+    For ``interview.slugify`` (used for human-readable YAML titles +
+    folder names downstream), the Unicode-letter policy is the right
+    one — that helper keeps CJK intact.
     """
-    s = s.strip()
-    # Lowercase first so ASCII A-Z folds to a-z. CJK has no case, so
-    # lowercase is a no-op there.
-    s = s.lower()
-    # \w with re.UNICODE (default) matches Unicode letters + digits +
-    # underscore. Replace everything else with a dash.
-    s = re.sub(r"[^\w]+", "-", s, flags=re.UNICODE)
-    # Underscore is filesystem-safe but visually noisy in quest_ids;
-    # fold to dash.
-    s = s.replace("_", "-")
-    # Collapse repeats.
-    s = re.sub(r"-+", "-", s)
-    return s.strip("-") or "untitled"
+    s = s.strip().lower()
+    # ASCII-only character class — re.UNICODE is irrelevant here.
+    ascii_only = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    if ascii_only:
+        return ascii_only
+    # No ASCII letters/digits survived. Hash-fallback only when the
+    # original input carries at least one Unicode letter/digit —
+    # otherwise pure-punctuation / empty input still produces
+    # ``untitled`` (the long-standing fallback the tests pin).
+    if re.search(r"\w", s, flags=re.UNICODE):
+        import hashlib
+        digest = hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
+        return f"i18n-{digest}"
+    return "untitled"
 
 
 def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:

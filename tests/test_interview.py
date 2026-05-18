@@ -185,42 +185,50 @@ def test_slugify_examples(inp: str, out: str) -> None:
     assert slugify(inp) == out
 
 
-@pytest.mark.parametrize("inp,expected_nonempty", [
+@pytest.mark.parametrize("inp,expected", [
     # Traditional Chinese — the user-reported failing case.
-    ("近視的遺傳影響", True),
+    ("近視的遺傳影響", "近視的遺傳影響"),
     # Simplified Chinese.
-    ("近视的遗传影响", True),
-    # Japanese — hiragana + katakana + kanji mix.
-    ("日本語のテスト", True),
-    # Korean.
-    ("한국어 테스트", True),
-    # Cyrillic.
-    ("Тестовая тема", True),
-    # Greek.
-    ("Δοκιμή", True),
-    # Mixed CJK + ASCII keeps both.
-    ("Genetic 遺傳 impact", True),
+    ("近视的遗传影响", "近视的遗传影响"),
+    # Japanese — hiragana + katakana + kanji mix collapsed into one run.
+    ("日本語のテスト", "日本語のテスト"),
+    # Korean — space → dash.
+    ("한국어 테스트", "한국어-테스트"),
+    # Cyrillic — lowercased.
+    ("Тестовая тема", "тестовая-тема"),
+    # Greek — lowercased.
+    ("Δοκιμή", "δοκιμή"),
+    # Mixed CJK + ASCII keeps BOTH runs (not just the ASCII portion).
+    ("Genetic 遺傳 impact", "genetic-遺傳-impact"),
 ])
-def test_slugify_preserves_non_latin_scripts(inp: str, expected_nonempty: bool) -> None:
+def test_slugify_preserves_non_latin_scripts(inp: str, expected: str) -> None:
     """Pre-fix bug: CJK / Cyrillic / Greek topics produced an empty
     slug because ``[^a-z0-9\\s-]`` stripped every non-Latin codepoint.
-    Post-fix: ``[^\\w\\s-]`` (Unicode-aware) keeps them."""
-    out = slugify(inp)
-    if expected_nonempty:
-        assert out, f"slugify({inp!r}) returned empty — non-Latin chars must survive"
-    # Underscore folded to dash so quest_ids stay dash-separated.
-    assert "_" not in out
+    Post-fix: ``[^\\w\\s-]`` (Unicode-aware) keeps them. Exact-match
+    assertion so a regression to "drops part of mixed input" surfaces
+    immediately — a non-empty check would still pass with bugs."""
+    assert slugify(inp) == expected
 
 
-def test_engine_slugify_preserves_non_latin_scripts() -> None:
-    """The engine has its own ``_slugify`` for quest_id generation.
-    Bug parity with the interview helper: a CJK topic must NOT collapse
-    to the constant ``untitled`` (which would make every CJK quest
-    share an id prefix and collide)."""
+def test_engine_slugify_falls_back_to_hex_for_pure_non_ascii() -> None:
+    """The engine's quest-id ``_slugify`` MUST stay ASCII because the
+    digest / critique / --resume / interview_update validators all
+    require ``^\\d{10}-[a-z0-9-]+-[0-9a-f]{6}$``. Pure non-Latin topics
+    fall back to a deterministic 8-hex digest of the original text:
+    each distinct CJK / Cyrillic topic still gets a distinct quest_id
+    (instead of every one colliding on ``"untitled"``)."""
     from core.engine import _slugify
-    assert _slugify("近視的遺傳影響") not in ("", "untitled")
-    assert _slugify("日本語のテスト") not in ("", "untitled")
-    assert _slugify("genetic 近視 impact") not in ("", "untitled")
+    import re as _re
+    cjk = _slugify("近視的遺傳影響")
+    jp = _slugify("日本語のテスト")
+    assert _re.fullmatch(r"i18n-[0-9a-f]{8}", cjk)
+    assert _re.fullmatch(r"i18n-[0-9a-f]{8}", jp)
+    # Distinct inputs → distinct hashes.
+    assert cjk != jp
+    # Deterministic — same input twice, same hash.
+    assert _slugify("近視的遺傳影響") == cjk
+    # Mixed CJK + ASCII keeps the ASCII portion (most-readable id).
+    assert _slugify("genetic 近視 impact") == "genetic-impact"
     # ASCII path unchanged.
     assert _slugify("Hello World") == "hello-world"
     # Truly empty / pure-punctuation still falls back to untitled.

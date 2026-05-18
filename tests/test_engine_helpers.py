@@ -6,6 +6,7 @@ by `test_engine_smoke.py` so they run in milliseconds.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -283,21 +284,29 @@ def test_slugify_all_non_alnum_returns_untitled() -> None:
     assert _slugify("!!!---???") == "untitled"
 
 
-def test_slugify_preserves_non_latin_letters() -> None:
-    """Pre-fix: pure non-ASCII fell back to "untitled" because the
-    regex only kept ASCII. Post-fix: Unicode letters (\\w with re.UNICODE)
-    survive, so CJK / Cyrillic / Greek topics produce real slugs and
-    every CJK quest no longer shares the ``untitled`` prefix."""
-    assert _slugify("日本語") == "日本語"
-    assert _slugify("近視的遺傳影響") == "近視的遺傳影響"
-    assert _slugify("Тестовая") == "тестовая"
+def test_slugify_pure_non_latin_uses_hash_fallback() -> None:
+    """Quest-id slug must be ASCII (the digest / critique / --resume
+    regex enforces it). Pre-fix: pure non-ASCII collapsed to the
+    constant ``"untitled"`` so every CJK quest shared the same id
+    prefix. Post-fix: deterministic 8-hex hash so each distinct
+    non-ASCII topic gets a distinct quest_id."""
+    out = _slugify("日本語")
+    assert out != "untitled"
+    assert out.startswith("i18n-")
+    assert len(out) == len("i18n-") + 8
+    # Same input → same hash (determinism for /resume-by-topic).
+    assert _slugify("日本語") == out
+    # Different inputs → different hashes.
+    assert _slugify("近視的遺傳影響") != out
+    # ASCII characters never inside the i18n-... output.
+    assert re.fullmatch(r"i18n-[0-9a-f]{8}", out)
 
 
-def test_slugify_unicode_mixed_keeps_both_runs() -> None:
-    """Pre-fix the CJK middle was stripped, leaving ``hello-world``;
-    now Unicode letters survive so both runs end up in the slug,
-    dash-separated."""
-    assert _slugify("hello 日本 world") == "hello-日本-world"
+def test_slugify_mixed_script_keeps_ascii_run() -> None:
+    """Mixed CJK + ASCII keeps the ASCII portion verbatim — that's the
+    most-readable quest_id available without transliterating CJK."""
+    assert _slugify("hello 日本 world") == "hello-world"
+    assert _slugify("Genetic 遺傳 impact") == "genetic-impact"
 
 
 def test_slugify_strips_leading_trailing_dashes() -> None:
