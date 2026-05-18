@@ -129,6 +129,27 @@
     color: #4cd7f6;
     box-shadow: 0 8px 24px -10px rgba(6, 182, 212, 0.45);
   }
+  /* Respect the user's OS-level "Reduce motion" preference. The hero
+     terminal's per-line fade-in and the status pulse can both trigger
+     motion sensitivity; the node-chip hover transition is mild but
+     also disabled for consistency. Static fallbacks preserve the
+     visual hierarchy (terminal lines fully opaque from the start,
+     pulse dot solid instead of breathing). */
+  @media (prefers-reduced-motion: reduce) {
+    .terminal-line {
+      opacity: 1 !important;
+      animation: none !important;
+    }
+    .pulse-dot {
+      animation: none !important;
+      box-shadow: 0 0 0 0 rgba(228, 242, 34, 0.7) !important;
+    }
+    .node-chip,
+    .node-chip:hover {
+      transition: none !important;
+      transform: none !important;
+    }
+  }
 </style>
 </head>
 <body class="bg-surface-obsidian text-on-surface bg-dot-grid bg-dots min-h-screen font-body selection:bg-indigo-accent selection:text-white antialiased">
@@ -210,17 +231,20 @@
         <span class="text-cyan-accent font-semibold">$</span>
         <span class="text-on-surface"> python launch.py --new</span>
       </div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:80ms"># 14 questions · provider · clarify slots · &lt; 30s</div>
-      <div class="terminal-line text-on-surface-variant mb-3" style="animation-delay:160ms">&nbsp;</div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:240ms">[FI] start quest_id=<span class="text-primary">1778952003-coulomb-blockade</span> provider=<span class="text-cyan-accent">gemini_cli</span></div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:320ms">[clarify] auto · 8 slots resolved · pinned 7 from interview</div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:400ms">[ideate]    <span class="text-electric-lime">✓</span> chosen_idea=tournament_winner score=<span class="text-electric-lime">0.81</span></div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:480ms">[literature] retrieved 17 docs · 5 from Axon · 12 from arXiv</div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:560ms">[design] → [implement] → [execute]</div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:640ms">[execute]   <span class="text-electric-lime">●</span> subprocess venv · figures: 4 · result_json: 1.2 KB</div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:720ms">[analyze]   → [cross_check] → [write]</div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:800ms">[review]    verdict=<span class="text-electric-lime font-semibold">accept</span> score=<span class="text-electric-lime">4</span></div>
-      <div class="terminal-line text-on-surface-variant mt-3" style="animation-delay:880ms">⮕ <span class="text-primary">paper/paper.pdf</span> <span class="text-electric-lime">ready</span> &nbsp;|&nbsp; figures/ · code/experiment.py · .fi/cost.jsonl</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:80ms"># 6 questions, then a review screen. YAML written to outputs/_drafts/.</div>
+      <div class="terminal-line" style="animation-delay:160ms">
+        <span class="text-cyan-accent font-semibold">$</span>
+        <span class="text-on-surface"> python launch.py --config outputs/_drafts/2026-05-18-1500-coulomb-blockade.yaml</span>
+      </div>
+      <div class="terminal-line text-on-surface-variant mb-3" style="animation-delay:240ms">&nbsp;</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:320ms">[<span class="text-primary">1779140057-coulomb-blockade-2c4ae3</span>] starting quest 1779140057-coulomb-blockade-2c4ae3</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:400ms">[1779140057-coulomb-blockade-2c4ae3] provider <span class="text-cyan-accent">vscode_extension</span> -&gt; bridge://127.0.0.1:12345 (gpt-4o)</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:480ms">[1779140057-coulomb-blockade-2c4ae3] [clarify] mode=auto; all 8 slots pinned via clarify_overrides</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:560ms">[1779140057-coulomb-blockade-2c4ae3] [literature] retrieved 18 docs (iter=1, +18 new after dedup, total=18)</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:640ms">[1779140057-coulomb-blockade-2c4ae3] [execute] rc=0 · figures=4 · result_json=1.2 KB</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:720ms">[1779140057-coulomb-blockade-2c4ae3] [cross_check] supporting=2 conflicting=0 neutral=1</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:800ms">[1779140057-coulomb-blockade-2c4ae3] [review] verdict=<span class="text-electric-lime font-semibold">accept</span> score=<span class="text-electric-lime">4</span></div>
+      <div class="terminal-line text-on-surface-variant mt-3" style="animation-delay:880ms">⮕ <span class="text-primary">outputs/1779140057-coulomb-blockade-2c4ae3/paper/paper.pdf</span> <span class="text-electric-lime">ready</span> &nbsp;|&nbsp; figures/ · code/experiment.py · .fi/cost.jsonl</div>
     </div>
   </div>
 </section>
@@ -243,10 +267,12 @@
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">implement</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-electric-lime/40 text-electric-lime">execute&nbsp;<span class="opacity-60">▶</span></span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">analyze</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">execute_reflect</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">cross_check</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">write</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">review</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">critique</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">auto_collect_data</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">wait_for_data</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">data_load</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-cyan-accent/40 text-cyan-accent">paper.pdf</span>
     </div>
@@ -336,8 +362,9 @@
         </div>
         <p class="text-on-surface-variant text-body-md mb-4">For CI, remote shells, overnight fleets.</p>
         <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py --new
-python launch.py --proposal "..."
-python launch.py --fleet a.yaml b.yaml</code></pre>
+python launch.py --proposal "RK4 vs Verlet on Kepler"
+python launch.py --fleet a.yaml b.yaml --max-concurrent 2
+python launch.py --resume &lt;quest_id&gt;</code></pre>
       </div>
       <div class="card-border-gradient p-6 md:p-7">
         <div class="flex items-center gap-3 mb-4">
@@ -346,7 +373,8 @@ python launch.py --fleet a.yaml b.yaml</code></pre>
         </div>
         <p class="text-on-surface-variant text-body-md mb-4">Sanctioned <code class="font-mono text-xs">vscode.lm</code> bridge &mdash; counts as your normal Copilot usage.</p>
         <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>@fi /new
-@fi /update &lt;quest_id&gt;
+@fi /start &lt;path-to-config.yaml&gt;
+@fi /resume &lt;quest_id&gt;
 @fi /proposal Compare RK4 vs Verlet</code></pre>
       </div>
       <div class="card-border-gradient p-6 md:p-7">
@@ -355,7 +383,7 @@ python launch.py --fleet a.yaml b.yaml</code></pre>
           <h4 class="font-display font-bold text-lg">Local web UI</h4>
         </div>
         <p class="text-on-surface-variant text-body-md mb-4">Dashboard, live quest detail, tools page for every CLI feature.</p>
-        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py --serve
+        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py --serve --output-root ./outputs
 # → http://127.0.0.1:8765/</code></pre>
       </div>
     </div>
