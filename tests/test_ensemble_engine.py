@@ -86,10 +86,10 @@ def test_ensemble_for_node_returns_config(tmp_path: Path) -> None:
 
 def test_ensemble_for_node_missing_returns_none(tmp_path: Path) -> None:
     engine, _ = _engine_with_ensemble(tmp_path, {
-        "analyze": NodeEnsembleConfig(models=["m1"], merge="synthesize"),
+        "ideate": NodeEnsembleConfig(models=["m1"], merge="tournament"),
     })
     # Different node — not configured.
-    assert engine._ensemble_for_node("ideate") is None
+    assert engine._ensemble_for_node("analyze") is None
 
 
 def test_ensemble_for_node_none_when_not_configured(tmp_path: Path) -> None:
@@ -127,17 +127,26 @@ async def test_ensemble_chat_tournament_returns_winner(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_ensemble_chat_synthesize_merges_two_analyses(tmp_path: Path) -> None:
     """Two models fan out; moderator merges; the merged text comes
-    back along with a disagreement_score derived from ⚠ markers."""
+    back along with a disagreement_score derived from ⚠ markers.
+
+    The synthesize merger lives outside the engine-node parser path —
+    it's the merger used by /critique (prose output). The ProviderConfig
+    validator blocks it from being attached to analyze, so we test the
+    primitive plumbing under a placeholder node key.
+    """
     cfg = NodeEnsembleConfig(
         models=["m1", "m2"], merge="synthesize", moderator="mod",
     )
-    engine, client = _engine_with_ensemble(tmp_path, {"analyze": cfg})
+    # ``critique`` isn't a real engine-node key; engine ignores it for
+    # provider.node_ensemble lookup. We feed cfg directly to
+    # _ensemble_chat below so config-key doesn't matter for this test.
+    engine, client = _engine_with_ensemble(tmp_path, {"critique": cfg})
     client.script = {
         "m1": "trend up",
         "m2": "trend down",
         "mod": "Result: contested.\n⚠ Disagreement: m1 says up, m2 says down.",
     }
-    result = await engine._ensemble_chat("analyze this", node="analyze", ensemble_cfg=cfg)
+    result = await engine._ensemble_chat("analyze this", node="critique", ensemble_cfg=cfg)
     assert "contested" in result.merged
     assert result.disagreement_score > 0.0
     # 2 fan-out + 1 moderator.
@@ -200,3 +209,65 @@ async def test_ensemble_chat_moderator_default_falls_to_first_model(tmp_path: Pa
 
     result = await engine._ensemble_chat("brainstorm", node="ideate", ensemble_cfg=cfg)
     assert result.merged == "first"
+
+
+@pytest.mark.asyncio
+async def test_ensemble_chat_writes_breadcrumbs_to_cost_jsonl(tmp_path: Path) -> None:
+    """``_ensemble_chat`` writes the ``cost_jsonl_entries`` rows
+    (role/merge/ok/error) to the quest's cost.jsonl alongside the
+    per-call rows. This is the cost-tool's only signal that the call
+    was part of an ensemble."""
+    import json as _json
+    cfg = NodeEnsembleConfig(
+        models=["m1", "m2"], merge="tournament", moderator="judge",
+    )
+    engine, client = _engine_with_ensemble(tmp_path, {"ideate": cfg})
+    # Point the engine at a writable fi_dir so cost.jsonl lands there.
+    engine.fi_dir = tmp_path / ".fi"  # type: ignore[attr-defined]
+    client.script = {
+        "m1": "alpha", "m2": "beta",
+        "judge": "WINNER: [A]\nA wins.",
+    }
+    await engine._ensemble_chat("test", node="ideate", ensemble_cfg=cfg)
+    cost_log = (tmp_path / ".fi" / "cost.jsonl").read_text(encoding="utf-8")
+    rows = [_json.loads(line) for line in cost_log.splitlines() if line.strip()]
+    # Each row that came from the breadcrumb helper carries an
+    # ``ensemble`` key. We expect 2 fan-out + 1 moderator = 3 rows.
+    ensemble_rows = [r for r in rows if r.get("ensemble")]
+    assert len(ensemble_rows) == 3
+    roles = [r["role"] for r in ensemble_rows]
+    assert roles.count("fanout") == 2
+    assert roles.count("moderator") == 1
+    assert all(r.get("ts") is not None for r in ensemble_rows)
+
+
+def test_provider_config_rejects_analyze_synthesize() -> None:
+    """``provider.node_ensemble.analyze.merge: synthesize`` is rejected
+    at config load: the analyze parser expects JSON but synthesize
+    emits markdown, which would silently corrupt the analysis."""
+    with pytest.raises(ValueError) as exc:
+        ProviderConfig(
+            name="openai",
+            node_ensemble={
+                "analyze": NodeEnsembleConfig(
+                    models=["m1", "m2"], merge="synthesize",
+                ),
+            },
+        )
+    assert "synthesize" in str(exc.value).lower()
+    assert "tournament" in str(exc.value).lower()
+
+
+def test_provider_config_accepts_analyze_tournament() -> None:
+    """Tournament is the safe choice for analyze — the winning candidate's
+    JSON output is returned verbatim, preserving the parser contract."""
+    cfg = ProviderConfig(
+        name="openai",
+        node_ensemble={
+            "analyze": NodeEnsembleConfig(
+                models=["m1", "m2"], merge="tournament", moderator="m1",
+            ),
+        },
+    )
+    assert cfg.node_ensemble is not None
+    assert cfg.node_ensemble["analyze"].merge == "tournament"

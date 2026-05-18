@@ -2100,12 +2100,20 @@ class Engine:
         up to the caller, which decides whether to fall back to a
         single-call path or hard-fail."""
         from core.ensemble import (
-            fanout_chat, merge_synthesize, merge_tournament, merge_vote,
+            cost_jsonl_entries, fanout_chat, merge_synthesize,
+            merge_tournament, merge_vote,
         )
         assert self._client is not None
 
         # The chat_fn ensemble.py calls. Match the keyword shape of
         # LLMClient.chat so the primitive stays transport-agnostic.
+        #
+        # Concurrency note: fan-out calls run via ``asyncio.gather`` and
+        # all share ``self._client.last_model`` / ``last_usage``. We
+        # snapshot those two fields IMMEDIATELY after our own chat
+        # returns — no awaits in between — so the cost row attributes
+        # spend to the model we just used, not the one another in-flight
+        # call has since written.
         async def _chat_fn(
             messages: list[dict[str, str]], *,
             temperature: float = 0.2, model: str | None = None,
@@ -2115,8 +2123,13 @@ class Engine:
             text = await self._client.chat(
                 messages, temperature=temperature, model=model, node=node,
             )
-            # Log every ensemble round-trip just like single-call paths do.
-            self._log_chat_cost(node=node)
+            snap_model = (
+                getattr(self._client, "last_model", None) or model or ""
+            )
+            snap_usage = getattr(self._client, "last_usage", None)
+            self._log_chat_cost(
+                node=node, model=snap_model, usage=snap_usage,
+            )
             return text
 
         messages = [{"role": "user", "content": prompt}]
@@ -2126,21 +2139,43 @@ class Engine:
         )
 
         if ensemble_cfg.merge == "tournament":
-            return await merge_tournament(
+            result = await merge_tournament(
                 raw, moderator_model=(ensemble_cfg.moderator or ensemble_cfg.models[0]),
                 chat_fn=_chat_fn, node=node, prompt_summary=prompt[:200],
             )
-        if ensemble_cfg.merge == "synthesize":
-            return await merge_synthesize(
+        elif ensemble_cfg.merge == "synthesize":
+            result = await merge_synthesize(
                 raw, moderator_model=(ensemble_cfg.moderator or ensemble_cfg.models[0]),
                 chat_fn=_chat_fn, node=node, prompt_summary=prompt[:200],
             )
-        if ensemble_cfg.merge == "vote":
+        elif ensemble_cfg.merge == "vote":
             # Vote consumes structured (JSON) responses; the engine
             # caller — typically cross_check — passes JSON-emitting
-            # prompts, and merge_vote parses each survivor.
-            return merge_vote(raw, key="verdict")
-        raise ValueError(f"unknown ensemble merge strategy: {ensemble_cfg.merge!r}")
+            # prompts, and merge_vote parses each survivor. The key is
+            # currently hard-coded to ``"verdict"`` because that's the
+            # only shape the engine produces for this merger today; if
+            # we add a second vote caller we'll thread the key through
+            # ``NodeEnsembleConfig`` rather than continue to assume.
+            result = merge_vote(raw, key="verdict")
+        else:
+            raise ValueError(f"unknown ensemble merge strategy: {ensemble_cfg.merge!r}")
+
+        # Write the ensemble breadcrumb rows — these sit alongside the
+        # per-call rows emitted by ``_log_chat_cost`` above and carry
+        # the metadata (role/merge/ok/error/disagreement) the cost tool
+        # uses to break spend down by ensemble vs single-call.
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            breadcrumbs = cost_jsonl_entries(
+                result, base_node=node, merge_strategy=ensemble_cfg.merge,
+            )
+            with (self.fi_dir / "cost.jsonl").open("a", encoding="utf-8") as f:
+                for row in breadcrumbs:
+                    row["ts"] = time.time()
+                    f.write(json.dumps(row) + "\n")
+        except OSError as e:
+            self._log.debug("[cost] failed to write ensemble breadcrumbs: %r", e)
+        return result
 
     async def _chat_messages(
         self,
@@ -2160,7 +2195,11 @@ class Engine:
         self._log_chat_cost(node=node or "")
         return response
 
-    def _log_chat_cost(self, *, node: str) -> None:
+    def _log_chat_cost(
+        self, *, node: str,
+        model: str | None = None,
+        usage: dict[str, int] | None = None,
+    ) -> None:
         """Append one row to ``<quest_root>/.fi/cost.jsonl`` per chat
         call. Pulled out of ``_chat`` / ``_chat_messages`` so both
         call sites stay tight.
@@ -2171,6 +2210,14 @@ class Engine:
         ``last_usage = None`` — we still write the row so the chart
         on ``/quest/<id>`` can show "call count" + node breakdown
         even when token-level data is unavailable.
+
+        ``model`` / ``usage`` overrides exist for concurrent callers
+        (ensemble fan-out): the shared ``last_model`` / ``last_usage``
+        on the LLMClient can be overwritten between awaits when N
+        chat calls run via ``asyncio.gather``. Concurrent paths
+        snapshot the values immediately after their own chat returns
+        and pass them in explicitly so the row attributes spend to the
+        correct model.
         """
         assert self._client is not None
         # Lazy-import: web UI quests touch this file every chat call;
@@ -2185,8 +2232,10 @@ class Engine:
         # ``getattr(..., None)`` returns the new field when the real
         # LLMClient is in play, or skips the cost-log row entirely
         # when a stub is used.
-        usage = getattr(self._client, "last_usage", None)
-        model = getattr(self._client, "last_model", None) or ""
+        if usage is None:
+            usage = getattr(self._client, "last_usage", None)
+        if model is None:
+            model = getattr(self._client, "last_model", None) or ""
         cost = None
         if usage:
             cost = estimate_cost_usd(
