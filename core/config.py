@@ -181,12 +181,27 @@ class NodeEnsembleConfig(BaseModel):
 
 
 ClarifyMode = Literal["off", "auto", "interactive"]
+HumanFeedbackGate = Literal["off", "after_review"]
 
 
 class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = 2
     review_loop: bool = True
+    # Human-feedback gate. When ``"after_review"``, the engine pauses
+    # AFTER the review node fires and waits for the user to
+    # accept / reject / refine the result before finalising. The
+    # ``after_review`` callback receives the review verdict + scores +
+    # paper md and returns one of:
+    #
+    #   {"action": "accept"}                     # finalise the quest as-is
+    #   {"action": "reject"}                     # finalise with verdict=rejected
+    #   {"action": "refine", "feedback": "..."}  # bump iteration; back to design
+    #                                            #   with feedback injected
+    #
+    # ``"off"`` (default) keeps today's behaviour: the engine's
+    # review-loop verdict drives revise/done routing without a pause.
+    human_feedback_gate: HumanFeedbackGate = "off"
     # Pre-flight clarification (`clarify` node before `ideate`).
     #
     #   "off"         — skip the node entirely. Default for tests and fleet.
