@@ -101,7 +101,7 @@ async def test_quest_writeback_invokes_axon_when_enabled(
         })
         return True
 
-    async def fake_asearch(self, query, *, top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
+    async def fake_asearch(self, query, *, top_k=None, external_top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
         return []
 
     monkeypatch.setattr("core.knowledge.Knowledge.add_quest_artifacts", fake_add)
@@ -183,7 +183,7 @@ async def test_quest_writeback_skipped_when_verdict_revise_and_accept_gate_on(
     def fake_add(self, *, quest_id, paper_md_path, summary, metadata=None) -> bool:  # noqa: ANN001
         captured.append({"quest_id": quest_id})
         return True
-    async def fake_asearch(self, q, *, top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
+    async def fake_asearch(self, q, *, top_k=None, external_top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
         return []
     monkeypatch.setattr("core.knowledge.Knowledge.add_quest_artifacts", fake_add)
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", fake_asearch)
@@ -226,7 +226,7 @@ async def test_quest_writeback_runs_on_revise_when_accept_gate_off(
     def fake_add(self, *, quest_id, paper_md_path, summary, metadata=None) -> bool:  # noqa: ANN001
         captured.append({"quest_id": quest_id, "verdict": (metadata or {}).get("verdict")})
         return True
-    async def fake_asearch(self, q, *, top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
+    async def fake_asearch(self, q, *, top_k=None, external_top_k=None, chosen_idea=None, chat_fn=None):  # noqa: ANN001
         return []
     monkeypatch.setattr("core.knowledge.Knowledge.add_quest_artifacts", fake_add)
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", fake_asearch)
