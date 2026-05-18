@@ -55,9 +55,14 @@ export interface InterviewAnswers {
     // FI-internal cross-quest memory from References; "internal"
     // keeps everything (project reports, internal memos).
     audience: "external" | "internal";
-    // Prior-work retrievals per quest. 5 default; bump for
-    // comprehensive reviews.
+    // Axon (RAG) retrievals per quest. 8 default; the Python
+    // smart-default bumps to 12 for ``study_depth: comprehensive review``.
     knowledge_top_k: number;
+    // External (arXiv / OpenAlex / Crossref / S2 / ...) hits per quest
+    // when Axon misses. 20 default; bumped to 30 for comprehensive
+    // reviews. Sized independently of ``knowledge_top_k`` because web
+    // search is coarser than RAG and a literature scan needs breadth.
+    knowledge_external_top_k?: number;
     // Multi-model ensemble preset. "off" (default) keeps single-call
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
@@ -230,9 +235,14 @@ export function answersToYaml(answers: InterviewAnswers): string {
 
     lines.push("knowledge:");
     lines.push(`${indent}enabled: ${answers.knowledge_enabled ? "true" : "false"}`);
-    // Emit top_k only when it differs from the engine default (5).
-    if (answers.knowledge_top_k && answers.knowledge_top_k !== 5) {
+    // Emit top_k only when it differs from the engine default (8).
+    if (answers.knowledge_top_k && answers.knowledge_top_k !== 8) {
         lines.push(`${indent}top_k: ${answers.knowledge_top_k}`);
+    }
+    // Emit external_top_k only when it differs from the engine default (20).
+    const extK = answers.knowledge_external_top_k;
+    if (extK !== undefined && extK !== null && extK !== 20) {
+        lines.push(`${indent}external_top_k: ${extK}`);
     }
     if (!answers.knowledge_enabled) {
         lines.push(`${indent}external_fallback: ["openalex", "arxiv", "crossref"]`);

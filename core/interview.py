@@ -511,11 +511,21 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         id="knowledge_top_k",
-        label="Prior-work retrievals per quest",
-        prompt="How many Axon hits to feed into the writer. Higher = more sources but bigger prompt = slower + costlier. 5 default, 12 for comprehensive reviews.",
+        label="Axon hits per quest",
+        prompt="Dense-embedding retrievals from Axon fed to the writer. Small-k is precision (8 default); bump to 12-15 for comprehensive reviews. External web hits are sized separately via 'External hits per quest'.",
         kind="text",
-        default=5,
-        placeholder="5",
+        default=8,
+        placeholder="8",
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    Question(
+        id="knowledge_external_top_k",
+        label="External hits per quest",
+        prompt="arXiv / OpenAlex / Crossref / S2 results when Axon misses. Bigger than Axon's cap because web search is coarser and a literature scan needs breadth. 20 default; 30+ for survey-shaped quests.",
+        kind="text",
+        default=20,
+        placeholder="20",
         mid_quest_editable=True,
         tier=3,
     ),
@@ -641,10 +651,22 @@ def smart_default_knowledge_enabled(_partial: dict[str, Any]) -> bool:
         return False
 
 
-def smart_default_knowledge_top_k(_partial: dict[str, Any]) -> int:
-    """5 is the default that balances prior-work breadth against
-    prompt size. Bump to 12-15 for `study_depth: comprehensive review`."""
-    return 5
+def smart_default_knowledge_top_k(partial: dict[str, Any]) -> int:
+    """8 is the new default that balances prior-work breadth against
+    prompt size. Bump to 12 for ``study_depth: comprehensive review``
+    automatically — the writer needs more sources for a survey."""
+    if partial.get("study_depth") == "comprehensive review":
+        return 12
+    return 8
+
+
+def smart_default_knowledge_external_top_k(partial: dict[str, Any]) -> int:
+    """20 is the default external (web) cap — bigger than the Axon cap
+    because web hits are coarser and a literature scan benefits from
+    breadth. Comprehensive reviews bump to 30."""
+    if partial.get("study_depth") == "comprehensive review":
+        return 30
+    return 20
 
 
 # Map of question id → smart-default callable. Frontends call
@@ -659,6 +681,7 @@ SMART_DEFAULTS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "audience": smart_default_audience,
     "knowledge_enabled": smart_default_knowledge_enabled,
     "knowledge_top_k": smart_default_knowledge_top_k,
+    "knowledge_external_top_k": smart_default_knowledge_external_top_k,
 }
 
 
@@ -917,10 +940,14 @@ class InterviewAnswers:
     # cross-quest memory from the References section; "internal"
     # keeps everything. Default external for safe one-shot quests.
     audience: str = "external"
-    # How many prior-work entries the literature node retrieves into
-    # the writer's context block. 5 is the prompt-size sweet spot;
-    # bump to 12-15 for comprehensive reviews.
-    knowledge_top_k: int = 5
+    # How many Axon (RAG) prior-work entries the literature node
+    # retrieves into the writer's context block. 8 is the default;
+    # the smart-default helper bumps it to 12 for comprehensive reviews.
+    knowledge_top_k: int = 8
+    # How many EXTERNAL (web search — arXiv / OpenAlex / Crossref /
+    # S2 / ...) hits to fetch when Axon misses. Bigger than the Axon
+    # cap because web search is coarser; default 20 → 30 for surveys.
+    knowledge_external_top_k: int = 20
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1068,8 +1095,10 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
 
     lines.append("knowledge:")
     lines.append(f"{indent}enabled: {'true' if answers.knowledge_enabled else 'false'}")
-    if answers.knowledge_top_k != 5:
+    if answers.knowledge_top_k != 8:
         lines.append(f"{indent}top_k: {answers.knowledge_top_k}")
+    if answers.knowledge_external_top_k != 20:
+        lines.append(f"{indent}external_top_k: {answers.knowledge_external_top_k}")
     if not answers.knowledge_enabled:
         lines.append(f"{indent}external_fallback: [\"openalex\", \"arxiv\", \"crossref\"]")
         lines.append(f"{indent}source_routing: \"manual\"")

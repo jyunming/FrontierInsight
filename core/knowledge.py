@@ -1413,10 +1413,18 @@ class Knowledge:
         3. **External router** — `crossref` / `openalex` / etc., either
            agent-routed (`source_routing="auto"`) or YAML-configured.
 
-        Local papers count toward `top_k` so the user doesn't get
-        flooded — if they supplied 8 papers and top_k=5, only the first
+        Cap policy:
+        * ``top_k`` (or ``self.cfg.top_k``) bounds the Axon RAG layer
+          and the pinned-papers head — small-k because dense hits are
+          precise.
+        * ``self.cfg.external_top_k`` bounds the external router when
+          Axon misses — web search returns coarser matches and a
+          literature scan benefits from breadth (~20 abstracts).
+        Local papers count toward the Axon cap so the user doesn't get
+        flooded; if they supplied 8 papers and top_k=5, only the first
         5 are returned (and external sources aren't queried)."""
         k = top_k if top_k is not None else self.cfg.top_k
+        external_k = self.cfg.external_top_k
 
         # Layer 1: pinned local papers, always first.
         pinned = list(self._local_papers[:k])
@@ -1429,8 +1437,11 @@ class Knowledge:
         if axon_docs:
             return pinned + axon_docs[:remaining]
 
-        # Layer 3: external router.
-        remaining = k - len(pinned)
+        # Layer 3: external router. The external cap is independent of
+        # the Axon cap — when Axon misses, web search returns coarser
+        # matches and breadth matters. Pinned still count toward the
+        # external cap so the head isn't double-billed.
+        remaining_ext = max(0, external_k - len(pinned))
         fallback = self._fallback_sources()
         if self.cfg.source_routing == "auto" and chat_fn is not None:
             sources = await _route_sources_with_llm(
@@ -1441,7 +1452,7 @@ class Knowledge:
             sources = fallback
         if not sources:
             return pinned
-        external = await _route_external(query, remaining, sources)
+        external = await _route_external(query, remaining_ext, sources)
         # Phase 2: opportunistic full-text fetch for external hits. Off
         # by default; opt-in via `knowledge.try_fetch_full_text: true`.
         # Login walls fail the Content-Type + %PDF magic-bytes check
@@ -1453,7 +1464,7 @@ class Knowledge:
                 total_budget_s=self.cfg.full_text_fetch_total_s,
                 max_kb=self.cfg.full_text_max_kb,
             )
-        return pinned + external[:remaining]
+        return pinned + external[:remaining_ext]
 
     def search(self, query: str, *, top_k: int | None = None) -> list[RetrievedDoc]:
         """Synchronous wrapper for non-async callers (tests, scripts).

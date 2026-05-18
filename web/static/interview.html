@@ -479,6 +479,7 @@
       review_panel: [],
       knowledge_enabled: await probeAxonReachable(),
       audience: 'external',
+      knowledge_top_k: tier1.study_depth === 'comprehensive review' ? 12 : 8,
     };
   }
 
@@ -487,7 +488,7 @@
       comparative_baseline: '',
       success_metric: '',
       budget: '',
-      knowledge_top_k: 5,
+      knowledge_external_top_k: 20,
       ensemble_profile: 'off',
     };
   }

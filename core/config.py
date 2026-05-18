@@ -343,7 +343,17 @@ class KnowledgeConfig(BaseModel):
 
     enabled: bool = True
     axon_config: Path | dict[str, Any] | None = None
-    top_k: int = Field(default=5, ge=1)
+    # Axon (RAG) retrieval cap. Small-k because dense embedding hits
+    # are precise — 8 strong matches beat 20 medium ones for the writer
+    # prompt. The literature node uses this when querying Axon.
+    top_k: int = Field(default=8, ge=1)
+    # External (arxiv / openalex / crossref / s2 / ...) retrieval cap.
+    # Bigger than ``top_k`` because web search returns coarser matches
+    # and the writer benefits from breadth — 20 retrieved abstracts
+    # still fits comfortably in a prompt and a literature scan
+    # genuinely needs that many hits. Set independently of ``top_k`` so
+    # users can tune RAG precision without starving web breadth.
+    external_top_k: int = Field(default=20, ge=1)
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
     # `Knowledge.search()` when Axon is disabled OR returns zero results.

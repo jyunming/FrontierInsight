@@ -1503,7 +1503,8 @@ async def _run_new(
         provider=str(partial.get("provider", "openai")),
         provider_model=str(partial.get("provider_model")) if partial.get("provider_model") else None,
         audience=str(derived.get("audience", "external")),
-        knowledge_top_k=int(advanced.get("knowledge_top_k", 5) or 5),
+        knowledge_top_k=int(derived.get("knowledge_top_k", 8) or 8),
+        knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
         ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
     )
 
