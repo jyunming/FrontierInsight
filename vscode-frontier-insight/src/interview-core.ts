@@ -302,16 +302,25 @@ export function yamlEscape(s: string | null | undefined): string {
 
 
 export function slugify(s: string): string {
+    // Preserve Unicode letters (CJK / Cyrillic / Greek / ...) so a
+    // Traditional Chinese topic yields a real slug instead of an empty
+    // string. ``\p{L}`` is the Unicode-letter category; ``\p{N}`` digits.
+    // Mirrors ``core/interview.py:slugify``.
     return s
         .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, "")
+        .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+        .replace(/_+/g, "-")
         .replace(/\s+/g, "-")
         .replace(/-+/g, "-")
         .replace(/^-|-$/g, "");
 }
 
 function slugifyTitle(s: string): string {
-    return s.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
+    // Same Unicode-friendly policy as ``slugify`` so titles in non-Latin
+    // scripts survive the per-character normalization pass.
+    return s
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}-]/gu, "-");
 }
 
 function stamp(): string {

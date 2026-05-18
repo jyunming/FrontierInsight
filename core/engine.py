@@ -3448,9 +3448,38 @@ def mint_quest_id(seed: str) -> str:
 
 
 def _slugify(s: str) -> str:
-    s = s.lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    return s.strip("-") or "untitled"
+    """Quest-id slug. ASCII-only by contract — the quest_id regex used
+    by digest / critique / --resume / interview_update is
+    ``^\\d{10}-[a-z0-9-]+-[0-9a-f]{6}$``, so a non-ASCII slug would
+    create a quest directory that those downstream paths can't see.
+
+    Policy for a topic in a non-Latin script (Traditional Chinese,
+    Cyrillic, ...):
+    1. Lowercase + extract the ASCII-letter / digit runs (handles
+       mixed-script topics like ``Genetic 遺傳 impact`` → ``genetic-impact``).
+    2. If nothing ASCII survives, fall back to a stable 8-hex digest of
+       the original string so every distinct CJK topic still gets a
+       distinct quest_id (instead of every CJK quest colliding on the
+       constant ``"untitled"``).
+
+    For ``interview.slugify`` (used for human-readable YAML titles +
+    folder names downstream), the Unicode-letter policy is the right
+    one — that helper keeps CJK intact.
+    """
+    s = s.strip().lower()
+    # ASCII-only character class — re.UNICODE is irrelevant here.
+    ascii_only = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    if ascii_only:
+        return ascii_only
+    # No ASCII letters/digits survived. Hash-fallback only when the
+    # original input carries at least one Unicode letter/digit —
+    # otherwise pure-punctuation / empty input still produces
+    # ``untitled`` (the long-standing fallback the tests pin).
+    if re.search(r"\w", s, flags=re.UNICODE):
+        import hashlib
+        digest = hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
+        return f"i18n-{digest}"
+    return "untitled"
 
 
 def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:

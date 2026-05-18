@@ -185,6 +185,57 @@ def test_slugify_examples(inp: str, out: str) -> None:
     assert slugify(inp) == out
 
 
+@pytest.mark.parametrize("inp,expected", [
+    # Traditional Chinese — the user-reported failing case.
+    ("近視的遺傳影響", "近視的遺傳影響"),
+    # Simplified Chinese.
+    ("近视的遗传影响", "近视的遗传影响"),
+    # Japanese — hiragana + katakana + kanji mix collapsed into one run.
+    ("日本語のテスト", "日本語のテスト"),
+    # Korean — space → dash.
+    ("한국어 테스트", "한국어-테스트"),
+    # Cyrillic — lowercased.
+    ("Тестовая тема", "тестовая-тема"),
+    # Greek — lowercased.
+    ("Δοκιμή", "δοκιμή"),
+    # Mixed CJK + ASCII keeps BOTH runs (not just the ASCII portion).
+    ("Genetic 遺傳 impact", "genetic-遺傳-impact"),
+])
+def test_slugify_preserves_non_latin_scripts(inp: str, expected: str) -> None:
+    """Pre-fix bug: CJK / Cyrillic / Greek topics produced an empty
+    slug because ``[^a-z0-9\\s-]`` stripped every non-Latin codepoint.
+    Post-fix: ``[^\\w\\s-]`` (Unicode-aware) keeps them. Exact-match
+    assertion so a regression to "drops part of mixed input" surfaces
+    immediately — a non-empty check would still pass with bugs."""
+    assert slugify(inp) == expected
+
+
+def test_engine_slugify_falls_back_to_hex_for_pure_non_ascii() -> None:
+    """The engine's quest-id ``_slugify`` MUST stay ASCII because the
+    digest / critique / --resume / interview_update validators all
+    require ``^\\d{10}-[a-z0-9-]+-[0-9a-f]{6}$``. Pure non-Latin topics
+    fall back to a deterministic 8-hex digest of the original text:
+    each distinct CJK / Cyrillic topic still gets a distinct quest_id
+    (instead of every one colliding on ``"untitled"``)."""
+    from core.engine import _slugify
+    import re as _re
+    cjk = _slugify("近視的遺傳影響")
+    jp = _slugify("日本語のテスト")
+    assert _re.fullmatch(r"i18n-[0-9a-f]{8}", cjk)
+    assert _re.fullmatch(r"i18n-[0-9a-f]{8}", jp)
+    # Distinct inputs → distinct hashes.
+    assert cjk != jp
+    # Deterministic — same input twice, same hash.
+    assert _slugify("近視的遺傳影響") == cjk
+    # Mixed CJK + ASCII keeps the ASCII portion (most-readable id).
+    assert _slugify("genetic 近視 impact") == "genetic-impact"
+    # ASCII path unchanged.
+    assert _slugify("Hello World") == "hello-world"
+    # Truly empty / pure-punctuation still falls back to untitled.
+    assert _slugify("") == "untitled"
+    assert _slugify("!!!---!!!") == "untitled"
+
+
 # ---------------------------------------------------------------------------
 # YAML emitter — round-trip through Config validation
 # ---------------------------------------------------------------------------

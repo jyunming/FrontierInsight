@@ -6,6 +6,7 @@ by `test_engine_smoke.py` so they run in milliseconds.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -283,13 +284,29 @@ def test_slugify_all_non_alnum_returns_untitled() -> None:
     assert _slugify("!!!---???") == "untitled"
 
 
-def test_slugify_unicode_falls_back_to_untitled() -> None:
-    # The regex keeps only ASCII a-z0-9, so pure non-ASCII becomes empty.
-    assert _slugify("日本語") == "untitled"
+def test_slugify_pure_non_latin_uses_hash_fallback() -> None:
+    """Quest-id slug must be ASCII (the digest / critique / --resume
+    regex enforces it). Pre-fix: pure non-ASCII collapsed to the
+    constant ``"untitled"`` so every CJK quest shared the same id
+    prefix. Post-fix: deterministic 8-hex hash so each distinct
+    non-ASCII topic gets a distinct quest_id."""
+    out = _slugify("日本語")
+    assert out != "untitled"
+    assert out.startswith("i18n-")
+    assert len(out) == len("i18n-") + 8
+    # Same input → same hash (determinism for /resume-by-topic).
+    assert _slugify("日本語") == out
+    # Different inputs → different hashes.
+    assert _slugify("近視的遺傳影響") != out
+    # ASCII characters never inside the i18n-... output.
+    assert re.fullmatch(r"i18n-[0-9a-f]{8}", out)
 
 
-def test_slugify_unicode_mixed_keeps_ascii_run() -> None:
+def test_slugify_mixed_script_keeps_ascii_run() -> None:
+    """Mixed CJK + ASCII keeps the ASCII portion verbatim — that's the
+    most-readable quest_id available without transliterating CJK."""
     assert _slugify("hello 日本 world") == "hello-world"
+    assert _slugify("Genetic 遺傳 impact") == "genetic-impact"
 
 
 def test_slugify_strips_leading_trailing_dashes() -> None:
