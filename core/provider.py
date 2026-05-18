@@ -945,18 +945,24 @@ class LLMClient:
         error-context note in ``chat`` wraps a single call site."""
         # Reset cost-tracking state at the top of every
         # call so a transport that DOESN'T return usage (CLI / bridge)
-        # leaves last_usage = None rather than inheriting a previous
-        # HTTP call's numbers. The Engine cost-logger reads this after
-        # the call returns and skips rows where last_usage is None.
+        # leaves last_usage = None until the post-call estimator fills
+        # it in below. The Engine cost-logger reads last_usage after
+        # the call returns; today every call carries at least an
+        # estimated row so the cost chart shows real numbers instead
+        # of empty bars for CLI / bridge transports.
         self.last_usage = None
         self.last_model = (model or self.endpoint.model)
         if self.endpoint.transport == "cli":
-            return await self._chat_cli(messages, model_override=model)
+            text = await self._chat_cli(messages, model_override=model)
+            self._fill_usage_estimate_if_missing(messages, text)
+            return text
         if self.endpoint.transport == "vscode_bridge":
-            return await self._chat_vscode_bridge(
+            text = await self._chat_vscode_bridge(
                 messages, model_override=model, temperature=temperature,
                 node=node,
             )
+            self._fill_usage_estimate_if_missing(messages, text)
+            return text
         body: dict[str, Any] = {
             "model": (model or self.endpoint.model),
             "messages": messages,
@@ -1038,7 +1044,40 @@ class LLMClient:
         # not the one we asked for.
         if isinstance(data.get("model"), str):
             self.last_model = data["model"]
-        return data["choices"][0]["message"]["content"]
+        text = data["choices"][0]["message"]["content"]
+        # Older Ollama versions omit ``usage`` from the response. Fall
+        # through to char-based estimation so the cost.jsonl row still
+        # carries real numbers instead of nulls.
+        self._fill_usage_estimate_if_missing(messages, text)
+        return text
+
+    # ~4 chars per token holds reasonably well across English-text
+    # tokenizers (BPE / tiktoken / SentencePiece). It's not exact —
+    # code-heavy prompts run ~3 chars/token, math-heavy ~5 — but for
+    # a cost chart that previously showed empty bars on CLI/bridge
+    # transports, "roughly correct" beats "null". Estimated rows are
+    # flagged with ``estimated: True`` so the chart can render them
+    # differently if it ever wants to.
+    _CHARS_PER_TOKEN = 4
+
+    def _fill_usage_estimate_if_missing(
+        self, messages: list[dict[str, str]], completion: str,
+    ) -> None:
+        """Populate ``last_usage`` with a char-based token estimate when
+        the transport didn't return structured usage. No-op when usage
+        was already captured upstream (HTTP responses with ``usage``)."""
+        if self.last_usage is not None:
+            return
+        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        completion_chars = len(completion or "")
+        prompt_tokens = max(1, prompt_chars // self._CHARS_PER_TOKEN)
+        completion_tokens = max(0, completion_chars // self._CHARS_PER_TOKEN)
+        self.last_usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "estimated": True,
+        }
 
     async def _chat_vscode_bridge(
         self,

@@ -349,6 +349,7 @@ class Engine:
 
             artifacts = self._collect_artifacts(final_state)
             self._write_back_knowledge(artifacts, final_state)
+            self._write_cost_summary()
             self._log.info("quest %s reached terminal state", self.quest_id)
             return artifacts
         finally:
@@ -2195,6 +2196,49 @@ class Engine:
         self._log_chat_cost(node=node or "")
         return response
 
+    def _write_cost_summary(self) -> None:
+        """Aggregate ``.fi/cost.jsonl`` into ``.fi/cost.summary.json``
+        at quest finalization. The summary carries totals and per-node
+        / per-model breakdowns so the cost tool can render a one-line
+        "this quest cost N tokens / $X across M requests" without
+        re-walking the raw log on every render.
+
+        Schema (per the JSON file):
+
+            {
+              "total_requests": <int>,
+              "total_prompt_tokens": <int>,
+              "total_completion_tokens": <int>,
+              "total_tokens": <int>,
+              "total_cost_usd": <float | null>,
+              "estimated_rows": <int>,        # rows from char-based fallback
+              "by_node":  { <node>: {...same shape...} },
+              "by_model": { <model>: {...same shape...} },
+              "generated_at": <epoch>,
+            }
+
+        Best-effort: a missing / unreadable cost.jsonl produces a
+        summary with zeros; no exception bubbles out.
+        """
+        try:
+            path = self.fi_dir / "cost.jsonl"
+            if not path.is_file():
+                return
+            rows: list[dict[str, Any]] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            summary = _aggregate_cost_rows(rows)
+            (self.fi_dir / "cost.summary.json").write_text(
+                json.dumps(summary, indent=2) + "\n", encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.debug("[cost] failed to write cost.summary.json: %r", e)
+
     def _log_chat_cost(
         self, *, node: str,
         model: str | None = None,
@@ -2478,6 +2522,86 @@ class Engine:
 
 
 # ---- module-level helpers ------------------------------------------------
+
+
+def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Roll up a list of cost.jsonl rows into a one-shot summary dict.
+
+    Skips ensemble breadcrumb rows (``ensemble: True`` from
+    ``cost_jsonl_entries``) — those mirror per-call rows already
+    accounted for via ``_log_chat_cost``, so counting them again
+    would double-count requests and tokens. Pure function so it's
+    also callable from the web UI's cost endpoint without spinning
+    up an Engine.
+    """
+    totals = {
+        "total_requests": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_tokens": 0,
+        "total_cost_usd": 0.0,
+        "estimated_rows": 0,
+    }
+    has_cost_value = False
+    by_node: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
+
+    def _bucket() -> dict[str, Any]:
+        return {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "estimated_rows": 0,
+        }
+
+    for row in rows:
+        if row.get("ensemble") is True:
+            continue
+        usage = row.get("usage") or {}
+        prompt_t = int(usage.get("prompt_tokens", 0) or 0)
+        completion_t = int(usage.get("completion_tokens", 0) or 0)
+        total_t = int(usage.get("total_tokens", 0) or 0) or (prompt_t + completion_t)
+        cost = row.get("cost_usd")
+        is_estimated = bool(usage.get("estimated"))
+
+        totals["total_requests"] += 1
+        totals["total_prompt_tokens"] += prompt_t
+        totals["total_completion_tokens"] += completion_t
+        totals["total_tokens"] += total_t
+        if isinstance(cost, (int, float)):
+            totals["total_cost_usd"] += float(cost)
+            has_cost_value = True
+        if is_estimated:
+            totals["estimated_rows"] += 1
+
+        node = str(row.get("node") or "unknown")
+        model = str(row.get("model") or "unknown")
+        for d, key in ((by_node, node), (by_model, model)):
+            bucket = d.setdefault(key, _bucket())
+            bucket["requests"] += 1
+            bucket["prompt_tokens"] += prompt_t
+            bucket["completion_tokens"] += completion_t
+            bucket["total_tokens"] += total_t
+            if isinstance(cost, (int, float)):
+                bucket["cost_usd"] += float(cost)
+            if is_estimated:
+                bucket["estimated_rows"] += 1
+
+    if not has_cost_value:
+        # No real pricing data hit any row — surface that explicitly
+        # instead of pretending the total is $0.00.
+        totals["total_cost_usd"] = None  # type: ignore[assignment]
+        for bucket in list(by_node.values()) + list(by_model.values()):
+            bucket["cost_usd"] = None  # type: ignore[assignment]
+
+    return {
+        **totals,
+        "by_node": by_node,
+        "by_model": by_model,
+        "generated_at": time.time(),
+    }
 
 
 def _load_prompts() -> dict[str, string.Template]:
