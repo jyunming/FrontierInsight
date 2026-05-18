@@ -1504,6 +1504,7 @@ async def _run_new(
         provider_model=str(partial.get("provider_model")) if partial.get("provider_model") else None,
         audience=str(derived.get("audience", "external")),
         knowledge_top_k=int(advanced.get("knowledge_top_k", 5) or 5),
+        ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
     )
 
     yaml_text = answers_to_yaml(answers, frontend="cli")

@@ -106,7 +106,7 @@ npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
 #   CLI:  code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through 12 quick questions (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 

@@ -214,6 +214,68 @@ NO_SIMULATION_CHOICES: tuple[Choice, ...] = (
 )
 
 
+ENSEMBLE_PROFILES: tuple[Choice, ...] = (
+    Choice("off", "Single model (default, cheapest)",
+           "One LLM call per node. Cost baseline = 1×."),
+    Choice("cross_check_only", "Fan out cross_check only (~1.3× cost)",
+           "3 models vote per finding; catches issues the writer might miss. Minimal extra spend."),
+    Choice("ideate_and_check", "Fan out ideate + cross_check (~2.0× cost)",
+           "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding."),
+    Choice("full", "Fan out ideate + analyze + cross_check (~2.5× cost)",
+           "Multi-model on the three highest-leverage nodes. Best signal; highest cost."),
+)
+
+
+# Cost multipliers vs a single-model baseline. Frontends display these
+# next to the profile choice so the user sees the trade-off before
+# launch. The numbers are conservative estimates: ideate goes from 1
+# call to 4 (3 fan-out + 1 moderator); analyze same; cross_check goes
+# from K calls to 3K (no moderator). Across a typical quest of 7-18
+# LLM calls, that's the rough multiplier each profile lands at.
+_ENSEMBLE_COST_MULTIPLIERS: dict[str, float] = {
+    "off": 1.0,
+    "cross_check_only": 1.3,
+    "ideate_and_check": 2.0,
+    "full": 2.5,
+}
+
+
+def estimate_ensemble_cost_multiplier(profile: str) -> float:
+    """Return the rough LLM-cost multiplier vs the no-ensemble baseline.
+    Frontends render ``~Nx more LLM calls`` next to the profile picker
+    so the user sees the cost discipline implication at decision time."""
+    return _ENSEMBLE_COST_MULTIPLIERS.get(profile, 1.0)
+
+
+# Per-provider model trios used by every ensemble profile. These are
+# the models the interview will populate node_ensemble[*].models with
+# when the user picks a profile != "off". Edit the trio for a new
+# provider here (NOT in the YAML emitter) so all three frontends agree.
+_ENSEMBLE_MODEL_TRIOS: dict[str, tuple[str, str, str]] = {
+    "openai":           ("gpt-4o", "gpt-4o-mini", "o1-mini"),
+    "codex":            ("gpt-5", "gpt-4o", "gpt-4o-mini"),
+    "claude_cli":       ("claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"),
+    "codex_cli":        ("gpt-5", "gpt-4o", "gpt-4o-mini"),
+    "copilot_cli":      ("gpt-4o", "claude-3-5-sonnet", "o1-mini"),
+    "gemini_cli":       ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"),
+    "ollama":           ("llama3.1:70b", "qwen2.5:32b", "llama3.1:8b"),
+    "vscode_extension": ("gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"),
+}
+
+
+def ensemble_model_trio(provider: str, provider_model: str | None = None) -> list[str]:
+    """Return the three model ids the ensemble profile will fan out
+    over for ``provider``. Falls back to repeating ``provider_model``
+    (or "default") three times for unknown providers — the engine will
+    still fire 3 calls, just against the same model, which is mostly
+    useful as a smoke test for new providers."""
+    trio = _ENSEMBLE_MODEL_TRIOS.get(provider)
+    if trio is not None:
+        return list(trio)
+    fallback = provider_model or "default"
+    return [fallback, fallback, fallback]
+
+
 AUDIENCE_CHOICES: tuple[Choice, ...] = (
     Choice("external", "External — journal / open web (recommended)",
            "FI's own cross-quest memory (fi_critique / fi_digest / fi_portfolio / fi_proposal / fi_summary) is dropped from References; an outside reader can't look those up. Real external sources + your own ingested papers are kept."),
@@ -454,6 +516,16 @@ QUESTIONS: tuple[Question, ...] = (
         kind="text",
         default=5,
         placeholder="5",
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
+        id="ensemble_profile",
+        label="Multi-model ensemble",
+        prompt="Run the same node across multiple LLMs and merge their answers. Cost multiplies; agreement signal increases. Pick 'off' for single-model (cheapest) or one of the fan-out profiles for higher-stakes work.",
+        kind="single",
+        choices=ENSEMBLE_PROFILES,
+        default="off",
         mid_quest_editable=True,
         tier=3,
     ),
@@ -849,6 +921,46 @@ class InterviewAnswers:
     # the writer's context block. 5 is the prompt-size sweet spot;
     # bump to 12-15 for comprehensive reviews.
     knowledge_top_k: int = 5
+    # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
+    # the ``provider.node_ensemble`` block when non-"off". See
+    # ``ENSEMBLE_PROFILES`` for the four options and their cost
+    # multipliers; ``ensemble_model_trio`` for the per-provider models.
+    ensemble_profile: str = "off"
+
+
+def expand_ensemble_profile(
+    profile: str, *, provider: str, provider_model: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Expand a profile name to a ``node_ensemble`` dict shape.
+
+    Returns a dict ready to plug into ``provider.node_ensemble`` in the
+    YAML, mapping engine-node name → ``{models, merge[, moderator]}``.
+    Returns an empty dict for ``off`` so the YAML emitter can omit the
+    block entirely (no regression for users who don't pick a profile).
+
+    The shape mirrors ``core.config.NodeEnsembleConfig`` but stays a
+    plain dict so this module doesn't import from ``core.config`` (that
+    would create a circular import via ``core.config``'s use of pydantic
+    + ``core.interview`` schema-export plumbing).
+    """
+    if profile == "off" or not profile:
+        return {}
+    trio = ensemble_model_trio(provider, provider_model)
+    moderator = trio[0]
+    nodes: dict[str, dict[str, Any]] = {}
+    # cross_check: every profile that fans out includes it. Vote is the
+    # only safe merger here (engine's cross_check parses ``verdict``);
+    # the moderator field is unused for vote and intentionally omitted.
+    if profile in ("cross_check_only", "ideate_and_check", "full"):
+        nodes["cross_check"] = {"models": trio, "merge": "vote"}
+    if profile in ("ideate_and_check", "full"):
+        nodes["ideate"] = {"models": trio, "merge": "tournament", "moderator": moderator}
+    if profile == "full":
+        # analyze MUST use tournament — synthesize is rejected by the
+        # ProviderConfig validator because analyze's downstream parser
+        # expects JSON, which only tournament's verbatim winner preserves.
+        nodes["analyze"] = {"models": trio, "merge": "tournament", "moderator": moderator}
+    return nodes
 
 
 def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
@@ -889,6 +1001,23 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     lines.append(f"{indent}name: {json.dumps(answers.provider)}")
     if answers.provider_model:
         lines.append(f"{indent}model: {json.dumps(answers.provider_model)}")
+    # Multi-model ensemble preset. Only emit when the user picked
+    # something non-"off"; otherwise leave the engine on its
+    # single-model path (no regression for default quests).
+    node_ensemble = expand_ensemble_profile(
+        answers.ensemble_profile,
+        provider=answers.provider,
+        provider_model=answers.provider_model,
+    )
+    if node_ensemble:
+        lines.append(f"{indent}node_ensemble:")
+        for node, cfg in node_ensemble.items():
+            lines.append(f"{indent}{indent}{node}:")
+            quoted_models = ", ".join(json.dumps(m) for m in cfg["models"])
+            lines.append(f"{indent}{indent}{indent}models: [{quoted_models}]")
+            lines.append(f"{indent}{indent}{indent}merge: {json.dumps(cfg['merge'])}")
+            if "moderator" in cfg:
+                lines.append(f"{indent}{indent}{indent}moderator: {json.dumps(cfg['moderator'])}")
     lines.append("")
 
     lines.append("engine:")
@@ -987,6 +1116,11 @@ def export_schema_json() -> dict[str, Any]:
         "clarify_modes": [_choice(c) for c in CLARIFY_MODES],
         "review_panels": [_choice(c) for c in REVIEW_PANELS],
         "audience_choices": [_choice(c) for c in AUDIENCE_CHOICES],
+        "ensemble_profiles": [_choice(c) for c in ENSEMBLE_PROFILES],
+        "ensemble_cost_multipliers": dict(_ENSEMBLE_COST_MULTIPLIERS),
+        "ensemble_model_trios": {
+            name: list(trio) for name, trio in _ENSEMBLE_MODEL_TRIOS.items()
+        },
         "providers": [_choice(c) for c in PROVIDER_CHOICES],
         "provider_models": {
             name: [_choice(c) for c in opts]

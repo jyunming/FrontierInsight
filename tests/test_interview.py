@@ -475,3 +475,112 @@ def test_schema_json_file_matches_export() -> None:
         "`python -c 'from core.interview import write_schema_json; "
         "write_schema_json()'` to regenerate."
     )
+
+
+# ---------------------------------------------------------------------------
+# Ensemble profile — Tier-3 question wiring
+# ---------------------------------------------------------------------------
+
+
+def test_ensemble_profile_question_is_tier_3_and_optional() -> None:
+    """The ensemble profile lives at Tier 3 (behind 'Show advanced')
+    and defaults to ``off`` so users who don't opt in see no change.
+    It's mid-quest-editable so the user can flip profiles between
+    /resume passes."""
+    q = next(q for q in QUESTIONS if q.id == "ensemble_profile")
+    assert q.tier == 3
+    assert q.default == "off"
+    assert q.mid_quest_editable is True
+    values = {c.value for c in q.choices}
+    assert values == {"off", "cross_check_only", "ideate_and_check", "full"}
+
+
+def test_expand_ensemble_profile_off_emits_no_block() -> None:
+    """``off`` → empty dict so the YAML emitter can skip the
+    ``node_ensemble`` block entirely."""
+    from core.interview import expand_ensemble_profile
+    assert expand_ensemble_profile("off", provider="openai") == {}
+    assert expand_ensemble_profile("", provider="openai") == {}
+
+
+def test_expand_ensemble_profile_cross_check_only_has_just_cross_check() -> None:
+    """Cheapest non-trivial profile: fan-out limited to cross_check,
+    vote merge (no moderator call — pure tally)."""
+    from core.interview import expand_ensemble_profile
+    out = expand_ensemble_profile("cross_check_only", provider="openai")
+    assert set(out) == {"cross_check"}
+    assert out["cross_check"]["merge"] == "vote"
+    assert "moderator" not in out["cross_check"]
+    assert len(out["cross_check"]["models"]) == 3
+
+
+def test_expand_ensemble_profile_full_avoids_analyze_synthesize() -> None:
+    """The full profile must never pair ``analyze`` with ``synthesize``
+    — that combination is rejected by ProviderConfig's validator.
+    Tournament is the only safe merger for analyze."""
+    from core.interview import expand_ensemble_profile
+    out = expand_ensemble_profile("full", provider="claude_cli")
+    assert set(out) == {"cross_check", "ideate", "analyze"}
+    assert out["analyze"]["merge"] == "tournament"
+    assert out["ideate"]["merge"] == "tournament"
+    assert out["cross_check"]["merge"] == "vote"
+    # Tournament needs a moderator. The first trio model is the default.
+    assert out["analyze"]["moderator"] == out["analyze"]["models"][0]
+
+
+def test_ensemble_model_trio_unknown_provider_falls_back() -> None:
+    """Providers not in the trio catalog still get a 3-element list
+    (repeated provider_model). The engine fans out 3 calls; the user
+    can edit the YAML to swap models."""
+    from core.interview import ensemble_model_trio
+    out = ensemble_model_trio("nonsense-provider", provider_model="my-model")
+    assert out == ["my-model", "my-model", "my-model"]
+
+
+def test_estimate_ensemble_cost_multiplier_orders_match_intuition() -> None:
+    """Cost grows monotonically with ensemble breadth. Frontends rely
+    on this ordering when rendering the cost-discipline hint."""
+    from core.interview import estimate_ensemble_cost_multiplier
+    assert estimate_ensemble_cost_multiplier("off") == 1.0
+    assert (
+        estimate_ensemble_cost_multiplier("off")
+        < estimate_ensemble_cost_multiplier("cross_check_only")
+        < estimate_ensemble_cost_multiplier("ideate_and_check")
+        < estimate_ensemble_cost_multiplier("full")
+    )
+
+
+def test_answers_to_yaml_emits_node_ensemble_when_profile_picked() -> None:
+    """When ``ensemble_profile != "off"``, the YAML emitter materializes
+    a ``provider.node_ensemble`` block. The block must round-trip
+    through the ProviderConfig validator (analyze: tournament is OK)."""
+    from core.config import Config
+    answers = InterviewAnswers(
+        topic="t", title="t", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="b", success_metric="m", budget="b",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="openai", ensemble_profile="full",
+    )
+    yaml_text = answers_to_yaml(answers)
+    assert "node_ensemble:" in yaml_text
+    assert "ideate:" in yaml_text
+    assert "analyze:" in yaml_text
+    assert "cross_check:" in yaml_text
+    # Round-trip through the Pydantic loader so a future YAML-shape
+    # regression fails the test instead of corrupting real quests.
+    parsed = yaml.safe_load(yaml_text)
+    Config.model_validate(parsed)
+
+
+def test_answers_to_yaml_omits_node_ensemble_for_default_off() -> None:
+    """Default profile = "off" → no node_ensemble block. Existing quests
+    that never touched this slot continue to emit identical YAML."""
+    answers = InterviewAnswers(
+        topic="t", title="t", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="b", success_metric="m", budget="b",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="openai", ensemble_profile="off",
+    )
+    assert "node_ensemble" not in answers_to_yaml(answers)
