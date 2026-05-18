@@ -16,7 +16,89 @@ import pytest
 from core.config import Config
 from core.engine import QuestArtifacts
 from generation import paper as paper_mod
-from generation.paper import PaperGenerator
+from generation.paper import PaperGenerator, _tighten_inline_math
+
+
+# ---------------------------------------------------------------------------
+# _tighten_inline_math — rescue LLM-emitted "$ \beta $" math
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # The exact pattern that broke quest 1779131901 — spaces around \beta.
+        ("Align so the reported $ \\beta $ matches.",
+         "Align so the reported $\\beta$ matches."),
+        # Greek letter alone with trailing space only.
+        ("Use $\\sigma $ as the scale.",
+         "Use $\\sigma$ as the scale."),
+        # Compound math expression with leading + trailing space.
+        ("Set $ \\dfrac{a}{b} $ to one.",
+         "Set $\\dfrac{a}{b}$ to one."),
+    ],
+)
+def test_tighten_inline_math_strips_inner_whitespace(raw: str, expected: str) -> None:
+    """Inline math containing a LaTeX command gets surrounding
+    whitespace stripped so pandoc parses it as math instead of
+    treating the dollars as literal characters."""
+    assert _tighten_inline_math(raw) == expected
+
+
+def test_tighten_leaves_already_tight_math_unchanged() -> None:
+    """``$\\beta$`` (no spaces) — already correct, must not be mangled.
+    Including the cross-span case where two tight math expressions
+    sit on the same line with prose between them; the regex must NOT
+    bridge them into one ``$ ... $`` span."""
+    raw = "Use $\\beta$ here and $\\sigma$ there."
+    assert _tighten_inline_math(raw) == raw
+
+
+def test_tighten_does_not_touch_currency_dollars() -> None:
+    """``$ 100`` has no backslash command — left untouched."""
+    raw = "It costs $ 100 to $ 200 dollars."
+    assert _tighten_inline_math(raw) == raw
+
+
+def test_tighten_does_not_match_across_lines() -> None:
+    """Inline math is single-line. A ``$ ... \n ... $`` pattern is
+    almost certainly two separate dollars, not a math span."""
+    raw = "Cost is $ 50.\nProfit is $ 10 high."
+    assert _tighten_inline_math(raw) == raw
+
+
+def test_tighten_handles_mixed_tight_and_loose_math() -> None:
+    """A line with one tight + one loose math span tightens only the
+    loose one."""
+    raw = "Tight $\\alpha$ then loose $ \\beta $ end."
+    expected = "Tight $\\alpha$ then loose $\\beta$ end."
+    assert _tighten_inline_math(raw) == expected
+
+
+def test_tighten_skips_inline_code_spans() -> None:
+    """A literal ``$ \\beta $`` inside inline backticks is a code
+    example, not math — pandoc would render it as code. The tightener
+    must leave it alone so paper-about-LaTeX prose stays accurate."""
+    raw = "In prose: $ \\beta $ should tighten. But in code: ``$ \\beta $`` should NOT change."
+    out = _tighten_inline_math(raw)
+    assert "$\\beta$ should tighten" in out
+    assert "``$ \\beta $``" in out
+
+
+def test_tighten_skips_fenced_code_blocks() -> None:
+    """A fenced code block documenting a LaTeX example must survive
+    untouched — even when the surrounding prose has a loose math span."""
+    raw = (
+        "Loose prose math: $ \\sigma $\n\n"
+        "```latex\n"
+        "Example: $ \\beta $ stays exactly as written.\n"
+        "```\n"
+        "After fence: $ \\gamma $ tightens."
+    )
+    out = _tighten_inline_math(raw)
+    assert "$\\sigma$" in out
+    assert "$\\gamma$" in out
+    assert "Example: $ \\beta $ stays exactly as written." in out
 
 
 def _make_config(tmp_path: Path, kinds: list[str], paper_format: str = "generic") -> Config:
