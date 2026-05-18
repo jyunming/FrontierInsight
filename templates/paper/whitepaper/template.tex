@@ -15,6 +15,7 @@
 % pandoc emits \def\LTcaptype{none} for caption-less tables; longtable
 % then calls \refstepcounter{none} internally, so the counter must exist.
 \newcounter{none}
+\usepackage{amsmath, amssymb}
 \usepackage{hyperref}
 % helvet is universally available in minimal TeX Live installs;
 % opensans (an earlier choice) is not, and tripped paper_pdf compile

@@ -169,6 +169,35 @@ def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
     return "".join(parts)
 
 
+# Pandoc's markdown reader requires inline math to have NO whitespace
+# immediately after the opening ``$`` or before the closing ``$``.
+# When the LLM emits ``$ \beta $`` (with internal spaces) pandoc treats
+# the dollars as literal text (escaping them to ``\$``), and ``\beta``
+# then runs OUTSIDE math mode, producing "Undefined control sequence".
+#
+# The regex REQUIRES the content to start with a LaTeX backslash
+# command (``\beta``, ``\dfrac``). This anchor:
+#   1. Excludes currency prose like ``$ 100 to $ 200`` — no backslash.
+#   2. Prevents cross-matching across two separate math spans like
+#      ``$\alpha$ and $\beta$`` — the prose between the two pairs
+#      doesn't start with ``\``, so the regex can't bridge them.
+# Spaces / tabs (not newlines) are allowed on either side; one of the
+# two must be non-empty for the rewrite to be observable.
+_INLINE_MATH_TIGHTEN_RE = re.compile(
+    r"\$([ \t]*\\[a-zA-Z][^$\n]*?[ \t]*)\$",
+)
+
+
+def _tighten_inline_math(markdown: str) -> str:
+    """Normalize ``$  \\command...  $`` to ``$\\command...$`` so pandoc
+    parses it as inline math. Only rewrites when the content starts
+    with a LaTeX command — currency-like ``$ 100`` and prose-bracketed
+    dollars are left untouched."""
+    def _strip(m: "re.Match[str]") -> str:
+        return "$" + m.group(1).strip() + "$"
+    return _INLINE_MATH_TIGHTEN_RE.sub(_strip, markdown)
+
+
 def _count_sanitized_glyphs(markdown: str) -> int:
     """Count how many source-glyph occurrences the sanitizer rewrote.
     Used for the INFO log so the count is honest. Computing from
@@ -560,6 +589,12 @@ class PaperGenerator:
             md_text = paper_md.read_text(encoding="utf-8")
             glyph_count = _count_sanitized_glyphs(md_text)
             sanitized_md = _sanitize_unicode_for_latex(md_text)
+            # Tighten ``$ \beta $`` → ``$\beta$`` so pandoc parses it
+            # as inline math instead of treating the dollars as
+            # literal text (the latter produced "Missing $" /
+            # "Undefined control sequence" errors on quests whose LLM
+            # emitted math with whitespace inside the delimiters).
+            sanitized_md = _tighten_inline_math(sanitized_md)
             if glyph_count:
                 _log.info(
                     "paper.pdf: rewrote %d Unicode glyph occurrence(s) "
