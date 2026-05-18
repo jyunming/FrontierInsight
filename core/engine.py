@@ -26,14 +26,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict
 
+# User-supplied async function that collects answers to clarify-node
+# questions. Receives the ``clarify_questions`` dict and must return
+# the answers dict (same keys, resolved values).
 ClarifyCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
 # Human-feedback gate callback. Receives the review snapshot dict
 # (verdict / score / strengths / weaknesses / suggestions / paper_md_path)
 # and returns ``{"action": <accept|reject|refine>, "feedback": "..."}``.
 HumanFeedbackCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
-"""User-supplied async function that collects answers to clarify-node
-questions. Receives the `clarify_questions` dict and must return the
-answers dict (same keys, resolved values)."""
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -2217,6 +2218,16 @@ class Engine:
         """
         review = state.get("review") or {}
         verdict = review.get("verdict", "accept")
+        # Prefer the path the write node actually recorded in state —
+        # accommodates custom pipelines / future relocations of the
+        # rendered paper. Falls back to the conventional path if the
+        # write node didn't populate it (older quest checkpoints).
+        paper_md_state = state.get("paper_md") or ""
+        paper_md_path = (
+            str(paper_md_state)
+            if paper_md_state
+            else str(self.quest_root / "paper" / "paper.md")
+        )
         snapshot = {
             "quest_id": self.quest_id,
             "iteration": state.get("iteration", 0),
@@ -2226,7 +2237,7 @@ class Engine:
             "weaknesses": review.get("weaknesses") or [],
             "suggestions": review.get("suggestions") or [],
             "rationale": review.get("rationale", ""),
-            "paper_md_path": str(self.quest_root / "paper" / "paper.md"),
+            "paper_md_path": paper_md_path,
         }
         # Best-effort disk snapshot so a web UI / VSCode chat can render
         # the gate state without re-loading the LangGraph checkpoint.
@@ -2271,6 +2282,15 @@ class Engine:
                 "[human_feedback] refine → iteration %d (feedback len=%d)",
                 update["iteration"], len(feedback),
             )
+        elif action == "reject":
+            # Match the documented contract: the user "rejected" the
+            # result, so the review verdict is overwritten to
+            # ``rejected`` (distinct from ``accept`` and ``revise``).
+            # Downstream artifacts + the cost report can see the
+            # rejection without consulting state.human_feedback.
+            rejected_review = {**review, "verdict": "rejected"}
+            update["review"] = rejected_review
+            self._log.info("[human_feedback] action=reject — review.verdict=rejected")
         else:
             self._log.info("[human_feedback] action=%s — finalising", action)
         return update

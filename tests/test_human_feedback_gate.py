@@ -188,6 +188,41 @@ def test_human_feedback_malformed_payload_defaults_to_accept(
         assert patch["human_feedback"]["action"] == "accept"
 
 
+def test_human_feedback_reject_overwrites_review_verdict(
+    gated_engine: Engine,
+) -> None:
+    """Reject is the documented "user said no" path. The node persists
+    ``review.verdict = "rejected"`` so finalisation / cost-report /
+    digest paths can see the rejection without consulting
+    state.human_feedback. accept leaves verdict untouched."""
+    state = {"review": {"verdict": "accept", "score": 3}, "iteration": 0}
+    patch_reject = _drive_node(gated_engine, state, {"action": "reject"})
+    assert patch_reject["human_feedback"]["action"] == "reject"
+    assert patch_reject["review"]["verdict"] == "rejected"
+    patch_accept = _drive_node(gated_engine, state, {"action": "accept"})
+    assert "review" not in patch_accept
+
+
+def test_human_feedback_snapshot_uses_state_paper_md_path(
+    gated_engine: Engine, tmp_path: Path,
+) -> None:
+    """The snapshot's ``paper_md_path`` is sourced from
+    ``state["paper_md"]`` when present so custom pipelines / future
+    write-node relocations don't desynchronise the gate view from the
+    real file path."""
+    custom = str(tmp_path / "custom-location" / "paper.md")
+    state = {
+        "review": {"verdict": "accept"},
+        "iteration": 0,
+        "paper_md": custom,
+    }
+    _drive_node(gated_engine, state, {"action": "accept"})
+    snap = json.loads(
+        (gated_engine.fi_dir / "human_review.json").read_text(encoding="utf-8"),
+    )
+    assert snap["paper_md_path"] == custom
+
+
 def test_human_feedback_writes_snapshot_json(gated_engine: Engine) -> None:
     """Before the interrupt fires, ``human_review.json`` lands in
     ``<quest_root>/.fi/`` so a web UI can render the gate state without

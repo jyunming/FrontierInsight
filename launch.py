@@ -638,11 +638,14 @@ async def _cli_human_feedback_callback(
 ) -> dict[str, object]:
     """Terminal-based human-feedback gate. Prints the current review
     + verdict / score / weaknesses, then asks the user to type
-    ``accept`` / ``reject`` / ``refine``. On ``refine`` collects a
-    multi-line freeform comment (single-line, terminated by Enter)
-    that flows into the design node's prompt on the next revise loop.
+    ``accept`` / ``reject`` / ``refine``. On ``refine`` reads a single
+    line of freeform feedback (terminated by Enter) that flows into
+    the design node's prompt on the next revise loop. Multi-line
+    feedback isn't supported on the CLI — users with longer comments
+    should keep them in a notes file and reference it, or use the
+    web UI / VSCode flow once the gate surface lands there.
 
-    Used by ``launch.py --interactive`` when
+    Wired by ``launch.py --interactive`` when
     ``engine.human_feedback_gate: after_review`` is set in the YAML.
     """
     print()
@@ -729,11 +732,17 @@ async def run_one(
     #                            (the engine catches this and produces
     #                            a clear RuntimeError).
     callback = _pick_clarify_callback(cfg, engine, interactive)
-    # Wire the human-feedback gate callback when the YAML opts in.
-    # Terminal callback by default; users on `provider=vscode_extension`
-    # can override this to route through the bridge (future PR).
+    # Wire the human-feedback gate callback only when --interactive is
+    # set. Without that, the CLI callback would block on ``input()``
+    # in a non-interactive run (CI, fleet, headless). The engine
+    # raises a clear RuntimeError when the gate is on but no callback
+    # is wired, so the user gets a "you need --interactive" pointer
+    # instead of a silent hang.
     hf_callback: object = None
-    if cfg.engine.human_feedback_gate == "after_review":
+    if (
+        cfg.engine.human_feedback_gate == "after_review"
+        and interactive
+    ):
         hf_callback = _cli_human_feedback_callback
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
