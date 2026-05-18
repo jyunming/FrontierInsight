@@ -383,12 +383,15 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
-    // Tier-3 fields are only worth printing if the user has set them.
-    // Defaults: knowledge_top_k=8 (Axon RAG), knowledge_external_top_k=20 (web).
+    // ``knowledge_top_k`` is Tier-2 in core/interview.py — show it in
+    // the always-visible review block alongside the other defaults so
+    // the VSCode flow matches the schema-backed web/CLI tiering.
+    lines.push(`| Axon hits per quest (top_k) | \`${a.knowledge_top_k}\` |`);
+    // Tier-3 fields only render when the user set them (anything other
+    // than the static defaults). External cap default = 20.
     const ext = a.knowledge_external_top_k;
     const hasOverride = (
         a.comparative_baseline || a.success_metric || a.budget
-        || a.knowledge_top_k !== 8
         || (ext !== undefined && ext !== 20)
     );
     if (hasOverride) {
@@ -396,7 +399,6 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         if (a.comparative_baseline) lines.push(`  • baseline: ${a.comparative_baseline}`);
         if (a.success_metric) lines.push(`  • metric: ${a.success_metric}`);
         if (a.budget) lines.push(`  • budget: ${a.budget}`);
-        if (a.knowledge_top_k !== 8) lines.push(`  • top_k (Axon): ${a.knowledge_top_k}`);
         if (ext !== undefined && ext !== 20) lines.push(`  • external_top_k (web): ${ext}`);
     }
     lines.push("");
@@ -413,10 +415,31 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Reviewer panel", value: "review_panel" },
             { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
             { label: "Paper audience", value: "audience" },
+            { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
         ],
         { title: "Edit which default?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "knowledge_top_k") {
+        const v = await vscode.window.showInputBox({
+            title: "Axon (RAG) retrievals per quest",
+            value: String(a.knowledge_top_k),
+            placeHolder: "8",
+            ignoreFocusOut: true,
+            validateInput: (s) => {
+                const n = Number(s);
+                if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+                    return "must be a positive integer (>= 1)";
+                }
+                return null;
+            },
+        });
+        if (v !== undefined && v.trim()) {
+            const n = Number(v);
+            if (Number.isInteger(n) && n >= 1) a.knowledge_top_k = n;
+        }
+        return;
+    }
     switch (which.value) {
         case "title": {
             const v = await vscode.window.showInputBox({ title: "Title", value: a.title, ignoreFocusOut: true });
@@ -504,7 +527,6 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "Comparative baseline", value: "comparative_baseline" },
             { label: "Success metric", value: "success_metric" },
             { label: "Time / compute budget", value: "budget" },
-            { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
             { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
@@ -516,24 +538,22 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             value: String(a.knowledge_external_top_k ?? 20),
             placeHolder: "20",
             ignoreFocusOut: true,
+            // ``isdigit``-only check used to accept ``0``; explicit
+            // ``>= 1`` rejects it. Same predicate gates the save path
+            // below so an accepted value never silently falls back to
+            // the old hard-coded default.
             validateInput: (s) => {
                 const n = Number(s);
-                if (!Number.isInteger(n) || n < 1) return "must be a positive integer";
+                if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+                    return "must be a positive integer (>= 1)";
+                }
                 return null;
             },
         });
-        if (v !== undefined) a.knowledge_external_top_k = Number(v);
-        return;
-    }
-    if (which.value === "knowledge_top_k") {
-        const v = await vscode.window.showInputBox({
-            title: "Axon (RAG) retrievals per quest",
-            value: String(a.knowledge_top_k),
-            placeHolder: "8",
-            ignoreFocusOut: true,
-            validateInput: (s) => (s && /^\d+$/.test(s.trim()) ? null : "must be a positive integer"),
-        });
-        if (v !== undefined) a.knowledge_top_k = parseInt(v.trim(), 10) || 5;
+        if (v !== undefined && v.trim()) {
+            const n = Number(v);
+            if (Number.isInteger(n) && n >= 1) a.knowledge_external_top_k = n;
+        }
         return;
     }
     const aBag = a as unknown as Record<string, unknown>;
