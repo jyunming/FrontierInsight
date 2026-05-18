@@ -283,6 +283,45 @@ async def test_synthesize_merges_and_counts_disagreements(fake: FakeTransport) -
 
 
 @pytest.mark.asyncio
+async def test_tournament_moderator_failure_falls_back(fake: FakeTransport) -> None:
+    """When the moderator call itself raises (e.g. transport timeout),
+    the merger falls back to first survivor + note. Fan-out work isn't
+    wasted, and the engine never has to catch the moderator's raw
+    transport exception."""
+    raw = [
+        FanoutResponse(model="m1", text="alpha"),
+        FanoutResponse(model="m2", text="beta"),
+    ]
+    fake.script("mod", [("err", "timeout")])
+    result = await merge_tournament(
+        raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+    )
+    assert result.merged == "alpha"
+    assert "moderator call failed" in result.notes
+    assert "timeout" in result.notes
+    # No moderator_model set → cost row will skip the moderator entry.
+    assert result.moderator_model is None
+
+
+@pytest.mark.asyncio
+async def test_synthesize_moderator_failure_concatenates(fake: FakeTransport) -> None:
+    """Same fallback policy for synthesize: moderator failure → raw
+    concatenation of survivors so no analysis is lost."""
+    raw = [
+        FanoutResponse(model="m1", text="alpha report"),
+        FanoutResponse(model="m2", text="beta report"),
+    ]
+    fake.script("mod", [("err", "rate limit")])
+    result = await merge_synthesize(
+        raw, moderator_model="mod", chat_fn=fake.chat, node="analyze",
+    )
+    assert "alpha report" in result.merged
+    assert "beta report" in result.merged
+    assert "moderator call failed" in result.notes
+    assert result.moderator_model is None
+
+
+@pytest.mark.asyncio
 async def test_synthesize_no_moderator_concatenates(fake: FakeTransport) -> None:
     """Without a moderator, the merger crudely concatenates the
     survivors so no information is lost. Truthful > pretty."""
@@ -387,6 +426,18 @@ def test_cost_jsonl_vote_has_no_moderator_row() -> None:
     rows = cost_jsonl_entries(result, base_node="cross_check", merge_strategy="vote")
     assert len(rows) == 2
     assert all(r["role"] == "fanout" for r in rows)
+
+
+def test_cost_jsonl_skips_moderator_row_when_none_was_called() -> None:
+    """When the merger took an early-return path (single survivor /
+    no moderator configured / moderator call failed), no LLM moderator
+    call actually happened — so no moderator cost row should be emitted.
+    The moderator_model field on the result is the truthy signal."""
+    raw = [FanoutResponse(model="m1", text="x")]
+    # Single-survivor early-return → moderator_model stays None.
+    result = EnsembleResult(merged="x", raw=raw, moderator_model=None)
+    rows = cost_jsonl_entries(result, base_node="ideate", merge_strategy="tournament")
+    assert all(r["role"] != "moderator" for r in rows)
 
 
 def test_cost_jsonl_marks_failed_calls() -> None:

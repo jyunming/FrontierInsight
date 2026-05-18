@@ -200,11 +200,25 @@ async def merge_tournament(
         f"Then on the next line a one-sentence rationale. Nothing else.\n"
         f"Valid letters: {', '.join('['+x+']' for x in labels)}.\n"
     )
-    mod_text = await chat_fn(
-        [{"role": "user", "content": instruction}],
-        temperature=0.0, model=moderator_model,
-        node=f"{node}.ensemble.moderator",
-    )
+    try:
+        mod_text = await chat_fn(
+            [{"role": "user", "content": instruction}],
+            temperature=0.0, model=moderator_model,
+            node=f"{node}.ensemble.moderator",
+        )
+    except Exception as e:  # noqa: BLE001  — every transport raises differently
+        # Moderator call itself failed (timeout / rate-limit / transport).
+        # The fan-out work isn't wasted: fall back to the first survivor
+        # and tell the caller. Same shape as the unparseable-output
+        # fallback below so engine integration is uniform.
+        _log.warning(
+            "[ensemble] %s: moderator call failed (%s); using first survivor",
+            node, e,
+        )
+        return EnsembleResult(
+            merged=survivors[0].text, raw=raw,
+            notes=f"moderator call failed ({type(e).__name__}: {e}); took first survivor",
+        )
     pick = _parse_winner_label(mod_text, labels)
     if pick is None:
         # Moderator didn't follow the format — fall back to the first
@@ -290,11 +304,28 @@ async def merge_synthesize(
         f"Output: one merged analysis in markdown, with disagreement-flag lines "
         f"inline where applicable. No JSON, no preamble, no surrounding fence."
     )
-    merged = await chat_fn(
-        [{"role": "user", "content": instruction}],
-        temperature=0.2, model=moderator_model,
-        node=f"{node}.ensemble.moderator",
-    )
+    try:
+        merged = await chat_fn(
+            [{"role": "user", "content": instruction}],
+            temperature=0.2, model=moderator_model,
+            node=f"{node}.ensemble.moderator",
+        )
+    except Exception as e:  # noqa: BLE001  — every transport raises differently
+        # Moderator failed → fall back to raw concatenation (preserves
+        # every survivor's analysis verbatim, no information loss) and
+        # flag in notes. Engine integration handles this uniformly via
+        # the same fallback path as the no-moderator case.
+        _log.warning(
+            "[ensemble] %s: moderator call failed (%s); concatenating survivors",
+            node, e,
+        )
+        joined = "\n\n---\n\n".join(
+            f"### {s.model}\n\n{s.text}" for s in survivors
+        )
+        return EnsembleResult(
+            merged=joined, raw=raw,
+            notes=f"moderator call failed ({type(e).__name__}: {e}); raw concatenation",
+        )
     # Count disagreement markers — gives the engine a numeric handle to
     # log + display in the cost report. Single pattern so a line like
     # "⚠ Disagreement:" counts once, not twice.
@@ -406,13 +437,15 @@ def cost_jsonl_entries(
             "ok": r.ok,
             "error": r.error,
         })
-    # Moderator row only emitted by tournament + synthesize. Vote has
-    # no moderator (it's a pure tally). The moderator row carries the
-    # same {model, ok, error} keys as the fan-out rows so the cost
-    # tool can attribute spend per model without special-casing role.
-    # The moderator can only reach this helper after a successful call
-    # (the merger raises otherwise), so ok=True / error=None here.
-    if merge_strategy in ("tournament", "synthesize"):
+    # Moderator row only emitted when a moderator actually ran.
+    # Tournament + synthesize have early-return paths (single survivor,
+    # moderator_model=None, moderator-call failure) where no LLM call
+    # was made — we gate on the moderator_model field, which the mergers
+    # only set after a successful moderator call. Vote has no moderator
+    # at all (pure tally). The moderator row carries the same
+    # {model, ok, error} keys as the fan-out rows so the cost tool can
+    # attribute spend per model without special-casing role.
+    if merge_strategy in ("tournament", "synthesize") and result.moderator_model:
         rows.append({
             "node": f"{base_node}.ensemble.moderator",
             "model": result.moderator_model,
