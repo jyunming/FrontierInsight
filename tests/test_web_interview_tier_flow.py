@@ -187,6 +187,57 @@ def test_submit_omits_audience_at_default_for_compact_yaml(tmp_path) -> None:  #
     )
 
 
+def test_submit_rejects_vscode_extension_without_bridge_port(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """User-reported question: 'is it possible that i launch --serve
+    but call vscode_extension?'. Yes — but only when a live bridge is
+    wired. If the dashboard wasn't started with --vscode-bridge-port
+    (and FI_VSCODE_BRIDGE_PORT isn't in env), submitting a quest with
+    provider=vscode_extension must 400 at submit time, not crash mid-
+    quest with the engine's cryptic 'requires extra[bridge_port]'."""
+    from fastapi.testclient import TestClient
+    from web.server import make_app
+
+    app = make_app(tmp_path, vscode_bridge_port=0)
+    client = TestClient(app)
+    payload = {
+        "topic": "t", "title": "t",
+        "output_kinds": ["paper_md"], "paper_format": "generic",
+        "study_depth": "journal-length",
+        "provider": "vscode_extension", "provider_model": "",
+        "no_simulation": False, "clarify_mode": "auto",
+        "review_panel": [], "knowledge_enabled": False,
+        "comparative_baseline": "", "success_metric": "", "budget": "",
+        "audience": "external", "knowledge_top_k": 5,
+    }
+    r = client.post("/api/interview/submit", json=payload)
+    assert r.status_code == 400
+    assert "vscode_extension" in r.json()["detail"]
+    assert "bridge" in r.json()["detail"].lower()
+
+
+def test_submit_accepts_vscode_extension_when_bridge_port_set(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Same flow but with the dashboard launched with a live bridge —
+    submit must succeed (the engine will route LLM calls through the
+    bridge port the launcher inherits)."""
+    from fastapi.testclient import TestClient
+    from web.server import make_app
+
+    app = make_app(tmp_path, vscode_bridge_port=12345)
+    client = TestClient(app)
+    payload = {
+        "topic": "t", "title": "t",
+        "output_kinds": ["paper_md"], "paper_format": "generic",
+        "study_depth": "journal-length",
+        "provider": "vscode_extension", "provider_model": "",
+        "no_simulation": False, "clarify_mode": "auto",
+        "review_panel": [], "knowledge_enabled": False,
+        "comparative_baseline": "", "success_metric": "", "budget": "",
+        "audience": "external", "knowledge_top_k": 5,
+    }
+    r = client.post("/api/interview/submit", json=payload)
+    assert r.status_code == 200, r.text
+
+
 def test_submit_rejects_bad_audience(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Defensive — invalid audience strings get a 400."""
     from fastapi.testclient import TestClient
