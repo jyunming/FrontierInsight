@@ -483,12 +483,18 @@
     };
   }
 
-  function deriveTier3(_tier1) {
+  function deriveTier3(tier1) {
+    // Mirror core/interview.py's smart-default helpers — comprehensive
+    // review bumps the external (web) cap to 30 because a survey-shaped
+    // quest legitimately benefits from broader retrieval. Without this
+    // mirror, the web UI silently drops the bump and a comp-review
+    // quest gets the default 20.
+    const compReview = tier1 && tier1.study_depth === 'comprehensive review';
     return {
       comparative_baseline: '',
       success_metric: '',
       budget: '',
-      knowledge_external_top_k: 20,
+      knowledge_external_top_k: compReview ? 30 : 20,
       ensemble_profile: 'off',
     };
   }

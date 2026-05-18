@@ -1401,6 +1401,7 @@ class Knowledge:
         query: str,
         *,
         top_k: int | None = None,
+        external_top_k: int | None = None,
         chosen_idea: dict | None = None,
         chat_fn: Any | None = None,
     ) -> list[RetrievedDoc]:
@@ -1417,14 +1418,27 @@ class Knowledge:
         * ``top_k`` (or ``self.cfg.top_k``) bounds the Axon RAG layer
           and the pinned-papers head — small-k because dense hits are
           precise.
-        * ``self.cfg.external_top_k`` bounds the external router when
-          Axon misses — web search returns coarser matches and a
-          literature scan benefits from breadth (~20 abstracts).
+        * The external (web) layer is bounded by, in order of priority:
+          1. an explicit ``external_top_k`` kwarg (callers that want
+             broad web retrieval — e.g. the literature node — pass
+             ``self.cfg.external_top_k`` here),
+          2. otherwise the caller's ``top_k`` (so an ideate seed that
+             asks for 3 papers gets at most 3 external hits, not 20),
+          3. otherwise ``self.cfg.external_top_k`` (the default broad
+             cap when no caller cap was specified).
         Local papers count toward the Axon cap so the user doesn't get
         flooded; if they supplied 8 papers and top_k=5, only the first
         5 are returned (and external sources aren't queried)."""
         k = top_k if top_k is not None else self.cfg.top_k
-        external_k = self.cfg.external_top_k
+        if external_top_k is not None:
+            external_k = external_top_k
+        elif top_k is not None:
+            # Caller pinned a per-call cap (e.g. ideate seed wants 3
+            # papers) — honour it for external too. Otherwise the cheap
+            # callers would silently trigger a 20-result fetch.
+            external_k = top_k
+        else:
+            external_k = self.cfg.external_top_k
 
         # Layer 1: pinned local papers, always first.
         pinned = list(self._local_papers[:k])

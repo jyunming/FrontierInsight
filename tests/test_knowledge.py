@@ -306,11 +306,11 @@ def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
     assert "all:" in captured["params"]["search_query"]
 
 
-def test_external_top_k_is_independent_of_axon_top_k(monkeypatch) -> None:
-    """The user's explicit ask: when Axon misses, the web layer should
-    return more than the Axon RAG cap. external_top_k controls the web
-    layer independently of top_k, so a quest with top_k=5 + external_top_k=20
-    sees 5 Axon hits OR 20 web hits — never 5 web hits."""
+def test_external_top_k_used_when_caller_explicitly_passes_it(monkeypatch) -> None:
+    """The literature node is the one caller that wants broad external
+    retrieval when Axon misses — it passes ``external_top_k`` explicitly,
+    so the web layer fetches the bigger config cap instead of being
+    silently bounded by the caller's per-call ``top_k``."""
     from core.knowledge import Knowledge
 
     k = Knowledge(KnowledgeConfig(enabled=False))
@@ -342,8 +342,89 @@ def test_external_top_k_is_independent_of_axon_top_k(monkeypatch) -> None:
             return r
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
-    k.search("anything")
-    # The web layer asks for the FULL external_top_k, not the Axon cap.
+    import asyncio as _asyncio
+    _asyncio.run(k.asearch("anything", top_k=5, external_top_k=20))
+    assert captured["params"]["max_results"] == "20"
+
+
+def test_external_top_k_honours_caller_per_call_cap(monkeypatch) -> None:
+    """When the caller passes ``top_k=3`` (e.g. ideate seeding, cross_check)
+    WITHOUT an explicit ``external_top_k``, the external layer must
+    respect the per-call cap. PR #113's first cut regressed this:
+    an ideate seed asking for 3 papers got 20 web hits instead."""
+    from core.knowledge import Knowledge
+
+    k = Knowledge(KnowledgeConfig(enabled=False))
+    k.enabled = True
+    k.cfg = KnowledgeConfig(
+        enabled=True, external_fallback=["arxiv"],
+        top_k=5, external_top_k=20,
+    )
+    class _Empty:
+        def invoke(self, _): return []
+        def with_overrides(self, _): return self
+    k._retriever = _Empty()
+
+    captured: dict = {}
+    atom = _arxiv_atom(
+        {"id": "2401.0001", "title": "a", "summary": "x"},
+        {"id": "2401.0002", "title": "b", "summary": "x"},
+        {"id": "2401.0003", "title": "c", "summary": "x"},
+    )
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, params=None, **_):
+            captured["params"] = params
+            r = MagicMock()
+            r.text = atom
+            r.raise_for_status = MagicMock()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
+    import asyncio as _asyncio
+    _asyncio.run(k.asearch("ideate seed", top_k=3))
+    assert captured["params"]["max_results"] == "3"
+
+
+def test_external_top_k_uses_config_when_no_caller_caps(monkeypatch) -> None:
+    """When ``asearch`` is called with no caps at all, the external
+    layer falls through to ``cfg.external_top_k`` (the broad default)."""
+    from core.knowledge import Knowledge
+
+    k = Knowledge(KnowledgeConfig(enabled=False))
+    k.enabled = True
+    k.cfg = KnowledgeConfig(
+        enabled=True, external_fallback=["arxiv"],
+        top_k=8, external_top_k=20,
+    )
+    class _Empty:
+        def invoke(self, _): return []
+        def with_overrides(self, _): return self
+    k._retriever = _Empty()
+
+    captured: dict = {}
+    atom = _arxiv_atom(*[
+        {"id": f"24{i:02d}.0001", "title": f"paper {i}", "summary": "x"}
+        for i in range(20)
+    ])
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, params=None, **_):
+            captured["params"] = params
+            r = MagicMock()
+            r.text = atom
+            r.raise_for_status = MagicMock()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
+    import asyncio as _asyncio
+    _asyncio.run(k.asearch("anything"))
     assert captured["params"]["max_results"] == "20"
 
 

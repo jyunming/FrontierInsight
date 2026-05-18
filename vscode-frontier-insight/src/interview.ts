@@ -285,6 +285,10 @@ export async function runInterview(
     // ─── Tier-2 derivation (mirrors core/interview.py SMART_DEFAULTS) ───
     // title — slug from topic; no_simulation — prose vs scientific;
     // others are static or auto-probed.
+    // Mirror core/interview.py's smart-default helpers: a survey-shaped
+    // quest legitimately wants more prior-work entries (Axon RAG cap 12,
+    // external web cap 30) than the cost-conscious defaults (8 / 20).
+    const compReview = studyDepth === "comprehensive review";
     const answers: InterviewAnswers = {
         topic: topic.trim(),
         title: suggestedTitle,
@@ -301,7 +305,8 @@ export async function runInterview(
         provider_model: "",
         max_iterations: 2,
         audience: "external",
-        knowledge_top_k: 5,
+        knowledge_top_k: compReview ? 12 : 8,
+        knowledge_external_top_k: compReview ? 30 : 20,
     };
 
     // ─── Review block + action picker loop ──────────────────────────
@@ -379,12 +384,20 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
     // Tier-3 fields are only worth printing if the user has set them.
-    if (a.comparative_baseline || a.success_metric || a.budget || a.knowledge_top_k !== 5) {
+    // Defaults: knowledge_top_k=8 (Axon RAG), knowledge_external_top_k=20 (web).
+    const ext = a.knowledge_external_top_k;
+    const hasOverride = (
+        a.comparative_baseline || a.success_metric || a.budget
+        || a.knowledge_top_k !== 8
+        || (ext !== undefined && ext !== 20)
+    );
+    if (hasOverride) {
         lines.push("\n_Advanced overrides:_");
         if (a.comparative_baseline) lines.push(`  • baseline: ${a.comparative_baseline}`);
         if (a.success_metric) lines.push(`  • metric: ${a.success_metric}`);
         if (a.budget) lines.push(`  • budget: ${a.budget}`);
-        if (a.knowledge_top_k !== 5) lines.push(`  • top_k: ${a.knowledge_top_k}`);
+        if (a.knowledge_top_k !== 8) lines.push(`  • top_k (Axon): ${a.knowledge_top_k}`);
+        if (ext !== undefined && ext !== 20) lines.push(`  • external_top_k (web): ${ext}`);
     }
     lines.push("");
     return lines.join("\n");
@@ -491,16 +504,32 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "Comparative baseline", value: "comparative_baseline" },
             { label: "Success metric", value: "success_metric" },
             { label: "Time / compute budget", value: "budget" },
-            { label: "Prior-work retrievals per quest (top_k)", value: "knowledge_top_k" },
+            { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
+            { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "knowledge_external_top_k") {
+        const v = await vscode.window.showInputBox({
+            title: "External (web) hits per quest",
+            value: String(a.knowledge_external_top_k ?? 20),
+            placeHolder: "20",
+            ignoreFocusOut: true,
+            validateInput: (s) => {
+                const n = Number(s);
+                if (!Number.isInteger(n) || n < 1) return "must be a positive integer";
+                return null;
+            },
+        });
+        if (v !== undefined) a.knowledge_external_top_k = Number(v);
+        return;
+    }
     if (which.value === "knowledge_top_k") {
         const v = await vscode.window.showInputBox({
-            title: "Prior-work retrievals per quest",
+            title: "Axon (RAG) retrievals per quest",
             value: String(a.knowledge_top_k),
-            placeHolder: "5",
+            placeHolder: "8",
             ignoreFocusOut: true,
             validateInput: (s) => (s && /^\d+$/.test(s.trim()) ? null : "must be a positive integer"),
         });

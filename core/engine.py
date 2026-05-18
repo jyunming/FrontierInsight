@@ -1076,6 +1076,11 @@ class Engine:
         docs = await self.knowledge.asearch(
             query.strip(),
             top_k=self.config.knowledge.top_k,
+            # The literature node is the one path that explicitly wants
+            # broad external retrieval when Axon misses — pass the
+            # config's external cap so a web miss returns ~20 abstracts
+            # instead of being silently capped at the Axon top_k.
+            external_top_k=self.config.knowledge.external_top_k,
             chosen_idea=chosen,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
