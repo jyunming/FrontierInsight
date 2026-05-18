@@ -301,6 +301,23 @@ class Engine:
                                 data_dir, self.quest_id,
                             )
                             break
+                        if intr_value.get("papers_required"):
+                            # literature node's pause-for-user-papers
+                            # gate fired. Same pause-exit semantics as
+                            # the data_required path: exit rc=0 cleanly,
+                            # user drops PDFs into ``inputs/papers/``
+                            # and runs ``fi --resume``.
+                            data_paused = True
+                            papers_dir = intr_value.get(
+                                "papers_dir",
+                                str(self.quest_root / "inputs" / "papers"),
+                            )
+                            self._log.info(
+                                "[FI] paused for user papers: drop PDFs into "
+                                "%s then run `fi --resume %s`",
+                                papers_dir, self.quest_id,
+                            )
+                            break
                         # Clarify node raised `interrupt(...)`. Hand the
                         # questions to the caller's callback for answers.
                         questions = intr_value.get("clarify_questions", {})
@@ -1108,10 +1125,56 @@ class Engine:
                 seen.add(ident)
             merged.append(entry)
         added = len(merged) - len(prior)
-        self._log.info(
-            "[literature] retrieved %d docs (iter=%d, +%d new after dedup, total=%d)",
-            len(docs), this_iter, added, len(merged),
+        # Pull in any PDFs the user dropped under ``inputs/papers/`` on
+        # a previous pause cycle. Indexes them as new ``user_supplied``
+        # literature entries so the design / write nodes see real
+        # full text instead of only the upstream abstracts.
+        merged, user_added = _ingest_user_dropped_papers(
+            self.quest_root, merged, seen, self._log,
         )
+        if user_added:
+            self._log.info(
+                "[literature] picked up %d user-supplied paper(s) from inputs/papers/",
+                user_added,
+            )
+        self._log.info(
+            "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
+            "+%d user-supplied, total=%d)",
+            len(docs), this_iter, added, user_added, len(merged),
+        )
+
+        # Pause-for-user-papers gate. Fires only when the user opted in
+        # AND we have abstract-only hits (heuristic: content shorter
+        # than ~1500 chars or carrying an explicit ``abstract_only``
+        # flag from the retriever). On a re-entry after the user
+        # dropped PDFs, ``inputs/papers/`` is non-empty and we don't
+        # pause again — the resume path picks up the new files and
+        # proceeds.
+        if (
+            self.config.knowledge.pause_for_user_papers
+            and not _papers_dir_has_files(self.quest_root)
+        ):
+            needed = [d for d in docs if _is_abstract_only(d)]
+            if needed:
+                _write_paper_need_stubs(self.quest_root, needed, self._log)
+                self._log.info(
+                    "[literature] pausing — %d paper(s) abstract-only; "
+                    "drop PDFs into %s/inputs/papers/ and re-run",
+                    len(needed), self.quest_root,
+                )
+                interrupt({
+                    "papers_required": True,
+                    "quest_id": self.quest_id,
+                    "papers_dir": str(self.quest_root / "inputs" / "papers"),
+                    "needed_count": len(needed),
+                })
+                # Unreachable in practice (see ``wait_for_data`` for the
+                # same pattern): interrupt() raises GraphInterrupt; on
+                # resume this node is re-invoked from the checkpoint,
+                # ``_ingest_user_dropped_papers`` picks up the new
+                # files, and the gate's else-branch falls through.
+                return {}
+
         return {
             "literature": merged,
             "literature_iter": this_iter,
@@ -3532,6 +3595,192 @@ def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> s
             front[key] = str(value).replace("\n", " ").strip()
     yaml_block = yaml.safe_dump(front, default_flow_style=False, sort_keys=False)
     return f"---\n{yaml_block}---\n{content.strip()}\n"
+
+
+_PAPERS_README = """\
+# Papers needed
+
+This quest's literature search returned only abstracts for a handful
+of papers — full text wasn't available from the open-web sources FI
+tries (arXiv / OpenAlex / Crossref / Semantic Scholar / ...).
+
+**Drop the PDFs the agent flagged in ``../needs/`` into THIS directory**
+(or anywhere under it — FI walks recursively). Then re-run:
+
+```
+fi --resume {quest_id}
+```
+
+The literature node will pick up the new files, extract their text,
+and merge them into the existing literature list — the design /
+write nodes then see real full text instead of bare abstracts.
+
+Accepted formats: ``.pdf`` / ``.md`` / ``.txt``. Other formats are
+ignored. The README itself never counts as a paper.
+"""
+
+
+def _ingest_user_dropped_papers(
+    quest_root: Path,
+    merged: list[dict[str, Any]],
+    seen: set[str],
+    log: logging.Logger,
+) -> tuple[list[dict[str, Any]], int]:
+    """Walk ``<quest_root>/inputs/papers/`` for user-supplied PDFs /
+    MDs / TXTs and append them to the literature list as
+    ``source=user_supplied`` entries with their full text in
+    ``content``. Returns ``(merged, count_added)``.
+
+    Dedups against the ``seen`` set the caller is already building
+    (first 200 chars of content keyed). Files smaller than 200 bytes
+    are skipped — empty stubs aren't worth ingesting."""
+    papers_dir = quest_root / "inputs" / "papers"
+    if not papers_dir.is_dir():
+        return merged, 0
+    count = 0
+    for p in sorted(papers_dir.rglob("*")):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if p.name == "README.md" and p.parent == papers_dir:
+            continue
+        suffix = p.suffix.lower()
+        if suffix not in (".pdf", ".md", ".txt"):
+            continue
+        try:
+            if suffix == ".pdf":
+                content = _extract_pdf_text(p)
+            else:
+                content = p.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError) as e:
+            log.warning("[literature] could not read %s: %r", p, e)
+            continue
+        content = (content or "").strip()
+        if len(content) < 200:
+            continue
+        ident = content[:200]
+        if ident in seen:
+            continue
+        seen.add(ident)
+        merged.append({
+            "content": content[:8000],  # cap to keep prompt manageable
+            "metadata": {
+                "source": "user_supplied",
+                "filename": p.name,
+                "path": str(p),
+                "abstract_only": False,
+            },
+        })
+        count += 1
+    return merged, count
+
+
+def _extract_pdf_text(path: Path) -> str:
+    """Pull plain text out of a PDF via pypdf. Returns empty string on
+    failure (caller decides whether to skip). pypdf is a soft
+    dependency — when missing, returns the path name so the LLM at
+    least knows the file exists."""
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError:
+        return f"[pypdf not installed; user-supplied paper at {path.name}]"
+    try:
+        reader = PdfReader(str(path))
+        return "\n\n".join(
+            (page.extract_text() or "").strip() for page in reader.pages
+        )
+    except Exception as e:  # noqa: BLE001
+        # pypdf raises a zoo of exceptions on malformed PDFs.
+        return f"[pypdf could not parse {path.name}: {e}]"
+
+
+# Threshold below which a retrieved doc is treated as abstract-only
+# (full text not available). Most arXiv / OpenAlex / Crossref / S2
+# returns are abstracts in the 800–1400 char range; a real paper body
+# is well above 5000 chars even when truncated. 1500 splits the two
+# comfortably without over- or under-flagging.
+_ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
+
+
+def _is_abstract_only(doc: "RetrievedDoc") -> bool:
+    """Heuristic: a doc is abstract-only if the retriever explicitly
+    set ``metadata.abstract_only`` to truthy OR the content is short
+    enough to be only an abstract (< 1500 chars). The explicit flag
+    wins so future retrievers can set it precisely; the length check
+    is the fallback for today's retrievers, which don't carry the flag
+    on every hit."""
+    md = doc.metadata or {}
+    if md.get("abstract_only"):
+        return True
+    if md.get("fetched_full_text"):
+        return False
+    if md.get("source") in ("local_paper", "user_supplied"):
+        return False
+    return len(doc.content or "") < _ABSTRACT_ONLY_CHAR_THRESHOLD
+
+
+def _papers_dir_has_files(quest_root: Path) -> bool:
+    """True iff ``<quest_root>/inputs/papers/`` already carries
+    user-dropped PDFs/MDs/TXTs (ignoring the README we write). Used
+    by the literature pause gate to avoid re-pausing on resume."""
+    papers_dir = quest_root / "inputs" / "papers"
+    if not papers_dir.is_dir():
+        return False
+    for p in papers_dir.rglob("*"):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if p.name == "README.md" and p.parent == papers_dir:
+            continue
+        if p.suffix.lower() in (".pdf", ".md", ".txt"):
+            return True
+    return False
+
+
+def _write_paper_need_stubs(
+    quest_root: Path,
+    needed: list["RetrievedDoc"],
+    log: logging.Logger,
+) -> None:
+    """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with
+    the metadata FI knows (title, authors, DOI, URL, source) so the
+    user can resolve the citation and download the right PDF. Also
+    creates ``<quest_root>/inputs/papers/README.md`` with resume
+    instructions so the user knows what to do next."""
+    needs_dir = quest_root / "needs"
+    papers_dir = quest_root / "inputs" / "papers"
+    needs_dir.mkdir(parents=True, exist_ok=True)
+    papers_dir.mkdir(parents=True, exist_ok=True)
+    readme = papers_dir / "README.md"
+    if not readme.exists():
+        try:
+            readme.write_text(
+                _PAPERS_README.format(quest_id=quest_root.name),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            log.debug("[literature] papers README write failed: %r", e)
+    for i, doc in enumerate(needed):
+        md = doc.metadata or {}
+        title = str(md.get("title") or md.get("name") or f"paper-{i+1}")
+        slug = _slugify(title)[:48] or f"paper-{i+1}"
+        stub_path = needs_dir / f"{slug}.json"
+        # Don't overwrite an existing stub — preserves user notes.
+        if stub_path.exists():
+            continue
+        try:
+            stub_path.write_text(
+                json.dumps({
+                    "title": md.get("title"),
+                    "authors": md.get("authors") or md.get("author"),
+                    "doi": md.get("doi"),
+                    "arxiv_id": md.get("arxiv_id"),
+                    "url": md.get("url") or md.get("pdf_url"),
+                    "source": md.get("source"),
+                    "abstract": (doc.content or "")[:600],
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            log.debug("[literature] needs stub write failed: %r", e)
 
 
 def _list_user_data_files(data_dir: Path) -> list[Path]:
