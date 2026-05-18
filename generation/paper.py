@@ -192,10 +192,50 @@ def _tighten_inline_math(markdown: str) -> str:
     """Normalize ``$  \\command...  $`` to ``$\\command...$`` so pandoc
     parses it as inline math. Only rewrites when the content starts
     with a LaTeX command — currency-like ``$ 100`` and prose-bracketed
-    dollars are left untouched."""
+    dollars are left untouched.
+
+    Skips fenced code blocks (``` ... ```) and inline code spans
+    (`` ` ... ` ``) so a paper that documents LaTeX-via-markdown can
+    show a literal ``$ \\beta $`` example without it being silently
+    rewritten in the rendered PDF.
+    """
     def _strip(m: "re.Match[str]") -> str:
         return "$" + m.group(1).strip() + "$"
-    return _INLINE_MATH_TIGHTEN_RE.sub(_strip, markdown)
+
+    out: list[str] = []
+    for segment, is_code in _split_code_segments(markdown):
+        if is_code:
+            out.append(segment)
+        else:
+            out.append(_INLINE_MATH_TIGHTEN_RE.sub(_strip, segment))
+    return "".join(out)
+
+
+# Splits markdown into alternating (text, code) segments so a transform
+# that should only touch prose can iterate without re-implementing
+# fence + backtick tracking. Yields tuples of (segment, is_code).
+_FENCED_OR_INLINE_CODE_RE = re.compile(
+    # ``` fenced block ``` with optional language tag, OR ` inline ` /
+    # `` inline with `backtick` `` (one or two backticks). Non-greedy.
+    r"(?P<fence>^```[^\n]*\n.*?^```\s*$)"
+    r"|(?P<inline>``[^`\n]*?``|`[^`\n]+?`)",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _split_code_segments(text: str):
+    """Yield (segment, is_code) pairs that, concatenated, reproduce
+    ``text`` exactly. ``is_code`` is True for fenced blocks + inline
+    spans, False for everything else (prose, headings, math, etc.).
+    """
+    pos = 0
+    for m in _FENCED_OR_INLINE_CODE_RE.finditer(text):
+        if m.start() > pos:
+            yield text[pos:m.start()], False
+        yield m.group(0), True
+        pos = m.end()
+    if pos < len(text):
+        yield text[pos:], False
 
 
 def _count_sanitized_glyphs(markdown: str) -> int:

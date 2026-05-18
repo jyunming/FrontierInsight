@@ -75,6 +75,32 @@ def test_tighten_handles_mixed_tight_and_loose_math() -> None:
     assert _tighten_inline_math(raw) == expected
 
 
+def test_tighten_skips_inline_code_spans() -> None:
+    """A literal ``$ \\beta $`` inside inline backticks is a code
+    example, not math — pandoc would render it as code. The tightener
+    must leave it alone so paper-about-LaTeX prose stays accurate."""
+    raw = "In prose: $ \\beta $ should tighten. But in code: ``$ \\beta $`` should NOT change."
+    out = _tighten_inline_math(raw)
+    assert "$\\beta$ should tighten" in out
+    assert "``$ \\beta $``" in out
+
+
+def test_tighten_skips_fenced_code_blocks() -> None:
+    """A fenced code block documenting a LaTeX example must survive
+    untouched — even when the surrounding prose has a loose math span."""
+    raw = (
+        "Loose prose math: $ \\sigma $\n\n"
+        "```latex\n"
+        "Example: $ \\beta $ stays exactly as written.\n"
+        "```\n"
+        "After fence: $ \\gamma $ tightens."
+    )
+    out = _tighten_inline_math(raw)
+    assert "$\\sigma$" in out
+    assert "$\\gamma$" in out
+    assert "Example: $ \\beta $ stays exactly as written." in out
+
+
 def _make_config(tmp_path: Path, kinds: list[str], paper_format: str = "generic") -> Config:
     return Config.model_validate(
         {
