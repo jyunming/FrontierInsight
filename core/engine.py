@@ -821,7 +821,33 @@ class Engine:
             literature_block=_format_lit(seeded),
             clarify_block=_format_clarify(state),
         )
-        text = await self._chat(prompt, node="ideate")
+        # Multi-model ensemble path: when the YAML carries
+        # provider.node_ensemble["ideate"], fan out N models in parallel
+        # and tournament-pick the best ideas-JSON. We skip the downstream
+        # ``ideate_tournament`` + ``ideate_reflect`` steps in that case —
+        # the ensemble's moderator already does that job (picking the
+        # best of N candidate idea-sets) and re-running tournament/reflect
+        # on top would double-bill for no quality gain.
+        ensemble_cfg = self._ensemble_for_node("ideate")
+        if ensemble_cfg is not None:
+            from core.ensemble import EnsembleError
+            try:
+                result = await self._ensemble_chat(
+                    prompt, node="ideate", ensemble_cfg=ensemble_cfg,
+                )
+                text = result.merged if isinstance(result.merged, str) else json.dumps(result.merged)
+                # Ensemble already did the "pick the best" work — skip
+                # tournament + reflect downstream.
+                ideate_skip_post_processing = True
+            except EnsembleError as e:
+                self._log.warning(
+                    "[ideate] ensemble all-failed (%s); falling back to single-call path", e,
+                )
+                text = await self._chat(prompt, node="ideate")
+                ideate_skip_post_processing = False
+        else:
+            text = await self._chat(prompt, node="ideate")
+            ideate_skip_post_processing = False
         parsed = _parse_json_lenient(text) or {}
         ideas = parsed.get("ideas") or []
         chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
@@ -834,7 +860,8 @@ class Engine:
         critique: dict[str, Any] = {}
         tournament_result: dict[str, Any] | None = None
         tournament_ran = False
-        if self.config.engine.ideate_tournament and len(ideas) >= 2:
+        if (not ideate_skip_post_processing
+            and self.config.engine.ideate_tournament and len(ideas) >= 2):
             try:
                 chosen, tournament_result = await self._run_ideate_tournament(
                     state, ideas, initial_chosen=chosen,
@@ -851,7 +878,9 @@ class Engine:
         # pick subsumes the critique's purpose). If the tournament
         # was enabled but couldn't run (N<2 ideas) or raised, reflect
         # still gets its chance to refine the single idea.
-        if not tournament_ran and self.config.engine.ideate_reflect and ideas:
+        if (not ideate_skip_post_processing
+            and not tournament_ran
+            and self.config.engine.ideate_reflect and ideas):
             try:
                 critique_prompt = self._prompts["ideate_reflect"].substitute(
                     topic=state["topic"],
@@ -1693,7 +1722,31 @@ class Engine:
             result_json=json.dumps(state.get("result_json") or {}, indent=2),
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
         )
-        text = await self._chat(prompt, node="analyze")
+        # Multi-model ensemble path: when the YAML carries
+        # provider.node_ensemble["analyze"], fan out N parallel calls
+        # and merge. The moderator's synthesized output is then parsed
+        # the same way as the single-call path, so the rest of the
+        # pipeline (cross_check, write) sees an identical shape.
+        ensemble_cfg = self._ensemble_for_node("analyze")
+        if ensemble_cfg is not None:
+            from core.ensemble import EnsembleError
+            try:
+                result = await self._ensemble_chat(
+                    prompt, node="analyze", ensemble_cfg=ensemble_cfg,
+                )
+                text = result.merged if isinstance(result.merged, str) else json.dumps(result.merged)
+                if result.disagreement_score > 0:
+                    self._log.info(
+                        "[analyze] ensemble disagreement_score=%.2f (%d models)",
+                        result.disagreement_score, len(ensemble_cfg.models),
+                    )
+            except EnsembleError as e:
+                self._log.warning(
+                    "[analyze] ensemble all-failed (%s); falling back to single-call path", e,
+                )
+                text = await self._chat(prompt, node="analyze")
+        else:
+            text = await self._chat(prompt, node="analyze")
         analysis = _parse_json_lenient(text) or {"summary": "(parse failed)", "key_findings": []}
         # Default `next_step` to publish when the LLM omits it (older
         # prompts, parse failures) so the route doesn't break.
@@ -1737,16 +1790,51 @@ class Engine:
                     "candidates": [],
                 })
                 continue
-            # Classify with one LLM call.
+            # Classify. Single call by default; multi-model vote when
+            # provider.node_ensemble["cross_check"] is configured —
+            # majority verdict wins per-finding, ties surfaced. Either
+            # way ``parsed`` carries the same shape downstream.
             cand_block = _format_lit(hits)
             prompt = self._prompts["cross_check"].substitute(
                 topic=state.get("topic", "")[:1000],
                 finding=text,
                 candidate_literature=cand_block,
             )
+            ensemble_cfg = self._ensemble_for_node("cross_check")
             try:
-                resp = await self._chat(prompt, node="cross_check")
-                parsed = _parse_json_lenient(resp) or {}
+                if ensemble_cfg is not None:
+                    from core.ensemble import EnsembleError
+                    try:
+                        result = await self._ensemble_chat(
+                            prompt, node="cross_check", ensemble_cfg=ensemble_cfg,
+                        )
+                        # merge_vote returns a dict {verdict, tally, tie};
+                        # we still need the supporting/conflicting/neutral
+                        # lists, so we re-parse one of the survivors that
+                        # voted with the majority. Fallback: first survivor.
+                        majority = result.merged if isinstance(result.merged, dict) else {}
+                        survivors = [r for r in result.raw if r.ok]
+                        # Pick a survivor whose JSON agrees with the majority verdict
+                        # so we get a consistent supporting/conflicting/neutral block.
+                        winner_text = ""
+                        for s in survivors:
+                            try:
+                                obj = json.loads(s.text.strip())
+                                if obj.get("verdict") == majority.get("verdict"):
+                                    winner_text = s.text
+                                    break
+                            except Exception:
+                                continue
+                        parsed = _parse_json_lenient(winner_text or (survivors[0].text if survivors else "")) or {}
+                        if majority.get("tie"):
+                            self._log.warning("[cross_check] vote tie on finding %r — picked first occurrence", text[:60])
+                    except EnsembleError as e:
+                        self._log.warning("[cross_check] ensemble all-failed (%s); falling back to single call", e)
+                        resp = await self._chat(prompt, node="cross_check")
+                        parsed = _parse_json_lenient(resp) or {}
+                else:
+                    resp = await self._chat(prompt, node="cross_check")
+                    parsed = _parse_json_lenient(resp) or {}
             except Exception as e:
                 self._log.warning("[cross_check] classify call failed: %s", e)
                 parsed = {}
@@ -1989,6 +2077,106 @@ class Engine:
         self._log_chat_cost(node=node or "")
         return response
 
+    def _ensemble_for_node(self, node: str) -> "NodeEnsembleConfig | None":  # type: ignore[name-defined]
+        """Return the ensemble config for ``node`` if the YAML carries
+        one, else None. Single-call nodes (no ensemble configured)
+        keep today's path — no cost or latency regression."""
+        ne = self.config.provider.node_ensemble or {}
+        return ne.get(node)
+
+    async def _ensemble_chat(
+        self, prompt: str, *, node: str, ensemble_cfg: "NodeEnsembleConfig",  # type: ignore[name-defined]
+    ) -> "EnsembleResult":  # type: ignore[name-defined]
+        """Fan out ``node``'s chat across ``ensemble_cfg.models``, merge
+        per ``ensemble_cfg.merge``, return the EnsembleResult.
+
+        Each fan-out call is logged to cost.jsonl via
+        ``_log_chat_cost(node=<node>.ensemble[<model>])``; the moderator
+        call (if any) under ``<node>.ensemble.moderator``. The cost
+        tool buckets these by the ``.ensemble`` substring later.
+
+        Lenient: per-model failures are captured (not raised); the
+        merger sees survivors only. All-fail bubbles ``EnsembleError``
+        up to the caller, which decides whether to fall back to a
+        single-call path or hard-fail."""
+        from core.ensemble import (
+            cost_jsonl_entries, fanout_chat, merge_synthesize,
+            merge_tournament, merge_vote,
+        )
+        assert self._client is not None
+
+        # The chat_fn ensemble.py calls. Match the keyword shape of
+        # LLMClient.chat so the primitive stays transport-agnostic.
+        #
+        # Concurrency note: fan-out calls run via ``asyncio.gather`` and
+        # all share ``self._client.last_model`` / ``last_usage``. We
+        # snapshot those two fields IMMEDIATELY after our own chat
+        # returns — no awaits in between — so the cost row attributes
+        # spend to the model we just used, not the one another in-flight
+        # call has since written.
+        async def _chat_fn(
+            messages: list[dict[str, str]], *,
+            temperature: float = 0.2, model: str | None = None,
+            node: str = "",
+        ) -> str:
+            assert self._client is not None
+            text = await self._client.chat(
+                messages, temperature=temperature, model=model, node=node,
+            )
+            snap_model = (
+                getattr(self._client, "last_model", None) or model or ""
+            )
+            snap_usage = getattr(self._client, "last_usage", None)
+            self._log_chat_cost(
+                node=node, model=snap_model, usage=snap_usage,
+            )
+            return text
+
+        messages = [{"role": "user", "content": prompt}]
+        raw = await fanout_chat(
+            messages, ensemble_cfg.models,
+            chat_fn=_chat_fn, node=node,
+        )
+
+        if ensemble_cfg.merge == "tournament":
+            result = await merge_tournament(
+                raw, moderator_model=(ensemble_cfg.moderator or ensemble_cfg.models[0]),
+                chat_fn=_chat_fn, node=node, prompt_summary=prompt[:200],
+            )
+        elif ensemble_cfg.merge == "synthesize":
+            result = await merge_synthesize(
+                raw, moderator_model=(ensemble_cfg.moderator or ensemble_cfg.models[0]),
+                chat_fn=_chat_fn, node=node, prompt_summary=prompt[:200],
+            )
+        elif ensemble_cfg.merge == "vote":
+            # Vote consumes structured (JSON) responses; the engine
+            # caller — typically cross_check — passes JSON-emitting
+            # prompts, and merge_vote parses each survivor. The key is
+            # currently hard-coded to ``"verdict"`` because that's the
+            # only shape the engine produces for this merger today; if
+            # we add a second vote caller we'll thread the key through
+            # ``NodeEnsembleConfig`` rather than continue to assume.
+            result = merge_vote(raw, key="verdict")
+        else:
+            raise ValueError(f"unknown ensemble merge strategy: {ensemble_cfg.merge!r}")
+
+        # Write the ensemble breadcrumb rows — these sit alongside the
+        # per-call rows emitted by ``_log_chat_cost`` above and carry
+        # the metadata (role/merge/ok/error/disagreement) the cost tool
+        # uses to break spend down by ensemble vs single-call.
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            breadcrumbs = cost_jsonl_entries(
+                result, base_node=node, merge_strategy=ensemble_cfg.merge,
+            )
+            with (self.fi_dir / "cost.jsonl").open("a", encoding="utf-8") as f:
+                for row in breadcrumbs:
+                    row["ts"] = time.time()
+                    f.write(json.dumps(row) + "\n")
+        except OSError as e:
+            self._log.debug("[cost] failed to write ensemble breadcrumbs: %r", e)
+        return result
+
     async def _chat_messages(
         self,
         messages: list[dict[str, str]],
@@ -2007,7 +2195,11 @@ class Engine:
         self._log_chat_cost(node=node or "")
         return response
 
-    def _log_chat_cost(self, *, node: str) -> None:
+    def _log_chat_cost(
+        self, *, node: str,
+        model: str | None = None,
+        usage: dict[str, int] | None = None,
+    ) -> None:
         """Append one row to ``<quest_root>/.fi/cost.jsonl`` per chat
         call. Pulled out of ``_chat`` / ``_chat_messages`` so both
         call sites stay tight.
@@ -2018,6 +2210,14 @@ class Engine:
         ``last_usage = None`` — we still write the row so the chart
         on ``/quest/<id>`` can show "call count" + node breakdown
         even when token-level data is unavailable.
+
+        ``model`` / ``usage`` overrides exist for concurrent callers
+        (ensemble fan-out): the shared ``last_model`` / ``last_usage``
+        on the LLMClient can be overwritten between awaits when N
+        chat calls run via ``asyncio.gather``. Concurrent paths
+        snapshot the values immediately after their own chat returns
+        and pass them in explicitly so the row attributes spend to the
+        correct model.
         """
         assert self._client is not None
         # Lazy-import: web UI quests touch this file every chat call;
@@ -2032,8 +2232,10 @@ class Engine:
         # ``getattr(..., None)`` returns the new field when the real
         # LLMClient is in play, or skips the cost-log row entirely
         # when a stub is used.
-        usage = getattr(self._client, "last_usage", None)
-        model = getattr(self._client, "last_model", None) or ""
+        if usage is None:
+            usage = getattr(self._client, "last_usage", None)
+        if model is None:
+            model = getattr(self._client, "last_model", None) or ""
         cost = None
         if usage:
             cost = estimate_cost_usd(
