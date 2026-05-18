@@ -418,12 +418,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # expose ``FI_VSCODE_BRIDGE_PORT`` to a terminal session it spawns,
     # which lets the user run ``python launch.py --serve`` (or any
     # other mode) without re-passing the port on the command line.
-    # Useful when the user wants the web UI to share the same Copilot
-    # session the extension already authenticated.
-    if not args.vscode_bridge_port:
+    #
+    # The argparse default is 0, so ``args.vscode_bridge_port == 0``
+    # could mean either "flag omitted" or "user explicitly passed 0
+    # to disable bridge routing for this run". We respect explicit 0
+    # by sniffing argv: only honour the env var when the flag wasn't
+    # present at all. Also enforce 1..65535 so a bogus negative /
+    # out-of-range value doesn't quietly defeat the bridge guard.
+    flag_argv = argv if argv is not None else sys.argv[1:]
+    flag_present = any(
+        a == "--vscode-bridge-port" or a.startswith("--vscode-bridge-port=")
+        for a in flag_argv
+    )
+    if not flag_present and args.vscode_bridge_port == 0:
         env_port = os.environ.get("FI_VSCODE_BRIDGE_PORT", "").strip()
-        if env_port.isdigit() and int(env_port) > 0:
-            args.vscode_bridge_port = int(env_port)
+        if env_port.isdigit():
+            n = int(env_port)
+            if 1 <= n <= 65535:
+                args.vscode_bridge_port = n
+    if args.vscode_bridge_port and not (1 <= args.vscode_bridge_port <= 65535):
+        p.error(
+            f"--vscode-bridge-port must be in 1..65535, got "
+            f"{args.vscode_bridge_port}",
+        )
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
     if args.ingest and args.output is not None:

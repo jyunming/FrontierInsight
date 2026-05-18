@@ -89,14 +89,17 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # cryptic ``vscode_extension provider requires extra['bridge_port']``
         # message; 400-fail-fast at submit time so the user sees the
         # context up front (and a path to fix it).
-        if (
-            answers.provider == "vscode_extension"
-            and not getattr(app.state, "vscode_bridge_port", 0)
-        ):
+        #
+        # Explicit ``> 0`` check (not truthy-on-int) so a stray negative
+        # value can't sneak through — argparse would normally reject
+        # negatives at startup, but the guard should be the same shape
+        # at every layer.
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        if answers.provider == "vscode_extension" and bridge_port <= 0:
             raise HTTPException(
                 400,
                 "vscode_extension provider requires a live bridge — "
-                "start --serve from a VSCode terminal so "
+                "start --serve from a VSCode integrated terminal so "
                 "FI_VSCODE_BRIDGE_PORT is exposed, or pass "
                 "--vscode-bridge-port N on the command line. Other "
                 "providers (openai, claude_cli, copilot_cli, ...) work "
