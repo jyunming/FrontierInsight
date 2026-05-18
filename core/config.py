@@ -95,6 +95,52 @@ class ProviderConfig(BaseModel):
     # models share one OAuth and one premium-request budget.
     node_models: dict[str, str] | None = None
 
+    # Multi-model ensemble per node. Maps an engine node name (one of
+    # ``ideate`` / ``analyze`` / ``cross_check``) to a configuration
+    # that fires N parallel chat calls (one per model in ``models``)
+    # and merges the responses via ``merge`` strategy.
+    #
+    # Cost: N + 1 calls per ensembled node (N fan-out + 1 moderator),
+    # except ``merge=vote`` which is N (no moderator — pure tally).
+    #
+    # Example:
+    #     node_ensemble:
+    #       ideate:
+    #         models: [gpt-5.5, claude-opus-4-7, gemini-2.5-pro]
+    #         merge: tournament
+    #         moderator: claude-opus-4-7
+    #       analyze:
+    #         models: [gpt-5.5, claude-opus-4-7]
+    #         merge: synthesize
+    #         moderator: claude-opus-4-7
+    #       cross_check:
+    #         models: [gpt-5.5, gemini-2.5-pro]
+    #         merge: vote
+    #
+    # When None or the lookup misses, the node falls back to a single
+    # call against ``model`` / ``node_models[node]`` (today's behavior
+    # — no regression for quests without ensemble configured).
+    node_ensemble: dict[str, "NodeEnsembleConfig"] | None = None
+
+
+MergeStrategy = Literal["tournament", "synthesize", "vote"]
+
+
+class NodeEnsembleConfig(BaseModel):
+    """Per-node ensemble setting — N parallel chat calls + merger.
+
+    Used by the engine to fan out a node's LLM call across multiple
+    models and merge into one final response. See ``core/ensemble.py``
+    for the primitives.
+    """
+    models: list[str] = Field(..., min_length=1)
+    merge: MergeStrategy = "tournament"
+    # Which model performs the merge step. Required for ``tournament``
+    # and ``synthesize`` (those merge strategies make an LLM call).
+    # Ignored for ``vote`` (pure tally — no LLM call). Falls back to
+    # the first model in ``models`` when None for tournament/synthesize.
+    moderator: str | None = None
+
 
 ClarifyMode = Literal["off", "auto", "interactive"]
 
