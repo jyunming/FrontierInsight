@@ -33,7 +33,7 @@ import json
 import logging
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 _log = logging.getLogger("frontier_insight.ensemble")
@@ -78,6 +78,10 @@ class EnsembleResult:
     raw: list[FanoutResponse]
     disagreement_score: float = 0.0
     notes: str = ""
+    # Set by tournament/synthesize when a moderator was called. Lets
+    # cost_jsonl_entries attribute the moderator row to a concrete model
+    # so per-model cost accounting stays consistent across all rows.
+    moderator_model: str | None = None
 
 
 async def fanout_chat(
@@ -158,6 +162,11 @@ async def merge_tournament(
     is OK — the moderator falls back to the candidate content alone.
     """
     survivors = _survivors(raw)
+    if not survivors:
+        # Defensive: fanout_chat already raises EnsembleError when every
+        # call fails, but a caller could construct a result and pass it
+        # here directly. Fail loudly instead of IndexError'ing on [0].
+        raise EnsembleError("merge_tournament: no surviving responses")
     if len(survivors) == 1:
         return EnsembleResult(
             merged=survivors[0].text, raw=raw,
@@ -168,6 +177,14 @@ async def merge_tournament(
         return EnsembleResult(merged=survivors[0].text, raw=raw,
                               notes="no moderator configured — taking first survivor")
 
+    if len(survivors) > 26:
+        # The label scheme is single A-Z; 26 is the hard cap. Real
+        # ensembles fan out 2-5 ways — anything beyond 26 is a config
+        # bug, not a legitimate ask.
+        raise EnsembleError(
+            f"merge_tournament: too many candidates ({len(survivors)}); "
+            f"max 26 to fit single-letter labels A-Z",
+        )
     labels = [chr(ord("A") + i) for i in range(len(survivors))]
     candidate_blocks = "\n\n".join(
         f"--- Candidate [{labels[i]}] (model={s.model}) ---\n{s.text}"
@@ -194,11 +211,13 @@ async def merge_tournament(
         # survivor + flag in notes. Better than crashing the node.
         return EnsembleResult(
             merged=survivors[0].text, raw=raw,
+            moderator_model=moderator_model,
             notes=f"moderator output unparseable, took first survivor; raw: {mod_text[:200]}",
         )
     winner_idx = labels.index(pick)
     return EnsembleResult(
         merged=survivors[winner_idx].text, raw=raw,
+        moderator_model=moderator_model,
         notes=f"moderator picked [{pick}] (model={survivors[winner_idx].model})",
     )
 
@@ -238,6 +257,10 @@ async def merge_synthesize(
     point of running N models.
     """
     survivors = _survivors(raw)
+    if not survivors:
+        # Defensive: matches merge_tournament/merge_vote, so callers see
+        # one consistent failure contract regardless of merger choice.
+        raise EnsembleError("merge_synthesize: no surviving responses")
     if len(survivors) == 1:
         return EnsembleResult(
             merged=survivors[0].text, raw=raw,
@@ -273,15 +296,25 @@ async def merge_synthesize(
         node=f"{node}.ensemble.moderator",
     )
     # Count disagreement markers — gives the engine a numeric handle to
-    # log + display in the cost report.
-    n_disagree = len(re.findall(r"⚠\s*Disagreement", merged, re.IGNORECASE)) + \
-                 len(re.findall(r"\bDisagreement\b\s*:", merged))
+    # log + display in the cost report. Single pattern so a line like
+    # "⚠ Disagreement:" counts once, not twice.
+    n_disagree = len(_DISAGREEMENT_RE.findall(merged))
     # disagreement_score: 0..1, clamped at 1.0 once we see 5+ flags.
     score = min(1.0, n_disagree / 5.0)
     return EnsembleResult(
         merged=merged, raw=raw, disagreement_score=score,
+        moderator_model=moderator_model,
         notes=f"moderator-synthesized; {n_disagree} disagreement flag(s)",
     )
+
+
+# One disagreement flag per match: either the ⚠-prefixed form OR a
+# plain "Disagreement:" line. The leading sentinel (⚠ or line-start)
+# prevents double-counting when the moderator writes "⚠ Disagreement:".
+_DISAGREEMENT_RE = re.compile(
+    r"(?:⚠\s*Disagreement|(?:^|\n)\s*Disagreement)\b\s*:?",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -374,13 +407,20 @@ def cost_jsonl_entries(
             "error": r.error,
         })
     # Moderator row only emitted by tournament + synthesize. Vote has
-    # no moderator (it's a pure tally).
+    # no moderator (it's a pure tally). The moderator row carries the
+    # same {model, ok, error} keys as the fan-out rows so the cost
+    # tool can attribute spend per model without special-casing role.
+    # The moderator can only reach this helper after a successful call
+    # (the merger raises otherwise), so ok=True / error=None here.
     if merge_strategy in ("tournament", "synthesize"):
         rows.append({
             "node": f"{base_node}.ensemble.moderator",
+            "model": result.moderator_model,
             "ensemble": True,
             "role": "moderator",
             "merge": merge_strategy,
+            "ok": True,
+            "error": None,
             "disagreement_score": result.disagreement_score,
         })
     return rows

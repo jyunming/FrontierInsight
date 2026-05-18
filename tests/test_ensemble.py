@@ -1,9 +1,10 @@
 """Unit tests for ``core/ensemble.py``.
 
 The primitive has three merge strategies and two failure modes; we
-cover each. Every test uses a synchronous fake ``chat_fn`` — no
-network, no bridge, no transport — so the tests run in milliseconds
-and stay reliable on CI.
+cover each. Every test uses an in-process async fake ``chat_fn``
+(``FakeTransport.chat`` is an ``async def``, exercised under
+``pytest.mark.asyncio``) — no network, no bridge, no transport — so
+the tests run in milliseconds and stay reliable on CI.
 """
 from __future__ import annotations
 
@@ -186,6 +187,58 @@ async def test_tournament_single_survivor_skips_moderator(fake: FakeTransport) -
 
 
 @pytest.mark.asyncio
+async def test_tournament_empty_survivors_raises(fake: FakeTransport) -> None:
+    """Defensive contract: passing an all-failed raw list directly to
+    the merger surfaces EnsembleError, not IndexError. fanout_chat
+    already enforces this upstream but the merger is callable on its
+    own."""
+    raw = [FanoutResponse(model="m1", error="x"),
+           FanoutResponse(model="m2", error="y")]
+    with pytest.raises(EnsembleError):
+        await merge_tournament(
+            raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+        )
+
+
+@pytest.mark.asyncio
+async def test_tournament_over_26_candidates_raises(fake: FakeTransport) -> None:
+    """27 candidates breaks the single-letter A-Z labeling scheme; the
+    merger refuses rather than emit ``[\\` as a label."""
+    raw = [FanoutResponse(model=f"m{i}", text=f"c{i}") for i in range(27)]
+    with pytest.raises(EnsembleError) as exc:
+        await merge_tournament(
+            raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+        )
+    assert "26" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_empty_survivors_raises(fake: FakeTransport) -> None:
+    """Same defensive contract for synthesize: no survivors → raise,
+    don't return an empty-string merged result."""
+    raw = [FanoutResponse(model="m1", error="x")]
+    with pytest.raises(EnsembleError):
+        await merge_synthesize(
+            raw, moderator_model="mod", chat_fn=fake.chat, node="analyze",
+        )
+
+
+@pytest.mark.asyncio
+async def test_synthesize_disagreement_no_double_count(fake: FakeTransport) -> None:
+    """A single ``⚠ Disagreement:`` line counts ONCE, not twice. The
+    old regex matched both ``⚠ Disagreement`` and ``Disagreement:`` on
+    the same line and inflated the score."""
+    raw = [FanoutResponse(model="m1", text="a"), FanoutResponse(model="m2", text="b")]
+    merged_text = "Summary text.\n⚠ Disagreement: a vs b. b wins."
+    fake.script("mod", [("ok", merged_text)])
+    result = await merge_synthesize(
+        raw, moderator_model="mod", chat_fn=fake.chat, node="analyze",
+    )
+    # One flag → score == 1/5 == 0.2 exactly. The buggy version saw 2 → 0.4.
+    assert result.disagreement_score == pytest.approx(0.2, abs=1e-3)
+
+
+@pytest.mark.asyncio
 async def test_tournament_no_moderator_returns_first_survivor(fake: FakeTransport) -> None:
     """``moderator_model=None`` → can't pick by quality; default to the
     first survivor + note. Useful for tests + ultra-cheap configs."""
@@ -309,7 +362,7 @@ def test_cost_jsonl_tournament_has_fanout_plus_moderator() -> None:
         FanoutResponse(model="m1", text="x"),
         FanoutResponse(model="m2", text="y"),
     ]
-    result = EnsembleResult(merged="x", raw=raw)
+    result = EnsembleResult(merged="x", raw=raw, moderator_model="mod-7")
     rows = cost_jsonl_entries(result, base_node="ideate", merge_strategy="tournament")
     assert len(rows) == 3  # 2 fanout + 1 moderator
     roles = [r["role"] for r in rows]
@@ -318,6 +371,12 @@ def test_cost_jsonl_tournament_has_fanout_plus_moderator() -> None:
     # Each fan-out row carries the model identity so the cost tool can
     # bucket spend per model.
     assert {r["model"] for r in rows if r["role"] == "fanout"} == {"m1", "m2"}
+    # Moderator row carries model + ok + error too, mirroring fan-out
+    # rows so cost aggregation doesn't need a role-specific branch.
+    mod = next(r for r in rows if r["role"] == "moderator")
+    assert mod["model"] == "mod-7"
+    assert mod["ok"] is True
+    assert mod["error"] is None
 
 
 def test_cost_jsonl_vote_has_no_moderator_row() -> None:
