@@ -296,6 +296,15 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
             f"'off' / 'cross_check_only' / 'ideate_and_check' / 'full'; "
             f"got {ensemble_profile!r}"
         )
+    max_iterations = body.get("max_iterations", 2)
+    try:
+        max_iterations = int(max_iterations)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"max_iterations must be an int, got {type(max_iterations).__name__}"
+        )
+    if max_iterations < 1:
+        raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -315,4 +324,5 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         knowledge_top_k=top_k,
         knowledge_external_top_k=external_top_k,
         ensemble_profile=ensemble_profile,
+        max_iterations=max_iterations,
     )

@@ -536,6 +536,23 @@
       ],
       "allow_other": false,
       "tier": 3
+    },
+    {
+      "id": "max_iterations",
+      "label": "Design-revise iteration budget",
+      "prompt": "Hard cap on the design → review → revise loop (and the cross_check redirects to design / literature). Lower = cheaper + faster; higher = more chances to fix issues review caught. 2 default — bump to 3-4 only when you specifically want extra revise passes.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "2",
+      "default": 2,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
     }
   ],
   "paper_formats": [
@@ -890,6 +907,7 @@
     "knowledge_enabled",
     "knowledge_external_top_k",
     "knowledge_top_k",
+    "max_iterations",
     "output_kinds",
     "paper_format",
     "review_panel",
@@ -927,6 +945,7 @@
     "review_panel": [
       "review"
     ],
-    "knowledge_enabled": []
+    "knowledge_enabled": [],
+    "max_iterations": []
   }
 }

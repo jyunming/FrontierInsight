@@ -147,9 +147,10 @@ def test_smart_default_audience_and_clarify_are_static() -> None:
 def test_tier3_covers_the_advanced_fields() -> None:
     """Tier-3 hides behind a 'Show advanced' toggle on each frontend.
     Three are topic-tuned (preflight LLM call suggests a value);
-    ``knowledge_external_top_k`` controls the web-search cap;
-    ``ensemble_profile`` is the multi-model preset picker. The Axon
-    RAG cap (``knowledge_top_k``) moved up to Tier-2."""
+    ``knowledge_external_top_k`` is the web-search cap (Axon RAG cap
+    ``knowledge_top_k`` lives in Tier-2); ``ensemble_profile`` is the
+    multi-model preset picker; ``max_iterations`` is the design-revise
+    loop hard cap."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "comparative_baseline",
@@ -157,6 +158,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "budget",
         "knowledge_external_top_k",
         "ensemble_profile",
+        "max_iterations",
     }
 
 
