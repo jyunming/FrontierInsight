@@ -235,6 +235,7 @@ async def generate_proposal(
     supervisor: ProxySupervisor | None = None,
     knowledge: Knowledge | None = None,
     now: datetime | None = None,
+    ensemble: "NodeEnsembleConfig | None" = None,  # noqa: F821 — forward ref
 ) -> ProposalArtifacts:
     """Produce a pre-quest proposal markdown + companion YAML.
 
@@ -268,14 +269,63 @@ async def generate_proposal(
     endpoint = await resolve_endpoint_async(provider, sup)
     client = LLMClient(endpoint)
     try:
-        markdown = await client.chat(
-            [{"role": "user", "content": prompt}],
-            # Lower than critique because the proposal should converge
-            # on a single sane plan, not exploratory failure-mode
-            # brainstorming.
-            temperature=0.2,
-            node="proposal",
-        )
+        if ensemble is not None:
+            # Multi-model ensemble: N parallel candidate proposals + a
+            # moderator picks the best (tournament) or merges them
+            # (synthesize). Worth the N+1 calls at this stage because
+            # the proposal frames every downstream quest decision.
+            from core.ensemble import (
+                EnsembleError, fanout_chat,
+                merge_synthesize, merge_tournament,
+            )
+
+            async def _chat_fn(messages, *, temperature=0.2, model=None, node=""):
+                return await client.chat(
+                    messages, temperature=temperature, model=model, node=node,
+                )
+
+            try:
+                raw = await fanout_chat(
+                    [{"role": "user", "content": prompt}],
+                    ensemble.models,
+                    chat_fn=_chat_fn, node="proposal",
+                )
+                moderator = ensemble.moderator or ensemble.models[0]
+                if ensemble.merge == "synthesize":
+                    result = await merge_synthesize(
+                        raw, moderator_model=moderator,
+                        chat_fn=_chat_fn, node="proposal",
+                        prompt_summary=topic[:200],
+                    )
+                else:
+                    # Default + tournament case.
+                    result = await merge_tournament(
+                        raw, moderator_model=moderator,
+                        chat_fn=_chat_fn, node="proposal",
+                        prompt_summary=topic[:200],
+                    )
+                markdown = result.merged if isinstance(result.merged, str) else str(result.merged)
+            except EnsembleError as e:
+                # All N candidates failed — fall back to a single call
+                # so the user still gets a proposal rather than a hard
+                # error.
+                import logging
+                logging.getLogger("frontier_insight.proposal").warning(
+                    "ensemble all-failed (%s); falling back to single-call", e,
+                )
+                markdown = await client.chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.2, node="proposal",
+                )
+        else:
+            markdown = await client.chat(
+                [{"role": "user", "content": prompt}],
+                # Lower than critique because the proposal should converge
+                # on a single sane plan, not exploratory failure-mode
+                # brainstorming.
+                temperature=0.2,
+                node="proposal",
+            )
     finally:
         await client.aclose()
         if provider.name in PROXY_PROVIDERS:

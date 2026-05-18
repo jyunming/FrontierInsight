@@ -242,6 +242,64 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "from chat, headless CLI providers otherwise.",
     )
     p.add_argument(
+        "--proposal-ensemble",
+        type=str,
+        default="",
+        metavar="M1,M2,M3",
+        help="Multi-model ensemble for --proposal. Comma-separated "
+             "list of model identifiers. Each model independently "
+             "drafts a proposal; a moderator picks the best (default) "
+             "or merges (with --proposal-ensemble-merge synthesize). "
+             "Cost: N+1 LLM calls. Worth it because the proposal "
+             "frames every downstream quest decision. Example: "
+             "--proposal-ensemble gpt-5.5,claude-opus-4-7,gemini-2.5-pro",
+    )
+    p.add_argument(
+        "--proposal-ensemble-merge",
+        type=str,
+        choices=("tournament", "synthesize"),
+        default="tournament",
+        help="How to combine the ensemble candidates. tournament "
+             "(default): moderator picks the single best plan, "
+             "preserving the winner's voice. synthesize: moderator "
+             "merges all N into one coherent plan that flags any "
+             "disagreement between candidates.",
+    )
+    p.add_argument(
+        "--proposal-ensemble-moderator",
+        type=str,
+        default="",
+        help="Model to perform the merge step. Defaults to the first "
+             "model in --proposal-ensemble.",
+    )
+    p.add_argument(
+        "--critique-ensemble",
+        type=str,
+        default="",
+        metavar="M1,M2,M3",
+        help="Multi-model ensemble for --critique. Same shape as "
+             "--proposal-ensemble but default merge is synthesize — "
+             "adversarial critique benefits from preserving every "
+             "critic's perspective, not picking one winner.",
+    )
+    p.add_argument(
+        "--critique-ensemble-merge",
+        type=str,
+        choices=("tournament", "synthesize"),
+        default="synthesize",
+        help="How to combine the critique candidates. synthesize "
+             "(default): merge all N adversarial critiques into one "
+             "report with disagreement flags. tournament: moderator "
+             "picks the most rigorous single critic.",
+    )
+    p.add_argument(
+        "--critique-ensemble-moderator",
+        type=str,
+        default="",
+        help="Model to perform the merge step. Defaults to the first "
+             "model in --critique-ensemble.",
+    )
+    p.add_argument(
         "--analyze-topic",
         type=str,
         default=None,
@@ -872,6 +930,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
                 supervisor=supervisor,
+                ensemble_models=args.critique_ensemble,
+                ensemble_merge=args.critique_ensemble_merge,
+                ensemble_moderator=args.critique_ensemble_moderator,
             )
 
         if args.proposal:
@@ -882,6 +943,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
                 supervisor=supervisor,
+                ensemble_models=args.proposal_ensemble,
+                ensemble_merge=args.proposal_ensemble_merge,
+                ensemble_moderator=args.proposal_ensemble_moderator,
             )
 
         if args.analyze:
@@ -1134,6 +1198,29 @@ async def _run_portfolio(
     return 0
 
 
+def _parse_ensemble_flag(
+    models_csv: str, merge: str, moderator: str,
+) -> "NodeEnsembleConfig | None":  # type: ignore[name-defined]
+    """Convert ``--{proposal,critique}-ensemble M1,M2,M3`` flag triple
+    into a NodeEnsembleConfig, or None when the flag was omitted.
+
+    Empty / whitespace-only strings → None (no ensemble; default
+    single-call path). Otherwise split on comma, strip, drop empties.
+    """
+    csv = (models_csv or "").strip()
+    if not csv:
+        return None
+    models = [m.strip() for m in csv.split(",") if m.strip()]
+    if not models:
+        return None
+    from core.config import NodeEnsembleConfig
+    return NodeEnsembleConfig(
+        models=models,
+        merge=merge,  # type: ignore[arg-type]
+        moderator=(moderator.strip() or None),
+    )
+
+
 async def _run_critique(
     *,
     quest_id: str,
@@ -1142,6 +1229,9 @@ async def _run_critique(
     axon_config_path: Path | None,
     vscode_bridge_port: int,
     supervisor: ProxySupervisor,
+    ensemble_models: str = "",
+    ensemble_merge: str = "synthesize",
+    ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --critique <quest_id>``.
 
@@ -1172,11 +1262,19 @@ async def _run_critique(
             file=sys.stderr,
         )
 
-    print(f"[FI] critique {quest_id} (provider={provider.name})")
+    ensemble = _parse_ensemble_flag(
+        ensemble_models, ensemble_merge, ensemble_moderator,
+    )
+    if ensemble is not None:
+        print(f"[FI] critique {quest_id} (provider={provider.name}; "
+              f"ensemble: {len(ensemble.models)} critics, merge={ensemble.merge})")
+    else:
+        print(f"[FI] critique {quest_id} (provider={provider.name})")
     try:
         art = await generate_critique(
             quest_id, output_root, provider=provider,
             supervisor=supervisor, knowledge=knowledge,
+            ensemble=ensemble,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"[FI] --critique: {e}", file=sys.stderr)
@@ -1634,6 +1732,9 @@ async def _run_proposal(
     axon_config_path: Path | None,
     vscode_bridge_port: int,
     supervisor: ProxySupervisor,
+    ensemble_models: str = "",
+    ensemble_merge: str = "tournament",
+    ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --proposal "<topic>"``.
 
@@ -1662,11 +1763,20 @@ async def _run_proposal(
             file=sys.stderr,
         )
 
-    print(f"[FI] proposal (provider={provider.name})")
+    # Build optional ensemble config from CLI flags.
+    ensemble = _parse_ensemble_flag(
+        ensemble_models, ensemble_merge, ensemble_moderator,
+    )
+    if ensemble is not None:
+        print(f"[FI] proposal (provider={provider.name}; "
+              f"ensemble: {len(ensemble.models)} models, merge={ensemble.merge})")
+    else:
+        print(f"[FI] proposal (provider={provider.name})")
     try:
         art = await generate_proposal(
             topic, output_root, provider=provider,
             supervisor=supervisor, knowledge=knowledge,
+            ensemble=ensemble,
         )
     except ValueError as e:
         print(f"[FI] --proposal: {e}", file=sys.stderr)
