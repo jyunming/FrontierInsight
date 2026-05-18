@@ -77,10 +77,12 @@ def test_topic_is_tier1_and_not_mid_quest_editable() -> None:
 # ---- Tier-2 contract ----
 
 
-def test_tier2_covers_the_six_derived_fields() -> None:
+def test_tier2_covers_the_derived_fields() -> None:
     """Tier-2 is the auto-derive set that lands on the review
     screen. New fields land here when they're cheaply derivable
-    from tier-1 answers."""
+    from tier-1 answers — ``knowledge_top_k`` joined this tier
+    when the Axon RAG cap became user-tunable (separate from the
+    web/external cap)."""
     ids = [q.id for q in questions_for_tier(2, "cli")]
     assert set(ids) == {
         "title",
@@ -89,6 +91,7 @@ def test_tier2_covers_the_six_derived_fields() -> None:
         "review_panel",
         "knowledge_enabled",
         "audience",
+        "knowledge_top_k",
     }
 
 
@@ -144,14 +147,15 @@ def test_smart_default_audience_and_clarify_are_static() -> None:
 def test_tier3_covers_the_advanced_fields() -> None:
     """Tier-3 hides behind a 'Show advanced' toggle on each frontend.
     Three are topic-tuned (preflight LLM call suggests a value);
-    ``knowledge_top_k`` is a numeric knob; ``ensemble_profile`` is
-    the multi-model preset picker."""
+    ``knowledge_external_top_k`` controls the web-search cap;
+    ``ensemble_profile`` is the multi-model preset picker. The Axon
+    RAG cap (``knowledge_top_k``) moved up to Tier-2."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "comparative_baseline",
         "success_metric",
         "budget",
-        "knowledge_top_k",
+        "knowledge_external_top_k",
         "ensemble_profile",
     }
 
@@ -166,11 +170,15 @@ def test_derive_tier3_returns_empty_strings_until_preflight_fills_them() -> None
     assert out["budget"] == ""
 
 
-def test_derive_tier3_top_k_default_is_5() -> None:
-    """knowledge_top_k carries a real static default (5) — the cap
-    is meaningful even without a preflight LLM call."""
+def test_derive_tier3_external_top_k_default_is_20() -> None:
+    """knowledge_external_top_k carries a real static default (20) —
+    web search is coarser than RAG, so breadth matters even without
+    a preflight LLM call. Comprehensive reviews bump to 30."""
     out = derive_tier3({"topic": "x", "paper_format": "generic"})
-    assert out["knowledge_top_k"] == 5
+    assert out["knowledge_external_top_k"] == 20
+    out = derive_tier3({"topic": "x", "paper_format": "generic",
+                         "study_depth": "comprehensive review"})
+    assert out["knowledge_external_top_k"] == 30
 
 
 # ---- Cross-tier invariants ----

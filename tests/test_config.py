@@ -120,7 +120,11 @@ def test_axon_config_none_default() -> None:
     kc = KnowledgeConfig()
     assert kc.axon_config is None
     assert kc.enabled is True
-    assert kc.top_k == 5
+    # top_k bumped 5 → 8 when the Axon vs external caps were split:
+    # dense embedding hits are precise, 8 is the new sweet spot.
+    assert kc.top_k == 8
+    # New independent cap on external (web) search results.
+    assert kc.external_top_k == 20
     assert kc.write_back_quests is True
 
 

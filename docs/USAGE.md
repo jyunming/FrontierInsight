@@ -208,7 +208,8 @@ knowledge:
   axon_config:
     embedding: { provider: ollama, model: nomic-embed-text }
     llm:       { provider: ollama, model: qwen2.5-coder:32b }
-  top_k: 5
+  top_k: 8                          # Axon RAG cap — dense hits are precise, 8 strong matches beat 20 medium ones for the writer prompt. The interview's "Axon hits per quest" question.
+  external_top_k: 20                # External (arXiv / OpenAlex / Crossref / S2 / ...) cap when Axon misses. Bigger than top_k because web search is coarser; bump to 30 for survey-shaped quests.
   write_back_quests: true
   write_back_only_on_accept: true
 

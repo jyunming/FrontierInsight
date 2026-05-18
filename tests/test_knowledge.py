@@ -254,14 +254,21 @@ def _arxiv_atom(*entries: dict) -> str:
 
 def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
     """When Axon is enabled but returns 0 results, search() falls
-    through to the configured external fallback (arxiv by default)."""
+    through to the configured external fallback (arxiv by default).
+    The external layer uses ``external_top_k`` (not ``top_k``) so a
+    web miss can return broader coverage than the RAG cap allows."""
     from core.knowledge import Knowledge
 
     k = Knowledge(KnowledgeConfig(enabled=False))
     k.enabled = True  # bypass axon import
     # Pin fallback to arxiv-only so the test doesn't have to stub other
-    # sources' JSON responses.
-    k.cfg = KnowledgeConfig(enabled=True, external_fallback=["arxiv"], top_k=3)
+    # sources' JSON responses. external_top_k=3 keeps the test
+    # deterministic — without setting it the default is 20 and the
+    # arxiv stub would need to return 20 entries.
+    k.cfg = KnowledgeConfig(
+        enabled=True, external_fallback=["arxiv"],
+        top_k=3, external_top_k=3,
+    )
     class _Empty:
         def invoke(self, _): return []
         def with_overrides(self, _): return self
@@ -297,6 +304,47 @@ def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
     assert "BV under noise" in docs[0].content
     assert captured["params"]["max_results"] == "3"
     assert "all:" in captured["params"]["search_query"]
+
+
+def test_external_top_k_is_independent_of_axon_top_k(monkeypatch) -> None:
+    """The user's explicit ask: when Axon misses, the web layer should
+    return more than the Axon RAG cap. external_top_k controls the web
+    layer independently of top_k, so a quest with top_k=5 + external_top_k=20
+    sees 5 Axon hits OR 20 web hits — never 5 web hits."""
+    from core.knowledge import Knowledge
+
+    k = Knowledge(KnowledgeConfig(enabled=False))
+    k.enabled = True
+    k.cfg = KnowledgeConfig(
+        enabled=True, external_fallback=["arxiv"],
+        top_k=5, external_top_k=20,
+    )
+    class _Empty:
+        def invoke(self, _): return []
+        def with_overrides(self, _): return self
+    k._retriever = _Empty()
+
+    captured: dict = {}
+    atom = _arxiv_atom(*[
+        {"id": f"24{i:02d}.0001", "title": f"paper {i}", "summary": "x"}
+        for i in range(20)
+    ])
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, params=None, **_):
+            captured["params"] = params
+            r = MagicMock()
+            r.text = atom
+            r.raise_for_status = MagicMock()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
+    k.search("anything")
+    # The web layer asks for the FULL external_top_k, not the Axon cap.
+    assert captured["params"]["max_results"] == "20"
 
 
 def test_arxiv_fallback_disabled_when_external_fallback_none(monkeypatch) -> None:
@@ -449,8 +497,15 @@ def test_local_papers_supplement_external_when_few(tmp_path: Path, monkeypatch) 
         ]
     monkeypatch.setattr("core.knowledge._route_external", fake_router)
 
-    cfg = KnowledgeConfig(enabled=False, source_routing="manual",
-                          external_fallback=["arxiv"], local_papers=[local], top_k=4)
+    # Pin external_top_k too so the test stays deterministic — the
+    # default (20) would let the fake router return up to 19 external
+    # docs alongside the pinned paper; the test only cares about the
+    # head-of-list invariant (local paper first, then external).
+    cfg = KnowledgeConfig(
+        enabled=False, source_routing="manual",
+        external_fallback=["arxiv"], local_papers=[local],
+        top_k=4, external_top_k=4,
+    )
     k = Knowledge(cfg)
     import asyncio
     docs = asyncio.run(k.asearch("test"))

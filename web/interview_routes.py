@@ -267,7 +267,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         raise ValueError(
             f"audience must be 'external' or 'internal', got {audience!r}"
         )
-    top_k = body.get("knowledge_top_k", 5)
+    top_k = body.get("knowledge_top_k", 8)
     try:
         top_k = int(top_k)
     except (TypeError, ValueError):
@@ -276,6 +276,17 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         )
     if top_k < 1:
         raise ValueError(f"knowledge_top_k must be >= 1, got {top_k}")
+    external_top_k = body.get("knowledge_external_top_k", 20)
+    try:
+        external_top_k = int(external_top_k)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"knowledge_external_top_k must be an int, got {type(external_top_k).__name__}"
+        )
+    if external_top_k < 1:
+        raise ValueError(
+            f"knowledge_external_top_k must be >= 1, got {external_top_k}"
+        )
     ensemble_profile = body.get("ensemble_profile", "off")
     if not isinstance(ensemble_profile, str) or ensemble_profile not in (
         "off", "cross_check_only", "ideate_and_check", "full",
@@ -302,5 +313,6 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         provider_model=pm if pm else None,
         audience=audience,
         knowledge_top_k=top_k,
+        knowledge_external_top_k=external_top_k,
         ensemble_profile=ensemble_profile,
     )

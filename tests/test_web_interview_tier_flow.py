@@ -157,7 +157,8 @@ def test_submit_round_trips_audience_and_top_k(tmp_path) -> None:  # type: ignor
 def test_submit_omits_audience_at_default_for_compact_yaml(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """When audience == 'external' (the default), the emitter omits
     the line entirely. Keeps the generated YAML small for the common
-    case. Same for top_k == 5."""
+    case. Same for ``top_k == 8`` (the new default after the split into
+    Axon vs external caps)."""
     from fastapi.testclient import TestClient
     from web.server import make_app
 
@@ -172,7 +173,7 @@ def test_submit_omits_audience_at_default_for_compact_yaml(tmp_path) -> None:  #
         "no_simulation": False, "clarify_mode": "auto",
         "review_panel": [], "knowledge_enabled": False,
         "comparative_baseline": "", "success_metric": "", "budget": "",
-        "audience": "external", "knowledge_top_k": 5,
+        "audience": "external", "knowledge_top_k": 8,
     }
     r = client.post("/api/interview/submit", json=payload)
     assert r.status_code == 200, r.text
@@ -182,7 +183,7 @@ def test_submit_omits_audience_at_default_for_compact_yaml(tmp_path) -> None:  #
         "audience=external is the default and shouldn't be emitted"
     )
     assert "top_k:" not in text, (
-        "top_k=5 is the default and shouldn't be emitted"
+        "top_k=8 is the default and shouldn't be emitted"
     )
 
 
@@ -202,7 +203,7 @@ def test_submit_rejects_bad_audience(tmp_path) -> None:  # type: ignore[no-untyp
         "review_panel": [], "knowledge_enabled": False,
         "comparative_baseline": "", "success_metric": "", "budget": "",
         "audience": "third-party",   # bogus
-        "knowledge_top_k": 5,
+        "knowledge_top_k": 8,
     }
     r = client.post("/api/interview/submit", json=payload)
     assert r.status_code == 400

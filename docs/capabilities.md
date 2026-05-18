@@ -187,7 +187,8 @@ knowledge:
   axon_config:                    # inline AxonConfig — or pass a path to a YAML
     embedding: { provider: ollama, model: nomic-embed-text }
     llm:       { provider: ollama, model: qwen2.5-coder:32b }
-  top_k: 5
+  top_k: 8                          # Axon RAG retrieval cap (precision).
+  external_top_k: 20                # External (arXiv / OpenAlex / Crossref / S2) cap (breadth) when Axon misses.
   write_back_quests: true
   write_back_only_on_accept: true
 
