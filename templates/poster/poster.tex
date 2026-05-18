@@ -1,4 +1,17 @@
-% Frontier Insight - fixed 36"x48" 3-column poster template.
+% Frontier Insight — A1 landscape (84.1 x 59.4 cm = 33" x 23") 3-column
+% poster template.
+%
+% Why A1 instead of 36"x48":
+% The LLM-generated content (3 columns, ~3-4 figures) reliably fills
+% A1 from edge to edge. The old 121.92 x 91.44 cm (48"x36") page left
+% the bottom ~50% blank for short / medium-depth quests, which made
+% posters look incomplete. A1 is a real, printable poster size
+% (standard for single-author academic conference posters) and gives
+% a dense, professional rendering for the content volume FI actually
+% generates. Users who need a larger conference-hall poster can edit
+% this file: set width=121.92 height=91.44 for 48"x36", or
+% width=118.9 height=84.1 for A0.
+%
 % Substitutions (Python string.Template): title, left, middle, right.
 % In the body below, each placeholder appears as a single-dollar
 % ``$$name`` form — that is what safe_substitute() actually replaces.
@@ -15,7 +28,7 @@
 % end up as raw LaTeX BEFORE \documentclass — pdflatex then errors
 % on \textbf with "Undefined control sequence".
 \documentclass[final,t]{beamer}
-\usepackage[size=custom,width=121.92,height=91.44,scale=1.0]{beamerposter}
+\usepackage[size=custom,width=84.1,height=59.4,scale=1.0]{beamerposter}
 \usepackage{graphicx}
 \usepackage{multicol}
 \usepackage{amsmath, amssymb}
