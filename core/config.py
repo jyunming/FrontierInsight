@@ -354,6 +354,21 @@ class KnowledgeConfig(BaseModel):
     # genuinely needs that many hits. Set independently of ``top_k`` so
     # users can tune RAG precision without starving web breadth.
     external_top_k: int = Field(default=20, ge=1)
+    # Pause-for-user-papers gate. When True, the literature node pauses
+    # after retrieval IF any retrieved doc came back as abstract-only
+    # (no full text available — typical for paywalled / Crossref / S2
+    # metadata-only hits). Writes a ``needs/<slug>.json`` stub per
+    # missing paper and creates ``inputs/papers/`` for the user to drop
+    # downloaded PDFs into. On ``fi --resume``, the node walks
+    # ``inputs/papers/``, indexes the files into the literature list,
+    # and proceeds — giving the writer real full text instead of
+    # abstracts.
+    #
+    # Default ``False`` so existing quests keep running unattended.
+    # Pairs naturally with the ``knowledge.try_fetch_full_text`` knob:
+    # turn that on first, then this gate only fires for the subset of
+    # papers the host couldn't open-text-fetch.
+    pause_for_user_papers: bool = False
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
     # `Knowledge.search()` when Axon is disabled OR returns zero results.
