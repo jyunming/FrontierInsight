@@ -706,6 +706,7 @@ async def generate_digest(
     supervisor: ProxySupervisor | None = None,
     knowledge: Knowledge | None = None,
     now: datetime | None = None,
+    ensemble: "NodeEnsembleConfig | None" = None,  # noqa: F821 — forward ref
 ) -> DigestArtifacts:
     """Top-level entry. Collects snapshots, computes the diff, calls
     the LLM once, writes ``outputs/_digests/<digest_id>.md``, and
@@ -778,10 +779,25 @@ async def generate_digest(
     endpoint = await resolve_endpoint_async(provider, sup)
     client = LLMClient(endpoint)
     try:
-        markdown = await client.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.2,
+        from core.ensemble import run_singleshot_with_ensemble
+
+        async def _chat_fn(messages, *, temperature=0.2, model=None, node=""):
+            return await client.chat(
+                messages, temperature=temperature, model=model, node=node,
+            )
+
+        markdown = await run_singleshot_with_ensemble(
+            prompt=prompt,
+            chat_fn=_chat_fn,
+            ensemble=ensemble,
+            # WeekDiff benefits from preserved disagreement — different
+            # models surface different stalled / promoted quests they
+            # find compelling, and the synthesize merge keeps that
+            # signal in the report rather than averaging it away.
+            default_merge="synthesize",
             node="digest",
+            temperature=0.2,
+            prompt_summary=f"digest for {since.date()} to {until.date()}",
         )
     finally:
         await client.aclose()

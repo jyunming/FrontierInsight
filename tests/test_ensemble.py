@@ -453,3 +453,60 @@ def test_cost_jsonl_marks_failed_calls() -> None:
     assert len(failed) == 1
     assert failed[0]["model"] == "m2"
     assert "timeout" in failed[0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# run_singleshot_with_ensemble — shared helper for digest / portfolio /
+# summarize / critique single-LLM-call tools.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_singleshot_no_ensemble_fires_one_call() -> None:
+    """``ensemble=None`` is the documented cheap path — one chat call,
+    no fan-out, no moderator overhead. Confirms the helper doesn't
+    sneak in extra calls when the user didn't opt in."""
+    from core.ensemble import run_singleshot_with_ensemble
+    calls = []
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        calls.append({"model": model, "node": node})
+        return "single-call answer"
+
+    out = await run_singleshot_with_ensemble(
+        prompt="hi", chat_fn=fake_chat, ensemble=None,
+        default_merge="synthesize", node="digest",
+    )
+    assert out == "single-call answer"
+    assert len(calls) == 1
+    assert calls[0]["node"] == "digest"
+
+
+@pytest.mark.asyncio
+async def test_singleshot_falls_back_when_all_fanout_calls_fail() -> None:
+    """Every fan-out call raises → fanout_chat raises EnsembleError →
+    the helper catches and falls through to a single-call path so the
+    user still gets an answer instead of a hard failure on a flaky
+    network. Same lenient policy the engine uses for per-node
+    ensemble."""
+    from core.config import NodeEnsembleConfig
+    from core.ensemble import run_singleshot_with_ensemble
+    attempts = {"fanout": 0, "fallback": 0}
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        if model is not None:
+            attempts["fanout"] += 1
+            raise RuntimeError("simulated upstream outage")
+        attempts["fallback"] += 1
+        return "fallback answer"
+
+    ensemble = NodeEnsembleConfig(
+        models=["m1", "m2", "m3"], merge="synthesize",
+    )
+    out = await run_singleshot_with_ensemble(
+        prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
+        default_merge="synthesize", node="digest",
+    )
+    assert out == "fallback answer"
+    assert attempts["fanout"] == 3
+    assert attempts["fallback"] == 1
