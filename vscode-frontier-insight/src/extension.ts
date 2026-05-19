@@ -1367,15 +1367,35 @@ async function probeAxonOnActivate(
 ): Promise<void> {
     const host = process.env.AXON_HOST || "127.0.0.1";
     const port = process.env.AXON_PORT || "8000";
-    const status = await probeAxonHealth(host, port);
-    if (status.live) return;  // sidecar is up, nothing to surface
 
-    // Log the actual failure so the user can see it in the extension
-    // output channel — the original probe swallowed errors silently
-    // which made "axon is up but extension says it isn't" impossible
-    // to diagnose.
+    // Activation runs on `onStartupFinished`, which often fires
+    // BEFORE the user's Axon sidecar finishes its cold-init (the
+    // sentence-transformers model load is the slow step — typically
+    // 5-15 s on a fresh launch). A one-shot probe right at activate
+    // racing the sidecar produces false-negative "Axon not detected"
+    // notifications. Poll on a short interval with a generous total
+    // budget so a slow sidecar isn't mistaken for an absent one.
+    //
+    // Schedule (15 attempts × 2 s = ~30 s total): fast enough to
+    // surface the notification while it's still useful, slow enough
+    // to absorb the typical cold-start. If Axon comes up at any
+    // point during the window the probe silently returns and the
+    // user never sees a false notification.
+    const TOTAL_ATTEMPTS = 15;
+    const INTERVAL_MS = 2000;
+    let status: AxonHealthResult = { live: false, ready: false };
+    for (let attempt = 1; attempt <= TOTAL_ATTEMPTS; attempt++) {
+        status = await probeAxonHealth(host, port);
+        if (status.live) return;
+        if (attempt < TOTAL_ATTEMPTS) {
+            await new Promise(r => setTimeout(r, INTERVAL_MS));
+        }
+    }
+
+    // 30s budget exhausted — sidecar genuinely isn't reachable.
     console.warn(
-        `[fi] axon probe failed at http://${host}:${port}/health/live: ${status.error}`,
+        `[fi] axon probe failed at http://${host}:${port}/health/live ` +
+        `after ${TOTAL_ATTEMPTS} attempts over ~${(TOTAL_ATTEMPTS * INTERVAL_MS) / 1000}s: ${status.error}`,
     );
     const detail = status.error ? ` (probe error: ${status.error})` : "";
     const action = await vscode.window.showInformationMessage(
