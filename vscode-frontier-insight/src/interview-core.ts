@@ -80,14 +80,14 @@ export interface InterviewAnswers {
  * record out of the TS file and compares it to the JSON snapshot.
  */
 export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
-    "vscode_extension": ["gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"],
-    "openai": ["gpt-4o", "gpt-4o-mini", "o1-mini"],
-    "codex": ["gpt-5", "gpt-4o", "gpt-4o-mini"],
+    "openai": ["gpt-5", "gpt-5-mini", "o3-mini"],
+    "codex": ["gpt-5", "gpt-5-mini", "gpt-4o"],
     "claude_cli": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
-    "codex_cli": ["gpt-5", "gpt-4o", "gpt-4o-mini"],
-    "copilot_cli": ["gpt-4o", "claude-3-5-sonnet", "o1-mini"],
-    "gemini_cli": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
-    "ollama": ["llama3.1:70b", "qwen2.5:32b", "llama3.1:8b"],
+    "codex_cli": ["gpt-5", "gpt-5-mini", "gpt-4o"],
+    "copilot_cli": ["gpt-5", "claude-opus-4-7", "gemini-2.5-pro"],
+    "gemini_cli": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+    "ollama": ["llama3.3:70b", "qwen2.5:32b", "qwen2.5:7b"],
+    "vscode_extension": ["gpt-5", "claude-opus-4-7", "gemini-2.5-pro"],
 };
 
 
