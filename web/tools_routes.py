@@ -314,14 +314,13 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             # picker (it is intentionally absent from the interview's
             # PROVIDER_CHOICES list).
             "vscode_bridge_available": bridge_live,
-            "vscode_extension_models": [
-                {"value": "gpt-4o", "label": "gpt-4o",
-                 "description": "Copilot default when available."},
-                {"value": "claude-3-5-sonnet", "label": "claude-3-5-sonnet",
-                 "description": "Available on some Copilot tiers."},
-                {"value": "gemini-2.0-flash", "label": "gemini-2.0-flash",
-                 "description": "Available when Copilot federates Gemini."},
-            ],
+            # Source from the canonical ensemble trio so the picker
+            # never drifts from what the `full` ensemble profile
+            # would actually fan out across. Both lists were
+            # hardcoded separately before; that drift gets users
+            # who pick a single model and then opt into the
+            # ensemble silently routed across a different set.
+            "vscode_extension_models": _vscode_extension_model_choices(),
         })
 
     @app.get("/api/provider/models")
@@ -467,6 +466,28 @@ _provider_models_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 def _provider_models_cache_clear() -> None:
     _provider_models_cache.clear()
+
+
+# Per-call rather than module-constant so reloading the schema (e.g.
+# a test that bumps the trio) picks up changes without reimporting
+# the routes module.
+def _vscode_extension_model_choices() -> list[dict[str, str]]:
+    """Render the picker's vscode_extension model list from the
+    canonical ensemble trio in ``core.interview``. Keeps the
+    single-model dropdown values in lock-step with what the `full`
+    ensemble profile would fan out across, so a user who pre-picks
+    one model and then enables ensemble doesn't get silently routed
+    through a different three."""
+    try:
+        from core.interview import ensemble_model_trio
+        trio = ensemble_model_trio("vscode_extension") or []
+    except Exception:
+        trio = []
+    return [
+        {"value": m, "label": m,
+         "description": "From the vscode_extension ensemble trio."}
+        for m in trio
+    ]
 
 
 async def _provider_models_cached(app: FastAPI, provider: str) -> JSONResponse:

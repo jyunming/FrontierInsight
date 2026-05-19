@@ -101,8 +101,12 @@ def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(
     assert providers[0] == "vscode_extension"
     assert payload["vscode_bridge_available"] is True
     models = payload["provider_models"].get("vscode_extension", [])
-    assert any(m["value"] == "gpt-4o" for m in models)
-    assert any(m["value"] == "claude-3-5-sonnet" for m in models)
+    # The trio-as-source-of-truth contract: the picker list must equal
+    # what the `full` ensemble profile would fan out across.
+    from core.interview import ensemble_model_trio
+    expected_trio = set(ensemble_model_trio("vscode_extension"))
+    actual = {m["value"] for m in models}
+    assert actual == expected_trio, (actual, expected_trio)
 
 
 def test_interview_schema_hides_vscode_extension_when_port_dead(tmp_path: Path) -> None:

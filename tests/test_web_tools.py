@@ -289,7 +289,13 @@ def test_tools_schema_reports_no_bridge_by_default(tmp_path: Path) -> None:
     # can render it the moment a bridge becomes available without
     # re-fetching schema.
     assert isinstance(body.get("vscode_extension_models"), list)
-    assert any(m["value"] == "gpt-4o" for m in body["vscode_extension_models"])
+    # Source-of-truth for these labels is the canonical ensemble trio
+    # in core/interview.py — pin against that helper rather than a
+    # hardcoded value so refreshing the trio doesn't drift this test.
+    from core.interview import ensemble_model_trio
+    expected_trio = set(ensemble_model_trio("vscode_extension"))
+    actual = {m["value"] for m in body["vscode_extension_models"]}
+    assert actual == expected_trio, (actual, expected_trio)
 
 
 def test_tools_schema_reports_bridge_when_port_set(

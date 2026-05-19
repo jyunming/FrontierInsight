@@ -113,15 +113,20 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             # Mirror the model list /api/tools/schema advertises so
             # the existing populateProviderModel() in interview.html
             # finds entries when the user picks vscode_extension.
+            # Source from the canonical ensemble trio so the picker
+            # and the `full` ensemble fan-out target the same three
+            # models — a single hardcoded list here used to drift
+            # from _ENSEMBLE_MODEL_TRIOS and silently switched models
+            # under the user when they opted into ensemble.
             provider_models = dict(schema.get("provider_models", {}))
-            provider_models.setdefault("vscode_extension", [
-                {"value": "gpt-4o", "label": "gpt-4o",
-                 "description": "Copilot default when available."},
-                {"value": "claude-3-5-sonnet", "label": "claude-3-5-sonnet",
-                 "description": "Available on some Copilot tiers."},
-                {"value": "gemini-2.0-flash", "label": "gemini-2.0-flash",
-                 "description": "Available when Copilot federates Gemini."},
-            ])
+            if "vscode_extension" not in provider_models:
+                from core.interview import ensemble_model_trio
+                trio = ensemble_model_trio("vscode_extension") or []
+                provider_models["vscode_extension"] = [
+                    {"value": m, "label": m,
+                     "description": "From the vscode_extension ensemble trio."}
+                    for m in trio
+                ]
             schema["provider_models"] = provider_models
         return JSONResponse(schema)
 
