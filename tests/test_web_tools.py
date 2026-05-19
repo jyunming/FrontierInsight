@@ -472,3 +472,84 @@ def test_build_argv_ensemble_only_wired_for_proposal_and_critique(tmp_path: Path
         except ValueError:
             continue  # missing-arg path is fine; we're checking flag absence
         assert f"--{name}-ensemble" not in argv, name
+
+
+# ---------------------------------------------------------------------------
+# /api/provider/models — dynamic discovery + cache
+# ---------------------------------------------------------------------------
+
+
+def test_provider_models_endpoint_returns_static_marker_for_unknown_provider(
+    tmp_path: Path,
+) -> None:
+    """An empty / unknown provider must NOT 500 — answer
+    ``{source: "static"}`` so the UI keeps the schema fallback."""
+    res = _client(tmp_path).get("/api/provider/models?provider=")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["source"] == "static"
+    assert body["models"] == []
+
+
+def test_provider_models_endpoint_returns_dynamic_when_discovery_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: discovery returns a list → endpoint reports
+    source="dynamic" and the models flow through to the UI."""
+    from web.tools_routes import _provider_models_cache_clear
+    _provider_models_cache_clear()
+
+    async def fake_discover(provider: str, **_kwargs):
+        assert provider == "openai"
+        return [
+            {"value": "gpt-5", "label": "gpt-5", "description": ""},
+            {"value": "gpt-4o", "label": "gpt-4o", "description": ""},
+        ]
+    monkeypatch.setattr(
+        "core.provider_models_discover.discover", fake_discover,
+    )
+    body = _client(tmp_path).get("/api/provider/models?provider=openai").json()
+    assert body["source"] == "dynamic"
+    assert {m["value"] for m in body["models"]} == {"gpt-5", "gpt-4o"}
+
+
+def test_provider_models_endpoint_falls_back_to_static_on_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery returns None → endpoint reports source="static" and
+    the UI keeps the schema's curated list. This is the path CLI
+    providers and offline Ollama hit."""
+    from web.tools_routes import _provider_models_cache_clear
+    _provider_models_cache_clear()
+
+    async def fake_discover(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(
+        "core.provider_models_discover.discover", fake_discover,
+    )
+    body = _client(tmp_path).get("/api/provider/models?provider=claude_cli").json()
+    assert body["source"] == "static"
+    assert body["models"] == []
+
+
+def test_provider_models_endpoint_caches_results_within_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling the endpoint twice in a row must only invoke discovery
+    once — the picker re-fetches on every provider change, so an
+    uncached endpoint would hammer the upstream."""
+    from web.tools_routes import _provider_models_cache_clear
+    _provider_models_cache_clear()
+    calls = {"n": 0}
+
+    async def fake_discover(provider: str, **_kwargs):
+        calls["n"] += 1
+        return [{"value": "gpt-5", "label": "gpt-5", "description": ""}]
+    monkeypatch.setattr(
+        "core.provider_models_discover.discover", fake_discover,
+    )
+    client = _client(tmp_path)
+    first = client.get("/api/provider/models?provider=openai").json()
+    second = client.get("/api/provider/models?provider=openai").json()
+    assert calls["n"] == 1
+    assert first == second

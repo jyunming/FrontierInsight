@@ -214,23 +214,45 @@
     const sel = wrap.querySelector('select');
     sel.addEventListener('change', (e) => {
       const v = e.target.value;
-      const msel = document.getElementById('f-provider_model');
-      if (!msel) return;
-      // vscode_extension's models aren't in the interview's
-      // provider_models map (intentional — the interview never asks
-      // about vscode_extension). Fall back to the tools-schema list
-      // when the user picks it.
-      const models = v === 'vscode_extension'
-        ? vscodeExtensionModels
-        : ((providerSchema.provider_models || {})[v] || []);
-      const otherModelOpt = '<option value="__OTHER__">Other (type your own)…</option>';
-      msel.innerHTML = '<option value="">' + (models.length ? '(pick a model)' : '(none for this provider)') + '</option>'
-        + models.map(m => `<option value="${escapeAttr(m.value)}" title="${escapeAttr(m.description || '')}">${escapeHtml(m.label)}</option>`).join('')
-        + otherModelOpt;
-      // Hide any leftover model text-input from a prior selection.
-      handleOtherSelection(msel, 'Model');
+      void populateModelsFor(v);
     });
     return wrap;
+  }
+
+  // Populate the model picker for ``v``. Tries the live discovery
+  // endpoint first (OpenAI /v1/models, Ollama /api/tags, ...) and
+  // falls back to the static schema list when the endpoint returns
+  // ``{source: "static"}``. Always appends an "Other" option so a
+  // brand-new model not on either list is still typeable.
+  async function populateModelsFor(provider) {
+    const msel = document.getElementById('f-provider_model');
+    if (!msel) return;
+    const staticFallback = provider === 'vscode_extension'
+      ? vscodeExtensionModels
+      : ((providerSchema.provider_models || {})[provider] || []);
+    // Render the static set first so the picker isn't blank while
+    // the discovery fetch is in flight.
+    renderModelOptions(msel, staticFallback, /* dynamicSource */ false);
+    if (!provider) return;
+    try {
+      const res = await fetch(`/api/provider/models?provider=${encodeURIComponent(provider)}`);
+      if (!res.ok) return;
+      const body = await res.json();
+      if (body.source === 'dynamic' && Array.isArray(body.models) && body.models.length) {
+        renderModelOptions(msel, body.models, /* dynamicSource */ true);
+      }
+    } catch (_) { /* keep static fallback */ }
+  }
+
+  function renderModelOptions(msel, models, dynamicSource) {
+    const blankLabel = models.length
+      ? (dynamicSource ? '(pick a model — live)' : '(pick a model)')
+      : '(none for this provider)';
+    const otherModelOpt = '<option value="__OTHER__">Other (type your own)…</option>';
+    msel.innerHTML = `<option value="">${blankLabel}</option>`
+      + models.map(m => `<option value="${escapeAttr(m.value)}" title="${escapeAttr(m.description || '')}">${escapeHtml(m.label)}</option>`).join('')
+      + otherModelOpt;
+    handleOtherSelection(msel, 'Model');
   }
 
   function makeModelPicker() {

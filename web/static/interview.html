@@ -422,7 +422,30 @@
   }
 
   function populateProviderModel(providerName) {
-    const models = (schema.provider_models || {})[providerName] || [];
+    // Render the static curated list immediately, then upgrade to
+    // the live list if the discovery endpoint returns one. Same
+    // pattern as tools.html so the picker is never blank during
+    // the in-flight fetch.
+    renderProviderModelOptions(
+      (schema.provider_models || {})[providerName] || [],
+      /* dynamicSource */ false,
+    );
+    if (!providerName) return;
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/provider/models?provider=${encodeURIComponent(providerName)}`,
+        );
+        if (!res.ok) return;
+        const body = await res.json();
+        if (body.source === 'dynamic' && Array.isArray(body.models) && body.models.length) {
+          renderProviderModelOptions(body.models, /* dynamicSource */ true);
+        }
+      } catch (_) { /* keep static fallback */ }
+    })();
+  }
+
+  function renderProviderModelOptions(models, dynamicSource) {
     let sel = document.getElementById('q-provider_model');
     if (!sel) return;
     if (sel.tagName !== 'SELECT') {
@@ -435,7 +458,9 @@
     sel.innerHTML = '';
     const blank = document.createElement('option');
     blank.value = '';
-    blank.textContent = models.length ? '(pick a model)' : '(pick a provider first)';
+    blank.textContent = models.length
+      ? (dynamicSource ? '(pick a model — live)' : '(pick a model)')
+      : '(pick a provider first)';
     sel.appendChild(blank);
     for (const m of models) {
       const opt = document.createElement('option');

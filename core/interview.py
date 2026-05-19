@@ -252,14 +252,14 @@ def estimate_ensemble_cost_multiplier(profile: str) -> float:
 # when the user picks a profile != "off". Edit the trio for a new
 # provider here (NOT in the YAML emitter) so all three frontends agree.
 _ENSEMBLE_MODEL_TRIOS: dict[str, tuple[str, str, str]] = {
-    "openai":           ("gpt-4o", "gpt-4o-mini", "o1-mini"),
-    "codex":            ("gpt-5", "gpt-4o", "gpt-4o-mini"),
+    "openai":           ("gpt-5", "gpt-5-mini", "o3-mini"),
+    "codex":            ("gpt-5", "gpt-5-mini", "gpt-4o"),
     "claude_cli":       ("claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"),
-    "codex_cli":        ("gpt-5", "gpt-4o", "gpt-4o-mini"),
-    "copilot_cli":      ("gpt-4o", "claude-3-5-sonnet", "o1-mini"),
-    "gemini_cli":       ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"),
-    "ollama":           ("llama3.1:70b", "qwen2.5:32b", "llama3.1:8b"),
-    "vscode_extension": ("gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"),
+    "codex_cli":        ("gpt-5", "gpt-5-mini", "gpt-4o"),
+    "copilot_cli":      ("gpt-5", "claude-opus-4-7", "gemini-2.5-pro"),
+    "gemini_cli":       ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"),
+    "ollama":           ("llama3.3:70b", "qwen2.5:32b", "qwen2.5:7b"),
+    "vscode_extension": ("gpt-5", "claude-opus-4-7", "gemini-2.5-pro"),
 }
 
 
@@ -311,15 +311,16 @@ PROVIDER_CHOICES: tuple[Choice, ...] = (
 # a brand-new model name not yet on the list.
 PROVIDER_MODEL_OPTIONS: dict[str, tuple[Choice, ...]] = {
     "openai": (
-        Choice("gpt-4o", "gpt-4o", "Latest GA. Balanced quality + cost."),
-        Choice("gpt-4o-mini", "gpt-4o-mini", "Cheap; good for high-volume nodes."),
-        Choice("gpt-4-turbo", "gpt-4-turbo", "Older flagship; still strong."),
-        Choice("o1-preview", "o1-preview", "Reasoning model; slower + pricier."),
-        Choice("o1-mini", "o1-mini", "Cheaper reasoning model."),
+        Choice("gpt-5", "gpt-5", "Latest flagship. Best overall quality."),
+        Choice("gpt-5-mini", "gpt-5-mini", "Cheap; good for high-volume nodes."),
+        Choice("gpt-4o", "gpt-4o", "Previous-generation default; still strong."),
+        Choice("o3", "o3", "Reasoning model; slower + pricier."),
+        Choice("o3-mini", "o3-mini", "Cheaper reasoning model."),
     ),
     "codex": (
-        Choice("gpt-5", "gpt-5", "ChatGPT backend; quality matches Plus/Pro web UI."),
-        Choice("gpt-4o", "gpt-4o", "Older default."),
+        Choice("gpt-5", "gpt-5", "ChatGPT backend; matches Plus/Pro web UI."),
+        Choice("gpt-5-mini", "gpt-5-mini", "Cheaper Plus/Pro backend variant."),
+        Choice("gpt-4o", "gpt-4o", "Previous-generation default."),
     ),
     "claude_cli": (
         Choice("claude-opus-4-7", "claude-opus-4-7", "Latest Opus; strongest model."),
@@ -328,20 +329,25 @@ PROVIDER_MODEL_OPTIONS: dict[str, tuple[Choice, ...]] = {
     ),
     "codex_cli": (
         Choice("gpt-5", "gpt-5", "ChatGPT backend default."),
-        Choice("gpt-4o", "gpt-4o", "Older default."),
+        Choice("gpt-5-mini", "gpt-5-mini", "Cheaper ChatGPT backend variant."),
+        Choice("gpt-4o", "gpt-4o", "Previous-generation default."),
     ),
     "copilot_cli": (
-        Choice("gpt-4o", "gpt-4o", "Copilot Pro/Business default."),
-        Choice("claude-3-5-sonnet", "claude-3-5-sonnet", "Available to some Copilot tiers."),
+        Choice("gpt-5", "gpt-5", "Copilot Pro/Business default since 2025."),
+        Choice("claude-opus-4-7", "claude-opus-4-7", "Available to Copilot Business+."),
+        Choice("claude-sonnet-4-6", "claude-sonnet-4-6", "Cheaper Anthropic option."),
+        Choice("gemini-2.5-pro", "gemini-2.5-pro", "Available when Copilot federates Gemini."),
     ),
     "gemini_cli": (
         Choice("gemini-2.5-pro", "gemini-2.5-pro", "Latest Pro; long context."),
         Choice("gemini-2.5-flash", "gemini-2.5-flash", "Cheaper / faster."),
+        Choice("gemini-2.0-flash", "gemini-2.0-flash", "Previous-generation flash."),
     ),
     "ollama": (
-        Choice("llama3.1:70b", "llama3.1:70b", "Largest Llama 3.1 that fits 80GB VRAM."),
-        Choice("llama3.1:8b", "llama3.1:8b", "Fits 12GB VRAM; modest quality."),
+        Choice("llama3.3:70b", "llama3.3:70b", "Latest large Llama; needs ~48GB VRAM."),
+        Choice("llama3.2:3b", "llama3.2:3b", "Tiny; fits a laptop GPU."),
         Choice("qwen2.5:32b", "qwen2.5:32b", "Strong open-source mid-size."),
+        Choice("qwen2.5:7b", "qwen2.5:7b", "Lighter Qwen for laptops."),
     ),
 }
 

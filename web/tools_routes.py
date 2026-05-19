@@ -324,6 +324,18 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             ],
         })
 
+    @app.get("/api/provider/models")
+    async def provider_models(provider: str = "") -> JSONResponse:
+        """Live model-list discovery for the picker. Replies with
+        either {source:"dynamic", models:[...]} when a real endpoint
+        (OpenAI /v1/models, Ollama /api/tags, the VSCode persistent
+        bridge) answered, or {source:"static"} which signals the UI
+        to fall through to the schema's curated list.
+
+        5-minute in-memory cache keyed on provider name so the picker
+        can re-fetch on every change without hammering the upstream."""
+        return await _provider_models_cached(app, (provider or "").strip())
+
     @app.post("/api/tools/{tool_name}")
     async def run_tool(tool_name: str, request: Request) -> JSONResponse:
         spec = TOOLS_BY_NAME.get(tool_name)
@@ -440,6 +452,49 @@ def _ensemble_argv_tail(
     # we don't introduce a behaviour drift between the two surfaces.
     merge = "tournament" if tool == "proposal" else "synthesize"
     return [f"--{tool}-ensemble", csv, f"--{tool}-ensemble-merge", merge]
+
+
+# Per-provider in-memory cache for ``/api/provider/models``. Keyed on
+# provider name; entries expire after _PROVIDER_MODELS_TTL_S so a
+# freshly-installed model (``ollama pull`` etc.) doesn't take an hour
+# to show up in the picker. Cache lives at module scope rather than
+# on app.state so test clients share it within the test process —
+# call _provider_models_cache_clear() in setup if you need a fresh
+# cache.
+_PROVIDER_MODELS_TTL_S = 300
+_provider_models_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _provider_models_cache_clear() -> None:
+    _provider_models_cache.clear()
+
+
+async def _provider_models_cached(app: FastAPI, provider: str) -> JSONResponse:
+    """Dispatch helper shared by /api/provider/models. Holds the
+    cache off the request handler so it can be cleared from tests
+    without touching the endpoint's signature."""
+    if not provider:
+        return JSONResponse(
+            {"source": "static", "provider": "", "models": []},
+        )
+    now = time.time()
+    hit = _provider_models_cache.get(provider)
+    if hit and (now - hit[0]) < _PROVIDER_MODELS_TTL_S:
+        return JSONResponse(hit[1])
+    from core.provider_models_discover import discover
+    bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+    bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+    models = await discover(
+        provider,
+        bridge_socket=bridge_socket,
+        bridge_port=bridge_port,
+    )
+    if models is None:
+        body = {"source": "static", "provider": provider, "models": []}
+    else:
+        body = {"source": "dynamic", "provider": provider, "models": models}
+    _provider_models_cache[provider] = (now, body)
+    return JSONResponse(body)
 
 
 async def _stage_uploads(form: Any, output_root: Path, tool_name: str) -> list[Path]:
