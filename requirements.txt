@@ -29,7 +29,8 @@ langgraph-checkpoint-sqlite>=2.0
 
 # Knowledge base (research literature + cross-quest memory).
 # https://github.com/jyunming/Axon
-axon-rag>=0.4
+axon-rag>=0.4.2
+tqdb>=0.8.4
 
 # FastAPI status GUI. Loaded lazily only when `launch.py --serve`
 # is used; the rest of FI runs without invoking it.
