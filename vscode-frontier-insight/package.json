@@ -20,7 +20,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onChatParticipant:frontier-insight.fi"
+    "onChatParticipant:frontier-insight.fi",
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {

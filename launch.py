@@ -422,6 +422,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "run — use copilot_cli or similar for headless Copilot usage.",
     )
     p.add_argument(
+        "--vscode-bridge-socket",
+        type=str,
+        default="",
+        help="Per-user IPC path of the FI VSCode extension's session-long "
+             "PersistentBridge (Unix-domain socket on POSIX, named pipe on "
+             "Windows). When --serve / --tools runs from outside the "
+             "extension's chat-spawn path, this is how it routes LLM calls "
+             "through `vscode.lm.*`. Default: auto-resolved per OS / user "
+             "via `core.bridge_path.persistent_bridge_path()`. Pass empty "
+             "string to disable.",
+    )
+    p.add_argument(
+        "--no-vscode-bridge",
+        action="store_true",
+        help="Explicitly disable the VSCode bridge for this --serve run. "
+             "Skips auto-resolving the persistent-bridge socket path. Use "
+             "when running --serve outside a VSCode session and you don't "
+             "want vscode_extension to appear in the provider picker.",
+    )
+    p.add_argument(
         "--no-axon-sidecar",
         action="store_true",
         help="Skip the Axon sidecar health check + auto-launch. By default, "
@@ -455,6 +475,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             n = int(env_port)
             if 1 <= n <= 65535:
                 args.vscode_bridge_port = n
+    # Bridge-socket resolution: explicit flag wins, then env var, then
+    # the canonical per-user default. The default lights up the IPC
+    # bridge automatically whenever the user is on the same machine
+    # as a VSCode that's hosting the FI extension — no env var, no
+    # port number, no manual wiring. ``--no-vscode-bridge`` opts out
+    # entirely (sets both port and socket to their disabled values).
+    socket_flag_present = any(
+        a == "--vscode-bridge-socket" or a.startswith("--vscode-bridge-socket=")
+        for a in flag_argv
+    )
+    if not socket_flag_present and not args.vscode_bridge_socket:
+        env_socket = os.environ.get("FI_VSCODE_BRIDGE_SOCKET", "").strip()
+        if env_socket:
+            args.vscode_bridge_socket = env_socket
+        elif args.serve and not args.no_vscode_bridge:
+            from core.bridge_path import persistent_bridge_path
+            args.vscode_bridge_socket = persistent_bridge_path()
+    if args.no_vscode_bridge:
+        args.vscode_bridge_port = 0
+        args.vscode_bridge_socket = ""
     if args.vscode_bridge_port and not (1 <= args.vscode_bridge_port <= 65535):
         p.error(
             f"--vscode-bridge-port must be in 1..65535, got "
@@ -539,6 +579,49 @@ def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
         return
     cfg.provider.name = "vscode_extension"
     cfg.provider.extra = {**(cfg.provider.extra or {}), "bridge_port": port}
+
+
+def _apply_vscode_bridge_socket_override(cfg: Config, socket_path: str) -> None:
+    """Same as :func:`_apply_vscode_bridge_override` but for the IPC
+    transport. The session-long PersistentBridge in the extension
+    listens on a per-user OS-managed socket/pipe — when --serve or
+    --tools is invoked from outside the chat-spawn path, that socket
+    is the only way to route through ``vscode.lm.*`` without a port
+    convention. Populates ``provider.extra['bridge_socket']`` which
+    :func:`core.provider.resolve_endpoint` then threads into the
+    LLMClient."""
+    if not socket_path:
+        return
+    cfg.provider.name = "vscode_extension"
+    cfg.provider.extra = {
+        **(cfg.provider.extra or {}),
+        "bridge_socket": socket_path,
+    }
+
+
+def _set_vscode_bridge_extras(
+    provider: "Any",  # ProviderConfig — keep loose to avoid forward-ref import
+    bridge_port: int,
+    bridge_socket: str,
+) -> None:
+    """Single place each ``_run_*`` helper calls to populate
+    ``provider.extra['bridge_port']`` / ``['bridge_socket']`` when
+    --vscode-bridge-port / --vscode-bridge-socket was passed. Both go
+    in if both are set; ``core.provider`` prefers the socket. The
+    earlier per-runner inline blocks only set the port — which made
+    `vscode_extension` providers spawned by ``--digest-provider`` /
+    ``--summarize-provider`` etc. fail at first LLM call when the
+    user wired the persistent bridge socket instead of a port (as
+    --serve does by default)."""
+    if bridge_port <= 0 and not bridge_socket:
+        return
+    provider.name = "vscode_extension"
+    extras = dict(provider.extra or {})
+    if bridge_port > 0:
+        extras["bridge_port"] = bridge_port
+    if bridge_socket:
+        extras["bridge_socket"] = bridge_socket
+    provider.extra = extras
 
 
 def _pick_clarify_callback(
@@ -987,9 +1070,10 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.serve:
             # We're already inside an event loop (main_async), so use
             # the async helper rather than the blocking uvicorn.run.
-            # Forward --max-concurrent + --vscode-bridge-port so the
-            # web UI's subprocess launcher inherits the same caps +
-            # transport the rest of FI was started with.
+            # Forward --max-concurrent + --vscode-bridge-port +
+            # --vscode-bridge-socket so the web UI's subprocess launcher
+            # inherits the same caps + transport the rest of FI was
+            # started with.
             from web.server import serve_async
             await serve_async(
                 output_root=args.output_root,
@@ -997,6 +1081,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 port=args.port,
                 max_concurrent=args.max_concurrent,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
             )
             return 0
 
@@ -1017,6 +1102,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 output_root=args.output_root,
                 draft_only=args.draft_only,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 interactive=args.interactive,
                 supervisor=supervisor,
             )
@@ -1029,6 +1115,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 quest_id=args.update,
                 output_root=args.output_root,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 interactive=args.interactive,
                 supervisor=supervisor,
             )
@@ -1040,6 +1127,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 provider_name=args.digest_provider,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
             )
 
@@ -1049,6 +1137,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 provider_name=args.portfolio_provider,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
             )
 
@@ -1059,6 +1148,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 provider_name=args.critique_provider,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
                 ensemble_models=args.critique_ensemble,
                 ensemble_merge=args.critique_ensemble_merge,
@@ -1072,6 +1162,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 provider_name=args.proposal_provider,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
                 ensemble_models=args.proposal_ensemble,
                 ensemble_merge=args.proposal_ensemble_merge,
@@ -1085,6 +1176,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 output_root=args.output_root,
                 provider_name=args.analyze_provider,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
                 profile=args.profile,
             )
@@ -1097,6 +1189,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 output_root=args.output_root,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
             )
 
@@ -1105,6 +1198,7 @@ async def main_async(args: argparse.Namespace) -> int:
             if args.output is not None:
                 cfg.output.output_dir = args.output
             _apply_vscode_bridge_override(cfg, args.vscode_bridge_port)
+            _apply_vscode_bridge_socket_override(cfg, args.vscode_bridge_socket)
             if args.resume:
                 resume_err = _validate_resume_quest_id(
                     args.resume, cfg.output.output_dir,
@@ -1123,6 +1217,7 @@ async def main_async(args: argparse.Namespace) -> int:
         configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
         for _, c in configs:
             _apply_vscode_bridge_override(c, args.vscode_bridge_port)
+            _apply_vscode_bridge_socket_override(c, args.vscode_bridge_socket)
         return await run_fleet(
             configs,
             supervisor=supervisor,
@@ -1142,6 +1237,7 @@ async def _run_summarize(
     output_root: Path,
     axon_config_path: Path | None,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
 ) -> int:
     """Top-level wiring for ``python launch.py --summarize <folder>``.
@@ -1160,11 +1256,9 @@ async def _run_summarize(
         return 1
 
     provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
-    # When launched from the VSCode extension the bridge port is set;
-    # honor it the same way quests do.
-    if vscode_bridge_port > 0:
-        provider.name = "vscode_extension"
-        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+    # When launched from the VSCode extension the bridge port or
+    # socket is set; honor either the same way quests do.
+    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     # Best-effort Knowledge handle. The summarizer tolerates
     # `knowledge=None` (or a disabled Knowledge) so an Axon-less
@@ -1206,6 +1300,7 @@ async def _run_digest(
     provider_name: str,
     axon_config_path: Path | None,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
 ) -> int:
     """Top-level wiring for ``python launch.py --digest``.
@@ -1223,9 +1318,7 @@ async def _run_digest(
         return 1
 
     provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
-    if vscode_bridge_port > 0:
-        provider.name = "vscode_extension"
-        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
     try:
@@ -1277,6 +1370,7 @@ async def _run_portfolio(
     provider_name: str,
     axon_config_path: Path | None,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
 ) -> int:
     """Top-level wiring for ``python launch.py --portfolio``.
@@ -1289,9 +1383,7 @@ async def _run_portfolio(
     from core.portfolio import generate_portfolio
 
     provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
-    if vscode_bridge_port > 0:
-        provider.name = "vscode_extension"
-        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
     try:
@@ -1358,6 +1450,7 @@ async def _run_critique(
     provider_name: str,
     axon_config_path: Path | None,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
     ensemble_models: str = "",
     ensemble_merge: str = "synthesize",
@@ -1373,9 +1466,7 @@ async def _run_critique(
     from core.critique import generate_critique
 
     provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
-    if vscode_bridge_port > 0:
-        provider.name = "vscode_extension"
-        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
     try:
@@ -1428,6 +1519,7 @@ async def _run_analyze(
     output_root: Path,
     provider_name: str,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
     profile: bool = False,
 ) -> int:
@@ -1441,7 +1533,14 @@ async def _run_analyze(
     data_load → analyze → write → review) handles the rest."""
     from core.analyze_cli import prepare_analyze_quest
 
-    if vscode_bridge_port > 0:
+    # Force vscode_extension as the provider when EITHER bridge
+    # transport was supplied — the port is the chat-spawn path, the
+    # socket is the persistent IPC path. Setting the name here so
+    # ``prepare_analyze_quest`` builds the Config with the right
+    # provider; we then thread the actual bridge_port / bridge_socket
+    # via _apply_vscode_bridge_*_override below (those touch
+    # ``provider.extra`` directly).
+    if vscode_bridge_port > 0 or vscode_bridge_socket:
         provider_name = "vscode_extension"
 
     try:
@@ -1462,6 +1561,7 @@ async def _run_analyze(
         return 1
 
     _apply_vscode_bridge_override(cfg, vscode_bridge_port)
+    _apply_vscode_bridge_socket_override(cfg, vscode_bridge_socket)
 
     print(
         f"[FI] --analyze: quest_id={quest_id} "
@@ -1488,6 +1588,7 @@ async def _run_new(
     output_root: Path,
     draft_only: bool,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     interactive: bool,
     supervisor: ProxySupervisor,
 ) -> int:
@@ -1842,6 +1943,7 @@ async def _run_update(
     quest_id: str,
     output_root: Path,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     interactive: bool,
     supervisor: ProxySupervisor,
 ) -> int:
@@ -1873,6 +1975,7 @@ async def _run_proposal(
     provider_name: str,
     axon_config_path: Path | None,
     vscode_bridge_port: int,
+    vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
     ensemble_models: str = "",
     ensemble_merge: str = "tournament",
@@ -1886,9 +1989,7 @@ async def _run_proposal(
     from core.proposal import generate_proposal
 
     provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
-    if vscode_bridge_port > 0:
-        provider.name = "vscode_extension"
-        provider.extra = {**(provider.extra or {}), "bridge_port": vscode_bridge_port}
+    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
     try:

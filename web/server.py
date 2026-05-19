@@ -248,26 +248,30 @@ def make_app(
     *,
     max_concurrent: int = 4,
     vscode_bridge_port: int = 0,
+    vscode_bridge_socket: str = "",
 ) -> FastAPI:
     """Build the FastAPI app. Pass the on-disk root where quest dirs
     will live; the server scans this for status and writes new quests
     here when ``POST /api/quests/start`` is called.
 
     ``max_concurrent`` bounds the number of in-flight quests spawned
-    via the web UI interview. ``vscode_bridge_port`` is forwarded to
-    each child quest so LLM calls keep routing through the same
-    bridge the dashboard inherits from its parent."""
+    via the web UI interview. ``vscode_bridge_port`` / ``vscode_bridge_socket``
+    are forwarded to each child quest so LLM calls keep routing
+    through the same bridge the dashboard inherits from its parent.
+    The socket path is the preferred transport (per-user IPC, no port
+    conflict on shared hosts); the port is kept for backward compat
+    with users still passing ``--vscode-bridge-port``."""
     app = FastAPI(title="Frontier Insight", version="1.0")
     registry = _QuestRegistry()
     app.state.registry = registry
     app.state.output_root = output_root
     app.state.supervisor = ProxySupervisor()
-    # Stash the bridge port on app.state so request handlers can guard
-    # against a user picking ``vscode_extension`` when no bridge is
-    # available — the engine would error mid-quest with a cryptic
-    # ``vscode_extension provider requires extra['bridge_port']``;
-    # better to 400 at submit time with a clear message.
+    # Stash both bridge transports on app.state so request handlers
+    # can guard against a user picking ``vscode_extension`` when
+    # neither is available, and so /api/*/schema endpoints can probe
+    # the right address.
     app.state.vscode_bridge_port = vscode_bridge_port
+    app.state.vscode_bridge_socket = vscode_bridge_socket
 
     # Subprocess launcher for quests spawned from the web UI.
     # The launcher lives on the app so request handlers can share it.
@@ -277,6 +281,7 @@ def make_app(
         repo_root=repo_root,
         max_concurrent=max_concurrent,
         vscode_bridge_port=vscode_bridge_port,
+        vscode_bridge_socket=vscode_bridge_socket,
     )
 
     static_dir = Path(__file__).resolve().parent / "static"
@@ -1574,15 +1579,17 @@ async def serve_async(
     port: int = 8765,
     max_concurrent: int = 4,
     vscode_bridge_port: int = 0,
+    vscode_bridge_socket: str = "",
 ) -> None:
     """Async entry point — invoked from within an existing event loop.
     Uses ``uvicorn.Server.serve`` so we don't try to nest event loops.
     The server runs until SIGINT/SIGTERM.
 
     ``max_concurrent`` caps how many quests the web UI's subprocess
-    launcher can spawn at once. ``vscode_bridge_port`` is passed to
-    each spawned child so LLM calls keep routing through the same
-    bridge the dashboard inherits. Both forwarded to ``make_app``."""
+    launcher can spawn at once. ``vscode_bridge_port`` /
+    ``vscode_bridge_socket`` are passed to each spawned child so LLM
+    calls keep routing through the same bridge the dashboard
+    inherits. Both forwarded to ``make_app``."""
     import uvicorn  # imported here so non-server runs don't need it
     _warn_if_non_loopback(host)
     _ensure_axon_sidecar()
@@ -1590,6 +1597,7 @@ async def serve_async(
         output_root.resolve(),
         max_concurrent=max_concurrent,
         vscode_bridge_port=vscode_bridge_port,
+        vscode_bridge_socket=vscode_bridge_socket,
     )
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
@@ -1603,6 +1611,7 @@ def serve(
     port: int = 8765,
     max_concurrent: int = 4,
     vscode_bridge_port: int = 0,
+    vscode_bridge_socket: str = "",
 ) -> None:
     """Blocking entry point invoked when run standalone (no event loop)."""
     import uvicorn  # imported here so non-server runs don't need it
@@ -1612,6 +1621,7 @@ def serve(
         output_root.resolve(),
         max_concurrent=max_concurrent,
         vscode_bridge_port=vscode_bridge_port,
+        vscode_bridge_socket=vscode_bridge_socket,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
 

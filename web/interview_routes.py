@@ -74,7 +74,61 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
 
     @app.get("/api/interview/schema")
     async def get_schema() -> JSONResponse:
-        return JSONResponse(export_schema_json())
+        # Start from the canonical interview schema (the same payload
+        # the CLI consumes). When the dashboard was launched from a
+        # VSCode terminal — i.e. `FI_VSCODE_BRIDGE_PORT` was inherited
+        # — augment the response with `vscode_extension` so the
+        # /interview and /update/<id> provider pickers can offer the
+        # sanctioned Copilot path. The CLI interview keeps the
+        # original list because the comment at core/interview.py:289
+        # still applies there: the VSCode extension pins the provider
+        # silently and the CLI has no bridge to route through.
+        schema = export_schema_json()
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        # Probe both transports — IPC socket path (default for
+        # --serve outside a chat-spawn) and TCP port (chat-spawned
+        # path). Either one open → vscode_extension surfaces.
+        from web._bridge_probe import is_bridge_listening, is_socket_listening
+        import asyncio as _asyncio
+        tcp_ok, sock_ok = await _asyncio.gather(
+            is_bridge_listening(bridge_port),
+            is_socket_listening(bridge_socket),
+        )
+        bridge_live = bool(tcp_ok or sock_ok)
+        schema["vscode_bridge_available"] = bridge_live
+        if bridge_live:
+            providers = list(schema.get("providers", []))
+            if not any(p.get("value") == "vscode_extension" for p in providers):
+                providers.insert(0, {
+                    "value": "vscode_extension",
+                    "label": "vscode_extension — sanctioned Copilot Chat bridge",
+                    "description": (
+                        "Routes every LLM call through vscode.lm on your "
+                        "authenticated Copilot session. Available because "
+                        "this dashboard was launched from a VSCode terminal."
+                    ),
+                })
+            schema["providers"] = providers
+            # Mirror the model list /api/tools/schema advertises so
+            # the existing populateProviderModel() in interview.html
+            # finds entries when the user picks vscode_extension.
+            # Source from the canonical ensemble trio so the picker
+            # and the `full` ensemble fan-out target the same three
+            # models — a single hardcoded list here used to drift
+            # from _ENSEMBLE_MODEL_TRIOS and silently switched models
+            # under the user when they opted into ensemble.
+            provider_models = dict(schema.get("provider_models", {}))
+            if "vscode_extension" not in provider_models:
+                from core.interview import ensemble_model_trio
+                trio = ensemble_model_trio("vscode_extension") or []
+                provider_models["vscode_extension"] = [
+                    {"value": m, "label": m,
+                     "description": "From the vscode_extension ensemble trio."}
+                    for m in trio
+                ]
+            schema["provider_models"] = provider_models
+        return JSONResponse(schema)
 
     @app.post("/api/interview/submit")
     async def submit_new(request: Request) -> JSONResponse:
@@ -84,18 +138,16 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         except (KeyError, TypeError, ValueError) as e:
             raise HTTPException(400, f"invalid answers payload: {e}")
 
-        # Guard: ``vscode_extension`` quests need a live bridge port.
-        # Without one the engine would crash at first LLM call with a
-        # cryptic ``vscode_extension provider requires extra['bridge_port']``
-        # message; 400-fail-fast at submit time so the user sees the
-        # context up front (and a path to fix it).
-        #
-        # Explicit ``> 0`` check (not truthy-on-int) so a stray negative
-        # value can't sneak through — argparse would normally reject
-        # negatives at startup, but the guard should be the same shape
-        # at every layer.
+        # Guard: ``vscode_extension`` quests need a live bridge. Either
+        # transport (IPC socket path or TCP port) is enough; both
+        # empty/zero means there's nowhere to route LLM calls and
+        # the engine would crash on first call. 400-fail-fast so
+        # the user sees a clear message instead of a cryptic
+        # mid-quest traceback.
         bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
-        if answers.provider == "vscode_extension" and bridge_port <= 0:
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        has_bridge = bridge_port > 0 or bool(bridge_socket)
+        if answers.provider == "vscode_extension" and not has_bridge:
             raise HTTPException(
                 400,
                 "vscode_extension provider requires a live bridge — "

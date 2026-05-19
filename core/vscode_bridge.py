@@ -60,9 +60,22 @@ class VSCodeBridgeClient:
     in fleet mode). Concurrent calls are demultiplexed by request id.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        *,
+        socket_path: str | None = None,
+    ) -> None:
+        """Construct an idle client. ``socket_path`` takes precedence
+        over ``host``/``port`` when set — that's the per-user IPC
+        path the extension's PersistentBridge listens on (Unix domain
+        socket on POSIX, named pipe on Windows). Falling back to
+        ``host``/``port`` preserves the per-chat-command TCP path the
+        extension's per-spawn :class:`Bridge` still uses."""
         self.host = host
         self.port = port
+        self.socket_path = socket_path
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         # Per-request futures keyed by id. lm requests resolve to the
@@ -78,8 +91,27 @@ class VSCodeBridgeClient:
         self._lock = asyncio.Lock()  # serialize writes
 
     async def connect(self) -> None:
-        """Open the TCP connection to the extension. Idempotent."""
+        """Open the connection to the extension. Idempotent.
+
+        Two transports today:
+        * ``socket_path`` set → connect to the extension's
+          PersistentBridge over a Unix-domain socket (POSIX) or named
+          pipe (Windows).
+        * Otherwise → TCP connect to ``host``/``port`` (the
+          per-chat-command transport the extension's per-spawn Bridge
+          class uses).
+        """
         if self._writer is not None and not self._writer.is_closing():
+            return
+        if self.socket_path:
+            self._reader, self._writer = await _open_ipc_connection(
+                self.socket_path,
+            )
+            self._reader_task = asyncio.create_task(self._read_loop())
+            _log.info(
+                "connected to VSCode persistent bridge at %s",
+                self.socket_path,
+            )
             return
         try:
             self._reader, self._writer = await asyncio.open_connection(
@@ -279,3 +311,55 @@ class VSCodeBridgeClient:
             ))
         else:
             _log.info("bridge: ignoring message type=%r", mtype)
+
+
+async def _open_ipc_connection(
+    socket_path: str,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Connect to the extension's PersistentBridge over the platform's
+    IPC channel and return the same ``(reader, writer)`` shape
+    :func:`asyncio.open_connection` does, so :class:`VSCodeBridgeClient`
+    doesn't have to special-case the transport elsewhere.
+
+    POSIX → Unix-domain socket via :func:`asyncio.open_unix_connection`.
+
+    Windows → named pipe via :meth:`ProactorEventLoop.create_pipe_connection`
+    wrapped in a :class:`StreamReaderProtocol` adapter so the caller
+    still sees the high-level Stream API. Requires the proactor event
+    loop (the default on Python 3.8+ Windows).
+    """
+    import sys
+
+    if not sys.platform.startswith("win"):
+        try:
+            return await asyncio.open_unix_connection(socket_path)
+        except OSError as e:
+            raise BridgeError(
+                f"could not connect to VSCode persistent bridge at "
+                f"{socket_path}: {e}"
+            ) from e
+
+    # Windows named pipe — ProactorEventLoop's create_pipe_connection
+    # returns a (transport, protocol) tuple; wrap it as a StreamReader
+    # / StreamWriter pair manually because there's no
+    # ``open_pipe_connection`` high-level helper in stdlib.
+    loop = asyncio.get_event_loop()
+    if not hasattr(loop, "create_pipe_connection"):
+        raise BridgeError(
+            "Windows named-pipe transport requires asyncio.ProactorEventLoop "
+            "(the default on Python 3.8+). Got "
+            f"{type(loop).__name__}.",
+        )
+    reader = asyncio.StreamReader(loop=loop)
+    protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+    try:
+        transport, _ = await loop.create_pipe_connection(  # type: ignore[attr-defined]
+            lambda: protocol, socket_path,
+        )
+    except OSError as e:
+        raise BridgeError(
+            f"could not connect to VSCode persistent bridge at "
+            f"{socket_path}: {e}"
+        ) from e
+    writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+    return reader, writer

@@ -535,7 +535,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 1
     },
     {
       "id": "max_iterations",
@@ -710,14 +710,14 @@
   },
   "ensemble_model_trios": {
     "openai": [
-      "gpt-4o",
-      "gpt-4o-mini",
-      "o1-mini"
+      "gpt-5",
+      "gpt-5-mini",
+      "o3-mini"
     ],
     "codex": [
       "gpt-5",
-      "gpt-4o",
-      "gpt-4o-mini"
+      "gpt-5-mini",
+      "gpt-4o"
     ],
     "claude_cli": [
       "claude-opus-4-7",
@@ -726,28 +726,28 @@
     ],
     "codex_cli": [
       "gpt-5",
-      "gpt-4o",
-      "gpt-4o-mini"
+      "gpt-5-mini",
+      "gpt-4o"
     ],
     "copilot_cli": [
-      "gpt-4o",
-      "claude-3-5-sonnet",
-      "o1-mini"
+      "gpt-5",
+      "claude-opus-4-7",
+      "gemini-2.5-pro"
     ],
     "gemini_cli": [
       "gemini-2.5-pro",
       "gemini-2.5-flash",
-      "gemini-2.5-pro"
+      "gemini-2.0-flash"
     ],
     "ollama": [
-      "llama3.1:70b",
+      "llama3.3:70b",
       "qwen2.5:32b",
-      "llama3.1:8b"
+      "qwen2.5:7b"
     ],
     "vscode_extension": [
-      "gpt-4o",
-      "claude-3-5-sonnet",
-      "gemini-2.0-flash"
+      "gpt-5",
+      "claude-opus-4-7",
+      "gemini-2.5-pro"
     ]
   },
   "providers": [
@@ -790,28 +790,28 @@
   "provider_models": {
     "openai": [
       {
-        "value": "gpt-4o",
-        "label": "gpt-4o",
-        "description": "Latest GA. Balanced quality + cost."
+        "value": "gpt-5",
+        "label": "gpt-5",
+        "description": "Latest flagship. Best overall quality."
       },
       {
-        "value": "gpt-4o-mini",
-        "label": "gpt-4o-mini",
+        "value": "gpt-5-mini",
+        "label": "gpt-5-mini",
         "description": "Cheap; good for high-volume nodes."
       },
       {
-        "value": "gpt-4-turbo",
-        "label": "gpt-4-turbo",
-        "description": "Older flagship; still strong."
+        "value": "gpt-4o",
+        "label": "gpt-4o",
+        "description": "Previous-generation default; still strong."
       },
       {
-        "value": "o1-preview",
-        "label": "o1-preview",
+        "value": "o3",
+        "label": "o3",
         "description": "Reasoning model; slower + pricier."
       },
       {
-        "value": "o1-mini",
-        "label": "o1-mini",
+        "value": "o3-mini",
+        "label": "o3-mini",
         "description": "Cheaper reasoning model."
       }
     ],
@@ -819,12 +819,17 @@
       {
         "value": "gpt-5",
         "label": "gpt-5",
-        "description": "ChatGPT backend; quality matches Plus/Pro web UI."
+        "description": "ChatGPT backend; matches Plus/Pro web UI."
+      },
+      {
+        "value": "gpt-5-mini",
+        "label": "gpt-5-mini",
+        "description": "Cheaper Plus/Pro backend variant."
       },
       {
         "value": "gpt-4o",
         "label": "gpt-4o",
-        "description": "Older default."
+        "description": "Previous-generation default."
       }
     ],
     "claude_cli": [
@@ -851,21 +856,36 @@
         "description": "ChatGPT backend default."
       },
       {
+        "value": "gpt-5-mini",
+        "label": "gpt-5-mini",
+        "description": "Cheaper ChatGPT backend variant."
+      },
+      {
         "value": "gpt-4o",
         "label": "gpt-4o",
-        "description": "Older default."
+        "description": "Previous-generation default."
       }
     ],
     "copilot_cli": [
       {
-        "value": "gpt-4o",
-        "label": "gpt-4o",
-        "description": "Copilot Pro/Business default."
+        "value": "gpt-5",
+        "label": "gpt-5",
+        "description": "Copilot Pro/Business default since 2025."
       },
       {
-        "value": "claude-3-5-sonnet",
-        "label": "claude-3-5-sonnet",
-        "description": "Available to some Copilot tiers."
+        "value": "claude-opus-4-7",
+        "label": "claude-opus-4-7",
+        "description": "Available to Copilot Business+."
+      },
+      {
+        "value": "claude-sonnet-4-6",
+        "label": "claude-sonnet-4-6",
+        "description": "Cheaper Anthropic option."
+      },
+      {
+        "value": "gemini-2.5-pro",
+        "label": "gemini-2.5-pro",
+        "description": "Available when Copilot federates Gemini."
       }
     ],
     "gemini_cli": [
@@ -878,23 +898,33 @@
         "value": "gemini-2.5-flash",
         "label": "gemini-2.5-flash",
         "description": "Cheaper / faster."
+      },
+      {
+        "value": "gemini-2.0-flash",
+        "label": "gemini-2.0-flash",
+        "description": "Previous-generation flash."
       }
     ],
     "ollama": [
       {
-        "value": "llama3.1:70b",
-        "label": "llama3.1:70b",
-        "description": "Largest Llama 3.1 that fits 80GB VRAM."
+        "value": "llama3.3:70b",
+        "label": "llama3.3:70b",
+        "description": "Latest large Llama; needs ~48GB VRAM."
       },
       {
-        "value": "llama3.1:8b",
-        "label": "llama3.1:8b",
-        "description": "Fits 12GB VRAM; modest quality."
+        "value": "llama3.2:3b",
+        "label": "llama3.2:3b",
+        "description": "Tiny; fits a laptop GPU."
       },
       {
         "value": "qwen2.5:32b",
         "label": "qwen2.5:32b",
         "description": "Strong open-source mid-size."
+      },
+      {
+        "value": "qwen2.5:7b",
+        "label": "qwen2.5:7b",
+        "description": "Lighter Qwen for laptops."
       }
     ]
   },

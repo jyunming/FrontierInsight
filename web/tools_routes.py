@@ -290,7 +290,50 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
 
     @app.get("/api/tools/schema")
     async def tools_schema() -> JSONResponse:
-        return JSONResponse({"tools": [_spec_to_dict(t) for t in TOOL_SPECS]})
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        # Probe both transports. Either one open → vscode_extension
+        # lights up in the UI. The IPC socket path is now the canonical
+        # default for --serve (no port to wire); the TCP port is kept
+        # for backward compat with chat-spawned environments where the
+        # extension passed --vscode-bridge-port. We probe in parallel
+        # so the slower one doesn't gate the schema fetch.
+        from web._bridge_probe import is_bridge_listening, is_socket_listening
+        import asyncio as _asyncio
+        tcp_ok, sock_ok = await _asyncio.gather(
+            is_bridge_listening(bridge_port),
+            is_socket_listening(bridge_socket),
+        )
+        bridge_live = bool(tcp_ok or sock_ok)
+        return JSONResponse({
+            "tools": [_spec_to_dict(t) for t in TOOL_SPECS],
+            # When the dashboard was launched from a VSCode terminal,
+            # the bridge port is inherited and every tool can route
+            # LLM calls through `vscode.lm.*`. The client uses this
+            # flag to surface `vscode_extension` in the provider
+            # picker (it is intentionally absent from the interview's
+            # PROVIDER_CHOICES list).
+            "vscode_bridge_available": bridge_live,
+            # Source from the canonical ensemble trio so the picker
+            # never drifts from what the `full` ensemble profile
+            # would actually fan out across. Both lists were
+            # hardcoded separately before; that drift gets users
+            # who pick a single model and then opt into the
+            # ensemble silently routed across a different set.
+            "vscode_extension_models": _vscode_extension_model_choices(),
+        })
+
+    @app.get("/api/provider/models")
+    async def provider_models(provider: str = "") -> JSONResponse:
+        """Live model-list discovery for the picker. Replies with
+        either {source:"dynamic", models:[...]} when a real endpoint
+        (OpenAI /v1/models, Ollama /api/tags, the VSCode persistent
+        bridge) answered, or {source:"static"} which signals the UI
+        to fall through to the schema's curated list.
+
+        5-minute in-memory cache keyed on provider name so the picker
+        can re-fetch on every change without hammering the upstream."""
+        return await _provider_models_cached(app, (provider or "").strip())
 
     @app.post("/api/tools/{tool_name}")
     async def run_tool(tool_name: str, request: Request) -> JSONResponse:
@@ -312,6 +355,23 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
                 for k, v in form.items()
             }
             uploaded_paths = await _stage_uploads(form, output_root, spec.name)
+
+        # Mirror the interview's submit-time guard: refuse
+        # `vscode_extension` when neither bridge transport is wired.
+        # The IPC socket is the default path; the TCP port is kept
+        # for the chat-spawn case where the extension passes it.
+        picked_provider = (payload.get("provider") or "").strip()
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        if picked_provider == "vscode_extension" and bridge_port <= 0 and not bridge_socket:
+            raise HTTPException(
+                400,
+                "vscode_extension provider requires a live VSCode bridge — "
+                "neither --vscode-bridge-socket (the per-user IPC default) "
+                "nor --vscode-bridge-port is wired. Either launch VSCode "
+                "with the FI extension active (so the PersistentBridge is "
+                "available) or pick a different provider.",
+            )
 
         try:
             argv_tail = _build_argv(spec, payload, uploaded_paths, output_root)
@@ -341,6 +401,121 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             "artifact_dir": str(output_root / spec.artifact_dir)
             if spec.artifact_dir else None,
         })
+
+
+# Per-profile fan-out scope. The interview's
+# ``core.interview.expand_ensemble_profile`` plus
+# ``ensemble_model_trios`` already define the canonical mapping; this
+# is the same mapping spelled out for the standalone-tool case where
+# the engine isn't running and we just need an explicit CSV for the
+# ``--{tool}-ensemble`` flag.
+_ENSEMBLE_PROFILE_TO_TRIO_KEY: dict[str, str] = {
+    "off": "",  # no fan-out
+    "cross_check_only": "trio",
+    "ideate_and_check": "trio",
+    "full": "trio",
+}
+
+
+def _ensemble_argv_tail(
+    tool: str, provider: str, payload: dict[str, Any],
+) -> list[str]:
+    """Build the ``--{tool}-ensemble M1,M2,M3 --{tool}-ensemble-merge X``
+    tail for the spawned subprocess based on the picked profile +
+    provider. Returns ``[]`` for ``off`` / missing / unknown profile.
+
+    Cross-references the canonical trios at
+    ``core.interview._ENSEMBLE_MODEL_TRIOS`` so the standalone tool
+    fan-out matches the engine's node-ensemble fan-out for the same
+    provider + profile.
+    """
+    profile = (payload.get("ensemble_profile") or "off").strip()
+    if profile == "off" or profile not in _ENSEMBLE_PROFILE_TO_TRIO_KEY:
+        return []
+    if not provider:
+        # No provider picked — fan-out has nowhere to fall back to.
+        # Caller will surface this as a UI prompt rather than silently
+        # dropping the profile.
+        return []
+    try:
+        from core.interview import ensemble_model_trio
+    except Exception:
+        return []
+    trio = ensemble_model_trio(provider, payload.get("provider_model"))
+    if not trio:
+        return []
+    # The CLI flag accepts the same CSV the engine YAML accepts.
+    csv = ",".join(trio)
+    # `synthesize` is critique's documented default; proposal defaults
+    # to `tournament`. Keep parity with launch.py argparse defaults so
+    # we don't introduce a behaviour drift between the two surfaces.
+    merge = "tournament" if tool == "proposal" else "synthesize"
+    return [f"--{tool}-ensemble", csv, f"--{tool}-ensemble-merge", merge]
+
+
+# Per-provider in-memory cache for ``/api/provider/models``. Keyed on
+# provider name; entries expire after _PROVIDER_MODELS_TTL_S so a
+# freshly-installed model (``ollama pull`` etc.) doesn't take an hour
+# to show up in the picker. Cache lives at module scope rather than
+# on app.state so test clients share it within the test process —
+# call _provider_models_cache_clear() in setup if you need a fresh
+# cache.
+_PROVIDER_MODELS_TTL_S = 300
+_provider_models_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _provider_models_cache_clear() -> None:
+    _provider_models_cache.clear()
+
+
+# Per-call rather than module-constant so reloading the schema (e.g.
+# a test that bumps the trio) picks up changes without reimporting
+# the routes module.
+def _vscode_extension_model_choices() -> list[dict[str, str]]:
+    """Render the picker's vscode_extension model list from the
+    canonical ensemble trio in ``core.interview``. Keeps the
+    single-model dropdown values in lock-step with what the `full`
+    ensemble profile would fan out across, so a user who pre-picks
+    one model and then enables ensemble doesn't get silently routed
+    through a different three."""
+    try:
+        from core.interview import ensemble_model_trio
+        trio = ensemble_model_trio("vscode_extension") or []
+    except Exception:
+        trio = []
+    return [
+        {"value": m, "label": m,
+         "description": "From the vscode_extension ensemble trio."}
+        for m in trio
+    ]
+
+
+async def _provider_models_cached(app: FastAPI, provider: str) -> JSONResponse:
+    """Dispatch helper shared by /api/provider/models. Holds the
+    cache off the request handler so it can be cleared from tests
+    without touching the endpoint's signature."""
+    if not provider:
+        return JSONResponse(
+            {"source": "static", "provider": "", "models": []},
+        )
+    now = time.time()
+    hit = _provider_models_cache.get(provider)
+    if hit and (now - hit[0]) < _PROVIDER_MODELS_TTL_S:
+        return JSONResponse(hit[1])
+    from core.provider_models_discover import discover
+    bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+    bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+    models = await discover(
+        provider,
+        bridge_socket=bridge_socket,
+        bridge_port=bridge_port,
+    )
+    if models is None:
+        body = {"source": "static", "provider": provider, "models": []}
+    else:
+        body = {"source": "dynamic", "provider": provider, "models": models}
+    _provider_models_cache[provider] = (now, body)
+    return JSONResponse(body)
 
 
 async def _stage_uploads(form: Any, output_root: Path, tool_name: str) -> list[Path]:
@@ -391,17 +566,28 @@ def _build_argv(
         flag = f"--{spec.name}-provider"
         provider_tail = [flag, provider]
 
+    # Ensemble tail: --<tool>-ensemble takes a CSV of models, not a
+    # profile name. Expand the profile picked in the UI into the
+    # provider's curated 3-model trio (mirrors what the interview's
+    # YAML emitter does for engine-side node_ensemble). Only the two
+    # tools that currently have CLI ensemble flags are wired here;
+    # the other 4 LLM tools need core-layer ensemble support before
+    # they can accept this argument.
+    ensemble_tail: list[str] = []
+    if spec.needs_llm and name in ("proposal", "critique"):
+        ensemble_tail = _ensemble_argv_tail(name, provider, payload)
+
     if name == "proposal":
         topic = (payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("topic is required")
-        return ["--proposal", topic, *provider_tail]
+        return ["--proposal", topic, *provider_tail, *ensemble_tail]
 
     if name == "critique":
         quest_id = (payload.get("quest_id") or "").strip()
         if not quest_id:
             raise ValueError("quest_id is required")
-        return ["--critique", quest_id, *provider_tail]
+        return ["--critique", quest_id, *provider_tail, *ensemble_tail]
 
     if name == "digest":
         days = int(payload.get("days") or 7)

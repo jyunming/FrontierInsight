@@ -50,11 +50,21 @@
   let spec = null;
   let allQuests = [];
   let providerSchema = null;
+  // Whether the dashboard was launched from a VSCode terminal — when
+  // true we surface `vscode_extension` as a provider option and let
+  // VSCode's Chat model picker drive the model.
+  let vscodeBridgeAvailable = false;
+  // Extra model list for vscode_extension that's intentionally absent
+  // from the interview's `provider_models` map (the interview never
+  // asks about vscode_extension). Comes from /api/tools/schema.
+  let vscodeExtensionModels = [];
 
   async function load() {
     const res = await fetch('/api/tools/schema');
     const data = await res.json();
     spec = data.tools.find(t => t.name === toolName);
+    vscodeBridgeAvailable = !!data.vscode_bridge_available;
+    vscodeExtensionModels = data.vscode_extension_models || [];
     if (!spec) {
       document.getElementById('tool-title').textContent = 'Unknown tool';
       document.getElementById('tool-blurb').textContent = `No spec found for "${toolName}".`;
@@ -91,8 +101,29 @@
       const grid = fs.querySelector('.fields-grid');
       grid.classList.remove('grid-cols-1');
       grid.classList.add('grid-cols-1', 'md:grid-cols-2');
-      grid.appendChild(makeProviderPicker(providerSchema.providers || []));
+      // Augment provider list with vscode_extension when the dashboard
+      // was launched from a VSCode terminal. /api/interview/schema
+      // already injects it at the head when bridge is wired, so first
+      // check whether it's there; only prepend if absent (older /serve
+      // builds may not augment that schema).
+      let providers = (providerSchema.providers || []).slice();
+      const alreadyHasVscode = providers.some(p => p.value === 'vscode_extension');
+      if (vscodeBridgeAvailable && !alreadyHasVscode) {
+        providers = [{
+          value: 'vscode_extension',
+          label: 'vscode_extension — sanctioned Copilot Chat bridge',
+          description: 'Routes every LLM call through vscode.lm on your authenticated Copilot session. Available because this dashboard was launched from a VSCode terminal.',
+        }, ...providers];
+      }
+      grid.appendChild(makeProviderPicker(providers));
       grid.appendChild(makeModelPicker());
+      // Only the two tools whose CLI accept --<tool>-ensemble can
+      // honour the picker. Surfacing it elsewhere would silently
+      // discard the user's choice. Other LLM tools need core-side
+      // ensemble wiring before they can join.
+      if (spec.name === 'proposal' || spec.name === 'critique') {
+        grid.appendChild(makeEnsemblePicker(providerSchema.ensemble_profiles || []));
+      }
       form.appendChild(fs);
     }
     // Submit row.
@@ -166,7 +197,11 @@
   function makeProviderPicker(providers) {
     const wrap = document.createElement('div');
     wrap.className = 'flex flex-col gap-2';
-    const opts = providers.map(p => `<option value="${escapeAttr(p.value)}">${escapeHtml(p.label)}</option>`).join('');
+    const opts = providers.map(p => `<option value="${escapeAttr(p.value)}" title="${escapeAttr(p.description || '')}">${escapeHtml(p.label)}</option>`).join('');
+    // Provider does NOT get an "Other" option (parity with the main
+    // interview's PROVIDER_CHOICES, which keeps allow_other=False).
+    // Provider names map to concrete transports in core/provider.py;
+    // accepting a free-text value would just crash at engine init.
     wrap.innerHTML = `
       <label class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider" for="f-provider">Provider</label>
       <div class="relative">
@@ -176,13 +211,48 @@
         <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-outline pointer-events-none">expand_more</span>
       </div>
     `;
-    wrap.querySelector('select').addEventListener('change', (e) => {
-      const models = (providerSchema.provider_models || {})[e.target.value] || [];
-      const msel = document.getElementById('f-provider_model');
-      msel.innerHTML = '<option value="">' + (models.length ? '(pick a model)' : '(none for this provider)') + '</option>'
-        + models.map(m => `<option value="${escapeAttr(m.value)}">${escapeHtml(m.label)}</option>`).join('');
+    const sel = wrap.querySelector('select');
+    sel.addEventListener('change', (e) => {
+      const v = e.target.value;
+      void populateModelsFor(v);
     });
     return wrap;
+  }
+
+  // Populate the model picker for ``v``. Tries the live discovery
+  // endpoint first (OpenAI /v1/models, Ollama /api/tags, ...) and
+  // falls back to the static schema list when the endpoint returns
+  // ``{source: "static"}``. Always appends an "Other" option so a
+  // brand-new model not on either list is still typeable.
+  async function populateModelsFor(provider) {
+    const msel = document.getElementById('f-provider_model');
+    if (!msel) return;
+    const staticFallback = provider === 'vscode_extension'
+      ? vscodeExtensionModels
+      : ((providerSchema.provider_models || {})[provider] || []);
+    // Render the static set first so the picker isn't blank while
+    // the discovery fetch is in flight.
+    renderModelOptions(msel, staticFallback, /* dynamicSource */ false);
+    if (!provider) return;
+    try {
+      const res = await fetch(`/api/provider/models?provider=${encodeURIComponent(provider)}`);
+      if (!res.ok) return;
+      const body = await res.json();
+      if (body.source === 'dynamic' && Array.isArray(body.models) && body.models.length) {
+        renderModelOptions(msel, body.models, /* dynamicSource */ true);
+      }
+    } catch (_) { /* keep static fallback */ }
+  }
+
+  function renderModelOptions(msel, models, dynamicSource) {
+    const blankLabel = models.length
+      ? (dynamicSource ? '(pick a model — live)' : '(pick a model)')
+      : '(none for this provider)';
+    const otherModelOpt = '<option value="__OTHER__">Other (type your own)…</option>';
+    msel.innerHTML = `<option value="">${blankLabel}</option>`
+      + models.map(m => `<option value="${escapeAttr(m.value)}" title="${escapeAttr(m.description || '')}">${escapeHtml(m.label)}</option>`).join('')
+      + otherModelOpt;
+    handleOtherSelection(msel, 'Model');
   }
 
   function makeModelPicker() {
@@ -193,11 +263,68 @@
       <div class="relative">
         <select id="f-provider_model" name="provider_model" class="w-full bg-surface-low border border-outline-variant rounded-lg p-3 pl-4 pr-10 font-code-md text-code-md text-on-surface appearance-none focus:outline-none input-glow transition-all">
           <option value="">(pick a provider first)</option>
+          <option value="__OTHER__">Other (type your own)…</option>
         </select>
         <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-outline pointer-events-none">expand_more</span>
       </div>
     `;
+    wrap.querySelector('select').addEventListener('change', (e) => {
+      handleOtherSelection(e.target, 'Model');
+    });
     return wrap;
+  }
+
+  function makeEnsemblePicker(profiles) {
+    // Profiles come from /api/interview/schema's `ensemble_profiles`.
+    // Schema falls back to a static list so the picker still renders
+    // if the interview-side endpoint is unreachable.
+    const fallback = [
+      { value: 'off',                 label: 'off — single model (cheapest)' },
+      { value: 'cross_check_only',    label: 'cross_check only — fan out the cross_check node' },
+      { value: 'ideate_and_check',    label: 'ideate + cross_check' },
+      { value: 'full',                label: 'full — ideate + analyze + cross_check' },
+    ];
+    const list = profiles.length ? profiles : fallback;
+    const opts = list.map(p => `<option value="${escapeAttr(p.value)}" title="${escapeAttr(p.description || '')}"${p.value === 'off' ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('');
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-2 md:col-span-2';
+    wrap.innerHTML = `
+      <label class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider" for="f-ensemble_profile">Multi-model ensemble</label>
+      <div class="relative">
+        <select id="f-ensemble_profile" name="ensemble_profile" class="w-full bg-surface-low border border-outline-variant rounded-lg p-3 pl-4 pr-10 font-code-md text-code-md text-on-surface appearance-none focus:outline-none input-glow transition-all">
+          ${opts}
+        </select>
+        <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-outline pointer-events-none">expand_more</span>
+      </div>
+      <p class="font-body-md text-body-md text-outline italic">Fan out the LLM call across the picked provider's 3-model trio and merge. Cost multiplies; agreement signal increases.</p>
+    `;
+    return wrap;
+  }
+
+  // Reveal / hide a text input below a select when its value is the
+  // sentinel `__OTHER__`. The input is reused on subsequent changes
+  // and removed-by-hide (kept in the DOM so its value can be cleared
+  // when the user reselects a curated option). Mirrors the pattern
+  // interview.html uses so /tools and /interview behave the same.
+  function handleOtherSelection(sel, fieldLabel) {
+    const otherId = `${sel.id}-other`;
+    let other = document.getElementById(otherId);
+    if (sel.value === '__OTHER__') {
+      if (!other) {
+        other = document.createElement('input');
+        other.type = 'text';
+        other.id = otherId;
+        other.name = `${sel.name}_other`;
+        other.placeholder = `Type a ${fieldLabel.toLowerCase()} value…`;
+        other.className = 'w-full bg-surface-low border border-outline-variant rounded-lg p-3 px-4 font-code-md text-code-md text-on-surface focus:outline-none input-glow transition-all mt-2';
+        sel.parentElement.insertAdjacentElement('afterend', other);
+      }
+      other.style.display = '';
+      other.focus();
+    } else if (other) {
+      other.style.display = 'none';
+      other.value = '';
+    }
   }
 
   // Named `submitTool` rather than `submit` — the bare `submit` name in
@@ -209,6 +336,22 @@
     ev.preventDefault();
     const form = document.getElementById('tool-form');
     const fd = new FormData(form);
+    // Resolve __OTHER__ → user-typed value for model before POST so
+    // the backend sees a real value (mirrors interview.html). Strips
+    // the side-channel `_other` field. Provider has no Other option.
+    if (fd.get('provider_model') === '__OTHER__') {
+      const typed = (fd.get('provider_model_other') || '').toString().trim();
+      if (!typed) {
+        const result = document.getElementById('result');
+        result.classList.remove('hidden');
+        result.className = 'w-full max-w-4xl fi-banner fi-banner-error';
+        result.textContent = 'Pick a model or type one in the "Other" field.';
+        document.getElementById('f-provider_model-other')?.focus();
+        return false;
+      }
+      fd.set('provider_model', typed);
+    }
+    fd.delete('provider_model_other');
     const result = document.getElementById('result');
     result.classList.remove('hidden');
     result.className = 'w-full max-w-4xl fi-banner fi-banner-info';
