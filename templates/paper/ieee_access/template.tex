@@ -9,6 +9,12 @@
 \usepackage{graphicx}
 % Required for pandoc-rendered markdown tables (pandoc emits egin{longtable}).
 \usepackage{longtable}
+% Required for pandoc-rendered table column widths. Pandoc emits column
+% specs like ``p{(\linewidth - 6\tabcolsep) * \real{0.2667}}`` whose
+% arithmetic only parses with calc loaded. Without this, any markdown
+% table with relative column widths fails the LaTeX compile with
+% ``Missing number, treated as zero`` at the longtable \begin{}.
+\usepackage{calc}
 \usepackage{array}
 % pandoc emits \def\LTcaptype{none} for caption-less tables; longtable
 % then calls \refstepcounter{none} internally, so the counter must exist.
