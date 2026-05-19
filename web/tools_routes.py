@@ -571,9 +571,12 @@ def _build_argv(
     # /api/provider/models for vscode_extension).
     provider = (payload.get("provider") or "").strip()
     # The picker emits ``provider_model``; the free-text sibling for
-    # "Other (type your own)" lives at ``provider_model_other`` but
-    # tools.html already collapses that into ``provider_model`` before
-    # POST, so only one key needs to be read here.
+    # "Other (type your own)" lives at ``provider_model_other``.
+    # ``tools.html`` collapses the two before POST (rewrites
+    # ``provider_model`` from the typed value when the picker is on
+    # ``__OTHER__`` and drops the sibling key), so the typed-path
+    # branch below is defence-in-depth for direct curl / scripted
+    # POSTs that skip the JS layer — not dead code.
     model = (payload.get("provider_model") or "").strip()
     if model == "__OTHER__":
         model = (payload.get("provider_model_other") or "").strip()

@@ -189,9 +189,15 @@ export class PersistentBridge {
             // working when the YAML pre-dates the picker.
             let models: vscode.LanguageModelChat[] = [];
             if (req.model_hint) {
-                models = await vscode.lm.selectChatModels({ id: req.model_hint });
+                // Constrain to vendor=copilot on both legs — this bridge
+                // exists to route FI's Copilot session, and the diagnostic
+                // dump below also pins vendor=copilot, so matching against
+                // any other vendor would produce inconsistent behavior
+                // (and could silently pull a non-Copilot model into a
+                // quest the user expects to bill against Copilot).
+                models = await vscode.lm.selectChatModels({ vendor: "copilot", id: req.model_hint });
                 if (!models.length) {
-                    models = await vscode.lm.selectChatModels({ family: req.model_hint });
+                    models = await vscode.lm.selectChatModels({ vendor: "copilot", family: req.model_hint });
                 }
             } else {
                 models = await vscode.lm.selectChatModels({ vendor: "copilot" });

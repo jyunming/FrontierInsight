@@ -226,9 +226,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the per-provider default model for --summarize. "
              "For vscode_extension this is the model id from the picker "
              "(e.g. gemini-3-flash-preview); for CLI providers it's the "
-             "--model / -m / --proposal-model value. Empty → "
-             "provider default (or the user's Copilot Chat-picker "
-             "selection for vscode_extension).",
+             "same identifier the provider's own --model / -m flag "
+             "accepts. Empty → provider default (or the user's Copilot "
+             "Chat-picker selection for vscode_extension).",
     )
     p.add_argument(
         "--days",
