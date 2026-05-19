@@ -580,11 +580,11 @@ def _build_argv(
     # Ensemble tail: --<tool>-ensemble takes a CSV of models, not a
     # profile name. Expand the profile picked in the UI into the
     # provider's curated 3-model trio (mirrors what the interview's
-    # YAML emitter does for engine-side node_ensemble). Only the two
-    # Every LLM tool accepts --<tool>-ensemble now (single-shot fan-out
-    # for digest/portfolio/summarize/critique/proposal; engine-level
-    # node_ensemble for analyze). Map the profile picker to the CSV
-    # the CLI expects.
+    # YAML emitter does for engine-side node_ensemble).
+    # Every LLM tool accepts --<tool>-ensemble now: single-shot
+    # fan-out for digest / portfolio / summarize / critique / proposal,
+    # engine-level node_ensemble for analyze. Map the profile picker
+    # to the CSV the CLI expects.
     _ENSEMBLE_TOOLS = {"proposal", "critique", "digest", "portfolio",
                        "summarize", "analyze"}
     ensemble_tail: list[str] = []

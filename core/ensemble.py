@@ -507,7 +507,11 @@ async def run_singleshot_with_ensemble(
                 chat_fn=chat_fn, node=node, prompt_summary=summary,
             )
         elif merge_kind == "vote":
-            result = await merge_vote(raw)
+            # merge_vote is sync (pure tally; no moderator LLM call) —
+            # do NOT await. ``await`` on a non-awaitable raises at
+            # runtime as "object EnsembleResult can't be used in 'await'
+            # expression".
+            result = merge_vote(raw)
         else:
             result = await merge_synthesize(
                 raw, moderator_model=moderator,
