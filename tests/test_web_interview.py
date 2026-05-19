@@ -65,6 +65,37 @@ def test_interview_schema_endpoint_returns_questions(tmp_path: Path) -> None:
         assert new_q in ids
 
 
+def test_interview_schema_hides_vscode_extension_without_bridge(tmp_path: Path) -> None:
+    """The CLI-shared provider list intentionally omits vscode_extension
+    (see core/interview.py:289 — the VSCode extension pins it silently).
+    A dashboard launched without FI_VSCODE_BRIDGE_PORT must keep that
+    list unchanged."""
+    payload = _client(tmp_path).get("/api/interview/schema").json()
+    providers = {p["value"] for p in payload["providers"]}
+    assert "vscode_extension" not in providers
+    assert payload.get("vscode_bridge_available") is False
+    assert "vscode_extension" not in payload.get("provider_models", {})
+
+
+def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(tmp_path: Path) -> None:
+    """When the dashboard inherits FI_VSCODE_BRIDGE_PORT (i.e. was
+    launched from a VSCode terminal), the interview's provider list
+    must offer vscode_extension AND populate its model list, so the
+    user picking it gets the same UX as any other provider."""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    app = make_app(output_root, vscode_bridge_port=37001)
+    payload = TestClient(app).get("/api/interview/schema").json()
+    providers = [p["value"] for p in payload["providers"]]
+    # Surfaced at the head of the list so the sanctioned path is the
+    # first thing a user sees in the picker.
+    assert providers[0] == "vscode_extension"
+    assert payload["vscode_bridge_available"] is True
+    models = payload["provider_models"].get("vscode_extension", [])
+    assert any(m["value"] == "gpt-4o" for m in models)
+    assert any(m["value"] == "claude-3-5-sonnet" for m in models)
+
+
 def test_submit_new_writes_yaml(tmp_path: Path) -> None:
     client = _client(tmp_path)
     res = client.post("/api/interview/submit", json=_ok_answers_payload())

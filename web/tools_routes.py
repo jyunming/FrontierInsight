@@ -290,7 +290,25 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
 
     @app.get("/api/tools/schema")
     async def tools_schema() -> JSONResponse:
-        return JSONResponse({"tools": [_spec_to_dict(t) for t in TOOL_SPECS]})
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        return JSONResponse({
+            "tools": [_spec_to_dict(t) for t in TOOL_SPECS],
+            # When the dashboard was launched from a VSCode terminal,
+            # the bridge port is inherited and every tool can route
+            # LLM calls through `vscode.lm.*`. The client uses this
+            # flag to surface `vscode_extension` in the provider
+            # picker (it is intentionally absent from the interview's
+            # PROVIDER_CHOICES list).
+            "vscode_bridge_available": bridge_port > 0,
+            "vscode_extension_models": [
+                {"value": "gpt-4o", "label": "gpt-4o",
+                 "description": "Copilot default when available."},
+                {"value": "claude-3-5-sonnet", "label": "claude-3-5-sonnet",
+                 "description": "Available on some Copilot tiers."},
+                {"value": "gemini-2.0-flash", "label": "gemini-2.0-flash",
+                 "description": "Available when Copilot federates Gemini."},
+            ],
+        })
 
     @app.post("/api/tools/{tool_name}")
     async def run_tool(tool_name: str, request: Request) -> JSONResponse:
@@ -312,6 +330,21 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
                 for k, v in form.items()
             }
             uploaded_paths = await _stage_uploads(form, output_root, spec.name)
+
+        # Mirror the interview's submit-time guard: refuse
+        # `vscode_extension` when the dashboard wasn't started from
+        # a VSCode terminal — the spawned subprocess would otherwise
+        # crash mid-run with a cryptic bridge error.
+        picked_provider = (payload.get("provider") or "").strip()
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        if picked_provider == "vscode_extension" and bridge_port <= 0:
+            raise HTTPException(
+                400,
+                "vscode_extension provider requires a live VSCode bridge — "
+                "this dashboard was not launched from a VSCode terminal "
+                "(FI_VSCODE_BRIDGE_PORT is unset). Either launch via the "
+                "VSCode extension's terminal or pick a different provider.",
+            )
 
         try:
             argv_tail = _build_argv(spec, payload, uploaded_paths, output_root)

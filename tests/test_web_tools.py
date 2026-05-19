@@ -272,3 +272,68 @@ def test_post_503_when_launcher_full(
     res = client.post("/api/tools/portfolio", json={})
     assert res.status_code == 503
     assert res.headers.get("Retry-After") == "30"
+
+
+# ---------------------------------------------------------------------------
+# vscode_extension provider + bridge guard
+# ---------------------------------------------------------------------------
+
+
+def test_tools_schema_reports_no_bridge_by_default(tmp_path: Path) -> None:
+    """Without a VSCode bridge port, the schema must advertise the
+    provider as unavailable so the UI doesn't surface it."""
+    res = _client(tmp_path).get("/api/tools/schema")
+    body = res.json()
+    assert body["vscode_bridge_available"] is False
+    # The vscode_extension model list is always included so the UI
+    # can render it the moment a bridge becomes available without
+    # re-fetching schema.
+    assert isinstance(body.get("vscode_extension_models"), list)
+    assert any(m["value"] == "gpt-4o" for m in body["vscode_extension_models"])
+
+
+def test_tools_schema_reports_bridge_when_port_set(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    app = make_app(output_root, vscode_bridge_port=37001)
+    client = TestClient(app)
+    body = client.get("/api/tools/schema").json()
+    assert body["vscode_bridge_available"] is True
+
+
+def test_post_tool_with_vscode_extension_requires_bridge(
+    tmp_path: Path, mock_subprocess: list[list[str]],
+) -> None:
+    """The interview already 400s when a user picks vscode_extension
+    without a live bridge; the tools endpoint must do the same so
+    the spawned subprocess doesn't crash mid-run with a cryptic
+    bridge error."""
+    client = _client(tmp_path)  # no bridge_port
+    res = client.post(
+        "/api/tools/proposal",
+        json={"topic": "x", "provider": "vscode_extension"},
+    )
+    assert res.status_code == 400
+    assert "vscode_extension" in res.text
+    assert "bridge" in res.text.lower()
+    assert not mock_subprocess  # nothing spawned
+
+
+def test_post_tool_with_vscode_extension_and_bridge_succeeds(
+    tmp_path: Path, mock_subprocess: list[list[str]],
+) -> None:
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    app = make_app(output_root, vscode_bridge_port=37001)
+    client = TestClient(app)
+    res = client.post(
+        "/api/tools/proposal",
+        json={"topic": "test topic", "provider": "vscode_extension"},
+    )
+    assert res.status_code == 200, res.text
+    argv = mock_subprocess[0]
+    # The per-tool --<tool>-provider flag must carry vscode_extension
+    # through to the subprocess, otherwise launch.py would fall back
+    # to its own default.
+    assert "--proposal-provider" in argv
+    assert "vscode_extension" in argv

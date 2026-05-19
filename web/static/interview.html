@@ -364,6 +364,15 @@
       if (!editable) sel.disabled = true;
       let choices = q.choices;
       if (q.id === 'provider_model') choices = [];
+      // Prefer the top-level `schema.providers` list for the
+      // `provider` question — the server augments that list with
+      // `vscode_extension` when the dashboard was launched from a
+      // VSCode terminal (the question's embedded `choices` comes
+      // straight from PROVIDER_CHOICES, which intentionally omits
+      // vscode_extension for the CLI's sake).
+      if (q.id === 'provider' && Array.isArray(schema.providers) && schema.providers.length) {
+        choices = schema.providers;
+      }
       const blank = document.createElement('option');
       blank.value = '';
       blank.textContent = q.id === 'provider_model' ? '(pick a provider first)' : '(pick one)';

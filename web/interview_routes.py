@@ -74,7 +74,45 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
 
     @app.get("/api/interview/schema")
     async def get_schema() -> JSONResponse:
-        return JSONResponse(export_schema_json())
+        # Start from the canonical interview schema (the same payload
+        # the CLI consumes). When the dashboard was launched from a
+        # VSCode terminal — i.e. `FI_VSCODE_BRIDGE_PORT` was inherited
+        # — augment the response with `vscode_extension` so the
+        # /interview and /update/<id> provider pickers can offer the
+        # sanctioned Copilot path. The CLI interview keeps the
+        # original list because the comment at core/interview.py:289
+        # still applies there: the VSCode extension pins the provider
+        # silently and the CLI has no bridge to route through.
+        schema = export_schema_json()
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        schema["vscode_bridge_available"] = bridge_port > 0
+        if bridge_port > 0:
+            providers = list(schema.get("providers", []))
+            if not any(p.get("value") == "vscode_extension" for p in providers):
+                providers.insert(0, {
+                    "value": "vscode_extension",
+                    "label": "vscode_extension — sanctioned Copilot Chat bridge",
+                    "description": (
+                        "Routes every LLM call through vscode.lm on your "
+                        "authenticated Copilot session. Available because "
+                        "this dashboard was launched from a VSCode terminal."
+                    ),
+                })
+            schema["providers"] = providers
+            # Mirror the model list /api/tools/schema advertises so
+            # the existing populateProviderModel() in interview.html
+            # finds entries when the user picks vscode_extension.
+            provider_models = dict(schema.get("provider_models", {}))
+            provider_models.setdefault("vscode_extension", [
+                {"value": "gpt-4o", "label": "gpt-4o",
+                 "description": "Copilot default when available."},
+                {"value": "claude-3-5-sonnet", "label": "claude-3-5-sonnet",
+                 "description": "Available on some Copilot tiers."},
+                {"value": "gemini-2.0-flash", "label": "gemini-2.0-flash",
+                 "description": "Available when Copilot federates Gemini."},
+            ])
+            schema["provider_models"] = provider_models
+        return JSONResponse(schema)
 
     @app.post("/api/interview/submit")
     async def submit_new(request: Request) -> JSONResponse:
