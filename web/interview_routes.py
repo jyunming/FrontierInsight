@@ -85,8 +85,19 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # silently and the CLI has no bridge to route through.
         schema = export_schema_json()
         bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
-        schema["vscode_bridge_available"] = bridge_port > 0
-        if bridge_port > 0:
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        # Probe both transports — IPC socket path (default for
+        # --serve outside a chat-spawn) and TCP port (chat-spawned
+        # path). Either one open → vscode_extension surfaces.
+        from web._bridge_probe import is_bridge_listening, is_socket_listening
+        import asyncio as _asyncio
+        tcp_ok, sock_ok = await _asyncio.gather(
+            is_bridge_listening(bridge_port),
+            is_socket_listening(bridge_socket),
+        )
+        bridge_live = bool(tcp_ok or sock_ok)
+        schema["vscode_bridge_available"] = bridge_live
+        if bridge_live:
             providers = list(schema.get("providers", []))
             if not any(p.get("value") == "vscode_extension" for p in providers):
                 providers.insert(0, {
@@ -122,18 +133,16 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         except (KeyError, TypeError, ValueError) as e:
             raise HTTPException(400, f"invalid answers payload: {e}")
 
-        # Guard: ``vscode_extension`` quests need a live bridge port.
-        # Without one the engine would crash at first LLM call with a
-        # cryptic ``vscode_extension provider requires extra['bridge_port']``
-        # message; 400-fail-fast at submit time so the user sees the
-        # context up front (and a path to fix it).
-        #
-        # Explicit ``> 0`` check (not truthy-on-int) so a stray negative
-        # value can't sneak through — argparse would normally reject
-        # negatives at startup, but the guard should be the same shape
-        # at every layer.
+        # Guard: ``vscode_extension`` quests need a live bridge. Either
+        # transport (IPC socket path or TCP port) is enough; both
+        # empty/zero means there's nowhere to route LLM calls and
+        # the engine would crash on first call. 400-fail-fast so
+        # the user sees a clear message instead of a cryptic
+        # mid-quest traceback.
         bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
-        if answers.provider == "vscode_extension" and bridge_port <= 0:
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        has_bridge = bridge_port > 0 or bool(bridge_socket)
+        if answers.provider == "vscode_extension" and not has_bridge:
             raise HTTPException(
                 400,
                 "vscode_extension provider requires a live bridge — "

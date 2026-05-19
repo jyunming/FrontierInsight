@@ -77,14 +77,23 @@ def test_interview_schema_hides_vscode_extension_without_bridge(tmp_path: Path) 
     assert "vscode_extension" not in payload.get("provider_models", {})
 
 
-def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(tmp_path: Path) -> None:
-    """When the dashboard inherits FI_VSCODE_BRIDGE_PORT (i.e. was
-    launched from a VSCode terminal), the interview's provider list
-    must offer vscode_extension AND populate its model list, so the
-    user picking it gets the same UX as any other provider."""
+def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a bridge transport is configured AND a probe confirms a
+    listener, the interview's provider list must offer vscode_extension
+    AND populate its model list, so the user picking it gets the same
+    UX as any other provider. The probe-confirmation step is new — a
+    configured-but-dead bridge no longer lights up the picker."""
     output_root = tmp_path / "outputs"
     output_root.mkdir()
     app = make_app(output_root, vscode_bridge_port=37001)
+
+    async def _yes(*_args, **_kwargs):
+        return True
+    monkeypatch.setattr("web._bridge_probe.is_bridge_listening", _yes)
+    monkeypatch.setattr("web._bridge_probe.is_socket_listening", _yes)
+
     payload = TestClient(app).get("/api/interview/schema").json()
     providers = [p["value"] for p in payload["providers"]]
     # Surfaced at the head of the list so the sanctioned path is the
@@ -94,6 +103,19 @@ def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(tmp_path: 
     models = payload["provider_models"].get("vscode_extension", [])
     assert any(m["value"] == "gpt-4o" for m in models)
     assert any(m["value"] == "claude-3-5-sonnet" for m in models)
+
+
+def test_interview_schema_hides_vscode_extension_when_port_dead(tmp_path: Path) -> None:
+    """A configured port with no listener must NOT surface
+    vscode_extension. This is the core safety property of the new
+    probe: schema reflects TCP reality, not just configuration."""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    app = make_app(output_root, vscode_bridge_port=37001)
+    payload = TestClient(app).get("/api/interview/schema").json()
+    providers = [p["value"] for p in payload["providers"]]
+    assert "vscode_extension" not in providers
+    assert payload["vscode_bridge_available"] is False
 
 
 def test_submit_new_writes_yaml(tmp_path: Path) -> None:

@@ -292,10 +292,60 @@ def test_tools_schema_reports_no_bridge_by_default(tmp_path: Path) -> None:
     assert any(m["value"] == "gpt-4o" for m in body["vscode_extension_models"])
 
 
-def test_tools_schema_reports_bridge_when_port_set(tmp_path: Path) -> None:
+def test_tools_schema_reports_bridge_when_port_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the bridge port is configured AND something is actually
+    listening on it, the schema must advertise the provider as
+    available. The "actually listening" check is the new TCP probe —
+    without it, a stale port would silently advertise vscode_extension
+    and the spawned subprocess would crash on first LLM call."""
     output_root = tmp_path / "outputs"
     output_root.mkdir()
     app = make_app(output_root, vscode_bridge_port=37001)
+
+    async def _yes(*_args, **_kwargs):
+        return True
+    monkeypatch.setattr("web._bridge_probe.is_bridge_listening", _yes)
+    monkeypatch.setattr("web._bridge_probe.is_socket_listening", _yes)
+
+    client = TestClient(app)
+    body = client.get("/api/tools/schema").json()
+    assert body["vscode_bridge_available"] is True
+
+
+def test_tools_schema_hides_bridge_when_port_set_but_nothing_listens(
+    tmp_path: Path,
+) -> None:
+    """Port number alone is no longer enough — the probe must confirm
+    a listener. This guards against a stale or wrong default port
+    misleading the UI into offering a path that the engine would then
+    crash on. (No monkeypatch here: port 37001 is unlikely to be
+    listening in the test environment.)"""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    app = make_app(output_root, vscode_bridge_port=37001)
+    client = TestClient(app)
+    body = client.get("/api/tools/schema").json()
+    assert body["vscode_bridge_available"] is False
+
+
+def test_tools_schema_lights_up_when_socket_path_listens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new IPC transport: when ``vscode_bridge_socket`` is set
+    AND the socket is alive, vscode_extension surfaces in the UI
+    without any TCP port being involved. This is the default path
+    for --serve started near a VSCode session."""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    app = make_app(output_root, vscode_bridge_socket="/tmp/fake.sock")
+
+    async def _yes(*_args, **_kwargs):
+        return True
+    monkeypatch.setattr("web._bridge_probe.is_bridge_listening", _yes)
+    monkeypatch.setattr("web._bridge_probe.is_socket_listening", _yes)
+
     client = TestClient(app)
     body = client.get("/api/tools/schema").json()
     assert body["vscode_bridge_available"] is True

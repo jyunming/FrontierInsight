@@ -422,6 +422,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "run — use copilot_cli or similar for headless Copilot usage.",
     )
     p.add_argument(
+        "--vscode-bridge-socket",
+        type=str,
+        default="",
+        help="Per-user IPC path of the FI VSCode extension's session-long "
+             "PersistentBridge (Unix-domain socket on POSIX, named pipe on "
+             "Windows). When --serve / --tools runs from outside the "
+             "extension's chat-spawn path, this is how it routes LLM calls "
+             "through `vscode.lm.*`. Default: auto-resolved per OS / user "
+             "via `core.bridge_path.persistent_bridge_path()`. Pass empty "
+             "string to disable.",
+    )
+    p.add_argument(
+        "--no-vscode-bridge",
+        action="store_true",
+        help="Explicitly disable the VSCode bridge for this --serve run. "
+             "Skips auto-resolving the persistent-bridge socket path. Use "
+             "when running --serve outside a VSCode session and you don't "
+             "want vscode_extension to appear in the provider picker.",
+    )
+    p.add_argument(
         "--no-axon-sidecar",
         action="store_true",
         help="Skip the Axon sidecar health check + auto-launch. By default, "
@@ -455,6 +475,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             n = int(env_port)
             if 1 <= n <= 65535:
                 args.vscode_bridge_port = n
+    # Bridge-socket resolution: explicit flag wins, then env var, then
+    # the canonical per-user default. The default lights up the IPC
+    # bridge automatically whenever the user is on the same machine
+    # as a VSCode that's hosting the FI extension — no env var, no
+    # port number, no manual wiring. ``--no-vscode-bridge`` opts out
+    # entirely (sets both port and socket to their disabled values).
+    socket_flag_present = any(
+        a == "--vscode-bridge-socket" or a.startswith("--vscode-bridge-socket=")
+        for a in flag_argv
+    )
+    if not socket_flag_present and not args.vscode_bridge_socket:
+        env_socket = os.environ.get("FI_VSCODE_BRIDGE_SOCKET", "").strip()
+        if env_socket:
+            args.vscode_bridge_socket = env_socket
+        elif args.serve and not args.no_vscode_bridge:
+            from core.bridge_path import persistent_bridge_path
+            args.vscode_bridge_socket = persistent_bridge_path()
+    if args.no_vscode_bridge:
+        args.vscode_bridge_port = 0
+        args.vscode_bridge_socket = ""
     if args.vscode_bridge_port and not (1 <= args.vscode_bridge_port <= 65535):
         p.error(
             f"--vscode-bridge-port must be in 1..65535, got "
@@ -539,6 +579,24 @@ def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
         return
     cfg.provider.name = "vscode_extension"
     cfg.provider.extra = {**(cfg.provider.extra or {}), "bridge_port": port}
+
+
+def _apply_vscode_bridge_socket_override(cfg: Config, socket_path: str) -> None:
+    """Same as :func:`_apply_vscode_bridge_override` but for the IPC
+    transport. The session-long PersistentBridge in the extension
+    listens on a per-user OS-managed socket/pipe — when --serve or
+    --tools is invoked from outside the chat-spawn path, that socket
+    is the only way to route through ``vscode.lm.*`` without a port
+    convention. Populates ``provider.extra['bridge_socket']`` which
+    :func:`core.provider.resolve_endpoint` then threads into the
+    LLMClient."""
+    if not socket_path:
+        return
+    cfg.provider.name = "vscode_extension"
+    cfg.provider.extra = {
+        **(cfg.provider.extra or {}),
+        "bridge_socket": socket_path,
+    }
 
 
 def _pick_clarify_callback(
@@ -987,9 +1045,10 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.serve:
             # We're already inside an event loop (main_async), so use
             # the async helper rather than the blocking uvicorn.run.
-            # Forward --max-concurrent + --vscode-bridge-port so the
-            # web UI's subprocess launcher inherits the same caps +
-            # transport the rest of FI was started with.
+            # Forward --max-concurrent + --vscode-bridge-port +
+            # --vscode-bridge-socket so the web UI's subprocess launcher
+            # inherits the same caps + transport the rest of FI was
+            # started with.
             from web.server import serve_async
             await serve_async(
                 output_root=args.output_root,
@@ -997,6 +1056,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 port=args.port,
                 max_concurrent=args.max_concurrent,
                 vscode_bridge_port=args.vscode_bridge_port,
+                vscode_bridge_socket=args.vscode_bridge_socket,
             )
             return 0
 

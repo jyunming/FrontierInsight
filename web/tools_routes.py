@@ -291,6 +291,20 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
     @app.get("/api/tools/schema")
     async def tools_schema() -> JSONResponse:
         bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        # Probe both transports. Either one open → vscode_extension
+        # lights up in the UI. The IPC socket path is now the canonical
+        # default for --serve (no port to wire); the TCP port is kept
+        # for backward compat with chat-spawned environments where the
+        # extension passed --vscode-bridge-port. We probe in parallel
+        # so the slower one doesn't gate the schema fetch.
+        from web._bridge_probe import is_bridge_listening, is_socket_listening
+        import asyncio as _asyncio
+        tcp_ok, sock_ok = await _asyncio.gather(
+            is_bridge_listening(bridge_port),
+            is_socket_listening(bridge_socket),
+        )
+        bridge_live = bool(tcp_ok or sock_ok)
         return JSONResponse({
             "tools": [_spec_to_dict(t) for t in TOOL_SPECS],
             # When the dashboard was launched from a VSCode terminal,
@@ -299,7 +313,7 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             # flag to surface `vscode_extension` in the provider
             # picker (it is intentionally absent from the interview's
             # PROVIDER_CHOICES list).
-            "vscode_bridge_available": bridge_port > 0,
+            "vscode_bridge_available": bridge_live,
             "vscode_extension_models": [
                 {"value": "gpt-4o", "label": "gpt-4o",
                  "description": "Copilot default when available."},
@@ -332,18 +346,20 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             uploaded_paths = await _stage_uploads(form, output_root, spec.name)
 
         # Mirror the interview's submit-time guard: refuse
-        # `vscode_extension` when the dashboard wasn't started from
-        # a VSCode terminal — the spawned subprocess would otherwise
-        # crash mid-run with a cryptic bridge error.
+        # `vscode_extension` when neither bridge transport is wired.
+        # The IPC socket is the default path; the TCP port is kept
+        # for the chat-spawn case where the extension passes it.
         picked_provider = (payload.get("provider") or "").strip()
         bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
-        if picked_provider == "vscode_extension" and bridge_port <= 0:
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        if picked_provider == "vscode_extension" and bridge_port <= 0 and not bridge_socket:
             raise HTTPException(
                 400,
                 "vscode_extension provider requires a live VSCode bridge — "
-                "this dashboard was not launched from a VSCode terminal "
-                "(FI_VSCODE_BRIDGE_PORT is unset). Either launch via the "
-                "VSCode extension's terminal or pick a different provider.",
+                "neither --vscode-bridge-socket (the per-user IPC default) "
+                "nor --vscode-bridge-port is wired. Either launch VSCode "
+                "with the FI extension active (so the PersistentBridge is "
+                "available) or pick a different provider.",
             )
 
         try:

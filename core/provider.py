@@ -242,9 +242,15 @@ class ResolvedEndpoint:
     # (e.g. "claude_cli (CLI default)") rather than going blank.
     cli_model_override: str = ""
     # VSCode-extension bridge. When transport == "vscode_bridge",
-    # this is the localhost TCP port the FI extension is listening on;
-    # the bridge client connects there for every chat call.
+    # the client picks ONE of two transports based on what the caller
+    # populated:
+    #   * ``vscode_bridge_socket`` (preferred for --serve / --tools) →
+    #     Unix-domain socket (POSIX) or named pipe (Windows) at the
+    #     extension's session-long PersistentBridge address.
+    #   * ``vscode_bridge_port`` (per-chat-command spawns) → loopback
+    #     TCP port the extension's per-command Bridge picked.
     vscode_bridge_port: int = 0
+    vscode_bridge_socket: str = ""
     # As with `cli_model_override`: the user's explicit YAML
     # `provider.model` (empty when unset). Sent as the wire-level
     # `model_hint` to the extension; an empty string is the documented
@@ -671,17 +677,28 @@ def resolve_endpoint(
             f"provider {name!r} requires async resolution via resolve_endpoint_async"
         )
     if name == "vscode_extension":
-        # The FI VSCode extension is the parent process;
-        # it spawned us with `--vscode-bridge-port N` and the port
-        # lives in provider.extra["bridge_port"] (the launch.py flag
-        # writes it there at config-load time).
+        # The FI VSCode extension is the parent process for chat-spawned
+        # quests; it passes ``--vscode-bridge-port N`` and the port
+        # lives in ``provider.extra["bridge_port"]``.
+        #
+        # For --serve / --tools subprocesses we don't have the
+        # extension as a parent — instead they connect to the
+        # extension's session-long PersistentBridge over a per-user
+        # OS-managed IPC channel (Unix socket on POSIX, named pipe on
+        # Windows). The path arrives via ``provider.extra["bridge_socket"]``
+        # (``launch.py`` populates it from ``--vscode-bridge-socket``
+        # or the canonical per-user default).
+        socket_path = provider.extra.get("bridge_socket") or ""
         port = int(provider.extra.get("bridge_port", 0))
-        if port <= 0:
+        if not socket_path and port <= 0:
             raise RuntimeError(
-                "vscode_extension provider requires extra['bridge_port'] "
-                "to be set (the FI VSCode extension passes this via "
-                "--vscode-bridge-port). Are you launching FI from outside "
-                "the extension? Use copilot_cli for headless Copilot runs."
+                "vscode_extension provider requires either "
+                "extra['bridge_socket'] (--vscode-bridge-socket; what "
+                "--serve / --tools use) or extra['bridge_port'] "
+                "(--vscode-bridge-port; what the VSCode chat-spawn "
+                "path uses). Are you launching FI from outside the "
+                "extension's reach? Use copilot_cli for headless "
+                "Copilot runs."
             )
         return ResolvedEndpoint(
             base_url="",
@@ -690,6 +707,7 @@ def resolve_endpoint(
             transport="vscode_bridge",
             provider_name=name,
             vscode_bridge_port=port,
+            vscode_bridge_socket=socket_path,
             # The display string above is for logs only — it would be
             # an invalid family filter for selectChatModels. The real
             # override is empty unless the YAML pinned a model.
@@ -1096,8 +1114,14 @@ class LLMClient:
         # Lazy-import so non-VSCode runs don't pay for the module load.
         from .vscode_bridge import VSCodeBridgeClient
         if self._bridge is None:
+            # Prefer the IPC socket when available (--serve / --tools
+            # path), fall back to the TCP port (chat-spawned per-command
+            # bridges still use TCP). The client picks the transport
+            # based on which kwarg is non-empty.
             self._bridge = VSCodeBridgeClient(
-                host="127.0.0.1", port=self.endpoint.vscode_bridge_port,
+                host="127.0.0.1",
+                port=self.endpoint.vscode_bridge_port,
+                socket_path=(self.endpoint.vscode_bridge_socket or None),
             )
             await self._bridge.connect()
         # Per-call override wins; otherwise use the user's

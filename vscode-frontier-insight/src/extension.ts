@@ -22,6 +22,7 @@ import * as net from "net";
 import * as path from "path";
 import { spawn } from "child_process";
 import { Bridge } from "./bridge";
+import { PersistentBridge } from "./persistent-bridge";
 import { runInterview, writeInterviewYaml } from "./interview";
 
 
@@ -35,6 +36,8 @@ async function fsExists(p: string): Promise<boolean> {
         return false;
     }
 }
+
+let persistentBridge: PersistentBridge | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
     const participant = vscode.chat.createChatParticipant(
@@ -52,10 +55,25 @@ export function activate(context: vscode.ExtensionContext): void {
     // notification if it's down so the first /start of the session
     // doesn't pay the cold-init cost silently.
     void probeAxonOnActivate(context);
+
+    // Start the session-long IPC bridge so a `python launch.py --serve`
+    // (or any --tool subprocess) can route LLM calls through
+    // ``vscode.lm.*`` without the user wiring a port. The bridge
+    // listens on a per-user OS-managed socket / named pipe; see
+    // ./bridge-path.ts for the address.
+    const outputChannel = vscode.window.createOutputChannel("Frontier Insight");
+    context.subscriptions.push(outputChannel);
+    persistentBridge = new PersistentBridge(outputChannel);
+    persistentBridge.listen().catch((err) => {
+        outputChannel.appendLine(`[fi] persistent bridge failed to start: ${err}`);
+    });
 }
 
 export function deactivate(): void {
-    // Nothing to clean up — each chat turn manages its own resources.
+    if (persistentBridge) {
+        void persistentBridge.close();
+        persistentBridge = null;
+    }
 }
 
 async function handleRequest(

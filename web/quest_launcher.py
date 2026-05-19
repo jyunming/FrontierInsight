@@ -80,11 +80,13 @@ class QuestLauncher:
         *,
         python_path: str | None = None,
         vscode_bridge_port: int = 0,
+        vscode_bridge_socket: str = "",
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.max_concurrent = max_concurrent
         self.python_path = python_path or sys.executable
         self.vscode_bridge_port = vscode_bridge_port
+        self.vscode_bridge_socket = vscode_bridge_socket
         self._quests: list[LaunchedQuest] = []
         self._lock = Lock()
 
@@ -110,6 +112,8 @@ class QuestLauncher:
             ]
             if self.vscode_bridge_port > 0:
                 argv.extend(["--vscode-bridge-port", str(self.vscode_bridge_port)])
+            if self.vscode_bridge_socket:
+                argv.extend(["--vscode-bridge-socket", self.vscode_bridge_socket])
             # PYTHONUNBUFFERED + -u so the engine's logs flush to the
             # quest's run.log promptly (the UI reads from that file,
             # not the subprocess stdout).
@@ -330,6 +334,8 @@ class QuestLauncher:
             argv.extend(argv_tail)
             if self.vscode_bridge_port > 0 and "--vscode-bridge-port" not in argv_tail:
                 argv.extend(["--vscode-bridge-port", str(self.vscode_bridge_port)])
+            if self.vscode_bridge_socket and "--vscode-bridge-socket" not in argv_tail:
+                argv.extend(["--vscode-bridge-socket", self.vscode_bridge_socket])
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             if extra_env:
                 env.update(extra_env)
