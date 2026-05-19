@@ -510,3 +510,29 @@ async def test_singleshot_falls_back_when_all_fanout_calls_fail() -> None:
     assert out == "fallback answer"
     assert attempts["fanout"] == 3
     assert attempts["fallback"] == 1
+
+
+@pytest.mark.asyncio
+async def test_singleshot_rejects_vote_merge() -> None:
+    """``vote`` requires a ``key`` argument naming a JSON field on the
+    response — single-shot tools emit free-form markdown so the
+    field doesn't exist. The helper must reject with a clear message,
+    not crash deep inside merge_vote with a TypeError about a missing
+    keyword. Pins PR #124 Copilot review (the comment that ``await
+    merge_vote(raw)`` was broken in TWO ways at once)."""
+    from core.config import NodeEnsembleConfig
+    from core.ensemble import run_singleshot_with_ensemble, EnsembleError
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        return "irrelevant"
+
+    ensemble = NodeEnsembleConfig(
+        models=["m1", "m2", "m3"], merge="vote",
+    )
+    with pytest.raises(EnsembleError) as exc:
+        await run_singleshot_with_ensemble(
+            prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
+            default_merge="tournament", node="digest",
+        )
+    assert "vote" in str(exc.value).lower()
+    assert "tournament" in str(exc.value) or "synthesize" in str(exc.value)
