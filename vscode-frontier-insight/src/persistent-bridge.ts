@@ -130,8 +130,46 @@ export class PersistentBridge {
     private async dispatch(socket: net.Socket, msg: unknown): Promise<void> {
         if (!msg || typeof msg !== "object") return;
         const m = msg as { type?: string };
-        if (m.type !== "lm_request") return; // narrow scope on purpose
-        await this.handleLmRequest(socket, msg as LmRequest);
+        if (m.type === "lm_request") {
+            await this.handleLmRequest(socket, msg as LmRequest);
+        } else if (m.type === "list_models") {
+            await this.handleListModels(socket, msg as { id: number });
+        }
+    }
+
+    /**
+     * Answer a ``{type:"list_models", id}`` probe with the live
+     * Copilot model catalog. Used by Python's
+     * ``core.provider_models_discover.discover_vscode_extension`` so
+     * the picker shows what the user's Copilot session actually
+     * federates today (gpt-5, claude-opus-4-7, etc. plus whatever
+     * else Copilot has added since), not a static trio.
+     *
+     * Each model contributes ``{value, label, vendor, family, version}``;
+     * the Python side renders ``value`` as the picker option and
+     * ``family`` / ``version`` go into the tooltip.
+     */
+    private async handleListModels(
+        socket: net.Socket, req: { id: number },
+    ): Promise<void> {
+        try {
+            const models = await vscode.lm.selectChatModels({ vendor: "copilot" });
+            const payload = models.map((m) => ({
+                value: m.id,
+                label: m.id,
+                vendor: m.vendor,
+                family: m.family,
+                version: m.version,
+            }));
+            this.send(socket, {
+                type: "models", id: req.id, models: payload,
+            });
+        } catch (e) {
+            const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            this.send(socket, {
+                type: "models_error", id: req.id, error: msg,
+            });
+        }
     }
 
     private send(socket: net.Socket, obj: unknown): void {

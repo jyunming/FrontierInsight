@@ -126,26 +126,95 @@ async def discover_vscode_extension(
     socket_path: str = "", bridge_port: int = 0,
 ) -> list[ModelChoice] | None:
     """Ask the extension's PersistentBridge for the live Copilot model
-    catalog. Returns ``None`` when the bridge isn't reachable — the
-    picker falls back to the static {gpt-4o, claude-3-5-sonnet,
-    gemini-2.0-flash} placeholder list."""
-    # Reachability check first — avoids creating a full bridge client
-    # just to fail at connect time.
-    from web._bridge_probe import is_bridge_listening, is_socket_listening
-    if socket_path:
-        if not await is_socket_listening(socket_path):
-            return None
-    elif bridge_port > 0:
-        if not await is_bridge_listening(bridge_port):
-            return None
-    else:
+    catalog. The bridge calls ``vscode.lm.selectChatModels({vendor:"copilot"})``
+    on the extension side and streams the result back over the same
+    socket/pipe the LLM requests use.
+
+    Returns ``None`` when the bridge isn't reachable — the picker
+    falls back to the static ensemble trio (gpt-5 / claude-opus-4-7 /
+    gemini-2.5-pro) so the dropdown still renders.
+
+    Only the socket transport is used. The per-chat-command TCP
+    bridges are scoped to one Python child and don't outlive a
+    chat command, so they can't answer a discovery probe from a
+    standalone process anyway.
+    """
+    if not socket_path:
         return None
-    # NOTE: the model-list call itself is deferred — the
-    # PersistentBridge in 0.x only handles `lm_request`, not a model
-    # listing message. Once the extension grows a `list_models`
-    # message we plumb it here. For now, returning None forces the
-    # fallback path, which is correct.
-    return None
+    from web._bridge_probe import is_socket_listening
+    if not await is_socket_listening(socket_path):
+        return None
+    return await _ask_bridge_for_models(socket_path, timeout_s=5.0)
+
+
+async def _ask_bridge_for_models(
+    socket_path: str, *, timeout_s: float = 5.0,
+) -> list[ModelChoice] | None:
+    """One-shot ``list_models`` round-trip over the PersistentBridge.
+    Opens the socket / pipe, sends one JSON line, reads one back,
+    closes. Doesn't reuse VSCodeBridgeClient because that class
+    carries per-quest state (pending futures, read loop) that's
+    overkill for a stateless probe.
+
+    Returns the parsed model list, or ``None`` on any failure
+    (connect refused, malformed reply, timeout). Failures are
+    swallowed because the caller already has a static fallback —
+    a probe error shouldn't bubble up as a 500 to the picker.
+    """
+    import sys
+    from core.vscode_bridge import _open_ipc_connection, BridgeError
+    try:
+        reader, writer = await asyncio.wait_for(
+            _open_ipc_connection(socket_path), timeout=timeout_s,
+        )
+    except (BridgeError, asyncio.TimeoutError, OSError):
+        return None
+    try:
+        req = {"type": "list_models", "id": 1}
+        writer.write((json.dumps(req) + "\n").encode("utf-8"))
+        try:
+            await asyncio.wait_for(writer.drain(), timeout=timeout_s)
+            line = await asyncio.wait_for(
+                reader.readline(), timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            return None
+        if not line:
+            return None
+        try:
+            msg = json.loads(line.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(msg, dict) or msg.get("type") != "models":
+            return None
+        models = msg.get("models") or []
+        if not isinstance(models, list):
+            return None
+        out: list[ModelChoice] = []
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            value = str(m.get("value") or m.get("id") or "").strip()
+            if not value:
+                continue
+            family = str(m.get("family") or "")
+            vendor = str(m.get("vendor") or "")
+            version = str(m.get("version") or "")
+            description = " · ".join(
+                p for p in (vendor, family, version) if p
+            )
+            out.append({
+                "value": value,
+                "label": str(m.get("label") or value),
+                "description": description,
+            })
+        return out or None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def discover(

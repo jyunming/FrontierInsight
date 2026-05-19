@@ -151,6 +151,64 @@ def test_discover_vscode_extension_returns_none_when_socket_dead(
     assert _run(discover_vscode_extension(socket_path="/tmp/fake.sock")) is None
 
 
+def test_discover_vscode_extension_round_trips_list_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the bridge IS listening, the helper sends ``list_models``
+    and parses the ``models`` reply into the picker shape. Pins the
+    wire protocol so a future refactor of either side gets caught."""
+    async def _yes(*_args, **_kwargs):
+        return True
+    monkeypatch.setattr("web._bridge_probe.is_socket_listening", _yes)
+
+    sent: list[bytes] = []
+
+    async def runner():
+        # Build the StreamReader INSIDE the test's asyncio loop —
+        # creating it at module/function-body scope binds it to the
+        # outer loop (or `asyncio.run`'s freshly-closed one) and the
+        # subsequent in-loop feed_data raises "got Future attached to
+        # a different loop". Same gotcha as
+        # https://docs.python.org/3/library/asyncio-stream.html#examples
+        reader = asyncio.StreamReader()
+
+        class _FakeWriter:
+            def write(self, data: bytes) -> None:
+                sent.append(data)
+                reply = (json.dumps({
+                    "type": "models", "id": 1,
+                    "models": [
+                        {"value": "gpt-5", "label": "gpt-5",
+                         "vendor": "copilot", "family": "gpt-5",
+                         "version": "2025"},
+                        {"value": "claude-opus-4-7",
+                         "label": "claude-opus-4-7",
+                         "vendor": "copilot", "family": "claude",
+                         "version": "4-7"},
+                    ],
+                }) + "\n").encode("utf-8")
+                reader.feed_data(reply)
+            async def drain(self) -> None: return None
+            def close(self) -> None: return None
+            async def wait_closed(self) -> None: return None
+
+        async def fake_open(_path: str):
+            return reader, _FakeWriter()
+
+        monkeypatch.setattr(
+            "core.vscode_bridge._open_ipc_connection", fake_open,
+        )
+        return await discover_vscode_extension(socket_path="/tmp/fake.sock")
+
+    models = asyncio.run(runner())
+    assert models is not None
+    assert {m["value"] for m in models} == {"gpt-5", "claude-opus-4-7"}
+    by = {m["value"]: m for m in models}
+    assert "copilot" in by["gpt-5"]["description"]
+    assert "gpt-5" in by["gpt-5"]["description"]
+    assert b'"type": "list_models"' in sent[0] or b'"type":"list_models"' in sent[0]
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
