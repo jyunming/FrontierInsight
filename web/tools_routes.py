@@ -556,26 +556,35 @@ def _build_argv(
     that launch.py expects. Each spec is hand-coded because the
     CLI shapes differ; this is the place to add a new tool.
 
-    Per-tool provider/model are appended at the end via the
-    ``--<tool>-provider`` flag launch.py already supports. The
-    model goes into a fresh ``--<tool>-model`` flag we don't
-    actually take (the engine reads provider.model from the
-    Config); instead, we set it in the spawned subprocess's env
-    via ``FI_PROVIDER_MODEL_OVERRIDE`` if we add such a path
-    later. For now, the model dropdown is a UX hint — the picked
-    provider is honored; the model field is captured but doesn't
-    flow into argv yet. (Engine-wide per-call model overrides
-    require an env-var pathway in the provider layer that's
-    deferred to a follow-up.)"""
+    Per-tool provider and model are appended at the end via the
+    ``--<tool>-provider`` and ``--<tool>-model`` flags. The model is
+    threaded into the spawned process's ``ProviderConfig.model``,
+    same wiring the interview-generated YAML uses for quests, so the
+    picker selection actually routes the LLM call instead of being a
+    UX-only hint."""
     name = spec.name
-    # Common provider tail for LLM-using tools. Each PM-command
+    # Common provider/model tail for LLM-using tools. Each PM-command
     # accepts --<tool>-provider with the standard ProviderName
-    # values (openai / codex / claude_cli / etc.).
+    # values (openai / codex / claude_cli / etc.) and a sibling
+    # --<tool>-model that pins routing to a specific id from the
+    # provider's catalog (e.g. the live list returned by
+    # /api/provider/models for vscode_extension).
     provider = (payload.get("provider") or "").strip()
+    # The picker emits ``provider_model``; the free-text sibling for
+    # "Other (type your own)" lives at ``provider_model_other``.
+    # ``tools.html`` collapses the two before POST (rewrites
+    # ``provider_model`` from the typed value when the picker is on
+    # ``__OTHER__`` and drops the sibling key), so the typed-path
+    # branch below is defence-in-depth for direct curl / scripted
+    # POSTs that skip the JS layer — not dead code.
+    model = (payload.get("provider_model") or "").strip()
+    if model == "__OTHER__":
+        model = (payload.get("provider_model_other") or "").strip()
     provider_tail: list[str] = []
     if spec.needs_llm and provider:
-        flag = f"--{spec.name}-provider"
-        provider_tail = [flag, provider]
+        provider_tail = [f"--{spec.name}-provider", provider]
+    if spec.needs_llm and model:
+        provider_tail += [f"--{spec.name}-model", model]
 
     # Ensemble tail: --<tool>-ensemble takes a CSV of models, not a
     # profile name. Expand the profile picked in the UI into the

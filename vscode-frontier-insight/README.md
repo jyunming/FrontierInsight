@@ -299,10 +299,14 @@ provider:
     review_moderator:            gpt-4o-mini
 ```
 
-The extension passes each `model_hint` to `vscode.lm.selectChatModels`.
-If the hint doesn't match any model your subscription has access to,
-that one call fails with a clear error (`no Copilot model available for
-hint '<name>'`) — VSCode handles the gate.
+The extension passes each `model_hint` to `vscode.lm.selectChatModels`,
+trying `{id: hint}` first and falling back to `{family: hint}`. The id
+path honours exact picks from the dashboard's live model dropdown
+(e.g. `gemini-3-flash-preview`, whose family is the coarser
+`gemini-3-flash`); the family path keeps legacy fuzzy hints
+(`gpt-5`, `claude-opus-4-7`) working. If neither matches, the error
+lists every available `id|family` pair from your subscription so the
+next mismatch is self-diagnosing — no need to attach a debugger.
 
 ## Cost & rate-limit reality
 

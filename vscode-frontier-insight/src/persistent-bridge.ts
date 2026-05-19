@@ -179,14 +179,41 @@ export class PersistentBridge {
 
     private async handleLmRequest(socket: net.Socket, req: LmRequest): Promise<void> {
         try {
-            const filter: vscode.LanguageModelChatSelector = req.model_hint
-                ? { family: req.model_hint }
-                : { vendor: "copilot" };
-            const models = await vscode.lm.selectChatModels(filter);
+            // Resolve the model by *id* first, then by *family*. The
+            // model picker (handleListModels) emits ``value: m.id`` so
+            // the user-selected string is an id (e.g.
+            // ``gemini-3-flash-preview``) — selecting by family with
+            // that string misses any model whose family differs from
+            // its id (every versioned/preview Copilot model). Falling
+            // through to ``family`` keeps fuzzy hints like ``gpt-5``
+            // working when the YAML pre-dates the picker.
+            let models: vscode.LanguageModelChat[] = [];
+            if (req.model_hint) {
+                // Constrain to vendor=copilot on both legs — this bridge
+                // exists to route FI's Copilot session, and the diagnostic
+                // dump below also pins vendor=copilot, so matching against
+                // any other vendor would produce inconsistent behavior
+                // (and could silently pull a non-Copilot model into a
+                // quest the user expects to bill against Copilot).
+                models = await vscode.lm.selectChatModels({ vendor: "copilot", id: req.model_hint });
+                if (!models.length) {
+                    models = await vscode.lm.selectChatModels({ vendor: "copilot", family: req.model_hint });
+                }
+            } else {
+                models = await vscode.lm.selectChatModels({ vendor: "copilot" });
+            }
             if (!models.length) {
+                // Self-diagnosing error: dump every available id|family
+                // pair so the next user who hits this knows exactly
+                // what they could have picked, without having to
+                // re-instrument the extension.
+                const all = await vscode.lm.selectChatModels({ vendor: "copilot" });
+                const summary = all.length
+                    ? all.map((m) => `${m.id}|family=${m.family}`).join(", ")
+                    : "(no Copilot models exposed to this extension)";
                 this.send(socket, {
                     type: "lm_error", id: req.id,
-                    error: `no model matches hint=${JSON.stringify(req.model_hint)}`,
+                    error: `no model matches hint=${JSON.stringify(req.model_hint)}; available=[${summary}]`,
                 });
                 return;
             }

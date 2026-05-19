@@ -220,6 +220,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "claude_cli / codex_cli / gemini_cli for headless runs.",
     )
     p.add_argument(
+        "--summarize-model",
+        type=str,
+        default="",
+        help="Override the per-provider default model for --summarize. "
+             "For vscode_extension this is the model id from the picker "
+             "(e.g. gemini-3-flash-preview); for CLI providers it's the "
+             "same identifier the provider's own --model / -m flag "
+             "accepts. Empty → provider default (or the user's Copilot "
+             "Chat-picker selection for vscode_extension).",
+    )
+    p.add_argument(
         "--days",
         type=int,
         default=7,
@@ -237,11 +248,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "from chat, headless CLI providers otherwise.",
     )
     p.add_argument(
+        "--digest-model",
+        type=str,
+        default="",
+        help="Override the per-provider default model for --digest. "
+             "See --summarize-model for the conventions.",
+    )
+    p.add_argument(
         "--portfolio-provider",
         type=str,
         default="vscode_extension",
         help="Provider for --portfolio. Same conventions as "
              "--digest-provider.",
+    )
+    p.add_argument(
+        "--portfolio-model",
+        type=str,
+        default="",
+        help="Override the per-provider default model for --portfolio. "
+             "See --summarize-model for the conventions.",
     )
     p.add_argument(
         "--critique-provider",
@@ -253,12 +278,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "to get the strongest adversarial second-pass effect.",
     )
     p.add_argument(
+        "--critique-model",
+        type=str,
+        default="",
+        help="Override the per-provider default model for --critique. "
+             "See --summarize-model for the conventions.",
+    )
+    p.add_argument(
         "--proposal-provider",
         type=str,
         default="vscode_extension",
         help="Provider for --proposal. Same conventions as the other "
              "PM-command providers — vscode_extension when launched "
              "from chat, headless CLI providers otherwise.",
+    )
+    p.add_argument(
+        "--proposal-model",
+        type=str,
+        default="",
+        help="Override the per-provider default model for --proposal. "
+             "See --summarize-model for the conventions.",
     )
     p.add_argument(
         "--proposal-ensemble",
@@ -388,6 +427,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Provider for --analyze. Same conventions as the other "
              "PM-command providers — vscode_extension when launched "
              "from chat, headless CLI providers otherwise.",
+    )
+    p.add_argument(
+        "--analyze-model",
+        type=str,
+        default="",
+        help="Override the per-provider default model for --analyze. "
+             "See --summarize-model for the conventions.",
     )
     p.add_argument(
         "--output-root",
@@ -1177,6 +1223,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 output_root=args.output_root,
                 days=args.days,
                 provider_name=args.digest_provider,
+                provider_model=args.digest_model,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
@@ -1190,6 +1237,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return await _run_portfolio(
                 output_root=args.output_root,
                 provider_name=args.portfolio_provider,
+                provider_model=args.portfolio_model,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
@@ -1204,6 +1252,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 quest_id=args.critique,
                 output_root=args.output_root,
                 provider_name=args.critique_provider,
+                provider_model=args.critique_model,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
@@ -1218,6 +1267,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 topic=args.proposal,
                 output_root=args.output_root,
                 provider_name=args.proposal_provider,
+                provider_model=args.proposal_model,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
@@ -1233,6 +1283,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 topic=args.analyze_topic,
                 output_root=args.output_root,
                 provider_name=args.analyze_provider,
+                provider_model=args.analyze_model,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
@@ -1247,6 +1298,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 folder=args.summarize.resolve(),
                 kind=args.summarize_kind,
                 provider_name=args.summarize_provider,
+                provider_model=args.summarize_model,
                 output_root=args.output_root,
                 axon_config_path=args.axon_config,
                 vscode_bridge_port=args.vscode_bridge_port,
@@ -1298,6 +1350,7 @@ async def _run_summarize(
     folder: Path,
     kind: str,
     provider_name: str,
+    provider_model: str = "",
     output_root: Path,
     axon_config_path: Path | None,
     vscode_bridge_port: int,
@@ -1322,7 +1375,7 @@ async def _run_summarize(
         print(f"[FI] --summarize: not a directory: {folder}", file=sys.stderr)
         return 1
 
-    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
     # When launched from the VSCode extension the bridge port or
     # socket is set; honor either the same way quests do.
     _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
@@ -1375,6 +1428,7 @@ async def _run_digest(
     output_root: Path,
     days: int,
     provider_name: str,
+    provider_model: str = "",
     axon_config_path: Path | None,
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
@@ -1397,7 +1451,7 @@ async def _run_digest(
         print(f"[FI] --digest: --days must be positive (got {days})", file=sys.stderr)
         return 1
 
-    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
     _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
@@ -1459,6 +1513,7 @@ async def _run_portfolio(
     *,
     output_root: Path,
     provider_name: str,
+    provider_model: str = "",
     axon_config_path: Path | None,
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
@@ -1476,7 +1531,7 @@ async def _run_portfolio(
     from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
     from core.portfolio import generate_portfolio
 
-    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
     _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
@@ -1552,6 +1607,7 @@ async def _run_critique(
     quest_id: str,
     output_root: Path,
     provider_name: str,
+    provider_model: str = "",
     axon_config_path: Path | None,
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
@@ -1569,7 +1625,7 @@ async def _run_critique(
     from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
     from core.critique import generate_critique
 
-    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
     _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None
@@ -1622,6 +1678,7 @@ async def _run_analyze(
     topic: str,
     output_root: Path,
     provider_name: str,
+    provider_model: str = "",
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
@@ -1677,6 +1734,12 @@ async def _run_analyze(
 
     _apply_vscode_bridge_override(cfg, vscode_bridge_port)
     _apply_vscode_bridge_socket_override(cfg, vscode_bridge_socket)
+
+    # Honor --analyze-model from the picker. Empty string keeps the
+    # provider default (or the user's Copilot Chat-picker selection
+    # for vscode_extension); a non-empty string pins routing.
+    if provider_model:
+        cfg.provider.model = provider_model
 
     ensemble = _parse_ensemble_flag(
         ensemble_models, ensemble_merge, ensemble_moderator,
@@ -2114,6 +2177,7 @@ async def _run_proposal(
     ensemble_models: str = "",
     ensemble_merge: str = "tournament",
     ensemble_moderator: str = "",
+    provider_model: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --proposal "<topic>"``.
 
@@ -2122,7 +2186,7 @@ async def _run_proposal(
     from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
     from core.proposal import generate_proposal
 
-    provider = _ProviderConfig(name=provider_name)  # type: ignore[arg-type]
+    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
     _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
 
     knowledge = None

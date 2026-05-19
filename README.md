@@ -417,6 +417,8 @@ Inverts the usual flow. Instead of running a full quest and discovering the ques
 
 Ingested into Axon as `kind=fi_proposal` so future quests can retrieve "have I considered this before?"
 
+Every PM-command (`--proposal`, `--critique`, `--digest`, `--portfolio`, `--summarize`, `--analyze`) accepts a `--<tool>-model <id>` companion to `--<tool>-provider` so the picker selection from `/tools/<tool>` actually routes the LLM call. For `vscode_extension` the id is the model id surfaced by the live Copilot catalog (e.g. `gemini-3-flash-preview`); for CLI providers it's the same identifier the CLI's own `--model` flag accepts. Omit the flag to keep the provider default (or — for `vscode_extension` — fall through to whatever the user has selected in their Copilot Chat model picker).
+
 ### Get an adversarial second opinion on a completed quest
 
 ```
