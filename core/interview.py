@@ -537,7 +537,12 @@ QUESTIONS: tuple[Question, ...] = (
         choices=ENSEMBLE_PROFILES,
         default="off",
         mid_quest_editable=True,
-        tier=3,
+        # Promoted from tier-3 to tier-1 so the picker sits alongside
+        # provider / model on the main interview page (the cost
+        # multiplier is a tier-1 decision, not a hidden-in-Advanced
+        # tweak — users routinely want to opt in to ensemble at quest
+        # creation without clicking through the Advanced disclosure).
+        tier=1,
     ),
     Question(
         id="max_iterations",

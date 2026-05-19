@@ -535,7 +535,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 1
     },
     {
       "id": "max_iterations",

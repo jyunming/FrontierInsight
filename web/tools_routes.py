@@ -376,6 +376,56 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
         })
 
 
+# Per-profile fan-out scope. The interview's
+# ``core.interview.expand_ensemble_profile`` plus
+# ``ensemble_model_trios`` already define the canonical mapping; this
+# is the same mapping spelled out for the standalone-tool case where
+# the engine isn't running and we just need an explicit CSV for the
+# ``--{tool}-ensemble`` flag.
+_ENSEMBLE_PROFILE_TO_TRIO_KEY: dict[str, str] = {
+    "off": "",  # no fan-out
+    "cross_check_only": "trio",
+    "ideate_and_check": "trio",
+    "full": "trio",
+}
+
+
+def _ensemble_argv_tail(
+    tool: str, provider: str, payload: dict[str, Any],
+) -> list[str]:
+    """Build the ``--{tool}-ensemble M1,M2,M3 --{tool}-ensemble-merge X``
+    tail for the spawned subprocess based on the picked profile +
+    provider. Returns ``[]`` for ``off`` / missing / unknown profile.
+
+    Cross-references the canonical trios at
+    ``core.interview._ENSEMBLE_MODEL_TRIOS`` so the standalone tool
+    fan-out matches the engine's node-ensemble fan-out for the same
+    provider + profile.
+    """
+    profile = (payload.get("ensemble_profile") or "off").strip()
+    if profile == "off" or profile not in _ENSEMBLE_PROFILE_TO_TRIO_KEY:
+        return []
+    if not provider:
+        # No provider picked — fan-out has nowhere to fall back to.
+        # Caller will surface this as a UI prompt rather than silently
+        # dropping the profile.
+        return []
+    try:
+        from core.interview import ensemble_model_trio
+    except Exception:
+        return []
+    trio = ensemble_model_trio(provider, payload.get("provider_model"))
+    if not trio:
+        return []
+    # The CLI flag accepts the same CSV the engine YAML accepts.
+    csv = ",".join(trio)
+    # `synthesize` is critique's documented default; proposal defaults
+    # to `tournament`. Keep parity with launch.py argparse defaults so
+    # we don't introduce a behaviour drift between the two surfaces.
+    merge = "tournament" if tool == "proposal" else "synthesize"
+    return [f"--{tool}-ensemble", csv, f"--{tool}-ensemble-merge", merge]
+
+
 async def _stage_uploads(form: Any, output_root: Path, tool_name: str) -> list[Path]:
     """Pull file uploads from the form. Files land in
     ``outputs/_uploads/<tool>-<ts>/<filename>``. Returns the list of
@@ -424,17 +474,28 @@ def _build_argv(
         flag = f"--{spec.name}-provider"
         provider_tail = [flag, provider]
 
+    # Ensemble tail: --<tool>-ensemble takes a CSV of models, not a
+    # profile name. Expand the profile picked in the UI into the
+    # provider's curated 3-model trio (mirrors what the interview's
+    # YAML emitter does for engine-side node_ensemble). Only the two
+    # tools that currently have CLI ensemble flags are wired here;
+    # the other 4 LLM tools need core-layer ensemble support before
+    # they can accept this argument.
+    ensemble_tail: list[str] = []
+    if spec.needs_llm and name in ("proposal", "critique"):
+        ensemble_tail = _ensemble_argv_tail(name, provider, payload)
+
     if name == "proposal":
         topic = (payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("topic is required")
-        return ["--proposal", topic, *provider_tail]
+        return ["--proposal", topic, *provider_tail, *ensemble_tail]
 
     if name == "critique":
         quest_id = (payload.get("quest_id") or "").strip()
         if not quest_id:
             raise ValueError("quest_id is required")
-        return ["--critique", quest_id, *provider_tail]
+        return ["--critique", quest_id, *provider_tail, *ensemble_tail]
 
     if name == "digest":
         days = int(payload.get("days") or 7)

@@ -31,8 +31,10 @@ from core.interview import (
 # ---- Tier-1 contract ----
 
 
-def test_tier1_cli_is_exactly_six_questions() -> None:
-    """CLI and the web --serve interview both ask six tier-1 questions."""
+def test_tier1_cli_is_exactly_seven_questions() -> None:
+    """CLI and the web --serve interview both ask seven tier-1 questions
+    (ensemble_profile was promoted from tier-3 so the multi-model
+    cost decision lives next to provider/model)."""
     ids = [q.id for q in questions_for_tier(1, "cli")]
     assert ids == [
         "topic",
@@ -41,6 +43,7 @@ def test_tier1_cli_is_exactly_six_questions() -> None:
         "study_depth",
         "provider",
         "provider_model",
+        "ensemble_profile",
     ]
 
 
@@ -53,16 +56,18 @@ def test_tier1_serve_matches_cli() -> None:
     assert cli_ids == serve_ids
 
 
-def test_tier1_vscode_is_four_questions_no_provider() -> None:
+def test_tier1_vscode_is_five_questions_no_provider() -> None:
     """VSCode pins provider=vscode_extension and grabs the Copilot
     model the user picked in the chat picker — so its tier-1 set
-    drops both."""
+    drops both, but still surfaces ensemble_profile because the
+    profile expansion uses the pinned provider's model trio."""
     ids = [q.id for q in questions_for_tier(1, "vscode")]
     assert ids == [
         "topic",
         "paper_format",
         "output_kinds",
         "study_depth",
+        "ensemble_profile",
     ]
 
 
@@ -148,16 +153,15 @@ def test_tier3_covers_the_advanced_fields() -> None:
     """Tier-3 hides behind a 'Show advanced' toggle on each frontend.
     Three are topic-tuned (preflight LLM call suggests a value);
     ``knowledge_external_top_k`` is the web-search cap (Axon RAG cap
-    ``knowledge_top_k`` lives in Tier-2); ``ensemble_profile`` is the
-    multi-model preset picker; ``max_iterations`` is the design-revise
-    loop hard cap."""
+    ``knowledge_top_k`` lives in Tier-2); ``max_iterations`` is the
+    design-revise loop hard cap. ``ensemble_profile`` was promoted out
+    of tier-3 to tier-1 so the cost multiplier sits with provider/model."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "comparative_baseline",
         "success_metric",
         "budget",
         "knowledge_external_top_k",
-        "ensemble_profile",
         "max_iterations",
     }
 

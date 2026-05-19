@@ -117,6 +117,13 @@
       }
       grid.appendChild(makeProviderPicker(providers));
       grid.appendChild(makeModelPicker());
+      // Only the two tools whose CLI accept --<tool>-ensemble can
+      // honour the picker. Surfacing it elsewhere would silently
+      // discard the user's choice. Other LLM tools need core-side
+      // ensemble wiring before they can join.
+      if (spec.name === 'proposal' || spec.name === 'critique') {
+        grid.appendChild(makeEnsemblePicker(providerSchema.ensemble_profiles || []));
+      }
       form.appendChild(fs);
     }
     // Submit row.
@@ -242,6 +249,33 @@
     wrap.querySelector('select').addEventListener('change', (e) => {
       handleOtherSelection(e.target, 'Model');
     });
+    return wrap;
+  }
+
+  function makeEnsemblePicker(profiles) {
+    // Profiles come from /api/interview/schema's `ensemble_profiles`.
+    // Schema falls back to a static list so the picker still renders
+    // if the interview-side endpoint is unreachable.
+    const fallback = [
+      { value: 'off',                 label: 'off — single model (cheapest)' },
+      { value: 'cross_check_only',    label: 'cross_check only — fan out the cross_check node' },
+      { value: 'ideate_and_check',    label: 'ideate + cross_check' },
+      { value: 'full',                label: 'full — ideate + analyze + cross_check' },
+    ];
+    const list = profiles.length ? profiles : fallback;
+    const opts = list.map(p => `<option value="${escapeAttr(p.value)}" title="${escapeAttr(p.description || '')}"${p.value === 'off' ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('');
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-2 md:col-span-2';
+    wrap.innerHTML = `
+      <label class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider" for="f-ensemble_profile">Multi-model ensemble</label>
+      <div class="relative">
+        <select id="f-ensemble_profile" name="ensemble_profile" class="w-full bg-surface-low border border-outline-variant rounded-lg p-3 pl-4 pr-10 font-code-md text-code-md text-on-surface appearance-none focus:outline-none input-glow transition-all">
+          ${opts}
+        </select>
+        <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-outline pointer-events-none">expand_more</span>
+      </div>
+      <p class="font-body-md text-body-md text-outline italic">Fan out the LLM call across the picked provider's 3-model trio and merge. Cost multiplies; agreement signal increases.</p>
+    `;
     return wrap;
   }
 

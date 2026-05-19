@@ -337,3 +337,88 @@ def test_post_tool_with_vscode_extension_and_bridge_succeeds(
     # to its own default.
     assert "--proposal-provider" in argv
     assert "vscode_extension" in argv
+
+
+# ---------------------------------------------------------------------------
+# Ensemble profile → CLI flag mapping
+# ---------------------------------------------------------------------------
+
+
+def test_build_argv_proposal_off_profile_emits_no_ensemble(tmp_path: Path) -> None:
+    """'off' is the documented default — the spawned subprocess
+    should run the cheap single-call path with zero ensemble flags."""
+    spec = TOOLS_BY_NAME["proposal"]
+    argv = _build_argv(
+        spec,
+        {"topic": "t", "provider": "openai", "ensemble_profile": "off"},
+        [], tmp_path,
+    )
+    assert "--proposal-ensemble" not in argv
+
+
+def test_build_argv_proposal_full_profile_expands_to_trio(tmp_path: Path) -> None:
+    """Picking 'full' must expand the picked provider's curated trio
+    into the --proposal-ensemble CSV the CLI expects."""
+    spec = TOOLS_BY_NAME["proposal"]
+    argv = _build_argv(
+        spec,
+        {"topic": "t", "provider": "openai", "ensemble_profile": "full"},
+        [], tmp_path,
+    )
+    assert "--proposal-ensemble" in argv
+    idx = argv.index("--proposal-ensemble")
+    csv = argv[idx + 1]
+    # The 3-model openai trio (see ensemble_model_trios) — exact
+    # values are pinned in the interview schema test, not here.
+    parts = csv.split(",")
+    assert len(parts) == 3
+    # Proposal-side merge defaults to tournament (the launch.py CLI
+    # default for --proposal-ensemble-merge) — must be in the tail.
+    assert "--proposal-ensemble-merge" in argv
+    assert "tournament" in argv
+
+
+def test_build_argv_critique_full_profile_expands_to_trio_with_synthesize(tmp_path: Path) -> None:
+    """Critique's documented merge default is `synthesize` (different
+    from proposal's `tournament`). The web mapping must preserve that
+    parity so behaviour doesn't drift between CLI and serve users."""
+    spec = TOOLS_BY_NAME["critique"]
+    argv = _build_argv(
+        spec,
+        {"quest_id": "abc", "provider": "claude_cli", "ensemble_profile": "full"},
+        [], tmp_path,
+    )
+    assert "--critique-ensemble" in argv
+    assert "--critique-ensemble-merge" in argv
+    assert "synthesize" in argv
+
+
+def test_build_argv_unknown_profile_treated_as_off(tmp_path: Path) -> None:
+    """An unknown profile name must NOT silently fan out — fall back
+    to the single-call path (same as 'off')."""
+    spec = TOOLS_BY_NAME["proposal"]
+    argv = _build_argv(
+        spec,
+        {"topic": "t", "provider": "openai", "ensemble_profile": "bogus"},
+        [], tmp_path,
+    )
+    assert "--proposal-ensemble" not in argv
+
+
+def test_build_argv_ensemble_only_wired_for_proposal_and_critique(tmp_path: Path) -> None:
+    """The other 4 LLM tools have no --<tool>-ensemble flag in
+    launch.py yet — surfacing the profile would silently discard it,
+    so the argv builder must drop it entirely for these tools."""
+    for name in ("digest", "portfolio", "summarize", "analyze"):
+        spec = TOOLS_BY_NAME[name]
+        payload = {
+            "provider": "openai", "ensemble_profile": "full",
+            # Tool-specific required fields
+            "days": 7, "folder": str(tmp_path), "path": str(tmp_path),
+            "topic": "t", "kind": "auto",
+        }
+        try:
+            argv = _build_argv(spec, payload, [], tmp_path)
+        except ValueError:
+            continue  # missing-arg path is fine; we're checking flag absence
+        assert f"--{name}-ensemble" not in argv, name
