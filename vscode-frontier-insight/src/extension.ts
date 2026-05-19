@@ -17,6 +17,8 @@
  */
 import * as vscode from "vscode";
 import * as fsPromises from "fs/promises";
+import * as http from "http";
+import * as net from "net";
 import * as path from "path";
 import { spawn } from "child_process";
 import { Bridge } from "./bridge";
@@ -1381,35 +1383,105 @@ async function probeAxonOnActivate(
 
 /**
  * Single-source probe of the Axon sidecar's two health endpoints.
- * Returns `{live, ready, error?}`. ``error`` is the stringified
- * fetch/abort error when the live probe didn't return 200 — exposed
- * so callers can show the user WHY the probe failed instead of
- * "we couldn't tell."
+ * Returns `{live, ready, error?}`. ``error`` is exposed so callers
+ * can show the user WHY the probe failed instead of "we couldn't
+ * tell."
  *
- * 5 s timeout (up from the original 1.5 s) — VS Code's bundled Node
- * cold-starts the first fetch noticeably slower than a hot REPL,
- * and a tight timeout was the most common cause of "axon is running
- * but the extension says it isn't" reports.
+ * Uses Node's built-in ``http.request`` rather than the global
+ * ``fetch`` (undici). VSCode users repeatedly hit
+ * ``TypeError: fetch failed`` against a localhost Axon that curl
+ * could talk to fine — the opaque undici error hides the real cause
+ * (corporate proxy env vars, EDR injection, stale agent connection
+ * pool, IPv6 misroute). ``http.request`` has no global agent
+ * keepalive pool, surfaces ECONNREFUSED / ETIMEDOUT / etc. directly,
+ * and accepts ``family: 4`` to force IPv4 so a misconfigured ``::1``
+ * resolution can't quietly break the probe.
+ *
+ * Each HTTP check is paired with a raw TCP connect against the same
+ * host:port. If TCP succeeds but HTTP fails, the bug is above the
+ * socket layer (proxy / EDR / HTTP-protocol mismatch) — surface
+ * that in the error string so the user knows where to look.
+ *
+ * 5 s timeout per probe.
  */
 interface AxonHealthResult {
     live: boolean;
     ready: boolean;
     error?: string;
 }
-async function probeAxonHealth(host: string, port: string): Promise<AxonHealthResult> {
-    const probe = async (path: string): Promise<{ ok: boolean; error?: string }> => {
-        const url = `http://${host}:${port}${path}`;
-        try {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 5000);
-            const res = await fetch(url, { signal: ctrl.signal });
+
+function tcpConnectCheck(host: string, port: number, timeoutMs: number): Promise<{ ok: boolean; error?: string }> {
+    return new Promise(resolve => {
+        const sock = net.connect({ host, port, family: 4 });
+        const timer = setTimeout(() => {
+            sock.destroy();
+            resolve({ ok: false, error: `TCP timeout after ${timeoutMs}ms` });
+        }, timeoutMs);
+        sock.once("connect", () => {
             clearTimeout(timer);
-            return { ok: res.ok, error: res.ok ? undefined : `HTTP ${res.status}` };
-        } catch (e) {
-            const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-            return { ok: false, error: msg };
+            sock.end();
+            resolve({ ok: true });
+        });
+        sock.once("error", err => {
+            clearTimeout(timer);
+            const code = (err as NodeJS.ErrnoException).code;
+            resolve({ ok: false, error: code ? `TCP ${code}` : `TCP error: ${err.message}` });
+        });
+    });
+}
+
+function httpProbe(host: string, port: number, urlPath: string, timeoutMs: number): Promise<{ ok: boolean; error?: string; status?: number }> {
+    return new Promise(resolve => {
+        const req = http.request(
+            {
+                host, port, path: urlPath, method: "GET",
+                family: 4,
+                // Use a one-shot agent so we don't share undici's
+                // poisoned global keepalive pool from any earlier
+                // failure window.
+                agent: new http.Agent({ keepAlive: false }),
+                timeout: timeoutMs,
+            },
+            res => {
+                // Drain so the socket can close.
+                res.resume();
+                const ok = (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300;
+                resolve({ ok, status: res.statusCode, error: ok ? undefined : `HTTP ${res.statusCode}` });
+            },
+        );
+        req.on("timeout", () => {
+            req.destroy();
+            resolve({ ok: false, error: `HTTP timeout after ${timeoutMs}ms` });
+        });
+        req.on("error", err => {
+            const code = (err as NodeJS.ErrnoException).code;
+            resolve({ ok: false, error: code ? `HTTP ${code}` : `HTTP error: ${err.message}` });
+        });
+        req.end();
+    });
+}
+
+async function probeAxonHealth(host: string, port: string): Promise<AxonHealthResult> {
+    const portN = Number(port);
+    const TIMEOUT = 5000;
+
+    const probe = async (urlPath: string): Promise<{ ok: boolean; error?: string }> => {
+        const httpRes = await httpProbe(host, portN, urlPath, TIMEOUT);
+        if (httpRes.ok) return { ok: true };
+
+        // HTTP failed. Do a sibling TCP probe so the user can tell
+        // socket-level failure (axon not listening) apart from
+        // above-socket failure (proxy / EDR / HTTP mismatch).
+        const tcpRes = await tcpConnectCheck(host, portN, TIMEOUT);
+        if (tcpRes.ok) {
+            return {
+                ok: false,
+                error: `${httpRes.error} (TCP connect succeeded — HTTP request blocked; check HTTP_PROXY / antivirus / EDR)`,
+            };
         }
+        return { ok: false, error: `${httpRes.error}; ${tcpRes.error}` };
     };
+
     const live = await probe("/health/live");
     if (!live.ok) {
         return { live: false, ready: false, error: live.error };
