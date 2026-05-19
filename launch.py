@@ -328,6 +328,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     #   * analyze: tournament (engine-level node_ensemble is built per-node
     #     so the CLI flag picks a single merge that gets applied to the
     #     analyze + cross_check nodes).
+    # ``analyze`` is the odd one out — engine-level ``analyze.merge =
+    # synthesize`` is rejected at config load by
+    # ``ProviderConfig._check_node_ensemble_node_specific_constraints``
+    # because its downstream parser expects JSON. So the
+    # ``--analyze-ensemble-merge`` flag MUST exclude ``synthesize``;
+    # only ``tournament`` is admissible. The other 3 tools take both.
+    _MERGE_CHOICES = {
+        "digest":    ("tournament", "synthesize"),
+        "portfolio": ("tournament", "synthesize"),
+        "summarize": ("tournament", "synthesize"),
+        "analyze":   ("tournament",),
+    }
     for _tool, _merge_default in (
         ("digest", "synthesize"),
         ("portfolio", "tournament"),
@@ -348,7 +360,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.add_argument(
             f"--{_tool}-ensemble-merge",
             type=str,
-            choices=("tournament", "synthesize"),
+            choices=_MERGE_CHOICES[_tool],
             default=_merge_default,
             help=f"How to combine the ensemble candidates for --{_tool}.",
         )
