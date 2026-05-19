@@ -652,10 +652,19 @@ export class Bridge {
             const any = await vscode.lm.selectChatModels({ vendor: "copilot" });
             return any[0];
         }
-        // Hint set → try the family filter first.
-        const matched = await vscode.lm.selectChatModels({
-            vendor: "copilot", family,
+        // Hint set → try by *id* first (the model picker emits ids,
+        // e.g. ``gemini-3-flash-preview``), then fall back to *family*
+        // for legacy hints (``gpt-5``, ``claude-opus-4-7``). Filtering
+        // by family with an id misses every versioned/preview model
+        // whose family differs from its id.
+        let matched = await vscode.lm.selectChatModels({
+            vendor: "copilot", id: hint,
         });
+        if (!matched.length) {
+            matched = await vscode.lm.selectChatModels({
+                vendor: "copilot", family,
+            });
+        }
         if (matched.length > 0) {
             return matched[0];
         }
