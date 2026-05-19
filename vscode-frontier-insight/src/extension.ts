@@ -1373,29 +1373,37 @@ async function probeAxonOnActivate(
     // sentence-transformers model load is the slow step — typically
     // 5-15 s on a fresh launch). A one-shot probe right at activate
     // racing the sidecar produces false-negative "Axon not detected"
-    // notifications. Poll on a short interval with a generous total
-    // budget so a slow sidecar isn't mistaken for an absent one.
+    // notifications. Poll until either Axon answers or a wall-clock
+    // deadline elapses, so a slow sidecar isn't mistaken for an
+    // absent one.
     //
-    // Schedule (15 attempts × 2 s = ~30 s total): fast enough to
-    // surface the notification while it's still useful, slow enough
-    // to absorb the typical cold-start. If Axon comes up at any
-    // point during the window the probe silently returns and the
-    // user never sees a false notification.
-    const TOTAL_ATTEMPTS = 15;
+    // Per-probe timeout is 1s (vs. 5s default) so each failed attempt
+    // returns fast and the deadline is honored. Worst-case-per-attempt
+    // is now ~2s (HTTP timeout + sibling TCP timeout) instead of ~10s,
+    // and the loop checks the elapsed deadline before sleeping or
+    // probing again — so the ~30s budget is real wall-clock, not just
+    // attempt count.
+    const DEADLINE_MS = 30000;
+    const PER_PROBE_TIMEOUT_MS = 1000;
     const INTERVAL_MS = 2000;
+    const startedAt = Date.now();
     let status: AxonHealthResult = { live: false, ready: false };
-    for (let attempt = 1; attempt <= TOTAL_ATTEMPTS; attempt++) {
-        status = await probeAxonHealth(host, port);
+    let attempts = 0;
+    while (Date.now() - startedAt < DEADLINE_MS) {
+        attempts++;
+        status = await probeAxonHealth(host, port, PER_PROBE_TIMEOUT_MS);
         if (status.live) return;
-        if (attempt < TOTAL_ATTEMPTS) {
-            await new Promise(r => setTimeout(r, INTERVAL_MS));
-        }
+        const elapsed = Date.now() - startedAt;
+        const remaining = DEADLINE_MS - elapsed;
+        if (remaining <= 0) break;
+        await new Promise(r => setTimeout(r, Math.min(INTERVAL_MS, remaining)));
     }
 
-    // 30s budget exhausted — sidecar genuinely isn't reachable.
+    // Deadline reached — sidecar genuinely isn't reachable.
+    const totalElapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.warn(
         `[fi] axon probe failed at http://${host}:${port}/health/live ` +
-        `after ${TOTAL_ATTEMPTS} attempts over ~${(TOTAL_ATTEMPTS * INTERVAL_MS) / 1000}s: ${status.error}`,
+        `after ${attempts} attempts over ${totalElapsedSec}s: ${status.error}`,
     );
     const detail = status.error ? ` (probe error: ${status.error})` : "";
     const action = await vscode.window.showInformationMessage(
@@ -1499,9 +1507,11 @@ function httpProbe(host: string, port: number, urlPath: string, timeoutMs: numbe
     });
 }
 
-async function probeAxonHealth(host: string, port: string): Promise<AxonHealthResult> {
+async function probeAxonHealth(
+    host: string, port: string, timeoutMs: number = 5000,
+): Promise<AxonHealthResult> {
     const portN = Number(port);
-    const TIMEOUT = 5000;
+    const TIMEOUT = timeoutMs;
 
     const probe = async (urlPath: string): Promise<{ ok: boolean; error?: string }> => {
         const httpRes = await httpProbe(host, portN, urlPath, TIMEOUT);

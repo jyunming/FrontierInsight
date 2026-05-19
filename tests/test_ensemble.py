@@ -513,6 +513,36 @@ async def test_singleshot_falls_back_when_all_fanout_calls_fail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_singleshot_propagates_merger_ensemble_error() -> None:
+    """Merger-time EnsembleError (e.g. tournament rejects >26
+    survivors) is a real config bug — it MUST propagate. The
+    fanout-all-failed fallback is intentionally narrow and must
+    not swallow these. Pins PR #125 Copilot review."""
+    from core.config import NodeEnsembleConfig
+    from core.ensemble import run_singleshot_with_ensemble, EnsembleError
+
+    # 27 models > the 26-letter A-Z cap merge_tournament enforces.
+    over_cap_models = [f"m{i}" for i in range(27)]
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        # Every fan-out call succeeds → merge_tournament raises on cap.
+        return f"answer from {model}" if model else "fallback-not-expected"
+
+    ensemble = NodeEnsembleConfig(
+        models=over_cap_models, merge="tournament",
+    )
+    with pytest.raises(EnsembleError) as exc:
+        await run_singleshot_with_ensemble(
+            prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
+            default_merge="tournament", node="proposal",
+        )
+    # Error must be the merger's 26-cap, NOT silently swallowed by
+    # the fallback (which would have called fake_chat with model=None
+    # and returned "fallback-not-expected" without raising).
+    assert "26" in str(exc.value) or "candidates" in str(exc.value)
+
+
+@pytest.mark.asyncio
 async def test_singleshot_rejects_vote_merge() -> None:
     """``vote`` requires a ``key`` argument naming a JSON field on the
     response — single-shot tools emit free-form markdown so the

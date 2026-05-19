@@ -475,11 +475,19 @@ async def run_singleshot_with_ensemble(
     model trio and merges per ``ensemble.merge`` (or ``default_merge``
     when the config didn't pin one).
 
-    Falls back to the single-call path with a logged warning when
-    every fan-out call fails (``EnsembleError``) — same lenient
-    semantics the engine uses for per-node ensemble. The moderator
-    failing inside the merger still raises so the caller can decide
-    whether to surface it as a hard error.
+    Falls back to the single-call path with a logged warning ONLY when
+    every fan-out call fails (``EnsembleError`` from ``fanout_chat``)
+    — same lenient semantics the engine uses for per-node ensemble.
+
+    Other ``EnsembleError`` sources (merger-time issues — e.g.
+    ``merge_tournament`` rejecting >26 survivors as a config bug)
+    propagate to the caller; falling back silently after paying the
+    full fan-out cost would mask a real configuration problem.
+
+    The mergers themselves catch their OWN moderator-call failures
+    and fall back to the first survivor with a note in
+    ``EnsembleResult.notes`` — see ``merge_tournament`` /
+    ``merge_synthesize``. Their failures don't bubble up here.
 
     ``default_merge`` differs by tool: ``synthesize`` for critique
     (preserve disagreement), ``tournament`` for proposal / summarize /
@@ -509,24 +517,15 @@ async def run_singleshot_with_ensemble(
             "(merge with disagreement flags) instead."
         )
     summary = prompt_summary or node
+    # Narrow scope on purpose: only fanout-chat-all-failed is the
+    # "fall back to single call" path. Merger-time EnsembleError
+    # (>26 survivors, etc.) is a real config bug — let it propagate.
     try:
         raw = await fanout_chat(
             [{"role": "user", "content": prompt}],
             ensemble.models, chat_fn=chat_fn, node=node,
             temperature=temperature,
         )
-        moderator = ensemble.moderator or ensemble.models[0]
-        if merge_kind == "tournament":
-            result = await merge_tournament(
-                raw, moderator_model=moderator,
-                chat_fn=chat_fn, node=node, prompt_summary=summary,
-            )
-        else:
-            result = await merge_synthesize(
-                raw, moderator_model=moderator,
-                chat_fn=chat_fn, node=node, prompt_summary=summary,
-            )
-        return result.merged if isinstance(result.merged, str) else str(result.merged)
     except EnsembleError as e:
         _log.warning(
             "ensemble all-failed at %s (%s); falling back to single-call",
@@ -536,3 +535,15 @@ async def run_singleshot_with_ensemble(
             [{"role": "user", "content": prompt}],
             temperature=temperature, node=node,
         )
+    moderator = ensemble.moderator or ensemble.models[0]
+    if merge_kind == "tournament":
+        result = await merge_tournament(
+            raw, moderator_model=moderator,
+            chat_fn=chat_fn, node=node, prompt_summary=summary,
+        )
+    else:
+        result = await merge_synthesize(
+            raw, moderator_model=moderator,
+            chat_fn=chat_fn, node=node, prompt_summary=summary,
+        )
+    return result.merged if isinstance(result.merged, str) else str(result.merged)
