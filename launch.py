@@ -318,6 +318,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Model to perform the merge step. Defaults to the first "
              "model in --critique-ensemble.",
     )
+    # Ensemble flags for the other LLM-using single-shot tools share
+    # the same {--<tool>-ensemble, --<tool>-ensemble-merge,
+    # --<tool>-ensemble-moderator} shape as proposal / critique above.
+    # Defaults intentionally differ per tool:
+    #   * digest: synthesize (WeekDiff narrative preserves disagreement).
+    #   * portfolio: tournament (one canonical thesis about clusters).
+    #   * summarize: tournament (the produced summary is the artifact).
+    #   * analyze: tournament (engine-level node_ensemble is built per-node
+    #     so the CLI flag picks a single merge that gets applied to the
+    #     analyze + cross_check nodes).
+    # ``analyze`` is the odd one out — engine-level ``analyze.merge =
+    # synthesize`` is rejected at config load by
+    # ``ProviderConfig._check_node_ensemble_node_specific_constraints``
+    # because its downstream parser expects JSON. So the
+    # ``--analyze-ensemble-merge`` flag MUST exclude ``synthesize``;
+    # only ``tournament`` is admissible. The other 3 tools take both.
+    _MERGE_CHOICES = {
+        "digest":    ("tournament", "synthesize"),
+        "portfolio": ("tournament", "synthesize"),
+        "summarize": ("tournament", "synthesize"),
+        "analyze":   ("tournament",),
+    }
+    for _tool, _merge_default in (
+        ("digest", "synthesize"),
+        ("portfolio", "tournament"),
+        ("summarize", "tournament"),
+        ("analyze", "tournament"),
+    ):
+        p.add_argument(
+            f"--{_tool}-ensemble",
+            type=str, default="",
+            metavar="M1,M2,M3",
+            help=(
+                f"Multi-model ensemble for --{_tool}. Comma-separated list "
+                f"of model identifiers; default merge is {_merge_default!r}. "
+                f"Cost: N+1 LLM calls. Example: "
+                f"--{_tool}-ensemble gpt-5,claude-opus-4-7,gemini-2.5-pro"
+            ),
+        )
+        p.add_argument(
+            f"--{_tool}-ensemble-merge",
+            type=str,
+            choices=_MERGE_CHOICES[_tool],
+            default=_merge_default,
+            help=f"How to combine the ensemble candidates for --{_tool}.",
+        )
+        p.add_argument(
+            f"--{_tool}-ensemble-moderator",
+            type=str, default="",
+            help=f"Model to perform the merge step for --{_tool}. Defaults "
+                 f"to the first model in --{_tool}-ensemble.",
+        )
     p.add_argument(
         "--analyze-topic",
         type=str,
@@ -1129,6 +1181,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
+                ensemble_models=args.digest_ensemble,
+                ensemble_merge=args.digest_ensemble_merge,
+                ensemble_moderator=args.digest_ensemble_moderator,
             )
 
         if args.portfolio:
@@ -1139,6 +1194,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
+                ensemble_models=args.portfolio_ensemble,
+                ensemble_merge=args.portfolio_ensemble_merge,
+                ensemble_moderator=args.portfolio_ensemble_moderator,
             )
 
         if args.critique:
@@ -1179,6 +1237,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
                 profile=args.profile,
+                ensemble_models=args.analyze_ensemble,
+                ensemble_merge=args.analyze_ensemble_merge,
+                ensemble_moderator=args.analyze_ensemble_moderator,
             )
 
         if args.summarize:
@@ -1191,6 +1252,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 supervisor=supervisor,
+                ensemble_models=args.summarize_ensemble,
+                ensemble_merge=args.summarize_ensemble_merge,
+                ensemble_moderator=args.summarize_ensemble_moderator,
             )
 
         if args.config:
@@ -1239,6 +1303,9 @@ async def _run_summarize(
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
+    ensemble_models: str = "",
+    ensemble_merge: str = "tournament",
+    ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --summarize <folder>``.
 
@@ -1275,11 +1342,21 @@ async def _run_summarize(
     except Exception as e:  # pragma: no cover — Axon may not be installed
         print(f"[FI] --summarize: Axon unavailable ({e!r}); summary will still be written.", file=sys.stderr)
 
-    print(f"[FI] summarize {folder} (kind={kind}, provider={provider.name})")
+    ensemble = _parse_ensemble_flag(
+        ensemble_models, ensemble_merge, ensemble_moderator,
+    )
+    if ensemble is not None:
+        print(
+            f"[FI] summarize {folder} (kind={kind}, provider={provider.name}; "
+            f"ensemble={ensemble.models!r}, merge={ensemble.merge})",
+        )
+    else:
+        print(f"[FI] summarize {folder} (kind={kind}, provider={provider.name})")
     try:
         art = await summarize_folder(
             folder, provider=provider, output_dir=output_root,
             supervisor=supervisor, kind=kind, knowledge=knowledge,
+            ensemble=ensemble,
         )
     except Exception as e:
         print(f"[FI] --summarize failed: {e!r}", file=sys.stderr)
@@ -1302,6 +1379,9 @@ async def _run_digest(
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
+    ensemble_models: str = "",
+    ensemble_merge: str = "synthesize",
+    ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --digest``.
 
@@ -1335,11 +1415,22 @@ async def _run_digest(
             file=sys.stderr,
         )
 
-    print(f"[FI] digest window=last {days} days (provider={provider.name})")
+    ensemble = _parse_ensemble_flag(
+        ensemble_models, ensemble_merge, ensemble_moderator,
+    )
+    if ensemble is not None:
+        print(
+            f"[FI] digest window=last {days} days "
+            f"(provider={provider.name}; ensemble={ensemble.models!r}, "
+            f"merge={ensemble.merge})",
+        )
+    else:
+        print(f"[FI] digest window=last {days} days (provider={provider.name})")
     try:
         art = await generate_digest(
             output_root, days=days, provider=provider,
             supervisor=supervisor, knowledge=knowledge,
+            ensemble=ensemble,
         )
     except Exception as e:
         print(f"[FI] --digest failed: {e!r}", file=sys.stderr)
@@ -1372,6 +1463,9 @@ async def _run_portfolio(
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
+    ensemble_models: str = "",
+    ensemble_merge: str = "tournament",
+    ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --portfolio``.
 
@@ -1400,11 +1494,21 @@ async def _run_portfolio(
             file=sys.stderr,
         )
 
-    print(f"[FI] portfolio synthesis (provider={provider.name})")
+    ensemble = _parse_ensemble_flag(
+        ensemble_models, ensemble_merge, ensemble_moderator,
+    )
+    if ensemble is not None:
+        print(
+            f"[FI] portfolio synthesis (provider={provider.name}; "
+            f"ensemble={ensemble.models!r}, merge={ensemble.merge})",
+        )
+    else:
+        print(f"[FI] portfolio synthesis (provider={provider.name})")
     try:
         art = await generate_portfolio(
             output_root, provider=provider,
             supervisor=supervisor, knowledge=knowledge,
+            ensemble=ensemble,
         )
     except Exception as e:
         print(f"[FI] --portfolio failed: {e!r}", file=sys.stderr)
@@ -1522,6 +1626,9 @@ async def _run_analyze(
     vscode_bridge_socket: str = "",
     supervisor: ProxySupervisor,
     profile: bool = False,
+    ensemble_models: str = "",
+    ensemble_merge: str = "tournament",
+    ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --analyze <data_path>
     --analyze-topic "..."``.
@@ -1530,7 +1637,15 @@ async def _run_analyze(
     quest's ``data/`` directory, then runs the engine through
     ``run_one``. The engine's no-simulation path (auto_collect_data
     passthrough → wait_for_data passthrough since data exists →
-    data_load → analyze → write → review) handles the rest."""
+    data_load → analyze → write → review) handles the rest.
+
+    Unlike the single-shot tools (digest / portfolio / summarize)
+    that wrap a single LLM call, ``--analyze`` runs a multi-node
+    engine quest. The CLI ``--analyze-ensemble`` flag therefore
+    populates ``cfg.provider.node_ensemble`` for the ``analyze`` and
+    ``cross_check`` nodes — the engine's per-node fan-out logic does
+    the rest, same as a quest run from the YAML.
+    """
     from core.analyze_cli import prepare_analyze_quest
 
     # Force vscode_extension as the provider when EITHER bridge
@@ -1563,10 +1678,29 @@ async def _run_analyze(
     _apply_vscode_bridge_override(cfg, vscode_bridge_port)
     _apply_vscode_bridge_socket_override(cfg, vscode_bridge_socket)
 
-    print(
-        f"[FI] --analyze: quest_id={quest_id} "
-        f"files_staged={files_staged} provider={cfg.provider.name}",
+    ensemble = _parse_ensemble_flag(
+        ensemble_models, ensemble_merge, ensemble_moderator,
     )
+    if ensemble is not None:
+        # Apply the ensemble to the two nodes that matter for an
+        # analyze-mode quest: ``analyze`` (the headline synthesis)
+        # and ``cross_check`` (per-finding literature search +
+        # supporting/conflicting classification). Other engine nodes
+        # for analyze quests are short and not worth fanning out.
+        cfg.provider.node_ensemble = dict(cfg.provider.node_ensemble or {})
+        for _node in ("analyze", "cross_check"):
+            cfg.provider.node_ensemble[_node] = ensemble
+        print(
+            f"[FI] --analyze: quest_id={quest_id} "
+            f"files_staged={files_staged} provider={cfg.provider.name} "
+            f"ensemble: {len(ensemble.models)} models on "
+            f"analyze+cross_check, merge={ensemble.merge}",
+        )
+    else:
+        print(
+            f"[FI] --analyze: quest_id={quest_id} "
+            f"files_staged={files_staged} provider={cfg.provider.name}",
+        )
     # Pass the minted quest_id through as ``resume_quest_id`` so the
     # Engine reuses it instead of generating a fresh one. Without
     # this, the data we just staged into

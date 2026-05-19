@@ -1367,15 +1367,43 @@ async function probeAxonOnActivate(
 ): Promise<void> {
     const host = process.env.AXON_HOST || "127.0.0.1";
     const port = process.env.AXON_PORT || "8000";
-    const status = await probeAxonHealth(host, port);
-    if (status.live) return;  // sidecar is up, nothing to surface
 
-    // Log the actual failure so the user can see it in the extension
-    // output channel — the original probe swallowed errors silently
-    // which made "axon is up but extension says it isn't" impossible
-    // to diagnose.
+    // Activation runs on `onStartupFinished`, which often fires
+    // BEFORE the user's Axon sidecar finishes its cold-init (the
+    // sentence-transformers model load is the slow step — typically
+    // 5-15 s on a fresh launch). A one-shot probe right at activate
+    // racing the sidecar produces false-negative "Axon not detected"
+    // notifications. Poll until either Axon answers or a wall-clock
+    // deadline elapses, so a slow sidecar isn't mistaken for an
+    // absent one.
+    //
+    // Per-probe timeout is 1s (vs. 5s default) so each failed attempt
+    // returns fast and the deadline is honored. Worst-case-per-attempt
+    // is now ~2s (HTTP timeout + sibling TCP timeout) instead of ~10s,
+    // and the loop checks the elapsed deadline before sleeping or
+    // probing again — so the ~30s budget is real wall-clock, not just
+    // attempt count.
+    const DEADLINE_MS = 30000;
+    const PER_PROBE_TIMEOUT_MS = 1000;
+    const INTERVAL_MS = 2000;
+    const startedAt = Date.now();
+    let status: AxonHealthResult = { live: false, ready: false };
+    let attempts = 0;
+    while (Date.now() - startedAt < DEADLINE_MS) {
+        attempts++;
+        status = await probeAxonHealth(host, port, PER_PROBE_TIMEOUT_MS);
+        if (status.live) return;
+        const elapsed = Date.now() - startedAt;
+        const remaining = DEADLINE_MS - elapsed;
+        if (remaining <= 0) break;
+        await new Promise(r => setTimeout(r, Math.min(INTERVAL_MS, remaining)));
+    }
+
+    // Deadline reached — sidecar genuinely isn't reachable.
+    const totalElapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.warn(
-        `[fi] axon probe failed at http://${host}:${port}/health/live: ${status.error}`,
+        `[fi] axon probe failed at http://${host}:${port}/health/live ` +
+        `after ${attempts} attempts over ${totalElapsedSec}s: ${status.error}`,
     );
     const detail = status.error ? ` (probe error: ${status.error})` : "";
     const action = await vscode.window.showInformationMessage(
@@ -1479,9 +1507,11 @@ function httpProbe(host: string, port: number, urlPath: string, timeoutMs: numbe
     });
 }
 
-async function probeAxonHealth(host: string, port: string): Promise<AxonHealthResult> {
+async function probeAxonHealth(
+    host: string, port: string, timeoutMs: number = 5000,
+): Promise<AxonHealthResult> {
     const portN = Number(port);
-    const TIMEOUT = 5000;
+    const TIMEOUT = timeoutMs;
 
     const probe = async (urlPath: string): Promise<{ ok: boolean; error?: string }> => {
         const httpRes = await httpProbe(host, portN, urlPath, TIMEOUT);

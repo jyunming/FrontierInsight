@@ -117,11 +117,12 @@
       }
       grid.appendChild(makeProviderPicker(providers));
       grid.appendChild(makeModelPicker());
-      // Only the two tools whose CLI accept --<tool>-ensemble can
-      // honour the picker. Surfacing it elsewhere would silently
-      // discard the user's choice. Other LLM tools need core-side
-      // ensemble wiring before they can join.
-      if (spec.name === 'proposal' || spec.name === 'critique') {
+      // Every LLM tool now accepts --<tool>-ensemble. The fan-out
+      // shape differs across tools (single-shot wrap for digest /
+      // portfolio / summarize / critique / proposal; per-node
+      // node_ensemble for analyze) but the form-level UX is identical:
+      // pick a profile, server expands to the provider's trio.
+      if (spec.needs_llm) {
         grid.appendChild(makeEnsemblePicker(providerSchema.ensemble_profiles || []));
       }
       form.appendChild(fs);

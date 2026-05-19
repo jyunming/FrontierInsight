@@ -457,3 +457,93 @@ def cost_jsonl_entries(
             "disagreement_score": result.disagreement_score,
         })
     return rows
+
+
+async def run_singleshot_with_ensemble(
+    *,
+    prompt: str,
+    chat_fn: ChatFn,
+    ensemble: "Any",  # NodeEnsembleConfig | None
+    default_merge: str,
+    node: str,
+    temperature: float = 0.2,
+    prompt_summary: str = "",
+) -> str:
+    """Shared helper for the standalone single-shot tools (digest /
+    portfolio / summarize / critique). Either fires one chat call
+    (when ``ensemble`` is None) or fans out across the configured
+    model trio and merges per ``ensemble.merge`` (or ``default_merge``
+    when the config didn't pin one).
+
+    Falls back to the single-call path with a logged warning ONLY when
+    every fan-out call fails (``EnsembleError`` from ``fanout_chat``)
+    — same lenient semantics the engine uses for per-node ensemble.
+
+    Other ``EnsembleError`` sources (merger-time issues — e.g.
+    ``merge_tournament`` rejecting >26 survivors as a config bug)
+    propagate to the caller; falling back silently after paying the
+    full fan-out cost would mask a real configuration problem.
+
+    The mergers themselves catch their OWN moderator-call failures
+    and fall back to the first survivor with a note in
+    ``EnsembleResult.notes`` — see ``merge_tournament`` /
+    ``merge_synthesize``. Their failures don't bubble up here.
+
+    ``default_merge`` differs by tool: ``synthesize`` for critique
+    (preserve disagreement), ``tournament`` for proposal / summarize /
+    portfolio (pick the strongest single answer); ``digest`` defaults
+    to ``synthesize`` because the WeekDiff narrative benefits from
+    multiple model perspectives on the same set of quests.
+    """
+    if ensemble is None:
+        return await chat_fn(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature, node=node,
+        )
+    merge_kind = ensemble.merge or default_merge
+    # ``vote`` is only meaningful for structured-output nodes
+    # (cross_check) where every model emits the same JSON shape and a
+    # majority can be tallied on a named field. Single-shot tools emit
+    # free-form markdown — no field to vote on. Reject UP-FRONT,
+    # outside the all-fanout-failed fallback path below, so the user
+    # sees a clear configuration error instead of a silent fallback to
+    # single-call.
+    if merge_kind == "vote":
+        raise EnsembleError(
+            "merge='vote' is only supported for structured-output "
+            "nodes (cross_check). For single-shot tools "
+            "(digest/portfolio/summarize/critique/proposal) pick "
+            "'tournament' (one canonical answer) or 'synthesize' "
+            "(merge with disagreement flags) instead."
+        )
+    summary = prompt_summary or node
+    # Narrow scope on purpose: only fanout-chat-all-failed is the
+    # "fall back to single call" path. Merger-time EnsembleError
+    # (>26 survivors, etc.) is a real config bug — let it propagate.
+    try:
+        raw = await fanout_chat(
+            [{"role": "user", "content": prompt}],
+            ensemble.models, chat_fn=chat_fn, node=node,
+            temperature=temperature,
+        )
+    except EnsembleError as e:
+        _log.warning(
+            "ensemble all-failed at %s (%s); falling back to single-call",
+            node, e,
+        )
+        return await chat_fn(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature, node=node,
+        )
+    moderator = ensemble.moderator or ensemble.models[0]
+    if merge_kind == "tournament":
+        result = await merge_tournament(
+            raw, moderator_model=moderator,
+            chat_fn=chat_fn, node=node, prompt_summary=summary,
+        )
+    else:
+        result = await merge_synthesize(
+            raw, moderator_model=moderator,
+            chat_fn=chat_fn, node=node, prompt_summary=summary,
+        )
+    return result.merged if isinstance(result.merged, str) else str(result.merged)

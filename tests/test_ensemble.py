@@ -453,3 +453,116 @@ def test_cost_jsonl_marks_failed_calls() -> None:
     assert len(failed) == 1
     assert failed[0]["model"] == "m2"
     assert "timeout" in failed[0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# run_singleshot_with_ensemble — shared helper for digest / portfolio /
+# summarize / critique single-LLM-call tools.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_singleshot_no_ensemble_fires_one_call() -> None:
+    """``ensemble=None`` is the documented cheap path — one chat call,
+    no fan-out, no moderator overhead. Confirms the helper doesn't
+    sneak in extra calls when the user didn't opt in."""
+    from core.ensemble import run_singleshot_with_ensemble
+    calls = []
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        calls.append({"model": model, "node": node})
+        return "single-call answer"
+
+    out = await run_singleshot_with_ensemble(
+        prompt="hi", chat_fn=fake_chat, ensemble=None,
+        default_merge="synthesize", node="digest",
+    )
+    assert out == "single-call answer"
+    assert len(calls) == 1
+    assert calls[0]["node"] == "digest"
+
+
+@pytest.mark.asyncio
+async def test_singleshot_falls_back_when_all_fanout_calls_fail() -> None:
+    """Every fan-out call raises → fanout_chat raises EnsembleError →
+    the helper catches and falls through to a single-call path so the
+    user still gets an answer instead of a hard failure on a flaky
+    network. Same lenient policy the engine uses for per-node
+    ensemble."""
+    from core.config import NodeEnsembleConfig
+    from core.ensemble import run_singleshot_with_ensemble
+    attempts = {"fanout": 0, "fallback": 0}
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        if model is not None:
+            attempts["fanout"] += 1
+            raise RuntimeError("simulated upstream outage")
+        attempts["fallback"] += 1
+        return "fallback answer"
+
+    ensemble = NodeEnsembleConfig(
+        models=["m1", "m2", "m3"], merge="synthesize",
+    )
+    out = await run_singleshot_with_ensemble(
+        prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
+        default_merge="synthesize", node="digest",
+    )
+    assert out == "fallback answer"
+    assert attempts["fanout"] == 3
+    assert attempts["fallback"] == 1
+
+
+@pytest.mark.asyncio
+async def test_singleshot_propagates_merger_ensemble_error() -> None:
+    """Merger-time EnsembleError (e.g. tournament rejects >26
+    survivors) is a real config bug — it MUST propagate. The
+    fanout-all-failed fallback is intentionally narrow and must
+    not swallow these. Pins PR #125 Copilot review."""
+    from core.config import NodeEnsembleConfig
+    from core.ensemble import run_singleshot_with_ensemble, EnsembleError
+
+    # 27 models > the 26-letter A-Z cap merge_tournament enforces.
+    over_cap_models = [f"m{i}" for i in range(27)]
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        # Every fan-out call succeeds → merge_tournament raises on cap.
+        return f"answer from {model}" if model else "fallback-not-expected"
+
+    ensemble = NodeEnsembleConfig(
+        models=over_cap_models, merge="tournament",
+    )
+    with pytest.raises(EnsembleError) as exc:
+        await run_singleshot_with_ensemble(
+            prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
+            default_merge="tournament", node="proposal",
+        )
+    # Error must be the merger's 26-cap, NOT silently swallowed by
+    # the fallback (which would have called fake_chat with model=None
+    # and returned "fallback-not-expected" without raising).
+    assert "26" in str(exc.value) or "candidates" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_singleshot_rejects_vote_merge() -> None:
+    """``vote`` requires a ``key`` argument naming a JSON field on the
+    response — single-shot tools emit free-form markdown so the
+    field doesn't exist. The helper must reject with a clear message,
+    not crash deep inside merge_vote with a TypeError about a missing
+    keyword. Pins PR #124 Copilot review (the comment that ``await
+    merge_vote(raw)`` was broken in TWO ways at once)."""
+    from core.config import NodeEnsembleConfig
+    from core.ensemble import run_singleshot_with_ensemble, EnsembleError
+
+    async def fake_chat(messages, *, temperature=0.2, model=None, node=""):
+        return "irrelevant"
+
+    ensemble = NodeEnsembleConfig(
+        models=["m1", "m2", "m3"], merge="vote",
+    )
+    with pytest.raises(EnsembleError) as exc:
+        await run_singleshot_with_ensemble(
+            prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
+            default_merge="tournament", node="digest",
+        )
+    assert "vote" in str(exc.value).lower()
+    assert "tournament" in str(exc.value) or "synthesize" in str(exc.value)
