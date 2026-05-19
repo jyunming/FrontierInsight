@@ -466,7 +466,20 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     )
 
     review_branch = next(iter(g.branches["review"].values()))
-    assert review_branch.ends == {"revise": "design", "done": END}
+    assert review_branch.ends == {
+        "revise": "design",
+        "done": END,
+        # The human-feedback gate adds a third terminal: when
+        # ``engine.human_feedback_gate: "after_review"`` the router
+        # picks ``human_feedback`` instead of revise/done so the user
+        # can accept / reject / refine.
+        "human_feedback": "human_feedback",
+    }
+    # human_feedback node itself routes back to design (refine) or END
+    # (accept/reject). Same ``revise``/``done`` labels the auto path uses.
+    assert "human_feedback" in g.branches
+    hf_branch = next(iter(g.branches["human_feedback"].values()))
+    assert hf_branch.ends == {"revise": "design", "done": END}
     reflect_branch = next(iter(g.branches["execute_reflect"].values()))
     assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))

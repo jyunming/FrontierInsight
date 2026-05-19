@@ -633,6 +633,63 @@ async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, objec
     return answers
 
 
+async def _cli_human_feedback_callback(
+    snapshot: dict[str, object],
+) -> dict[str, object]:
+    """Terminal-based human-feedback gate. Prints the current review
+    + verdict / score / weaknesses, then asks the user to type
+    ``accept`` / ``reject`` / ``refine``. On ``refine`` reads a single
+    line of freeform feedback (terminated by Enter) that flows into
+    the design node's prompt on the next revise loop. Multi-line
+    feedback isn't supported on the CLI — users with longer comments
+    should keep them in a notes file and reference it, or use the
+    web UI / VSCode flow once the gate surface lands there.
+
+    Wired by ``launch.py --interactive`` when
+    ``engine.human_feedback_gate: after_review`` is set in the YAML.
+    """
+    print()
+    print("=" * 72)
+    print("Human-feedback gate — quest paused after review")
+    print("=" * 72)
+    print(f"  Verdict      : {snapshot.get('verdict')}")
+    if snapshot.get("score") is not None:
+        print(f"  Score        : {snapshot.get('score')}")
+    weaknesses = snapshot.get("weaknesses") or []
+    if isinstance(weaknesses, list) and weaknesses:
+        print("  Weaknesses   :")
+        for w in weaknesses[:5]:
+            print(f"    - {w}")
+    suggestions = snapshot.get("suggestions") or []
+    if isinstance(suggestions, list) and suggestions:
+        print("  Suggestions  :")
+        for s in suggestions[:5]:
+            print(f"    - {s}")
+    paper = snapshot.get("paper_md_path")
+    if paper:
+        print(f"  Paper        : {paper}")
+    print()
+    print("Choose: accept (finalise), reject (abandon), refine (loop with feedback)")
+    try:
+        raw = input("  action [accept]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        raw = "accept"
+    action = raw if raw in ("accept", "reject", "refine") else "accept"
+    feedback = ""
+    if action == "refine":
+        try:
+            feedback = input("  feedback (one line): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            feedback = ""
+        if not feedback:
+            print("  (empty feedback — falling back to accept)")
+            action = "accept"
+    print(f"  → {action}")
+    print("=" * 72)
+    print()
+    return {"action": action, "feedback": feedback}
+
+
 async def run_one(
     cfg: Config,
     *,
@@ -675,8 +732,21 @@ async def run_one(
     #                            (the engine catches this and produces
     #                            a clear RuntimeError).
     callback = _pick_clarify_callback(cfg, engine, interactive)
+    # Wire the human-feedback gate callback only when --interactive is
+    # set. Without that, the CLI callback would block on ``input()``
+    # in a non-interactive run (CI, fleet, headless). The engine
+    # raises a clear RuntimeError when the gate is on but no callback
+    # is wired, so the user gets a "you need --interactive" pointer
+    # instead of a silent hang.
+    hf_callback: object = None
+    if (
+        cfg.engine.human_feedback_gate == "after_review"
+        and interactive
+    ):
+        hf_callback = _cli_human_feedback_callback
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
+        human_feedback_callback=hf_callback,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
     written = await _run_generators(cfg, art, supervisor=supervisor)
@@ -782,18 +852,28 @@ async def _maybe_profiled(
     *,
     profile: bool,
     clarify_callback: object = None,
+    human_feedback_callback: object = None,
 ) -> QuestArtifacts:
     if not profile:
-        return await engine.run(clarify_callback=clarify_callback)
+        return await engine.run(
+            clarify_callback=clarify_callback,
+            human_feedback_callback=human_feedback_callback,
+        )
     try:
         from viztracer import VizTracer  # type: ignore[import-not-found]
     except ImportError:
         print("[FI] --profile requested but viztracer is not installed; skipping")
-        return await engine.run(clarify_callback=clarify_callback)
+        return await engine.run(
+            clarify_callback=clarify_callback,
+            human_feedback_callback=human_feedback_callback,
+        )
     trace_path = engine.fi_dir / "profile.json"
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
     with VizTracer(output_file=str(trace_path)):
-        art = await engine.run(clarify_callback=clarify_callback)
+        art = await engine.run(
+            clarify_callback=clarify_callback,
+            human_feedback_callback=human_feedback_callback,
+        )
     print(f"[FI] {art.quest_id} profile -> {trace_path}")
     return art
 

@@ -26,10 +26,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict
 
+# User-supplied async function that collects answers to clarify-node
+# questions. Receives the ``clarify_questions`` dict and must return
+# the answers dict (same keys, resolved values).
 ClarifyCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
-"""User-supplied async function that collects answers to clarify-node
-questions. Receives the `clarify_questions` dict and must return the
-answers dict (same keys, resolved values)."""
+
+# Human-feedback gate callback. Receives the review snapshot dict
+# (verdict / score / strengths / weaknesses / suggestions / paper_md_path)
+# and returns ``{"action": <accept|reject|refine>, "feedback": "..."}``.
+HumanFeedbackCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -114,6 +119,12 @@ class QuestState(TypedDict, total=False):
     cross_check: list[dict[str, Any]]
     paper_md: str
     review: dict[str, Any]
+    # Human-feedback gate state. Populated by ``_node_human_feedback``
+    # when ``engine.human_feedback_gate == "after_review"``. ``action``
+    # is one of "accept" / "reject" / "refine"; ``feedback`` carries
+    # the user's freeform text on refine, which the design node reads
+    # on the next revise loop. Pre-resume the dict is empty.
+    human_feedback: dict[str, Any]
     # Per-persona reviews from the panel, before moderation.
     # One entry per `engine.review_panel` member, each with the same
     # JSON shape the single reviewer produces plus a `persona` field.
@@ -197,6 +208,7 @@ class Engine:
         self,
         *,
         clarify_callback: ClarifyCallback | None = None,
+        human_feedback_callback: "HumanFeedbackCallback | None" = None,
     ) -> QuestArtifacts:
         """Run the quest to terminal state.
 
@@ -318,6 +330,25 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
+                        # human_feedback node raised `interrupt(...)`.
+                        # Hand the review snapshot to the callback and
+                        # resume with whatever action it returns.
+                        if "human_review" in intr_value:
+                            snap = intr_value["human_review"]
+                            if human_feedback_callback is None:
+                                raise RuntimeError(
+                                    f"quest {self.quest_id} paused at human_feedback "
+                                    f"node but no human_feedback_callback was supplied; "
+                                    f"set engine.human_feedback_gate to 'off' for "
+                                    f"headless runs."
+                                )
+                            self._log.info(
+                                "[run] human_feedback interrupt fired (verdict=%s); "
+                                "invoking callback", snap.get("verdict"),
+                            )
+                            answer = await human_feedback_callback(snap)
+                            payload = Command(resume=answer)
+                            continue
                         # Clarify node raised `interrupt(...)`. Hand the
                         # questions to the caller's callback for answers.
                         questions = intr_value.get("clarify_questions", {})
@@ -402,6 +433,7 @@ class Engine:
         g.add_node("cross_check", self._node_cross_check)
         g.add_node("write", self._node_write)
         g.add_node("review", self._node_review)
+        g.add_node("human_feedback", self._node_human_feedback)
         # no-simulation mode: design → auto_collect_data → wait_for_data
         # → (pause + resume) → data_load → analyze. All three new nodes
         # are conditional and only fire when
@@ -455,6 +487,13 @@ class Engine:
         g.add_conditional_edges(
             "review",
             self._route_after_review,
+            {"revise": "design", "done": END, "human_feedback": "human_feedback"},
+        )
+        # human_feedback resolves to one of three outcomes after the
+        # callback returns: accept / reject → END, refine → design.
+        g.add_conditional_edges(
+            "human_feedback",
+            self._route_after_human_feedback,
             {"revise": "design", "done": END},
         )
         return g
@@ -534,11 +573,30 @@ class Engine:
         return "write"
 
     def _route_after_review(self, state: QuestState) -> str:
+        # The human-feedback gate runs BEFORE the verdict-driven
+        # revise/done routing — the user gets a chance to override
+        # the LLM's verdict. Skipped silently when not configured so
+        # existing quests keep their fast finalisation path.
+        if self.config.engine.human_feedback_gate == "after_review":
+            return "human_feedback"
         if not self.config.engine.review_loop:
             return "done"
         review = state.get("review") or {}
         verdict = review.get("verdict", "accept")
         if verdict == "revise" and state.get("iteration", 0) < self.config.engine.max_iterations:
+            return "revise"
+        return "done"
+
+    def _route_after_human_feedback(self, state: QuestState) -> str:
+        """``refine`` bumps the iteration counter (done in the node)
+        and loops back to design with the user's feedback in state;
+        ``accept`` / ``reject`` (and the iteration-cap-exhausted case)
+        finalise. The cap is the same ``max_iterations`` the verdict
+        loop respects — a user who clicks "refine" forever can't
+        outrun the loop budget."""
+        hf = state.get("human_feedback") or {}
+        action = hf.get("action", "accept")
+        if action == "refine" and state.get("iteration", 0) < self.config.engine.max_iterations:
             return "revise"
         return "done"
 
@@ -1186,6 +1244,18 @@ class Engine:
         review_feedback = ""
         if iteration > 0:
             review_feedback = json.dumps(state.get("review", {}), indent=2)
+        # Human-feedback refinement (when the gate is configured AND the
+        # user picked "refine"). Folded into the same review_feedback
+        # block the design prompt already reads — explicitly attributed
+        # so the LLM understands this came from a real user, not the
+        # auto-review.
+        hf = state.get("human_feedback") or {}
+        if hf.get("action") == "refine" and hf.get("feedback"):
+            review_feedback = (
+                f"{review_feedback}\n\n"
+                f"--- USER FEEDBACK (priority over auto-review above) ---\n"
+                f"{hf['feedback']}\n"
+            ).strip()
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
@@ -2128,6 +2198,101 @@ class Engine:
                 "[review] panel verdict=%s (agreement=%s, score=%s)",
                 agg.get("verdict"), agg.get("agreement"), agg.get("score"),
             )
+        return update
+
+    async def _node_human_feedback(self, state: QuestState) -> QuestState:
+        """Pause after the review node and ask the user (CLI / web /
+        VSCode) to accept / reject / refine the result before finalising.
+
+        Only fires when ``engine.human_feedback_gate == "after_review"``.
+        Writes a snapshot of the current review at
+        ``<quest_root>/.fi/human_review.json`` so a UI can read it and
+        post back; then raises ``interrupt()`` carrying the same
+        payload for the in-process callback path (CLI / VSCode bridge).
+
+        The interrupt payload is a dict ``{"action": "...", "feedback": "..."}``;
+        ``action`` ∈ ``{"accept", "reject", "refine"}``. The router
+        consumes the resolved value from ``state["human_feedback"]``
+        and either ends the quest or bumps iteration → design with the
+        feedback text stuffed into state so the design node can read it.
+        """
+        review = state.get("review") or {}
+        verdict = review.get("verdict", "accept")
+        # Prefer the path the write node actually recorded in state —
+        # accommodates custom pipelines / future relocations of the
+        # rendered paper. Falls back to the conventional path if the
+        # write node didn't populate it (older quest checkpoints).
+        paper_md_state = state.get("paper_md") or ""
+        paper_md_path = (
+            str(paper_md_state)
+            if paper_md_state
+            else str(self.quest_root / "paper" / "paper.md")
+        )
+        snapshot = {
+            "quest_id": self.quest_id,
+            "iteration": state.get("iteration", 0),
+            "verdict": verdict,
+            "score": review.get("score"),
+            "strengths": review.get("strengths") or [],
+            "weaknesses": review.get("weaknesses") or [],
+            "suggestions": review.get("suggestions") or [],
+            "rationale": review.get("rationale", ""),
+            "paper_md_path": paper_md_path,
+        }
+        # Best-effort disk snapshot so a web UI / VSCode chat can render
+        # the gate state without re-loading the LangGraph checkpoint.
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "human_review.json").write_text(
+                json.dumps(snapshot, indent=2) + "\n", encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.debug("[human_feedback] snapshot write failed: %r", e)
+
+        self._log.info(
+            "[human_feedback] pausing (verdict=%s, score=%s, iteration=%s)",
+            verdict, review.get("score"), state.get("iteration", 0),
+        )
+        payload = interrupt({"human_review": snapshot})
+        # Resume: ``payload`` is what the callback / web POST returned.
+        # Validate + normalise so a malformed answer doesn't propagate
+        # into the routing layer.
+        action = "accept"
+        feedback = ""
+        if isinstance(payload, dict):
+            raw_action = str(payload.get("action") or "accept").lower()
+            if raw_action in ("accept", "reject", "refine"):
+                action = raw_action
+            feedback = str(payload.get("feedback") or "").strip()
+        # ``refine`` with no text falls back to ``accept`` — a 0-char
+        # refinement is indistinguishable from approval.
+        if action == "refine" and not feedback:
+            action = "accept"
+
+        update: QuestState = {
+            "human_feedback": {"action": action, "feedback": feedback},
+        }
+        # When the user refines, bump iteration so the loop budget is
+        # consumed and the design node sees an explicit "we're in a
+        # revise pass" signal (same convention the verdict-driven
+        # revise loop uses).
+        if action == "refine":
+            update["iteration"] = state.get("iteration", 0) + 1
+            self._log.info(
+                "[human_feedback] refine → iteration %d (feedback len=%d)",
+                update["iteration"], len(feedback),
+            )
+        elif action == "reject":
+            # Match the documented contract: the user "rejected" the
+            # result, so the review verdict is overwritten to
+            # ``rejected`` (distinct from ``accept`` and ``revise``).
+            # Downstream artifacts + the cost report can see the
+            # rejection without consulting state.human_feedback.
+            rejected_review = {**review, "verdict": "rejected"}
+            update["review"] = rejected_review
+            self._log.info("[human_feedback] action=reject — review.verdict=rejected")
+        else:
+            self._log.info("[human_feedback] action=%s — finalising", action)
         return update
 
     # ---- helpers ---------------------------------------------------------
