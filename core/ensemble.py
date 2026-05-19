@@ -492,6 +492,22 @@ async def run_singleshot_with_ensemble(
             [{"role": "user", "content": prompt}],
             temperature=temperature, node=node,
         )
+    merge_kind = ensemble.merge or default_merge
+    # ``vote`` is only meaningful for structured-output nodes
+    # (cross_check) where every model emits the same JSON shape and a
+    # majority can be tallied on a named field. Single-shot tools emit
+    # free-form markdown — no field to vote on. Reject UP-FRONT,
+    # outside the all-fanout-failed fallback path below, so the user
+    # sees a clear configuration error instead of a silent fallback to
+    # single-call.
+    if merge_kind == "vote":
+        raise EnsembleError(
+            "merge='vote' is only supported for structured-output "
+            "nodes (cross_check). For single-shot tools "
+            "(digest/portfolio/summarize/critique/proposal) pick "
+            "'tournament' (one canonical answer) or 'synthesize' "
+            "(merge with disagreement flags) instead."
+        )
     summary = prompt_summary or node
     try:
         raw = await fanout_chat(
@@ -500,18 +516,11 @@ async def run_singleshot_with_ensemble(
             temperature=temperature,
         )
         moderator = ensemble.moderator or ensemble.models[0]
-        merge_kind = ensemble.merge or default_merge
         if merge_kind == "tournament":
             result = await merge_tournament(
                 raw, moderator_model=moderator,
                 chat_fn=chat_fn, node=node, prompt_summary=summary,
             )
-        elif merge_kind == "vote":
-            # merge_vote is sync (pure tally; no moderator LLM call) —
-            # do NOT await. ``await`` on a non-awaitable raises at
-            # runtime as "object EnsembleResult can't be used in 'await'
-            # expression".
-            result = merge_vote(raw)
         else:
             result = await merge_synthesize(
                 raw, moderator_model=moderator,
