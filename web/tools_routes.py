@@ -446,10 +446,21 @@ def _ensemble_argv_tail(
         return []
     # The CLI flag accepts the same CSV the engine YAML accepts.
     csv = ",".join(trio)
-    # `synthesize` is critique's documented default; proposal defaults
-    # to `tournament`. Keep parity with launch.py argparse defaults so
-    # we don't introduce a behaviour drift between the two surfaces.
-    merge = "tournament" if tool == "proposal" else "synthesize"
+    # Per-tool default merge mirrors the launch.py argparse defaults
+    # exactly so behaviour doesn't drift between CLI and serve users:
+    #   proposal: tournament — one canonical plan.
+    #   critique: synthesize — preserve adversarial disagreement.
+    #   digest:   synthesize — preserve WeekDiff disagreement.
+    #   portfolio/summarize/analyze: tournament — one canonical synthesis.
+    _MERGE_DEFAULTS = {
+        "proposal":  "tournament",
+        "critique":  "synthesize",
+        "digest":    "synthesize",
+        "portfolio": "tournament",
+        "summarize": "tournament",
+        "analyze":   "tournament",
+    }
+    merge = _MERGE_DEFAULTS.get(tool, "tournament")
     return [f"--{tool}-ensemble", csv, f"--{tool}-ensemble-merge", merge]
 
 
@@ -570,11 +581,14 @@ def _build_argv(
     # profile name. Expand the profile picked in the UI into the
     # provider's curated 3-model trio (mirrors what the interview's
     # YAML emitter does for engine-side node_ensemble). Only the two
-    # tools that currently have CLI ensemble flags are wired here;
-    # the other 4 LLM tools need core-layer ensemble support before
-    # they can accept this argument.
+    # Every LLM tool accepts --<tool>-ensemble now (single-shot fan-out
+    # for digest/portfolio/summarize/critique/proposal; engine-level
+    # node_ensemble for analyze). Map the profile picker to the CSV
+    # the CLI expects.
+    _ENSEMBLE_TOOLS = {"proposal", "critique", "digest", "portfolio",
+                       "summarize", "analyze"}
     ensemble_tail: list[str] = []
-    if spec.needs_llm and name in ("proposal", "critique"):
+    if spec.needs_llm and name in _ENSEMBLE_TOOLS:
         ensemble_tail = _ensemble_argv_tail(name, provider, payload)
 
     if name == "proposal":
@@ -591,10 +605,10 @@ def _build_argv(
 
     if name == "digest":
         days = int(payload.get("days") or 7)
-        return ["--digest", "--days", str(days), *provider_tail]
+        return ["--digest", "--days", str(days), *provider_tail, *ensemble_tail]
 
     if name == "portfolio":
-        return ["--portfolio", *provider_tail]
+        return ["--portfolio", *provider_tail, *ensemble_tail]
 
     if name == "summarize":
         folder = (payload.get("folder") or "").strip()
@@ -607,6 +621,7 @@ def _build_argv(
         if kind and kind != "auto":
             argv.extend(["--summarize-kind", kind])
         argv.extend(provider_tail)
+        argv.extend(ensemble_tail)
         return argv
 
     if name == "analyze":
@@ -618,7 +633,7 @@ def _build_argv(
         topic = (payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("analysis topic is required")
-        return ["--analyze", path, "--analyze-topic", topic, *provider_tail]
+        return ["--analyze", path, "--analyze-topic", topic, *provider_tail, *ensemble_tail]
 
     if name == "fleet":
         yaml_paths_raw = (payload.get("yaml_paths") or "").strip()

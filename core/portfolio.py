@@ -272,6 +272,7 @@ async def generate_portfolio(
     supervisor: ProxySupervisor | None = None,
     knowledge: Knowledge | None = None,
     now: datetime | None = None,
+    ensemble: "NodeEnsembleConfig | None" = None,  # noqa: F821 — forward ref
 ) -> PortfolioArtifacts:
     """Generate a portfolio snapshot across every quest under
     ``outputs_dir``. Writes
@@ -329,10 +330,26 @@ async def generate_portfolio(
     endpoint = await resolve_endpoint_async(provider, sup)
     client = LLMClient(endpoint)
     try:
-        markdown = await client.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.2,
+        from core.ensemble import run_singleshot_with_ensemble
+
+        async def _chat_fn(messages, *, temperature=0.2, model=None, node=""):
+            return await client.chat(
+                messages, temperature=temperature, model=model, node=node,
+            )
+
+        markdown = await run_singleshot_with_ensemble(
+            prompt=prompt,
+            chat_fn=_chat_fn,
+            ensemble=ensemble,
+            # Portfolio defaults to tournament — the report is meant
+            # to commit to a single thesis about clusters / gaps /
+            # next-quest suggestions, not surface "different models
+            # disagree about your portfolio." A moderator picks the
+            # strongest single synthesis.
+            default_merge="tournament",
             node="portfolio",
+            temperature=0.2,
+            prompt_summary="portfolio synthesis",
         )
     finally:
         await client.aclose()

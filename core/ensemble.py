@@ -457,3 +457,69 @@ def cost_jsonl_entries(
             "disagreement_score": result.disagreement_score,
         })
     return rows
+
+
+async def run_singleshot_with_ensemble(
+    *,
+    prompt: str,
+    chat_fn: ChatFn,
+    ensemble: "Any",  # NodeEnsembleConfig | None
+    default_merge: str,
+    node: str,
+    temperature: float = 0.2,
+    prompt_summary: str = "",
+) -> str:
+    """Shared helper for the standalone single-shot tools (digest /
+    portfolio / summarize / critique). Either fires one chat call
+    (when ``ensemble`` is None) or fans out across the configured
+    model trio and merges per ``ensemble.merge`` (or ``default_merge``
+    when the config didn't pin one).
+
+    Falls back to the single-call path with a logged warning when
+    every fan-out call fails (``EnsembleError``) — same lenient
+    semantics the engine uses for per-node ensemble. The moderator
+    failing inside the merger still raises so the caller can decide
+    whether to surface it as a hard error.
+
+    ``default_merge`` differs by tool: ``synthesize`` for critique
+    (preserve disagreement), ``tournament`` for proposal / summarize /
+    portfolio (pick the strongest single answer); ``digest`` defaults
+    to ``synthesize`` because the WeekDiff narrative benefits from
+    multiple model perspectives on the same set of quests.
+    """
+    if ensemble is None:
+        return await chat_fn(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature, node=node,
+        )
+    summary = prompt_summary or node
+    try:
+        raw = await fanout_chat(
+            [{"role": "user", "content": prompt}],
+            ensemble.models, chat_fn=chat_fn, node=node,
+            temperature=temperature,
+        )
+        moderator = ensemble.moderator or ensemble.models[0]
+        merge_kind = ensemble.merge or default_merge
+        if merge_kind == "tournament":
+            result = await merge_tournament(
+                raw, moderator_model=moderator,
+                chat_fn=chat_fn, node=node, prompt_summary=summary,
+            )
+        elif merge_kind == "vote":
+            result = await merge_vote(raw)
+        else:
+            result = await merge_synthesize(
+                raw, moderator_model=moderator,
+                chat_fn=chat_fn, node=node, prompt_summary=summary,
+            )
+        return result.merged if isinstance(result.merged, str) else str(result.merged)
+    except EnsembleError as e:
+        _log.warning(
+            "ensemble all-failed at %s (%s); falling back to single-call",
+            node, e,
+        )
+        return await chat_fn(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature, node=node,
+        )

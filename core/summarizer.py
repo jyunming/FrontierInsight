@@ -396,6 +396,7 @@ async def summarize_folder(
     supervisor: ProxySupervisor | None = None,
     kind: str = "auto",
     knowledge: Knowledge | None = None,
+    ensemble: "NodeEnsembleConfig | None" = None,  # noqa: F821 — forward ref
 ) -> SummaryArtifacts:
     """Top-level entry point. Walks ``folder``, builds a prompt,
     invokes one LLM call, writes the produced markdown, and (if a
@@ -463,10 +464,25 @@ async def summarize_folder(
     endpoint = await resolve_endpoint_async(provider, sup)
     client = LLMClient(endpoint)
     try:
-        markdown = await client.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.2,
+        from core.ensemble import run_singleshot_with_ensemble
+
+        async def _chat_fn(messages, *, temperature=0.2, model=None, node=""):
+            return await client.chat(
+                messages, temperature=temperature, model=model, node=node,
+            )
+
+        markdown = await run_singleshot_with_ensemble(
+            prompt=prompt,
+            chat_fn=_chat_fn,
+            ensemble=ensemble,
+            # Summarize defaults to tournament — the summary is the
+            # canonical artifact a future quest will retrieve; one
+            # strong synthesis is more useful than a "different
+            # models think different things about the folder."
+            default_merge="tournament",
             node="summarize",
+            temperature=0.2,
+            prompt_summary=f"summary of {folder.name}",
         )
     finally:
         await client.aclose()

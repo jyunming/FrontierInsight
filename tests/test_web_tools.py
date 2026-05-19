@@ -461,22 +461,46 @@ def test_build_argv_unknown_profile_treated_as_off(tmp_path: Path) -> None:
     assert "--proposal-ensemble" not in argv
 
 
-def test_build_argv_ensemble_only_wired_for_proposal_and_critique(tmp_path: Path) -> None:
-    """The other 4 LLM tools have no --<tool>-ensemble flag in
-    launch.py yet — surfacing the profile would silently discard it,
-    so the argv builder must drop it entirely for these tools."""
-    for name in ("digest", "portfolio", "summarize", "analyze"):
+def test_build_argv_ensemble_wired_for_every_llm_tool(tmp_path: Path) -> None:
+    """All 6 LLM tools (proposal/critique/digest/portfolio/summarize/
+    analyze) now accept --<tool>-ensemble via the picker. Fleet and
+    ingest are non-LLM and intentionally skip the picker entirely."""
+    expected_merge_per_tool = {
+        "proposal":  "tournament",
+        "critique":  "synthesize",
+        "digest":    "synthesize",
+        "portfolio": "tournament",
+        "summarize": "tournament",
+        "analyze":   "tournament",
+    }
+    for name, expected_merge in expected_merge_per_tool.items():
         spec = TOOLS_BY_NAME[name]
         payload = {
             "provider": "openai", "ensemble_profile": "full",
             # Tool-specific required fields
             "days": 7, "folder": str(tmp_path), "path": str(tmp_path),
-            "topic": "t", "kind": "auto",
+            "topic": "t", "quest_id": "abc", "kind": "auto",
+        }
+        argv = _build_argv(spec, payload, [], tmp_path)
+        assert f"--{name}-ensemble" in argv, name
+        assert f"--{name}-ensemble-merge" in argv, name
+        merge_idx = argv.index(f"--{name}-ensemble-merge")
+        assert argv[merge_idx + 1] == expected_merge, (name, argv[merge_idx + 1])
+
+
+def test_build_argv_ensemble_absent_for_non_llm_tools(tmp_path: Path) -> None:
+    """fleet + ingest are non-LLM. Even with ensemble_profile in the
+    payload, the argv must NOT carry any --<tool>-ensemble flag."""
+    for name in ("fleet", "ingest"):
+        spec = TOOLS_BY_NAME[name]
+        payload = {
+            "provider": "openai", "ensemble_profile": "full",
+            "yaml_paths": "a.yaml", "paths": str(tmp_path / "x.pdf"),
         }
         try:
             argv = _build_argv(spec, payload, [], tmp_path)
         except ValueError:
-            continue  # missing-arg path is fine; we're checking flag absence
+            continue
         assert f"--{name}-ensemble" not in argv, name
 
 
