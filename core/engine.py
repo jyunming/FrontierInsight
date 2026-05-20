@@ -1266,7 +1266,52 @@ class Engine:
         )
         text = await self._chat(prompt, node="design")
         design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
-        return {"design": design}
+
+        # Second-pass methodology audit. The draft design just produced is
+        # passed back to the LLM with a fixed checklist of common-but-fatal
+        # design errors (circular evaluation, single-point eval, weak
+        # baseline plans, pseudo-units, natural-stratum collapse) and a
+        # mandate to either patch them or confirm non-applicability.
+        #
+        # Cost: +1 LLM call per design pass. For a typical 2-iteration
+        # quest, +2 calls in the design lane. Worth it because design
+        # errors are O(quest cost) to fix at review time but O(critique
+        # call cost) to fix here, BEFORE implement / execute / analyze
+        # / write / review have spent compute building on a bad design.
+        #
+        # On parse failure we keep the un-critiqued design and skip the
+        # objections list — failing this pass should NEVER block the
+        # quest, since the original design is still a valid (if
+        # unaudited) design.
+        critique_prompt = self._prompts["design_self_critique"].substitute(
+            topic=state["topic"],
+            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+            draft_design=json.dumps(design, indent=2),
+        )
+        critique_text = await self._chat(critique_prompt, node="design_self_critique")
+        critique = _parse_json_lenient(critique_text) or {}
+        amended = critique.get("amended_design") if isinstance(critique, dict) else None
+        objections = critique.get("objections_addressed") if isinstance(critique, dict) else None
+        if isinstance(amended, dict) and amended:
+            # Sanity: the amended design must keep the same top-level
+            # contract (hypothesis at minimum). If the critique pass
+            # returned a malformed structure, fall back to the draft.
+            if "hypothesis" in amended:
+                design = amended
+        n_addressed = len(objections) if isinstance(objections, list) else 0
+        self._log.info(
+            "[design_self_critique] iteration=%d objections_addressed=%d",
+            iteration, n_addressed,
+        )
+
+        out: dict[str, Any] = {"design": design}
+        if isinstance(objections, list):
+            # Surfaced into state so it can be inspected post-quest (run.log
+            # already carries the count; the full list lives here for any
+            # caller that wants to render it).
+            out["design_objections"] = objections
+        return out
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
         """Agent-side data collection via Axon, run BEFORE
@@ -2840,7 +2885,8 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _load_prompts() -> dict[str, string.Template]:
     names = (
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
-        "design", "implement", "execute_reflect", "analyze",
+        "design", "design_self_critique",   # second-pass methodology audit
+        "implement", "execute_reflect", "analyze",
         "cross_check", "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
