@@ -281,6 +281,17 @@ def rewrite_yaml_with_new_answers(
         ("knowledge", "enabled"),
         ("knowledge", "top_k"), ("knowledge", "external_top_k"),
     }
+    # Exception: when the user's chosen ``ensemble_profile`` is "off",
+    # the interview emits nothing for ``provider.node_ensemble``. If we
+    # leave it managed in that case, ``deep_merge`` would erase any
+    # hand-crafted ``node_ensemble`` block in ``raw`` that the
+    # interview couldn't classify back to a preset. Unmanaging on
+    # "off" lets the hand-crafted block round-trip untouched. (When
+    # the user picked a non-"off" profile, the interview wrote a
+    # fresh expanded block into base_data, so we keep this path
+    # managed and overwrite raw's old block.)
+    if new.ensemble_profile == "off":
+        managed_paths.discard(("provider", "node_ensemble"))
 
     def deep_merge(dst: dict[str, Any], src: dict[str, Any], prefix: tuple[str, ...] = ()) -> None:
         """For unmanaged paths, raw (the user's customized YAML) WINS
@@ -461,6 +472,24 @@ async def run_update_flow(
     # ensemble_profile, knowledge_top_k, knowledge_external_top_k,
     # max_iterations) MUST be threaded through here — omitting them
     # silently dropped non-default values on every --update.
+    #
+    # CLI prompts return strings even for numeric fields (kind="text"
+    # has no numeric coercion). A bare ``int(...)`` would raise
+    # ValueError and crash the update on any non-numeric typo. Fall
+    # back to the current value (and warn) so the user gets a single
+    # field reverted instead of a whole-update wipeout.
+    def _coerce_int(key: str, fallback: int) -> int:
+        v = new_partial.get(key, fallback)
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            print(
+                f"[FI] --update: ignoring non-integer {key}={v!r}; "
+                f"keeping current value {fallback}.",
+                file=sys.stderr,
+            )
+            return fallback
+
     new = InterviewAnswers(
         topic=current.topic,
         title=current.title,
@@ -477,14 +506,14 @@ async def run_update_flow(
         provider=current.provider,  # frozen
         provider_model=current.provider_model,  # frozen
         audience=str(new_partial.get("audience", current.audience)),
-        knowledge_top_k=int(new_partial.get("knowledge_top_k", current.knowledge_top_k)),
-        knowledge_external_top_k=int(new_partial.get(
+        knowledge_top_k=_coerce_int("knowledge_top_k", current.knowledge_top_k),
+        knowledge_external_top_k=_coerce_int(
             "knowledge_external_top_k", current.knowledge_external_top_k,
-        )),
+        ),
         ensemble_profile=str(new_partial.get(
             "ensemble_profile", current.ensemble_profile,
         )),
-        max_iterations=int(new_partial.get("max_iterations", current.max_iterations)),
+        max_iterations=_coerce_int("max_iterations", current.max_iterations),
     )
 
     changes = diff_answers(current, new)

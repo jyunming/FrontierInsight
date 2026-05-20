@@ -252,6 +252,53 @@ def test_rewrite_yaml_round_trips_through_config_validation(tmp_path: Path) -> N
     assert cfg.output.paper_format == "essay"
 
 
+def test_rewrite_yaml_preserves_handcrafted_node_ensemble_when_profile_is_off() -> None:
+    """A user can hand-craft a ``provider.node_ensemble`` block that
+    doesn't match any preset (e.g. fan-out on ``write`` only, or a
+    different model list than the presets emit). ``load_current_answers``
+    can't classify that block, so it falls back to ``ensemble_profile =
+    "off"``. The --update round-trip MUST preserve the hand-crafted
+    block — otherwise every --update silently strips it. Regression
+    guard for PR #149 review comment #1."""
+    raw = yaml.safe_load(answers_to_yaml(_sample(ensemble_profile="off"), frontend="cli"))
+    handcrafted = {
+        "write": {
+            "models": ["openai/gpt-5", "anthropic/claude-sonnet-4-6"],
+            "merge": "moderator",
+            "moderator": "openai/gpt-5",
+        }
+    }
+    raw.setdefault("provider", {})["node_ensemble"] = handcrafted
+    # User opens --update, doesn't touch ensemble (profile stays "off").
+    new_yaml_text = rewrite_yaml_with_new_answers(raw, _sample(ensemble_profile="off"))
+    new_data = yaml.safe_load(new_yaml_text)
+    assert new_data["provider"]["node_ensemble"] == handcrafted, (
+        "hand-crafted node_ensemble must round-trip when ensemble_profile "
+        "is 'off' on both sides"
+    )
+
+
+def test_rewrite_yaml_overwrites_node_ensemble_when_new_profile_is_set() -> None:
+    """The complement: when the user picks a non-'off' profile, the
+    interview's emitted block must REPLACE raw's old block — otherwise
+    switching profiles silently keeps the old one. Regression guard
+    for the natural overreach of the previous test's fix."""
+    # Start with an "off" YAML carrying a stale block in raw.
+    raw = yaml.safe_load(answers_to_yaml(_sample(ensemble_profile="off"), frontend="cli"))
+    raw.setdefault("provider", {})["node_ensemble"] = {
+        "write": {"models": ["openai/gpt-5", "anthropic/claude-sonnet-4-6"],
+                  "merge": "concat"},
+    }
+    # User picks "full" — three new nodes should overwrite the old "write" block.
+    new_yaml_text = rewrite_yaml_with_new_answers(raw, _sample(ensemble_profile="full"))
+    new_data = yaml.safe_load(new_yaml_text)
+    ne = new_data["provider"]["node_ensemble"]
+    assert set(ne.keys()) == {"ideate", "analyze", "cross_check"}, (
+        f"expected 'full' profile nodes, got {set(ne.keys())}"
+    )
+    assert "write" not in ne, "stale 'write' fan-out must be wiped"
+
+
 # ---------------------------------------------------------------------------
 # Hard-refuse fields
 # ---------------------------------------------------------------------------
