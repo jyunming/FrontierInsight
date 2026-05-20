@@ -382,7 +382,7 @@ def merge_vote(
         if obj is None or key not in obj:
             # Tolerate non-JSON / missing-key by sniffing the raw text
             # for common verdict tokens. Engine callers can post-filter.
-            tokens = re.findall(r"\b(supporting|conflicting|neutral|accept|revise|reject|yes|no)\b",
+            tokens = re.findall(r"\b(supporting|conflicting|neutral|mixed|accept|revise|reject|yes|no)\b",
                                 s.text, re.IGNORECASE)
             obj = {key: tokens[0].lower() if tokens else "unknown"}
         parsed.append(obj[key])

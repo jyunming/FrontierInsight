@@ -438,8 +438,9 @@ async def test_cross_check_ensemble_unanimous_supporting_picks_a_survivor(
     Pre-fix the survivor-pick loop (obj.get('verdict') == majority['verdict'])
     never matched any JSON because the prompt didn't emit ``verdict``, so
     the engine always fell back to ``survivors[0].text``. Post-fix, the
-    supporting block can come from ANY of the 3 models whose verdict
-    matches the majority — and the tally is meaningful instead of a
+    supporting block comes from the FIRST survivor whose verdict matches
+    the majority (survivors are iterated in ``models`` order in
+    ``_ensemble_chat``) — and the tally is meaningful instead of a
     regex coincidence."""
     ensemble = {
         "cross_check": NodeEnsembleConfig(
@@ -553,6 +554,55 @@ async def test_cross_check_ensemble_vote_tally_recorded_via_merge_vote(
     assert result.merged["verdict"] == "supporting"
     assert result.merged["tally"] == {"supporting": 2, "conflicting": 1}
     assert result.merged["tie"] is False
+
+
+def test_cross_check_ensemble_vote_tie_is_surfaced() -> None:
+    """1 supporting / 1 conflicting → genuine tie. ``merge_vote`` must
+    surface ``tie=True`` and pick one deterministic winner (the first
+    most-common entry in the Counter, which is the first-encountered
+    value among the tied tally entries). The downstream engine consumer
+    can read ``tie`` from the merged dict and choose to log a warning
+    or fall through to a tie-break heuristic; without this assertion,
+    a regression in ``merge_vote``'s tie-detection (e.g. always
+    returning ``tie=False``) would silently swallow disagreement
+    signals on every 2-model ensemble."""
+    from core.ensemble import FanoutResponse, merge_vote
+
+    raw = [
+        FanoutResponse(model="m1", text=_cross_check_payload("supporting")),
+        FanoutResponse(model="m2", text=_cross_check_payload("conflicting")),
+    ]
+    result = merge_vote(raw, key="verdict")
+    assert isinstance(result.merged, dict)
+    # First-encountered most-common entry wins on ties — survivors are
+    # iterated in input order so m1's "supporting" lands first.
+    assert result.merged["verdict"] == "supporting"
+    assert result.merged["tally"] == {"supporting": 1, "conflicting": 1}
+    assert result.merged["tie"] is True
+
+
+def test_cross_check_ensemble_vote_mixed_token_in_fallback_path() -> None:
+    """The new ``verdict: mixed`` value must be recognised by
+    ``merge_vote``'s non-JSON token-sniff fallback at
+    ``core/ensemble.py:385``. Without this, a malformed survivor
+    response that contains the word "mixed" but no parseable JSON
+    would tally as ``unknown`` and silently distort the majority.
+    Pins the post-fix token list against future regression."""
+    from core.ensemble import FanoutResponse, merge_vote
+
+    # Three survivors whose responses are NOT valid JSON; the token
+    # sniff must recognise "mixed" alongside "supporting"/"conflicting"
+    # so the tally reflects the model's actual stated verdict.
+    raw = [
+        FanoutResponse(model="m1", text="My read: the literature is mixed on this finding."),
+        FanoutResponse(model="m2", text="On balance, conflicting evidence dominates here."),
+        FanoutResponse(model="m3", text="The literature is mixed; both directions are present."),
+    ]
+    result = merge_vote(raw, key="verdict")
+    assert isinstance(result.merged, dict)
+    # Two "mixed" + one "conflicting" → majority mixed.
+    assert result.merged["verdict"] == "mixed"
+    assert result.merged["tally"]["mixed"] == 2
 
 
 @pytest.mark.asyncio
