@@ -163,6 +163,84 @@ async def test_design_self_critique_empty_objections_keeps_draft(
 
 
 @pytest.mark.asyncio
+async def test_design_self_critique_swallows_chat_exception(
+    tmp_path: Path,
+) -> None:
+    """If the critique LLM call raises (provider 5xx, network error,
+    rate-limit-after-retry, timeout, …), the draft design must survive
+    and the quest must continue. The audit is advisory; a transient
+    chat failure on it cannot be allowed to take down a quest the
+    draft alone could have completed."""
+    cfg = _mk_cfg(tmp_path)
+    eng = Engine(cfg)
+
+    calls = {"n": 0}
+
+    async def fake_chat(messages, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return json.dumps(_DRAFT_DESIGN)
+        raise RuntimeError("simulated provider 503 — bad gateway")
+
+    eng._client = type(
+        "Stub", (), {"chat": AsyncMock(side_effect=fake_chat)},
+    )()
+
+    patch = await eng._node_design({"topic": "OPC", "iteration": 0})
+
+    assert patch["design"] == _DRAFT_DESIGN, (
+        "chat exception on the critique pass must NOT corrupt the "
+        "design — draft must survive"
+    )
+    assert "design_objections" not in patch, (
+        "no objections list should land in state when the critique "
+        "didn't actually run"
+    )
+
+
+@pytest.mark.asyncio
+async def test_design_self_critique_rejects_shape_drifted_amended_design(
+    tmp_path: Path,
+) -> None:
+    """If the critique returns an ``amended_design`` that drops keys
+    the draft carried (e.g. only ``hypothesis``, no ``variables`` /
+    ``method`` / ``figures_planned``), the engine must reject it and
+    keep the draft. Silently shipping a partial design would mis-feed
+    every downstream node — implement would have no method to
+    implement, write would have no figures to reference. Schema-drift
+    is a real failure mode for LLM-emitted JSON; this is the guard."""
+    cfg = _mk_cfg(tmp_path)
+    eng = Engine(cfg)
+
+    drifted = {"hypothesis": "amended hypothesis only — everything else dropped"}
+    objections = [
+        {"check": "circular_evaluation",
+         "objection": "evaluator and optimizer share simulator",
+         "fix": "introduce independent evaluator"},
+    ]
+    responses = [
+        json.dumps(_DRAFT_DESIGN),
+        json.dumps({
+            "objections_addressed": objections,
+            "amended_design": drifted,
+        }),
+    ]
+    eng._client = type(
+        "Stub", (), {"chat": AsyncMock(side_effect=responses)},
+    )()
+
+    patch = await eng._node_design({"topic": "OPC", "iteration": 0})
+
+    assert patch["design"] == _DRAFT_DESIGN, (
+        "shape-drifted amended_design must be rejected; draft survives"
+    )
+    # Objections list still surfaces — the audit ran, just couldn't
+    # produce a valid replacement. Downstream consumers can still log
+    # / display the objections.
+    assert patch["design_objections"] == objections
+
+
+@pytest.mark.asyncio
 async def test_design_self_critique_makes_two_llm_calls_in_order(
     tmp_path: Path,
 ) -> None:

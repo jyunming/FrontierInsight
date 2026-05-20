@@ -16,7 +16,7 @@ $draft_design
 
 Apply this checklist to the draft design and report the top 3 most important findings. Be specific. Vague "consider edge cases" objections are not useful; "the evaluator and the optimizer share the same Gaussian/threshold simulator, so the comparative claim is trivially true — switch to a held-out scoring function" is useful.
 
-Mandatory check list — if any apply, you MUST patch them:
+Mandatory checklist — if any apply, you MUST patch them:
 
 1. **Circular evaluation** — does the optimization target (loss, scoring rule, correction model, simulator) share its model / distribution / data with the evaluation metric? If yes, the comparative claim is a training-set report and the design must either (a) introduce an independent evaluator or (b) drop the comparative claim and reframe as a mechanism demonstration.
 
