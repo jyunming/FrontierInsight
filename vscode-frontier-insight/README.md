@@ -228,6 +228,22 @@ diagnostic next to it. See [`docs/USAGE.md`](../docs/USAGE.md) — the
 "strict-mode PDF enforcement" section under the `output.require_pdf`
 schema entry.
 
+Every output kind follows the same graceful-skip contract:
+`slides_skipped.md`, `speech_skipped.md`, `poster_pdf_skipped.md`
+each explain what was requested, why it couldn't be produced
+(missing CLI, refused LLM response, render-tool error), and how to
+fix it — so the user discovers the failure by opening the quest
+folder instead of grepping `run.log`. A subsequent successful run
+of the same kind removes the stale breadcrumb.
+
+If a quest crashes mid-graph (a `_node_*` raises, or a pre-graph
+stage fails), the engine writes `quest_failed.md` to the quest
+root with the failing-node name, the exception text, a log tail,
+provider context, and a `--resume` command. The chat emits a
+single `❌ Quest failed: <reason>` line at the end of the run;
+open the quest folder to read `quest_failed.md` for the full
+context and the resume hint.
+
 ## Pre-quest proposal
 
 ```
