@@ -208,9 +208,19 @@ def test_route_after_cross_check_publish_goes_to_write(tmp_path: Path) -> None:
     }) == "write"
 
 
+# A minimal non-empty cross_check payload — the route needs *something*
+# in `state["cross_check"]` to proceed past the empty-guard (see below).
+_CC_NON_EMPTY = [{
+    "finding": "x",
+    "supporting": [], "conflicting": [], "neutral": [],
+    "summary": "", "candidates": [],
+}]
+
+
 def test_route_after_cross_check_re_experiment_routes_to_design(tmp_path: Path) -> None:
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     assert eng._route_after_cross_check({
+        "cross_check": _CC_NON_EMPTY,
         "analysis": {"next_step": "re_experiment"},
         "iteration": 0,
     }) == "redesign"
@@ -226,6 +236,7 @@ def test_route_after_cross_check_broaden_lit_routes_to_literature(
     saying "broaden_lit"."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     assert eng._route_after_cross_check({
+        "cross_check": _CC_NON_EMPTY,
         "analysis": {"next_step": "broaden_lit"},
         "iteration": 0,
     }) == "broaden_lit"
@@ -239,6 +250,7 @@ def test_route_after_cross_check_broaden_lit_falls_through_when_budget_exhausted
     publishes instead of looping again."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     assert eng._route_after_cross_check({
+        "cross_check": _CC_NON_EMPTY,
         "analysis": {"next_step": "broaden_lit"},
         "iteration": 2,
     }) == "write"
@@ -251,6 +263,7 @@ def test_route_after_cross_check_falls_through_to_write_when_budget_exhausted(
     cap we publish anyway — the quest stays bounded."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     assert eng._route_after_cross_check({
+        "cross_check": _CC_NON_EMPTY,
         "analysis": {"next_step": "re_experiment"},
         "iteration": 2,  # already at cap
     }) == "write"
@@ -261,7 +274,38 @@ def test_route_after_cross_check_respects_config_disable(tmp_path: Path) -> None
     regardless of `next_step`."""
     eng = Engine(_mk_cfg(tmp_path, enable_analyze_reroute=False))
     assert eng._route_after_cross_check({
+        "cross_check": _CC_NON_EMPTY,
         "analysis": {"next_step": "re_experiment"},
+        "iteration": 0,
+    }) == "write"
+
+
+def test_route_after_cross_check_empty_cross_check_terminates_loop(
+    tmp_path: Path,
+) -> None:
+    """Audit BLOCK #11: ``_node_cross_check`` returns ``{"cross_check": []}``
+    early when ``analysis.key_findings`` is empty (or ``cross_check_per_finding_k
+    <= 0``) BEFORE the iteration-bump block runs. If analyze still emits
+    ``next_step: "broaden_lit"`` in that case, iteration never increments,
+    the cap never fires, and the engine loops literature → design →
+    implement → execute → analyze → cross_check → broaden_lit forever —
+    unbounded LLM cost. The empty-cross_check guard must terminate the
+    loop by routing to ``write`` regardless of analyze's recommendation."""
+    eng = Engine(_mk_cfg(tmp_path, max_iter=10))
+    assert eng._route_after_cross_check({
+        "cross_check": [],
+        "analysis": {"next_step": "broaden_lit"},
+        "iteration": 0,
+    }) == "write"
+    # Same for ``re_experiment`` — no findings to re-experiment against either.
+    assert eng._route_after_cross_check({
+        "cross_check": [],
+        "analysis": {"next_step": "re_experiment"},
+        "iteration": 0,
+    }) == "write"
+    # Missing key entirely (defensive — early aborts may not even set it).
+    assert eng._route_after_cross_check({
+        "analysis": {"next_step": "broaden_lit"},
         "iteration": 0,
     }) == "write"
 

@@ -607,8 +607,21 @@ class Engine:
 
         Both re-entry branches share the same ``engine.max_iterations``
         budget so the whole quest stays bounded.
+
+        Empty-cross_check guard: ``_node_cross_check`` returns
+        ``{"cross_check": []}`` early when ``analysis.key_findings`` is
+        empty OR when ``cross_check_per_finding_k <= 0`` — both BEFORE
+        the iteration-bump block runs. If analyze still emits
+        ``next_step: "broaden_lit"`` in that case, the loop literature →
+        design → implement → execute → analyze → cross_check → broaden_lit
+        never increments ``iteration`` and the cap never fires. Terminate
+        on empty cross_check: there are no findings to broaden literature
+        against, so writing the paper with what we have is the safe
+        choice (audit BLOCK #11).
         """
         if not self.config.engine.enable_analyze_reroute:
+            return "write"
+        if not state.get("cross_check"):
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
