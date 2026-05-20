@@ -601,7 +601,22 @@ async function runInterviewAndQuest(
         repoPath = ws;
     }
 
-    const yamlPath = writeInterviewYaml(answers, repoPath);
+    // `writeInterviewYaml` does sync mkdir + writeFile; both can throw
+    // on EACCES, ENOSPC, or a OneDrive sync lock. Without this catch,
+    // the chat handler unwinds and the user sees the interview "finish"
+    // with no quest and no error.
+    let yamlPath: string;
+    try {
+        yamlPath = writeInterviewYaml(answers, repoPath);
+    } catch (err) {
+        const draftDir = path.join(repoPath, "outputs", "_drafts");
+        const msg = err instanceof Error ? err.message : String(err);
+        stream.markdown(
+            `❌ Failed to write quest YAML to \`${draftDir}\`: ${msg}. ` +
+            `Common causes: disk full, read-only mount, OneDrive sync conflict, missing parent dir permissions.`,
+        );
+        return;
+    }
     const rel = path.relative(repoPath, yamlPath).split(path.sep).join("/");
     stream.markdown(`📝 Wrote config: \`${rel}\`\n\n`);
     // Surface which model the user's calls will route through so the
