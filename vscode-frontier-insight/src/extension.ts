@@ -38,6 +38,23 @@ async function fsExists(p: string): Promise<boolean> {
 }
 
 /**
+ * Discriminated result for ``waitForChildExit``. The three outcomes
+ * are intentionally distinct so callers can branch correctly:
+ *
+ *   - ``"exit"`` — child started, ran, exited. ``code`` is the
+ *     non-null exit code on normal exit, or ``null`` when ``signal``
+ *     is non-null (process killed by a signal — SIGTERM from a
+ *     user-cancel, SIGKILL from OOM, etc.). Callers that want to
+ *     show "non-zero exit" diagnostics check ``code`` here.
+ *   - ``"spawn-error"`` — ``spawn()`` itself failed (no child exists).
+ *     ``error.code`` carries the ENOENT / EACCES / EPERM hint.
+ *     The helper has already streamed the user-facing diagnostic.
+ */
+type ChildExitResult =
+    | { kind: "exit"; code: number | null; signal: NodeJS.Signals | null }
+    | { kind: "spawn-error"; error: NodeJS.ErrnoException };
+
+/**
  * Wait for a freshly-`spawn()`-ed Python child to exit, with the
  * `error` event wired up. Without an `error` listener, a `spawn()`
  * failure (typically ENOENT — `python` not on PATH, or
@@ -46,41 +63,55 @@ async function fsExists(p: string): Promise<boolean> {
  * and the chat panel hangs forever on the streaming spinner. The user
  * has to restart VSCode to clear the stuck participant.
  *
- * Returns the exit code on normal termination, or `null` if the spawn
- * itself failed. In the latter case this function ALSO surfaces a
- * diagnostic chat message naming the failing pythonPath and the most
- * likely cause; callers should short-circuit (`if (rc === null) return;`)
- * and let their normal exit-code branch handle non-spawn-error paths.
+ * Returns a discriminated ``ChildExitResult`` so callers can tell
+ * apart a spawn failure (no process ever ran) from a signal exit
+ * (process started but was killed) from a normal exit code. The
+ * helper streams the user-facing diagnostic on ``spawn-error``;
+ * callers handle ``exit`` themselves (code 0 = success, non-zero
+ * = show stderr, signal-only = inform user of the kill).
  */
 async function waitForChildExit(
     child: import("child_process").ChildProcess,
     bridge: Bridge,
     pythonPath: string,
     stream: vscode.ChatResponseStream,
-): Promise<number | null> {
-    let spawnErr: NodeJS.ErrnoException | null = null;
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-        child.on("error", (e) => { spawnErr = e as NodeJS.ErrnoException; resolve(null); });
+): Promise<ChildExitResult> {
+    const result: ChildExitResult = await new Promise((resolve) => {
+        child.on("close", (code, signal) =>
+            resolve({ kind: "exit", code, signal }));
+        child.on("error", (e) =>
+            resolve({ kind: "spawn-error", error: e as NodeJS.ErrnoException }));
     });
     await bridge.close();
-    if (spawnErr) {
-        const err: NodeJS.ErrnoException = spawnErr;
-        const cause = err.code === "ENOENT"
-            ? `\`${pythonPath}\` was not found. Likely causes: ` +
-              "(a) `python` isn't on PATH (try setting `frontierInsight.pythonPath` to an " +
-              "absolute path like `C:\\Python312\\python.exe` or `/usr/bin/python3`); " +
-              "(b) the path in `frontierInsight.pythonPath` is wrong; " +
-              "(c) on macOS / Linux, the file exists but lacks the executable bit (`chmod +x`)."
-            : `\`${pythonPath}\` failed to launch (${err.code || "(no code)"}): ${err.message}.`;
+    if (result.kind === "spawn-error") {
+        const err = result.error;
+        // Distinguish ENOENT (path doesn't exist / not on PATH) from
+        // EACCES / EPERM (path exists but isn't executable — chmod +x
+        // is the fix, not pointing somewhere else). Generic branch
+        // covers everything else (EBADF, ENOMEM, etc.).
+        let cause: string;
+        if (err.code === "ENOENT") {
+            cause =
+                `\`${pythonPath}\` was not found. Likely causes: ` +
+                "(a) `python` isn't on PATH (try setting `frontierInsight.pythonPath` to an " +
+                "absolute path like `C:\\Python312\\python.exe` or `/usr/bin/python3`); " +
+                "(b) the path in `frontierInsight.pythonPath` is wrong.";
+        } else if (err.code === "EACCES" || err.code === "EPERM") {
+            cause =
+                `\`${pythonPath}\` exists but isn't executable (${err.code}). ` +
+                "On macOS / Linux, run `chmod +x " + pythonPath + "` to set the " +
+                "executable bit. On Windows, check that your user has execute permission " +
+                "on the file (rare; usually a result of a hardened security policy).";
+        } else {
+            cause = `\`${pythonPath}\` failed to launch (${err.code || "(no code)"}): ${err.message}.`;
+        }
         stream.markdown(
             `\n❌ **Failed to start Python.** ${cause}\n\n` +
             "Set `frontierInsight.pythonPath` in VSCode settings to a working interpreter, " +
             "then retry the command.\n",
         );
-        return null;
     }
-    return exitCode;
+    return result;
 }
 
 let persistentBridge: PersistentBridge | null = null;
@@ -807,8 +838,9 @@ async function runQuest(
     // 4. Wait for Python to exit. Bridge messages flow through the
     // socket on its own; the chat handler resolves when the child
     // terminates, which is when the quest (or fleet) is done.
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;  // spawn failed; helper already surfaced the error
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
@@ -1001,8 +1033,9 @@ async function runSummarize(
         }
     });
 
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Summary done.\n");
@@ -1138,8 +1171,9 @@ async function runDigest(
         }
     });
 
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Digest done.\n");
@@ -1243,8 +1277,9 @@ async function runPortfolio(
         }
     });
 
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Portfolio done.\n");
@@ -1375,8 +1410,9 @@ async function runCritique(
         }
     });
 
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Critique done.\n");
@@ -1802,8 +1838,9 @@ async function runProposal(
         }
     });
 
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Proposal done. Read the markdown, edit either file if needed, then `/start` the YAML when ready.\n");
@@ -1961,8 +1998,9 @@ async function runAnalyze(
         }
     });
 
-    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (exitCode === null) return;
+    const result = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (result.kind === "spawn-error") return;
+    const exitCode = result.code;
 
     if (exitCode === 0) {
         stream.markdown(
