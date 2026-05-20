@@ -20,6 +20,11 @@
 % pandoc emits \def\LTcaptype{none} for caption-less tables; longtable
 % then calls \refstepcounter{none} internally, so the counter must exist.
 \newcounter{none}
+% Required for pandoc-rendered markdown tables. Pandoc emits \toprule /
+% \midrule / \bottomrule around every pipe table; without booktabs the
+% compile dies on ``Undefined control sequence. \toprule`` at the first
+% table.
+\usepackage{booktabs}
 \usepackage{amsmath, amssymb}
 \usepackage{hyperref}
 \usepackage{setspace}
