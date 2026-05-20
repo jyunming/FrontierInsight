@@ -18,7 +18,7 @@ try:
 except Exception:  # pragma: no cover
     pytest.skip("fastapi/httpx not installed", allow_module_level=True)
 
-from web.server import make_app
+from web.server import _QUEST_ID_RE, make_app
 from web.tools_routes import TOOL_SPECS, TOOLS_BY_NAME, _build_argv
 
 
@@ -285,9 +285,16 @@ def test_post_same_second_double_submit_yields_distinct_job_ids(
     DIFFERENT job_ids. Pre-fix, both got ``<tool>-<epoch>`` and the
     second LaunchedQuest shadowed the first in ``status_for()``,
     leaking a subprocess and truncating the first log via ``wb``."""
-    # Pin the clock so the epoch component is identical for both
-    # calls — only the random suffix can disambiguate.
+    # Pin the clock AND the random suffix so the test is fully
+    # deterministic. Without the token_hex pin, the assertion
+    # ``jid1 != jid2`` relies on two 24-bit random draws differing —
+    # a 1-in-16-million flake we don't need to live with.
     monkeypatch.setattr("web.tools_routes.time.time", lambda: 1_700_000_000)
+    suffixes = iter(["aabbcc", "ddeeff"])
+    monkeypatch.setattr(
+        "web.tools_routes.secrets.token_hex",
+        lambda _n: next(suffixes),
+    )
 
     client = _client(tmp_path)
     res1 = client.post("/api/tools/portfolio", json={})
@@ -296,14 +303,15 @@ def test_post_same_second_double_submit_yields_distinct_job_ids(
     assert res2.status_code == 200
     jid1 = res1.json()["job_id"]
     jid2 = res2.json()["job_id"]
-    assert jid1 != jid2, (jid1, jid2)
-    assert jid1.startswith("portfolio-1700000000-")
-    assert jid2.startswith("portfolio-1700000000-")
+    assert jid1 == "portfolio-1700000000-aabbcc"
+    assert jid2 == "portfolio-1700000000-ddeeff"
+    assert jid1 != jid2
     # Suffix must satisfy web.server._QUEST_ID_RE so status_for()
-    # lookups still resolve the new id format.
-    quest_id_re = re.compile(r"^[A-Za-z0-9_\-.]+$")
-    assert quest_id_re.match(jid1)
-    assert quest_id_re.match(jid2)
+    # lookups still resolve the new id format. Import the same regex
+    # the server uses — local redefinition would drift if the server
+    # ever tightens the rule.
+    assert _QUEST_ID_RE.match(jid1)
+    assert _QUEST_ID_RE.match(jid2)
 
 
 # ---------------------------------------------------------------------------
