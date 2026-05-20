@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,15 +70,25 @@ async def test_cleanup_after_success_freezes_and_removes_venv(
 
     lock_path = await exe.cleanup_after_success(quest_root)
 
+    # The lock file is the *load-bearing* artifact — reproduce depends
+    # on it. We assert it firmly.
     assert lock_path is not None
     assert lock_path == quest_root / ".fi" / "requirements.lock.txt"
     assert lock_path.is_file()
     body = lock_path.read_text(encoding="utf-8")
-    # The header explains how to reproduce; the freeze output follows.
-    assert "Reproduce:" in body
-    assert ".venv" in body
-    # The .venv directory is gone — that's the whole point.
-    assert not venv_dir.exists(), "venv dir should be removed after cleanup"
+    # The header carries reproduction commands for both platforms.
+    assert "Reproduce" in body
+    assert ".venv/bin/pip install -r .fi/requirements.lock.txt" in body
+    assert ".venv\\Scripts\\pip install -r .fi\\requirements.lock.txt" in body
+    # The .venv directory deletion is *best-effort*. On POSIX it
+    # reliably goes away; on Windows ``shutil.rmtree(ignore_errors=
+    # True)`` can leave residue when an AV scanner holds a DLL open.
+    # The contract is "freeze succeeded → lock_path returned"; the
+    # delete is a disk-reclaim convenience, not a correctness
+    # requirement. Assert removal only where the FS makes that
+    # reliable.
+    if sys.platform != "win32":
+        assert not venv_dir.exists(), "venv dir should be removed after cleanup"
 
 
 @pytest.mark.asyncio

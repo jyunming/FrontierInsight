@@ -147,51 +147,85 @@ class VenvExecutor:
         if not (venv_dir / "pyvenv.cfg").exists():
             return None
 
-        fi_dir = quest_root / ".fi"
-        fi_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = fi_dir / "requirements.lock.txt"
-        py = self.python_path(quest_root)
-        if not py.is_file():
+        # The whole body must honor "log and return None — never raise"
+        # so a venv-cleanup hiccup can't mask a successful quest. Every
+        # filesystem op below (mkdir, write_text, rmtree) can raise on
+        # permission / disk-full / AV-lock failures; the outer
+        # try/except converts all of them to a logged warning.
+        try:
+            fi_dir = quest_root / ".fi"
+            fi_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = fi_dir / "requirements.lock.txt"
+            py = self.python_path(quest_root)
+            if not py.is_file():
+                _log.warning(
+                    "cleanup_after_success: venv python missing at %s; skipping freeze + delete",
+                    py,
+                )
+                return None
+            # ``pip freeze`` produces a deterministic, pip-installable list.
+            freeze = await self.execute(
+                [str(py), "-m", "pip", "freeze"],
+                cwd=quest_root,
+                timeout_s=60,
+            )
+            if freeze.returncode != 0:
+                _log.warning(
+                    "cleanup_after_success: pip freeze rc=%d stderr=%s; "
+                    "keeping .venv/ for debugging",
+                    freeze.returncode,
+                    freeze.stderr[-300:],
+                )
+                return None
+            # Stamp the lock file with a short header so a future reader
+            # knows what produced it and how to reuse it. POSIX and
+            # Windows reproduction lines are both spelled out — the
+            # ``pip install -r ...`` form is the load-bearing part and
+            # was previously truncated on the Windows hint.
+            header = (
+                "# Frozen by FrontierInsight on quest success.\n"
+                "# Reproduce (POSIX):\n"
+                "#   python -m venv .venv && "
+                ".venv/bin/pip install -r .fi/requirements.lock.txt\n"
+                "# Reproduce (Windows):\n"
+                "#   python -m venv .venv && "
+                ".venv\\Scripts\\pip install -r .fi\\requirements.lock.txt\n"
+            )
+            lock_path.write_text(header + freeze.stdout, encoding="utf-8")
+            # Delete the venv. ``ignore_errors`` rather than ``onerror=``
+            # so a stuck file handle on Windows doesn't propagate — the
+            # lock file is the durable artifact; a stray .venv/ is
+            # harmless leftover that the user can ``rm -rf`` themselves.
+            await asyncio.to_thread(shutil.rmtree, venv_dir, True)
+            # Verify the delete actually succeeded before claiming it.
+            # On Windows ``ignore_errors=True`` can leave the directory
+            # partially intact when a DLL handle is held open by an AV
+            # scanner — the lock file is still valid (reproducibility
+            # is preserved) but the disk-reclaim claim would be a lie.
+            if venv_dir.exists():
+                _log.warning(
+                    "cleanup_after_success: froze %d packages to %s, but "
+                    ".venv/ at %s was only partially removed (likely a "
+                    "Windows file lock); you can delete it manually.",
+                    freeze.stdout.count("\n"),
+                    lock_path,
+                    venv_dir,
+                )
+            else:
+                _log.info(
+                    "cleanup_after_success: froze %d packages to %s and removed %s",
+                    freeze.stdout.count("\n"),
+                    lock_path,
+                    venv_dir,
+                )
+            return lock_path
+        except OSError as e:
             _log.warning(
-                "cleanup_after_success: venv python missing at %s; skipping freeze + delete",
-                py,
+                "cleanup_after_success: filesystem error during cleanup "
+                "(quest still succeeded): %r",
+                e,
             )
             return None
-        # ``pip freeze`` produces a deterministic, pip-installable list.
-        freeze = await self.execute(
-            [str(py), "-m", "pip", "freeze"],
-            cwd=quest_root,
-            timeout_s=60,
-        )
-        if freeze.returncode != 0:
-            _log.warning(
-                "cleanup_after_success: pip freeze rc=%d stderr=%s; "
-                "keeping .venv/ for debugging",
-                freeze.returncode,
-                freeze.stderr[-300:],
-            )
-            return None
-        # Stamp the lock file with a short header so a future reader
-        # knows what produced it and how to reuse it.
-        header = (
-            "# Frozen by FrontierInsight on quest success.\n"
-            "# Reproduce: python -m venv .venv && "
-            ".venv/bin/pip install -r .fi/requirements.lock.txt\n"
-            "# (on Windows: .venv\\Scripts\\pip install ...)\n"
-        )
-        lock_path.write_text(header + freeze.stdout, encoding="utf-8")
-        # Delete the venv. ``ignore_errors`` rather than ``onerror=`` so
-        # a stuck file handle on Windows doesn't propagate — the lock
-        # file is the durable artifact; a stray .venv/ is harmless
-        # leftover that the user can ``rm -rf`` themselves.
-        await asyncio.to_thread(shutil.rmtree, venv_dir, True)
-        _log.info(
-            "cleanup_after_success: froze %d packages to %s and removed %s",
-            freeze.stdout.count("\n"),
-            lock_path,
-            venv_dir,
-        )
-        return lock_path
 
 
 def _build_venv(venv_dir: Path, *, with_pip: bool) -> None:
