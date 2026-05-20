@@ -93,6 +93,11 @@ $topic
   "paper_venue": {
     "question": "<one sentence asking which paper template / format style fits — scientific venues (generic, neurips, iclr, ieee_access, nature_mi) or non-scientific prose (essay, report, policy_brief, whitepaper)>",
     "default": "<your best guess; see venue rules below>"
+  },
+  "topic_shape": {
+    "question": "<one sentence asking which intellectual SHAPE this topic has — a specific testable comparison (experimental), a broad synthesis of prior knowledge (review), one system / phenomenon to study in depth (case_study), or a position to argue (opinion)>",
+    "default": "experimental" or "review" or "case_study" or "opinion",
+    "reason": "<one-sentence justification — quote which words in the topic point to this shape>"
   }
 }
 ```
@@ -123,4 +128,10 @@ $topic
     - `policy_brief` — 2-4 page brief for policymakers. Single decision recommendation backed by issue + context. Picks when the natural shape is "here's the issue, here's what to do, here's why."
     - `whitepaper` — industry/vendor-neutral 8-20 page analysis. Tech trends, architecture comparisons, standards interpretations. Picks when the audience is industry practitioners and the structure is problem → approach → evidence → conclusion.
   * **DEFAULT to `generic` when uncertain** for scientific topics; **DEFAULT to `essay`** for non-simulatable topics that fall in humanities / social-science / archival / current-events.
+- The `topic_shape` slot orthogonally classifies the topic's INTELLECTUAL SHAPE — separate from `simulatability` (which asks "can Python answer this?"). Four shapes:
+  * `experimental` — the topic names a specific testable comparison ("compare X vs Y on benchmark Z", "does method M reduce error E"). Hypothesis + variables + measurable outcome. Default for most topics that fit `simulatability=yes`.
+  * `review` — the topic asks for a synthesis of prior knowledge across a field ("OPC importance in low-k1 era", "history of resolution enhancement", "differences between A and B"). The right output is a literature synthesis, not a toy experiment masquerading as a benchmark. Trigger words: "importance", "history", "evolution", "differences", "review of", "landscape of", "trends in".
+  * `case_study` — the topic studies one system / one event / one phenomenon in depth, with no comparator and no sweep ("why did chip X fail at process node Y", "the 2018 PUE incident in datacenter Z"). Trigger words: "the X", "this Y", proper nouns dominating.
+  * `opinion` — the topic argues a position with no decisive empirical answer ("should we adopt MLOps", "is the AI safety field underinvested", "what should our team do about Z"). Values + reasoning, not measurements. Trigger words: "should", "is X worth it", "what to do about".
+  - When `topic_shape` is `review`, `case_study`, or `opinion` BUT `simulatability` is `yes`, you have a mismatch — the engine WILL run a Python experiment (per simulatability) but the topic doesn't want one. Surface this honestly: keep `topic_shape` accurate; the engine will log the mismatch and the design / write stages will keep the experiment minimal and shift weight to the literature synthesis.
 - No prose outside the JSON object. No code fences. No commentary.

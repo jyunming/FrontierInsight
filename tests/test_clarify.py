@@ -87,12 +87,12 @@ def test_format_clarify_skips_unknown_slots() -> None:
     assert "future_slot" not in out
 
 
-def test_default_clarify_questions_has_all_seven_slots() -> None:
+def test_default_clarify_questions_has_all_eight_slots() -> None:
     q = _default_clarify_questions("any topic")
     assert set(q) == {
         "comparative_baseline", "empirical_vs_theoretical",
         "success_metric", "budget", "output_kinds",
-        "study_depth", "paper_venue",
+        "study_depth", "paper_venue", "topic_shape",
     }
     for slot, value in q.items():
         assert isinstance(value, dict)
@@ -109,6 +109,11 @@ def test_default_clarify_questions_has_all_seven_slots() -> None:
     # about — `_apply_paper_venue_override` silently drops unknown values.
     assert q["paper_venue"]["default"] in (
         "generic", "neurips", "iclr", "ieee_access", "nature_mi",
+    )
+    # topic_shape default is one of the four documented shapes — design
+    # and write prompts pattern-match on the value.
+    assert q["topic_shape"]["default"] in (
+        "experimental", "review", "case_study", "opinion",
     )
 
 
@@ -319,11 +324,12 @@ async def test_clarify_auto_falls_back_on_unparseable_llm_output(
 
     patch = await eng._node_clarify({"topic": "some topic"})
 
-    # Even with garbage from the LLM, we still produce all 7 slots.
+    # Even with garbage from the LLM, we still produce all 8 slots
+    # (7 originals + topic_shape).
     assert set(patch["clarify_questions"]) == {
         "comparative_baseline", "empirical_vs_theoretical",
         "success_metric", "budget", "output_kinds", "study_depth",
-        "paper_venue",
+        "paper_venue", "topic_shape",
     }
     assert patch["clarify_done"] is True
 
