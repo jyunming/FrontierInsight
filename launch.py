@@ -515,9 +515,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="TCP port the FI VSCode extension is listening on for "
              "the LLM bridge. The extension passes this when it spawns FI; "
-             "setting it forces provider.name=vscode_extension regardless of "
-             "what the YAML says. Do not pass this from a regular terminal "
-             "run — use copilot_cli or similar for headless Copilot usage.",
+             "setting it wires the bridge port into ``provider.extra`` "
+             "AND coerces ``provider.name`` to ``vscode_extension`` IF "
+             "the YAML didn't pick a different provider. A YAML that "
+             "explicitly chose ``claude_cli`` / ``openai`` / etc. is "
+             "respected — the bridge wiring is left off. Do not pass "
+             "this from a regular terminal run — use copilot_cli or "
+             "similar for headless Copilot usage.",
     )
     p.add_argument(
         "--vscode-bridge-socket",
