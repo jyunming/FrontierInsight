@@ -69,6 +69,50 @@ def test_load_persona_prefix_builtin_personas_each_have_distinct_prefix() -> Non
     assert len({v for v in prefixes.values()}) == len(builtins)
 
 
+def test_methodologist_persona_includes_must_flag_section() -> None:
+    """Methodologist must carry the MUST-FLAG checklist verbatim.
+
+    The four hard-must-flag patterns are common-but-fatal methodology
+    errors. Earlier reviews of low-quality engine-generated papers
+    accepted them silently — accepting a paper with circular
+    evaluation or an admittedly-broken baseline is the failure mode
+    the must-flag block is designed to prevent. If someone trims the
+    persona file to a one-liner, this test catches it before the
+    quality regression ships.
+    """
+    prefix = _load_persona_prefix("methodologist")
+    assert "MUST-FLAG" in prefix
+    # Carve just the MUST-FLAG block — the existing discretionary
+    # bullet list already mentions "sample sizes / sweeps" and
+    # "baseline" in passing, so a global-text search would pass even
+    # if someone silently deleted the must-flag rules. The block
+    # starts at the MUST-FLAG header.
+    must_flag_block = prefix[prefix.index("MUST-FLAG"):].lower()
+    # The block must terminate with the verdict-binding closer; if
+    # that sentence is missing, the rule is documentation, not
+    # enforcement.
+    assert "must-flag hit forces verdict" in must_flag_block, (
+        "methodologist MUST-FLAG block missing the verdict-binding "
+        "closer; silence-is-not-acceptance is the contract."
+    )
+    must_flag_keywords = [
+        # Circular evaluation / train-on-test
+        ("circular", "train-on-test contamination guard"),
+        # Single-point eval where a sweep is the norm
+        ("sweep", "single-point-evaluation guard"),
+        # Weak baseline kept instead of re-run
+        ("admitted-weak baseline", "admitted-weak-baseline guard"),
+        # Pseudo-units / dimensionless
+        ("pseudo-units", "pseudo-units guard"),
+    ]
+    for needle, label in must_flag_keywords:
+        assert needle in must_flag_block, (
+            f"methodologist MUST-FLAG block is missing the {label} "
+            f"(keyword {needle!r} not found INSIDE the must-flag "
+            f"section)."
+        )
+
+
 def test_load_persona_prefix_custom_name_falls_back_to_generic_template() -> None:
     """A persona name with no corresponding file falls back to the
     generic template so users can declare ad-hoc roles in YAML."""
