@@ -25,9 +25,19 @@ Respond with a single JSON object, no prose, no markdown fence:
 
 ```
 {
+  "verdict": "<supporting | conflicting | neutral | mixed>",
   "supporting":  [{"index": <1-based>, "why": "<one-sentence explanation>"}, ...],
   "conflicting": [{"index": <1-based>, "why": "<one-sentence explanation>"}, ...],
   "neutral":     [{"index": <1-based>, "why": "<one-sentence explanation>"}, ...],
   "summary": "<one short paragraph: does the literature broadly agree, disagree, or remain inconclusive?>"
 }
 ```
+
+**`verdict` semantics — pick exactly one based on the balance of the literature:**
+
+- **`supporting`** — the literature, on balance, supports the finding (e.g. supporting citations clearly outweigh conflicting ones, or the only signal at all is corroborating).
+- **`conflicting`** — the literature, on balance, contradicts the finding (e.g. conflicting citations clearly outweigh supporting ones).
+- **`mixed`** — there is meaningful evidence on BOTH the supporting and conflicting sides, roughly balanced, and a single direction can't be honestly chosen.
+- **`neutral`** — the literature is mostly silent / topically tangential; neither supporting nor conflicting evidence is substantive enough to weigh in.
+
+The `verdict` MUST be one of these four exact lowercase strings. It is the single field downstream ensembles tally to pick a majority opinion across multiple models — keep it crisp and consistent with the supporting/conflicting/neutral lists you populated above.
