@@ -610,7 +610,11 @@ async function runInterviewAndQuest(
         yamlPath = writeInterviewYaml(answers, repoPath);
     } catch (err) {
         const draftDir = path.join(repoPath, "outputs", "_drafts");
-        const msg = err instanceof Error ? err.message : String(err);
+        const rawMsg = err instanceof Error ? err.message : String(err);
+        // Node FS errors often already end with punctuation
+        // (e.g. ``EACCES: permission denied, open '...'``); strip a
+        // trailing period to avoid the awkward double-dot.
+        const msg = rawMsg.replace(/\.\s*$/, "");
         stream.markdown(
             `❌ Failed to write quest YAML to \`${draftDir}\`: ${msg}. ` +
             `Common causes: disk full, read-only mount, OneDrive sync conflict, missing parent dir permissions.`,
