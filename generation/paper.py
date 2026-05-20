@@ -450,17 +450,15 @@ class PaperGenerator:
                     except OSError:
                         pass
             elif skip_reason is not None:
-                # PDF compile skipped — also clean up any sanitized
-                # source file from a PRIOR successful run. The comment
-                # on that file says "exactly what pandoc consumed";
-                # leaving it stale after a skip would mislead users
-                # into thinking the just-written file was the source
-                # of the (skipped) failure.
-                if sanitized_src.is_file():
-                    try:
-                        sanitized_src.unlink()
-                    except OSError:
-                        pass
+                # PDF compile skipped — KEEP ``paper_pdf_source.md`` on
+                # disk. ``_compile_pdf`` writes that file FIRST and then
+                # invokes pandoc on it, so on failure it's literally
+                # "exactly what pandoc consumed and choked on" — the
+                # single most useful artifact for diagnosing the
+                # compile error. (A previous version deleted it here,
+                # citing staleness vs prior successful runs, but a
+                # failed-this-run file is NEVER stale: it was written
+                # 2 lines earlier in the same call.)
                 # User asked for a PDF, none was produced, AND we know why.
                 # Write a single-paragraph diagnostic file in the same
                 # directory so the failure is discoverable without grepping
@@ -554,6 +552,20 @@ class PaperGenerator:
         enough info for ``_render_pdf_skip_md`` to write a useful
         ``paper_pdf_skipped.md`` for the user.
         """
+        # Wipe any stale ``paper_pdf_source.md`` from a prior run BEFORE
+        # we do anything else. The semantic this guarantees: after
+        # ``_compile_pdf`` returns, either ``paper_pdf_source.md`` was
+        # written by THIS call (so on failure it's the source pandoc
+        # consumed and choked on — preserve it for diagnosis) or it
+        # doesn't exist at all. A stale prior-run file masquerading as
+        # this-run output is the failure mode we're foreclosing.
+        stale_src = out_dir / "paper_pdf_source.md"
+        if stale_src.is_file():
+            try:
+                stale_src.unlink()
+            except OSError:
+                pass
+
         # Pandoc itself: `subprocess.run` on Windows auto-appends `.exe`
         # to bare executable names via CreateProcess, so resolving via
         # `shutil.which` is mostly defensive (would matter if pandoc
@@ -775,10 +787,23 @@ class PaperGenerator:
                     f"The LaTeX engine errored. Common causes: a malformed "
                     f"LaTeX template, an unsupported character in paper.md, "
                     f"or a missing CTAN package on the first-ever compile. "
-                    f"stderr tail:\n\n```\n{stderr_tail}\n```\n\n"
-                    f"Inspect the template at "
-                    f"`templates/paper/{fmt}/template.tex` and verify "
-                    f"paper.md doesn't contain raw LaTeX that conflicts."
+                    f"stderr tail (last 500 chars):\n\n```\n{stderr_tail}\n```\n\n"
+                    f"The exact markdown pandoc consumed is preserved at "
+                    f"`paper_pdf_source.md` (post-Unicode-sanitization, "
+                    f"post-frontmatter-lift). The ``l.N`` line numbers in "
+                    f"the stderr above index into pandoc's intermediate "
+                    f".tex (which pandoc deletes on exit) — not into "
+                    f"`paper_pdf_source.md` directly. To recover the .tex "
+                    f"for inspection, run:\n\n"
+                    f"```\n"
+                    f"pandoc paper_pdf_source.md -o paper.tex --standalone "
+                    f"--template templates/paper/{fmt}/template.tex\n"
+                    f"```\n\n"
+                    f"Then look at the quoted ``l.N`` of `paper.tex`. Once "
+                    f"the bad construct is identified, patch either "
+                    f"`templates/paper/{fmt}/template.tex` (template bug) "
+                    f"or `paper.md` (LLM emitted something pandoc translated "
+                    f"into broken LaTeX)."
                 ),
             )
         if not out_pdf.exists():

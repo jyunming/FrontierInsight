@@ -1296,25 +1296,63 @@ def test_compile_pdf_sanitizes_unicode_inside_code_blocks_too(
     assert "≥" not in sanitized
 
 
-def test_compile_pdf_cleans_stale_source_md_on_skip(
+def test_compile_pdf_clears_stale_source_md_on_early_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the PDF compile is skipped, the stale
-    ``paper_pdf_source.md`` from a prior SUCCESSFUL run must be
-    removed — its purpose ("exactly what pandoc consumed") would be
-    misleading for the just-failed attempt that didn't run pandoc."""
+    """A pre-existing ``paper_pdf_source.md`` from a prior SUCCESSFUL
+    run must be cleared at the START of ``_compile_pdf`` so an
+    early-out skip (e.g. pandoc missing) doesn't leave a stale file
+    masquerading as the source of the just-failed attempt. THIS run
+    didn't sanitize anything, so the only correct state for
+    ``paper_pdf_source.md`` is "absent"."""
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     stale = out_dir / "paper_pdf_source.md"
     stale.write_text("from a previous successful run", encoding="utf-8")
 
-    # pandoc missing → skip path.
+    # pandoc missing → early-out skip path (returns BEFORE sanitization).
     monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
     art = _make_artifacts(tmp_path)
     PaperGenerator(cfg).generate(art, out_dir)
     assert not stale.exists()
+
+
+def test_compile_pdf_preserves_source_md_on_post_sanitize_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When pandoc runs but exits non-zero (e.g. a LaTeX template bug),
+    ``paper_pdf_source.md`` must survive — it's the exact markdown
+    pandoc consumed and choked on, the single most useful artifact
+    for post-mortem. Regression test for the deletion-on-skip fix
+    surfaced by the 1779224125 quest (missing \\usepackage{calc})."""
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda c: f"/fake/{c}.exe")
+    monkeypatch.setattr(
+        PaperGenerator, "_find_pdf_engine",
+        lambda self: ("pdflatex", "/fake/pdflatex.exe"),
+    )
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        # Simulate pdflatex rc!=0 — pandoc invoked, sanitization
+        # completed, paper_pdf_source.md is on disk, but no PDF.
+        return SimpleNamespace(
+            returncode=43,
+            stdout="",
+            stderr="! Missing number, treated as zero.\nl.417 \\begin",
+        )
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+    PaperGenerator(cfg).generate(art, out_dir)
+    sanitized = out_dir / "paper_pdf_source.md"
+    assert sanitized.exists(), (
+        "paper_pdf_source.md must be preserved on post-sanitize compile "
+        "failure — it's the markdown pandoc just consumed."
+    )
+    assert (out_dir / "paper_pdf_skipped.md").exists()
 
 
 def test_generate_cleans_paper_pdf_source_when_pdf_not_in_kinds(
