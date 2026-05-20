@@ -9,17 +9,17 @@
 
 Frontier Insight (FI) is an automated research assistant. You write a one-paragraph topic into a YAML file; FI runs an 11-step research loop:
 
-1. asks you 5 clarifying questions (optional),
-2. brainstorms research directions,
+1. surveys ~9 framing slots (optional, default off, configurable on / auto / interactive),
+2. brainstorms research directions (or re-routes to data ingest for non-experimental topics),
 3. searches the literature,
-4. designs an experiment,
+4. designs an experiment, then self-critiques the design for circular evaluation / weak baselines,
 5. writes the experiment code,
 6. runs it in a sandboxed venv (and fixes its own bugs if the script crashes),
 7. cross-checks the results against published papers,
-8. drafts an IMRAD paper,
-9. reviews itself (optionally with a panel of reviewer personas),
-10. iterates if the review says "revise",
-11. saves the finished paper, figures, code, and a slides deck.
+8. drafts the paper — IMRAD (NeurIPS / ICLR / IEEE Access / Nature MI / generic) or essay / report / policy_brief / whitepaper,
+9. reviews itself (optionally with a panel of reviewer personas; the methodologist persona hard-flags four common-but-fatal patterns),
+10. iterates if the review says "revise" — optionally pauses for human accept / reject / refine,
+11. saves paper + figures + code + slides + (optional) poster + speech, plus a reproducible `requirements.lock.txt`.
 
 Everything runs locally on your machine. The only external dependency is an LLM provider (your choice: OpenAI / Anthropic / Gemini API keys, or your GitHub Copilot subscription, or local Ollama).
 
@@ -69,6 +69,8 @@ data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldb
 .fi/state.sqlite                      ← resumable checkpoint
 .fi/requirements.lock.txt             ← pip freeze (only on successful finish; .venv/ is then removed to reclaim disk)
 frontier_insight_summary.json        ← machine-readable index
+quest_failed.md                       ← only if the quest crashed: failing node, exception, log tail, --resume command
+<kind>_skipped.md                     ← only if an output kind couldn't be produced: what was requested, why it skipped, how to fix
 ```
 
 ---
