@@ -314,11 +314,15 @@ export class PersistentBridge {
                 return;
             }
             const model = models[0];
-            const messages = req.messages.map((m) =>
-                m.role === "system"
-                    ? vscode.LanguageModelChatMessage.User(`SYSTEM: ${m.content}`)
-                    : vscode.LanguageModelChatMessage.User(m.content),
-            );
+            const messages = req.messages.map((m) => {
+                if (m.role === "system") {
+                    return vscode.LanguageModelChatMessage.User(`SYSTEM: ${m.content}`);
+                }
+                if (m.role === "assistant") {
+                    return vscode.LanguageModelChatMessage.Assistant(m.content);
+                }
+                return vscode.LanguageModelChatMessage.User(m.content);
+            });
             const cts = new vscode.CancellationTokenSource();
             const res = await model.sendRequest(messages, {}, cts.token);
             let content = "";
