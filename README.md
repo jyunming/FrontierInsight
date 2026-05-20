@@ -9,8 +9,8 @@
 
 Frontier Insight (FI) is an automated research assistant. You write a one-paragraph topic into a YAML file; FI runs an 11-step research loop:
 
-1. surveys ~9 framing slots (optional, default off, configurable on / auto / interactive),
-2. brainstorms research directions (or re-routes to data ingest for non-experimental topics),
+1. surveys ~9 framing slots (`engine.clarify_mode`: `off` (default) / `auto` / `interactive`),
+2. brainstorms research directions (or skips ideate→implement→execute entirely when `simulatability == "no"`, routing through data-ingest instead),
 3. searches the literature,
 4. designs an experiment, then self-critiques the design for circular evaluation / weak baselines,
 5. writes the experiment code,
@@ -19,7 +19,7 @@ Frontier Insight (FI) is an automated research assistant. You write a one-paragr
 8. drafts the paper — IMRAD (NeurIPS / ICLR / IEEE Access / Nature MI / generic) or essay / report / policy_brief / whitepaper,
 9. reviews itself (optionally with a panel of reviewer personas; the methodologist persona hard-flags four common-but-fatal patterns),
 10. iterates if the review says "revise" — optionally pauses for human accept / reject / refine,
-11. saves paper + figures + code + slides + (optional) poster + speech, plus a reproducible `requirements.lock.txt`.
+11. saves paper + figures + code + slides + (optional) poster + speech, plus a reproducible `.fi/requirements.lock.txt`.
 
 Everything runs locally on your machine. The only external dependency is an LLM provider (your choice: OpenAI / Anthropic / Gemini API keys, or your GitHub Copilot subscription, or local Ollama).
 

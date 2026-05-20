@@ -239,9 +239,10 @@ of the same kind removes the stale breadcrumb.
 If a quest crashes mid-graph (a `_node_*` raises, or a pre-graph
 stage fails), the engine writes `quest_failed.md` to the quest
 root with the failing-node name, the exception text, a log tail,
-provider context, and a `--resume` command. The chat surfaces a
-red one-line summary pointing at the file; the same file is
-visible in the dashboard's quest detail page.
+provider context, and a `--resume` command. The chat emits a
+single `❌ Quest failed: <reason>` line at the end of the run;
+open the quest folder to read `quest_failed.md` for the full
+context and the resume hint.
 
 ## Pre-quest proposal
 
