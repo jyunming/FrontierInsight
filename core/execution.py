@@ -14,12 +14,16 @@ Both expose the same async `execute(cmd, cwd, timeout_s) -> ExecutionResult`.
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
 import sys
 import time
 import venv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
+
+_log = logging.getLogger("frontier_insight.execution")
 
 
 @dataclass
@@ -43,6 +47,15 @@ class Executor(Protocol):
     ) -> ExecutionResult: ...
     async def install(self, packages: Iterable[str], *, quest_root: Path) -> ExecutionResult: ...
     def python_path(self, quest_root: Path) -> Path: ...
+    async def cleanup_after_success(self, quest_root: Path) -> Path | None:
+        """Optional. Called when the quest reaches a terminal success
+        state. Implementations should free any heavyweight resources
+        (e.g. the per-quest venv) while preserving a reproducibility
+        artifact (e.g. ``requirements.lock.txt``). A no-op by default;
+        ``DockerExecutor`` has nothing to clean. Returns the path to
+        the produced reproducibility artifact, or ``None`` if there
+        was nothing to clean up or freeze."""
+        return None
 
 
 class VenvExecutor:
@@ -114,6 +127,72 @@ class VenvExecutor:
             timed_out=timed_out,
         )
 
+    async def cleanup_after_success(self, quest_root: Path) -> Path | None:
+        """Freeze the venv's pip state to ``.fi/requirements.lock.txt``
+        then delete ``<quest_root>/.venv/`` to reclaim disk space.
+
+        A typical quest venv lands at 150–250 MB (matplotlib, pandas,
+        scipy, etc.); over a multi-quest session this dominates the
+        ``outputs/`` footprint. The frozen lock file is everything a
+        future reader needs to reproduce the environment:
+        ``python -m venv .venv && .venv/bin/pip install -r .fi/requirements.lock.txt``.
+
+        Idempotent and best-effort: if the venv is missing (Docker run,
+        ``no_simulation=true``, already cleaned) or freeze/delete fails
+        (permission denied on a stuck handle, AV scanner holding files
+        open on Windows, …), we log and return None — never raise.
+        A failed cleanup must not mask a successful quest.
+        """
+        venv_dir = quest_root / ".venv"
+        if not (venv_dir / "pyvenv.cfg").exists():
+            return None
+
+        fi_dir = quest_root / ".fi"
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = fi_dir / "requirements.lock.txt"
+        py = self.python_path(quest_root)
+        if not py.is_file():
+            _log.warning(
+                "cleanup_after_success: venv python missing at %s; skipping freeze + delete",
+                py,
+            )
+            return None
+        # ``pip freeze`` produces a deterministic, pip-installable list.
+        freeze = await self.execute(
+            [str(py), "-m", "pip", "freeze"],
+            cwd=quest_root,
+            timeout_s=60,
+        )
+        if freeze.returncode != 0:
+            _log.warning(
+                "cleanup_after_success: pip freeze rc=%d stderr=%s; "
+                "keeping .venv/ for debugging",
+                freeze.returncode,
+                freeze.stderr[-300:],
+            )
+            return None
+        # Stamp the lock file with a short header so a future reader
+        # knows what produced it and how to reuse it.
+        header = (
+            "# Frozen by FrontierInsight on quest success.\n"
+            "# Reproduce: python -m venv .venv && "
+            ".venv/bin/pip install -r .fi/requirements.lock.txt\n"
+            "# (on Windows: .venv\\Scripts\\pip install ...)\n"
+        )
+        lock_path.write_text(header + freeze.stdout, encoding="utf-8")
+        # Delete the venv. ``ignore_errors`` rather than ``onerror=`` so
+        # a stuck file handle on Windows doesn't propagate — the lock
+        # file is the durable artifact; a stray .venv/ is harmless
+        # leftover that the user can ``rm -rf`` themselves.
+        await asyncio.to_thread(shutil.rmtree, venv_dir, True)
+        _log.info(
+            "cleanup_after_success: froze %d packages to %s and removed %s",
+            freeze.stdout.count("\n"),
+            lock_path,
+            venv_dir,
+        )
+        return lock_path
+
 
 def _build_venv(venv_dir: Path, *, with_pip: bool) -> None:
     builder = venv.EnvBuilder(with_pip=with_pip, clear=False, upgrade_deps=False)
@@ -170,6 +249,12 @@ class DockerExecutor:
     def python_path(self, quest_root: Path) -> Path:
         # Inside the container the Python interpreter is on PATH as `python`.
         return Path("python")
+
+    async def cleanup_after_success(self, quest_root: Path) -> Path | None:
+        """Docker has no per-quest venv on disk — the interpreter and
+        every installed package live inside an ephemeral container
+        that's already torn down per execute() call. Nothing to free."""
+        return None
 
     async def install(
         self, packages: Iterable[str], *, quest_root: Path

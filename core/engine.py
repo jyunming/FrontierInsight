@@ -421,6 +421,19 @@ class Engine:
             # uses for ``paper_pdf_skipped.md`` on a successful PDF
             # compile.
             self._clear_stale_quest_failed_diagnostic()
+            # Reclaim ~150-250 MB per quest by freezing the venv to
+            # ``.fi/requirements.lock.txt`` then deleting ``.venv/``.
+            # Only fires on the success path — failed/paused quests
+            # keep their venv so the user can poke at it. Best-effort:
+            # any exception here is swallowed so a venv-cleanup hiccup
+            # never masks a successful quest.
+            try:
+                await self.executor.cleanup_after_success(self.quest_root)
+            except Exception as cleanup_exc:
+                self._log.warning(
+                    "venv cleanup failed (quest still succeeded): %r",
+                    cleanup_exc,
+                )
             self._log.info("quest %s reached terminal state", self.quest_id)
             return artifacts
         except Exception as exc:

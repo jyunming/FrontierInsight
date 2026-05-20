@@ -67,6 +67,7 @@ data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldb
 .fi/run.log                           ← engine's structured node-by-node log
 .fi/launch.log                        ← subprocess wrapper log (written when launched via --serve / @fi)
 .fi/state.sqlite                      ← resumable checkpoint
+.fi/requirements.lock.txt             ← pip freeze (only on successful finish; .venv/ is then removed to reclaim disk)
 frontier_insight_summary.json        ← machine-readable index
 ```
 
