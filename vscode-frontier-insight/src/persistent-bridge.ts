@@ -338,7 +338,20 @@ export class PersistentBridge {
                     : vscode.LanguageModelChatMessage.User(m.content),
             );
             const cts = new vscode.CancellationTokenSource();
-            const res = await model.sendRequest(messages, {}, cts.token);
+            // Dispose ``cts`` on every exit path. The original code only
+            // disposed inside the streaming try/finally below, so if
+            // ``sendRequest`` threw (offline / auth / bad model) we
+            // leaked the CancellationTokenSource for the lifetime of
+            // the extension host. With one LM request per chat-turn
+            // this drips slowly, but it builds up over a long --serve
+            // session.
+            let res: vscode.LanguageModelChatResponse;
+            try {
+                res = await model.sendRequest(messages, {}, cts.token);
+            } catch (sendErr) {
+                cts.dispose();
+                throw sendErr;
+            }
             let content = "";
             let chunkCount = 0;
             // Race each ``iter.next()`` against an inactivity timer.

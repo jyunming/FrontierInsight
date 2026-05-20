@@ -303,8 +303,18 @@ async def test_bridge_chat_raises_when_response_never_arrives() -> None:
     client = VSCodeBridgeClient(port=port, cli_timeout_s=1.0)
     try:
         await client.connect()
+        # Outer ``wait_for`` is a regression guard. If a future change
+        # to ``VSCodeBridgeClient.chat`` lost the inner ``wait_for``
+        # (or the inner timeout ever stopped firing), the inner future
+        # would await forever and CI would hang for the full test
+        # timeout instead of failing fast. ``cli_timeout_s=1.0`` means
+        # ``chat`` should raise within ~1 s; we give ourselves 5 s of
+        # slack before forcing a failure.
         with pytest.raises(BridgeError, match="bridge stalled"):
-            await client.chat([{"role": "user", "content": "x"}])
+            await asyncio.wait_for(
+                client.chat([{"role": "user", "content": "x"}]),
+                timeout=5.0,
+            )
         # The "bridge stalled" phrasing is load-bearing — Python's
         # ``_TRANSIENT_BRIDGE_MARKERS`` matches on it so tenacity
         # retries instead of crashing the quest.

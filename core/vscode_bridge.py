@@ -296,6 +296,15 @@ class VSCodeBridgeClient:
         mtype = msg.get("type")
         if mtype == "lm_chunk":
             req_id = int(msg.get("id", 0))
+            # Drop chunks for requests that are no longer pending. The
+            # wait_for timeout path (and clarify-callback errors) pop
+            # ``_pending``/``_chunks`` before the extension stops
+            # streaming, so late chunks can arrive after cleanup. Using
+            # ``setdefault`` here would resurrect a buffer for an
+            # expired id and leak it for the lifetime of the bridge.
+            # Mirrors how ``lm_done`` / ``lm_error`` ignore unknown ids.
+            if req_id not in self._pending:
+                return
             self._chunks.setdefault(req_id, []).append(str(msg.get("delta", "")))
         elif mtype == "lm_done":
             req_id = int(msg.get("id", 0))
