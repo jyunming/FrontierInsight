@@ -58,16 +58,29 @@ export class PersistentBridge {
      */
     async listen(): Promise<string> {
         if (process.platform !== "win32") {
-            // POSIX: clear stale socket from a previous crash. The
-            // OS won't bind() to an existing path; we test for the
-            // socket-or-nothing rather than blindly unlinking so we
-            // never delete an active listener someone else owns.
-            try {
-                const stat = fs.statSync(this.path);
-                if (stat.isSocket()) fs.unlinkSync(this.path);
-            } catch {
-                // path doesn't exist; nothing to clean
+            // POSIX: clear stale socket from a previous crash, but
+            // ONLY if it's stale. ``stat.isSocket()`` returns true for
+            // ANY AF_UNIX file — including an active listener owned by
+            // another VSCode window. Blindly unlinking would silently
+            // steal the per-user bridge path: the second window's
+            // ``listen()`` deletes the first window's socket, binds in
+            // its place, and any new ``--serve`` / ``--tools`` Python
+            // subprocess (which resolves the same per-user path) would
+            // connect to the wrong window's Copilot session — silent
+            // cross-window LLM routing.
+            //
+            // Probe by trying to ``connect()`` first:
+            //   - connect succeeds → another listener is live → refuse
+            //   - connect fails (ENOENT, ECONNREFUSED, ...) → path is
+            //     either stale or never existed → safe to unlink + bind.
+            if (await this.isSocketLive(this.path)) {
+                const msg =
+                    `Another VSCode window already owns the FI bridge socket at ${this.path}. ` +
+                    `Close the other window or use a different VSCODE per-user identity.`;
+                this.outputChannel.appendLine(`[fi] ${msg}`);
+                throw new Error(msg);
             }
+            try { fs.unlinkSync(this.path); } catch { /* nothing to clean */ }
         }
         return new Promise((resolve, reject) => {
             this.server = net.createServer((socket) => this.onClient(socket));
@@ -78,6 +91,28 @@ export class PersistentBridge {
                 );
                 resolve(this.path);
             });
+        });
+    }
+
+    /**
+     * Probe whether ``socketPath`` has an active listener. Resolves
+     * ``true`` iff a TCP-level connect succeeds (someone is accepting);
+     * ``false`` on ENOENT, ECONNREFUSED, or any other connect failure
+     * (path stale or never bound).
+     *
+     * Used only by ``listen()`` to distinguish a crash-leftover socket
+     * from a live cross-window owner before unlinking.
+     */
+    private isSocketLive(socketPath: string): Promise<boolean> {
+        return new Promise((resolve) => {
+            const probe = net.createConnection(socketPath);
+            const done = (alive: boolean) => {
+                probe.removeAllListeners();
+                if (!probe.destroyed) probe.destroy();
+                resolve(alive);
+            };
+            probe.once("connect", () => done(true));
+            probe.once("error", () => done(false));
         });
     }
 
