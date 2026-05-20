@@ -88,12 +88,19 @@ def test_methodologist_persona_includes_must_flag_section() -> None:
     # if someone silently deleted the must-flag rules. The block
     # starts at the MUST-FLAG header.
     must_flag_block = prefix[prefix.index("MUST-FLAG"):].lower()
-    # The block must terminate with the verdict-binding closer; if
-    # that sentence is missing, the rule is documentation, not
-    # enforcement.
-    assert "must-flag hit forces verdict" in must_flag_block, (
+    # The block must bind a hit to BOTH ``verdict = revise`` AND
+    # ``score < 3``. The old "forces verdict <= revise" wording let a
+    # high-score revise vote silently outvoted by accept panelists
+    # (PR #142 / audit Slice 3 HIGH #2 follow-up). Both halves must be
+    # present so the rule is enforcement, not documentation.
+    assert "verdict = revise" in must_flag_block, (
         "methodologist MUST-FLAG block missing the verdict-binding "
-        "closer; silence-is-not-acceptance is the contract."
+        "half; silence-is-not-acceptance is the contract."
+    )
+    assert "score < 3" in must_flag_block, (
+        "methodologist MUST-FLAG block missing the low-score "
+        "requirement; a high-score revise would be outvoted in panel "
+        "mode and the design loop would silently never fire."
     )
     must_flag_keywords = [
         # Circular evaluation / train-on-test
@@ -456,3 +463,66 @@ def test_aggregate_empty_panel_provides_rigor_and_depth_defaults() -> None:
     agg = _aggregate_panel_reviews([])
     assert agg["rigor_score"] == 3
     assert agg["depth_score"] == 3
+
+
+# --- Slice 3 HIGH #2: MUST-FLAG must produce low score, not just revise ---
+
+
+def test_aggregate_methodologist_low_score_revise_outvotes_two_accepts() -> None:
+    """Audit Slice 3 HIGH #2 — the contract the *new* persona prompt
+    must satisfy.
+
+    Methodologist hits a MUST-FLAG (e.g., circular evaluation): returns
+    ``{verdict: revise, score: 2}``. Two other panelists give
+    ``{verdict: accept, score: 4}``. The aggregator's ``low_revise``
+    shortcut fires because any one persona produced ``score < 3``
+    AND ``verdict == revise`` — so the final verdict is ``revise`` and
+    the design loop fires. This is the path that gates the engine when
+    methodology is fatally broken.
+    """
+    agg = _aggregate_panel_reviews([
+        _r("methodologist", "revise", 2),
+        _r("statistician", "accept", 4),
+        _r("devil_advocate", "accept", 4),
+    ])
+    assert agg["verdict"] == "revise"
+
+
+def test_aggregate_methodologist_high_score_revise_is_silently_outvoted() -> None:
+    """Pin the aggregator's *existing* behaviour: a revise verdict with
+    ``score >= 3`` does NOT trigger ``low_revise``. With two accepts
+    against it, the majority wins and the verdict becomes ``accept``.
+
+    This is the failure mode the OLD methodologist prompt ("forces
+    verdict ≤ revise" with no score constraint) allowed — the
+    methodologist could MUST-FLAG a paper, return
+    ``{verdict: revise, score: 4}``, and still be silently outvoted by
+    two accept verdicts. The fix is in the persona prompt (now requires
+    ``score < 3`` together with ``verdict = revise``), not in the
+    aggregator. This test documents the aggregator's contract so a
+    future change to either side can't drift without flagging.
+    """
+    agg = _aggregate_panel_reviews([
+        _r("methodologist", "revise", 4),  # high-score revise = the bug
+        _r("statistician", "accept", 4),
+        _r("devil_advocate", "accept", 4),
+    ])
+    assert agg["verdict"] == "accept"
+
+
+def test_methodologist_persona_closer_requires_low_score_with_must_flag() -> None:
+    """The persona prompt must explicitly tie MUST-FLAG to
+    ``score < 3`` so the aggregator's ``low_revise`` shortcut fires.
+    Without this, the MUST-FLAG section is documentation only; with it,
+    the design loop is actually gated by methodology errors."""
+    prefix = _load_persona_prefix("methodologist")
+    # The closer sentence must mention both the verdict and a low-score
+    # requirement — otherwise a methodologist could MUST-FLAG and still
+    # be outvoted by two accept verdicts (audit Slice 3 HIGH #2).
+    must_flag_block = prefix[prefix.index("MUST-FLAG"):].lower()
+    assert "score < 3" in must_flag_block, (
+        "methodologist MUST-FLAG closer must require score < 3 "
+        "together with verdict=revise so the aggregator's low_revise "
+        "shortcut fires (otherwise the design loop is silently "
+        "outvoted in panel mode)."
+    )
