@@ -93,7 +93,7 @@ is the index.
 
 - **Paper PDF** via pandoc + LaTeX — real venue-flavored templates for `generic` / `neurips` / `iclr` / `ieee_access` two-column / `nature_mi`. Preprocessor lifts `# H1` into YAML `title:`, lifts `## Abstract` into YAML `abstract:`, shifts heading levels by −1, dedupes `"Title. Title."` patterns, sets PDF metadata via `\hypersetup`.
 - **Non-scientific paper formats** — `essay` / `report` / `policy_brief` / `whitepaper`, each with a full LaTeX template + per-format writer persona.
-- **Slides** — `slides.md` always; `slides.html` / `slides.pdf` (Marp CLI) and `slides.pptx` (pandoc) when available. `poster` via beamerposter; `speech` via single LLM call.
+- **Slides** — `slides.md` always; `slides.html` / `slides.pdf` (Marp CLI) and `slides.pptx` (pandoc) when available. `poster.tex` always when `poster` is in `output.kinds`; `poster.pdf` compiles via the same 3-tier LaTeX-engine fallback the paper generator uses (pdflatex → system tectonic → repo-local `tools/tectonic[.exe]`), with a `poster_pdf_skipped.md` diagnostic on skip. `speech` via single LLM call.
 - **Cite-by-content references** — prior-work block carries author / year / title / venue / DOI so References renders proper citations. Writer prompt forbids fabricating fields or embedding fenced code in the body.
 
 ### Cost + observability

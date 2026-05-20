@@ -61,7 +61,7 @@ code/experiment.py                    ← the exact code that ran
 slides.md                             ← if output.kinds: [slides]; Marp markdown source
 slides.pptx                           ← real PowerPoint (if pandoc installed too)
 slides.html / slides.pdf              ← if marp CLI installed
-poster.tex, talk.md                   ← optional deliverables
+poster.tex, poster.pdf, talk.md       ← optional deliverables (poster.pdf if a LaTeX engine is installed)
 data/auto_collected/<rank>_<slug>.md  ← Axon hits (no-simulation mode, written before the user-data pause)
 data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldbank, wikipedia) under per-adapter subdirs
 .fi/run.log                           ← full run log

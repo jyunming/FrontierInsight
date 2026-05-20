@@ -1,15 +1,18 @@
 """Poster generator.
 
 LLM populates 3 columns of a fixed 36"x48" beamerposter template; we
-compile via pdflatex. If pdflatex is missing, only `poster.tex` is
-produced.
+compile via pdflatex (or tectonic — the 3-tier fallback is shared
+with the paper generator via ``generation/_pdf_engine.py``). If no
+LaTeX engine is reachable, only ``poster.tex`` is produced and a
+``poster_pdf_skipped.md`` diagnostic is written next to it so the
+user discovers the skip without grepping run.log.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import shutil
+import shutil  # noqa: F401 — existing tests monkeypatch ``poster.shutil.which``
 import string
 import subprocess
 from pathlib import Path
@@ -22,6 +25,7 @@ from core.provider import (
     PROXY_PROVIDERS,
     resolve_endpoint_async,
 )
+from generation._pdf_engine import find_pdf_engine
 
 _log = logging.getLogger("frontier_insight.poster")
 
@@ -85,29 +89,134 @@ class PosterGenerator:
         poster_tex.write_text(body, encoding="utf-8")
         result: dict[str, Path] = {"poster_tex": poster_tex}
 
-        if shutil.which("pdflatex") is None:
-            _log.warning("pdflatex not on PATH; poster.pdf skipped")
+        # Use the SAME 3-tier engine fallback the paper generator uses
+        # (pdflatex → system tectonic → repo-local tools/tectonic[.exe])
+        # so a user who followed the documented no-admin install
+        # (``python launch.py --install-tectonic``) gets both
+        # ``paper.pdf`` AND ``poster.pdf`` rather than discovering the
+        # poster silently skipped while the paper compiled. The shared
+        # implementation lives in ``generation/_pdf_engine.py``.
+        engine = find_pdf_engine()
+        diag_path = out_dir / "poster_pdf_skipped.md"
+        if engine is None:
+            msg = (
+                "no LaTeX engine found (pdflatex or tectonic); poster.pdf "
+                "skipped. Run `python launch.py --install-tectonic` for a "
+                "no-admin LaTeX install."
+            )
+            _log.warning(msg)
+            diag_path.write_text(
+                _render_poster_skip_md(
+                    code="no_latex_engine",
+                    summary=msg,
+                    how_to_fix=(
+                        "Easiest no-admin path: run `python launch.py "
+                        "--install-tectonic` from the repo root. That drops a "
+                        "single self-bootstrapping LaTeX binary (~70 MB) into "
+                        "`tools/`; FI auto-detects it on the next quest. "
+                        "Standard alternative: install MiKTeX (Windows) or "
+                        "TeX Live (macOS/Linux) so `pdflatex` lands on PATH."
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            result["poster_pdf_skipped"] = diag_path
             return result
+        engine_name, engine_path = engine
+        _log.info("poster.pdf: using engine=%s at %s", engine_name, engine_path)
 
+        # tectonic accepts the same ``.tex`` input as pdflatex; both
+        # honour ``-interaction=nonstopmode``. Pass the absolute path to
+        # the engine binary (mirroring the paper-generator pattern) so
+        # we bypass any PATH-disagreement between the resolving shell
+        # and the Python child process.
         try:
             r = subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", str(poster_tex)],
+                [
+                    engine_path,
+                    "-interaction=nonstopmode",
+                    "-halt-on-error",
+                    str(poster_tex),
+                ],
                 capture_output=True, text=True, cwd=str(out_dir), timeout=180,
             )
         except subprocess.TimeoutExpired:
-            _log.warning("pdflatex poster timeout; skipped")
+            msg = f"{engine_name} poster timeout (>180s); skipped"
+            _log.warning(msg)
+            diag_path.write_text(
+                _render_poster_skip_md(
+                    code=f"{engine_name}_timeout",
+                    summary=msg,
+                    how_to_fix=(
+                        f"The {engine_name} compile took longer than 180s. "
+                        f"On a fresh tectonic install the first run downloads "
+                        f"CTAN packages (~30 s); retry once the cache is "
+                        f"populated. If it consistently times out, raise the "
+                        f"timeout in `generation/poster.py`."
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            result["poster_pdf_skipped"] = diag_path
             return result
         if r.returncode != 0:
-            # pdflatex writes diagnostics to stdout; stderr usually empty.
-            _log.warning(
-                "pdflatex poster rc=%d stdout=%s stderr=%s",
-                r.returncode, r.stdout[-500:], r.stderr[-200:],
+            # Both pdflatex and tectonic write LaTeX errors to stdout
+            # (stderr usually empty); slice both for the diagnostic.
+            msg = (
+                f"{engine_name} poster rc={r.returncode}; poster.pdf skipped"
             )
+            _log.warning(
+                "%s stdout=%s stderr=%s",
+                msg, r.stdout[-500:], r.stderr[-200:],
+            )
+            diag_path.write_text(
+                _render_poster_skip_md(
+                    code=f"{engine_name}_rc_{r.returncode}",
+                    summary=msg,
+                    how_to_fix=(
+                        f"The LaTeX engine errored on `poster.tex`. The most "
+                        f"common cause is a missing `beamerposter` package on "
+                        f"a fresh MiKTeX/TeX Live install; tectonic auto-fetches "
+                        f"it on first compile. stdout tail (last 500 chars):"
+                        f"\n\n```\n{r.stdout[-500:]}\n```"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            result["poster_pdf_skipped"] = diag_path
             return result
         out_pdf = out_dir / "poster.pdf"
         if out_pdf.exists():
             result["poster_pdf"] = out_pdf
+            # Success — remove any stale skip diagnostic from a prior
+            # failed run so the quest dir doesn't show both poster.pdf
+            # AND poster_pdf_skipped.md (confusing).
+            if diag_path.is_file():
+                try:
+                    diag_path.unlink()
+                except OSError:
+                    pass
         return result
+
+
+def _render_poster_skip_md(*, code: str, summary: str, how_to_fix: str) -> str:
+    """Render a ``poster_pdf_skipped.md`` diagnostic. Mirrors the shape
+    of ``paper_pdf_skipped.md`` (see ``generation/paper.py``) so a user
+    sees the same structure for both skip surfaces — reason code, what
+    happened, how to fix it."""
+    return (
+        f"# poster.pdf was requested but not produced\n\n"
+        f"Your `output.kinds` included `poster`, but the poster generator "
+        f"couldn't compile a PDF. The `poster.tex` source is still on disk "
+        f"next to this file — compile it manually once the prerequisites "
+        f"below are in place.\n\n"
+        f"## What happened\n\n"
+        f"**Reason code:** `{code}`\n\n"
+        f"{summary}\n\n"
+        f"## How to fix it\n\n"
+        f"{how_to_fix}\n\n"
+        f"This file is auto-deleted on the next successful poster.pdf compile.\n"
+    )
 
 
 def _lenient_json(text: str) -> dict | None:
