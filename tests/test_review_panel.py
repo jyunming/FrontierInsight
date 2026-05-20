@@ -82,28 +82,35 @@ def test_methodologist_persona_includes_must_flag_section() -> None:
     """
     prefix = _load_persona_prefix("methodologist")
     assert "MUST-FLAG" in prefix
+    # Carve just the MUST-FLAG block — the existing discretionary
+    # bullet list already mentions "sample sizes / sweeps" and
+    # "baseline" in passing, so a global-text search would pass even
+    # if someone silently deleted the must-flag rules. The block
+    # starts at the MUST-FLAG header.
+    must_flag_block = prefix[prefix.index("MUST-FLAG"):].lower()
+    # The block must terminate with the verdict-binding closer; if
+    # that sentence is missing, the rule is documentation, not
+    # enforcement.
+    assert "must-flag hit forces verdict" in must_flag_block, (
+        "methodologist MUST-FLAG block missing the verdict-binding "
+        "closer; silence-is-not-acceptance is the contract."
+    )
     must_flag_keywords = [
         # Circular evaluation / train-on-test
         ("circular", "train-on-test contamination guard"),
         # Single-point eval where a sweep is the norm
         ("sweep", "single-point-evaluation guard"),
         # Weak baseline kept instead of re-run
-        ("baseline", "admitted-weak-baseline guard"),
+        ("admitted-weak baseline", "admitted-weak-baseline guard"),
         # Pseudo-units / dimensionless
-        ("units", "pseudo-units guard"),
+        ("pseudo-units", "pseudo-units guard"),
     ]
-    body = prefix.lower()
     for needle, label in must_flag_keywords:
-        assert needle in body, (
-            f"methodologist persona is missing the {label} "
-            f"(keyword {needle!r} not found)."
+        assert needle in must_flag_block, (
+            f"methodologist MUST-FLAG block is missing the {label} "
+            f"(keyword {needle!r} not found INSIDE the must-flag "
+            f"section)."
         )
-    # The MUST-FLAG block must explicitly tie a hit to a non-accept
-    # verdict; without that the rule is documentation, not enforcement.
-    assert "revise" in body, (
-        "methodologist must-flag rules must explicitly bind hits to "
-        "verdict <= revise; silence-is-not-acceptance is the contract."
-    )
 
 
 def test_load_persona_prefix_custom_name_falls_back_to_generic_template() -> None:

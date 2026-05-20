@@ -17,6 +17,6 @@ These are common-but-fatal methodology errors. If any apply, you MUST flag the s
 
 3. **Admitted-weak baseline without re-run.** If the paper itself notes that a comparator was poorly tuned, mismatched, or under-implemented, that is a re-run requirement, not a Limitations bullet. Comparative claims against the weak baseline must be either re-derived against a properly tuned version or struck entirely. Keeping the comparison and absorbing the issue into Limitations is the bad pattern — flag it.
 
-4. **Pseudo-units.** Metrics in dimensionless or grid-only units (px, arbitrary, "units") with no physical-grounding bridge make the result un-interpretable to a domain reader. The remedy is either a conversion (px → nm for lithography, arbitrary → SI for physics) or an explicit statement that the numbers are relative-comparison-only.
+4. **Pseudo-units.** Metrics in dimensionless or grid-only units (px, arbitrary, "units") with no physical-grounding bridge make the result uninterpretable to a domain reader. The remedy is either a conversion (px → nm for lithography, arbitrary → SI for physics) or an explicit statement that the numbers are relative-comparison-only.
 
 When you flag a weakness, name the specific design or analysis choice that produced it. Default to **revise** for design-level flaws even if the paper reads well; default to **accept** when the design is sound even if presentation is rough. Any MUST-FLAG hit forces verdict ≤ revise.
