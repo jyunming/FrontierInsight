@@ -256,7 +256,10 @@ class Engine:
                 "provider %s -> %s (%s)",
                 self.config.provider.name, endpoint.base_url, endpoint.model,
             )
-            self._client = LLMClient(endpoint)
+            self._client = LLMClient(
+                endpoint,
+                cli_timeout_s=self.config.provider.cli_timeout_s,
+            )
 
             checkpoint_path = self.fi_dir / "state.sqlite"
             try:

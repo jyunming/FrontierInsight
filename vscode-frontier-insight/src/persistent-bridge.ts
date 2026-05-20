@@ -34,6 +34,14 @@ interface LmRequest {
     temperature: number;
 }
 
+// Inactivity budget for streaming chunks from ``model.sendRequest``.
+// Mirrors ``bridge.ts`` (the per-chat-command transport) so both bridges
+// behave identically when Copilot's HTTP/2 stream silently stalls
+// mid-response. The phrasing ``bridge stalled`` is load-bearing —
+// Python's ``_TRANSIENT_BRIDGE_MARKERS`` (core/provider.py) matches on
+// it so tenacity retries the request instead of crashing a long quest.
+const INACTIVITY_MS = 180_000;
+
 export class PersistentBridge {
     private server: net.Server | null = null;
     private clients = new Set<net.Socket>();
@@ -332,9 +340,53 @@ export class PersistentBridge {
             const cts = new vscode.CancellationTokenSource();
             const res = await model.sendRequest(messages, {}, cts.token);
             let content = "";
-            for await (const fragment of res.text) {
-                content += fragment;
-                this.send(socket, { type: "lm_chunk", id: req.id, delta: fragment });
+            let chunkCount = 0;
+            // Race each ``iter.next()`` against an inactivity timer.
+            // Without this, a silent Copilot HTTP/2 stall mid-stream
+            // hangs ``for await`` forever — and combined with Python's
+            // unbounded ``await fut`` in VSCodeBridgeClient.chat, the
+            // entire --serve / --tools engine wedges with no recovery.
+            // On stall we cancel the underlying request and emit
+            // ``lm_error: bridge stalled``; the Python side's
+            // ``_TRANSIENT_BRIDGE_MARKERS`` recognises that string and
+            // tenacity retries the call.
+            const iter = (res.text as AsyncIterable<string>)[Symbol.asyncIterator]();
+            try {
+                while (true) {
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const stallSignal: Promise<{ stalled: true }> = new Promise((resolve) => {
+                        timer = setTimeout(
+                            () => resolve({ stalled: true }),
+                            INACTIVITY_MS,
+                        );
+                    });
+                    let result: IteratorResult<string> | { stalled: true };
+                    try {
+                        result = await Promise.race([iter.next(), stallSignal]);
+                    } finally {
+                        if (timer) clearTimeout(timer);
+                    }
+                    if ("stalled" in result) {
+                        // Cancel the underlying HTTP/2 request so it
+                        // doesn't keep streaming into the void after we
+                        // surface the error.
+                        cts.cancel();
+                        // Phrasing matches bridge.ts so Python's
+                        // ``_is_bridge_error_transient`` classifier hits
+                        // on "bridge stalled" in either transport.
+                        throw new Error(
+                            `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
+                            `(received ${chunkCount} chunks / ${content.length} chars before stall)`,
+                        );
+                    }
+                    if (result.done) break;
+                    const fragment = result.value;
+                    content += fragment;
+                    chunkCount++;
+                    this.send(socket, { type: "lm_chunk", id: req.id, delta: fragment });
+                }
+            } finally {
+                cts.dispose();
             }
             this.send(socket, {
                 type: "lm_done", id: req.id,

@@ -66,16 +66,28 @@ class VSCodeBridgeClient:
         port: int = 0,
         *,
         socket_path: str | None = None,
+        cli_timeout_s: float = 300.0,
     ) -> None:
         """Construct an idle client. ``socket_path`` takes precedence
         over ``host``/``port`` when set — that's the per-user IPC
         path the extension's PersistentBridge listens on (Unix domain
         socket on POSIX, named pipe on Windows). Falling back to
         ``host``/``port`` preserves the per-chat-command TCP path the
-        extension's per-spawn :class:`Bridge` still uses."""
+        extension's per-spawn :class:`Bridge` still uses.
+
+        ``cli_timeout_s`` is the wall-clock budget for a single
+        :meth:`chat` call — if the extension never sends an ``lm_done``
+        (or ``lm_error``) within this window, :meth:`chat` raises
+        ``BridgeError("bridge stalled ...")`` so tenacity can retry.
+        Without this, a silent stall in the TS-side ``model.sendRequest``
+        stream hangs Python's ``await fut`` forever and the engine
+        wedges with no recovery except killing the process. Defaults
+        to 300 s (matches the CLI-transport budget in
+        :class:`LLMClient`)."""
         self.host = host
         self.port = port
         self.socket_path = socket_path
+        self.cli_timeout_s = cli_timeout_s
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         # Per-request futures keyed by id. lm requests resolve to the
@@ -186,7 +198,21 @@ class VSCodeBridgeClient:
         }
         await self._send(payload)
         try:
-            return await fut
+            # Bound the wait. The TS-side bridge has its own 180 s
+            # inactivity timer that emits ``lm_error: bridge stalled``,
+            # but a TCP/IPC blip that drops the lm_error itself, or an
+            # older .vsix without the timer, would still hang here
+            # forever on ``await fut``. ``cli_timeout_s`` is the
+            # belt-and-braces ceiling. The "bridge stalled" phrasing is
+            # load-bearing: ``_TRANSIENT_BRIDGE_MARKERS`` in
+            # ``core/provider.py`` matches on it so tenacity retries.
+            try:
+                return await asyncio.wait_for(fut, timeout=self.cli_timeout_s)
+            except asyncio.TimeoutError as e:
+                raise BridgeError(
+                    f"bridge stalled (no response within "
+                    f"{self.cli_timeout_s:g}s)"
+                ) from e
         finally:
             self._pending.pop(req_id, None)
             self._chunks.pop(req_id, None)

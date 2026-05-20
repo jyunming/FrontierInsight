@@ -76,6 +76,21 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+    # Wall-clock budget (seconds) for a single chat call on transports
+    # that lack a built-in per-request deadline. Applies to:
+    #
+    # - CLI providers (claude_cli/codex_cli/copilot_cli/gemini_cli):
+    #   a stuck child process is killed and tenacity retries.
+    # - vscode_extension: a stalled streaming response from
+    #   ``model.sendRequest`` (Copilot HTTP/2 hang) surfaces as
+    #   ``BridgeError("bridge stalled ...")`` which the transient-marker
+    #   list catches → tenacity retries.
+    #
+    # Default 300 s — longer than the typical 10-90 s per call but
+    # bounded so a silent stall can't wedge the engine indefinitely.
+    # HTTP providers use their own httpx-level timeout (``timeout_s``
+    # on :class:`LLMClient`) and ignore this field.
+    cli_timeout_s: float = 300.0
     # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model
     # string this provider should use when that node fires a chat call.
