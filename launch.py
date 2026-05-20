@@ -742,8 +742,21 @@ def _set_vscode_bridge_extras(
     `vscode_extension` providers spawned by ``--digest-provider`` /
     ``--summarize-provider`` etc. fail at first LLM call when the
     user wired the persistent bridge socket instead of a port (as
-    --serve does by default)."""
+    --serve does by default).
+
+    Provider-respecting semantics mirror
+    :func:`_apply_vscode_bridge_override` /
+    :func:`_apply_vscode_bridge_socket_override`: if the caller picked
+    a non-``vscode_extension`` provider (e.g. ``--critique-provider
+    claude_cli``) the auto-resolved bridge port/socket from ``--serve``
+    must NOT silently re-route the PM-command call through Copilot.
+    """
     if bridge_port <= 0 and not bridge_socket:
+        return
+    if provider.name and provider.name != "vscode_extension":
+        # User picked a different provider on the PM-command flag (or
+        # in YAML); honour it. Writing bridge_* into provider.extra is
+        # dead weight for non-vscode transports.
         return
     provider.name = "vscode_extension"
     extras = dict(provider.extra or {})
