@@ -976,6 +976,22 @@
       "review"
     ],
     "knowledge_enabled": [],
-    "max_iterations": []
+    "max_iterations": [],
+    "audience": [
+      "write"
+    ],
+    "ensemble_profile": [
+      "ideate",
+      "analyze",
+      "cross_check"
+    ],
+    "knowledge_top_k": [
+      "literature",
+      "write"
+    ],
+    "knowledge_external_top_k": [
+      "literature",
+      "write"
+    ]
   }
 }

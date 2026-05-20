@@ -97,15 +97,49 @@
   const updateQuestId = window.__fi_update_quest_id || null;
   const isUpdate = !!updateQuestId;
   let schema = null;
+  // Holds the quest's current editable answers when isUpdate is true,
+  // fetched from GET /api/quests/<id>/answers. Used by renderForm() /
+  // makeInput() to seed inputs from the saved YAML instead of the
+  // question defaults — without this, a user opening /update/<id>
+  // and clicking Submit without touching anything would silently
+  // overwrite every non-default field with its default value.
+  let updateAnswers = null;
+
+  function showLoadError(message) {
+    const div = document.getElementById('result');
+    div.classList.remove('hidden');
+    div.className = 'fi-banner fi-banner-error max-w-3xl';
+    div.textContent = message;
+  }
 
   async function loadSchema() {
-    const res = await fetch('/api/interview/schema');
-    schema = await res.json();
+    // Schema + (in update mode) the quest's current answers are
+    // independent fetches — kick them off in parallel so the form
+    // is interactive sooner. A failed answers fetch in update mode
+    // is fatal: a defaults-seeded form silently overwrites the
+    // user's config on submit, so we refuse to render rather than
+    // fail-open.
+    const schemaP = fetch('/api/interview/schema').then((r) => r.json());
+    const answersP = isUpdate
+      ? fetch(`/api/quests/${encodeURIComponent(updateQuestId)}/answers`)
+      : null;
+    schema = await schemaP;
     const title = document.getElementById('page-title');
     const subtitle = document.getElementById('page-subtitle');
     if (isUpdate) {
       title.textContent = `Update Quest`;
       subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
+      try {
+        const ar = await answersP;
+        if (!ar.ok) {
+          showLoadError(`Could not load quest answers (HTTP ${ar.status}). Refusing to render the form — submitting would overwrite your config with defaults.`);
+          return;
+        }
+        updateAnswers = await ar.json();
+      } catch (e) {
+        showLoadError(`Error fetching quest answers: ${e}. Refusing to render the form.`);
+        return;
+      }
     } else {
       title.textContent = 'New Research Quest';
       subtitle.textContent = 'Six questions, then a review of the auto-derived defaults. Edit anything before you launch.';
@@ -342,16 +376,31 @@
     form.appendChild(submitRow);
   }
 
+  // Compute the value to seed an input with for question ``q``.
+  // In the update flow this comes from the quest's saved answers
+  // (fetched at loadSchema time); otherwise it's the question's
+  // default. ``undefined`` means "leave the input blank" — the
+  // caller treats that as "no seed".
+  function seedValueFor(q) {
+    if (isUpdate && updateAnswers && q.id in updateAnswers) {
+      return updateAnswers[q.id];
+    }
+    return q.default;
+  }
+
   function makeInput(q, editable) {
     const id = `q-${q.id}`;
     const base = 'w-full bg-surface-low border border-white/10 rounded p-4 text-on-surface font-body-md text-body-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors placeholder:text-on-surface-variant/50';
+    const seed = seedValueFor(q);
     if (q.kind === 'text') {
       const el = document.createElement('textarea');
       el.id = id; el.name = q.id;
       el.className = base + ' resize-none';
       el.rows = 4;
       if (q.placeholder) el.placeholder = q.placeholder;
-      if (q.default !== null && q.default !== undefined) el.value = q.default;
+      if (seed !== null && seed !== undefined) {
+        el.value = typeof seed === 'object' ? JSON.stringify(seed) : String(seed);
+      }
       if (!editable) el.disabled = true;
       return el;
     }
@@ -377,14 +426,14 @@
       blank.value = '';
       blank.textContent = q.id === 'provider_model' ? '(pick a provider first)' : '(pick one)';
       sel.appendChild(blank);
-      const defaultEncoded = (q.default !== null && typeof q.default === 'object') ? JSON.stringify(q.default) : q.default;
+      const seedEncoded = (seed !== null && typeof seed === 'object') ? JSON.stringify(seed) : seed;
       for (const c of choices) {
         const opt = document.createElement('option');
         const ve = typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value);
         opt.value = ve;
         opt.textContent = c.label;
         if (c.description) opt.title = c.description;
-        if (ve === String(defaultEncoded)) opt.selected = true;
+        if (ve === String(seedEncoded)) opt.selected = true;
         sel.appendChild(opt);
       }
       if (q.id === 'provider') sel.addEventListener('change', () => populateProviderModel(sel.value));
@@ -399,6 +448,9 @@
     const el = document.createElement('input');
     el.type = 'text'; el.id = id; el.name = q.id;
     el.className = base;
+    if (seed !== null && seed !== undefined) {
+      el.value = typeof seed === 'object' ? JSON.stringify(seed) : String(seed);
+    }
     return el;
   }
 
