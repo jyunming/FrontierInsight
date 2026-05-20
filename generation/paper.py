@@ -552,6 +552,20 @@ class PaperGenerator:
         enough info for ``_render_pdf_skip_md`` to write a useful
         ``paper_pdf_skipped.md`` for the user.
         """
+        # Wipe any stale ``paper_pdf_source.md`` from a prior run BEFORE
+        # we do anything else. The semantic this guarantees: after
+        # ``_compile_pdf`` returns, either ``paper_pdf_source.md`` was
+        # written by THIS call (so on failure it's the source pandoc
+        # consumed and choked on — preserve it for diagnosis) or it
+        # doesn't exist at all. A stale prior-run file masquerading as
+        # this-run output is the failure mode we're foreclosing.
+        stale_src = out_dir / "paper_pdf_source.md"
+        if stale_src.is_file():
+            try:
+                stale_src.unlink()
+            except OSError:
+                pass
+
         # Pandoc itself: `subprocess.run` on Windows auto-appends `.exe`
         # to bare executable names via CreateProcess, so resolving via
         # `shutil.which` is mostly defensive (would matter if pandoc
