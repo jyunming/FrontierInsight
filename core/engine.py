@@ -677,17 +677,20 @@ class Engine:
             "comparative_baseline", "empirical_vs_theoretical",
             "simulatability", "success_metric", "budget",
             "output_kinds", "study_depth", "paper_venue",
+            "topic_shape",
         }
         if mode == "auto" and known_slots.issubset(overrides.keys()):
             self._log.info(
                 "[clarify] mode=auto; all %d slots pinned via "
                 "clarify_overrides (skipped LLM call)", len(known_slots),
             )
+            no_sim = self._resolve_no_simulation_from_clarify(overrides)
+            self._log_topic_shape_mismatch(overrides, no_simulation_resolved=no_sim)
             return {
                 "clarify_questions": {},
                 "clarify_answers": overrides,
                 "clarify_done": True,
-                "no_simulation_resolved": self._resolve_no_simulation_from_clarify(overrides),
+                "no_simulation_resolved": no_sim,
             }
 
         prompt = self._prompts["clarify"].substitute(topic=state["topic"])
@@ -716,11 +719,13 @@ class Engine:
                 )
             else:
                 self._log.info("[clarify] mode=auto; agent self-answered %d slots", agent_count)
+            no_sim = self._resolve_no_simulation_from_clarify(answers)
+            self._log_topic_shape_mismatch(answers, no_simulation_resolved=no_sim)
             return {
                 "clarify_questions": questions,
                 "clarify_answers": answers,
                 "clarify_done": True,
-                "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
+                "no_simulation_resolved": no_sim,
             }
 
         # Interactive: pre-fill any user-pinned answers as the
@@ -748,11 +753,13 @@ class Engine:
         else:
             # Resumed with a non-dict (or None) — fall through to defaults.
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
+        no_sim = self._resolve_no_simulation_from_clarify(answers)
+        self._log_topic_shape_mismatch(answers, no_simulation_resolved=no_sim)
         return {
             "clarify_questions": questions,
             "clarify_answers": answers,
             "clarify_done": True,
-            "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
+            "no_simulation_resolved": no_sim,
         }
 
     def _maybe_seed_clarify_from_proposal(
@@ -772,6 +779,50 @@ class Engine:
             return None
         from core.proposal_seed import seed_clarify_from_local_papers
         return seed_clarify_from_local_papers(local_papers)
+
+    def _log_topic_shape_mismatch(
+        self, answers: dict[str, Any], *, no_simulation_resolved: bool,
+    ) -> None:
+        """Log a WARNING when the clarify-detected topic shape disagrees
+        with the engine's already-computed simulatability decision.
+
+        Specifically: if the topic shape is ``review`` / ``case_study``
+        / ``opinion`` BUT the engine resolved to SIMULATE, the quest
+        is about to run a Python experiment on a topic that doesn't
+        really want one. The downstream design and write prompts
+        already read ``topic_shape`` from ``clarify_answers`` and will
+        keep the experiment minimal + shift weight to the literature
+        synthesis — but the mismatch is worth surfacing in run.log so
+        the user can hand-pivot ``simulatability=no`` next time if
+        they prefer the no-experiment flow.
+
+        Takes the already-computed ``no_simulation_resolved`` so we
+        don't double-call ``_resolve_no_simulation_from_clarify``
+        (which logs at INFO each call). No-op when the slot is
+        missing (legacy quests pre-dating ``topic_shape``) or the
+        shape is ``experimental``.
+        """
+        answers = answers or {}
+        shape_raw = answers.get("topic_shape")
+        shape = ""
+        if isinstance(shape_raw, dict):
+            shape = str(shape_raw.get("default", "")).strip().lower()
+        elif isinstance(shape_raw, str):
+            shape = shape_raw.strip().lower()
+        if not shape or shape == "experimental":
+            return
+        if no_simulation_resolved:
+            # NO_SIMULATION path is consistent with non-experimental
+            # shapes — no warning needed.
+            return
+        self._log.warning(
+            "[clarify] topic_shape=%r but engine resolved to SIMULATE — "
+            "the quest will run an experiment on a topic that doesn't "
+            "want one. design + write stages will keep the experiment "
+            "minimal and shift weight to literature synthesis; set "
+            "simulatability=no via clarify_overrides if you prefer the "
+            "no-experiment flow.", shape,
+        )
 
     def _resolve_no_simulation_from_clarify(
         self, answers: dict[str, Any],
@@ -3054,6 +3105,7 @@ _CLARIFY_LABELS = {
     "output_kinds": "Desired output kinds",
     "study_depth": "Study depth",
     "paper_venue": "Paper venue / template",
+    "topic_shape": "Topic shape",
 }
 
 
@@ -3107,6 +3159,10 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
         "paper_venue": {
             "question": "Which paper template should we use? (generic / neurips / iclr / ieee_access / nature_mi)",
             "default": "generic",
+        },
+        "topic_shape": {
+            "question": "What's the intellectual shape of this topic? (experimental / review / case_study / opinion)",
+            "default": "experimental",
         },
     }
 

@@ -63,7 +63,7 @@ is the index.
 - **Docker sandbox** — `execution.sandbox: docker` runs the experiment subprocess with network disabled, mounted at `/work`.
 - **Provider matrix** — direct HTTP, proxy, CLI exec, and VSCode-extension transports (see provider matrix below).
 - **Per-node model routing** via `provider.node_models` (e.g., a cheap model for `clarify`, a strong one for `write`).
-- **Pre-flight `clarify` node** — slot survey before `ideate`; off / auto / interactive modes.
+- **Pre-flight `clarify` node** — slot survey before `ideate`; off / auto / interactive modes. The slot set includes ``topic_shape`` (``experimental`` / ``review`` / ``case_study`` / ``opinion``) so the engine recognises when a topic naturally wants a literature synthesis instead of a code experiment. When the shape is non-experimental but simulatability still resolves to SIMULATE, the engine logs a WARNING in run.log and the design stage falls back to a narrow illustrative experiment with weight shifted to literature synthesis (rather than a full comparative benchmark).
 - **Execute-repair loop** — agent reads traceback, patches code, retries (`engine.exec_reflect_max_iterations`).
 - **Analyze-driven re-route** — `re_experiment` re-enters design; `broaden_lit` re-enters literature with the hypothesis folded in.
 - **Cross-paper check** — per-finding literature search + supporting / conflicting / neutral classification.
