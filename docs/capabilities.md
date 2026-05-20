@@ -59,7 +59,7 @@ is the index.
 ### Engine + execution
 
 - **Async LangGraph engine** with 14 nodes and 4 feedback loops; see `core/engine.py:_build_graph` for the actual edges.
-- **Per-quest venv** — agent-generated Python is installed and run in isolation.
+- **Per-quest venv with auto-cleanup** — agent-generated Python is installed and run in isolation in `<quest_root>/.venv/`. On successful quest finish the venv is frozen to `.fi/requirements.lock.txt` and then removed to reclaim disk (typically 150–250 MB per quest). The lock file makes the environment reproducible: `python -m venv .venv && .venv/bin/pip install -r .fi/requirements.lock.txt`. Failed or paused quests keep their `.venv/` so you can poke at it.
 - **Docker sandbox** — `execution.sandbox: docker` runs the experiment subprocess with network disabled, mounted at `/work`.
 - **Provider matrix** — direct HTTP, proxy, CLI exec, and VSCode-extension transports (see provider matrix below).
 - **Per-node model routing** via `provider.node_models` (e.g., a cheap model for `clarify`, a strong one for `write`).
