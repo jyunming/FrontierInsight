@@ -333,6 +333,53 @@ async def test_poster_writes_skip_diagnostic_when_no_engine_found(
 
 
 @pytest.mark.asyncio
+async def test_poster_writes_skip_diagnostic_when_pdf_missing_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine returned rc=0 but ``poster.pdf`` isn't on disk —
+    silent partial success. Without a diagnostic the caller sees a
+    missing ``poster_pdf`` in the result dict with no breadcrumb.
+
+    Mirrors the analogous branch in ``PaperGenerator._compile_pdf``
+    so the user gets the same skip-diagnostic shape across both
+    output kinds. Reason code is distinct
+    (``output_missing_after_success``) so the operator can tell this
+    apart from a real engine failure (rc != 0) when filtering logs.
+    """
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(payload)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    # Engine is present.
+    monkeypatch.setattr(
+        poster_mod.shutil, "which",
+        lambda name: f"/fake/{name}.exe" if name == "pdflatex" else None,
+    )
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        # Subprocess "succeeds" without producing the output file.
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    # No PDF.
+    assert "poster_pdf" not in result
+    # Diagnostic IS produced — the gap this test exists to plug.
+    diag = art.quest_root / "poster_pdf_skipped.md"
+    assert diag.exists()
+    body = diag.read_text(encoding="utf-8")
+    assert "output_missing_after_success" in body
+    assert result.get("poster_pdf_skipped") == diag
+
+
+@pytest.mark.asyncio
 async def test_poster_uses_same_engine_discovery_as_paper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

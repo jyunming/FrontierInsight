@@ -196,6 +196,41 @@ class PosterGenerator:
                     diag_path.unlink()
                 except OSError:
                     pass
+        else:
+            # rc=0 but the engine produced no .pdf on disk. Rare —
+            # usually filesystem-level (permission on out_dir, or the
+            # engine silently swallowed an internal error). Mirrors the
+            # analogous branch in ``PaperGenerator._compile_pdf`` so the
+            # user gets the same skip-diagnostic shape across both
+            # output kinds. Without this, the caller sees a missing
+            # ``poster_pdf`` and no ``poster_pdf_skipped.md`` — silent
+            # partial success.
+            msg = (
+                f"{engine_name} returned rc=0 but `poster.pdf` is not on "
+                f"disk in {out_dir}. The subprocess reported success but "
+                f"produced no output file."
+            )
+            _log.warning(msg)
+            diag_path.write_text(
+                _render_poster_skip_md(
+                    code="output_missing_after_success",
+                    summary=msg,
+                    how_to_fix=(
+                        f"Most likely a filesystem-level issue: "
+                        f"``{out_dir}`` may not be writable by the FI "
+                        f"process, or an antivirus/sync tool deleted "
+                        f"the file between subprocess exit and our "
+                        f"existence check. Verify the directory is "
+                        f"writable, re-run the quest, and if the "
+                        f"problem persists try running `{engine_name} "
+                        f"poster.tex` manually from {out_dir} to "
+                        f"isolate whether it's an engine bug or an "
+                        f"environment one."
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            result["poster_pdf_skipped"] = diag_path
         return result
 
 
