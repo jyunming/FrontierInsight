@@ -138,6 +138,76 @@ def test_launch_forwards_vscode_bridge_port(tmp_path: Path, monkeypatch: pytest.
 
 
 # ---------------------------------------------------------------------------
+# Per-folder launch.log layout
+# ---------------------------------------------------------------------------
+
+
+def test_quest_launch_writes_log_into_quest_fi_folder(
+    launcher: QuestLauncher, tmp_path: Path,
+) -> None:
+    """Per-quest launch log lives at ``<quest_root>/.fi/launch.log`` so
+    the subprocess wrapper log is co-located with the engine's
+    structured ``.fi/run.log`` and the rest of the quest's artifacts.
+    Replaces the old flat ``outputs/_logs/<quest_id>.log`` layout."""
+    yaml = tmp_path / "q.yaml"
+    yaml.write_text("topic: x", encoding="utf-8")
+    entry = launcher.launch(quest_id="quest-abc", yaml_path=yaml)
+    expected = tmp_path / "outputs" / "quest-abc" / ".fi" / "launch.log"
+    assert entry.log_path == expected
+    assert expected.parent.is_dir()
+    assert expected.is_file()
+
+
+def test_tool_job_writes_log_into_per_job_folder(
+    launcher: QuestLauncher, tmp_path: Path,
+) -> None:
+    """Tool jobs (proposal/critique/digest/portfolio/summarize/analyze)
+    get their own ``<output_root>/_jobs/<job_id>/launch.log`` rather
+    than a flat ``_logs/<job_id>.log`` file. Mirrors the per-quest
+    layout (one folder per job) so per-job artifacts have somewhere
+    obvious to live."""
+    entry = launcher.launch_command(
+        job_id="proposal-xyz", argv_tail=["--proposal", "--topic", "x"],
+    )
+    expected = tmp_path / "outputs" / "_jobs" / "proposal-xyz" / "launch.log"
+    assert entry.log_path == expected
+    assert expected.parent.is_dir()
+    assert expected.is_file()
+
+
+def test_launcher_honors_explicit_output_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the web server is started with --output-root pointing
+    somewhere other than ``repo_root/outputs``, the launcher must
+    honor it — otherwise the quest folder the engine writes its
+    artifacts to and the folder the launcher writes the log to
+    diverge silently."""
+    captured_paths: list[str] = []
+
+    def fake_popen(argv, **kwargs):
+        # Record the stdout file path so the assertion below can
+        # verify the launcher opened a file under the right tree.
+        sf = kwargs.get("stdout")
+        if hasattr(sf, "name"):
+            captured_paths.append(sf.name)
+        return _FakePopen()
+
+    monkeypatch.setattr("web.quest_launcher.subprocess.Popen", fake_popen)
+    custom_root = tmp_path / "my-custom-outputs"
+    launcher = QuestLauncher(
+        repo_root=tmp_path, max_concurrent=2, output_root=custom_root,
+    )
+    yaml = tmp_path / "q.yaml"
+    yaml.write_text("topic: x", encoding="utf-8")
+    launcher.launch(quest_id="q42", yaml_path=yaml)
+    assert any(
+        "my-custom-outputs" in p and "q42" in p and "launch.log" in p
+        for p in captured_paths
+    ), captured_paths
+
+
+# ---------------------------------------------------------------------------
 # Concurrency cap
 # ---------------------------------------------------------------------------
 

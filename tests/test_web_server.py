@@ -195,6 +195,59 @@ def test_app_figure_endpoint_serves_png_and_rejects_path_traversal(tmp_path: Pat
     assert r3.status_code == 400
 
 
+def test_app_jobs_endpoint_lists_quests_and_tool_jobs(tmp_path: Path) -> None:
+    """``/api/jobs`` reads launch logs from three layouts:
+      - per-quest:    ``<quest_id>/.fi/launch.log``
+      - per-tool-job: ``_jobs/<job_id>/launch.log``
+      - legacy flat:  ``_logs/<job_id>.log`` (preserved for old sessions)
+    All three must surface so the dashboard's "Jobs" tab doesn't lose
+    visibility into either the new layout or pre-migration files."""
+    # New layout — per-quest.
+    qd = tmp_path / "quest-aaa"
+    (qd / ".fi").mkdir(parents=True)
+    (qd / ".fi" / "launch.log").write_text("hello\n", encoding="utf-8")
+    # New layout — per-tool-job.
+    jd = tmp_path / "_jobs" / "tool-bbb"
+    jd.mkdir(parents=True)
+    (jd / "launch.log").write_text("bye\n", encoding="utf-8")
+    # Legacy flat layout.
+    ld = tmp_path / "_logs"
+    ld.mkdir()
+    (ld / "legacy-ccc.log").write_text("legacy\n", encoding="utf-8")
+
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.get("/api/jobs")
+    assert r.status_code == 200
+    ids = {j["job_id"] for j in r.json()["jobs"]}
+    assert ids == {"quest-aaa", "tool-bbb", "legacy-ccc"}
+
+
+def test_app_jobs_detail_finds_log_in_each_layout(tmp_path: Path) -> None:
+    """``/api/jobs/{job_id}`` probes new layouts first, falls back to
+    legacy. Verifies all three are reachable from the same endpoint."""
+    qd = tmp_path / "q-new"
+    (qd / ".fi").mkdir(parents=True)
+    (qd / ".fi" / "launch.log").write_text("quest-log-body\n", encoding="utf-8")
+    jd = tmp_path / "_jobs" / "j-new"
+    jd.mkdir(parents=True)
+    (jd / "launch.log").write_text("job-log-body\n", encoding="utf-8")
+    (tmp_path / "_logs").mkdir()
+    (tmp_path / "_logs" / "j-legacy.log").write_text("legacy-body\n", encoding="utf-8")
+
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    for jid, expected in (
+        ("q-new", "quest-log-body"),
+        ("j-new", "job-log-body"),
+        ("j-legacy", "legacy-body"),
+    ):
+        r = client.get(f"/api/jobs/{jid}")
+        assert r.status_code == 200, (jid, r.text)
+        body = r.json()
+        assert any(expected in line for line in body["log_tail"]), (jid, body)
+
+
 def test_app_paper_endpoint_serves_markdown(tmp_path: Path) -> None:
     _mk_quest_dir(tmp_path, "qpaper", paper_md="# title\nbody\n")
     app = make_app(tmp_path)

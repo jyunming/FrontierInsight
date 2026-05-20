@@ -427,7 +427,7 @@ class Engine:
             # Surface the failure as a quest-directory diagnostic the
             # user can discover by opening the quest folder, rather than
             # leaving an empty quest dir whose only breadcrumb is a
-            # traceback buried in ``outputs/_logs/<id>.log``. Mirrors the
+            # traceback buried in ``<quest_root>/.fi/launch.log``. Mirrors the
             # ``paper_pdf_skipped.md`` contract from the paper generator.
             #
             # Re-raise unconditionally — this handler is for diagnostics
@@ -2670,7 +2670,7 @@ class Engine:
     ) -> None:
         """Write ``<quest_root>/quest_failed.md`` so a node-raise is
         discoverable from the quest directory itself, not just from
-        ``outputs/_logs/<id>.log``.
+        ``<quest_root>/.fi/launch.log``.
 
         Captures:
 

@@ -163,7 +163,7 @@
     let tries = 0;
     const poller = setInterval(async () => {
       tries += 1;
-      if (tries > 100) { clearInterval(poller); status.textContent = 'gave up after 5 minutes — check outputs/_logs/ for the install log.'; btn.disabled = false; return; }
+      if (tries > 100) { clearInterval(poller); status.textContent = 'gave up after 5 minutes — check outputs/_jobs/<job_id>/launch.log for the install log.'; btn.disabled = false; return; }
       try {
         const r = await fetch(`/api/system/tectonic?job_id=${encodeURIComponent(jobId)}`);
         if (!r.ok) return;

@@ -4,7 +4,7 @@ When ``Engine.run()`` raises mid-quest (a ``_node_*`` method raised,
 or a pre-graph stage like ``_preflight_paper_pdf`` raised), the engine
 must write a ``<quest_root>/quest_failed.md`` breadcrumb so the user
 can discover the failure from the quest directory itself — not just
-from the buried ``outputs/_logs/<id>.log`` traceback.
+from the buried ``<quest_root>/.fi/launch.log`` traceback.
 
 The contract pins:
 
