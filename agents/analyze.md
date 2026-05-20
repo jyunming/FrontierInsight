@@ -30,6 +30,10 @@ $figure_list
 # Your task
 Interpret the results vs the hypothesis. Be honest about negative or null results — do not embellish.
 
+**If `result_json` contains a `by_<factor>` key** (or any nested dict whose top-level keys look like categorical strata — class names, method names, dataset slices), surface BOTH aggregate findings AND per-stratum findings. A real OPC paper distinguishes "model-based wins on dense lines" from "model-based wins on isolated lines"; collapsing those into a single aggregate mean obscures the most useful result. List stratum-level findings under `key_findings` with a clear prefix like `[by_clip_class:isolated_lines]` so the writer can render them as a per-stratum table. If the strata all behave the same way, ONE bullet stating that is fine ("the effect is uniform across all 5 clip classes"); the rule is "don't hide a non-uniform effect behind an aggregate."
+
+If `result_json` is aggregate-only (no `by_<factor>` key), this stratification step is a no-op — just interpret the aggregate.
+
 # Next-step routing
 After interpreting the results, decide one of:
 
