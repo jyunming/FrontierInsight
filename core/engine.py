@@ -229,6 +229,12 @@ class Engine:
         the same ``quest_id`` later in the same process. See
         ``_close_quest_logger`` for the full rationale.
         """
+        # ``run_config`` is defined inside the AsyncSqliteSaver block
+        # below, but the exception handler at the bottom of this method
+        # needs to reference it. Pre-bind to ``None`` so a pre-graph
+        # failure (preflight, endpoint resolution, executor.setup) doesn't
+        # NameError its way into masking the original exception.
+        run_config: dict[str, Any] | None = None
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
@@ -393,13 +399,55 @@ class Engine:
                     "quest %s paused for user data — exiting clean (rc=0)",
                     self.quest_id,
                 )
+                # Resume-from-failure clears the stale diagnostic too.
+                # If the prior run wrote ``quest_failed.md`` and the
+                # current resume got far enough to reach wait_for_data,
+                # the prior failure was recovered — leaving the file
+                # would mislead ("paused for data, but also failed?").
+                self._clear_stale_quest_failed_diagnostic()
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
             self._write_back_knowledge(artifacts, final_state)
             self._write_cost_summary()
+            # Clean up any stale ``quest_failed.md`` from a PRIOR
+            # failed run of this quest — the current run succeeded,
+            # so leaving the old diagnostic on disk would mislead the
+            # user into thinking the just-completed quest broke.
+            # Same idempotent-cleanup pattern as the paper generator
+            # uses for ``paper_pdf_skipped.md`` on a successful PDF
+            # compile.
+            self._clear_stale_quest_failed_diagnostic()
             self._log.info("quest %s reached terminal state", self.quest_id)
             return artifacts
+        except Exception as exc:
+            # Surface the failure as a quest-directory diagnostic the
+            # user can discover by opening the quest folder, rather than
+            # leaving an empty quest dir whose only breadcrumb is a
+            # traceback buried in ``outputs/_logs/<id>.log``. Mirrors the
+            # ``paper_pdf_skipped.md`` contract from the paper generator.
+            #
+            # Re-raise unconditionally — this handler is for diagnostics
+            # only, NOT for swallowing errors. The caller (launch.py)
+            # still surfaces the exception in stderr / its own exit code.
+            #
+            # The diagnostic-write itself is wrapped in its own
+            # try/except: a failure to write the diagnostic must NEVER
+            # mask the original exception (the user wants to see the
+            # real error, not "could not open file for diagnostic
+            # writing"). ``CancelledError`` and ``KeyboardInterrupt``
+            # are NOT caught here (they inherit from BaseException, not
+            # Exception) so user-initiated cancellation skips the
+            # diagnostic — those are not "the quest broke" events.
+            try:
+                await self._write_quest_failed_diagnostic(exc, run_config)
+            except Exception as diag_err:
+                # Best-effort logging only — re-raising the original
+                # exception is the contract.
+                self._log.warning(
+                    "[run] could not write quest_failed.md: %r", diag_err,
+                )
+            raise
         finally:
             # Outer cleanup: releases the per-quest run.log FileHandler
             # on EVERY exit path — normal completion, exception from
@@ -2580,6 +2628,196 @@ class Engine:
         )
         self._log_chat_cost(node=node or "")
         return response
+
+    def _clear_stale_quest_failed_diagnostic(self) -> None:
+        """Remove a stale ``quest_failed.md`` from a PRIOR failed run.
+
+        Called from the two non-failed exit paths (clean success and
+        data-pause-exit). Same idempotent-cleanup pattern the paper
+        generator uses for ``paper_pdf_skipped.md`` on a successful
+        PDF compile. Failures to unlink are logged but never raise —
+        a stale file is annoying but not fatal.
+        """
+        stale = self.quest_root / "quest_failed.md"
+        if stale.is_file():
+            try:
+                stale.unlink()
+            except OSError as e:
+                self._log.warning(
+                    "[run] could not remove stale %s: %r", stale, e,
+                )
+
+    async def _write_quest_failed_diagnostic(
+        self,
+        exc: BaseException,
+        run_config: dict[str, Any] | None,
+    ) -> None:
+        """Write ``<quest_root>/quest_failed.md`` so a node-raise is
+        discoverable from the quest directory itself, not just from
+        ``outputs/_logs/<id>.log``.
+
+        Captures:
+
+        * The failing node, when LangGraph's state snapshot is
+          available (``run_config`` is None for pre-graph failures —
+          preflight, endpoint resolution, executor setup — in which
+          case the diagnostic notes the pre-graph stage).
+        * Exception type + message (no full traceback in the .md —
+          that's already in run.log; the .md is a breadcrumb).
+        * Tail of the per-quest ``.fi/run.log`` (last ~80 lines), so
+          the user has the immediate cause without a separate ``tail``.
+        * Provider + model context, so the failure mode (e.g. CLI
+          wall-clock timeout) is interpretable in light of the
+          transport choice.
+        * A copy-pasteable resume command, since most node-raise
+          failures (transient API errors, timeouts) recover cleanly
+          on resume.
+
+        Best-effort: writing the diagnostic must NEVER mask the
+        original exception. The caller wraps THIS call in its own
+        try/except and re-raises the original ``exc`` regardless.
+        """
+        # Resolve the failing node. ``aget_state`` returns a
+        # ``StateSnapshot`` whose ``.next`` is a tuple of node names
+        # that were about to run — when ``ainvoke`` raised on a
+        # node, that's the one. For pre-graph failures (where the
+        # saver context never opened) ``run_config`` is None and we
+        # report the pre-graph stage instead.
+        failing_node = "(pre-graph stage — preflight / endpoint resolution / setup)"
+        if run_config is not None and self._client is not None:
+            try:
+                # Re-open a saver context purely to read the snapshot.
+                # The original saver context is already torn down by
+                # the time we get here (the inner ``finally`` ran).
+                checkpoint_path = self.fi_dir / "state.sqlite"
+                async with AsyncSqliteSaver.from_conn_string(
+                    str(checkpoint_path),
+                ) as saver:
+                    graph = self._build_graph().compile(checkpointer=saver)
+                    snap = await graph.aget_state(run_config)
+                    nxt = getattr(snap, "next", None) or ()
+                    if nxt:
+                        failing_node = ", ".join(nxt)
+            except Exception as e:  # noqa: BLE001
+                # Snapshot read failed (saver locked, corrupted, etc.).
+                # Fall back to a generic label — the .md is still
+                # useful with just the exception + log tail.
+                self._log.warning(
+                    "[run] could not resolve failing node from "
+                    "checkpoint snapshot: %r", e,
+                )
+                failing_node = "(unknown — could not read checkpoint snapshot)"
+
+        # Tail the per-quest run.log. The full trace is at the end of
+        # the file; ~80 lines is comfortably more than any single
+        # traceback but small enough to not bury the user.
+        #
+        # Bounded read: seek to the last 64 KB rather than reading the
+        # whole file into memory. Quest run.logs occasionally grow to
+        # tens of MB (LangGraph trace verbosity + per-iteration retry
+        # spam), and we don't want a diagnostic write — which fires
+        # exactly when the user is already having a bad day — to slow
+        # down further on a giant log. 64 KB is more than enough for
+        # 80 lines of even very long tracebacks. Mirrors the helper
+        # in ``web/server.py::_read_log_tail``.
+        run_log_path = self.fi_dir / "run.log"
+        log_tail = "(run.log not on disk — likely a pre-logging failure)"
+        if run_log_path.is_file():
+            try:
+                size = run_log_path.stat().st_size
+                with run_log_path.open("rb") as f:
+                    f.seek(max(0, size - 65536))
+                    tail_bytes = f.read()
+                lines = tail_bytes.decode("utf-8", errors="replace").splitlines()
+                log_tail = "\n".join(lines[-80:])
+            except OSError as e:
+                log_tail = f"(could not read run.log: {e!r})"
+
+        # Provider context — separate the YAML transport from any
+        # bridge override that landed in ``provider.extra``.
+        provider_name = self.config.provider.name
+        provider_model = self.config.provider.model or "(provider default)"
+        bridge_extras = []
+        for key in ("bridge_port", "bridge_socket"):
+            val = (self.config.provider.extra or {}).get(key)
+            if val:
+                bridge_extras.append(f"{key}={val!r}")
+        provider_extra_str = ", ".join(bridge_extras) or "(none)"
+
+        # Normalize the topic for header rendering. YAML block-scalar
+        # topics can contain embedded newlines, which would break the
+        # single-line ``**Topic:**`` header and split the markdown
+        # structure across multiple bullets. Collapse all internal
+        # whitespace (newlines, tabs, runs of spaces) to a single
+        # space before truncating to 200 chars.
+        topic_one_line = " ".join(self.config.topic.split())[:200]
+        body = (
+            f"# Quest failed before producing a paper\n"
+            f"\n"
+            f"**Quest ID:** `{self.quest_id}`\n"
+            f"**Topic:** {topic_one_line}\n"
+            f"**Failing node:** `{failing_node}`\n"
+            f"**Provider:** `{provider_name}` / model `{provider_model}`"
+            f" / extras: {provider_extra_str}\n"
+            f"\n"
+            f"## What broke\n"
+            f"\n"
+            f"```\n"
+            f"{type(exc).__name__}: {exc}\n"
+            f"```\n"
+            f"\n"
+            f"## Last ~80 lines of `.fi/run.log`\n"
+            f"\n"
+            f"```\n"
+            f"{log_tail}\n"
+            f"```\n"
+            f"\n"
+            f"## How to resume\n"
+            f"\n"
+            f"Most node failures are transient (rate-limit, CLI "
+            f"wall-clock timeout, network blip). The LangGraph "
+            f"checkpoint at `.fi/state.sqlite` lets the engine "
+            f"continue from the failing node on resume:\n"
+            f"\n"
+            f"```bash\n"
+            f"python launch.py --config "
+            f"{(self.quest_root / 'config.yaml').as_posix()} "
+            f"--resume {self.quest_id}\n"
+            f"```\n"
+            f"\n"
+            f"If the same node fails repeatedly, the cause is likely "
+            f"systematic. Common follow-ups:\n"
+            f"\n"
+            f"- **CLI wall-clock timeout** — switch to a smaller model "
+            f"via `provider.node_models.<failing_node>` (e.g. Haiku "
+            f"for `implement`), or shrink the prompt by disabling "
+            f"the ensemble preset.\n"
+            f"- **Bridge error** — the bridge dumps the available "
+            f"`id|family` model catalog on failed lookups; look for "
+            f"that line in the embedded log tail above to confirm "
+            f"the YAML's `provider.model` matches what Copilot "
+            f"actually exposes.\n"
+            f"- **Provider auth / quota** — re-authenticate "
+            f"(`claude login`, `gh auth refresh`, etc.) and retry.\n"
+            f"\n"
+            f"This file is auto-deleted on the next successful run "
+            f"of this quest.\n"
+        )
+        diag_path = self.quest_root / "quest_failed.md"
+        try:
+            # Defensive: the failure might have fired before ``Engine.run``
+            # got past the first mkdir, so the quest_root may not exist
+            # yet. Cheap to create it here — exist_ok=True keeps the
+            # common case (root already there) a no-op.
+            self.quest_root.mkdir(parents=True, exist_ok=True)
+            diag_path.write_text(body, encoding="utf-8")
+            self._log.warning(
+                "[run] quest_failed diagnostic written to %s", diag_path,
+            )
+        except OSError as e:
+            self._log.warning(
+                "[run] could not write %s: %r", diag_path, e,
+            )
 
     def _write_cost_summary(self) -> None:
         """Aggregate ``.fi/cost.jsonl`` into ``.fi/cost.summary.json``
