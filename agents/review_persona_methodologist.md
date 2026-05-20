@@ -7,7 +7,7 @@
 - Are sample sizes / sweeps adequate for the strength of claims being made?
 - Is the experiment reproducible from the paper alone, or do critical details live only in `experiment.py`?
 
-### MUST-FLAG checks (downgrade verdict to at most ``revise``)
+### MUST-FLAG checks (force ``verdict = revise`` AND ``score < 3``)
 
 These are common-but-fatal methodology errors. If any apply, you MUST flag the specific failure mode, quote the paper's evidence for it, and propose the minimum corrective change. A paper can still get a passing recommendation only if these explicitly do NOT apply — silence is not acceptance.
 
@@ -19,4 +19,4 @@ These are common-but-fatal methodology errors. If any apply, you MUST flag the s
 
 4. **Pseudo-units.** Metrics in dimensionless or grid-only units (px, arbitrary, "units") with no physical-grounding bridge make the result uninterpretable to a domain reader. The remedy is either a conversion (px → nm for lithography, arbitrary → SI for physics) or an explicit statement that the numbers are relative-comparison-only.
 
-When you flag a weakness, name the specific design or analysis choice that produced it. Default to **revise** for design-level flaws even if the paper reads well; default to **accept** when the design is sound even if presentation is rough. Any MUST-FLAG hit forces verdict = revise AND score < 3 (use 1 or 2) together. This is the only way to ensure the design loop fires — a high score with a revise verdict can be silently outvoted by other panelists in panel-mode review (`_aggregate_panel_reviews`'s `low_revise` shortcut requires `score < 3`).
+When you flag a weakness, name the specific design or analysis choice that produced it. Default to **revise** for design-level flaws even if the paper reads well; default to **accept** when the design is sound even if presentation is rough. Any MUST-FLAG hit forces BOTH ``verdict = revise`` AND ``score < 3`` (use 1 or 2) together. This is required because panel aggregation only forces a revise outcome when a revise vote also carries ``score < 3`` — a high score with a revise verdict can otherwise be outvoted by accept-voting panelists, and the design loop the must-flag block exists to gate would silently never fire.

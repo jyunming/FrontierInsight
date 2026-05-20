@@ -88,12 +88,19 @@ def test_methodologist_persona_includes_must_flag_section() -> None:
     # if someone silently deleted the must-flag rules. The block
     # starts at the MUST-FLAG header.
     must_flag_block = prefix[prefix.index("MUST-FLAG"):].lower()
-    # The block must terminate with the verdict-binding closer; if
-    # that sentence is missing, the rule is documentation, not
-    # enforcement.
-    assert "must-flag hit forces verdict" in must_flag_block, (
+    # The block must bind a hit to BOTH ``verdict = revise`` AND
+    # ``score < 3``. The old "forces verdict <= revise" wording let a
+    # high-score revise vote silently outvoted by accept panelists
+    # (PR #142 / audit Slice 3 HIGH #2 follow-up). Both halves must be
+    # present so the rule is enforcement, not documentation.
+    assert "verdict = revise" in must_flag_block, (
         "methodologist MUST-FLAG block missing the verdict-binding "
-        "closer; silence-is-not-acceptance is the contract."
+        "half; silence-is-not-acceptance is the contract."
+    )
+    assert "score < 3" in must_flag_block, (
+        "methodologist MUST-FLAG block missing the low-score "
+        "requirement; a high-score revise would be outvoted in panel "
+        "mode and the design loop would silently never fire."
     )
     must_flag_keywords = [
         # Circular evaluation / train-on-test
