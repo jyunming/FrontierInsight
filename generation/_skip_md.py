@@ -32,21 +32,27 @@ from __future__ import annotations
 
 def render_skip_md(
     *,
-    kind: str,
+    requested_kind: str,
+    display_name: str,
     reason_code: str,
     summary: str,
     how_to_fix: str,
 ) -> str:
-    """Render a ``<kind>_skipped.md`` diagnostic body.
+    """Render a ``<requested_kind>_skipped.md`` diagnostic body.
 
     Parameters
     ----------
-    kind:
-        Human-readable artifact name as it should appear in the H1 and
-        footer — e.g. ``"slides"``, ``"speech (talk.md)"``. NOT a path or
-        a config-kind enum value. Free-form because the same diagnostic
-        may cover multiple render targets (slides covers html/pdf/pptx
-        from a single shared engine).
+    requested_kind:
+        The ``output.kinds`` enum value that triggered this generator —
+        e.g. ``"slides"``, ``"speech"``. Used in the "Your output.kinds
+        requested X" line. MUST match a value that appears in
+        ``config.output.kinds`` so the user can grep their YAML.
+    display_name:
+        Human-readable artifact name as it appears in the H1 and
+        footer — e.g. ``"slides.html / slides.pdf"`` (when slides.md
+        still succeeded), or ``"speech (talk.md)"``. Free-form, may
+        differ from ``requested_kind`` when a single kind covers
+        multiple render targets and only some failed.
     reason_code:
         Short stable identifier consumed by tests and log filters —
         e.g. ``"no_marp"``, ``"llm_refused_or_empty"``. Kebab/snake_case
@@ -60,13 +66,14 @@ def render_skip_md(
         not "consider running" but "run X".
     """
     return (
-        f"# {kind} was requested but not produced\n\n"
-        f"Your `output.kinds` requested {kind}, but the generator "
-        f"couldn't produce it.\n\n"
+        f"# {display_name} was requested but not produced\n\n"
+        f"Your `output.kinds` requested `{requested_kind}`, but the "
+        f"generator couldn't produce {display_name}.\n\n"
         f"## What happened\n\n"
         f"**Reason code:** `{reason_code}`\n\n"
         f"{summary}\n\n"
         f"## How to fix it\n\n"
         f"{how_to_fix}\n\n"
-        f"This file is auto-deleted on the next successful {kind} run.\n"
+        f"This file is auto-deleted on the next successful "
+        f"{requested_kind} run.\n"
     )

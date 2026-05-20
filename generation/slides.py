@@ -86,7 +86,21 @@ class SlideGenerator:
         *,
         supervisor: ProxySupervisor | None = None,
     ) -> dict[str, Path]:
-        if "slides" not in self.config.output.kinds or art.paper_md is None:
+        # Cleanup gate: if "slides" is no longer in output.kinds (user
+        # removed it from their YAML between runs), remove any stale
+        # ``slides_skipped.md`` left over from a prior run. Mirrors
+        # PaperGenerator's cleanup when paper_pdf is dropped from
+        # kinds. Without this, the stale diagnostic persists forever
+        # after the user opts out.
+        if "slides" not in self.config.output.kinds:
+            stale = out_dir / "slides_skipped.md"
+            if stale.is_file():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            return {}
+        if art.paper_md is None:
             return {}
 
         slides_md = await self._author_marp(art, out_dir, supervisor=supervisor)
@@ -130,9 +144,16 @@ class SlideGenerator:
 
         if marp_skip is not None:
             code, summary, how_to_fix = marp_skip
+            # ``slides.md`` typically succeeds even when marp fails
+            # (it's authored by an LLM, not the marp CLI), so the
+            # H1 here is scoped to the actual failure surface
+            # (html / pdf) rather than the umbrella "slides" kind —
+            # the user opening their quest dir already sees
+            # ``slides.md`` and shouldn't be told slides is missing.
             diag_path.write_text(
                 render_skip_md(
-                    kind="slides",
+                    requested_kind="slides",
+                    display_name="slides.html / slides.pdf",
                     reason_code=code,
                     summary=summary,
                     how_to_fix=how_to_fix,

@@ -41,25 +41,41 @@ PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "speech.md"
 # we don't want to skip those.
 _MIN_TALK_CHARS = 200
 
-# Refusal phrases LLMs emit when they decline a request. Matched
-# case-insensitively against the raw response. Substring match (not
-# whole-line) because the refusal often appears mid-sentence: "I'm
-# sorry, but I cannot help with that request." All checked variants
-# are common across OpenAI / Anthropic / Mistral / open-source models.
+# Refusal phrases LLMs emit when they decline a REQUEST FOR HELP.
+# Matched case-insensitively against the raw response. Each token
+# includes assist/help-with-request language — that's the load-
+# bearing constraint that distinguishes a refusal from a legitimate
+# script line. Generic phrases like ``"I won't"`` or
+# ``"I'm unable to"`` are excluded because a real talk script
+# routinely says things like ``"I won't cover X today"`` or
+# ``"the model was unable to converge"`` — those would trigger
+# false positives and discard usable output.
+#
+# Additionally we only match these near the START of the response
+# (within the first ~400 chars). A refusal sits at the top of the
+# message ("I'm sorry, I can't help with that. — apology then
+# stop"); a script that mentions "sorry" in a quoted passage 6
+# paragraphs in should not be rejected.
 _REFUSAL_TOKENS: tuple[str, ...] = (
-    "sorry, i can't",
-    "sorry, i cannot",
-    "i'm sorry, i can't",
-    "i'm sorry, but i can't",
-    "i'm sorry, but i cannot",
-    "i cannot help",
-    "i'm unable to",
-    "i am unable to",
-    "i won't",
-    "i will not",
+    "sorry, i can't help",
+    "sorry, i cannot help",
+    "i'm sorry, i can't help",
+    "i'm sorry, but i can't help",
+    "i'm sorry, but i cannot help",
+    "i cannot help with",
     "i can't help with",
     "i cannot assist",
+    "i can't assist",
+    "i'm unable to help",
+    "i am unable to help",
+    "i'm unable to assist",
+    "i cannot provide",
+    "i can't provide",
 )
+# Window (in characters) within which a refusal token counts.
+# A refusal phrase appearing 1000 chars into a talk script is
+# almost certainly a quoted line, not the model declining.
+_REFUSAL_SCAN_PREFIX = 400
 
 
 def _is_refusal_or_empty(text: str) -> tuple[bool, str]:
@@ -75,9 +91,13 @@ def _is_refusal_or_empty(text: str) -> tuple[bool, str]:
             f"{_MIN_TALK_CHARS} is almost certainly an empty/aborted "
             f"completion, not a usable talk."
         )
-    low = stripped.lower()
+    # Only scan the leading prefix — a refusal sits at the TOP of
+    # the response; a later occurrence is almost certainly a quoted
+    # script line ("the participant said 'I can't help...'", etc.)
+    # and shouldn't trigger a reject.
+    head = stripped[:_REFUSAL_SCAN_PREFIX].lower()
     for token in _REFUSAL_TOKENS:
-        if token in low:
+        if token in head:
             return True, (
                 f"LLM response contained a refusal phrase "
                 f"(matched: {token!r}). The model declined to generate "
@@ -99,7 +119,21 @@ class SpeechGenerator:
         *,
         supervisor: ProxySupervisor | None = None,
     ) -> dict[str, Path]:
-        if "speech" not in self.config.output.kinds or art.paper_md is None:
+        # Cleanup gate: if "speech" is no longer in output.kinds (user
+        # removed it from their YAML between runs), remove any stale
+        # ``speech_skipped.md`` left over from a prior run. Mirrors
+        # PaperGenerator's cleanup when paper_pdf is dropped from
+        # kinds. Without this, the stale diagnostic persists forever
+        # after the user opts out of the speech kind.
+        if "speech" not in self.config.output.kinds:
+            stale = out_dir / "speech_skipped.md"
+            if stale.is_file():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            return {}
+        if art.paper_md is None:
             return {}
 
         paper_md = art.paper_md.read_text(encoding="utf-8")
@@ -145,14 +179,30 @@ class SpeechGenerator:
             # debugging operator can see what the model actually
             # returned without re-running the (paid, slow) chat call.
             raw_preview = text.strip()[:500]
+            # Pick a code-fence length that doesn't collide with any
+            # run of backticks in the embedded preview. The default
+            # triple-backtick fence breaks the markdown structure when
+            # the LLM response itself contains ``` (common for code-
+            # heavy refusals or partial responses). Find the longest
+            # run of backticks in the preview and use one more.
+            longest_backtick_run = 0
+            current_run = 0
+            for ch in raw_preview:
+                if ch == "`":
+                    current_run += 1
+                    longest_backtick_run = max(longest_backtick_run, current_run)
+                else:
+                    current_run = 0
+            fence = "`" * max(3, longest_backtick_run + 1)
             diag_path.write_text(
                 render_skip_md(
-                    kind="speech",
+                    requested_kind="speech",
+                    display_name="speech (talk.md)",
                     reason_code="llm_refused_or_empty",
                     summary=(
                         f"{reason}\n\n"
                         f"Raw LLM response (first 500 chars):\n\n"
-                        f"```\n{raw_preview}\n```"
+                        f"{fence}\n{raw_preview}\n{fence}"
                     ),
                     how_to_fix=(
                         "If the response is empty: retry the quest — "

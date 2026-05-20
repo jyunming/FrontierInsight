@@ -461,7 +461,11 @@ async def test_slides_writes_skip_diagnostic_when_marp_missing(
     diag = out_dir / "slides_skipped.md"
     assert diag.exists(), "slides_skipped.md must be written when marp is absent"
     body = diag.read_text(encoding="utf-8")
-    assert "slides was requested but not produced" in body
+    # Display name is scoped to the actual failure surface
+    # (slides.html / slides.pdf — what marp produces); slides.md
+    # typically lands even when marp fails so a blanket "slides was
+    # requested but not produced" mis-describes the state.
+    assert "slides.html / slides.pdf was requested but not produced" in body
     assert "no_marp" in body
     assert "marp-team/marp-cli" in body  # the install recipe
     assert result.get("slides_skipped") == diag
@@ -640,7 +644,9 @@ async def test_speech_writes_skip_diagnostic_on_empty_response(
     diag = out_dir / "speech_skipped.md"
     assert diag.exists()
     body = diag.read_text(encoding="utf-8")
-    assert "speech was requested but not produced" in body
+    # Display name names the actual file the user would have
+    # gotten (talk.md) so the H1 reads correctly to a reader.
+    assert "speech (talk.md) was requested but not produced" in body
     assert "llm_refused_or_empty" in body
     # Raw response excerpt embedded for debugging.
     assert "Too short to be a useful talk script" in body
@@ -711,3 +717,84 @@ async def test_speech_success_removes_stale_skip_diagnostic(
     )
     assert result.get("speech_md") == out_dir / "talk.md"
     assert "speech_skipped" not in result
+
+
+@pytest.mark.asyncio
+async def test_speech_removes_stale_diagnostic_when_kind_dropped(
+    tmp_path: Path,
+) -> None:
+    """User had ``speech`` in output.kinds; this run drops it. The
+    stale ``speech_skipped.md`` from a prior failed run must be
+    cleaned up — otherwise it persists indefinitely after the user
+    opts out. Mirrors PaperGenerator's cleanup-on-opt-out pattern."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["paper_md"])  # NO "speech"
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stale = out_dir / "speech_skipped.md"
+    stale.write_text("stale from previous failed run", encoding="utf-8")
+
+    result = await SpeechGenerator(cfg).generate(art, out_dir)
+
+    assert result == {}, "no artifacts when speech is not in kinds"
+    assert not stale.exists(), (
+        "stale speech_skipped.md must be removed when speech is "
+        "dropped from output.kinds"
+    )
+
+
+@pytest.mark.asyncio
+async def test_slides_removes_stale_diagnostic_when_kind_dropped(
+    tmp_path: Path,
+) -> None:
+    """Same cleanup-on-opt-out contract for slides."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["paper_md"])  # NO "slides"
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stale = out_dir / "slides_skipped.md"
+    stale.write_text("stale from previous failed run", encoding="utf-8")
+
+    result = await SlideGenerator(cfg).generate(art, out_dir)
+
+    assert result == {}, "no artifacts when slides is not in kinds"
+    assert not stale.exists(), (
+        "stale slides_skipped.md must be removed when slides is "
+        "dropped from output.kinds"
+    )
+
+
+@pytest.mark.asyncio
+async def test_speech_diagnostic_escapes_backtick_fences_in_llm_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM response embedded in the diagnostic might itself contain
+    ``` (e.g. a refusal mentioning code, or an aborted code block).
+    Default ``` fence would break the markdown structure. The
+    helper must pick a longer fence to escape correctly."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["speech"])
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 50 chars (below threshold) so the rejection fires; contains
+    # a literal ``` that would have broken the fence.
+    bad_response = "Sorry, I can't help.\n```python\nprint(1)\n```"
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return bad_response
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+
+    await SpeechGenerator(cfg).generate(art, out_dir)
+    body = (out_dir / "speech_skipped.md").read_text(encoding="utf-8")
+    # The fence MUST be longer than the longest backtick run in the
+    # embedded preview, so the markdown structure stays intact.
+    # 3 backticks in the response → fence must be at least 4.
+    assert "````" in body, (
+        "diagnostic must use a 4+-backtick fence when the preview "
+        "contains ``` so the embedded raw response doesn't escape "
+        "its container"
+    )
+    # The full preview content still lands inside the longer fence.
+    assert "print(1)" in body
