@@ -81,8 +81,19 @@ class QuestLauncher:
         python_path: str | None = None,
         vscode_bridge_port: int = 0,
         vscode_bridge_socket: str = "",
+        output_root: Path | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
+        # ``output_root`` is where quest folders and per-tool-job folders
+        # live. The launcher writes per-quest launch logs to
+        # ``<output_root>/<quest_id>/.fi/launch.log`` and per-tool-job
+        # logs to ``<output_root>/_jobs/<job_id>/launch.log``. When
+        # callers don't pass one we default to ``<repo_root>/outputs``
+        # — the same default the web server uses.
+        self.output_root = (
+            output_root.resolve() if output_root is not None
+            else self.repo_root / "outputs"
+        )
         self.max_concurrent = max_concurrent
         self.python_path = python_path or sys.executable
         self.vscode_bridge_port = vscode_bridge_port
@@ -126,16 +137,19 @@ class QuestLauncher:
                 "PYTHONUNBUFFERED": "1",
                 "FI_PRESEED_QUEST_ID": quest_id,
             }
-            # Capture the child's stdout + stderr to a file under
-            # outputs/_logs/ so a silent failure (e.g. tectonic
-            # install crashing on a network error) is investigatable.
-            # Previously stdout/stderr were redirected to DEVNULL,
-            # which gave the UI no way to surface "the install
-            # actually failed" — the user saw "started" forever.
-            from datetime import datetime
-            logs_dir = self.repo_root / "outputs" / "_logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            log_path = logs_dir / f"{quest_id}.log"
+            # Capture the child's stdout + stderr next to the quest's
+            # other artifacts at ``<quest_root>/.fi/launch.log``, so a
+            # silent failure (e.g. tectonic install crashing on a
+            # network error) is investigatable alongside the engine's
+            # own ``run.log``. The two logs are deliberately co-located
+            # under ``.fi/`` — engine-side run.log carries structured
+            # node-by-node progress, launch.log carries the subprocess
+            # stdout/stderr that the engine couldn't capture itself
+            # (e.g. import-time crashes before any node ran).
+            quest_root = self.output_root / quest_id
+            fi_dir = quest_root / ".fi"
+            fi_dir.mkdir(parents=True, exist_ok=True)
+            log_path = fi_dir / "launch.log"
             log_file = open(log_path, "wb")
             proc = subprocess.Popen(
                 argv,
@@ -339,9 +353,14 @@ class QuestLauncher:
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             if extra_env:
                 env.update(extra_env)
-            logs_dir = self.repo_root / "outputs" / "_logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            log_path = logs_dir / f"{job_id}.log"
+            # Tool-job log lives in its own per-job folder under
+            # ``<output_root>/_jobs/<job_id>/launch.log`` rather than a
+            # flat ``_logs/`` directory. Mirrors the quest layout
+            # (one folder per job) so future per-job artifacts (cache,
+            # transient YAML, etc.) have somewhere obvious to live.
+            job_dir = self.output_root / "_jobs" / job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            log_path = job_dir / "launch.log"
             log_file = open(log_path, "wb")
             proc = subprocess.Popen(
                 argv,

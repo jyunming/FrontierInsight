@@ -283,6 +283,7 @@ def make_app(
         max_concurrent=max_concurrent,
         vscode_bridge_port=vscode_bridge_port,
         vscode_bridge_socket=vscode_bridge_socket,
+        output_root=output_root,
     )
 
     static_dir = Path(__file__).resolve().parent / "static"
@@ -726,30 +727,81 @@ def make_app(
         --install-tectonic, --new/--update/--proposal quest launches),
         merging:
           (1) the launcher's live registry (alive jobs with pid/age)
-          (2) outputs/_logs/<job_id>.log files (everything ever logged
-              — alive *or* exited).
+          (2) on-disk launch.log files (everything ever logged —
+              alive *or* exited) from:
+                - ``<output_root>/<quest_id>/.fi/launch.log`` (quests)
+                - ``<output_root>/_jobs/<job_id>/launch.log`` (tool jobs)
+                - ``<output_root>/_logs/<job_id>.log`` (legacy flat
+                  layout, kept readable so jobs from older sessions
+                  still show up in the Jobs tab)
         Each entry the dashboard's "Jobs" tab consumes:
           {job_id, kind, alive, exit_code?, age_seconds, log_mtime}.
         """
         out_root = app.state.output_root
-        logs_dir = Path(__file__).resolve().parent.parent / "outputs" / "_logs"
         live = {q.quest_id: q for q in app.state.launcher.list_alive()}
         seen: dict[str, dict[str, Any]] = {}
-        # 1. Files on disk = every job that was ever logged.
-        if logs_dir.is_dir():
-            for p in sorted(
-                logs_dir.glob("*.log"),
-                key=lambda f: f.stat().st_mtime,
-                reverse=True,
-            )[:200]:
-                jid = p.stem
-                seen[jid] = {
-                    "job_id": jid,
-                    "kind": _classify_job(jid),
-                    "alive": jid in live,
-                    "log_mtime": p.stat().st_mtime,
-                    "log_size": p.stat().st_size,
-                }
+
+        # Collect (job_id, log_path, mtime, size) from each of the
+        # three layouts. ``stat()`` is called ONCE per candidate here
+        # (so the subsequent sort + dict build don't re-stat — 3x
+        # stat calls per file in the old version was an unnecessary
+        # cost on output roots with many quests). Files that vanish
+        # between ``iterdir()`` and ``stat()`` (race with a deletion
+        # / a cancelled-quest cleanup) are dropped silently rather
+        # than 500ing the endpoint.
+        def _stat_or_none(p: Path) -> tuple[float, int] | None:
+            try:
+                st = p.stat()
+                return st.st_mtime, st.st_size
+            except (FileNotFoundError, PermissionError):
+                return None
+
+        candidates: list[tuple[str, Path, float, int]] = []
+
+        def _add(jid: str, lp: Path) -> None:
+            stat = _stat_or_none(lp)
+            if stat is not None:
+                candidates.append((jid, lp, stat[0], stat[1]))
+
+        # 1a. Per-quest launch logs at <quest>/.fi/launch.log.
+        if out_root.is_dir():
+            for quest_dir in out_root.iterdir():
+                if not quest_dir.is_dir() or quest_dir.name.startswith("_"):
+                    continue
+                lp = quest_dir / ".fi" / "launch.log"
+                if lp.is_file():
+                    _add(quest_dir.name, lp)
+        # 1b. Per-tool-job logs at _jobs/<job_id>/launch.log.
+        jobs_root = out_root / "_jobs"
+        if jobs_root.is_dir():
+            for job_dir in jobs_root.iterdir():
+                if not job_dir.is_dir():
+                    continue
+                lp = job_dir / "launch.log"
+                if lp.is_file():
+                    _add(job_dir.name, lp)
+        # 1c. Legacy flat _logs/<id>.log — preserved so older sessions
+        # remain visible in the dashboard until the user cleans them up.
+        legacy_logs_dir = out_root / "_logs"
+        if legacy_logs_dir.is_dir():
+            for p in legacy_logs_dir.glob("*.log"):
+                _add(p.stem, p)
+
+        # Most-recent-first, capped at 200 to keep the response small.
+        candidates.sort(key=lambda row: row[2], reverse=True)
+        for jid, _lp, mtime, size in candidates[:200]:
+            if jid in seen:
+                # If both new and legacy layouts have an entry for the
+                # same id (unlikely but possible during migration),
+                # the newer-first sort already picked the freshest.
+                continue
+            seen[jid] = {
+                "job_id": jid,
+                "kind": _classify_job(jid),
+                "alive": jid in live,
+                "log_mtime": mtime,
+                "log_size": size,
+            }
         # 2. Live registry entries (may include jobs that haven't
         #    written a log file yet — rare but possible during startup).
         for jid, entry in live.items():
@@ -869,13 +921,24 @@ def make_app(
         log file knows about this job_id."""
         if not _QUEST_ID_RE.match(job_id):
             raise HTTPException(400, f"bad job_id format: {job_id!r}")
-        logs_dir = Path(__file__).resolve().parent.parent / "outputs" / "_logs"
-        log_path = logs_dir / f"{job_id}.log"
+        # Probe the three known layouts in newest-design-first order:
+        # per-quest .fi/launch.log → per-tool-job _jobs/<id>/launch.log
+        # → legacy _logs/<id>.log. First match wins.
+        out_root = app.state.output_root
+        log_path: Path | None = None
+        for candidate in (
+            out_root / job_id / ".fi" / "launch.log",
+            out_root / "_jobs" / job_id / "launch.log",
+            out_root / "_logs" / f"{job_id}.log",
+        ):
+            if candidate.is_file():
+                log_path = candidate
+                break
         st = app.state.launcher.status_for(job_id)
         log_lines: list[str] = []
         log_mtime = None
         log_size = None
-        if log_path.is_file():
+        if log_path is not None:
             try:
                 lines = log_path.read_text(
                     encoding="utf-8", errors="replace",
