@@ -69,6 +69,43 @@ def test_load_persona_prefix_builtin_personas_each_have_distinct_prefix() -> Non
     assert len({v for v in prefixes.values()}) == len(builtins)
 
 
+def test_methodologist_persona_includes_must_flag_section() -> None:
+    """Methodologist must carry the MUST-FLAG checklist verbatim.
+
+    The four hard-must-flag patterns are common-but-fatal methodology
+    errors. Earlier reviews of low-quality engine-generated papers
+    accepted them silently — accepting a paper with circular
+    evaluation or an admittedly-broken baseline is the failure mode
+    the must-flag block is designed to prevent. If someone trims the
+    persona file to a one-liner, this test catches it before the
+    quality regression ships.
+    """
+    prefix = _load_persona_prefix("methodologist")
+    assert "MUST-FLAG" in prefix
+    must_flag_keywords = [
+        # Circular evaluation / train-on-test
+        ("circular", "train-on-test contamination guard"),
+        # Single-point eval where a sweep is the norm
+        ("sweep", "single-point-evaluation guard"),
+        # Weak baseline kept instead of re-run
+        ("baseline", "admitted-weak-baseline guard"),
+        # Pseudo-units / dimensionless
+        ("units", "pseudo-units guard"),
+    ]
+    body = prefix.lower()
+    for needle, label in must_flag_keywords:
+        assert needle in body, (
+            f"methodologist persona is missing the {label} "
+            f"(keyword {needle!r} not found)."
+        )
+    # The MUST-FLAG block must explicitly tie a hit to a non-accept
+    # verdict; without that the rule is documentation, not enforcement.
+    assert "revise" in body, (
+        "methodologist must-flag rules must explicitly bind hits to "
+        "verdict <= revise; silence-is-not-acceptance is the contract."
+    )
+
+
 def test_load_persona_prefix_custom_name_falls_back_to_generic_template() -> None:
     """A persona name with no corresponding file falls back to the
     generic template so users can declare ad-hoc roles in YAML."""
