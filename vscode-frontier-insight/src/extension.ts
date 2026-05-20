@@ -37,6 +37,52 @@ async function fsExists(p: string): Promise<boolean> {
     }
 }
 
+/**
+ * Wait for a freshly-`spawn()`-ed Python child to exit, with the
+ * `error` event wired up. Without an `error` listener, a `spawn()`
+ * failure (typically ENOENT — `python` not on PATH, or
+ * `frontierInsight.pythonPath` pointing at a non-existent / non-
+ * executable file) means the child never starts, `close` never fires,
+ * and the chat panel hangs forever on the streaming spinner. The user
+ * has to restart VSCode to clear the stuck participant.
+ *
+ * Returns the exit code on normal termination, or `null` if the spawn
+ * itself failed. In the latter case this function ALSO surfaces a
+ * diagnostic chat message naming the failing pythonPath and the most
+ * likely cause; callers should short-circuit (`if (rc === null) return;`)
+ * and let their normal exit-code branch handle non-spawn-error paths.
+ */
+async function waitForChildExit(
+    child: import("child_process").ChildProcess,
+    bridge: Bridge,
+    pythonPath: string,
+    stream: vscode.ChatResponseStream,
+): Promise<number | null> {
+    let spawnErr: NodeJS.ErrnoException | null = null;
+    const exitCode: number | null = await new Promise((resolve) => {
+        child.on("close", (code) => resolve(code));
+        child.on("error", (e) => { spawnErr = e as NodeJS.ErrnoException; resolve(null); });
+    });
+    await bridge.close();
+    if (spawnErr) {
+        const err: NodeJS.ErrnoException = spawnErr;
+        const cause = err.code === "ENOENT"
+            ? `\`${pythonPath}\` was not found. Likely causes: ` +
+              "(a) `python` isn't on PATH (try setting `frontierInsight.pythonPath` to an " +
+              "absolute path like `C:\\Python312\\python.exe` or `/usr/bin/python3`); " +
+              "(b) the path in `frontierInsight.pythonPath` is wrong; " +
+              "(c) on macOS / Linux, the file exists but lacks the executable bit (`chmod +x`)."
+            : `\`${pythonPath}\` failed to launch (${err.code || "(no code)"}): ${err.message}.`;
+        stream.markdown(
+            `\n❌ **Failed to start Python.** ${cause}\n\n` +
+            "Set `frontierInsight.pythonPath` in VSCode settings to a working interpreter, " +
+            "then retry the command.\n",
+        );
+        return null;
+    }
+    return exitCode;
+}
+
 let persistentBridge: PersistentBridge | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -761,10 +807,8 @@ async function runQuest(
     // 4. Wait for Python to exit. Bridge messages flow through the
     // socket on its own; the chat handler resolves when the child
     // terminates, which is when the quest (or fleet) is done.
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;  // spawn failed; helper already surfaced the error
 
     if (exitCode === 0) {
         stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
@@ -957,10 +1001,8 @@ async function runSummarize(
         }
     });
 
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Summary done.\n");
@@ -1096,10 +1138,8 @@ async function runDigest(
         }
     });
 
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Digest done.\n");
@@ -1203,10 +1243,8 @@ async function runPortfolio(
         }
     });
 
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Portfolio done.\n");
@@ -1337,10 +1375,8 @@ async function runCritique(
         }
     });
 
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Critique done.\n");
@@ -1766,10 +1802,8 @@ async function runProposal(
         }
     });
 
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;
 
     if (exitCode === 0) {
         stream.markdown("\n✅ Proposal done. Read the markdown, edit either file if needed, then `/start` the YAML when ready.\n");
@@ -1927,10 +1961,8 @@ async function runAnalyze(
         }
     });
 
-    const exitCode: number | null = await new Promise((resolve) => {
-        child.on("close", (code) => resolve(code));
-    });
-    await bridge.close();
+    const exitCode = await waitForChildExit(child, bridge, pythonPath, stream);
+    if (exitCode === null) return;
 
     if (exitCode === 0) {
         stream.markdown(
