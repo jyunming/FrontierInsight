@@ -1122,6 +1122,14 @@ class LLMClient:
                 host="127.0.0.1",
                 port=self.endpoint.vscode_bridge_port,
                 socket_path=(self.endpoint.vscode_bridge_socket or None),
+                # Wall-clock cap per chat call so a TS-side silent stall
+                # (Copilot HTTP/2 hang the inactivity timer missed, or
+                # an older .vsix without the timer at all) can't wedge
+                # the engine forever on ``await fut``. The bridge
+                # raises ``BridgeError("bridge stalled ...")`` on
+                # timeout; ``_TRANSIENT_BRIDGE_MARKERS`` recognises it
+                # and tenacity below retries the call.
+                cli_timeout_s=self._cli_timeout_s,
             )
             await self._bridge.connect()
         # Per-call override wins; otherwise use the user's

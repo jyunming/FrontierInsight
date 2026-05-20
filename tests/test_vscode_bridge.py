@@ -276,6 +276,88 @@ async def test_bridge_connect_to_dead_port_raises_immediately() -> None:
         await client.connect()
 
 
+@pytest.mark.asyncio
+async def test_bridge_chat_raises_when_response_never_arrives() -> None:
+    """The TS-side bridge has its own 180 s inactivity timer, but a
+    TCP/IPC blip that drops the ``lm_error`` itself — or an older
+    .vsix without the timer — would still hang Python's ``await fut``
+    forever. ``VSCodeBridgeClient.cli_timeout_s`` is the belt-and-braces
+    ceiling: a bridge that never resolves the future must surface
+    ``BridgeError("bridge stalled ...")`` so tenacity can retry, not
+    wedge the engine indefinitely.
+
+    Audit Slice 4 BLOCK #1 / Slice 7 HIGH #1: ``--serve`` and
+    ``--tools`` quests hung forever on Copilot HTTP/2 stalls because
+    the persistent-bridge had no equivalent of ``bridge.ts``'s
+    inactivity timer."""
+    server = _MockBridgeServer()
+
+    def handler(msg: dict[str, Any], w) -> list[dict[str, Any]]:
+        # Receive the request but never reply — simulates a TS bridge
+        # whose inactivity timer also failed to fire (or an older .vsix
+        # without the timer).
+        return []
+
+    port = await server.start(handler)
+    # 1 s budget keeps the test fast; production default is 300 s.
+    client = VSCodeBridgeClient(port=port, cli_timeout_s=1.0)
+    try:
+        await client.connect()
+        with pytest.raises(BridgeError, match="bridge stalled"):
+            await client.chat([{"role": "user", "content": "x"}])
+        # The "bridge stalled" phrasing is load-bearing — Python's
+        # ``_TRANSIENT_BRIDGE_MARKERS`` matches on it so tenacity
+        # retries instead of crashing the quest.
+        from core.provider import _is_bridge_error_transient
+        assert _is_bridge_error_transient(
+            "bridge stalled (no response within 1s)"
+        ), "stall timeout error must be classified as transient"
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+def test_provider_config_exposes_cli_timeout_s() -> None:
+    """``ProviderConfig.cli_timeout_s`` is the user-facing knob for
+    the bridge stall ceiling (and the CLI-provider wall-clock cap).
+    Audit Slice 4 HIGH #3 flagged this missing; the bridge-stall fix
+    depends on a configurable override."""
+    cfg = ProviderConfig(name="vscode_extension", extra={"bridge_port": 1})
+    # Default matches the CLI-transport budget in LLMClient.
+    assert cfg.cli_timeout_s == 300.0
+    cfg2 = ProviderConfig(
+        name="vscode_extension", extra={"bridge_port": 1}, cli_timeout_s=45.0,
+    )
+    assert cfg2.cli_timeout_s == 45.0
+
+
+@pytest.mark.asyncio
+async def test_llmclient_threads_cli_timeout_into_bridge_client() -> None:
+    """``LLMClient(cli_timeout_s=...)`` must reach the
+    ``VSCodeBridgeClient`` it constructs lazily — otherwise the
+    user-facing ``provider.cli_timeout_s`` knob silently does nothing
+    on the bridge path and a stall still wedges the engine."""
+    server = _MockBridgeServer()
+
+    def handler(msg: dict[str, Any], w) -> list[dict[str, Any]]:
+        return [{"type": "lm_done", "id": msg["id"], "content": "ok"}]
+
+    port = await server.start(handler)
+    ep = ResolvedEndpoint(
+        base_url="", model="(VSCode chat default)", api_key="not-needed",
+        transport="vscode_bridge", vscode_bridge_port=port,
+    )
+    client = LLMClient(ep, cli_timeout_s=17.5)
+    try:
+        await client.chat([{"role": "user", "content": "hi"}])
+        # The lazily-built bridge must have inherited the timeout.
+        assert client._bridge is not None
+        assert client._bridge.cli_timeout_s == 17.5
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
 # --- Provider integration ---------------------------------------------------
 
 
