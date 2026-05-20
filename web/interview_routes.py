@@ -18,10 +18,13 @@ single source of truth. Two surfaces:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger("frontier_insight.web.interview")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -130,6 +133,35 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             schema["provider_models"] = provider_models
         return JSONResponse(schema)
 
+    @app.get("/api/quests/{quest_id}/answers")
+    async def get_quest_answers(quest_id: str) -> JSONResponse:
+        """Return the quest's current editable answers as a JSON dict.
+        Used by the ``/update/<id>`` form to seed input values from
+        the YAML rather than from question defaults — without this,
+        every web --update submit would silently overwrite non-default
+        fields with their defaults.
+
+        Reuses the same allowlist + relative_to guard the rest of the
+        web UI uses (``_resolve_quest_root``)."""
+        from core.interview_update import load_current_answers
+        from web.server import _resolve_quest_root
+        quest_root = _resolve_quest_root(output_root, quest_id)
+        if not quest_root.is_dir():
+            # Don't leak the resolved filesystem path back to the client
+            # — that reveals the --output-root layout (and on shared
+            # deployments, possibly other usernames). Log it server-side
+            # for operator debugging instead.
+            _log.warning(
+                "quest_id=%r resolved to %s but no directory exists",
+                quest_id, quest_root,
+            )
+            raise HTTPException(404, "quest not found")
+        try:
+            current, _yaml_path, _raw = load_current_answers(quest_root)
+        except (FileNotFoundError, ValueError) as e:
+            raise HTTPException(400, str(e))
+        return JSONResponse(asdict(current))
+
     @app.post("/api/interview/submit")
     async def submit_new(request: Request) -> JSONResponse:
         body = await request.json()
@@ -228,7 +260,15 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         from web.server import _resolve_quest_root
         quest_root = _resolve_quest_root(output_root, quest_id)
         if not quest_root.is_dir():
-            raise HTTPException(404, f"no quest directory at {quest_root}")
+            # Don't leak the resolved filesystem path back to the client
+            # — that reveals the --output-root layout (and on shared
+            # deployments, possibly other usernames). Log it server-side
+            # for operator debugging instead.
+            _log.warning(
+                "quest_id=%r resolved to %s but no directory exists",
+                quest_id, quest_root,
+            )
+            raise HTTPException(404, "quest not found")
 
         try:
             current, yaml_path, raw = load_current_answers(quest_root)
@@ -243,6 +283,10 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # Non-editable fields are pinned to the current values
         # regardless of what the client sent — the web UI form
         # should mark them disabled, but be defensive.
+        # All 5 tier-2/3 editable fields (audience, ensemble_profile,
+        # knowledge_top_k, knowledge_external_top_k, max_iterations)
+        # MUST be threaded through here — omitting them silently
+        # dropped non-default values on every web --update submit.
         new = InterviewAnswers(
             topic=current.topic,
             title=current.title,
@@ -258,6 +302,11 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             knowledge_enabled=new_answers.knowledge_enabled,
             provider=current.provider,
             provider_model=current.provider_model,
+            audience=new_answers.audience,
+            knowledge_top_k=new_answers.knowledge_top_k,
+            knowledge_external_top_k=new_answers.knowledge_external_top_k,
+            ensemble_profile=new_answers.ensemble_profile,
+            max_iterations=new_answers.max_iterations,
         )
         changes = diff_answers(current, new)
         stages = compute_invalidated_stages(changes)

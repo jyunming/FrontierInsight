@@ -66,7 +66,47 @@ from core.interview import (
     STAGE_INVALIDATION,
     answers_to_yaml,
     build_smart_defaults,
+    expand_ensemble_profile,
 )
+
+
+# Profiles whose ``expand_ensemble_profile`` output we attempt to
+# match against an existing ``provider.node_ensemble`` block when
+# reverse-deriving ``ensemble_profile`` from a YAML mapping. Order
+# matters — we prefer the most specific (``full``) match first so a
+# "full" config doesn't get mis-classified as ``ideate_and_check``
+# (a strict subset of ``full``).
+_ENSEMBLE_REVERSE_PROFILES: tuple[str, ...] = (
+    "full", "ideate_and_check", "cross_check_only",
+)
+
+
+def _derive_ensemble_profile(
+    node_ensemble_raw: Any, provider: str, provider_model: str | None,
+) -> str:
+    """Reverse-derive an ``ensemble_profile`` value from a YAML
+    ``provider.node_ensemble`` block. Returns ``"off"`` for an empty
+    or missing block, or the matching profile name. When the block
+    doesn't structurally match any preset profile we still return
+    ``"off"`` — the literal block is preserved in the rewrite path via
+    :func:`rewrite_yaml_with_new_answers`'s ``deep_merge``, so a user
+    with a hand-crafted ensemble doesn't lose it just because the
+    interview can't classify it.
+    """
+    if not isinstance(node_ensemble_raw, dict) or not node_ensemble_raw:
+        return "off"
+    # Compare on the set of configured nodes (cheapest match) — that's
+    # the discriminator between the three fan-out profiles. The model
+    # list isn't compared because user-edited YAML may swap models
+    # without changing the profile semantics.
+    configured_nodes = {k for k, v in node_ensemble_raw.items() if isinstance(v, dict)}
+    for profile in _ENSEMBLE_REVERSE_PROFILES:
+        expected = expand_ensemble_profile(
+            profile, provider=provider, provider_model=provider_model,
+        )
+        if set(expected.keys()) == configured_nodes:
+            return profile
+    return "off"
 
 
 # Which QuestState keys does each stage SET (so clearing them
@@ -74,6 +114,12 @@ from core.interview import (
 # Keep in sync with core/engine.py:QuestState — the relevant fields
 # are documented inline at QuestState's definition.
 STAGE_STATE_KEYS: dict[str, tuple[str, ...]] = {
+    # ideate writes both ``ideas`` (the list of candidates) and
+    # ``chosen_idea`` (the picked winner) into QuestState; clearing
+    # both forces a full re-run when ensemble_profile changes.
+    "ideate": ("ideas", "chosen_idea", "ideate_critique", "ideate_tournament"),
+    # literature emits the retrieved-paper list + the per-iter counter.
+    "literature": ("literature", "literature_iter"),
     "analyze": ("analysis",),
     "cross_check": ("cross_check",),
     "write": ("paper_md",),
@@ -117,6 +163,24 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         # Defensive — YAML literal blocks may parse to list-of-lines.
         topic = "\n".join(str(line) for line in topic)
 
+    # The 5 fields below were originally dropped on the round-trip
+    # (load_current_answers always emitted defaults), silently
+    # clobbering a user's ``ensemble_profile``, ``audience``,
+    # ``knowledge_top_k``, ``knowledge_external_top_k``, and
+    # ``max_iterations`` on every --update. They are now parsed from
+    # the YAML so the round-trip is lossless.
+    provider_name = str(provider.get("name") or "vscode_extension")
+    provider_model = str(provider.get("model")) if provider.get("model") else None
+    ensemble_profile = _derive_ensemble_profile(
+        provider.get("node_ensemble"), provider_name, provider_model,
+    )
+
+    def _coerce_int(value: Any, fallback: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
     answers = InterviewAnswers(
         topic=str(topic).strip(),
         title=str(raw.get("title", "")),
@@ -130,8 +194,13 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         clarify_mode=str(engine.get("clarify_mode") or "auto"),
         review_panel=list(engine.get("review_panel") or []),
         knowledge_enabled=bool(knowledge.get("enabled", False)),
-        provider=str(provider.get("name") or "vscode_extension"),
-        provider_model=str(provider.get("model")) if provider.get("model") else None,
+        provider=provider_name,
+        provider_model=provider_model,
+        audience=str(output.get("audience") or "external"),
+        knowledge_top_k=_coerce_int(knowledge.get("top_k", 8), 8),
+        knowledge_external_top_k=_coerce_int(knowledge.get("external_top_k", 20), 20),
+        ensemble_profile=ensemble_profile,
+        max_iterations=_coerce_int(engine.get("max_iterations", 2), 2),
     )
     return answers, yaml_path, raw
 
@@ -152,9 +221,9 @@ def diff_answers(old: InterviewAnswers, new: InterviewAnswers) -> dict[str, tupl
 def compute_invalidated_stages(changes: dict[str, tuple[Any, Any]]) -> list[str]:
     """Look up each changed field in ``STAGE_INVALIDATION`` and union
     the affected stages. Stages are returned in pipeline order
-    (analyze → cross_check → write → review) so the user sees a
-    natural "earliest first" listing."""
-    stage_order = ("analyze", "cross_check", "write", "review")
+    (ideate → literature → analyze → cross_check → write → review)
+    so the user sees a natural "earliest first" listing."""
+    stage_order = ("ideate", "literature", "analyze", "cross_check", "write", "review")
     stages: set[str] = set()
     for field in changes:
         for stage in STAGE_INVALIDATION.get(field, ()):
@@ -194,15 +263,35 @@ def rewrite_yaml_with_new_answers(
     # (provider, engine.clarify_mode, engine.no_simulation,
     # engine.review_panel, engine.clarify_overrides, output.kinds,
     # output.paper_format, knowledge.enabled, topic, title) because
-    # we've already overwritten them.
+    # we've already overwritten them. The 5 fields below
+    # (provider.node_ensemble, engine.max_iterations, output.audience,
+    # knowledge.top_k, knowledge.external_top_k) MUST be in the
+    # managed-paths set: without them, raw's stale block wins over
+    # the freshly-emitted answers and the user's chosen value is
+    # silently reverted on every --update.
     managed_paths = {
         ("topic",), ("title",),
         ("provider", "name"), ("provider", "model"),
+        ("provider", "node_ensemble"),
         ("engine", "clarify_mode"), ("engine", "no_simulation"),
         ("engine", "review_panel"), ("engine", "clarify_overrides"),
+        ("engine", "max_iterations"),
         ("output", "kinds"), ("output", "paper_format"),
+        ("output", "audience"),
         ("knowledge", "enabled"),
+        ("knowledge", "top_k"), ("knowledge", "external_top_k"),
     }
+    # Exception: when the user's chosen ``ensemble_profile`` is "off",
+    # the interview emits nothing for ``provider.node_ensemble``. If we
+    # leave it managed in that case, ``deep_merge`` would erase any
+    # hand-crafted ``node_ensemble`` block in ``raw`` that the
+    # interview couldn't classify back to a preset. Unmanaging on
+    # "off" lets the hand-crafted block round-trip untouched. (When
+    # the user picked a non-"off" profile, the interview wrote a
+    # fresh expanded block into base_data, so we keep this path
+    # managed and overwrite raw's old block.)
+    if new.ensemble_profile == "off":
+        managed_paths.discard(("provider", "node_ensemble"))
 
     def deep_merge(dst: dict[str, Any], src: dict[str, Any], prefix: tuple[str, ...] = ()) -> None:
         """For unmanaged paths, raw (the user's customized YAML) WINS
@@ -379,6 +468,28 @@ async def run_update_flow(
 
     # Build the new InterviewAnswers, copying through non-editable
     # fields verbatim (topic / title / provider / model / no_simulation).
+    # All 5 mid-quest-editable tier-2/3 fields (audience,
+    # ensemble_profile, knowledge_top_k, knowledge_external_top_k,
+    # max_iterations) MUST be threaded through here — omitting them
+    # silently dropped non-default values on every --update.
+    #
+    # CLI prompts return strings even for numeric fields (kind="text"
+    # has no numeric coercion). A bare ``int(...)`` would raise
+    # ValueError and crash the update on any non-numeric typo. Fall
+    # back to the current value (and warn) so the user gets a single
+    # field reverted instead of a whole-update wipeout.
+    def _coerce_int(key: str, fallback: int) -> int:
+        v = new_partial.get(key, fallback)
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            print(
+                f"[FI] --update: ignoring non-integer {key}={v!r}; "
+                f"keeping current value {fallback}.",
+                file=sys.stderr,
+            )
+            return fallback
+
     new = InterviewAnswers(
         topic=current.topic,
         title=current.title,
@@ -394,6 +505,15 @@ async def run_update_flow(
         knowledge_enabled=bool(new_partial["knowledge_enabled"]),
         provider=current.provider,  # frozen
         provider_model=current.provider_model,  # frozen
+        audience=str(new_partial.get("audience", current.audience)),
+        knowledge_top_k=_coerce_int("knowledge_top_k", current.knowledge_top_k),
+        knowledge_external_top_k=_coerce_int(
+            "knowledge_external_top_k", current.knowledge_external_top_k,
+        ),
+        ensemble_profile=str(new_partial.get(
+            "ensemble_profile", current.ensemble_profile,
+        )),
+        max_iterations=_coerce_int("max_iterations", current.max_iterations),
     )
 
     changes = diff_answers(current, new)

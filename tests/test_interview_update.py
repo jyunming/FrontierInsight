@@ -252,6 +252,53 @@ def test_rewrite_yaml_round_trips_through_config_validation(tmp_path: Path) -> N
     assert cfg.output.paper_format == "essay"
 
 
+def test_rewrite_yaml_preserves_handcrafted_node_ensemble_when_profile_is_off() -> None:
+    """A user can hand-craft a ``provider.node_ensemble`` block that
+    doesn't match any preset (e.g. fan-out on ``write`` only, or a
+    different model list than the presets emit). ``load_current_answers``
+    can't classify that block, so it falls back to ``ensemble_profile =
+    "off"``. The --update round-trip MUST preserve the hand-crafted
+    block — otherwise every --update silently strips it. Regression
+    guard for PR #149 review comment #1."""
+    raw = yaml.safe_load(answers_to_yaml(_sample(ensemble_profile="off"), frontend="cli"))
+    handcrafted = {
+        "write": {
+            "models": ["openai/gpt-5", "anthropic/claude-sonnet-4-6"],
+            "merge": "moderator",
+            "moderator": "openai/gpt-5",
+        }
+    }
+    raw.setdefault("provider", {})["node_ensemble"] = handcrafted
+    # User opens --update, doesn't touch ensemble (profile stays "off").
+    new_yaml_text = rewrite_yaml_with_new_answers(raw, _sample(ensemble_profile="off"))
+    new_data = yaml.safe_load(new_yaml_text)
+    assert new_data["provider"]["node_ensemble"] == handcrafted, (
+        "hand-crafted node_ensemble must round-trip when ensemble_profile "
+        "is 'off' on both sides"
+    )
+
+
+def test_rewrite_yaml_overwrites_node_ensemble_when_new_profile_is_set() -> None:
+    """The complement: when the user picks a non-'off' profile, the
+    interview's emitted block must REPLACE raw's old block — otherwise
+    switching profiles silently keeps the old one. Regression guard
+    for the natural overreach of the previous test's fix."""
+    # Start with an "off" YAML carrying a stale block in raw.
+    raw = yaml.safe_load(answers_to_yaml(_sample(ensemble_profile="off"), frontend="cli"))
+    raw.setdefault("provider", {})["node_ensemble"] = {
+        "write": {"models": ["openai/gpt-5", "anthropic/claude-sonnet-4-6"],
+                  "merge": "concat"},
+    }
+    # User picks "full" — three new nodes should overwrite the old "write" block.
+    new_yaml_text = rewrite_yaml_with_new_answers(raw, _sample(ensemble_profile="full"))
+    new_data = yaml.safe_load(new_yaml_text)
+    ne = new_data["provider"]["node_ensemble"]
+    assert set(ne.keys()) == {"ideate", "analyze", "cross_check"}, (
+        f"expected 'full' profile nodes, got {set(ne.keys())}"
+    )
+    assert "write" not in ne, "stale 'write' fan-out must be wiped"
+
+
 # ---------------------------------------------------------------------------
 # Hard-refuse fields
 # ---------------------------------------------------------------------------
@@ -291,3 +338,199 @@ def test_no_simulation_in_hard_refuse() -> None:
     set is consulted by run_update_flow to skip it during the
     interview walk."""
     assert "no_simulation" in HARD_REFUSE_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# Wave 3: round-trip completeness for the 5 previously-dropped fields
+# ---------------------------------------------------------------------------
+
+
+def test_load_current_answers_loads_audience(tmp_path: Path) -> None:
+    """``output.audience`` must be parsed into ``InterviewAnswers.audience``.
+    Without this, every --update silently reverted ``internal`` audience
+    quests to ``external`` (changing References-section behaviour)."""
+    quest_root = tmp_path / "q-aud"
+    quest_root.mkdir()
+    original = _sample(audience="internal")
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(original, frontend="cli"), encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.audience == "internal"
+
+
+def test_load_current_answers_loads_knowledge_top_k(tmp_path: Path) -> None:
+    quest_root = tmp_path / "q-topk"
+    quest_root.mkdir()
+    original = _sample(knowledge_top_k=15, knowledge_external_top_k=30)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(original, frontend="cli"), encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.knowledge_top_k == 15
+    assert loaded.knowledge_external_top_k == 30
+
+
+def test_load_current_answers_loads_max_iterations(tmp_path: Path) -> None:
+    quest_root = tmp_path / "q-iter"
+    quest_root.mkdir()
+    original = _sample(max_iterations=4)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(original, frontend="cli"), encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.max_iterations == 4
+
+
+def test_load_current_answers_loads_ensemble_profile_full(tmp_path: Path) -> None:
+    """``ensemble_profile: full`` reverse-derives from a
+    ``provider.node_ensemble`` block carrying ideate + analyze +
+    cross_check entries — the structural signature of the ``full``
+    profile."""
+    quest_root = tmp_path / "q-ens-full"
+    quest_root.mkdir()
+    original = _sample(ensemble_profile="full")
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(original, frontend="cli"), encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.ensemble_profile == "full"
+
+
+def test_load_current_answers_loads_ensemble_profile_cross_check_only(tmp_path: Path) -> None:
+    quest_root = tmp_path / "q-ens-cc"
+    quest_root.mkdir()
+    original = _sample(ensemble_profile="cross_check_only")
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(original, frontend="cli"), encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.ensemble_profile == "cross_check_only"
+
+
+def test_load_current_answers_loads_ensemble_profile_off_when_absent(tmp_path: Path) -> None:
+    """An emitted YAML with no ``node_ensemble`` block (``profile=off``)
+    must round-trip as ``"off"``, not silently misclassify."""
+    quest_root = tmp_path / "q-ens-off"
+    quest_root.mkdir()
+    original = _sample(ensemble_profile="off")
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(original, frontend="cli"), encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.ensemble_profile == "off"
+
+
+def test_round_trip_preserves_all_five_fields(tmp_path: Path) -> None:
+    """The full BLOCK #1+#2 fix: a YAML with non-default values for
+    every previously-dropped field must survive emit → load → rewrite
+    with the values preserved. This is the integration test for the
+    audit's "5 editable fields silently stripped" finding."""
+    quest_root = tmp_path / "q-rt"
+    quest_root.mkdir()
+    original = _sample(
+        audience="internal",
+        knowledge_top_k=12,
+        knowledge_external_top_k=30,
+        max_iterations=4,
+        ensemble_profile="full",
+    )
+    yaml_text = answers_to_yaml(original, frontend="cli")
+    (quest_root / "config.yaml").write_text(yaml_text, encoding="utf-8")
+    loaded, _, raw = load_current_answers(quest_root)
+    assert loaded.audience == "internal"
+    assert loaded.knowledge_top_k == 12
+    assert loaded.knowledge_external_top_k == 30
+    assert loaded.max_iterations == 4
+    assert loaded.ensemble_profile == "full"
+
+    # Now rewrite without changes and confirm the YAML still carries
+    # those values.
+    new_yaml_text = rewrite_yaml_with_new_answers(raw, loaded)
+    new_data = yaml.safe_load(new_yaml_text)
+    assert new_data["output"]["audience"] == "internal"
+    assert new_data["knowledge"]["top_k"] == 12
+    assert new_data["knowledge"]["external_top_k"] == 30
+    assert new_data["engine"]["max_iterations"] == 4
+    # node_ensemble carries the structural fingerprint of "full".
+    ne = new_data["provider"]["node_ensemble"]
+    assert set(ne.keys()) == {"ideate", "analyze", "cross_check"}
+
+
+# ---------------------------------------------------------------------------
+# Wave 3: new STAGE_INVALIDATION entries
+# ---------------------------------------------------------------------------
+
+
+def test_stage_invalidation_audience() -> None:
+    """audience flips the writer's References handling — re-run write."""
+    assert STAGE_INVALIDATION["audience"] == ("write",)
+
+
+def test_stage_invalidation_ensemble_profile() -> None:
+    """ensemble_profile changes which nodes fan out across models —
+    re-run every node that any profile would fan out across."""
+    assert set(STAGE_INVALIDATION["ensemble_profile"]) == {
+        "ideate", "analyze", "cross_check",
+    }
+
+
+def test_stage_invalidation_knowledge_top_k_pair() -> None:
+    """knowledge_top_k / external_top_k change the literature fetch
+    size — re-run literature, then re-write so the new corpus reaches
+    the writer."""
+    assert STAGE_INVALIDATION["knowledge_top_k"] == ("literature", "write")
+    assert STAGE_INVALIDATION["knowledge_external_top_k"] == ("literature", "write")
+
+
+def test_compute_invalidated_stages_for_ensemble_profile() -> None:
+    """Switching ensemble_profile off → full must invalidate the three
+    fan-out nodes (ideate, analyze, cross_check) in pipeline order."""
+    stages = compute_invalidated_stages(
+        {"ensemble_profile": ("off", "full")},
+    )
+    assert stages == ["ideate", "analyze", "cross_check"]
+
+
+def test_compute_invalidated_stages_for_knowledge_top_k() -> None:
+    """Bumping ``knowledge_top_k`` re-runs literature, then write —
+    in that pipeline order."""
+    stages = compute_invalidated_stages({"knowledge_top_k": (8, 15)})
+    assert stages == ["literature", "write"]
+
+
+def test_keys_to_clear_for_ideate_includes_chosen_idea() -> None:
+    """When ideate is invalidated, both the candidate list AND the
+    picked winner must be cleared — otherwise the resume sees the
+    old ``chosen_idea`` and skips re-firing ideate."""
+    keys = keys_to_clear(["ideate"])
+    assert "ideas" in keys
+    assert "chosen_idea" in keys
+
+
+def test_keys_to_clear_for_literature() -> None:
+    """Clearing literature drops both the retrieved-paper list and
+    the iter counter so the next literature run re-fetches."""
+    keys = keys_to_clear(["literature"])
+    assert "literature" in keys
+    assert "literature_iter" in keys
+
+
+def test_diff_answers_reports_new_field_changes() -> None:
+    """All 5 newly-threaded fields must surface in the diff when
+    they change. Pre-fix, none of them appeared in the dict-asdict
+    diff because they weren't loaded from the YAML."""
+    a = _sample()
+    b = _sample(
+        audience="internal",
+        ensemble_profile="full",
+        knowledge_top_k=15,
+        knowledge_external_top_k=30,
+        max_iterations=4,
+    )
+    diff = diff_answers(a, b)
+    assert "audience" in diff
+    assert "ensemble_profile" in diff
+    assert "knowledge_top_k" in diff
+    assert "knowledge_external_top_k" in diff
+    assert "max_iterations" in diff

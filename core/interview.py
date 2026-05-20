@@ -606,6 +606,20 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # raising it gives the loop more attempts. Either way no node
     # needs to re-run — the iteration counter in QuestState decides.
     "max_iterations": (),
+    # audience flips the writer's References handling (drops FI-internal
+    # cross-quest entries on external; keeps everything on internal).
+    # Only the write stage emits References — re-run write.
+    "audience": ("write",),
+    # ensemble_profile changes which nodes fan out across multiple
+    # models. Conservatively re-run every node that any profile would
+    # fan out across (ideate / analyze / cross_check) so a switch from
+    # off → full re-runs all three with the new ensemble shape.
+    "ensemble_profile": ("ideate", "analyze", "cross_check"),
+    # knowledge.top_k / external_top_k change how many Axon + web
+    # results the literature node fetches. The writer reads the
+    # retrieved list, so a re-fetch should be followed by a re-write.
+    "knowledge_top_k": ("literature", "write"),
+    "knowledge_external_top_k": ("literature", "write"),
 }
 
 

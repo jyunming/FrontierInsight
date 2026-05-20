@@ -208,6 +208,126 @@ def test_update_endpoint_404_when_quest_missing(tmp_path: Path) -> None:
     assert res.status_code == 404
 
 
+def test_get_quest_answers_returns_loaded_yaml(tmp_path: Path) -> None:
+    """``GET /api/quests/<id>/answers`` returns the quest's editable
+    answers parsed from its YAML — used by the /update/<id> form to
+    seed inputs from the saved values rather than from question
+    defaults. Without this, every web --update submit would silently
+    overwrite the user's config with defaults."""
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    quest_id = "test-quest-answers"
+    quest_root = output_root / quest_id
+    quest_root.mkdir()
+    initial = InterviewAnswers(
+        topic="Topic to preserve",
+        title="preserve",
+        output_kinds=["paper_md"],
+        paper_format="neurips",
+        no_simulation=False,
+        study_depth="comprehensive review",
+        comparative_baseline="BaselineX",
+        success_metric="recall >= 0.8",
+        budget="2 hours",
+        clarify_mode="auto",
+        review_panel=["methodologist"],
+        knowledge_enabled=True,
+        provider="openai",
+        provider_model="gpt-4o",
+        # The 5 fields the round-trip used to drop.
+        audience="internal",
+        knowledge_top_k=12,
+        knowledge_external_top_k=30,
+        ensemble_profile="full",
+        max_iterations=4,
+    )
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(initial, frontend="cli"), encoding="utf-8",
+    )
+
+    res = client.get(f"/api/quests/{quest_id}/answers")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    # Spot-check all the load-from-YAML fields, including the 5
+    # previously dropped.
+    assert body["topic"] == "Topic to preserve"
+    assert body["paper_format"] == "neurips"
+    assert body["study_depth"] == "comprehensive review"
+    assert body["audience"] == "internal"
+    assert body["knowledge_top_k"] == 12
+    assert body["knowledge_external_top_k"] == 30
+    assert body["ensemble_profile"] == "full"
+    assert body["max_iterations"] == 4
+
+
+def test_get_quest_answers_404_when_quest_missing(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    res = client.get("/api/quests/does-not-exist/answers")
+    assert res.status_code == 404
+
+
+def test_get_quest_answers_rejects_path_traversal(tmp_path: Path) -> None:
+    """Same allowlist guard as the rest of the /api/quests/<id> routes."""
+    client = _client(tmp_path)
+    for hostile in ("../somewhere", "a/b", "a\\b"):
+        res = client.get(f"/api/quests/{hostile}/answers")
+        # The path-traversal guard responds 400 (regex) or 404
+        # (resolved path doesn't exist) — never 200.
+        assert res.status_code in (400, 404, 422), (
+            f"hostile quest_id {hostile!r} returned {res.status_code}: {res.text}"
+        )
+
+
+def test_update_endpoint_noop_when_payload_matches_yaml(tmp_path: Path) -> None:
+    """The full BLOCK #1 fix: opening /update/<id>, fetching the
+    current answers, and POSTing them back without changes must be
+    a true no-op. Pre-fix, the form seeded inputs with question
+    defaults instead of the YAML, so this round-trip silently
+    overwrote every non-default field with its default."""
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    quest_id = "test-quest-noop"
+    quest_root = output_root / quest_id
+    quest_root.mkdir()
+    initial = InterviewAnswers(
+        topic="Initial topic",
+        title="initial",
+        output_kinds=["paper_md", "paper_pdf"],
+        paper_format="neurips",
+        no_simulation=False,
+        study_depth="comprehensive review",
+        comparative_baseline="BaselineA",
+        success_metric="AUC >= 0.9",
+        budget="5 minutes",
+        clarify_mode="auto",
+        review_panel=["methodologist"],
+        knowledge_enabled=True,
+        provider="openai",
+        provider_model="gpt-4o",
+        audience="internal",
+        knowledge_top_k=15,
+        knowledge_external_top_k=30,
+        ensemble_profile="full",
+        max_iterations=3,
+    )
+    yaml_text = answers_to_yaml(initial, frontend="cli")
+    (quest_root / "config.yaml").write_text(yaml_text, encoding="utf-8")
+
+    # Fetch the seed payload exactly as the JS would.
+    ar = client.get(f"/api/quests/{quest_id}/answers")
+    assert ar.status_code == 200, ar.text
+    payload = ar.json()
+    # Submit the payload unchanged.
+    res = client.post(f"/api/interview/update/{quest_id}", json=payload)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    # Zero changes = the no-op contract.
+    assert body["changes"] == {}, body["changes"]
+    assert body["invalidated_stages"] == []
+    # No backup written when there are no changes.
+    assert not (quest_root / "config.yaml.before-update").exists()
+
+
 def test_update_endpoint_rejects_path_traversal(tmp_path: Path) -> None:
     """Hostile or buggy clients can't escape the output root by
     composing path separators into the quest_id. Mirrors the same
