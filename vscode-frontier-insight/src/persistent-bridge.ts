@@ -40,6 +40,11 @@ export class PersistentBridge {
     private buffers = new WeakMap<net.Socket, string>();
     private path: string;
     private outputChannel: vscode.OutputChannel;
+    // True iff THIS instance successfully bound the socket. ``close()``
+    // only unlinks when this is true so a window whose ``listen()``
+    // refused (because another window already owned the path) won't
+    // delete the live owner's socket on deactivation.
+    private ownsSocket = false;
 
     constructor(outputChannel: vscode.OutputChannel) {
         this.path = persistentBridgePath();
@@ -69,23 +74,57 @@ export class PersistentBridge {
             // connect to the wrong window's Copilot session — silent
             // cross-window LLM routing.
             //
-            // Probe by trying to ``connect()`` first:
-            //   - connect succeeds → another listener is live → refuse
-            //   - connect fails (ENOENT, ECONNREFUSED, ...) → path is
-            //     either stale or never existed → safe to unlink + bind.
-            if (await this.isSocketLive(this.path)) {
+            // Probe order:
+            //   1. ``connect()`` probe. Live → refuse to bind, throw.
+            //      EACCES/EPERM/ENOTSOCK → something foreign at the
+            //      path (regular file, dir, other-user socket); refuse
+            //      to touch it. ENOENT/ECONNREFUSED → stale or absent.
+            //   2. If reached, ``lstat`` to confirm the path is
+            //      actually a socket before unlink. A regular file at
+            //      the per-user path (created accidentally or
+            //      maliciously) must NOT be deleted.
+            const liveness = await this.probeSocket(this.path);
+            if (liveness === "live") {
                 const msg =
                     `Another VSCode window already owns the FI bridge socket at ${this.path}. ` +
                     `Close the other window or use a different VSCODE per-user identity.`;
                 this.outputChannel.appendLine(`[fi] ${msg}`);
                 throw new Error(msg);
             }
-            try { fs.unlinkSync(this.path); } catch { /* nothing to clean */ }
+            if (liveness === "foreign") {
+                const msg =
+                    `Refusing to bind FI bridge socket: path ${this.path} exists but is not a usable socket ` +
+                    `(permission denied or not a socket file). Inspect and remove it manually if you trust it.`;
+                this.outputChannel.appendLine(`[fi] ${msg}`);
+                throw new Error(msg);
+            }
+            // ``stale`` — probe says no live listener AND no
+            // permission/non-socket signal. Confirm via lstat before
+            // unlinking; only delete genuine sockets.
+            try {
+                const st = fs.lstatSync(this.path);
+                if (st.isSocket()) {
+                    fs.unlinkSync(this.path);
+                }
+                // Non-socket here is unexpected after probeSocket said
+                // "stale" — most plausibly a TOCTOU (something replaced
+                // the path between probe and lstat). Leave it alone;
+                // the subsequent ``server.listen()`` will fail with
+                // EADDRINUSE and the user sees a clear error.
+            } catch (e) {
+                const code = (e as NodeJS.ErrnoException).code;
+                if (code !== "ENOENT") {
+                    this.outputChannel.appendLine(
+                        `[fi] lstat ${this.path} failed (${code}); leaving any existing file in place`,
+                    );
+                }
+            }
         }
         return new Promise((resolve, reject) => {
             this.server = net.createServer((socket) => this.onClient(socket));
             this.server.on("error", reject);
             this.server.listen(this.path, () => {
+                this.ownsSocket = true;
                 this.outputChannel.appendLine(
                     `[fi] persistent bridge listening at ${this.path}`,
                 );
@@ -95,24 +134,41 @@ export class PersistentBridge {
     }
 
     /**
-     * Probe whether ``socketPath`` has an active listener. Resolves
-     * ``true`` iff a TCP-level connect succeeds (someone is accepting);
-     * ``false`` on ENOENT, ECONNREFUSED, or any other connect failure
-     * (path stale or never bound).
+     * Probe what's at ``socketPath`` by attempting an IPC connect.
+     * Returns one of three states the caller uses to decide whether
+     * to bind, refuse, or clean up:
      *
-     * Used only by ``listen()`` to distinguish a crash-leftover socket
-     * from a live cross-window owner before unlinking.
+     *   - ``"live"``    — connect succeeded; a listener is active and
+     *                     this instance must NOT touch the path.
+     *   - ``"foreign"`` — connect failed with EACCES / EPERM / ENOTSOCK
+     *                     (something exists but we can't reach it or
+     *                     it's not a socket); refuse to unlink.
+     *   - ``"stale"``   — connect failed with ENOENT / ECONNREFUSED /
+     *                     ECONNRESET / EADDRNOTAVAIL or no recognised
+     *                     error code; path is either absent or a
+     *                     crash-leftover socket safe to clean up.
      */
-    private isSocketLive(socketPath: string): Promise<boolean> {
+    private probeSocket(socketPath: string): Promise<"live" | "foreign" | "stale"> {
         return new Promise((resolve) => {
             const probe = net.createConnection(socketPath);
-            const done = (alive: boolean) => {
+            const done = (result: "live" | "foreign" | "stale") => {
                 probe.removeAllListeners();
                 if (!probe.destroyed) probe.destroy();
-                resolve(alive);
+                resolve(result);
             };
-            probe.once("connect", () => done(true));
-            probe.once("error", () => done(false));
+            probe.once("connect", () => done("live"));
+            probe.once("error", (err: NodeJS.ErrnoException) => {
+                // Codes that mean "path exists but we can't probe it
+                // and definitely can't delete it" → foreign.
+                if (err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOTSOCK") {
+                    done("foreign");
+                } else {
+                    // ENOENT / ECONNREFUSED / ECONNRESET /
+                    // EADDRNOTAVAIL / anything else → safe to treat as
+                    // stale (absent or crash-leftover socket).
+                    done("stale");
+                }
+            });
         });
     }
 
@@ -127,8 +183,13 @@ export class PersistentBridge {
             );
             this.server = null;
         }
-        if (process.platform !== "win32") {
+        if (process.platform !== "win32" && this.ownsSocket) {
+            // Only unlink the socket this instance bound — a window
+            // whose ``listen()`` refused (because another window owned
+            // the path) must not delete the live owner's socket on
+            // its own deactivation.
             try { fs.unlinkSync(this.path); } catch { /* already gone */ }
+            this.ownsSocket = false;
         }
     }
 
