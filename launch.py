@@ -515,9 +515,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="TCP port the FI VSCode extension is listening on for "
              "the LLM bridge. The extension passes this when it spawns FI; "
-             "setting it forces provider.name=vscode_extension regardless of "
-             "what the YAML says. Do not pass this from a regular terminal "
-             "run — use copilot_cli or similar for headless Copilot usage.",
+             "setting it wires the bridge port into ``provider.extra`` "
+             "AND coerces ``provider.name`` to ``vscode_extension`` IF "
+             "the YAML didn't pick a different provider. A YAML that "
+             "explicitly chose ``claude_cli`` / ``openai`` / etc. is "
+             "respected — the bridge wiring is left off. Do not pass "
+             "this from a regular terminal run — use copilot_cli or "
+             "similar for headless Copilot usage.",
     )
     p.add_argument(
         "--vscode-bridge-socket",
@@ -667,13 +671,38 @@ def _validate_resume_quest_id(quest_id: str, output_dir: Path) -> str | None:
 
 
 def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
-    """When launched with ``--vscode-bridge-port N``, force
-    every quest's provider to route through the FI VSCode extension's
-    ``vscode.lm.*`` bridge on that port. Overrides whatever ``provider``
-    block the YAML carried (the YAML can still set ``provider.model``,
-    ``provider.node_models``, etc. — those flow through unchanged so
-    per-node model routing still works inside the chat session)."""
+    """Wire the FI VSCode extension's ``vscode.lm.*`` bridge port into
+    ``cfg.provider.extra`` so the LLMClient can reach it.
+
+    Behaviour by ``cfg.provider.name``:
+
+    * ``vscode_extension`` — route through the bridge (the whole point).
+    * Anything else        — RESPECT the YAML choice. The user picked
+                             ``claude_cli`` / ``openai`` / etc. on
+                             purpose; the bridge being available shouldn't
+                             silently re-route their quest through Copilot.
+                             (``answers_to_yaml`` always emits
+                             ``provider.name`` so the "unset" case doesn't
+                             arise from the interview path; hand-written
+                             YAMLs that omit ``provider:`` land on the
+                             ``ProviderConfig`` default of ``codex`` and
+                             are also respected here.)
+
+    Previously this function unconditionally clobbered ``provider.name``
+    to ``vscode_extension``, which broke ``--serve`` users who picked
+    a non-Copilot provider in the interview but happened to have the
+    extension running (so the auto-resolved socket fired the
+    override). Surfaced on the OPC quest that pinned ``claude_cli`` in
+    YAML and ended up hitting the VSCode bridge with a Claude model id
+    that no Copilot model matched.
+    """
     if port <= 0:
+        return
+    if cfg.provider.name and cfg.provider.name != "vscode_extension":
+        # User picked a different provider; honour it. The bridge wiring
+        # in ``provider.extra`` is dead weight for non-vscode providers
+        # (their transport doesn't read ``bridge_port``) but writing
+        # nothing is the cleanest no-op.
         return
     cfg.provider.name = "vscode_extension"
     cfg.provider.extra = {**(cfg.provider.extra or {}), "bridge_port": port}
@@ -681,14 +710,17 @@ def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
 
 def _apply_vscode_bridge_socket_override(cfg: Config, socket_path: str) -> None:
     """Same as :func:`_apply_vscode_bridge_override` but for the IPC
-    transport. The session-long PersistentBridge in the extension
-    listens on a per-user OS-managed socket/pipe — when --serve or
-    --tools is invoked from outside the chat-spawn path, that socket
-    is the only way to route through ``vscode.lm.*`` without a port
-    convention. Populates ``provider.extra['bridge_socket']`` which
+    transport (Unix-domain socket / Windows named pipe), and with the
+    same provider-respecting semantics — if the YAML picked a non-
+    vscode provider, the auto-resolved socket path does NOT silently
+    re-route their quest through Copilot. Populates
+    ``provider.extra['bridge_socket']`` which
     :func:`core.provider.resolve_endpoint` then threads into the
-    LLMClient."""
+    LLMClient.
+    """
     if not socket_path:
+        return
+    if cfg.provider.name and cfg.provider.name != "vscode_extension":
         return
     cfg.provider.name = "vscode_extension"
     cfg.provider.extra = {
