@@ -673,13 +673,29 @@ class Engine:
         # the answers are already known. Skip it. The 8-slot list
         # matches _CLARIFY_LABELS + the proposal-seed contract.
         overrides = dict(self.config.engine.clarify_overrides)
+        # ``known_slots`` defines when ``clarify_mode=auto`` can
+        # short-circuit (all answers known from clarify_overrides, no
+        # LLM call needed). Kept at the ORIGINAL 7 slots so configs
+        # produced by the existing interview machinery — which doesn't
+        # pin ``topic_shape`` yet — continue to short-circuit instead
+        # of regressing to a wasted LLM call on every quest.
+        # ``topic_shape`` is handled by the safety-default a few lines
+        # below: when not pinned, the engine populates a sensible
+        # ``experimental`` default so downstream consumers always see
+        # a value.
         known_slots = {
             "comparative_baseline", "empirical_vs_theoretical",
             "simulatability", "success_metric", "budget",
             "output_kinds", "study_depth", "paper_venue",
-            "topic_shape",
         }
         if mode == "auto" and known_slots.issubset(overrides.keys()):
+            # Auto-populate ``topic_shape`` when the user pinned the
+            # other 7 but not this one. ``experimental`` is the right
+            # safe default — most quests are experiment-shaped — and
+            # the mismatch helper / design prompt simply act as no-ops
+            # for ``experimental``. The override path leaves the
+            # caller's value intact when they DID pin it.
+            overrides.setdefault("topic_shape", "experimental")
             self._log.info(
                 "[clarify] mode=auto; all %d slots pinned via "
                 "clarify_overrides (skipped LLM call)", len(known_slots),
@@ -820,8 +836,9 @@ class Engine:
             "the quest will run an experiment on a topic that doesn't "
             "want one. design + write stages will keep the experiment "
             "minimal and shift weight to literature synthesis; set "
-            "simulatability=no via clarify_overrides if you prefer the "
-            "no-experiment flow.", shape,
+            "``simulatability: \"no\"`` in clarify_overrides (the quotes "
+            "matter — PyYAML reads bare ``no`` as boolean False) if you "
+            "prefer the no-experiment flow.", shape,
         )
 
     def _resolve_no_simulation_from_clarify(
@@ -878,8 +895,22 @@ class Engine:
         decision = ""
         reason = ""
         if isinstance(sim, dict):
-            decision = str(sim.get("default", "")).strip().lower()
+            raw_default = sim.get("default", "")
+            # Coerce bool to the documented string vocabulary — PyYAML
+            # parses unquoted ``yes`` / ``no`` as ``True`` / ``False``,
+            # which is the most common way users write the slot in
+            # their YAML. Without this coercion, ``simulatability: no``
+            # (unquoted) silently fell through to the legacy fallback
+            # and the engine ran the simulation path despite the user
+            # asking for no-simulation. ``True`` / ``False`` are the
+            # only sensible bool mappings: ``True`` ≈ "yes",
+            # ``False`` ≈ "no". String values are still preferred.
+            if isinstance(raw_default, bool):
+                raw_default = "yes" if raw_default else "no"
+            decision = str(raw_default).strip().lower()
             reason = str(sim.get("reason", "")).strip()
+        elif isinstance(sim, bool):
+            decision = "yes" if sim else "no"
         elif isinstance(sim, str):
             decision = sim.strip().lower()
         if decision or isinstance(sim, dict):

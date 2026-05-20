@@ -332,7 +332,7 @@ python launch.py --config <yaml> --resume <quest_id>
 
 The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `clarify_mode: auto|interactive` — setting `no_simulation: true` in YAML is just the explicit override.
 
-The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: no` in `clarify_overrides` (the interview pre-fills this for review-shaped topics).
+The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: "no"` in `clarify_overrides` (note the **quotes** — PyYAML parses unquoted `no` as boolean `False`; the engine now coerces that to `"no"` but explicit strings are still preferred). The interview pre-fills this for review-shaped topics.
 
 ### Make the PDF compile a hard gate
 

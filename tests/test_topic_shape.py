@@ -188,6 +188,91 @@ def test_clarify_prompt_carries_topic_shape_vocabulary() -> None:
     )
 
 
+def test_resolver_coerces_yaml_bool_false_to_no(tmp_path: Path) -> None:
+    """PyYAML parses bare ``no`` as boolean ``False``, which is how
+    users idiomatically write the slot in YAML. The resolver must
+    treat ``simulatability: False`` as ``"no"`` (route to
+    NO_SIMULATION), not fall through silently to the legacy fallback.
+
+    Before this fix, ``clarify_overrides: simulatability: no``
+    (unquoted) parsed to ``{simulatability: False}``, the resolver
+    rejected the bool, and the engine ran SIMULATE despite the user
+    explicitly asking for NO_SIMULATION.
+    """
+    eng = _mk_engine(tmp_path)
+    # Bool False at top level.
+    assert eng._resolve_no_simulation_from_clarify(
+        {"simulatability": False},
+    ) is True
+    # Bool True at top level.
+    assert eng._resolve_no_simulation_from_clarify(
+        {"simulatability": True},
+    ) is False
+    # Bool nested in the dict-shape (full slot with reason).
+    assert eng._resolve_no_simulation_from_clarify(
+        {"simulatability": {"default": False, "reason": "real-data quest"}},
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_short_circuit_populates_topic_shape_when_unset(
+    tmp_path: Path,
+) -> None:
+    """When clarify_mode=auto and all 7 ORIGINAL slots are pinned via
+    clarify_overrides (the common case from the interview), the
+    short-circuit must still fire AND populate ``topic_shape`` with
+    a safe default. Otherwise downstream consumers see a missing
+    slot and the mismatch helper is unable to fire.
+
+    Regression test for: adding ``topic_shape`` to ``known_slots``
+    would have broken the short-circuit for every existing interview-
+    generated YAML (which doesn't pin the new slot yet)."""
+    from core.config import (
+        Config, EngineConfig, ExecutionConfig, KnowledgeConfig,
+        OutputConfig, ProviderConfig,
+    )
+    overrides = {
+        "comparative_baseline": "(none)",
+        "empirical_vs_theoretical": "empirical",
+        "simulatability": "yes",
+        "success_metric": "F1 >= 0.9",
+        "budget": "5 min CPU",
+        "output_kinds": ["paper_md"],
+        "study_depth": "journal-length",
+        "paper_venue": "generic",
+        # NB: topic_shape intentionally not pinned — emulates current
+        # interview output. The short-circuit must still fire.
+    }
+    cfg = Config(
+        topic="some topic",
+        title="x",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False, clarify_mode="auto",
+            clarify_overrides=overrides,
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    eng = Engine(cfg)
+    # Build a stub client that asserts chat is NEVER called — the
+    # short-circuit's whole purpose is to skip the LLM round-trip.
+    from unittest.mock import AsyncMock
+    chat_mock = AsyncMock()
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    patch = await eng._node_clarify({"topic": "x"})
+
+    chat_mock.assert_not_called()
+    assert patch["clarify_done"] is True
+    # The original 7 survive verbatim.
+    for k, v in overrides.items():
+        assert patch["clarify_answers"][k] == v
+    # The 8th appeared with a safe default.
+    assert patch["clarify_answers"]["topic_shape"] == "experimental"
+
+
 def test_design_prompt_reads_topic_shape_signal() -> None:
     """Design prompt must adapt scope to topic_shape so a review-
     shaped topic doesn't produce a full-bore comparative experiment.
