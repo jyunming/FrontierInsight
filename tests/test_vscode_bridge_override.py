@@ -32,6 +32,7 @@ from core.config import (
 from launch import (
     _apply_vscode_bridge_override,
     _apply_vscode_bridge_socket_override,
+    _set_vscode_bridge_extras,
 )
 
 
@@ -140,3 +141,117 @@ def test_socket_override_respects_every_non_vscode_provider(
     cfg = _mk_cfg(tmp_path, provider_name=provider_name)
     _apply_vscode_bridge_socket_override(cfg, socket_path="/tmp/fi.sock")
     assert cfg.provider.name == provider_name
+
+
+# --- PM-command extras helper -----------------------------------------------
+#
+# ``_set_vscode_bridge_extras`` is the helper that the five PM-command
+# runners (``_run_summarize`` / ``_run_digest`` / ``_run_portfolio`` /
+# ``_run_critique`` / ``_run_proposal``) call to wire the bridge port +
+# socket into their freshly-built ``ProviderConfig``. The guard added in
+# PR #134 to ``_apply_vscode_bridge_override`` /
+# ``_apply_vscode_bridge_socket_override`` was missed here, so a user
+# running e.g. ``python launch.py --critique <id> --critique-provider
+# claude_cli`` while ``--serve``'s auto-resolved bridge socket was set
+# had their critique silently re-routed through Copilot. Same contract
+# now applies; same Literal-derived sweep guards it.
+
+
+def test_extras_no_op_when_port_zero_and_socket_empty(tmp_path: Path) -> None:
+    cfg = _mk_cfg(tmp_path, provider_name="claude_cli")
+    _set_vscode_bridge_extras(cfg.provider, bridge_port=0, bridge_socket="")
+    assert cfg.provider.name == "claude_cli"
+    assert "bridge_port" not in (cfg.provider.extra or {})
+    assert "bridge_socket" not in (cfg.provider.extra or {})
+
+
+def test_extras_wires_port_when_provider_is_vscode_extension(
+    tmp_path: Path,
+) -> None:
+    cfg = _mk_cfg(tmp_path, provider_name="vscode_extension")
+    _set_vscode_bridge_extras(cfg.provider, bridge_port=12345, bridge_socket="")
+    assert cfg.provider.name == "vscode_extension"
+    assert cfg.provider.extra["bridge_port"] == 12345
+    assert "bridge_socket" not in cfg.provider.extra
+
+
+def test_extras_wires_socket_when_provider_is_vscode_extension(
+    tmp_path: Path,
+) -> None:
+    cfg = _mk_cfg(tmp_path, provider_name="vscode_extension")
+    _set_vscode_bridge_extras(
+        cfg.provider, bridge_port=0, bridge_socket="/tmp/fi.sock",
+    )
+    assert cfg.provider.name == "vscode_extension"
+    assert cfg.provider.extra["bridge_socket"] == "/tmp/fi.sock"
+    assert "bridge_port" not in cfg.provider.extra
+
+
+def test_extras_wires_both_port_and_socket_when_vscode_extension(
+    tmp_path: Path,
+) -> None:
+    """``core.provider`` prefers the socket but both are accepted; the
+    helper writes whichever are non-empty so callers can hand it both
+    and let the resolver pick."""
+    cfg = _mk_cfg(tmp_path, provider_name="vscode_extension")
+    _set_vscode_bridge_extras(
+        cfg.provider, bridge_port=12345, bridge_socket="/tmp/fi.sock",
+    )
+    assert cfg.provider.name == "vscode_extension"
+    assert cfg.provider.extra["bridge_port"] == 12345
+    assert cfg.provider.extra["bridge_socket"] == "/tmp/fi.sock"
+
+
+def test_extras_respects_explicit_claude_cli_provider(tmp_path: Path) -> None:
+    """The Slice 7 HIGH #3 bug. ``--critique-provider claude_cli``
+    while the persistent VSCode bridge socket is auto-resolved must
+    NOT re-route the critique through Copilot."""
+    cfg = _mk_cfg(tmp_path, provider_name="claude_cli")
+    _set_vscode_bridge_extras(
+        cfg.provider, bridge_port=12345, bridge_socket="/tmp/fi.sock",
+    )
+    assert cfg.provider.name == "claude_cli"
+    assert "bridge_port" not in (cfg.provider.extra or {})
+    assert "bridge_socket" not in (cfg.provider.extra or {})
+
+
+@pytest.mark.parametrize("provider_name", _NON_VSCODE_PROVIDERS)
+def test_extras_respects_every_non_vscode_provider_port(
+    tmp_path: Path, provider_name: str,
+) -> None:
+    """``ProviderName``-derived sweep — bridge port alone must not
+    clobber any non-vscode provider chosen on a PM-command flag."""
+    cfg = _mk_cfg(tmp_path, provider_name=provider_name)
+    _set_vscode_bridge_extras(cfg.provider, bridge_port=999, bridge_socket="")
+    assert cfg.provider.name == provider_name
+    assert "bridge_port" not in (cfg.provider.extra or {})
+
+
+@pytest.mark.parametrize("provider_name", _NON_VSCODE_PROVIDERS)
+def test_extras_respects_every_non_vscode_provider_socket(
+    tmp_path: Path, provider_name: str,
+) -> None:
+    """``ProviderName``-derived sweep — bridge socket alone must not
+    clobber any non-vscode provider chosen on a PM-command flag."""
+    cfg = _mk_cfg(tmp_path, provider_name=provider_name)
+    _set_vscode_bridge_extras(
+        cfg.provider, bridge_port=0, bridge_socket="/tmp/fi.sock",
+    )
+    assert cfg.provider.name == provider_name
+    assert "bridge_socket" not in (cfg.provider.extra or {})
+
+
+@pytest.mark.parametrize("provider_name", _NON_VSCODE_PROVIDERS)
+def test_extras_respects_every_non_vscode_provider_both(
+    tmp_path: Path, provider_name: str,
+) -> None:
+    """The realistic ``--serve`` case: both port AND socket auto-
+    resolved; explicit non-vscode PM-command provider still wins."""
+    cfg = _mk_cfg(tmp_path, provider_name=provider_name)
+    _set_vscode_bridge_extras(
+        cfg.provider, bridge_port=12345, bridge_socket="/tmp/fi.sock",
+    )
+    assert cfg.provider.name == provider_name
+    extras = cfg.provider.extra or {}
+    assert "bridge_port" not in extras
+    assert "bridge_socket" not in extras
