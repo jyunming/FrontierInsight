@@ -741,9 +741,28 @@ def make_app(
         live = {q.quest_id: q for q in app.state.launcher.list_alive()}
         seen: dict[str, dict[str, Any]] = {}
 
-        # Collect (job_id, log_path) from each of the three layouts.
-        # Newer-first ordering happens after the merge.
-        candidates: list[tuple[str, Path]] = []
+        # Collect (job_id, log_path, mtime, size) from each of the
+        # three layouts. ``stat()`` is called ONCE per candidate here
+        # (so the subsequent sort + dict build don't re-stat — 3x
+        # stat calls per file in the old version was an unnecessary
+        # cost on output roots with many quests). Files that vanish
+        # between ``iterdir()`` and ``stat()`` (race with a deletion
+        # / a cancelled-quest cleanup) are dropped silently rather
+        # than 500ing the endpoint.
+        def _stat_or_none(p: Path) -> tuple[float, int] | None:
+            try:
+                st = p.stat()
+                return st.st_mtime, st.st_size
+            except (FileNotFoundError, PermissionError):
+                return None
+
+        candidates: list[tuple[str, Path, float, int]] = []
+
+        def _add(jid: str, lp: Path) -> None:
+            stat = _stat_or_none(lp)
+            if stat is not None:
+                candidates.append((jid, lp, stat[0], stat[1]))
+
         # 1a. Per-quest launch logs at <quest>/.fi/launch.log.
         if out_root.is_dir():
             for quest_dir in out_root.iterdir():
@@ -751,7 +770,7 @@ def make_app(
                     continue
                 lp = quest_dir / ".fi" / "launch.log"
                 if lp.is_file():
-                    candidates.append((quest_dir.name, lp))
+                    _add(quest_dir.name, lp)
         # 1b. Per-tool-job logs at _jobs/<job_id>/launch.log.
         jobs_root = out_root / "_jobs"
         if jobs_root.is_dir():
@@ -760,17 +779,17 @@ def make_app(
                     continue
                 lp = job_dir / "launch.log"
                 if lp.is_file():
-                    candidates.append((job_dir.name, lp))
+                    _add(job_dir.name, lp)
         # 1c. Legacy flat _logs/<id>.log — preserved so older sessions
         # remain visible in the dashboard until the user cleans them up.
         legacy_logs_dir = out_root / "_logs"
         if legacy_logs_dir.is_dir():
             for p in legacy_logs_dir.glob("*.log"):
-                candidates.append((p.stem, p))
+                _add(p.stem, p)
 
         # Most-recent-first, capped at 200 to keep the response small.
-        candidates.sort(key=lambda jp: jp[1].stat().st_mtime, reverse=True)
-        for jid, p in candidates[:200]:
+        candidates.sort(key=lambda row: row[2], reverse=True)
+        for jid, _lp, mtime, size in candidates[:200]:
             if jid in seen:
                 # If both new and legacy layouts have an entry for the
                 # same id (unlikely but possible during migration),
@@ -780,8 +799,8 @@ def make_app(
                 "job_id": jid,
                 "kind": _classify_job(jid),
                 "alive": jid in live,
-                "log_mtime": p.stat().st_mtime,
-                "log_size": p.stat().st_size,
+                "log_mtime": mtime,
+                "log_size": size,
             }
         # 2. Live registry entries (may include jobs that haven't
         #    written a log file yet — rare but possible during startup).
