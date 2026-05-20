@@ -8,6 +8,7 @@ Each route is tested with a mocked subprocess so the suite runs in
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -272,6 +273,37 @@ def test_post_503_when_launcher_full(
     res = client.post("/api/tools/portfolio", json={})
     assert res.status_code == 503
     assert res.headers.get("Retry-After") == "30"
+
+
+def test_post_same_second_double_submit_yields_distinct_job_ids(
+    tmp_path: Path,
+    mock_subprocess: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: two POSTs to the same tool inside one wall-clock
+    second (user double-clicks Run, or two tabs race) must produce
+    DIFFERENT job_ids. Pre-fix, both got ``<tool>-<epoch>`` and the
+    second LaunchedQuest shadowed the first in ``status_for()``,
+    leaking a subprocess and truncating the first log via ``wb``."""
+    # Pin the clock so the epoch component is identical for both
+    # calls — only the random suffix can disambiguate.
+    monkeypatch.setattr("web.tools_routes.time.time", lambda: 1_700_000_000)
+
+    client = _client(tmp_path)
+    res1 = client.post("/api/tools/portfolio", json={})
+    res2 = client.post("/api/tools/portfolio", json={})
+    assert res1.status_code == 200
+    assert res2.status_code == 200
+    jid1 = res1.json()["job_id"]
+    jid2 = res2.json()["job_id"]
+    assert jid1 != jid2, (jid1, jid2)
+    assert jid1.startswith("portfolio-1700000000-")
+    assert jid2.startswith("portfolio-1700000000-")
+    # Suffix must satisfy web.server._QUEST_ID_RE so status_for()
+    # lookups still resolve the new id format.
+    quest_id_re = re.compile(r"^[A-Za-z0-9_\-.]+$")
+    assert quest_id_re.match(jid1)
+    assert quest_id_re.match(jid2)
 
 
 # ---------------------------------------------------------------------------

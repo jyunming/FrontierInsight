@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import time
 from pathlib import Path
@@ -936,7 +937,10 @@ def make_app(
         try:
             launched = app.state.launcher.launch_command(
                 argv_tail=["--install-tectonic"],
-                job_id=f"tectonic-{int(time.time())}",
+                # Random suffix avoids same-second collision if two
+                # tabs both click "install tectonic" — see tools_routes
+                # for the same fix on the 8 tool launchers.
+                job_id=f"tectonic-{int(time.time())}-{secrets.token_hex(3)}",
             )
         except QuestLauncherFull as e:
             return JSONResponse(

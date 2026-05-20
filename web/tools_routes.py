@@ -25,6 +25,7 @@ path field for power users whose files already live on the box.
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -379,7 +380,12 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             raise HTTPException(400, str(e))
 
         from web.quest_launcher import QuestLauncherFull
-        job_id = f"{spec.name}-{int(time.time())}"
+        # Random suffix prevents same-second double-submit collisions
+        # (double-click Run, two tabs both POST in the same second):
+        # without it, two requests share a job_id, the launcher truncates
+        # the first log via "wb", and the second LaunchedQuest shadows
+        # the first in status_for() — leaking the first subprocess.
+        job_id = f"{spec.name}-{int(time.time())}-{secrets.token_hex(3)}"
         try:
             launched = app.state.launcher.launch_command(
                 argv_tail=argv_tail, job_id=job_id,
