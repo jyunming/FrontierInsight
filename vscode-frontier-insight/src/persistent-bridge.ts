@@ -314,9 +314,19 @@ export class PersistentBridge {
                 return;
             }
             const model = models[0];
+            // Align with ``bridge.ts:294-298`` exactly so chat-spawn
+            // and --serve transports give the model identical context
+            // for the same conversation. ``vscode.lm.*`` has only
+            // User / Assistant roles (no System) — both transports
+            // therefore collapse ``system`` to ``User``. If we ever
+            // want to preserve system-message intent, the fix needs
+            // to land in BOTH bridges (e.g., a shared helper that
+            // prefixes ``[SYSTEM]`` consistently); diverging here
+            // would silently change quest behaviour depending on
+            // which transport the user happened to be on.
             const messages = req.messages.map((m) =>
-                m.role === "system"
-                    ? vscode.LanguageModelChatMessage.User(`SYSTEM: ${m.content}`)
+                m.role === "assistant"
+                    ? vscode.LanguageModelChatMessage.Assistant(m.content)
                     : vscode.LanguageModelChatMessage.User(m.content),
             );
             const cts = new vscode.CancellationTokenSource();
