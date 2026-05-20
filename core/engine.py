@@ -1266,7 +1266,77 @@ class Engine:
         )
         text = await self._chat(prompt, node="design")
         design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
-        return {"design": design}
+
+        # Second-pass methodology audit. The draft design just produced is
+        # passed back to the LLM with a fixed checklist of common-but-fatal
+        # design errors (circular evaluation, single-point eval, weak
+        # baseline plans, pseudo-units, natural-stratum collapse) and a
+        # mandate to either patch them or confirm non-applicability.
+        #
+        # Cost: +1 LLM call per design pass. For a typical 2-iteration
+        # quest, +2 calls in the design lane. Worth it because design
+        # errors are O(quest cost) to fix at review time but O(critique
+        # call cost) to fix here, BEFORE implement / execute / analyze
+        # / write / review have spent compute building on a bad design.
+        #
+        # Failure isolation: this whole block is wrapped in
+        # try/except so a transient provider/network error on the
+        # critique call (``_chat`` itself can raise) NEVER blocks the
+        # quest. Parse failures and shape drift on the response are
+        # also non-fatal — the original draft survives in those
+        # cases. The audit is strictly advisory.
+        critique_prompt = self._prompts["design_self_critique"].substitute(
+            topic=state["topic"],
+            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+            draft_design=json.dumps(design, indent=2),
+        )
+        critique: dict[str, Any] = {}
+        try:
+            critique_text = await self._chat(
+                critique_prompt, node="design_self_critique",
+            )
+            critique = _parse_json_lenient(
+                critique_text, node="design_self_critique",
+            ) or {}
+        except Exception as e:  # noqa: BLE001 — see "Failure isolation" above
+            self._log.warning(
+                "[design_self_critique] chat/parse failed (%r); keeping "
+                "un-audited draft design", e,
+            )
+        amended = critique.get("amended_design") if isinstance(critique, dict) else None
+        objections = critique.get("objections_addressed") if isinstance(critique, dict) else None
+        if isinstance(amended, dict) and amended:
+            # The amended design must keep the original design's shape —
+            # otherwise downstream consumers (implement / analyze /
+            # write) will silently mis-read missing keys. Require the
+            # SAME set of top-level keys the draft had; on schema
+            # drift, fall back to the draft rather than ship a partial
+            # design. (Stricter than the prior "hypothesis only" check,
+            # which would silently drop variables / method /
+            # figures_planned / dependencies.)
+            draft_keys = set(design.keys())
+            amended_keys = set(amended.keys())
+            if draft_keys.issubset(amended_keys):
+                design = amended
+            else:
+                self._log.warning(
+                    "[design_self_critique] amended_design dropped keys "
+                    "%s; keeping draft", sorted(draft_keys - amended_keys),
+                )
+        n_addressed = len(objections) if isinstance(objections, list) else 0
+        self._log.info(
+            "[design_self_critique] iteration=%d objections_addressed=%d",
+            iteration, n_addressed,
+        )
+
+        out: dict[str, Any] = {"design": design}
+        if isinstance(objections, list):
+            # Surfaced into state so it can be inspected post-quest (run.log
+            # already carries the count; the full list lives here for any
+            # caller that wants to render it).
+            out["design_objections"] = objections
+        return out
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
         """Agent-side data collection via Axon, run BEFORE
@@ -2840,7 +2910,8 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _load_prompts() -> dict[str, string.Template]:
     names = (
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
-        "design", "implement", "execute_reflect", "analyze",
+        "design", "design_self_critique",   # second-pass methodology audit
+        "implement", "execute_reflect", "analyze",
         "cross_check", "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
