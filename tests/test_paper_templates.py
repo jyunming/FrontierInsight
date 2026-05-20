@@ -6,17 +6,21 @@ These templates are consumed by pandoc; every one of them must:
    ``\begin{longtable}[]{...}``, and without the package the compile
    dies on ``Environment longtable undefined``.
 
-2. Declare ``\newcounter{none}`` — pandoc prefixes caption-less
+2. Load ``booktabs`` — pandoc wraps every pipe table with ``\toprule``
+   / ``\midrule`` / ``\bottomrule``; without booktabs the compile dies
+   on ``Undefined control sequence. \toprule`` at the first table.
+
+3. Declare ``\newcounter{none}`` — pandoc prefixes caption-less
    tables with ``\def\LTcaptype{none}``; ``longtable`` then calls
    ``\refstepcounter{\LTcaptype}`` internally, so the counter must
    exist or the compile dies on ``No counter 'none' defined``.
 
-3. NOT load ``authblk`` together with ``titling`` — when both patch
+4. NOT load ``authblk`` together with ``titling`` — when both patch
    ``\author`` and ``\maketitle``, LaTeX hits ``\author[N]{...}``
    (authblk's optional-affiliation form) and reports ``Missing
    \begin{document}`` because titling's redefinition shadows it.
 
-A real EUV-stochastics quest hit all three failure modes in
+A real EUV-stochastics quest hit several of these failure modes in
 succession. This module is the regression guard so a future template
 edit (or a new template) doesn't silently re-introduce any of them.
 """
@@ -75,6 +79,19 @@ def test_template_loads_longtable_and_array(fmt: str) -> None:
     assert r"\usepackage{array}" in txt, (
         f"{fmt}/template.tex must load array (paired with longtable for "
         f"cell formatting)"
+    )
+
+
+@pytest.mark.parametrize("fmt", EXPECTED_FORMATS)
+def test_template_loads_booktabs(fmt: str) -> None:
+    """Pandoc renders every markdown pipe table with ``\\toprule`` /
+    ``\\midrule`` / ``\\bottomrule`` from booktabs. With ``longtable``
+    loaded but ``booktabs`` absent, the compile dies on
+    ``Undefined control sequence. \\toprule`` at the first table."""
+    txt = (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8")
+    assert r"\usepackage{booktabs}" in txt, (
+        f"{fmt}/template.tex must load booktabs so pandoc-rendered "
+        f"markdown tables (\\toprule/\\midrule/\\bottomrule) compile"
     )
 
 
