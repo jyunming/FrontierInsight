@@ -2711,13 +2711,24 @@ class Engine:
         # Tail the per-quest run.log. The full trace is at the end of
         # the file; ~80 lines is comfortably more than any single
         # traceback but small enough to not bury the user.
+        #
+        # Bounded read: seek to the last 64 KB rather than reading the
+        # whole file into memory. Quest run.logs occasionally grow to
+        # tens of MB (LangGraph trace verbosity + per-iteration retry
+        # spam), and we don't want a diagnostic write — which fires
+        # exactly when the user is already having a bad day — to slow
+        # down further on a giant log. 64 KB is more than enough for
+        # 80 lines of even very long tracebacks. Mirrors the helper
+        # in ``web/server.py::_read_log_tail``.
         run_log_path = self.fi_dir / "run.log"
         log_tail = "(run.log not on disk — likely a pre-logging failure)"
         if run_log_path.is_file():
             try:
-                lines = run_log_path.read_text(
-                    encoding="utf-8", errors="replace",
-                ).splitlines()
+                size = run_log_path.stat().st_size
+                with run_log_path.open("rb") as f:
+                    f.seek(max(0, size - 65536))
+                    tail_bytes = f.read()
+                lines = tail_bytes.decode("utf-8", errors="replace").splitlines()
                 log_tail = "\n".join(lines[-80:])
             except OSError as e:
                 log_tail = f"(could not read run.log: {e!r})"
@@ -2733,11 +2744,18 @@ class Engine:
                 bridge_extras.append(f"{key}={val!r}")
         provider_extra_str = ", ".join(bridge_extras) or "(none)"
 
+        # Normalize the topic for header rendering. YAML block-scalar
+        # topics can contain embedded newlines, which would break the
+        # single-line ``**Topic:**`` header and split the markdown
+        # structure across multiple bullets. Collapse all internal
+        # whitespace (newlines, tabs, runs of spaces) to a single
+        # space before truncating to 200 chars.
+        topic_one_line = " ".join(self.config.topic.split())[:200]
         body = (
             f"# Quest failed before producing a paper\n"
             f"\n"
             f"**Quest ID:** `{self.quest_id}`\n"
-            f"**Topic:** {self.config.topic.strip()[:200]}\n"
+            f"**Topic:** {topic_one_line}\n"
             f"**Failing node:** `{failing_node}`\n"
             f"**Provider:** `{provider_name}` / model `{provider_model}`"
             f" / extras: {provider_extra_str}\n"

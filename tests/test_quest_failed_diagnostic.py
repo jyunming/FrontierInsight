@@ -25,7 +25,7 @@ The contract pins:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -304,48 +304,52 @@ def test_clear_stale_quest_failed_tolerates_unlink_failure(
 
 
 @pytest.mark.asyncio
-async def test_engine_run_writes_diagnostic_when_node_raises(
+async def test_engine_run_writes_diagnostic_when_early_stage_raises(
     tmp_path: Path, request: pytest.FixtureRequest,
 ) -> None:
-    """End-to-end: when ``Engine.run`` raises out of a node (here,
-    forced by making ``_node_clarify`` raise), the wrap-with-try-except
-    around the run body must call the diagnostic helper, which must
-    write ``quest_failed.md`` next to the empty quest dir — AND the
-    original exception must still propagate to the caller.
+    """End-to-end: when something inside ``Engine.run``'s try-body
+    raises, the wrap-with-try-except must call the diagnostic helper
+    AND let the original exception propagate.
 
-    This pins the contract that's most likely to regress if someone
-    restructures ``Engine.run`` later (e.g. moves the saver block, adds
-    a new exit path) — the unit tests cover the helper in isolation,
-    but not the calling wrap."""
+    Pins the contract that's most likely to regress if someone
+    restructures ``Engine.run`` later (e.g. moves the saver block,
+    adds a new exit path).
+
+    We force the FAILURE at the pre-graph ``_preflight_paper_pdf``
+    stage — which keeps this test hermetic (no venv setup, no
+    endpoint resolution, no real LangGraph saver), and exercises the
+    ``run_config is None`` branch of the diagnostic helper. A
+    failure mid-graph would also work but require mocking the
+    venv-creating ``executor.setup`` and the real provider endpoint;
+    pre-graph is the same wrap, less plumbing.
+    """
     eng = _mk_engine(tmp_path, request)
+    sentinel = RuntimeError("simulated preflight failure for diagnostic test")
 
-    # Force the first node the graph runs to raise. ``clarify`` is the
-    # entry point with ``clarify_mode='off'`` — actually, with
-    # 'off' clarify is skipped. Use ideate instead.
-    sentinel = RuntimeError("simulated node crash for diagnostic test")
-
-    async def boom(state):
+    def boom() -> None:
         raise sentinel
 
-    # Patch ``_node_ideate`` (the first node that runs when clarify is
-    # off) so its LLM call doesn't fire — just raise immediately.
-    with patch.object(eng, "_node_ideate", boom):
+    with patch.object(eng, "_preflight_paper_pdf", boom):
         with pytest.raises(RuntimeError) as exc_info:
             await eng.run()
 
     # Original exception propagated — masking is the worst possible bug.
     assert exc_info.value is sentinel
 
-    # Diagnostic file written.
+    # Diagnostic file written. ``quest_failed.md`` lives next to the
+    # otherwise-empty quest dir.
     diag = eng.quest_root / "quest_failed.md"
     assert diag.is_file(), (
-        f"Engine.run must write quest_failed.md when a node raises; "
-        f"only found: {list(eng.quest_root.iterdir())}"
+        f"Engine.run must write quest_failed.md on a pre-graph "
+        f"failure; only found: {list(eng.quest_root.iterdir())}"
     )
     body = diag.read_text(encoding="utf-8")
-    assert "simulated node crash for diagnostic test" in body
+    assert "simulated preflight failure for diagnostic test" in body
     assert "RuntimeError" in body
     assert "--resume" in body
+    # Pre-graph branch: the failing-node label must reflect that the
+    # graph never opened, not surface a stale checkpoint reading.
+    assert "pre-graph stage" in body
 
 
 @pytest.mark.asyncio
@@ -367,6 +371,87 @@ async def test_engine_run_cleans_stale_diagnostic_on_success_after_failure(
     # returning artifacts on the data-paused branch.
     eng._clear_stale_quest_failed_diagnostic()
     assert not stale.exists()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_topic_header_strips_embedded_newlines(
+    tmp_path: Path, request: pytest.FixtureRequest,
+) -> None:
+    """A YAML block-scalar topic carries embedded newlines. Without
+    normalization, those newlines land in the rendered
+    ``**Topic:**`` line and break the markdown header by splitting
+    it across multiple bullet rows. The helper must collapse all
+    internal whitespace to a single space before the 200-char cap."""
+    cfg = Config(
+        topic="line one\nline two\nline three with    extra    spaces",
+        title="multi-line",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False, clarify_mode="off",
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    eng = _mk_engine(tmp_path, request, cfg=cfg)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    await eng._write_quest_failed_diagnostic(
+        RuntimeError("x"), run_config=None,
+    )
+    diag = (eng.quest_root / "quest_failed.md").read_text(encoding="utf-8")
+    # The Topic line should be exactly one line — find it, assert
+    # it doesn't contain a newline AND the three pieces are
+    # collapsed to single spaces.
+    topic_lines = [
+        line for line in diag.splitlines()
+        if line.startswith("**Topic:**")
+    ]
+    assert len(topic_lines) == 1
+    rendered = topic_lines[0].split("**Topic:**", 1)[1].strip()
+    assert "\n" not in rendered
+    assert "line one line two line three with extra spaces" in rendered
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_log_tail_uses_bounded_read(
+    tmp_path: Path, request: pytest.FixtureRequest,
+) -> None:
+    """The diagnostic must not load the entire run.log into memory.
+    Quest logs can grow to tens of MB; reading the whole file makes
+    the failure path slower exactly when the user is least patient.
+    Verifies the helper reads ≤ 64 KB even when the file is much
+    larger, and still surfaces the LAST 80 lines."""
+    eng = _mk_engine(tmp_path, request)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build a 1 MB log: 10_000 lines of "filler garbage line N\n" plus
+    # a distinctive tail. We assert the tail lands in the diagnostic
+    # and the filler far from the tail does NOT (which it couldn't
+    # if we're reading the last 64 KB ≈ a few hundred lines).
+    log = eng.fi_dir / "run.log"
+    filler_line = "filler garbage line " + ("x" * 80) + "\n"
+    expected_count = max(1, 1_000_000 // len(filler_line))
+    with log.open("w", encoding="utf-8") as f:
+        for i in range(expected_count):
+            f.write(filler_line)
+        f.write("[implement] FINAL TAIL CANARY at the very end\n")
+
+    await eng._write_quest_failed_diagnostic(
+        RuntimeError("y"), run_config=None,
+    )
+    diag = (eng.quest_root / "quest_failed.md").read_text(encoding="utf-8")
+    # Tail line MUST land.
+    assert "FINAL TAIL CANARY at the very end" in diag
+    # The rendered log_tail section is bounded — the diagnostic
+    # itself shouldn't be MB-sized. A simple upper bound on the .md
+    # size validates that we didn't slurp the whole log in.
+    diag_size = (eng.quest_root / "quest_failed.md").stat().st_size
+    assert diag_size < 200_000, (
+        f"diagnostic file is {diag_size} bytes — far larger than the "
+        f"~64 KB bound; bounded-read regression?"
+    )
 
 
 @pytest.mark.asyncio
