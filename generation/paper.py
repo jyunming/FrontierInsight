@@ -21,12 +21,12 @@ import logging
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from core.config import Config
 from core.engine import QuestArtifacts
+from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
 
 # Unicode math + typographic glyphs LLMs routinely emit that
@@ -505,43 +505,18 @@ class PaperGenerator:
         return result
 
     def _find_pdf_engine(self) -> tuple[str, str] | None:
-        """Locate a LaTeX engine for pandoc's ``--pdf-engine`` flag.
+        """Back-compat shim. The real lookup lives in
+        ``generation/_pdf_engine.py`` as ``find_pdf_engine`` so the
+        poster generator can call the same code path without
+        instantiating a ``PaperGenerator``. The method form is kept
+        because existing tests (and ``core/engine.py`` pre-flight)
+        monkeypatch ``PaperGenerator._find_pdf_engine`` directly.
 
-        Search order (stop at first match):
-          1. ``shutil.which("pdflatex")`` — the canonical MiKTeX / TeX Live
-             install. Preferred when present because a warm cache compiles
-             in ~1-3 s.
-          2. ``shutil.which("tectonic")`` — a single-binary self-bootstrapping
-             LaTeX. Works on corporate laptops without admin (downloads
-             packages on first run, no install step, no GUI prompts).
-          3. ``<repo_root>/tools/tectonic.exe`` (or ``./tools/tectonic``
-             on POSIX) — the opt-in install location populated by
-             ``python launch.py --install-tectonic``. Most-isolated path,
-             used when neither system install is present.
-
-        Returns ``(engine_name, full_path)`` or ``None`` when no engine
-        is reachable. Tectonic is intentionally the fallback — flipping
-        the order would penalize the dominant case (existing MiKTeX
-        users with a warm cache) to help the corporate-laptop minority.
+        Forwards ``paper.REPO_ROOT`` through so existing tests that
+        ``monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)`` keep
+        steering the repo-local tectonic probe at the temp dir.
         """
-        pdflatex = shutil.which("pdflatex")
-        if pdflatex:
-            return ("pdflatex", pdflatex)
-        tectonic = shutil.which("tectonic")
-        if tectonic:
-            return ("tectonic", tectonic)
-        # Repo-local opt-in install. Check ONLY the platform-appropriate
-        # filename — checking the wrong extension first (e.g.
-        # `tectonic.exe` on POSIX) risks picking up a stray Windows
-        # binary in a shared / WSL-mounted repo and crashing the pandoc
-        # call with an exec-format error. `--install-tectonic` writes
-        # under the same platform-appropriate name.
-        repo_tectonic = REPO_ROOT / "tools" / (
-            "tectonic.exe" if sys.platform == "win32" else "tectonic"
-        )
-        if repo_tectonic.is_file():
-            return ("tectonic", str(repo_tectonic))
-        return None
+        return _find_pdf_engine_impl(REPO_ROOT)
 
     def _compile_pdf(
         self, paper_md: Path, out_dir: Path,

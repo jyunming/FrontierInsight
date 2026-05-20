@@ -9,6 +9,9 @@ Covers:
 - pdflatex skip when the binary is not on PATH (no PDF asserted unless real
   pdflatex is available; even then, beamerposter may not be installed, so we
   do not require a successful PDF compile here).
+- Tectonic fallback: when pdflatex is absent but tectonic is on PATH, the
+  poster generator picks tectonic — same 3-tier discovery the paper
+  generator uses (audit BLOCK #5).
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +33,7 @@ from core.config import (
 )
 from core.engine import QuestArtifacts
 from core.provider import ResolvedEndpoint
+from generation import poster as poster_mod
 from generation.poster import PosterGenerator
 
 
@@ -211,3 +216,204 @@ async def test_poster_pdflatex_invoked_when_available(
     result = await PosterGenerator(cfg).generate(art, art.quest_root)
     assert "poster_tex" in result
     assert result["poster_tex"].exists()
+
+
+# ---- Audit BLOCK #5: poster shares paper's 3-tier engine discovery ---------
+
+
+@pytest.mark.asyncio
+async def test_poster_falls_back_to_tectonic_when_pdflatex_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit BLOCK #5 regression: a user who followed the documented
+    no-admin install (``python launch.py --install-tectonic``) gets
+    ``paper.pdf`` but the poster used to silently skip because the
+    previous gate was a bare ``shutil.which('pdflatex')`` check. After
+    the fix, poster.py must consult the same 3-tier discovery the
+    paper generator uses (pdflatex -> system tectonic -> repo-local
+    ``tools/tectonic[.exe]``).
+
+    Mock pdflatex as absent and tectonic as present on PATH; assert
+    the engine binary the subprocess actually receives is tectonic.
+    """
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(payload)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        if name == "pdflatex":
+            return None
+        if name == "tectonic":
+            return "/fake/tectonic.exe"
+        return None
+    # Patch the shutil module used by both poster.py and _pdf_engine.py
+    # (same module object — both ``import shutil``).
+    monkeypatch.setattr(poster_mod.shutil, "which", fake_which)
+
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured_cmd[:] = list(cmd)
+        # Pretend the engine produced poster.pdf so the success branch
+        # records it in the result dict and the test can assert on it.
+        cwd = Path(_kwargs.get("cwd") or ".")
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    # The subprocess invocation used the tectonic binary, NOT pdflatex —
+    # the regression we're guarding against is the old gate passing the
+    # literal string "pdflatex" here regardless of fallback.
+    assert captured_cmd, "subprocess.run was not invoked"
+    assert captured_cmd[0] == "/fake/tectonic.exe", (
+        f"Expected poster to invoke tectonic when pdflatex is missing; "
+        f"got argv0={captured_cmd[0]!r}"
+    )
+    # Same flag contract works for both engines.
+    assert "-interaction=nonstopmode" in captured_cmd
+    assert "-halt-on-error" in captured_cmd
+    assert "poster_pdf" in result
+    # On success the diagnostic file MUST NOT be left behind.
+    assert "poster_pdf_skipped" not in result
+    assert not (art.quest_root / "poster_pdf_skipped.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_poster_writes_skip_diagnostic_when_no_engine_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When neither pdflatex nor tectonic is reachable (and the repo-local
+    fallback at ``tools/tectonic[.exe]`` is also missing), the poster
+    generator must write ``poster_pdf_skipped.md`` next to ``poster.tex``
+    — mirroring the ``paper_pdf_skipped.md`` contract so the user
+    discovers the skip without grepping ``run.log``."""
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(payload)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    # PATH lookup misses everything.
+    monkeypatch.setattr(poster_mod.shutil, "which", lambda _name: None)
+    # Steer the repo-local probe at a clean tmp dir so a dev box with
+    # ``tools/tectonic.exe`` already present doesn't accidentally
+    # rescue the test.
+    from generation import _pdf_engine
+    monkeypatch.setattr(_pdf_engine, "_DEFAULT_REPO_ROOT", tmp_path)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    # poster.tex still produced.
+    assert "poster_tex" in result
+    # No PDF.
+    assert "poster_pdf" not in result
+    # Diagnostic file IS produced.
+    diag = art.quest_root / "poster_pdf_skipped.md"
+    assert diag.exists(), "poster_pdf_skipped.md was not written"
+    body = diag.read_text(encoding="utf-8")
+    assert "poster.pdf was requested but not produced" in body
+    assert "no_latex_engine" in body  # reason code
+    assert "--install-tectonic" in body  # how-to-fix recipe
+    # result dict surfaces the diagnostic so callers (launch.py / VSCode
+    # bridge) can include it in their "your quest is done" messages.
+    assert result.get("poster_pdf_skipped") == diag
+
+
+@pytest.mark.asyncio
+async def test_poster_writes_skip_diagnostic_when_pdf_missing_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine returned rc=0 but ``poster.pdf`` isn't on disk —
+    silent partial success. Without a diagnostic the caller sees a
+    missing ``poster_pdf`` in the result dict with no breadcrumb.
+
+    Mirrors the analogous branch in ``PaperGenerator._compile_pdf``
+    so the user gets the same skip-diagnostic shape across both
+    output kinds. Reason code is distinct
+    (``output_missing_after_success``) so the operator can tell this
+    apart from a real engine failure (rc != 0) when filtering logs.
+    """
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(payload)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    # Engine is present.
+    monkeypatch.setattr(
+        poster_mod.shutil, "which",
+        lambda name: f"/fake/{name}.exe" if name == "pdflatex" else None,
+    )
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        # Subprocess "succeeds" without producing the output file.
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    # No PDF.
+    assert "poster_pdf" not in result
+    # Diagnostic IS produced — the gap this test exists to plug.
+    diag = art.quest_root / "poster_pdf_skipped.md"
+    assert diag.exists()
+    body = diag.read_text(encoding="utf-8")
+    assert "output_missing_after_success" in body
+    assert result.get("poster_pdf_skipped") == diag
+
+
+@pytest.mark.asyncio
+async def test_poster_uses_same_engine_discovery_as_paper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever ``generation._pdf_engine.find_pdf_engine`` returns is
+    what the poster generator MUST use — the audit fix is exactly the
+    "use the shared helper" deduplication. Verify the contract by
+    swapping the helper for a sentinel and asserting the sentinel's
+    binary path lands in the subprocess argv."""
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(payload)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+
+    sentinel = ("tectonic", "/sentinel/tectonic.exe")
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: sentinel)
+
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured_cmd[:] = list(cmd)
+        cwd = Path(_kwargs.get("cwd") or ".")
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+
+    await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    assert captured_cmd[0] == sentinel[1], (
+        "Poster MUST invoke whichever binary find_pdf_engine returned; "
+        f"got {captured_cmd[0]!r} expected {sentinel[1]!r}"
+    )
