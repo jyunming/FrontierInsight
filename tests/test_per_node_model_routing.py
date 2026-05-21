@@ -208,9 +208,23 @@ async def test_cli_chat_per_call_override_takes_precedence_over_endpoint(
     client = LLMClient(ep, cli_timeout_s=5.0)
     try:
         captured: list = []
+        # claude_cli now uses ``output_via="stream_json"`` so the
+        # path through ``_run_cli`` reads stdout line-by-line. The
+        # mock supplies an empty stream (immediate EOF) — this test
+        # only cares about argv injection, not the assembled answer.
         proc = AsyncMock()
-        proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        stdout = AsyncMock()
+        stdout.readline = AsyncMock(return_value=b"")
+        proc.stdout = stdout
+        proc.stdin = AsyncMock()
+        proc.stdin.write = lambda b: None
+        proc.stdin.drain = AsyncMock(return_value=None)
+        proc.stdin.close = lambda: None
+        proc.stderr = AsyncMock()
+        proc.stderr.read = AsyncMock(return_value=b"")
+        proc.wait = AsyncMock(return_value=0)
         proc.returncode = 0
+        proc.kill = lambda: None
 
         async def fake_spawn(*args, **kw):
             captured.append(list(args))

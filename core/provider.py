@@ -634,21 +634,29 @@ async def _run_cli(
                 f"before using this provider."
             ) from e
 
-        if spec.output_via == "last_message_file":
-            # Legacy code path: stdout is DEVNULL so there's no per-line
-            # activity to observe. Fall back to the original total-wall-
-            # clock-only behaviour.
-            return await _collect_via_communicate(
-                proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
+        if spec.output_via == "stream_json":
+            # Streaming path: only used by claude_cli today. Reads
+            # stdout line-by-line, parses ``--output-format stream-
+            # json`` events, resets the inactivity watchdog on each
+            # event, surfaces text_deltas as the aggregated answer.
+            # Required for Sonnet 4.6 extended-thinking spans.
+            return await _collect_via_streaming(
+                proc, argv, spec, stdin_bytes,
+                timeout_s=timeout_s,
+                inactivity_timeout_s=inactivity_timeout_s,
+                heartbeat_cb=heartbeat_cb,
+                node=node,
             )
-        # Streaming path: read stdout line-by-line, reset the inactivity
-        # timer on every line, parse stream-json events when applicable.
-        return await _collect_via_streaming(
-            proc, argv, spec, stdin_bytes,
-            timeout_s=timeout_s,
-            inactivity_timeout_s=inactivity_timeout_s,
-            heartbeat_cb=heartbeat_cb,
-            node=node,
+        # Legacy ``communicate()`` path for everything else
+        # (codex_cli's ``last_message_file``, plus gemini_cli /
+        # copilot_cli plain ``stdout`` mode). Only the total
+        # wall-clock budget applies — these CLIs don't emit
+        # stream-style progress, so an inactivity timer would either
+        # fire false-positives (silent agent log) or do nothing useful
+        # (single stdout flush at end). Preserved here so existing
+        # tests that mock ``proc.communicate()`` keep working.
+        return await _collect_via_communicate(
+            proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
         )
     finally:
         if tmp_out_path is not None:
@@ -663,11 +671,22 @@ async def _collect_via_communicate(
     tmp_out_path: Path | None,
     timeout_s: float,
 ) -> str:
-    """Legacy path for ``output_via="last_message_file"`` — stdout is
-    DEVNULL, so no inactivity timer is meaningful; use a single
-    ``communicate(timeout=...)`` with the hard ceiling only."""
+    """Legacy ``communicate()`` path. Two sub-cases:
+
+    * ``output_via="last_message_file"`` (codex_cli) — stdout is
+      DEVNULL because the real answer lives in a temp file. The temp
+      file gets read after the child exits.
+    * ``output_via="stdout"`` (gemini_cli, copilot_cli) — stdout is
+      captured as the raw response; ``output_extractor`` may then
+      strip per-CLI envelope/banner lines.
+
+    Only the total wall-clock budget applies. The stream-json
+    inactivity-timer path lives in ``_collect_via_streaming`` and is
+    used for ``output_via="stream_json"`` (claude_cli) — that one
+    distinguishes "model is thinking" from "process is hung" by
+    resetting on every stream event."""
     try:
-        _stdout_b, stderr_b = await asyncio.wait_for(
+        stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(stdin_bytes), timeout=timeout_s,
         )
     except asyncio.TimeoutError:
@@ -682,8 +701,11 @@ async def _collect_via_communicate(
             f"{argv[0]} exited rc={proc.returncode}: "
             f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
         )
-    assert tmp_out_path is not None
-    content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
+    if spec.output_via == "last_message_file":
+        assert tmp_out_path is not None
+        content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
+    else:
+        content = (stdout_b or b"").decode("utf-8", errors="replace")
     if spec.output_extractor is not None:
         content = spec.output_extractor(content)
     return content.strip()

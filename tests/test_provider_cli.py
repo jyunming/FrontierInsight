@@ -52,7 +52,7 @@ def test_cli_specs_have_required_fields() -> None:
     for name, spec in _CLI_SPECS.items():
         assert spec.argv, f"{name}: empty argv"
         assert spec.pass_prompt_via in ("stdin", "arg"), name
-        assert spec.output_via in ("stdout", "last_message_file"), name
+        assert spec.output_via in ("stdout", "last_message_file", "stream_json"), name
 
 
 def test_resolve_endpoint_claude_cli_sets_transport_to_cli() -> None:
@@ -126,20 +126,92 @@ def test_messages_to_text_drops_empty_content_parts() -> None:
 
 
 def _fake_proc(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
+    """Build a fake ``Process`` that satisfies BOTH legacy and
+    streaming code paths inside ``_run_cli``.
+
+    The legacy path (``output_via="stdout"`` / ``"last_message_file"``)
+    consumes ``proc.communicate(stdin)`` once. The streaming path
+    (``output_via="stream_json"`` — claude_cli) consumes
+    ``proc.stdout.readline()`` until EOF, ``proc.stdin.write/drain/
+    close``, ``proc.wait()``, ``proc.stderr.read()``.
+
+    Many tests only assert on argv, not output. For those, the
+    streaming surfaces below produce immediate EOF so the call
+    completes with an empty answer — fine for argv assertions.
+    ``stdout=b"..."`` tests that DO inspect the returned text still
+    work via the legacy path (those tests target gemini_cli /
+    copilot_cli / codex_cli, not claude_cli)."""
     proc = AsyncMock()
+    # Legacy path:
     proc.communicate = AsyncMock(return_value=(stdout, stderr))
     proc.returncode = returncode
+    # Streaming path:
+    stdout_obj = AsyncMock()
+    # If a stdout payload was provided, emit it as ONE line then EOF
+    # so streaming tests can still read it (rare path; argv tests on
+    # claude_cli supply b"" so EOF is immediate).
+    lines = [stdout] if stdout else []
+    lines_iter = iter(lines + [b""])
+    async def fake_readline():
+        return next(lines_iter, b"")
+    stdout_obj.readline = fake_readline
+    proc.stdout = stdout_obj
+    proc.stdin = AsyncMock()
+    proc.stdin.write = lambda b: None
+    proc.stdin.drain = AsyncMock(return_value=None)
+    proc.stdin.close = lambda: None
+    proc.stderr = AsyncMock()
+    proc.stderr.read = AsyncMock(return_value=stderr)
+    proc.wait = AsyncMock(return_value=returncode)
+    proc.kill = lambda: None
+    return proc
+
+
+def _fake_streaming_proc(stream_lines: list[bytes], returncode: int = 0):
+    """Build a fake ``Process`` for the stream-json claude_cli path.
+
+    ``proc.stdout.readline()`` returns each line in ``stream_lines`` in
+    order, then ``b""`` for EOF. ``proc.stdin.write`` / ``.drain`` /
+    ``.close`` are no-ops. ``proc.wait()`` returns ``returncode``.
+    Mirrors what ``_collect_via_streaming`` consumes."""
+    proc = AsyncMock()
+    stdout = AsyncMock()
+    lines_iter = iter(list(stream_lines) + [b""])
+    async def fake_readline():
+        return next(lines_iter, b"")
+    stdout.readline = fake_readline
+    proc.stdout = stdout
+    proc.stdin = AsyncMock()
+    proc.stdin.write = lambda b: None
+    proc.stdin.drain = AsyncMock(return_value=None)
+    proc.stdin.close = lambda: None
+    proc.stderr = AsyncMock()
+    proc.stderr.read = AsyncMock(return_value=b"")
+    proc.wait = AsyncMock(return_value=returncode)
+    proc.returncode = returncode
+    proc.kill = lambda: None
     return proc
 
 
 @pytest.mark.asyncio
-async def test_claude_cli_passes_prompt_via_stdin_and_returns_stdout() -> None:
+async def test_claude_cli_passes_prompt_via_stdin_and_returns_stream_json_text() -> None:
+    """claude_cli now uses ``--output-format stream-json
+    --include-partial-messages``. The aggregator concatenates
+    ``text_delta`` events into the answer; ``thinking_delta`` events
+    count as activity but their bodies are discarded. Mock a typical
+    Sonnet response (two text deltas + EOF) and assert the result."""
     ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
     client = LLMClient(ep)
     try:
-        proc = _fake_proc(stdout=b"42\n")
-        # Pin shutil.which so the assertion can compare to a known sentinel
-        # instead of whatever the test host's PATH happens to resolve to.
+        stream = [
+            (b'{"type":"stream_event","event":{"type":"content_block_delta",'
+             b'"delta":{"type":"thinking_delta","thinking":"computing..."}}}\n'),
+            (b'{"type":"stream_event","event":{"type":"content_block_delta",'
+             b'"delta":{"type":"text_delta","text":"4"}}}\n'),
+            (b'{"type":"stream_event","event":{"type":"content_block_delta",'
+             b'"delta":{"type":"text_delta","text":"2"}}}\n'),
+        ]
+        proc = _fake_streaming_proc(stream)
         with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
              patch(
                  "core.provider.asyncio.create_subprocess_exec",
@@ -154,13 +226,12 @@ async def test_claude_cli_passes_prompt_via_stdin_and_returns_stdout() -> None:
     assert result == "42"
     spawn.assert_awaited_once()
     args, kwargs = spawn.call_args
-    # argv[0] is the shutil.which-resolved path, not the bare name.
     assert args[0] == "/usr/bin/claude"
-    assert "--print" in args and "--output-format" in args and "text" in args
+    # New argv: stream-json, not plain text.
+    assert "--print" in args
+    assert "--output-format" in args and "stream-json" in args
+    assert "--include-partial-messages" in args
     assert all(a != "what is 6 * 7?" for a in args), "prompt should NOT be in argv"
-    proc.communicate.assert_awaited_once()
-    stdin_arg = proc.communicate.await_args[0][0]
-    assert stdin_arg == b"what is 6 * 7?"
 
 
 @pytest.mark.asyncio
@@ -449,10 +520,14 @@ async def test_cli_model_flag_omitted_when_provider_model_blank() -> None:
 async def test_cli_call_killed_after_timeout_raises_transient() -> None:
     """A CLI that hangs longer than `cli_timeout_s` is killed and the
     raised `_CliTransientError` is retryable (so tenacity will try
-    again up to 4 attempts before giving up)."""
+    again up to 4 attempts before giving up).
+
+    Uses ``codex_cli`` (legacy ``communicate()`` path) for the hang
+    simulation. claude_cli's stream-json path has its own dedicated
+    timeout tests in ``tests/test_provider_streaming.py``."""
     from core.provider import _CliTransientError
 
-    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    ep = resolve_endpoint(ProviderConfig(name="codex_cli"))
     # Very short cli_timeout_s so the test doesn't actually wait.
     client = LLMClient(ep, cli_timeout_s=0.05)
     try:
@@ -467,7 +542,7 @@ async def test_cli_call_killed_after_timeout_raises_transient() -> None:
             return 0
         proc.wait = _wait_done
         proc.returncode = -1
-        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+        with patch("core.provider.shutil.which", return_value="/usr/bin/codex"), \
              patch(
                  "core.provider.asyncio.create_subprocess_exec",
                  new=AsyncMock(return_value=proc),
@@ -498,10 +573,14 @@ def test_cli_resolve_endpoint_preserves_display_model_when_unset() -> None:
 async def test_cli_timeout_subsecond_value_keeps_precision_in_error() -> None:
     """When `cli_timeout_s` is below 1 second (as test timeouts often
     are), the raised `_CliTransientError` message must NOT round to
-    `0s`. Sub-second values format as milliseconds with `:g` precision."""
+    `0s`. Sub-second values format as milliseconds with `:g` precision.
+
+    Targets the legacy ``communicate()`` timeout-formatter path via
+    ``codex_cli`` since claude_cli now uses stream-json which has a
+    different formatter inside ``_collect_via_streaming``."""
     from core.provider import _CliTransientError
 
-    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    ep = resolve_endpoint(ProviderConfig(name="codex_cli"))
     client = LLMClient(ep, cli_timeout_s=0.05)
     try:
         proc = AsyncMock()
@@ -513,7 +592,7 @@ async def test_cli_timeout_subsecond_value_keeps_precision_in_error() -> None:
             return 0
         proc.wait = _wait_done
         proc.returncode = -1
-        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+        with patch("core.provider.shutil.which", return_value="/usr/bin/codex"), \
              patch(
                  "core.provider.asyncio.create_subprocess_exec",
                  new=AsyncMock(return_value=proc),
@@ -533,10 +612,13 @@ async def test_cli_timeout_handles_already_exited_child() -> None:
     """If the child exits between the communicate() timeout firing and
     our `proc.kill()`, Python raises `ProcessLookupError`. The cleanup
     must swallow it (not propagate) so the user still sees the original
-    _CliTransientError describing the wall-clock cause."""
+    _CliTransientError describing the wall-clock cause.
+
+    Uses ``codex_cli`` (legacy ``communicate()`` path) since the race
+    being tested is specific to that code path."""
     from core.provider import _CliTransientError
 
-    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    ep = resolve_endpoint(ProviderConfig(name="codex_cli"))
     client = LLMClient(ep, cli_timeout_s=0.05)
     try:
         proc = AsyncMock()
@@ -549,7 +631,7 @@ async def test_cli_timeout_handles_already_exited_child() -> None:
             return -1
         proc.wait = _wait_done
         proc.returncode = -1
-        with patch("core.provider.shutil.which", return_value="/usr/bin/claude"), \
+        with patch("core.provider.shutil.which", return_value="/usr/bin/codex"), \
              patch(
                  "core.provider.asyncio.create_subprocess_exec",
                  new=AsyncMock(return_value=proc),
