@@ -1921,7 +1921,10 @@ class Engine:
                 "use the legacy one-shot path", exc,
             )
             return {"implement_outline": {}}
-        outline = _parse_json_lenient(text)
+        # Tag the lenient-parse with the node so its WARNING lines in
+        # run.log carry the originator — multiple nodes call this
+        # helper and the unprefixed warnings were hard to grep.
+        outline = _parse_json_lenient(text, node="implement_outline")
         if not isinstance(outline, dict) or "scaffold" not in outline:
             self._log.warning(
                 "[implement_outline] response not parseable or missing "
@@ -1939,12 +1942,13 @@ class Engine:
 
     async def _node_implement(self, state: QuestState) -> QuestState:
         outline = state.get("implement_outline") or {}
-        if outline and outline.get("scaffold"):
+        body_prompt = self._prompts.get("implement_body")
+        if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
                 "[implement] filling scaffold (%d functions to body)",
                 len(outline.get("functions") or []),
             )
-            prompt = self._prompts["implement_body"].substitute(
+            prompt = body_prompt.substitute(
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
@@ -1952,10 +1956,21 @@ class Engine:
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
-            # checkpoint resume, or the outline call failed). Use the
-            # original prompt verbatim so existing behaviour is
-            # preserved on resume.
-            self._log.info("[implement] generating experiment code (legacy one-shot)")
+            # checkpoint resume, the outline call failed, or — defensive
+            # case — a future checkpoint advanced past outline but the
+            # CURRENT running build doesn't ship ``agents/implement_body.md``.
+            # Use the original prompt verbatim so existing behaviour is
+            # preserved on resume across mixed-version builds.
+            if outline and outline.get("scaffold") and body_prompt is None:
+                self._log.warning(
+                    "[implement] outline cached but implement_body prompt "
+                    "not loaded; falling back to legacy one-shot. This "
+                    "happens when an older build resumes a checkpoint "
+                    "produced by a newer build — rebuild the agents/ "
+                    "directory to enable the two-stage path."
+                )
+            else:
+                self._log.info("[implement] generating experiment code (legacy one-shot)")
             prompt = self._prompts["implement"].substitute(
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
