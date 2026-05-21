@@ -867,14 +867,79 @@ async def _collect_via_streaming(
     if watchdog_raised is not None:
         raise watchdog_raised
     # Reader finished (EOF). Wait for the child to exit and check rc.
+    # Important: if we already collected text_deltas before EOF, the
+    # LLM call SUCCEEDED — claude.exe streamed its response and then
+    # closed stdout. The child handle lingering past a few seconds on
+    # Windows (proactor proc cleanup latency) is NOT a reason to throw
+    # away ~8 minutes of generation. Two-stage policy:
+    #
+    #   1. Wait up to 60 s for the OS to fully reap (generous because
+    #      this is post-EOF, the heavy work is done; we're just paying
+    #      cleanup latency).
+    #   2. On reap-timeout: if we got text, RETURN IT (with a warning).
+    #      Only kill+raise when there's literally nothing to return.
+    #
+    # This fixes a regression where a successful 8-minute body call
+    # got discarded because Windows took 11 s to mark claude.exe
+    # exited — tenacity then re-ran the whole call from scratch.
+    have_output = text_bytes_total > 0 or bool(aggregated)
     try:
-        rc = await asyncio.wait_for(proc.wait(), timeout=10)
+        rc = await asyncio.wait_for(proc.wait(), timeout=60)
     except asyncio.TimeoutError:
+        if have_output:
+            # Don't waste the LLM result. Kill the lingering process
+            # (best-effort) and continue with what we collected.
+            _log.warning(
+                "%s stdout closed and reap timed out, but the call "
+                "produced %d text bytes — returning result anyway "
+                "(killing lingering child best-effort)",
+                spec.argv[0], text_bytes_total,
+            )
+            await _kill_and_reap(proc, spec.argv[0])
+            # Skip the rc-based error check below — we never got rc.
+            # An empty error_message and have_output=True means good.
+            if error_message is not None:
+                raise _CliTransientError(
+                    f"{spec.argv[0]} stream error: {error_message[:500]}"
+                )
+            content = "".join(aggregated)
+            if spec.output_extractor is not None and spec.output_via != "stream_json":
+                content = spec.output_extractor(content)
+            return content.strip()
+        # No output AND no exit — genuinely stuck.
         await _kill_and_reap(proc, spec.argv[0])
         raise _CliTransientError(
-            f"{spec.argv[0]} stdout closed but child didn't exit within 10s"
+            f"{spec.argv[0]} stdout closed but child didn't exit within 60s "
+            f"(no output collected)"
         )
     if rc != 0:
+        # Even on non-zero exit, prefer the collected text over a
+        # retry IF we got substantial output. Some CLIs emit a clean
+        # stream then exit non-zero on a benign cleanup error
+        # (atexit hooks, signal handler, etc.) — throwing the
+        # response away there is strictly worse than logging the rc
+        # and returning.
+        if have_output:
+            stderr_b = b""
+            if proc.stderr is not None:
+                try:
+                    stderr_b = await asyncio.wait_for(proc.stderr.read(), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
+            _log.warning(
+                "%s exited rc=%d but emitted %d text bytes — returning "
+                "result. stderr tail: %s",
+                spec.argv[0], rc, text_bytes_total,
+                stderr_b.decode("utf-8", "replace")[-300:],
+            )
+            if error_message is not None:
+                raise _CliTransientError(
+                    f"{spec.argv[0]} stream error: {error_message[:500]}"
+                )
+            content = "".join(aggregated)
+            if spec.output_extractor is not None and spec.output_via != "stream_json":
+                content = spec.output_extractor(content)
+            return content.strip()
         stderr_b = b""
         if proc.stderr is not None:
             try:

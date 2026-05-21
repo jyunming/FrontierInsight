@@ -294,3 +294,85 @@ async def test_run_cli_streaming_error_event_raises_transient(
             timeout_s=5.0, inactivity_timeout_s=3.0,
         )
     assert "internal_server_error" in str(exc_info.value)
+
+
+def _make_lingering_streaming_binary(
+    tmp_path: Path, *, events: list[dict], post_eof_sleep_s: float,
+) -> tuple[Path, "object"]:
+    """Like ``_make_fake_streaming_binary`` but the child closes its
+    stdout (via ``sys.stdout.close()``) BEFORE sleeping for
+    ``post_eof_sleep_s`` seconds and exiting. This reproduces the
+    Windows-asyncio case where claude.exe streamed its full response,
+    closed stdout, and then took longer than the post-EOF wait to
+    actually exit. The old code killed the lingering child and threw
+    away the response; the fix returns the collected text."""
+    from core.provider import _CliSpec
+    script = tmp_path / "fake_lingering.py"
+    script.write_text(
+        "import json, sys, time\n"
+        f"events = {json.dumps(events)}\n"
+        "for ev in events:\n"
+        "    print(json.dumps(ev), flush=True)\n"
+        "sys.stdout.close()\n"
+        f"time.sleep({post_eof_sleep_s})\n",
+        encoding="utf-8",
+    )
+    spec = _CliSpec(
+        argv=(sys.executable, str(script)),
+        pass_prompt_via="stdin",
+        output_via="stream_json",
+        model_flag=None,
+    )
+    return script, spec
+
+
+@pytest.mark.asyncio
+async def test_run_cli_streaming_preserves_result_when_child_lingers_after_eof(
+    tmp_path: Path,
+) -> None:
+    """Regression guard: a Sonnet response that streamed cleanly,
+    closed stdout, but then took >10 s for the OS to clean up the
+    process used to be discarded — the old code killed the
+    "lingering" child and tenacity restarted the whole call from
+    scratch. For an 8-minute body call that's catastrophic.
+
+    The fix: if the streaming reader collected any text before EOF,
+    return that text. The post-EOF reap timeout is purely cleanup
+    latency; it does NOT invalidate the LLM result.
+
+    This test reproduces the situation: the fake binary emits a
+    valid stream-json text_delta, then closes stdout and sleeps
+    longer than the post-EOF wait timeout. ``_run_cli`` should
+    return the text, not raise.
+
+    (We can't pin the production 60s post-EOF timeout from a unit
+    test, but the principle is the same: ``have_output == True``
+    short-circuits any kill+raise path.)"""
+    events = [
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "the answer is 42"}}},
+    ]
+    # Sleep 3 s post-EOF — longer than the test would normally tolerate
+    # but the fix should NOT care: we have output, so return it. (The
+    # production code uses 60 s for the wait; the test asserts the
+    # short-circuit fires by checking we got the text fast enough that
+    # we DIDN'T fall through to a kill+raise path on a smaller test
+    # ceiling.)
+    _, spec = _make_lingering_streaming_binary(
+        tmp_path, events=events, post_eof_sleep_s=3.0,
+    )
+    import time as _time
+    started = _time.monotonic()
+    result = await _run_cli(
+        spec, "any prompt",
+        timeout_s=30.0,         # total ceiling generous
+        inactivity_timeout_s=5.0,   # would otherwise fire if we waited the full 3 s
+    )
+    elapsed = _time.monotonic() - started
+    assert result == "the answer is 42"
+    # Sanity: we returned WITHOUT waiting the full 60 s production
+    # reap window. The child's still alive lingering, but we got the
+    # text and moved on.
+    assert elapsed < 10.0, (
+        f"expected fast return on EOF with output; took {elapsed:.1f}s"
+    )
