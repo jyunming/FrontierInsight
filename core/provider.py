@@ -529,6 +529,7 @@ async def _run_cli(
     model: str = "",
     timeout_s: float = 300.0,
     inactivity_timeout_s: float = 180.0,
+    post_eof_reap_timeout_s: float = 60.0,
     heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     node: str = "",
 ) -> str:
@@ -561,7 +562,7 @@ async def _run_cli(
     elsewhere.
 
     ``heartbeat_cb`` is called periodically (best-effort) with a dict
-    describing progress: ``{kind, elapsed_s, idle_s, text_bytes,
+    describing progress: ``{kind, elapsed_s, idle_s, text_chars,
     thinking_tokens}``. The Engine wires this into its run.log so the
     user sees ``[implement] still thinking — 2400 thinking deltas,
     elapsed 4m22s`` instead of silent dead air. Errors raised by the
@@ -644,6 +645,7 @@ async def _run_cli(
                 proc, argv, spec, stdin_bytes,
                 timeout_s=timeout_s,
                 inactivity_timeout_s=inactivity_timeout_s,
+                post_eof_reap_timeout_s=post_eof_reap_timeout_s,
                 heartbeat_cb=heartbeat_cb,
                 node=node,
             )
@@ -719,6 +721,7 @@ async def _collect_via_streaming(
     *,
     timeout_s: float,
     inactivity_timeout_s: float,
+    post_eof_reap_timeout_s: float,
     heartbeat_cb: Callable[[dict[str, Any]], None] | None,
     node: str,
 ) -> str:
@@ -739,7 +742,7 @@ async def _collect_via_streaming(
     # ``sum(len(s) for s in aggregated)`` on every 1-s tick (that
     # would be O(N²) in stream length). Always updated in lock-step
     # with ``aggregated.append`` so the two never drift.
-    text_bytes_total = 0
+    text_chars_total = 0
     thinking_token_count = 0
     error_message: str | None = None  # populated from stream_json error events
     result_envelope_seen = False  # see _parse_stream_json_line caller below
@@ -758,7 +761,7 @@ async def _collect_via_streaming(
 
     async def read_stdout() -> None:
         nonlocal last_activity, thinking_token_count, error_message
-        nonlocal text_bytes_total, result_envelope_seen
+        nonlocal text_chars_total, result_envelope_seen
         while True:
             try:
                 line = await proc.stdout.readline()
@@ -782,7 +785,7 @@ async def _collect_via_streaming(
                         result_envelope_seen = True
                     else:
                         aggregated.append(text_delta)
-                        text_bytes_total += len(text_delta)
+                        text_chars_total += len(text_delta)
                         if is_result:
                             result_envelope_seen = True
                 thinking_token_count += thinking_inc
@@ -791,7 +794,7 @@ async def _collect_via_streaming(
             else:
                 decoded = line.decode("utf-8", errors="replace")
                 aggregated.append(decoded)
-                text_bytes_total += len(decoded)
+                text_chars_total += len(decoded)
 
     async def watchdog() -> None:
         while not stop.is_set():
@@ -810,7 +813,7 @@ async def _collect_via_streaming(
                     f"{spec.argv[0]} silent for {idle:.0f}s "
                     f"(inactivity threshold {inactivity_timeout_s:g}s); "
                     f"thinking_tokens={thinking_token_count}, "
-                    f"text_bytes={text_bytes_total}"
+                    f"text_chars={text_chars_total}"
                 )
             # Best-effort heartbeat. Cadence: only when the caller asked
             # for one. Errors swallowed; never block the LLM call.
@@ -821,7 +824,7 @@ async def _collect_via_streaming(
                         "node": node,
                         "elapsed_s": elapsed,
                         "idle_s": idle,
-                        "text_bytes": text_bytes_total,
+                        "text_chars": text_chars_total,
                         "thinking_tokens": thinking_token_count,
                     })
                 except Exception:
@@ -882,18 +885,18 @@ async def _collect_via_streaming(
     # This fixes a regression where a successful 8-minute body call
     # got discarded because Windows took 11 s to mark claude.exe
     # exited — tenacity then re-ran the whole call from scratch.
-    have_output = text_bytes_total > 0 or bool(aggregated)
+    have_output = text_chars_total > 0 or bool(aggregated)
     try:
-        rc = await asyncio.wait_for(proc.wait(), timeout=60)
+        rc = await asyncio.wait_for(proc.wait(), timeout=post_eof_reap_timeout_s)
     except asyncio.TimeoutError:
         if have_output:
             # Don't waste the LLM result. Kill the lingering process
             # (best-effort) and continue with what we collected.
             _log.warning(
                 "%s stdout closed and reap timed out, but the call "
-                "produced %d text bytes — returning result anyway "
+                "produced %d text chars — returning result anyway "
                 "(killing lingering child best-effort)",
-                spec.argv[0], text_bytes_total,
+                spec.argv[0], text_chars_total,
             )
             await _kill_and_reap(proc, spec.argv[0])
             # Skip the rc-based error check below — we never got rc.
@@ -909,7 +912,8 @@ async def _collect_via_streaming(
         # No output AND no exit — genuinely stuck.
         await _kill_and_reap(proc, spec.argv[0])
         raise _CliTransientError(
-            f"{spec.argv[0]} stdout closed but child didn't exit within 60s "
+            f"{spec.argv[0]} stdout closed but child didn't exit within "
+            f"{post_eof_reap_timeout_s:g}s "
             f"(no output collected)"
         )
     if rc != 0:
@@ -927,9 +931,9 @@ async def _collect_via_streaming(
                 except asyncio.TimeoutError:
                     pass
             _log.warning(
-                "%s exited rc=%d but emitted %d text bytes — returning "
+                "%s exited rc=%d but emitted %d text chars — returning "
                 "result. stderr tail: %s",
-                spec.argv[0], rc, text_bytes_total,
+                spec.argv[0], rc, text_chars_total,
                 stderr_b.decode("utf-8", "replace")[-300:],
             )
             if error_message is not None:

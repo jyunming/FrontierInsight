@@ -298,7 +298,7 @@ async def test_run_cli_streaming_error_event_raises_transient(
 
 def _make_lingering_streaming_binary(
     tmp_path: Path, *, events: list[dict], post_eof_sleep_s: float,
-) -> tuple[Path, "object"]:
+) -> tuple[Path, _CliSpec]:
     """Like ``_make_fake_streaming_binary`` but the child closes its
     stdout (via ``sys.stdout.close()``) BEFORE sleeping for
     ``post_eof_sleep_s`` seconds and exiting. This reproduces the
@@ -306,7 +306,6 @@ def _make_lingering_streaming_binary(
     closed stdout, and then took longer than the post-EOF wait to
     actually exit. The old code killed the lingering child and threw
     away the response; the fix returns the collected text."""
-    from core.provider import _CliSpec
     script = tmp_path / "fake_lingering.py"
     script.write_text(
         "import json, sys, time\n"
@@ -327,52 +326,40 @@ def _make_lingering_streaming_binary(
 
 
 @pytest.mark.asyncio
-async def test_run_cli_streaming_preserves_result_when_child_lingers_after_eof(
+async def test_run_cli_streaming_preserves_result_when_child_lingers_past_reap_timeout(
     tmp_path: Path,
 ) -> None:
-    """Regression guard: a Sonnet response that streamed cleanly,
-    closed stdout, but then took >10 s for the OS to clean up the
-    process used to be discarded — the old code killed the
-    "lingering" child and tenacity restarted the whole call from
-    scratch. For an 8-minute body call that's catastrophic.
+    """**The actual regression guard for the fix.**
 
-    The fix: if the streaming reader collected any text before EOF,
-    return that text. The post-EOF reap timeout is purely cleanup
-    latency; it does NOT invalidate the LLM result.
+    A Sonnet body call that streamed cleanly, closed stdout, but
+    then took longer than ``post_eof_reap_timeout_s`` for the OS to
+    clean up the process used to be discarded — the old code killed
+    the "lingering" child and tenacity restarted the whole call
+    from scratch. For an 8-minute body call that's catastrophic.
 
-    This test reproduces the situation: the fake binary emits a
-    valid stream-json text_delta, then closes stdout and sleeps
-    longer than the post-EOF wait timeout. ``_run_cli`` should
-    return the text, not raise.
-
-    (We can't pin the production 60s post-EOF timeout from a unit
-    test, but the principle is the same: ``have_output == True``
-    short-circuits any kill+raise path.)"""
+    Test design: the child sleeps ``post_eof_sleep_s`` AFTER closing
+    stdout. We pin ``post_eof_reap_timeout_s`` to ``half of`` the
+    sleep duration so the reap genuinely times out — that's the
+    code path the fix protects. The PRE-FIX implementation would
+    kill+raise here; the fix returns the text.
+    """
     events = [
         {"type": "stream_event", "event": {"type": "content_block_delta",
             "delta": {"type": "text_delta", "text": "the answer is 42"}}},
     ]
-    # Sleep 3 s post-EOF — longer than the test would normally tolerate
-    # but the fix should NOT care: we have output, so return it. (The
-    # production code uses 60 s for the wait; the test asserts the
-    # short-circuit fires by checking we got the text fast enough that
-    # we DIDN'T fall through to a kill+raise path on a smaller test
-    # ceiling.)
+    # 3 s sleep, 0.5 s reap timeout — reap WILL time out.
     _, spec = _make_lingering_streaming_binary(
         tmp_path, events=events, post_eof_sleep_s=3.0,
     )
-    import time as _time
-    started = _time.monotonic()
     result = await _run_cli(
         spec, "any prompt",
-        timeout_s=30.0,         # total ceiling generous
-        inactivity_timeout_s=5.0,   # would otherwise fire if we waited the full 3 s
+        timeout_s=30.0,                # total ceiling generous
+        inactivity_timeout_s=30.0,     # not under test here
+        post_eof_reap_timeout_s=0.5,   # force the reap to time out
     )
-    elapsed = _time.monotonic() - started
+    # The KEY assertion: with the fix, the reap-timeout path no
+    # longer discards the streamed text. The pre-fix code would
+    # have raised ``_CliTransientError("stdout closed but child
+    # didn't exit within 0.5s")`` instead of returning "the answer
+    # is 42". This single assert IS the regression guard.
     assert result == "the answer is 42"
-    # Sanity: we returned WITHOUT waiting the full 60 s production
-    # reap window. The child's still alive lingering, but we got the
-    # text and moved on.
-    assert elapsed < 10.0, (
-        f"expected fast return on EOF with output; took {elapsed:.1f}s"
-    )
