@@ -13,7 +13,7 @@ Frontier Insight (FI) is an automated research assistant. You write a one-paragr
 2. brainstorms research directions (or skips ideate→implement→execute entirely when `simulatability == "no"`, routing through data-ingest instead),
 3. searches the literature,
 4. designs an experiment, then self-critiques the design for circular evaluation / weak baselines,
-5. writes the experiment code,
+5. writes the experiment code in two stages — first a scaffold with function signatures and constant sources, then fills in the bodies (avoids ~9 min one-shot stalls on complex topics),
 6. runs it in a sandboxed venv (and fixes its own bugs if the script crashes),
 7. cross-checks the results against published papers,
 8. drafts the paper — IMRAD (NeurIPS / ICLR / IEEE Access / Nature MI / generic) or essay / report / policy_brief / whitepaper,

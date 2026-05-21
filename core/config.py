@@ -114,7 +114,19 @@ class ProviderConfig(BaseModel):
     # two nodes that have actually hit ``_CliTransientError`` in
     # production; everything else stays on the historical 300 s.
     node_cli_timeout_s: dict[str, float] = Field(
-        default_factory=lambda: {"implement": 1800.0, "execute_reflect": 900.0}
+        default_factory=lambda: {
+            # Outline is structurally bounded (signatures + constants),
+            # so it doesn't need the full implement budget; 600 s is
+            # generous for a ~30-80 line scaffold + JSON envelope.
+            "implement_outline": 600.0,
+            # Body call has the outline laid out, so it doesn't need
+            # the same extended-thinking spans as the legacy one-shot.
+            # 1200 s is a compromise: still longer than 300 s for hard
+            # topics, shorter than the legacy 1800 s default since the
+            # outline gives the model a head start.
+            "implement": 1200.0,
+            "execute_reflect": 900.0,
+        }
     )
     # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model

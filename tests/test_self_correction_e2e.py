@@ -101,11 +101,16 @@ async def test_full_dag_with_execute_repair_loop(
                 "dependencies": ["matplotlib"],
             })
         if "Implementation" in head:
-            # FIRST implement returns broken code. (After execute_reflect
-            # patches it, the engine writes the patched code to disk and
-            # routes back to execute — implement is NOT called again
-            # within the repair loop, so this gate fires only once per
-            # design iteration.)
+            # The two-stage implement node calls the LLM twice per
+            # design iteration: once for the outline (scaffold +
+            # function signatures), once for the body. This mock
+            # returns the SAME shape for both — the outline parser
+            # then rejects it (no ``scaffold`` key), the body falls
+            # through to the legacy single-shot path, and we end up
+            # with the broken code we want for the repair-loop test.
+            # The execute_reflect node patches it; implement_outline +
+            # implement are NOT called again within the repair loop,
+            # so this gate fires exactly twice per design iteration.
             state_flags["implement_calls"] += 1
             return json.dumps({"code": _BAD_EXPERIMENT, "deps": []})
         if "Execute-Reflect" in head:
@@ -158,8 +163,9 @@ async def test_full_dag_with_execute_repair_loop(
     # was the patched one. The state's `code` reflects the fixed code.
     assert "undefined_name" not in (raw.get("code") or "")
     assert "RESULT_JSON" in (raw.get("code") or "")
-    # Implement node was only invoked once (no full re-design happened).
-    assert state_flags["implement_calls"] == 1
+    # Implement gates fired exactly twice (outline + body for ONE
+    # design iteration). If design had looped, the count would be 4+.
+    assert state_flags["implement_calls"] == 2
 
 
 @pytest.mark.asyncio
