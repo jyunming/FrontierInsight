@@ -2705,13 +2705,17 @@ class Engine:
             return
         self._heartbeat_last_logged[node] = now
         thinking = int(payload.get("thinking_tokens", 0))
-        text_bytes = int(payload.get("text_bytes", 0))
+        # Provider's heartbeat payload counts CHARACTERS, not UTF-8
+        # bytes (text aggregator runs at str-level). Older field name
+        # was ``text_bytes`` and was misleading; ``text_chars`` is the
+        # honest label and the value matches.
+        text_chars = int(payload.get("text_chars", 0))
         # Phrasing: "still thinking" when we have thinking events but no
         # text yet (the OPC case); "still streaming" once text begins;
         # "no events yet" when idle is already past the inactivity
         # window's halfway mark (caller will kill soon).
-        if text_bytes > 0:
-            phase = f"streaming ({text_bytes} text bytes so far)"
+        if text_chars > 0:
+            phase = f"streaming ({text_chars} text chars so far)"
         elif thinking > 0:
             phase = f"thinking ({thinking} thinking-token events)"
         else:

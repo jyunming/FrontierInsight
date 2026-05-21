@@ -294,3 +294,72 @@ async def test_run_cli_streaming_error_event_raises_transient(
             timeout_s=5.0, inactivity_timeout_s=3.0,
         )
     assert "internal_server_error" in str(exc_info.value)
+
+
+def _make_lingering_streaming_binary(
+    tmp_path: Path, *, events: list[dict], post_eof_sleep_s: float,
+) -> tuple[Path, _CliSpec]:
+    """Like ``_make_fake_streaming_binary`` but the child closes its
+    stdout (via ``sys.stdout.close()``) BEFORE sleeping for
+    ``post_eof_sleep_s`` seconds and exiting. This reproduces the
+    Windows-asyncio case where claude.exe streamed its full response,
+    closed stdout, and then took longer than the post-EOF wait to
+    actually exit. The old code killed the lingering child and threw
+    away the response; the fix returns the collected text."""
+    script = tmp_path / "fake_lingering.py"
+    script.write_text(
+        "import json, sys, time\n"
+        f"events = {json.dumps(events)}\n"
+        "for ev in events:\n"
+        "    print(json.dumps(ev), flush=True)\n"
+        "sys.stdout.close()\n"
+        f"time.sleep({post_eof_sleep_s})\n",
+        encoding="utf-8",
+    )
+    spec = _CliSpec(
+        argv=(sys.executable, str(script)),
+        pass_prompt_via="stdin",
+        output_via="stream_json",
+        model_flag=None,
+    )
+    return script, spec
+
+
+@pytest.mark.asyncio
+async def test_run_cli_streaming_preserves_result_when_child_lingers_past_reap_timeout(
+    tmp_path: Path,
+) -> None:
+    """**The actual regression guard for the fix.**
+
+    A Sonnet body call that streamed cleanly, closed stdout, but
+    then took longer than ``post_eof_reap_timeout_s`` for the OS to
+    clean up the process used to be discarded — the old code killed
+    the "lingering" child and tenacity restarted the whole call
+    from scratch. For an 8-minute body call that's catastrophic.
+
+    Test design: the child sleeps ``post_eof_sleep_s`` AFTER closing
+    stdout. We pin ``post_eof_reap_timeout_s`` to ``half of`` the
+    sleep duration so the reap genuinely times out — that's the
+    code path the fix protects. The PRE-FIX implementation would
+    kill+raise here; the fix returns the text.
+    """
+    events = [
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "the answer is 42"}}},
+    ]
+    # 3 s sleep, 0.5 s reap timeout — reap WILL time out.
+    _, spec = _make_lingering_streaming_binary(
+        tmp_path, events=events, post_eof_sleep_s=3.0,
+    )
+    result = await _run_cli(
+        spec, "any prompt",
+        timeout_s=30.0,                # total ceiling generous
+        inactivity_timeout_s=30.0,     # not under test here
+        post_eof_reap_timeout_s=0.5,   # force the reap to time out
+    )
+    # The KEY assertion: with the fix, the reap-timeout path no
+    # longer discards the streamed text. The pre-fix code would
+    # have raised ``_CliTransientError("stdout closed but child
+    # didn't exit within 0.5s")`` instead of returning "the answer
+    # is 42". This single assert IS the regression guard.
+    assert result == "the answer is 42"
