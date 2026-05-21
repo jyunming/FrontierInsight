@@ -91,6 +91,31 @@ class ProviderConfig(BaseModel):
     # HTTP providers use their own httpx-level timeout (``timeout_s``
     # on :class:`LLMClient`) and ignore this field.
     cli_timeout_s: float = 300.0
+    # Soft inactivity watchdog for the streaming reader. Resets on
+    # every stdout line (or stream-json event); the child is killed if
+    # this many seconds pass with no output even when the overall
+    # ``cli_timeout_s`` budget hasn't expired. Distinguishes "model is
+    # thinking — events flowing, no answer text yet" (events keep
+    # ticking) from "process is hung" (no events at all). Set to None
+    # to disable and rely only on the total ceiling. Default 180 s is
+    # generous enough that complex Sonnet 4.6 ``thinking_delta``
+    # streams don't false-positive, while still catching real hangs in
+    # roughly 3 minutes.
+    cli_inactivity_timeout_s: float | None = 180.0
+    # Per-node ``cli_timeout_s`` override map. Reasoning-heavy nodes
+    # (``implement``, ``execute_reflect``) routinely outrun the 300 s
+    # default on complex topics under Sonnet 4.6 extended thinking;
+    # bumping them here avoids tenacity retries that all hit the same
+    # wall. Cheap nodes (``clarify``, ``ideate``) keep the default —
+    # tightening their budget catches real hangs faster.
+    #
+    # Maps engine-node name → seconds. Lookup misses fall back to
+    # ``cli_timeout_s``. The default carries explicit budgets for the
+    # two nodes that have actually hit ``_CliTransientError`` in
+    # production; everything else stays on the historical 300 s.
+    node_cli_timeout_s: dict[str, float] = Field(
+        default_factory=lambda: {"implement": 1800.0, "execute_reflect": 900.0}
+    )
     # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model
     # string this provider should use when that node fires a chat call.

@@ -27,6 +27,10 @@
         <div class="flex items-center gap-4 flex-wrap">
           <span id="status-badge" class="flex items-center gap-2 bg-surface-mid cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase text-on-surface-variant">loading…</span>
           <span id="current-node" class="font-label-sm text-label-sm text-outline uppercase"></span>
+          <span id="node-progress" class="hidden flex items-center gap-1 font-label-sm text-label-sm uppercase">
+            <span class="w-2 h-2 rounded-full" id="node-progress-dot"></span>
+            <span id="node-progress-text"></span>
+          </span>
         </div>
       </div>
     </div>
@@ -41,6 +45,16 @@
       <button id="trash-btn" onclick="trashQuest()" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Trash</button>
     </div>
   </header>
+
+  <!-- Quest-failed banner (only when <quest_root>/quest_failed.md exists). -->
+  <div id="quest-failed-banner" class="hidden fi-banner fi-banner-error">
+    <div class="font-body-md text-body-md text-on-surface flex flex-col gap-1">
+      <b>Quest failed before producing a paper.</b>
+      <span id="quest-failed-node-line" class="text-on-surface-variant"></span>
+      <span id="quest-failed-what-line" class="text-on-surface-variant font-code-md text-code-md"></span>
+      <span class="text-on-surface-variant">Open <code class="font-code-md">quest_failed.md</code> in the quest folder for the full traceback, log tail, and resume command.</span>
+    </div>
+  </div>
 
   <!-- Bento Grid -->
   <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter">
@@ -170,6 +184,8 @@
       badge.className = baseCls + ' bg-surface-mid';
     }
     document.getElementById('current-node').textContent = data.current_node ? `node: ${data.current_node}` : '';
+    renderNodeProgress(data);
+    renderQuestFailedBanner(data.quest_failed);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -253,6 +269,68 @@
   }
 
   function formatBytes(n) { if (n < 1024) return `${n} B`; if (n < 1024*1024) return `${(n/1024).toFixed(1)} KB`; return `${(n/1024/1024).toFixed(1)} MB`; }
+
+  function formatDuration(seconds) {
+    if (seconds == null || seconds < 0) return '';
+    // Floor everything to integer seconds up front. Mixing
+    // ``Math.round(seconds % 60)`` with ``Math.floor(seconds / 60)``
+    // (the original implementation) could produce "1m 60s" for
+    // values like 119.9 — round bumps the remainder past the
+    // boundary while floor under-counts the minute. Floor-first
+    // keeps the components consistent.
+    const total = Math.floor(seconds);
+    if (total < 60) return `${total}s`;
+    if (total < 3600) return `${Math.floor(total/60)}m ${total%60}s`;
+    return `${Math.floor(total/3600)}h ${Math.floor((total%3600)/60)}m`;
+  }
+
+  // Render the node-progress chip next to current-node. Color by idle
+  // time: green when the node is actively logging (idle < 60 s),
+  // yellow once idle crosses 5 min ("might be stuck"), red at 10 min
+  // ("very likely stuck — investigate"). Hidden when the quest isn't
+  // alive (the badge would just say "complete" / "idle" forever).
+  function renderNodeProgress(data) {
+    const chip = document.getElementById('node-progress');
+    const dot = document.getElementById('node-progress-dot');
+    const text = document.getElementById('node-progress-text');
+    if (!data.alive || data.node_elapsed_s == null) {
+      chip.classList.add('hidden');
+      return;
+    }
+    const elapsed = data.node_elapsed_s;
+    const idle = data.node_idle_s || 0;
+    let dotCls = 'bg-status-success';
+    let label = `running ${formatDuration(elapsed)}`;
+    if (idle >= 600) {
+      dotCls = 'bg-status-error';
+      label = `idle ${formatDuration(idle)} of ${formatDuration(elapsed)}`;
+    } else if (idle >= 300) {
+      dotCls = 'bg-status-warning';
+      label = `idle ${formatDuration(idle)} of ${formatDuration(elapsed)}`;
+    }
+    dot.className = `w-2 h-2 rounded-full ${dotCls}`;
+    text.textContent = label;
+    chip.classList.remove('hidden');
+  }
+
+  // When the engine wrote <quest_root>/quest_failed.md after a crash,
+  // surface the failing-node + one-line exception summary so the user
+  // sees the failure from the dashboard without having to open the
+  // file. The full traceback lives in the markdown; we just point at
+  // it. Banner is hidden when quest_failed is null (no diagnostic
+  // present, which is the common case).
+  function renderQuestFailedBanner(qf) {
+    const banner = document.getElementById('quest-failed-banner');
+    if (!qf || !qf.present) {
+      banner.classList.add('hidden');
+      return;
+    }
+    const nodeLine = document.getElementById('quest-failed-node-line');
+    const whatLine = document.getElementById('quest-failed-what-line');
+    nodeLine.textContent = qf.failing_node ? `Failed in node: ${qf.failing_node}` : '';
+    whatLine.textContent = qf.what_broke || '';
+    banner.classList.remove('hidden');
+  }
 
   function renderPaperPreview() {
     const el = document.getElementById('paper-preview');

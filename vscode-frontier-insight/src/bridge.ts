@@ -521,6 +521,19 @@ export class Bridge {
             this.opts.progress.markdown(
                 `\n❌ Quest failed: ${ev.reason}\n`,
             );
+        } else if (ev.event === "node_heartbeat") {
+            // The engine emits one of these every ~30 s during a
+            // long-running LLM call (e.g. Sonnet 4.6 extended-thinking
+            // spans where there's no visible output for minutes).
+            // Surfacing it here keeps the chat panel from looking
+            // frozen during a legitimate-but-slow node — same parity
+            // as the web dashboard's elapsed/idle chip.
+            const elapsed = typeof ev.elapsed_s === "number"
+                ? Math.round(ev.elapsed_s) : 0;
+            const phase = ev.phase || "waiting";
+            this.opts.progress.markdown(
+                `    \`${ev.node}\` — ${phase}, ${elapsed}s elapsed\n`,
+            );
         }
     }
 
