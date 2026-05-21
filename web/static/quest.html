@@ -272,9 +272,16 @@
 
   function formatDuration(seconds) {
     if (seconds == null || seconds < 0) return '';
-    if (seconds < 60) return `${Math.round(seconds)}s`;
-    if (seconds < 3600) return `${Math.floor(seconds/60)}m ${Math.round(seconds%60)}s`;
-    return `${Math.floor(seconds/3600)}h ${Math.floor((seconds%3600)/60)}m`;
+    // Floor everything to integer seconds up front. Mixing
+    // ``Math.round(seconds % 60)`` with ``Math.floor(seconds / 60)``
+    // (the original implementation) could produce "1m 60s" for
+    // values like 119.9 — round bumps the remainder past the
+    // boundary while floor under-counts the minute. Floor-first
+    // keeps the components consistent.
+    const total = Math.floor(seconds);
+    if (total < 60) return `${total}s`;
+    if (total < 3600) return `${Math.floor(total/60)}m ${total%60}s`;
+    return `${Math.floor(total/3600)}h ${Math.floor((total%3600)/60)}m`;
   }
 
   // Render the node-progress chip next to current-node. Color by idle

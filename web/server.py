@@ -228,17 +228,26 @@ _KNOWN_NODES = frozenset({
 })
 
 
-def _current_node_from_log(lines: list[str]) -> str:
+def _current_node_from_log(
+    lines: list[str],
+    *,
+    known_nodes: frozenset[str] | None = None,
+) -> str:
     """Best-effort: find the most recent ``[<node>]`` tag in the log.
 
     Match strict ``[lowercase_underscore]`` only, and prefer the LAST
     occurrence on a line that names a known node — otherwise random
     bracketed tokens like ``['matplotlib']`` from a pip-install log
-    line would be mistaken for the current node."""
+    line would be mistaken for the current node.
+
+    ``known_nodes`` lets callers inject a test fixture's node set; the
+    default is the module-level ``_KNOWN_NODES`` so existing call
+    sites keep their behaviour."""
+    recognisable = known_nodes if known_nodes is not None else _KNOWN_NODES
     for line in reversed(lines):
         for m in reversed(list(_NODE_TAG_RE.finditer(line))):
             tag = m.group(1)
-            if tag in _KNOWN_NODES:
+            if tag in recognisable:
                 return tag
     return "(unknown)"
 
@@ -246,13 +255,22 @@ def _current_node_from_log(lines: list[str]) -> str:
 # Match the engine's ISO-with-comma-millis timestamp that ``_quest_logger``
 # in ``core/engine.py`` produces. Example log line:
 #     2026-05-20 11:11:52,388 [INFO] [ideate] topic=...
+# Two capture groups: ISO date+time (whole seconds) and sub-second
+# digits (millis or micros). The sub-second part is normalised to
+# microseconds when parsing so timestamps don't lose precision.
 _LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})[,.](\d+)")
 
 
 def _parse_log_timestamp(line: str) -> float | None:
     """Best-effort parse of the engine's log-line timestamp into a
     POSIX timestamp. Returns None for lines without a parseable
-    timestamp (heartbeat-less lines, e.g. raw subprocess stdout)."""
+    timestamp (heartbeat-less lines, e.g. raw subprocess stdout).
+
+    Preserves sub-second precision (millis / micros) so heartbeat
+    spacing on the dashboard isn't quantised to whole seconds —
+    relevant when the inactivity-watchdog ticks at 1 s cadence and
+    the dashboard shows ``idle=0.6s`` distinct from ``idle=1.4s``.
+    """
     m = _LOG_TS_RE.match(line)
     if not m:
         return None
@@ -263,7 +281,16 @@ def _parse_log_timestamp(line: str) -> float | None:
         # natively on Py3.11+. Treat the parsed time as local — the engine
         # logger uses ``logging.Formatter`` with no tz, so this matches.
         dt = datetime.fromisoformat(ts_str)
-        return dt.timestamp()
+        base = dt.timestamp()
+        # Normalise the fractional part to a fraction of a second.
+        # Engine logger emits 3-digit ms by default; some sites emit 6.
+        # Pad/truncate to 6 digits so the divisor is fixed at 1_000_000.
+        frac_digits = m.group(2)[:6].ljust(6, "0")
+        try:
+            frac = int(frac_digits) / 1_000_000.0
+        except ValueError:
+            frac = 0.0
+        return base + frac
     except (ValueError, TypeError):
         return None
 
@@ -284,8 +311,14 @@ def _node_progress_from_log(
     badge ("running 4 min" green → "idle 5 min" yellow → "idle 10 min"
     red). All three values are ``None`` when there's nothing parseable
     — caller renders a fall-back without elapsed/idle info.
+
+    ``known_nodes`` is the recogniser set for ``_current_node_from_log``;
+    pass the same frozenset the caller uses elsewhere so the two
+    helpers stay in sync (avoids the bug where this function silently
+    fell back to the module-level ``_KNOWN_NODES`` and ignored the
+    caller's choice).
     """
-    current = _current_node_from_log(lines)
+    current = _current_node_from_log(lines, known_nodes=known_nodes)
     if current == "(unknown)":
         return {
             "node_started_at": None,
@@ -338,10 +371,13 @@ def _read_quest_failed_md(quest_root: Path) -> dict[str, Any] | None:
     """When the engine writes ``<quest_root>/quest_failed.md`` after a
     mid-graph crash, surface its summary to the dashboard so the user
     discovers the failure without grepping the file. Returns None when
-    the file is absent. Returns a dict with ``failing_node``,
-    ``what_broke`` (one-line exception text), and ``resume_command``
-    when present — fields parsed lenient-best-effort from the markdown
-    template the engine writes (see ``Engine._write_quest_failed_md``)."""
+    the file is absent. Returns a dict with ``present``, ``path``,
+    ``failing_node``, and ``what_broke`` (one-line exception text)
+    — fields parsed lenient-best-effort from the markdown template the
+    engine writes (see ``Engine._write_quest_failed_md``). The full
+    traceback + resume hint stays in the markdown body; the dashboard
+    intentionally surfaces just enough to direct the user to the file.
+    """
     path = quest_root / "quest_failed.md"
     if not path.is_file():
         return None
@@ -1348,7 +1384,20 @@ def make_app(
         # transports.
         # Already fetched above for the spawning-race fallback; reuse it.
         launcher_status = launcher_status or {}
-        node_progress = _node_progress_from_log(log_lines, _KNOWN_NODES)
+        # Use a LARGER window for the stage-progress derivation than
+        # the 20-line dashboard tail. A chatty node (literature with
+        # many docs, design with a long JSON, ...) can easily push its
+        # own opening ``[<node>] ...`` line off a 20-line tail, in
+        # which case ``node_started_at`` would be ``None`` and the
+        # elapsed/idle chip would silently hide. 500 lines is enough
+        # for any practical node — typical run.logs stay under 200
+        # lines per node — while still cheap on disk for a long quest.
+        node_progress_lines = _read_log_tail(
+            quest_root / ".fi" / "run.log", n=500,
+        )
+        node_progress = _node_progress_from_log(
+            node_progress_lines, _KNOWN_NODES,
+        )
         quest_failed = _read_quest_failed_md(quest_root)
         return JSONResponse({
             "quest_id": quest_id,

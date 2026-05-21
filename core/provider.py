@@ -713,8 +713,14 @@ async def _collect_via_streaming(
     last_activity = start
     stop = asyncio.Event()
     aggregated: list[str] = []
+    # Running counter so the heartbeat doesn't recompute
+    # ``sum(len(s) for s in aggregated)`` on every 1-s tick (that
+    # would be O(N²) in stream length). Always updated in lock-step
+    # with ``aggregated.append`` so the two never drift.
+    text_bytes_total = 0
     thinking_token_count = 0
     error_message: str | None = None  # populated from stream_json error events
+    result_envelope_seen = False  # see _parse_stream_json_line caller below
 
     async def write_stdin() -> None:
         if stdin_bytes is None or proc.stdin is None:
@@ -730,6 +736,7 @@ async def _collect_via_streaming(
 
     async def read_stdout() -> None:
         nonlocal last_activity, thinking_token_count, error_message
+        nonlocal text_bytes_total, result_envelope_seen
         while True:
             try:
                 line = await proc.stdout.readline()
@@ -739,14 +746,30 @@ async def _collect_via_streaming(
                 return  # EOF
             last_activity = time.monotonic()
             if spec.output_via == "stream_json":
-                text_delta, thinking_inc, err = _parse_stream_json_line(line)
+                text_delta, thinking_inc, err, is_result = (
+                    _parse_stream_json_line(line)
+                )
                 if text_delta:
-                    aggregated.append(text_delta)
+                    # The CLI sometimes emits a final ``result`` envelope
+                    # carrying the full assembled text AFTER streaming
+                    # all the ``text_delta`` chunks. If we already
+                    # collected the chunks, the result envelope would
+                    # duplicate them. Skip the envelope's body when we
+                    # already have streamed text.
+                    if is_result and aggregated:
+                        result_envelope_seen = True
+                    else:
+                        aggregated.append(text_delta)
+                        text_bytes_total += len(text_delta)
+                        if is_result:
+                            result_envelope_seen = True
                 thinking_token_count += thinking_inc
                 if err is not None and error_message is None:
                     error_message = err
             else:
-                aggregated.append(line.decode("utf-8", errors="replace"))
+                decoded = line.decode("utf-8", errors="replace")
+                aggregated.append(decoded)
+                text_bytes_total += len(decoded)
 
     async def watchdog() -> None:
         while not stop.is_set():
@@ -765,7 +788,7 @@ async def _collect_via_streaming(
                     f"{spec.argv[0]} silent for {idle:.0f}s "
                     f"(inactivity threshold {inactivity_timeout_s:g}s); "
                     f"thinking_tokens={thinking_token_count}, "
-                    f"text_bytes={sum(len(s) for s in aggregated)}"
+                    f"text_bytes={text_bytes_total}"
                 )
             # Best-effort heartbeat. Cadence: only when the caller asked
             # for one. Errors swallowed; never block the LLM call.
@@ -776,7 +799,7 @@ async def _collect_via_streaming(
                         "node": node,
                         "elapsed_s": elapsed,
                         "idle_s": idle,
-                        "text_bytes": sum(len(s) for s in aggregated),
+                        "text_bytes": text_bytes_total,
                         "thinking_tokens": thinking_token_count,
                     })
                 except Exception:
@@ -785,6 +808,7 @@ async def _collect_via_streaming(
     writer_task = asyncio.create_task(write_stdin())
     reader_task = asyncio.create_task(read_stdout())
     watchdog_task = asyncio.create_task(watchdog())
+    watchdog_raised: BaseException | None = None
     try:
         # Race: either the reader finishes (EOF) or the watchdog
         # raises. ``return_when=FIRST_COMPLETED`` lets us catch either.
@@ -794,7 +818,11 @@ async def _collect_via_streaming(
         )
         for t in done:
             if t.exception() is not None:
-                raise t.exception()  # type: ignore[misc]
+                # Save the watchdog's _CliTransientError so we can
+                # raise it AFTER we've reaped the child — otherwise
+                # the watchdog timeout escapes ``_collect_via_streaming``
+                # with the child still running.
+                watchdog_raised = t.exception()
     finally:
         stop.set()
         for t in (writer_task, reader_task, watchdog_task):
@@ -806,6 +834,16 @@ async def _collect_via_streaming(
                 await t
             except (asyncio.CancelledError, _CliTransientError, Exception):
                 pass
+        # If the watchdog tripped a timeout, the child is still alive
+        # (the watchdog's raise pre-empted any reap path). Kill it
+        # before we propagate the error to the caller so it doesn't
+        # keep burning CPU + LLM tokens in the background. Done
+        # inside ``finally`` so even if the caller cancels us mid-
+        # watchdog the kill still runs.
+        if watchdog_raised is not None:
+            await _kill_and_reap(proc, spec.argv[0])
+    if watchdog_raised is not None:
+        raise watchdog_raised
     # Reader finished (EOF). Wait for the child to exit and check rc.
     try:
         rc = await asyncio.wait_for(proc.wait(), timeout=10)
@@ -859,9 +897,10 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process, name: str) -> bool:
         return False
 
 
-def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None]:
+def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None, bool]:
     """Parse one line of Claude CLI's ``--output-format stream-json``
-    output. Returns ``(text_delta, thinking_delta_token_count, error)``.
+    output. Returns
+    ``(text_delta, thinking_delta_token_count, error, is_result_envelope)``.
 
     - ``text_delta`` is the new assistant-visible text (empty for
       thinking-only events).
@@ -870,6 +909,11 @@ def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None]:
       large and not useful to downstream parsers.
     - ``error`` is a fatal-error message extracted from
       ``{"type":"error",...}`` events, else None.
+    - ``is_result_envelope`` is True when this line came from a
+      ``{"type":"result", "result":"<full text>"}`` envelope. Callers
+      use it to deduplicate: the CLI sometimes emits BOTH a stream of
+      ``text_delta`` events AND a final result envelope carrying the
+      same content; appending both would double the answer.
 
     Tolerates non-JSON lines (the CLI sometimes emits status lines
     before stream-json events fully start) by returning all-empties.
@@ -877,38 +921,40 @@ def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None]:
     try:
         msg = json.loads(raw.decode("utf-8", errors="replace"))
     except (ValueError, UnicodeDecodeError):
-        return "", 0, None
+        return "", 0, None, False
     if not isinstance(msg, dict):
-        return "", 0, None
+        return "", 0, None, False
     mtype = msg.get("type")
     # Stream event wrapper — actual content is nested under .event.
     if mtype == "stream_event":
         event = msg.get("event") or {}
         if not isinstance(event, dict):
-            return "", 0, None
+            return "", 0, None, False
         if event.get("type") == "content_block_delta":
             delta = event.get("delta") or {}
             dtype = delta.get("type")
             if dtype == "text_delta":
-                return str(delta.get("text", "")), 0, None
+                return str(delta.get("text", "")), 0, None, False
             if dtype == "thinking_delta":
                 thinking = str(delta.get("thinking", ""))
                 # Rough token estimate: 4 chars/token. Used only for
                 # heartbeat progress, not billing.
-                return "", max(1, len(thinking) // 4), None
-        return "", 0, None
+                return "", max(1, len(thinking) // 4), None, False
+        return "", 0, None, False
     # Some events carry the final assembled text in a different shape
     # (e.g. ``"type":"result"`` with ``"result":"<text>"``). Capture
     # it as a fallback so we don't return empty on quests that emit
-    # the result event instead of streaming deltas.
+    # the result event instead of streaming deltas. The ``is_result``
+    # flag lets the caller skip appending when streamed deltas already
+    # supplied the same content.
     if mtype == "result":
         result = msg.get("result")
         if isinstance(result, str):
-            return result, 0, None
+            return result, 0, None, True
     if mtype == "error":
         err = msg.get("error") or msg.get("message") or "unknown stream error"
-        return "", 0, str(err)
-    return "", 0, None
+        return "", 0, str(err), False
+    return "", 0, None, False
 
 
 def _wait_for_openai_endpoint(port: int, *, timeout_s: int) -> None:

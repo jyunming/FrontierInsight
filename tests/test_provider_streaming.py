@@ -46,10 +46,11 @@ def test_parse_stream_json_text_delta_returns_text() -> None:
             "delta": {"type": "text_delta", "text": "hello "},
         },
     }).encode("utf-8")
-    text, thinking, err = _parse_stream_json_line(raw)
+    text, thinking, err, is_result = _parse_stream_json_line(raw)
     assert text == "hello "
     assert thinking == 0
     assert err is None
+    assert is_result is False
 
 
 def test_parse_stream_json_thinking_delta_counts_but_no_text() -> None:
@@ -63,41 +64,71 @@ def test_parse_stream_json_thinking_delta_counts_but_no_text() -> None:
             "delta": {"type": "thinking_delta", "thinking": "x" * 400},
         },
     }).encode("utf-8")
-    text, thinking, err = _parse_stream_json_line(raw)
+    text, thinking, err, is_result = _parse_stream_json_line(raw)
     assert text == ""
     assert thinking == 100  # 400 / 4
     assert err is None
+    assert is_result is False
 
 
 def test_parse_stream_json_result_event_captures_final_text() -> None:
     """Some claude_cli versions emit a final ``result`` envelope
     carrying the assembled text instead of (or in addition to) the
     stream of deltas. The parser must surface that body or we'd
-    return an empty string."""
+    return an empty string — but ALSO flag the envelope so callers
+    can deduplicate against streamed deltas."""
     raw = json.dumps({"type": "result", "result": "final answer body"}).encode()
-    text, thinking, err = _parse_stream_json_line(raw)
+    text, thinking, err, is_result = _parse_stream_json_line(raw)
     assert text == "final answer body"
     assert err is None
+    assert is_result is True
 
 
 def test_parse_stream_json_error_event_returns_error_message() -> None:
     raw = json.dumps({"type": "error", "error": "rate_limit_exceeded"}).encode()
-    text, thinking, err = _parse_stream_json_line(raw)
+    text, thinking, err, is_result = _parse_stream_json_line(raw)
     assert text == ""
     assert err == "rate_limit_exceeded"
+    assert is_result is False
 
 
 def test_parse_stream_json_non_json_line_returns_empties() -> None:
     """Pre-stream banner lines from the CLI (status messages, ANSI,
     etc.) must not crash the parser. They become silent no-ops."""
-    text, thinking, err = _parse_stream_json_line(b"INFO some status line\n")
-    assert (text, thinking, err) == ("", 0, None)
+    out = _parse_stream_json_line(b"INFO some status line\n")
+    assert out == ("", 0, None, False)
 
 
 def test_parse_stream_json_unrelated_message_type_ignored() -> None:
     raw = json.dumps({"type": "system", "subtype": "init"}).encode()
-    text, thinking, err = _parse_stream_json_line(raw)
-    assert (text, thinking, err) == ("", 0, None)
+    out = _parse_stream_json_line(raw)
+    assert out == ("", 0, None, False)
+
+
+def test_collect_via_streaming_deduplicates_result_envelope_after_deltas(
+    tmp_path,
+) -> None:
+    """When the CLI emits both streamed text_deltas AND a final result
+    envelope carrying the assembled text, the aggregator must NOT
+    append the envelope on top of the deltas (which would double the
+    answer). The is_result flag from _parse_stream_json_line is the
+    deduplication signal."""
+    import asyncio
+    events = [
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "Hello "}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "world"}}},
+        # Final envelope carrying the SAME assembled text. Must be
+        # ignored — the deltas already supplied it.
+        {"type": "result", "result": "Hello world"},
+    ]
+    _, spec = _make_fake_streaming_binary(tmp_path, events=events)
+    result = asyncio.run(_run_cli(
+        spec, "any prompt",
+        timeout_s=10.0, inactivity_timeout_s=5.0,
+    ))
+    assert result == "Hello world"  # NOT "Hello worldHello world"
 
 
 # ---------------------------------------------------------------------------

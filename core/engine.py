@@ -2569,13 +2569,19 @@ class Engine:
         elapsed = float(payload.get("elapsed_s", 0.0))
         idle = float(payload.get("idle_s", 0.0))
         node = str(payload.get("node") or "?")
-        # Throttle: only log every N seconds of elapsed time. The
-        # ``_heartbeat_last_logged`` dict is keyed by node so concurrent
-        # ensembled calls don't share a single bucket.
+        # Throttle: only log every N seconds of WALL-CLOCK time. We
+        # compare against ``time.monotonic()`` directly, NOT against
+        # the call's local elapsed — the call's elapsed resets to 0
+        # at the top of every new chat invocation, which would make a
+        # second call's "elapsed - last_logged" go negative and
+        # suppress every heartbeat after the first call's last log
+        # (the bug Copilot review on PR #154 flagged). Keying by node
+        # gives concurrent ensembled fan-out calls independent buckets.
+        now = time.monotonic()
         last = self._heartbeat_last_logged.get(node, 0.0)
-        if elapsed - last < self._heartbeat_log_interval_s:
+        if now - last < self._heartbeat_log_interval_s:
             return
-        self._heartbeat_last_logged[node] = elapsed
+        self._heartbeat_last_logged[node] = now
         thinking = int(payload.get("thinking_tokens", 0))
         text_bytes = int(payload.get("text_bytes", 0))
         # Phrasing: "still thinking" when we have thinking events but no
