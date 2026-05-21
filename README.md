@@ -70,6 +70,7 @@ data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldb
 .fi/requirements.lock.txt             ← pip freeze (only on successful finish; .venv/ is then removed to reclaim disk)
 frontier_insight_summary.json        ← machine-readable index
 quest_failed.md                       ← only if the quest crashed: failing node, exception, log tail, --resume command
+                                        (the web dashboard surfaces this as a red banner on the quest detail page)
 <kind>_skipped.md                     ← only if an output kind couldn't be produced: what was requested, why it skipped, how to fix
 ```
 

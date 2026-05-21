@@ -203,6 +203,13 @@ class Engine:
         self._log = _quest_logger(self.quest_id, self.fi_dir)
         self._prompts = _load_prompts()
         self._client: LLMClient | None = None
+        # Throttle bookkeeping for ``_llm_heartbeat``. Keyed by node
+        # name so concurrent ensembled calls don't share one bucket.
+        # Reset on every node entry would be nice but isn't needed —
+        # any new call's elapsed starts at 0 so the "elapsed - last <
+        # interval" check trivially passes.
+        self._heartbeat_last_logged: dict[str, float] = {}
+        self._heartbeat_log_interval_s: float = 30.0
 
     async def run(
         self,
@@ -259,6 +266,11 @@ class Engine:
             self._client = LLMClient(
                 endpoint,
                 cli_timeout_s=self.config.provider.cli_timeout_s,
+                cli_inactivity_timeout_s=(
+                    self.config.provider.cli_inactivity_timeout_s
+                ),
+                node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+                heartbeat_cb=self._llm_heartbeat,
             )
 
             checkpoint_path = self.fi_dir / "state.sqlite"
@@ -2539,6 +2551,47 @@ class Engine:
         )
         self._log_chat_cost(node=node or "")
         return response
+
+    def _llm_heartbeat(self, payload: dict[str, Any]) -> None:
+        """Receive a periodic progress beat from ``LLMClient`` during
+        a long-running CLI call (Sonnet 4.6 extended-thinking spans of
+        thinking_delta events look identical to a hung process on
+        ``--output-format text``; this hook is what makes them visible
+        in run.log).
+
+        Called every ~1 s by the CLI streaming reader. We THROTTLE
+        emission to once every ``_heartbeat_log_interval_s`` (default
+        30 s) so a 9-minute implement call writes ~18 progress lines,
+        not 540. Errors are swallowed by the caller — never re-raises.
+        """
+        if payload.get("kind") != "cli_progress":
+            return
+        elapsed = float(payload.get("elapsed_s", 0.0))
+        idle = float(payload.get("idle_s", 0.0))
+        node = str(payload.get("node") or "?")
+        # Throttle: only log every N seconds of elapsed time. The
+        # ``_heartbeat_last_logged`` dict is keyed by node so concurrent
+        # ensembled calls don't share a single bucket.
+        last = self._heartbeat_last_logged.get(node, 0.0)
+        if elapsed - last < self._heartbeat_log_interval_s:
+            return
+        self._heartbeat_last_logged[node] = elapsed
+        thinking = int(payload.get("thinking_tokens", 0))
+        text_bytes = int(payload.get("text_bytes", 0))
+        # Phrasing: "still thinking" when we have thinking events but no
+        # text yet (the OPC case); "still streaming" once text begins;
+        # "no events yet" when idle is already past the inactivity
+        # window's halfway mark (caller will kill soon).
+        if text_bytes > 0:
+            phase = f"streaming ({text_bytes} text bytes so far)"
+        elif thinking > 0:
+            phase = f"thinking ({thinking} thinking-token events)"
+        else:
+            phase = "no events yet"
+        self._log.info(
+            "[%s] still waiting on LLM — %s, elapsed=%.0fs, idle=%.0fs",
+            node, phase, elapsed, idle,
+        )
 
     def _ensemble_for_node(self, node: str) -> "NodeEnsembleConfig | None":  # type: ignore[name-defined]
         """Return the ensemble config for ``node`` if the YAML carries

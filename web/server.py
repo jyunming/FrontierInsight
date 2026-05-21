@@ -220,9 +220,11 @@ _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
 # `(unknown)` during the affected node's run, even though it's logging
 # normally — `_current_node_from_log` filters on this set.
 _KNOWN_NODES = frozenset({
-    "clarify", "ideate", "literature", "design", "implement",
-    "execute", "execute_reflect", "analyze", "cross_check",
-    "write", "review",
+    "clarify", "ideate", "literature", "design", "design_self_critique",
+    "implement", "execute", "execute_reflect", "analyze", "cross_check",
+    "write", "review", "human_feedback",
+    # No-simulation routing: triggered when ``simulatability == "no"``.
+    "auto_collect_data", "wait_for_data", "data_load",
 })
 
 
@@ -239,6 +241,145 @@ def _current_node_from_log(lines: list[str]) -> str:
             if tag in _KNOWN_NODES:
                 return tag
     return "(unknown)"
+
+
+# Match the engine's ISO-with-comma-millis timestamp that ``_quest_logger``
+# in ``core/engine.py`` produces. Example log line:
+#     2026-05-20 11:11:52,388 [INFO] [ideate] topic=...
+_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})[,.](\d+)")
+
+
+def _parse_log_timestamp(line: str) -> float | None:
+    """Best-effort parse of the engine's log-line timestamp into a
+    POSIX timestamp. Returns None for lines without a parseable
+    timestamp (heartbeat-less lines, e.g. raw subprocess stdout)."""
+    m = _LOG_TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        from datetime import datetime
+        ts_str = m.group(1).replace("T", " ")
+        # ``datetime.fromisoformat`` understands the space-separated form
+        # natively on Py3.11+. Treat the parsed time as local — the engine
+        # logger uses ``logging.Formatter`` with no tz, so this matches.
+        dt = datetime.fromisoformat(ts_str)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _node_progress_from_log(
+    lines: list[str], known_nodes: frozenset[str], *, now: float | None = None,
+) -> dict[str, float | str | None]:
+    """Derive node start/elapsed/idle from a tail of run.log lines.
+
+    Returns ``{"node_started_at", "node_elapsed_s", "node_idle_s"}``.
+    ``node_started_at`` is the POSIX timestamp of the FIRST log line
+    that tagged the current node (the most-recent ``[<node>]`` open).
+    ``node_elapsed_s`` is "now − node_started_at". ``node_idle_s`` is
+    "now − timestamp of the most recent log line" — caps at the elapsed
+    time so a quest with no recent activity reports an idle <= elapsed.
+
+    Used by the ``/api/quests/{id}`` endpoint to power a stuck-quest
+    badge ("running 4 min" green → "idle 5 min" yellow → "idle 10 min"
+    red). All three values are ``None`` when there's nothing parseable
+    — caller renders a fall-back without elapsed/idle info.
+    """
+    current = _current_node_from_log(lines)
+    if current == "(unknown)":
+        return {
+            "node_started_at": None,
+            "node_elapsed_s": None,
+            "node_idle_s": None,
+        }
+    if now is None:
+        now = time.time()
+    # Walk forward from the start; the FIRST line that tags ``current``
+    # is the node's start. Subsequent ``[<node>]`` mentions of the same
+    # tag don't reset the start (one node can log many lines). A LATER
+    # tag for a different node would mean we exited current — but then
+    # ``_current_node_from_log`` would have returned that other node,
+    # not ``current``. So walking forward and stopping at first match
+    # is correct.
+    started_at: float | None = None
+    last_activity: float | None = None
+    for line in lines:
+        ts = _parse_log_timestamp(line)
+        if ts is None:
+            continue
+        last_activity = ts  # any timestamped line counts as activity
+        if started_at is None:
+            for m in _NODE_TAG_RE.finditer(line):
+                if m.group(1) == current:
+                    started_at = ts
+                    break
+    if started_at is None:
+        return {
+            "node_started_at": None,
+            "node_elapsed_s": None,
+            "node_idle_s": None,
+        }
+    elapsed = max(0.0, now - started_at)
+    idle = (
+        max(0.0, now - last_activity) if last_activity is not None
+        else elapsed
+    )
+    # Cap idle at elapsed: it doesn't make sense to be "idle 5 min"
+    # in a node that only started 30 s ago.
+    idle = min(idle, elapsed)
+    return {
+        "node_started_at": started_at,
+        "node_elapsed_s": elapsed,
+        "node_idle_s": idle,
+    }
+
+
+def _read_quest_failed_md(quest_root: Path) -> dict[str, Any] | None:
+    """When the engine writes ``<quest_root>/quest_failed.md`` after a
+    mid-graph crash, surface its summary to the dashboard so the user
+    discovers the failure without grepping the file. Returns None when
+    the file is absent. Returns a dict with ``failing_node``,
+    ``what_broke`` (one-line exception text), and ``resume_command``
+    when present — fields parsed lenient-best-effort from the markdown
+    template the engine writes (see ``Engine._write_quest_failed_md``)."""
+    path = quest_root / "quest_failed.md"
+    if not path.is_file():
+        return None
+    try:
+        body = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    info: dict[str, Any] = {
+        "present": True,
+        "path": str(path),
+        "failing_node": None,
+        "what_broke": None,
+    }
+    # Templated lines in the engine's writer:
+    #   **Failing node:** `<node>`
+    #   ```\n<exception line>\n```
+    for line in body.splitlines():
+        if line.startswith("**Failing node:**"):
+            info["failing_node"] = (
+                line.split("**Failing node:**", 1)[1].strip().strip("`")
+            )
+            break
+    # First fenced line under "## What broke" carries the exception.
+    in_what_broke = False
+    in_fence = False
+    for line in body.splitlines():
+        if line.startswith("## What broke"):
+            in_what_broke = True
+            continue
+        if in_what_broke and line.strip().startswith("```"):
+            if in_fence:
+                break
+            in_fence = True
+            continue
+        if in_fence:
+            info["what_broke"] = line.strip()
+            break
+    return info
 
 
 # ---- app factory ----------------------------------------------------------
@@ -1207,10 +1348,19 @@ def make_app(
         # transports.
         # Already fetched above for the spawning-race fallback; reuse it.
         launcher_status = launcher_status or {}
+        node_progress = _node_progress_from_log(log_lines, _KNOWN_NODES)
+        quest_failed = _read_quest_failed_md(quest_root)
         return JSONResponse({
             "quest_id": quest_id,
             "quest_root": str(quest_root),
             "current_node": _current_node_from_log(log_lines),
+            # Stage-stuck signals derived from run.log timestamps. The
+            # JS detail page uses these to render a colored badge
+            # (green/yellow/red by idle threshold). All three are null
+            # when the log has nothing parseable yet.
+            "node_started_at": node_progress["node_started_at"],
+            "node_elapsed_s": node_progress["node_elapsed_s"],
+            "node_idle_s": node_progress["node_idle_s"],
             "log_tail": log_lines,
             "figures": figures,
             "paper_preview": (
@@ -1225,6 +1375,11 @@ def make_app(
             "pending_clarify": registry.pending_clarify(quest_id) is not None,
             "review": review,
             "review_panel": review_panel,
+            # `quest_failed.md` summary when the engine wrote one
+            # (post-crash diagnostic). Null when the file is absent so
+            # the UI can hide the banner. Lives in the quest root,
+            # cleared by the engine on a successful resume.
+            "quest_failed": quest_failed,
             # Subprocess-launcher specifics for the detail page UI.
             # `pid` lets users find the process; `started_at` powers a
             # "running for X minutes" hint. Both null when the quest

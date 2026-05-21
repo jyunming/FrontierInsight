@@ -133,11 +133,13 @@ class _CliSpec:
 
     argv: tuple[str, ...]            # base command; prompt may be appended
     pass_prompt_via: str             # "stdin" | "arg"
-    output_via: str                  # "stdout" | "last_message_file"
+    output_via: str                  # "stdout" | "last_message_file" | "stream_json"
     # Optional post-process step on the raw collected content. Used when
     # the CLI emits warnings/info before the real response or wraps the
     # response in a JSON envelope (see gemini_cli). `None` means no
     # extraction — `_run_cli` returns the raw collected content as-is.
+    # Ignored for ``output_via="stream_json"`` (the stream parser is
+    # already format-aware).
     output_extractor: Callable[[str], str] | None = None
     # If set, and the user passed `provider.model` in their YAML config,
     # FI inserts `[model_flag, <provider.model>]` after argv[0] so the
@@ -150,13 +152,24 @@ class _CliSpec:
 
 _CLI_SPECS: dict[str, _CliSpec] = {
     "claude_cli": _CliSpec(
-        # `claude --print` prints the response to stdout and exits. Output
-        # format "text" keeps it raw; "json" wraps in a JSON envelope. We
-        # use "text" and let the engine's `_parse_json_lenient` cope with
-        # whatever the model produces.
-        argv=("claude", "--print", "--output-format", "text"),
+        # `claude --print` prints the response to stdout and exits.
+        # We use ``stream-json`` + ``--include-partial-messages`` so the
+        # CLI emits SSE-style events (one JSON-per-line) instead of one
+        # silent flush at the end. This is load-bearing on Sonnet 4.6:
+        # complex prompts go into extended-thinking mode (tens of
+        # thousands of ``thinking_delta`` tokens before any answer text)
+        # which under ``--output-format text`` looks identical to a
+        # hung process. With stream-json the reader sees a steady
+        # stream of events and the inactivity-timer watchdog correctly
+        # distinguishes "model is thinking" from "process is stuck".
+        argv=(
+            "claude", "--print",
+            "--output-format", "stream-json",
+            "--include-partial-messages",
+            "--verbose",  # required by claude_cli for stream-json + --print
+        ),
         pass_prompt_via="stdin",
-        output_via="stdout",
+        output_via="stream_json",
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
     ),
     "codex_cli": _CliSpec(
@@ -515,7 +528,45 @@ async def _run_cli(
     *,
     model: str = "",
     timeout_s: float = 300.0,
+    inactivity_timeout_s: float = 180.0,
+    heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
+    node: str = "",
 ) -> str:
+    """Spawn the CLI and collect its response. Three output modes:
+
+    * ``output_via="stdout"`` — collect raw stdout until EOF.
+    * ``output_via="last_message_file"`` — final answer lands in a temp
+      file; stdout is treated as an opaque agent log.
+    * ``output_via="stream_json"`` — line-buffered JSON events (Claude
+      Code CLI's ``--output-format stream-json``); text deltas are
+      aggregated into the return value, thinking deltas are counted but
+      discarded.
+
+    Two timeouts protect against stuck children:
+
+    * ``timeout_s`` — hard ceiling on TOTAL wall-clock. Default 300 s
+      preserves historical behaviour; per-node overrides in
+      ``ProviderConfig.node_cli_timeout_s`` can raise this for
+      reasoning-heavy nodes (``implement``, ``execute_reflect``).
+    * ``inactivity_timeout_s`` — soft watchdog reset on every stdout
+      line or stream event. Default 180 s. This is what tells "model is
+      thinking and emitting thinking_delta events" apart from "process
+      hung silently". The hard ceiling still applies on top — even a
+      well-streaming child must finish within ``timeout_s``.
+
+    ``last_message_file`` mode can't watch stdout for activity (it's
+    DEVNULL'd to save memory on long-running CLI logs), so the
+    inactivity timer is silently disabled there and only the hard
+    ceiling applies. Same for any future spec that points stdout
+    elsewhere.
+
+    ``heartbeat_cb`` is called periodically (best-effort) with a dict
+    describing progress: ``{kind, elapsed_s, idle_s, text_bytes,
+    thinking_tokens}``. The Engine wires this into its run.log so the
+    user sees ``[implement] still thinking — 2400 thinking deltas,
+    elapsed 4m22s`` instead of silent dead air. Errors raised by the
+    callback are swallowed; never block the LLM call.
+    """
     # Resolve the binary up front. On Windows, `asyncio.create_subprocess_exec`
     # does NOT honor PATHEXT, so an unqualified name like "codex" raises
     # FileNotFoundError even when `codex.CMD` is sitting in a PATH directory.
@@ -583,61 +634,281 @@ async def _run_cli(
                 f"before using this provider."
             ) from e
 
-        # Bounded wait: a CLI that hangs (e.g. concurrent-fleet
-        # contention on a CLI that does heavy startup like gemini's MCP
-        # bootup) gets killed here so tenacity retries the call. Without
-        # this, a single stuck child blocks the whole quest indefinitely.
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(stdin_bytes), timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            # Format the timeout for the error message at full precision
-            # so sub-second values (test timeouts, fast retries) don't
-            # round to "0s" and lose debuggability.
-            elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass  # already exited between communicate-timeout and our kill
-            kill_clean = True
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                # Child did not reap within 5s after SIGKILL. Surface
-                # this — a leaked child on POSIX becomes a zombie until
-                # the parent dies, and on Windows the handle stays open.
-                kill_clean = False
-                _log.warning(
-                    "CLI %s did not reap within 5s after SIGKILL; "
-                    "process may be wedged in uninterruptible state",
-                    spec.argv[0],
-                )
-            raise _CliTransientError(
-                f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
-                + ("" if kill_clean else " (post-kill wait timed out)")
-            )
-        if proc.returncode != 0:
-            # Retryable: covers transient backend hiccups. Auth/quota
-            # failures also land here but in practice clear after the
-            # CLI refreshes OAuth; if they persist across 4 attempts the
-            # error surfaces.
-            raise _CliTransientError(
-                f"{argv[0]} exited rc={proc.returncode}: "
-                f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
-            )
-
         if spec.output_via == "last_message_file":
-            assert tmp_out_path is not None
-            content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
-        else:
-            content = (stdout_b or b"").decode("utf-8", errors="replace")
-        if spec.output_extractor is not None:
-            content = spec.output_extractor(content)
-        return content.strip()
+            # Legacy code path: stdout is DEVNULL so there's no per-line
+            # activity to observe. Fall back to the original total-wall-
+            # clock-only behaviour.
+            return await _collect_via_communicate(
+                proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
+            )
+        # Streaming path: read stdout line-by-line, reset the inactivity
+        # timer on every line, parse stream-json events when applicable.
+        return await _collect_via_streaming(
+            proc, argv, spec, stdin_bytes,
+            timeout_s=timeout_s,
+            inactivity_timeout_s=inactivity_timeout_s,
+            heartbeat_cb=heartbeat_cb,
+            node=node,
+        )
     finally:
         if tmp_out_path is not None:
             tmp_out_path.unlink(missing_ok=True)
+
+
+async def _collect_via_communicate(
+    proc: asyncio.subprocess.Process,
+    argv: list[str],
+    spec: _CliSpec,
+    stdin_bytes: bytes | None,
+    tmp_out_path: Path | None,
+    timeout_s: float,
+) -> str:
+    """Legacy path for ``output_via="last_message_file"`` — stdout is
+    DEVNULL, so no inactivity timer is meaningful; use a single
+    ``communicate(timeout=...)`` with the hard ceiling only."""
+    try:
+        _stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(stdin_bytes), timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
+        kill_clean = await _kill_and_reap(proc, spec.argv[0])
+        raise _CliTransientError(
+            f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
+            + ("" if kill_clean else " (post-kill wait timed out)")
+        )
+    if proc.returncode != 0:
+        raise _CliTransientError(
+            f"{argv[0]} exited rc={proc.returncode}: "
+            f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
+        )
+    assert tmp_out_path is not None
+    content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
+    if spec.output_extractor is not None:
+        content = spec.output_extractor(content)
+    return content.strip()
+
+
+async def _collect_via_streaming(
+    proc: asyncio.subprocess.Process,
+    argv: list[str],
+    spec: _CliSpec,
+    stdin_bytes: bytes | None,
+    *,
+    timeout_s: float,
+    inactivity_timeout_s: float,
+    heartbeat_cb: Callable[[dict[str, Any]], None] | None,
+    node: str,
+) -> str:
+    """Read the child's stdout line-by-line with two independent
+    timeouts (total + inactivity) and emit periodic heartbeats.
+
+    Distinguishes "model is thinking — events flowing, just no text
+    yet" from "process is hung — no events at all" by resetting the
+    inactivity timer on every line, regardless of whether it parsed
+    as a useful event.
+    """
+    assert proc.stdout is not None
+    start = time.monotonic()
+    last_activity = start
+    stop = asyncio.Event()
+    aggregated: list[str] = []
+    thinking_token_count = 0
+    error_message: str | None = None  # populated from stream_json error events
+
+    async def write_stdin() -> None:
+        if stdin_bytes is None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(stdin_bytes)
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            # Child exited before consuming stdin — the stdout reader
+            # will surface the real error (rc != 0 with stderr tail).
+            pass
+
+    async def read_stdout() -> None:
+        nonlocal last_activity, thinking_token_count, error_message
+        while True:
+            try:
+                line = await proc.stdout.readline()
+            except Exception:
+                break
+            if not line:
+                return  # EOF
+            last_activity = time.monotonic()
+            if spec.output_via == "stream_json":
+                text_delta, thinking_inc, err = _parse_stream_json_line(line)
+                if text_delta:
+                    aggregated.append(text_delta)
+                thinking_token_count += thinking_inc
+                if err is not None and error_message is None:
+                    error_message = err
+            else:
+                aggregated.append(line.decode("utf-8", errors="replace"))
+
+    async def watchdog() -> None:
+        while not stop.is_set():
+            await asyncio.sleep(1.0)
+            now = time.monotonic()
+            elapsed = now - start
+            idle = now - last_activity
+            if elapsed > timeout_s:
+                raise _CliTransientError(
+                    f"{spec.argv[0]} exceeded {timeout_s:g}s total wall-clock "
+                    f"and was killed (last activity {idle:.0f}s ago, "
+                    f"thinking_tokens={thinking_token_count})"
+                )
+            if idle > inactivity_timeout_s:
+                raise _CliTransientError(
+                    f"{spec.argv[0]} silent for {idle:.0f}s "
+                    f"(inactivity threshold {inactivity_timeout_s:g}s); "
+                    f"thinking_tokens={thinking_token_count}, "
+                    f"text_bytes={sum(len(s) for s in aggregated)}"
+                )
+            # Best-effort heartbeat. Cadence: only when the caller asked
+            # for one. Errors swallowed; never block the LLM call.
+            if heartbeat_cb is not None:
+                try:
+                    heartbeat_cb({
+                        "kind": "cli_progress",
+                        "node": node,
+                        "elapsed_s": elapsed,
+                        "idle_s": idle,
+                        "text_bytes": sum(len(s) for s in aggregated),
+                        "thinking_tokens": thinking_token_count,
+                    })
+                except Exception:
+                    pass
+
+    writer_task = asyncio.create_task(write_stdin())
+    reader_task = asyncio.create_task(read_stdout())
+    watchdog_task = asyncio.create_task(watchdog())
+    try:
+        # Race: either the reader finishes (EOF) or the watchdog
+        # raises. ``return_when=FIRST_COMPLETED`` lets us catch either.
+        done, _pending = await asyncio.wait(
+            {reader_task, watchdog_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in done:
+            if t.exception() is not None:
+                raise t.exception()  # type: ignore[misc]
+    finally:
+        stop.set()
+        for t in (writer_task, reader_task, watchdog_task):
+            if not t.done():
+                t.cancel()
+        # Reap any cancellations cleanly.
+        for t in (writer_task, reader_task, watchdog_task):
+            try:
+                await t
+            except (asyncio.CancelledError, _CliTransientError, Exception):
+                pass
+    # Reader finished (EOF). Wait for the child to exit and check rc.
+    try:
+        rc = await asyncio.wait_for(proc.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        await _kill_and_reap(proc, spec.argv[0])
+        raise _CliTransientError(
+            f"{spec.argv[0]} stdout closed but child didn't exit within 10s"
+        )
+    if rc != 0:
+        stderr_b = b""
+        if proc.stderr is not None:
+            try:
+                stderr_b = await asyncio.wait_for(proc.stderr.read(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
+        raise _CliTransientError(
+            f"{argv[0]} exited rc={rc}: "
+            f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
+        )
+    if error_message is not None:
+        # stream-json carried a fatal error event but the process exited
+        # 0 anyway (claude_cli does this for some error classes). Treat
+        # as transient so tenacity retries.
+        raise _CliTransientError(
+            f"{spec.argv[0]} stream error: {error_message[:500]}"
+        )
+    content = "".join(aggregated)
+    if spec.output_extractor is not None and spec.output_via != "stream_json":
+        content = spec.output_extractor(content)
+    return content.strip()
+
+
+async def _kill_and_reap(proc: asyncio.subprocess.Process, name: str) -> bool:
+    """Kill the child and wait up to 5 s for the OS to reap it. Returns
+    True iff the wait completed cleanly. Logs a warning otherwise — a
+    leaked child becomes a zombie on POSIX or holds an OS handle on
+    Windows until the parent exits."""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return True  # already exited
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+        return True
+    except asyncio.TimeoutError:
+        _log.warning(
+            "CLI %s did not reap within 5s after SIGKILL; "
+            "process may be wedged in uninterruptible state",
+            name,
+        )
+        return False
+
+
+def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None]:
+    """Parse one line of Claude CLI's ``--output-format stream-json``
+    output. Returns ``(text_delta, thinking_delta_token_count, error)``.
+
+    - ``text_delta`` is the new assistant-visible text (empty for
+      thinking-only events).
+    - ``thinking_delta_token_count`` is a count, NOT the thinking text
+      itself; we don't keep the thinking-text body because it's both
+      large and not useful to downstream parsers.
+    - ``error`` is a fatal-error message extracted from
+      ``{"type":"error",...}`` events, else None.
+
+    Tolerates non-JSON lines (the CLI sometimes emits status lines
+    before stream-json events fully start) by returning all-empties.
+    """
+    try:
+        msg = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError):
+        return "", 0, None
+    if not isinstance(msg, dict):
+        return "", 0, None
+    mtype = msg.get("type")
+    # Stream event wrapper — actual content is nested under .event.
+    if mtype == "stream_event":
+        event = msg.get("event") or {}
+        if not isinstance(event, dict):
+            return "", 0, None
+        if event.get("type") == "content_block_delta":
+            delta = event.get("delta") or {}
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                return str(delta.get("text", "")), 0, None
+            if dtype == "thinking_delta":
+                thinking = str(delta.get("thinking", ""))
+                # Rough token estimate: 4 chars/token. Used only for
+                # heartbeat progress, not billing.
+                return "", max(1, len(thinking) // 4), None
+        return "", 0, None
+    # Some events carry the final assembled text in a different shape
+    # (e.g. ``"type":"result"`` with ``"result":"<text>"``). Capture
+    # it as a fallback so we don't return empty on quests that emit
+    # the result event instead of streaming deltas.
+    if mtype == "result":
+        result = msg.get("result")
+        if isinstance(result, str):
+            return result, 0, None
+    if mtype == "error":
+        err = msg.get("error") or msg.get("message") or "unknown stream error"
+        return "", 0, str(err)
+    return "", 0, None
 
 
 def _wait_for_openai_endpoint(port: int, *, timeout_s: int) -> None:
@@ -842,6 +1113,9 @@ class LLMClient:
         http: httpx.AsyncClient | None = None,
         timeout_s: float = 120.0,
         cli_timeout_s: float = 300.0,
+        cli_inactivity_timeout_s: float | None = 180.0,
+        node_cli_timeout_s: dict[str, float] | None = None,
+        heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._owns_http = http is None
@@ -852,6 +1126,18 @@ class LLMClient:
         # than the typical 10–90 s per call but bounded so concurrent
         # fleet contention can't hang the whole quest indefinitely.
         self._cli_timeout_s = cli_timeout_s
+        # Inactivity-watchdog soft timeout. None disables and lets only
+        # the total ceiling apply (compat shim for callers that haven't
+        # opted into streaming yet). See ProviderConfig docstring.
+        self._cli_inactivity_timeout_s = cli_inactivity_timeout_s
+        # Per-node ``cli_timeout_s`` overrides; map node-name → seconds.
+        # Lookup misses fall back to ``self._cli_timeout_s``. Used by
+        # ``_chat_cli`` when ``node`` is passed in.
+        self._node_cli_timeout_s = node_cli_timeout_s or {}
+        # Optional periodic progress callback (Engine wires this to its
+        # run.log heartbeat logger). Receives a dict each ~1 s during
+        # CLI streaming; see ``_run_cli`` for the payload shape.
+        self._heartbeat_cb = heartbeat_cb
         # Lazily-built VSCode-extension bridge client. The bridge
         # connection is shared across every chat call from this
         # LLMClient instance.
@@ -971,7 +1257,9 @@ class LLMClient:
         self.last_usage = None
         self.last_model = (model or self.endpoint.model)
         if self.endpoint.transport == "cli":
-            text = await self._chat_cli(messages, model_override=model)
+            text = await self._chat_cli(
+                messages, model_override=model, node=node,
+            )
             self._fill_usage_estimate_if_missing(messages, text)
             return text
         if self.endpoint.transport == "vscode_bridge":
@@ -1199,6 +1487,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         model_override: str | None = None,
+        node: str = "",
     ) -> str:
         """Exec a local CLI binary with the prompt and return its output.
 
@@ -1212,11 +1501,29 @@ class LLMClient:
         Persistent auth/quota failures also surface here when the CLI's
         OAuth refresh has run out of options, since they are reported as
         non-zero exits and so will be retried up to 4 times before raising.
+
+        ``node`` is the FI engine node name; when set, looks up
+        ``node_cli_timeout_s[node]`` for the per-call wall-clock budget
+        so reasoning-heavy nodes (implement, execute_reflect) can get
+        longer ceilings than fast ones (clarify, ideate).
         """
         spec = self.endpoint.cli_spec
         if spec is None:  # pragma: no cover — guarded by transport check
             raise RuntimeError("transport=cli but no cli_spec set")
         prompt = _messages_to_text(messages)
+
+        # Pick the per-call total-timeout: node-specific override wins,
+        # else the client-level default.
+        effective_total_timeout = self._node_cli_timeout_s.get(
+            node, self._cli_timeout_s,
+        )
+        # Effective inactivity timeout. None means "disabled, only the
+        # total ceiling applies" — preserved for compat / tests.
+        effective_inactivity = (
+            self._cli_inactivity_timeout_s
+            if self._cli_inactivity_timeout_s is not None
+            else effective_total_timeout
+        )
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
@@ -1236,6 +1543,9 @@ class LLMClient:
                 return await _run_cli(
                     spec, prompt,
                     model=effective_model,
-                    timeout_s=self._cli_timeout_s,
+                    timeout_s=effective_total_timeout,
+                    inactivity_timeout_s=effective_inactivity,
+                    heartbeat_cb=self._heartbeat_cb,
+                    node=node,
                 )
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
