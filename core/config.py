@@ -114,7 +114,23 @@ class ProviderConfig(BaseModel):
     # two nodes that have actually hit ``_CliTransientError`` in
     # production; everything else stays on the historical 300 s.
     node_cli_timeout_s: dict[str, float] = Field(
-        default_factory=lambda: {"implement": 1800.0, "execute_reflect": 900.0}
+        default_factory=lambda: {
+            # Outline is structurally bounded (signatures + constants),
+            # so it doesn't need the full implement budget; 600 s is
+            # generous for a ~30-80 line scaffold + JSON envelope.
+            "implement_outline": 600.0,
+            # ``implement`` covers BOTH the two-stage body call (which
+            # consumes the outline so it typically finishes in 90-180s)
+            # AND the legacy single-shot fallback path (pre-Phase-2
+            # checkpoint resume, or when the outline call failed — this
+            # is where the OPC quest's ~9 min extended-thinking span
+            # lives). Sized for the WORST CASE so the fallback path
+            # doesn't regress vs Phase 1's behaviour; the body call's
+            # well-behaved short spans don't pay any cost since they
+            # finish well before the ceiling.
+            "implement": 1800.0,
+            "execute_reflect": 900.0,
+        }
     )
     # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model

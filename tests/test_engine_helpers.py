@@ -492,8 +492,13 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
         "broaden_lit": "literature",
     }
     design_branch = next(iter(g.branches["design"].values()))
+    # Two-stage implement: the simulate-path routing key stays
+    # ``implement`` (for resume contract compatibility — the 609990
+    # checkpoint pins ``next=("implement",)``) but the target is the
+    # outline node, which then chains to the body node also named
+    # ``implement``.
     assert design_branch.ends == {
-        "implement": "implement",
+        "implement": "implement_outline",
         "auto_collect_data": "auto_collect_data",
     }
 

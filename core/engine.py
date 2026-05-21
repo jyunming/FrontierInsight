@@ -101,6 +101,13 @@ class QuestState(TypedDict, total=False):
     # additional retrievals at ``engine.max_iterations + 1``.
     literature_iter: int
     design: dict[str, Any]
+    # Two-stage implement scaffold from ``_node_implement_outline``.
+    # Carries ``{scaffold, functions, data_flow, constants,
+    # result_json_template, deps}`` for the body node to consume.
+    # Empty dict on legacy resume (pre-Phase-2 checkpoint), in which
+    # case ``_node_implement`` falls back to the original
+    # ``agents/implement.md`` one-shot prompt.
+    implement_outline: dict[str, Any]
     code: str
     deps: list[str]
     exec_result: dict[str, Any]
@@ -500,6 +507,15 @@ class Engine:
         g.add_node("ideate", self._node_ideate)
         g.add_node("literature", self._node_literature)
         g.add_node("design", self._node_design)
+        # design → implement_outline → implement → execute (two-stage
+        # implement). The outline node produces a scaffold + function
+        # signatures + constants + RESULT_JSON template, which the
+        # body node fills in. Splitting the work this way lets each
+        # call be smaller and gives the model a feedback opportunity
+        # before committing to a full ~200-line experiment.py. On a
+        # pre-Phase-2 resume where ``implement_outline`` is empty, the
+        # body node falls back to the legacy single-shot prompt.
+        g.add_node("implement_outline", self._node_implement_outline)
         g.add_node("implement", self._node_implement)
         g.add_node("execute", self._node_execute)
         # execute → execute_reflect (loops back to execute on failure)
@@ -528,8 +544,20 @@ class Engine:
         g.add_conditional_edges(
             "design",
             self._route_after_design,
-            {"implement": "implement", "auto_collect_data": "auto_collect_data"},
+            {
+                # The route key stays ``implement`` for resume
+                # compatibility (the 609990 checkpoint pins
+                # ``next=("implement",)``); the underlying target is
+                # the outline node, which then chains to the body node
+                # named ``implement``. Routing decisions don't see
+                # the outline; the legacy ``implement`` resume path
+                # bypasses the outline and falls into the body's
+                # legacy single-shot prompt.
+                "implement": "implement_outline",
+                "auto_collect_data": "auto_collect_data",
+            },
         )
+        g.add_edge("implement_outline", "implement")
         g.add_edge("implement", "execute")
         g.add_edge("execute", "execute_reflect")
         g.add_conditional_edges(
@@ -1847,12 +1875,106 @@ class Engine:
             "figures": [],
         }
 
-    async def _node_implement(self, state: QuestState) -> QuestState:
-        self._log.info("[implement] generating experiment code")
-        prompt = self._prompts["implement"].substitute(
-            design_block=json.dumps(state.get("design") or {}, indent=2),
-            timeout_s=str(self.config.execution.timeout_s),
+    async def _node_implement_outline(self, state: QuestState) -> QuestState:
+        """First half of the two-stage implement flow: produce a
+        structural outline (scaffold + function signatures + constants
+        + RESULT_JSON template + deps) BEFORE the body stage spends its
+        thinking budget on algorithm details.
+
+        Failure-isolated like ``design_self_critique``: a transient
+        provider error or parse failure on the outline call doesn't
+        block the quest. We return an empty ``implement_outline`` dict
+        and the body stage falls back to the legacy single-shot
+        ``agents/implement.md`` prompt.
+
+        Skipped on resume from a pre-Phase-2 checkpoint whose
+        ``implement_outline`` slot is already populated — the body
+        stage uses what's there.
+        """
+        if state.get("implement_outline"):
+            # Already populated (resume after a failed body call, or a
+            # checkpoint that was advanced by a future-version engine).
+            # Don't re-bill an outline call.
+            self._log.info("[implement_outline] cached outline present; skipping")
+            return {}
+        self._log.info("[implement_outline] drafting scaffold + signatures")
+        try:
+            prompt = self._prompts["implement_outline"].substitute(
+                design_block=json.dumps(state.get("design") or {}, indent=2),
+                clarify_block=_format_clarify(state),
+                timeout_s=str(self.config.execution.timeout_s),
+            )
+        except KeyError:
+            # Prompt not loaded (e.g. running a build that doesn't ship
+            # the new agents/implement_outline.md). Leave the slot empty
+            # so the body stage falls back to the legacy single-shot.
+            self._log.warning(
+                "[implement_outline] prompt template missing; "
+                "body stage will use the legacy one-shot path"
+            )
+            return {"implement_outline": {}}
+        try:
+            text = await self._chat(prompt, node="implement_outline")
+        except Exception as exc:  # noqa: BLE001 — best-effort, strictly advisory
+            self._log.warning(
+                "[implement_outline] chat failed (%r); body stage will "
+                "use the legacy one-shot path", exc,
+            )
+            return {"implement_outline": {}}
+        # Tag the lenient-parse with the node so its WARNING lines in
+        # run.log carry the originator — multiple nodes call this
+        # helper and the unprefixed warnings were hard to grep.
+        outline = _parse_json_lenient(text, node="implement_outline")
+        if not isinstance(outline, dict) or "scaffold" not in outline:
+            self._log.warning(
+                "[implement_outline] response not parseable or missing "
+                "'scaffold' (kept legacy fallback). LLM head: %r",
+                (text or "")[:300],
+            )
+            return {"implement_outline": {}}
+        n_funcs = len(outline.get("functions") or [])
+        n_const = len(outline.get("constants") or [])
+        self._log.info(
+            "[implement_outline] scaffold ready — %d functions, %d constants",
+            n_funcs, n_const,
         )
+        return {"implement_outline": outline}
+
+    async def _node_implement(self, state: QuestState) -> QuestState:
+        outline = state.get("implement_outline") or {}
+        body_prompt = self._prompts.get("implement_body")
+        if outline and outline.get("scaffold") and body_prompt is not None:
+            self._log.info(
+                "[implement] filling scaffold (%d functions to body)",
+                len(outline.get("functions") or []),
+            )
+            prompt = body_prompt.substitute(
+                design_block=json.dumps(state.get("design") or {}, indent=2),
+                clarify_block=_format_clarify(state),
+                outline_block=json.dumps(outline, indent=2),
+                timeout_s=str(self.config.execution.timeout_s),
+            )
+        else:
+            # Legacy single-shot path: no outline available (pre-Phase-2
+            # checkpoint resume, the outline call failed, or — defensive
+            # case — a future checkpoint advanced past outline but the
+            # CURRENT running build doesn't ship ``agents/implement_body.md``.
+            # Use the original prompt verbatim so existing behaviour is
+            # preserved on resume across mixed-version builds.
+            if outline and outline.get("scaffold") and body_prompt is None:
+                self._log.warning(
+                    "[implement] outline cached but implement_body prompt "
+                    "not loaded; falling back to legacy one-shot. This "
+                    "happens when an older build resumes a checkpoint "
+                    "produced by a newer build — rebuild the agents/ "
+                    "directory to enable the two-stage path."
+                )
+            else:
+                self._log.info("[implement] generating experiment code (legacy one-shot)")
+            prompt = self._prompts["implement"].substitute(
+                design_block=json.dumps(state.get("design") or {}, indent=2),
+                timeout_s=str(self.config.execution.timeout_s),
+            )
         text = await self._chat(prompt, node="implement")
         code, deps = _parse_implement_response(text)
         if not code:
@@ -3319,7 +3441,10 @@ def _load_prompts() -> dict[str, string.Template]:
     names = (
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
-        "implement", "execute_reflect", "analyze",
+        "implement",                        # legacy one-shot (resume fallback)
+        "implement_outline",                # two-stage implement: scaffold
+        "implement_body",                   # two-stage implement: fills bodies
+        "execute_reflect", "analyze",
         "cross_check", "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
