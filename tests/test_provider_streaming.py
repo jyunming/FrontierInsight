@@ -363,3 +363,56 @@ async def test_run_cli_streaming_preserves_result_when_child_lingers_past_reap_t
     # didn't exit within 0.5s")`` instead of returning "the answer
     # is 42". This single assert IS the regression guard.
     assert result == "the answer is 42"
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit message detector — the OPC quest's paper.md got polluted
+# ---------------------------------------------------------------------------
+
+
+def test_rate_limit_marker_matcher_catches_session_limit() -> None:
+    """The exact string that ended up as paper.md content during
+    the OPC quest is the canonical bad case. Match must be
+    case-insensitive and length-bounded."""
+    from core.provider import _looks_like_rate_limit_message
+    real = "You've hit your session limit · resets 2:30am (Europe/Brussels)"
+    assert _looks_like_rate_limit_message(real) is not None
+
+
+def test_rate_limit_marker_matcher_ignores_long_real_response() -> None:
+    """A 5KB legitimate paper that happens to mention 'rate limit'
+    in its body must NOT trigger the heuristic — length guard."""
+    from core.provider import _looks_like_rate_limit_message
+    real = "# Some paper\n\nWe discuss rate-limit policies in scheduling.\n" * 100
+    assert _looks_like_rate_limit_message(real) is None
+
+
+def test_rate_limit_marker_matcher_ignores_empty_and_short_unmatched() -> None:
+    from core.provider import _looks_like_rate_limit_message
+    assert _looks_like_rate_limit_message("") is None
+    assert _looks_like_rate_limit_message("ok") is None
+    assert _looks_like_rate_limit_message("the real answer to this question") is None
+
+
+@pytest.mark.asyncio
+async def test_run_cli_streaming_raises_on_rate_limit_text(tmp_path: Path) -> None:
+    """When the CLI delivers the rate-limit message as a text_delta
+    (not an error envelope) and exits cleanly, the engine USED TO
+    happily aggregate it and write the string to paper.md. The fix
+    detects the marker and raises ``_CliTransientError`` so tenacity
+    retries instead of producing a 64-byte paper made of an error
+    message. Regression guard for the OPC quest's corrupted paper."""
+    events = [
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "text_delta",
+                      "text": "You've hit your session limit · resets 2:30am"}}},
+    ]
+    _, spec = _make_fake_streaming_binary(tmp_path, events=events)
+    with pytest.raises(_CliTransientError) as exc_info:
+        await _run_cli(
+            spec, "any prompt",
+            timeout_s=10.0, inactivity_timeout_s=5.0,
+        )
+    msg = str(exc_info.value)
+    assert "rate-limit-style message" in msg
+    assert "session limit" in msg

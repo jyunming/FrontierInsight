@@ -132,6 +132,31 @@ class ProviderConfig(BaseModel):
             "execute_reflect": 900.0,
         }
     )
+    # Per-node MODEL ESCALATION on tenacity retry. Maps an engine
+    # node name to a fallback model string. ``_chat_cli`` uses the
+    # primary (per-node or endpoint) model on attempt 1; if that
+    # raises ``_CliTransientError``, attempt 2+ uses the fallback.
+    #
+    # The primary motivation is empirical: Sonnet 4.6 on long
+    # code-gen prompts (implement_body, write) goes into extended-
+    # thinking and never produces text — 15-minute runaway with zero
+    # output, reproduced 3× across prompt-size and output-shape
+    # variants. Opus 4.7 lands the same prompt in ~5 minutes. By
+    # escalating to Opus only on retry, we honour the user's
+    # configured primary model (cheaper, often sufficient) on first
+    # try, then degrade gracefully when it transient-fails.
+    #
+    # Default escalates the two demonstrably-paralysis-prone nodes
+    # (implement, write) to ``claude-opus-4-7``. Cheap nodes stay
+    # on the user's primary because retry-escalation has a cost
+    # cliff and they rarely transient-fail. Set ``{}`` to disable
+    # escalation entirely.
+    node_model_fallbacks: dict[str, str] = Field(
+        default_factory=lambda: {
+            "implement": "claude-opus-4-7",
+            "write": "claude-opus-4-7",
+        }
+    )
     # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model
     # string this provider should use when that node fires a chat call.

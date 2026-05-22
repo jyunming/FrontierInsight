@@ -277,6 +277,9 @@ class Engine:
                     self.config.provider.cli_inactivity_timeout_s
                 ),
                 node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+                node_model_fallbacks=(
+                    self.config.provider.node_model_fallbacks
+                ),
                 heartbeat_cb=self._llm_heartbeat,
             )
 

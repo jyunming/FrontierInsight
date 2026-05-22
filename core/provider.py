@@ -522,6 +522,47 @@ class _CliTransientError(RuntimeError):
     so the retry predicate can target it precisely."""
 
 
+# CLI vendors sometimes deliver rate-limit / session-limit messages as
+# plain ``text_delta`` events instead of structured error envelopes —
+# the message then gets aggregated into the response and the engine
+# happily writes it to ``paper.md`` / ``experiment.py`` / etc. The
+# OPC quest produced a 64-byte paper.md containing literally
+# ``"You've hit your session limit · resets 2:30am (Europe/Brussels)"``.
+# These short-string heuristics catch the common variants and trigger
+# tenacity-retry instead of polluting the artifact.
+#
+# Case-insensitive substring match against the FULL aggregated text.
+# Kept short and unambiguous so we don't false-positive on a legitimate
+# paper that happens to discuss rate-limiting.
+_CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
+    "you've hit your session limit",
+    "you have hit your session limit",
+    "rate limit exceeded · resets",
+    "rate limit exceeded - resets",
+    "out of credits - upgrade your plan",
+    "claude usage limit reached",
+)
+
+
+def _looks_like_rate_limit_message(text: str) -> str | None:
+    """Return the matched marker when ``text`` is too short to be a
+    real response AND matches a known rate-limit-message pattern.
+    Returns None otherwise.
+
+    Length guard: short outputs (< 500 chars) are the suspicious case
+    — a real paper / code response runs into the thousands of chars.
+    A legitimate long response that happens to mention "rate limit" in
+    body text is NOT flagged. This keeps the heuristic narrow.
+    """
+    if not text or len(text) > 500:
+        return None
+    lowered = text.lower()
+    for marker in _CLI_RATE_LIMIT_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
+
 async def _run_cli(
     spec: _CliSpec,
     prompt: str,
@@ -710,7 +751,16 @@ async def _collect_via_communicate(
         content = (stdout_b or b"").decode("utf-8", errors="replace")
     if spec.output_extractor is not None:
         content = spec.output_extractor(content)
-    return content.strip()
+    final = content.strip()
+    marker = _looks_like_rate_limit_message(final)
+    if marker is not None:
+        raise _CliTransientError(
+            f"{spec.argv[0]} returned rate-limit-style message instead "
+            f"of a real response (matched: {marker!r}). This would have "
+            f"been written to disk as the artifact; treating as transient "
+            f"so tenacity retries (which may also escalate the model)."
+        )
+    return final
 
 
 async def _collect_via_streaming(
@@ -905,10 +955,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
-            content = "".join(aggregated)
-            if spec.output_extractor is not None and spec.output_via != "stream_json":
-                content = spec.output_extractor(content)
-            return content.strip()
+            return _finalise_stream_content(aggregated, spec)
         # No output AND no exit — genuinely stuck.
         await _kill_and_reap(proc, spec.argv[0])
         raise _CliTransientError(
@@ -940,10 +987,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
-            content = "".join(aggregated)
-            if spec.output_extractor is not None and spec.output_via != "stream_json":
-                content = spec.output_extractor(content)
-            return content.strip()
+            return _finalise_stream_content(aggregated, spec)
         stderr_b = b""
         if proc.stderr is not None:
             try:
@@ -961,10 +1005,31 @@ async def _collect_via_streaming(
         raise _CliTransientError(
             f"{spec.argv[0]} stream error: {error_message[:500]}"
         )
+    return _finalise_stream_content(aggregated, spec)
+
+
+def _finalise_stream_content(aggregated: list[str], spec: _CliSpec) -> str:
+    """Concatenate streamed text, apply per-spec extractor, and
+    apply the rate-limit-pattern guard. Centralised so all three
+    streaming return paths get the same protection — without this,
+    the OPC quest's ``paper.md`` became literally the string
+    ``"You've hit your session limit · resets 2:30am ..."`` because
+    claude_cli delivered the rate-limit message as ``text_delta``
+    events instead of an error envelope, and the engine wrote it to
+    disk as if it were the assistant's answer."""
     content = "".join(aggregated)
     if spec.output_extractor is not None and spec.output_via != "stream_json":
         content = spec.output_extractor(content)
-    return content.strip()
+    final = content.strip()
+    marker = _looks_like_rate_limit_message(final)
+    if marker is not None:
+        raise _CliTransientError(
+            f"{spec.argv[0]} returned rate-limit-style message instead "
+            f"of a real response (matched: {marker!r}). This would have "
+            f"been written to disk as the artifact; treating as transient "
+            f"so tenacity retries (and may escalate the model)."
+        )
+    return final
 
 
 async def _kill_and_reap(proc: asyncio.subprocess.Process, name: str) -> bool:
@@ -1252,6 +1317,7 @@ class LLMClient:
         cli_timeout_s: float = 300.0,
         cli_inactivity_timeout_s: float | None = 180.0,
         node_cli_timeout_s: dict[str, float] | None = None,
+        node_model_fallbacks: dict[str, str] | None = None,
         heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.endpoint = endpoint
@@ -1271,6 +1337,15 @@ class LLMClient:
         # Lookup misses fall back to ``self._cli_timeout_s``. Used by
         # ``_chat_cli`` when ``node`` is passed in.
         self._node_cli_timeout_s = node_cli_timeout_s or {}
+        # Per-node model escalation map. Used by ``_chat_cli`` on
+        # retry 2+ when the primary model failed transiently. The
+        # primary motivation is the empirically-observed Sonnet 4.6
+        # paralysis-thinking on long code-gen prompts: extended
+        # thinking spins forever without producing any text. Escaping
+        # to Opus 4.7 on retry consistently lands. ``node_models``
+        # (above) sets the FIRST-ATTEMPT model; this dict sets the
+        # SECOND-ATTEMPT-AND-LATER model.
+        self._node_model_fallbacks = node_model_fallbacks or {}
         # Optional periodic progress callback (Engine wires this to its
         # run.log heartbeat logger). Receives a dict each ~1 s during
         # CLI streaming; see ``_run_cli`` for the payload shape.
@@ -1643,6 +1718,14 @@ class LLMClient:
         ``node_cli_timeout_s[node]`` for the per-call wall-clock budget
         so reasoning-heavy nodes (implement, execute_reflect) can get
         longer ceilings than fast ones (clarify, ideate).
+
+        Model escalation on retry: on retry attempt 2+, look up
+        ``node_model_fallbacks[node]`` and switch to that model. The
+        primary motivation is empirically-observed Sonnet 4.6 paralysis
+        on long code-gen prompts (extended-thinking spins forever
+        without producing text); reproducible escape is to escalate to
+        Opus 4.7 on retry. The escalation is per-call and per-node so
+        the user's primary model preference is honoured on first try.
         """
         spec = self.endpoint.cli_spec
         if spec is None:  # pragma: no cover — guarded by transport check
@@ -1662,20 +1745,55 @@ class LLMClient:
             else effective_total_timeout
         )
 
+        # First-attempt model: per-call override > endpoint default.
+        primary_model = (
+            model_override if model_override is not None
+            else self.endpoint.cli_model_override
+        )
+        # On retry, escalate to a different model when configured.
+        fallback_model = self._node_model_fallbacks.get(node, "") if node else ""
+
+        # Diagnostic visibility: when tenacity catches an exception
+        # and decides to retry, the exception text used to be swallowed
+        # (the caller saw nothing in run.log until all 4 attempts
+        # exhausted). This callback logs each caught exception + which
+        # model the next attempt will use, so silent retries become
+        # debuggable. The actual log_warning is closed over in the
+        # ``_log`` reference below.
+        def _retry_log(rs: Any) -> None:
+            try:
+                exc = rs.outcome.exception() if rs.outcome else None
+                next_attempt = rs.attempt_number + 1
+                next_model = (
+                    fallback_model if (fallback_model and next_attempt >= 2)
+                    else primary_model
+                )
+                _log.warning(
+                    "[%s] CLI call attempt %d failed (%s); retrying "
+                    "(attempt %d of 4, model=%s)",
+                    node or spec.argv[0], rs.attempt_number,
+                    repr(exc)[:300] if exc else "no exception captured",
+                    next_attempt, next_model or "<cli default>",
+                )
+            except Exception:
+                pass  # never block retries on logging errors
+
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=1, min=2, max=20),
             retry=retry_if_exception_type((OSError, _CliTransientError)),
             reraise=True,
+            before_sleep=_retry_log,
         ):
             with attempt:
-                # Per-call override takes precedence over the
-                # endpoint-level override set at resolve time. Empty
-                # string means "use the CLI's own default" — which is
-                # also what cli_model_override="" means, so consistent.
+                # Escalate to fallback model on retry 2+ if configured.
+                # The first attempt always uses primary_model so the
+                # user's stated preference is tried first.
+                attempt_no = attempt.retry_state.attempt_number
                 effective_model = (
-                    model_override if model_override is not None
-                    else self.endpoint.cli_model_override
+                    fallback_model
+                    if (attempt_no >= 2 and fallback_model)
+                    else primary_model
                 )
                 return await _run_cli(
                     spec, prompt,
