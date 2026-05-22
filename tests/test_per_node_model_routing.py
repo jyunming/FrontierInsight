@@ -283,3 +283,126 @@ async def test_engine_node_calls_route_per_node_models(
     assert by_prompt["review-prompt"] == "claude-opus-4-7"
     assert by_prompt["methodologist"] == "gpt-5"            # dotted-key base match
     assert by_prompt["devil_advocate"] == "gemini-2.5-pro"  # exact persona match
+
+
+# ---------------------------------------------------------------------------
+# Tenacity model escalation on retry (node_model_fallbacks)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cli_retry_escalates_to_fallback_model_on_attempt_2(
+    tmp_path: Path,
+) -> None:
+    """Attempt 1 fails with ``_CliTransientError``; attempt 2 must
+    spawn claude_cli with the fallback model (``claude-opus-4-7``) in
+    argv, not the primary model. Empirically motivated by the OPC
+    quest where Sonnet 4.6 paralysis-thinks indefinitely on long
+    code-gen prompts; Opus 4.7 lands the same prompt in ~5 min."""
+    from core.provider import _CliTransientError, resolve_endpoint
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli", model="claude-sonnet-4-6"))
+    client = LLMClient(
+        ep, cli_timeout_s=5.0,
+        node_model_fallbacks={"implement": "claude-opus-4-7"},
+    )
+    try:
+        captured_models: list[str] = []
+        attempt_num = {"n": 0}
+
+        async def fake_run_cli(*args, **kwargs):
+            attempt_num["n"] += 1
+            captured_models.append(kwargs.get("model", "?"))
+            if attempt_num["n"] == 1:
+                # Simulate Sonnet runaway → transient error.
+                raise _CliTransientError("simulated Sonnet runaway")
+            return "from opus: real response"
+
+        with patch("core.provider._run_cli", new=fake_run_cli), \
+             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+            result = await client.chat(
+                [{"role": "user", "content": "hi"}],
+                node="implement",
+            )
+    finally:
+        await client.aclose()
+
+    assert result == "from opus: real response"
+    assert captured_models == ["claude-sonnet-4-6", "claude-opus-4-7"], (
+        "attempt 1 must use primary, attempt 2 must use fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_retry_no_fallback_keeps_primary_model_on_all_attempts(
+    tmp_path: Path,
+) -> None:
+    """When the user has NOT configured a fallback for the node, all
+    retries use the primary model (existing behaviour preserved)."""
+    from core.provider import _CliTransientError, resolve_endpoint
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli", model="claude-sonnet-4-6"))
+    client = LLMClient(ep, cli_timeout_s=5.0, node_model_fallbacks={})
+    try:
+        captured_models: list[str] = []
+        call_count = {"n": 0}
+
+        async def fake_run_cli(*args, **kwargs):
+            call_count["n"] += 1
+            captured_models.append(kwargs.get("model", "?"))
+            if call_count["n"] < 3:
+                raise _CliTransientError(f"sim fail {call_count['n']}")
+            return "finally"
+
+        with patch("core.provider._run_cli", new=fake_run_cli), \
+             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+            result = await client.chat(
+                [{"role": "user", "content": "hi"}],
+                node="implement",
+            )
+    finally:
+        await client.aclose()
+
+    assert result == "finally"
+    assert captured_models == ["claude-sonnet-4-6"] * 3, (
+        "no fallback configured → all attempts use primary"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_retry_before_sleep_logs_caught_exception(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Tenacity's caught ``_CliTransientError`` used to disappear
+    silently between attempts (the OPC quest's write-attempt-1 died
+    silently — we found NO diagnostic in any log). The before_sleep
+    callback now emits a WARNING with the exception text so retries
+    are debuggable in run.log."""
+    import logging
+    from core.provider import _CliTransientError, resolve_endpoint
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    client = LLMClient(ep, cli_timeout_s=5.0)
+    try:
+        call_count = {"n": 0}
+
+        async def fake_run_cli(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise _CliTransientError("the marker exception text we expect to see")
+            return "success on retry"
+
+        with patch("core.provider._run_cli", new=fake_run_cli), \
+             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0), \
+             caplog.at_level(logging.WARNING, logger="frontier_insight.provider"):
+            result = await client.chat(
+                [{"role": "user", "content": "hi"}],
+                node="implement",
+            )
+    finally:
+        await client.aclose()
+
+    assert result == "success on retry"
+    # The caught exception text must reach the warning log.
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("the marker exception text we expect to see" in m for m in msgs), (
+        f"expected the caught exception text in WARNING logs; got {msgs}"
+    )
+    assert any("attempt 1" in m.lower() and "retrying" in m.lower() for m in msgs)
