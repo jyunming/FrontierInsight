@@ -544,17 +544,21 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
 )
 
 
+_CLI_RATE_LIMIT_MAX_LEN = 500
+
+
 def _looks_like_rate_limit_message(text: str) -> str | None:
     """Return the matched marker when ``text`` is too short to be a
     real response AND matches a known rate-limit-message pattern.
     Returns None otherwise.
 
-    Length guard: short outputs (< 500 chars) are the suspicious case
+    Length guard: short outputs of up to and including
+    ``_CLI_RATE_LIMIT_MAX_LEN`` chars (500) are the suspicious case
     — a real paper / code response runs into the thousands of chars.
     A legitimate long response that happens to mention "rate limit" in
     body text is NOT flagged. This keeps the heuristic narrow.
     """
-    if not text or len(text) > 500:
+    if not text or len(text) > _CLI_RATE_LIMIT_MAX_LEN:
         return None
     lowered = text.lower()
     for marker in _CLI_RATE_LIMIT_MARKERS:
