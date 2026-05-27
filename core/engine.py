@@ -14,6 +14,7 @@ import asyncio
 import functools
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -113,6 +114,14 @@ class QuestState(TypedDict, total=False):
     exec_result: dict[str, Any]
     figures: list[str]
     result_json: dict[str, Any]
+    # Multi-seed replication: when ``engine.execute_replicates > 1``,
+    # ``_node_execute`` runs the script N times with different seeds
+    # and aggregates the N ``RESULT_JSON`` outputs into this list
+    # (one dict per replicate). The primary ``result_json`` field
+    # carries the first replicate so existing single-seed paths
+    # downstream stay unchanged. ``_node_analyze`` reads this list
+    # when present and aggregates numeric fields with mean ± std.
+    result_json_replicates: list[dict[str, Any]]
     # Execute-repair loop counter + history. The reflect
     # node increments `exec_reflect_iter` and appends a one-line
     # record per attempt, so analyze/write/review can describe what
@@ -2214,7 +2223,61 @@ class Engine:
             "[execute] rc=%d duration=%.1fs figures=%d result_json=%s",
             result.returncode, result.duration_s, len(figures), bool(result_json),
         )
-        return {
+
+        # Multi-seed replication. Only fires when (a) the primary run
+        # succeeded — we don't want to spend N×cost re-running a script
+        # that's already broken — and (b) ``execute_replicates > 1``.
+        # The first run we just did counts as seed 0; we now run N-1
+        # MORE with seeds 1..N-1 via ``FI_REPLICATE_SEED``. Failures
+        # in any individual replicate are recorded but don't abort the
+        # rest — better to have N-1 good replicates than zero. The
+        # primary ``result_json`` carries seed 0 so downstream
+        # single-seed code paths are unchanged.
+        replicates_n = max(1, int(self.config.engine.execute_replicates))
+        result_json_replicates: list[dict[str, Any]] = []
+        if result.returncode == 0 and result_json is not None:
+            # Tag seed 0 explicitly so the aggregator can attribute it.
+            result_json_replicates.append({"_seed": 0, **result_json})
+        if (
+            replicates_n > 1
+            and result.returncode == 0
+            and result_json is not None
+        ):
+            self._log.info(
+                "[execute] replicating: %d additional seeds (1..%d)",
+                replicates_n - 1, replicates_n - 1,
+            )
+            for seed in range(1, replicates_n):
+                # Merge with the parent's environment, not REPLACE it.
+                # ``asyncio.create_subprocess_exec(env=...)`` overrides
+                # the child's whole env when given a dict — passing
+                # only FI_REPLICATE_SEED would strip PATH, PYTHONPATH,
+                # LANG, SystemRoot (Windows), etc., and the venv
+                # python.exe would fail at the DLL-load step. Build
+                # a merged env so the child sees the inherited values
+                # plus our replicate seed.
+                rep_env = {**os.environ, "FI_REPLICATE_SEED": str(seed)}
+                rep_result = await self.executor.execute(
+                    [str(py), str(code_path)],
+                    cwd=self.quest_root,
+                    timeout_s=self.config.execution.timeout_s,
+                    env=rep_env,
+                )
+                rep_rj = _extract_result_json(rep_result.stdout)
+                if rep_result.returncode == 0 and rep_rj is not None:
+                    result_json_replicates.append({"_seed": seed, **rep_rj})
+                    self._log.info(
+                        "[execute] replicate seed=%d rc=0 duration=%.1fs",
+                        seed, rep_result.duration_s,
+                    )
+                else:
+                    self._log.warning(
+                        "[execute] replicate seed=%d FAILED rc=%d duration=%.1fs "
+                        "(skipping in aggregate)",
+                        seed, rep_result.returncode, rep_result.duration_s,
+                    )
+
+        patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
                 "duration_s": result.duration_s,
@@ -2225,6 +2288,14 @@ class Engine:
             "figures": figures,
             "result_json": result_json or {},
         }
+        # Only populate ``result_json_replicates`` when replication
+        # actually ran AND produced more than the primary entry. This
+        # keeps the field absent on default single-seed quests so
+        # downstream code can use ``state.get("result_json_replicates")``
+        # as a "did we run multi-seed" sentinel.
+        if len(result_json_replicates) > 1:
+            patch["result_json_replicates"] = result_json_replicates
+        return patch
 
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
         """Post-execute repair node.
@@ -2332,6 +2403,27 @@ class Engine:
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
         exec_result = state.get("exec_result") or {}
+        # Multi-seed replication: when the execute node produced more
+        # than one replicate, render the per-seed JSONs PLUS a mean ± std
+        # aggregate of numeric fields into the analyze prompt. The
+        # primary ``result_json`` (seed 0) is the headline value; the
+        # ``replicates`` block lets the LLM discuss variance honestly
+        # rather than treating a single-seed result as ground truth.
+        replicates = state.get("result_json_replicates") or []
+        if replicates and len(replicates) > 1:
+            agg = _aggregate_result_json_replicates(replicates)
+            result_json_block = json.dumps({
+                "result_json_seed_0": state.get("result_json") or {},
+                "replicates": replicates,
+                "aggregate_mean_std": agg,
+                "n_replicates": len(replicates),
+            }, indent=2)
+            self._log.info(
+                "[analyze] using replicate aggregate (n=%d, %d numeric keys)",
+                len(replicates), len(agg),
+            )
+        else:
+            result_json_block = json.dumps(state.get("result_json") or {}, indent=2)
         prompt = self._prompts["analyze"].substitute(
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
@@ -2340,7 +2432,7 @@ class Engine:
             timed_out=str(exec_result.get("timed_out", False)),
             stdout_tail=exec_result.get("stdout_tail", "")[:2000],
             stderr_tail=exec_result.get("stderr_tail", "")[:1000],
-            result_json=json.dumps(state.get("result_json") or {}, indent=2),
+            result_json=result_json_block,
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
         )
         # Multi-model ensemble path: when the YAML carries
@@ -3995,6 +4087,68 @@ def _load_persona_prefix(name: str, *, category: str = "review") -> str:
         return f"**Persona: {name}.**"
     template = string.Template(generic_path.read_text(encoding="utf-8"))
     return template.safe_substitute(persona_name=name).strip()
+
+
+def _aggregate_result_json_replicates(
+    replicates: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int]]:
+    """Compute mean ± sample-std for every numeric scalar field that
+    appears in EVERY replicate's ``RESULT_JSON``.
+
+    Each entry in ``replicates`` is one ``RESULT_JSON`` dict augmented
+    with a synthetic ``_seed`` field. We skip the ``_seed`` key, scan
+    the union of remaining keys, and emit an aggregate only for keys
+    whose values are scalar floats/ints in ALL replicates — mixed-type
+    keys (strings, lists, dicts) are skipped silently so the analyze
+    LLM can still reason about them from the raw per-seed JSON.
+
+    Returns ``{key: {"mean": float, "std": float, "n": int, "min": float, "max": float}}``.
+    Empty input → empty dict. n=1 (single replicate) → emits min=max=value,
+    std=0.0.
+    """
+    if not replicates:
+        return {}
+
+    # Union of all keys (excluding _seed).
+    all_keys: set[str] = set()
+    for r in replicates:
+        if not isinstance(r, dict):
+            continue
+        for k in r.keys():
+            if k != "_seed":
+                all_keys.add(k)
+
+    out: dict[str, dict[str, float | int]] = {}
+    for key in sorted(all_keys):
+        vals: list[float] = []
+        all_scalar_numeric = True
+        for r in replicates:
+            if not isinstance(r, dict) or key not in r:
+                all_scalar_numeric = False
+                break
+            v = r[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                all_scalar_numeric = False
+                break
+            vals.append(float(v))
+        if not all_scalar_numeric or not vals:
+            continue
+        n = len(vals)
+        mean = sum(vals) / n
+        if n > 1:
+            # Sample std (n-1 denominator) — the usual reported quantity.
+            var = sum((v - mean) ** 2 for v in vals) / (n - 1)
+            std = math.sqrt(var)
+        else:
+            std = 0.0
+        out[key] = {
+            "mean": mean,
+            "std": std,
+            "n": n,
+            "min": min(vals),
+            "max": max(vals),
+        }
+    return out
 
 
 def _aggregate_panel_reviews(
