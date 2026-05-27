@@ -1737,50 +1737,65 @@ class Engine:
             return
         if cfg_value not in ("both", stage):
             return
-        already = list(state.get("user_pauses_fired") or [])
-        if stage in already:
-            self._log.info(
-                "[%s] pause-for-user-input already fired this quest; "
-                "skipping (resume path)", stage,
-            )
-            return
-        # Mark the stage as fired in the snapshot we expose via interrupt
-        # — LangGraph re-invokes this node on resume and we read
-        # state['user_pauses_fired'] to decide whether to pause again.
-        # The list is committed to state via the interrupt value, which
-        # LangGraph merges into state on resume.
-        already.append(stage)
+        # Disk marker is the authoritative "already paused at this
+        # stage" signal — same pattern as wait_for_data uses with the
+        # data dir's file count. Using a state list (``user_pauses_fired``)
+        # alone would fail on the pause-exit + --resume flow because
+        # LangGraph's ``interrupt()`` raises BEFORE the node returns
+        # a state patch, so the partial-state update never lands in
+        # the checkpoint. Disk markers survive any resume path.
         inputs_dir = self.quest_root / "inputs"
         papers_dir = inputs_dir / "papers"
         data_dir = inputs_dir / "data"
         papers_dir.mkdir(parents=True, exist_ok=True)
         data_dir.mkdir(parents=True, exist_ok=True)
+        marker = self.fi_dir / f"paused_at_{stage}.flag"
+        already = list(state.get("user_pauses_fired") or [])
+        if marker.is_file() or stage in already:
+            self._log.info(
+                "[%s] pause-for-user-input already fired this quest; "
+                "skipping (resume path)", stage,
+            )
+            return
+        # Drop a fresh README on every pause (each stage writes its own
+        # header — after_design's text differs from after_paper's, so
+        # the second pause shouldn't show stale-stage prose). Best-effort;
+        # an OSError on the write isn't quest-fatal.
         readme = inputs_dir / "README.md"
-        if not readme.exists():
-            try:
-                readme.write_text(
-                    f"# User input drop zones for quest {self.quest_id}\n\n"
-                    f"This quest is paused at stage **{stage}** because "
-                    f"`engine.pause_for_user_input: {cfg_value}` was set.\n\n"
-                    f"## Drop reference papers here\n"
-                    f"`inputs/papers/` — PDFs and Markdown files. Picked up "
-                    f"by the literature node's next pass; they become "
-                    f"`user_supplied` literature entries the design / write "
-                    f"nodes can cite.\n\n"
-                    f"## Drop datasets here\n"
-                    f"`inputs/data/` — CSVs, JSON, TSV, anything tabular. "
-                    f"The analyze node surfaces these in its prompt as "
-                    f"`user_supplied_datasets` so it can reason about your "
-                    f"data alongside the generated experiment's RESULT_JSON.\n\n"
-                    f"## When you're done\n"
-                    f"Run `python launch.py --config <yaml> --resume {self.quest_id}` "
-                    f"(or `@fi /resume {self.quest_id}` in VSCode) to continue.\n",
-                    encoding="utf-8",
-                )
-            except OSError as e:
-                self._log.warning(
-                    "[%s] couldn't write inputs/README.md: %r", stage, e,
-                )
+        try:
+            readme.write_text(
+                f"# User input drop zones for quest {self.quest_id}\n\n"
+                f"This quest is paused at stage **{stage}** because "
+                f"`engine.pause_for_user_input: {cfg_value}` was set.\n\n"
+                f"## Drop reference papers here\n"
+                f"`inputs/papers/` — PDFs and Markdown files. Picked up "
+                f"by the literature node's next pass; they become "
+                f"`user_supplied` literature entries the design / write "
+                f"nodes can cite.\n\n"
+                f"## Drop datasets here\n"
+                f"`inputs/data/` — CSVs, JSON, TSV, anything tabular. "
+                f"The analyze node surfaces these in its prompt as "
+                f"`user_supplied_datasets` so it can reason about your "
+                f"data alongside the generated experiment's RESULT_JSON.\n\n"
+                f"## When you're done\n"
+                f"Run `python launch.py --config <yaml> --resume {self.quest_id}` "
+                f"(or `@fi /resume {self.quest_id}` in VSCode) to continue.\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning(
+                "[%s] couldn't write inputs/README.md: %r", stage, e,
+            )
+        # Commit the "this stage paused" marker BEFORE firing interrupt
+        # so a --resume of the (checkpointed) graph re-enters this node
+        # and the marker.is_file() check above falls through.
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(stage, encoding="utf-8")
+        except OSError as e:
+            self._log.warning(
+                "[%s] couldn't write pause marker %s: %r", stage, marker, e,
+            )
         self._log.info(
             "[%s] paused for user input: drop files into %s/{papers,data}/ "
             "then run `fi --resume %s`",
@@ -1793,7 +1808,6 @@ class Engine:
             "inputs_dir": str(inputs_dir),
             "papers_dir": str(papers_dir),
             "data_dir": str(data_dir),
-            "user_pauses_fired": already,
         })
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:

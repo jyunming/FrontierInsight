@@ -17,7 +17,6 @@ side-effect is observable without running the full graph.
 """
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +169,30 @@ def test_pause_does_not_refire_when_stage_already_in_user_pauses_fired(
     state = {"user_pauses_fired": ["after_design"]}
     fired, _ = _drive_pause(eng, state, "after_design")
     assert fired is False
+
+
+def test_pause_does_not_refire_when_disk_marker_present(tmp_path: Path) -> None:
+    """The disk marker at ``<quest_root>/.fi/paused_at_<stage>.flag``
+    is the authoritative resume-safe signal. State-only tracking
+    fails because ``interrupt()`` raises BEFORE the node returns a
+    state patch, so the prior pause's ``user_pauses_fired`` update
+    never lands in the checkpoint. The marker survives any resume."""
+    eng = _mk_engine(tmp_path, "after_design")
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "paused_at_after_design.flag").write_text(
+        "after_design", encoding="utf-8",
+    )
+    fired, _ = _drive_pause(eng, {}, "after_design")
+    assert fired is False
+
+
+def test_pause_writes_disk_marker_before_interrupt(tmp_path: Path) -> None:
+    """First pause must write the disk marker BEFORE firing
+    interrupt() — otherwise an immediate resume re-enters the node
+    without the marker present and pauses again, looping the user."""
+    eng = _mk_engine(tmp_path, "after_design")
+    _drive_pause(eng, {}, "after_design")
+    assert (eng.fi_dir / "paused_at_after_design.flag").is_file()
 
 
 def test_pause_writes_inputs_readme_with_drop_zone_hints(
