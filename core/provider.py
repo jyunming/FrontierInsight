@@ -522,18 +522,25 @@ class _CliTransientError(RuntimeError):
     so the retry predicate can target it precisely."""
 
 
-# CLI vendors sometimes deliver rate-limit / session-limit messages as
-# plain ``text_delta`` events instead of structured error envelopes —
-# the message then gets aggregated into the response and the engine
+# Output gates. CLI vendors sometimes deliver upstream-state messages
+# as plain ``text_delta`` events instead of structured error envelopes
+# — the message then gets aggregated into the response and the engine
 # happily writes it to ``paper.md`` / ``experiment.py`` / etc. The
 # OPC quest produced a 64-byte paper.md containing literally
 # ``"You've hit your session limit · resets 2:30am (Europe/Brussels)"``.
-# These short-string heuristics catch the common variants and trigger
-# tenacity-retry instead of polluting the artifact.
+# Each gate names itself, defines a short list of patterns it watches
+# for, and a length cap so a legitimate long paper that happens to
+# mention "rate limit" in body text doesn't false-positive. The
+# registry is iterated in declaration order; the first gate that
+# fires names itself in the raised ``_CliTransientError`` so retry
+# logs show *which* gate triggered (and a future maintainer can tune
+# the right pattern list without grepping the whole file).
 #
-# Case-insensitive substring match against the FULL aggregated text.
-# Kept short and unambiguous so we don't false-positive on a legitimate
-# paper that happens to discuss rate-limiting.
+# All gates produce ``_CliTransientError`` → tenacity retries (and
+# may escalate the model via the per-node fallback table). We do NOT
+# silently swallow these into the artifact — that's the bug they exist
+# to catch.
+
 _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "you've hit your session limit",
     "you have hit your session limit",
@@ -543,28 +550,116 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "claude usage limit reached",
 )
 
+# Placeholder / "I gave up" patterns that some CLIs emit instead of a
+# real response. Distinct from refusal — these signal the LLM lost the
+# plot mid-call rather than declining to help.
+_CLI_PLACEHOLDER_MARKERS: tuple[str, ...] = (
+    "[placeholder]",
+    "please provide more details",
+    "i need more information to continue",
+    "i'm unable to generate a response right now",
+)
 
-_CLI_RATE_LIMIT_MAX_LEN = 500
+# Refusal patterns. False-positive risk is higher here — a real paper
+# might quote a refusal. So we keep the list tight to phrases that
+# typically come from policy-classifier interception (not from the
+# topic itself) and only flag when the whole output is short.
+_CLI_REFUSAL_MARKERS: tuple[str, ...] = (
+    "i cannot assist with that",
+    "i can't help with that request",
+    "i'm sorry, but i cannot",
+    "as an ai language model, i cannot",
+    "i'm not able to provide",
+)
+
+
+_CLI_OUTPUT_GATE_MAX_LEN = 500
+
+
+class _ContentGate:
+    """One row in the output-gate registry. ``name`` shows up in retry
+    logs / exception messages so you can see which gate fired without
+    grepping the marker tables. ``check`` returns the matched marker
+    when the gate triggers (otherwise None).
+    """
+
+    __slots__ = ("name", "description", "_check")
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        check: Callable[[str], str | None],
+    ) -> None:
+        self.name = name
+        self.description = description
+        self._check = check
+
+    def check(self, text: str) -> str | None:
+        return self._check(text)
+
+
+def _short_marker_check(
+    markers: tuple[str, ...], max_len: int = _CLI_OUTPUT_GATE_MAX_LEN,
+) -> Callable[[str], str | None]:
+    """Build a gate-check that fires when ``text`` is short AND contains
+    one of the given case-insensitive markers. The length guard is
+    what keeps a real paper-length output from tripping these gates
+    just by mentioning the marker substring in body text."""
+
+    def _check(text: str) -> str | None:
+        if not text or len(text) > max_len:
+            return None
+        lowered = text.lower()
+        for marker in markers:
+            if marker in lowered:
+                return marker
+        return None
+
+    return _check
+
+
+# Note: there is intentionally no ``empty_response`` gate here even
+# though an empty CLI response is degenerate. Some legitimate paths
+# return empty (mock-CLI unit tests assert argv shape against an
+# empty-stdout fake; the engine itself handles empty-result-json via
+# the execute_reflect loop). Adding a transient retry on empty would
+# burn 4× retry budget on those paths for no upstream benefit.
+_OUTPUT_GATES: tuple[_ContentGate, ...] = (
+    _ContentGate(
+        name="rate_limit_message",
+        description="upstream rate-limit / session-limit text delivered as content",
+        check=_short_marker_check(_CLI_RATE_LIMIT_MARKERS),
+    ),
+    _ContentGate(
+        name="placeholder_response",
+        description="model emitted a placeholder / give-up pattern",
+        check=_short_marker_check(_CLI_PLACEHOLDER_MARKERS),
+    ),
+    _ContentGate(
+        name="refusal",
+        description="policy-classifier refusal short-circuited the response",
+        check=_short_marker_check(_CLI_REFUSAL_MARKERS),
+    ),
+)
+
+
+def _check_output_gates(text: str) -> tuple[str, str] | None:
+    """Iterate the gate registry in declaration order. Return
+    ``(gate_name, matched_marker)`` for the first gate that fires, or
+    None if every gate cleared the output."""
+    for gate in _OUTPUT_GATES:
+        marker = gate.check(text)
+        if marker is not None:
+            return gate.name, marker
+    return None
 
 
 def _looks_like_rate_limit_message(text: str) -> str | None:
-    """Return the matched marker when ``text`` is too short to be a
-    real response AND matches a known rate-limit-message pattern.
-    Returns None otherwise.
-
-    Length guard: short outputs of up to and including
-    ``_CLI_RATE_LIMIT_MAX_LEN`` chars (500) are the suspicious case
-    — a real paper / code response runs into the thousands of chars.
-    A legitimate long response that happens to mention "rate limit" in
-    body text is NOT flagged. This keeps the heuristic narrow.
-    """
-    if not text or len(text) > _CLI_RATE_LIMIT_MAX_LEN:
-        return None
-    lowered = text.lower()
-    for marker in _CLI_RATE_LIMIT_MARKERS:
-        if marker in lowered:
-            return marker
-    return None
+    """Back-compat shim for callers that only care about the
+    rate-limit gate. New callers should use ``_check_output_gates``
+    so every gate gets its chance."""
+    return _short_marker_check(_CLI_RATE_LIMIT_MARKERS)(text)
 
 
 async def _run_cli(
@@ -756,13 +851,14 @@ async def _collect_via_communicate(
     if spec.output_extractor is not None:
         content = spec.output_extractor(content)
     final = content.strip()
-    marker = _looks_like_rate_limit_message(final)
-    if marker is not None:
+    gate_hit = _check_output_gates(final)
+    if gate_hit is not None:
+        gate_name, marker = gate_hit
         raise _CliTransientError(
-            f"{spec.argv[0]} returned rate-limit-style message instead "
-            f"of a real response (matched: {marker!r}). This would have "
-            f"been written to disk as the artifact; treating as transient "
-            f"so tenacity retries (which may also escalate the model)."
+            f"{spec.argv[0]} tripped output gate {gate_name!r} (matched: "
+            f"{marker!r}). This would have been written to disk as the "
+            f"artifact; treating as transient so tenacity retries (which "
+            f"may also escalate the model)."
         )
     return final
 
@@ -1025,13 +1121,14 @@ def _finalise_stream_content(aggregated: list[str], spec: _CliSpec) -> str:
     if spec.output_extractor is not None and spec.output_via != "stream_json":
         content = spec.output_extractor(content)
     final = content.strip()
-    marker = _looks_like_rate_limit_message(final)
-    if marker is not None:
+    gate_hit = _check_output_gates(final)
+    if gate_hit is not None:
+        gate_name, marker = gate_hit
         raise _CliTransientError(
-            f"{spec.argv[0]} returned rate-limit-style message instead "
-            f"of a real response (matched: {marker!r}). This would have "
-            f"been written to disk as the artifact; treating as transient "
-            f"so tenacity retries (and may escalate the model)."
+            f"{spec.argv[0]} tripped output gate {gate_name!r} (matched: "
+            f"{marker!r}). This would have been written to disk as the "
+            f"artifact; treating as transient so tenacity retries (and "
+            f"may escalate the model)."
         )
     return final
 
