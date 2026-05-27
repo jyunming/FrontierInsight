@@ -2248,7 +2248,15 @@ class Engine:
                 replicates_n - 1, replicates_n - 1,
             )
             for seed in range(1, replicates_n):
-                rep_env = {"FI_REPLICATE_SEED": str(seed)}
+                # Merge with the parent's environment, not REPLACE it.
+                # ``asyncio.create_subprocess_exec(env=...)`` overrides
+                # the child's whole env when given a dict — passing
+                # only FI_REPLICATE_SEED would strip PATH, PYTHONPATH,
+                # LANG, SystemRoot (Windows), etc., and the venv
+                # python.exe would fail at the DLL-load step. Build
+                # a merged env so the child sees the inherited values
+                # plus our replicate seed.
+                rep_env = {**os.environ, "FI_REPLICATE_SEED": str(seed)}
                 rep_result = await self.executor.execute(
                     [str(py), str(code_path)],
                     cwd=self.quest_root,
@@ -4083,7 +4091,7 @@ def _load_persona_prefix(name: str, *, category: str = "review") -> str:
 
 def _aggregate_result_json_replicates(
     replicates: list[dict[str, Any]],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict[str, float | int]]:
     """Compute mean ± sample-std for every numeric scalar field that
     appears in EVERY replicate's ``RESULT_JSON``.
 
@@ -4110,7 +4118,7 @@ def _aggregate_result_json_replicates(
             if k != "_seed":
                 all_keys.add(k)
 
-    out: dict[str, dict[str, float]] = {}
+    out: dict[str, dict[str, float | int]] = {}
     for key in sorted(all_keys):
         vals: list[float] = []
         all_scalar_numeric = True
