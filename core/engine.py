@@ -2468,6 +2468,69 @@ class Engine:
                 }
                 for d in hits
             ]
+
+            verification_notes: list[dict[str, Any]] = []
+            # CoVe-style verification pass. Skipped when disabled by
+            # config OR when the first pass produced no non-neutral
+            # assignments (nothing to verify). Cost: +1 LLM call per
+            # finding. The pass can downgrade over-claimed supports
+            # to neutral, flip sign errors, or add a verification
+            # note that explains why the original direction held up.
+            do_verify = (
+                self.config.engine.cross_check_verify
+                and (parsed.get("supporting") or parsed.get("conflicting"))
+            )
+            if do_verify:
+                try:
+                    verify_prompt = self._prompts["cross_check_verify"].substitute(
+                        topic=state.get("topic", "")[:1000],
+                        finding=text,
+                        first_pass_block=json.dumps({
+                            "verdict": parsed.get("verdict") or "neutral",
+                            "supporting": parsed.get("supporting") or [],
+                            "conflicting": parsed.get("conflicting") or [],
+                            "neutral": parsed.get("neutral") or [],
+                            "summary": parsed.get("summary") or "",
+                        }, indent=2),
+                        candidate_literature=cand_block,
+                    )
+                    verify_resp = await self._chat(
+                        verify_prompt, node="cross_check_verify",
+                    )
+                    verified = _parse_json_lenient(verify_resp) or {}
+                    if isinstance(verified, dict) and (
+                        verified.get("supporting") is not None
+                        or verified.get("conflicting") is not None
+                        or verified.get("neutral") is not None
+                    ):
+                        # Verification produced a usable revision —
+                        # adopt it. Track the original classification
+                        # alongside for the write/audit downstream.
+                        first_pass_snapshot = {
+                            "verdict": parsed.get("verdict"),
+                            "supporting": parsed.get("supporting") or [],
+                            "conflicting": parsed.get("conflicting") or [],
+                            "neutral": parsed.get("neutral") or [],
+                        }
+                        parsed = verified
+                        notes = verified.get("verification_notes") or []
+                        if isinstance(notes, list):
+                            verification_notes = [
+                                n for n in notes if isinstance(n, dict)
+                            ]
+                        parsed["first_pass"] = first_pass_snapshot
+                        self._log.info(
+                            "[cross_check] verified finding %r (notes=%d)",
+                            text[:60], len(verification_notes),
+                        )
+                except Exception as e:
+                    # Verification is advisory — a transient failure
+                    # MUST NOT block the quest; the first-pass result
+                    # is still valid output.
+                    self._log.warning(
+                        "[cross_check] verification pass failed (kept first pass): %s", e,
+                    )
+
             out.append({
                 "finding": text,
                 "supporting": parsed.get("supporting") or [],
@@ -2475,6 +2538,8 @@ class Engine:
                 "neutral": parsed.get("neutral") or [],
                 "summary": parsed.get("summary") or "",
                 "candidates": candidates,
+                "verification_notes": verification_notes,
+                "first_pass": parsed.get("first_pass"),
             })
         self._log.info("[cross_check] checked %d findings", len(out))
         patch: QuestState = {"cross_check": out}
@@ -3608,7 +3673,9 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_outline",                # two-stage implement: scaffold
         "implement_body",                   # two-stage implement: fills bodies
         "execute_reflect", "analyze",
-        "cross_check", "write", "review",
+        "cross_check",
+        "cross_check_verify",   # CoVe-style second-pass verification
+        "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
