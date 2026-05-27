@@ -13,6 +13,15 @@ $design_block
   Skip the `by_<factor>` key when the experiment is a single-condition run (no natural strata). Aggregate-only is correct for those; aggregate-with-fake-singleton-strata is not.
 - Keep wall-time under $timeout_s seconds on a CPU.
 - No network access. No reading from outside the working directory.
+- **Honour `FI_REPLICATE_SEED` when present.** If the env var
+  `FI_REPLICATE_SEED` is set (the engine sets it on second-and-later
+  replicate runs of a multi-seed experiment), read it as an integer
+  and use it to seed every random generator the script uses —
+  `random.seed`, `np.random.seed`, `torch.manual_seed`, etc. When
+  unset, fall back to a deterministic default (e.g., seed 0). This
+  is what lets the engine quantify the result's variance over seeds
+  when `engine.execute_replicates > 1` is configured; without this,
+  N replicate runs collapse to a single point.
 
 # Output format
 Respond with EXACTLY two sections, in this order, and nothing else:

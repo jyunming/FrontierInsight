@@ -331,6 +331,16 @@ class EngineConfig(BaseModel):
     # citation-direction risk matters. When the first pass produces
     # no non-neutral assignments, the verification call is skipped.
     cross_check_verify: bool = False
+    # Multi-seed replication. When > 1, the execute node runs the
+    # generated experiment script N times with different seeds (the
+    # env var ``FI_REPLICATE_SEED`` is set to a fresh integer per
+    # run, which the implement prompt instructs the script to honour
+    # for its own rng seeding). The N ``RESULT_JSON`` outputs land
+    # in ``state['result_json_replicates']`` as a list; the analyze
+    # node aggregates numeric fields with mean ± std and surfaces
+    # the spread in its summary. Cost: N executions per design pass.
+    # Default 1 (no replication, current behaviour).
+    execute_replicates: int = Field(default=1, ge=1)
     # Also enables the `next_step` re-route emitted by analyze:
     # `publish` (default) / `re_experiment` / `broaden_lit`. Both
     # non-default values route back to `design` (via cross_check first)

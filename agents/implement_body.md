@@ -17,6 +17,7 @@ $outline_block
 - The last line of stdout MUST match the outline's `result_json_template` exactly: `RESULT_JSON: {...}`. Include stratified `by_<factor>` keys when the template carries them.
 - Keep wall-time under $timeout_s seconds on a CPU.
 - No network access. No reading from outside the working directory.
+- **Honour `FI_REPLICATE_SEED` when present.** If the env var `FI_REPLICATE_SEED` is set, parse it as an integer and use it to seed every random generator the script uses (`random.seed`, `np.random.seed`, `torch.manual_seed`, etc.). When unset, fall back to a deterministic default (e.g., seed 0). The engine sets this env var on the second-and-later runs of a multi-seed replication so the analyze stage can quantify variance; without it the replicates collapse to a single point.
 - Function signatures from the outline are immutable. If you discover during implementation that a signature is unworkable, that's a structural mistake the outline should have caught — DO NOT silently change it. Surface the conflict as a comment at the top of the file (the execute_reflect loop downstream can see comments and either flag it or fix it).
 
 # Output format
