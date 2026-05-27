@@ -63,7 +63,7 @@ from tenacity import (
     retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
+    wait_random_exponential,
 )
 
 from .config import ProviderConfig
@@ -1628,7 +1628,13 @@ class LLMClient:
         # this retry config.
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
-            wait=wait_exponential(multiplier=1, min=2, max=20),
+            # Jittered backoff: a deterministic ``wait_exponential``
+            # synchronises N concurrent quests in a --fleet that all
+            # hit a transient upstream blip simultaneously, so they
+            # all retry at the same wall-clock instant and re-clog
+            # the upstream. Random-exponential spreads them out over
+            # a window so the upstream sees a gentler ramp.
+            wait=wait_random_exponential(multiplier=1, max=20),
             retry=retry_if_exception_type(
                 (httpx.HTTPStatusError, httpx.TransportError, httpx.ReadTimeout)
             ),
@@ -1773,7 +1779,11 @@ class LLMClient:
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(6),
-                wait=wait_exponential(multiplier=2, min=4, max=60),
+                # Jittered backoff (see HTTP path comment): a
+                # deterministic schedule synchronises concurrent
+                # bridge clients in a --fleet on a shared upstream
+                # blip. Random spreads them over the window.
+                wait=wait_random_exponential(multiplier=2, max=60),
                 retry=retry_if_exception(_retry_transient_bridge),
                 reraise=True,
             ):
@@ -1881,7 +1891,12 @@ class LLMClient:
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
-            wait=wait_exponential(multiplier=1, min=2, max=20),
+            # Jittered backoff so concurrent --fleet quests don't all
+            # retry the same upstream at the same instant — see
+            # the HTTP path's note. wait_random_exponential picks a
+            # uniform random value from [0, multiplier * 2^attempt],
+            # capped at ``max``, which spreads retries over a window.
+            wait=wait_random_exponential(multiplier=1, max=20),
             retry=retry_if_exception_type((OSError, _CliTransientError)),
             reraise=True,
             before_sleep=_retry_log,

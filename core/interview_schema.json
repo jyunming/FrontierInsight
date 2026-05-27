@@ -323,18 +323,18 @@
       "kind": "single",
       "choices": [
         {
-          "value": [],
-          "label": "Single reviewer (cheapest)",
-          "description": "1 LLM call per review pass."
-        },
-        {
           "value": [
             "methodologist",
             "statistician",
             "devil_advocate"
           ],
-          "label": "3-persona panel",
-          "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."
+          "label": "3-persona panel (default)",
+          "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost. Methodologist is the must-flag-rule reviewer — drop the panel and you lose those checks."
+        },
+        {
+          "value": [],
+          "label": "Single reviewer (cheapest, no must-flag enforcement)",
+          "description": "1 LLM call per review pass. Loses the methodologist must-flag rules."
         },
         {
           "value": [
@@ -644,18 +644,18 @@
   ],
   "review_panels": [
     {
-      "value": [],
-      "label": "Single reviewer (cheapest)",
-      "description": "1 LLM call per review pass."
-    },
-    {
       "value": [
         "methodologist",
         "statistician",
         "devil_advocate"
       ],
-      "label": "3-persona panel",
-      "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."
+      "label": "3-persona panel (default)",
+      "description": "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost. Methodologist is the must-flag-rule reviewer — drop the panel and you lose those checks."
+    },
+    {
+      "value": [],
+      "label": "Single reviewer (cheapest, no must-flag enforcement)",
+      "description": "1 LLM call per review pass. Loses the methodologist must-flag rules."
     },
     {
       "value": [

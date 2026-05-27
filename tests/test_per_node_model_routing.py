@@ -318,7 +318,7 @@ async def test_cli_retry_escalates_to_fallback_model_on_attempt_2(
             return "from opus: real response"
 
         with patch("core.provider._run_cli", new=fake_run_cli), \
-             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+             patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0):
             result = await client.chat(
                 [{"role": "user", "content": "hi"}],
                 node="implement",
@@ -353,7 +353,7 @@ async def test_cli_retry_no_fallback_keeps_primary_model_on_all_attempts(
             return "finally"
 
         with patch("core.provider._run_cli", new=fake_run_cli), \
-             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+             patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0):
             result = await client.chat(
                 [{"role": "user", "content": "hi"}],
                 node="implement",
@@ -390,7 +390,7 @@ async def test_cli_retry_before_sleep_logs_caught_exception(
             return "success on retry"
 
         with patch("core.provider._run_cli", new=fake_run_cli), \
-             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0), \
+             patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0), \
              caplog.at_level(logging.WARNING, logger="frontier_insight.provider"):
             result = await client.chat(
                 [{"role": "user", "content": "hi"}],

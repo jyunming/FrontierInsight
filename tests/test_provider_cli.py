@@ -547,7 +547,7 @@ async def test_cli_call_killed_after_timeout_raises_transient() -> None:
                  "core.provider.asyncio.create_subprocess_exec",
                  new=AsyncMock(return_value=proc),
              ), \
-             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+             patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0):
             with pytest.raises(_CliTransientError, match="exceeded.*wall-clock"):
                 await client.chat([{"role": "user", "content": "hi"}])
     finally:
@@ -597,7 +597,7 @@ async def test_cli_timeout_subsecond_value_keeps_precision_in_error() -> None:
                  "core.provider.asyncio.create_subprocess_exec",
                  new=AsyncMock(return_value=proc),
              ), \
-             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+             patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0):
             with pytest.raises(_CliTransientError) as ei:
                 await client.chat([{"role": "user", "content": "hi"}])
         msg = str(ei.value)
@@ -636,7 +636,7 @@ async def test_cli_timeout_handles_already_exited_child() -> None:
                  "core.provider.asyncio.create_subprocess_exec",
                  new=AsyncMock(return_value=proc),
              ), \
-             patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+             patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0):
             with pytest.raises(_CliTransientError, match="exceeded.*wall-clock"):
                 await client.chat([{"role": "user", "content": "hi"}])
     finally:
@@ -675,7 +675,7 @@ async def test_cli_nonzero_exit_retries_then_raises() -> None:
             new=spawner,
         ):
             # Patch tenacity wait so the test isn't slow.
-            with patch("core.provider.wait_exponential", return_value=lambda *a, **kw: 0):
+            with patch("core.provider.wait_random_exponential", return_value=lambda *a, **kw: 0):
                 with pytest.raises(_CliTransientError, match="auth required"):
                     await client.chat([{"role": "user", "content": "x"}])
         # 4 retries per the stop_after_attempt(4) policy.

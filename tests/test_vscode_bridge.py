@@ -682,7 +682,7 @@ async def test_llmclient_chat_retries_transient_bridge_error() -> None:
         # Patch the tenacity backoff so the test doesn't actually sleep
         # 2s + 4s between attempts.
         from unittest.mock import patch
-        with patch("core.provider.wait_exponential",
+        with patch("core.provider.wait_random_exponential",
                    return_value=lambda *a, **kw: 0):
             out = await client.chat([{"role": "user", "content": "hi"}])
         assert out == "ok"
@@ -725,7 +725,7 @@ async def test_llmclient_chat_retries_up_to_six_then_friendly_error() -> None:
     client = LLMClient(ep)
     try:
         from unittest.mock import patch
-        with patch("core.provider.wait_exponential",
+        with patch("core.provider.wait_random_exponential",
                    return_value=lambda *a, **kw: 0):
             with pytest.raises(BridgeError) as excinfo:
                 await client.chat([{"role": "user", "content": "hi"}])
