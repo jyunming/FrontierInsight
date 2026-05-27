@@ -389,9 +389,97 @@ def test_rate_limit_marker_matcher_ignores_long_real_response() -> None:
 
 def test_rate_limit_marker_matcher_ignores_empty_and_short_unmatched() -> None:
     from core.provider import _looks_like_rate_limit_message
+    # The shim now treats empty as "no rate-limit marker" (the empty
+    # case is owned by a different gate). The general gate registry
+    # below is the authority for catching empty output.
     assert _looks_like_rate_limit_message("") is None
     assert _looks_like_rate_limit_message("ok") is None
     assert _looks_like_rate_limit_message("the real answer to this question") is None
+
+
+# ---------------------------------------------------------------------------
+# Content-gate registry — every gate is named and tested individually.
+# ---------------------------------------------------------------------------
+
+
+def test_output_gate_registry_catches_empty_response() -> None:
+    """An empty response is broken (a real LLM answer is at least one
+    token). The ``empty_response`` gate is the first one in the
+    registry so this is what fires for ``""``."""
+    from core.provider import _check_output_gates
+    hit = _check_output_gates("")
+    assert hit is not None
+    name, marker = hit
+    assert name == "empty_response"
+    assert marker == "<empty>"
+
+
+def test_output_gate_registry_catches_rate_limit_message() -> None:
+    """The canonical OPC-quest bad string still fires, now via the
+    registry, and reports the gate name so retry logs can show it."""
+    from core.provider import _check_output_gates
+    hit = _check_output_gates("You've hit your session limit · resets 2:30am")
+    assert hit is not None
+    name, _ = hit
+    assert name == "rate_limit_message"
+
+
+def test_output_gate_registry_catches_placeholder_response() -> None:
+    """An LLM that lost the plot mid-call sometimes returns a
+    placeholder — the gate catches the common patterns and triggers
+    a retry rather than letting the placeholder land in paper.md."""
+    from core.provider import _check_output_gates
+    hit = _check_output_gates("[placeholder] please provide more context")
+    assert hit is not None
+    name, _ = hit
+    assert name == "placeholder_response"
+
+
+def test_output_gate_registry_catches_refusal() -> None:
+    """A policy-classifier refusal short-circuits the response. The
+    gate catches the common patterns and retries — a re-try with a
+    different model (escalation) often succeeds."""
+    from core.provider import _check_output_gates
+    hit = _check_output_gates("I cannot assist with that request.")
+    assert hit is not None
+    name, _ = hit
+    assert name == "refusal"
+
+
+def test_output_gate_registry_ignores_long_real_response() -> None:
+    """A 5KB legitimate paper that happens to contain any gate's
+    marker substring in body text must NOT trigger any gate — the
+    length guard is what protects against false positives on real
+    paper-length content."""
+    from core.provider import _check_output_gates
+    body = (
+        "# A real paper\n\n"
+        "We discuss rate-limit policies, placeholder UX patterns, "
+        "and refusal-classifier dynamics in §3.\n"
+    ) * 100
+    assert _check_output_gates(body) is None
+
+
+def test_output_gate_registry_ignores_unmatched_short_text() -> None:
+    """Short legitimate replies (e.g. a one-line confirmation from a
+    micro-task call) must not trigger any gate just by being short."""
+    from core.provider import _check_output_gates
+    assert _check_output_gates("ok") is None
+    assert _check_output_gates("the real answer to this question") is None
+
+
+def test_output_gate_registry_first_match_wins() -> None:
+    """Gates are tried in declaration order and the first match wins
+    so the retry log can name a single gate. Empty fires before
+    rate-limit, etc.; this test pins the order."""
+    from core.provider import _OUTPUT_GATES
+    names = [g.name for g in _OUTPUT_GATES]
+    # Empty must come first (it's the catch-all for the degenerate
+    # case); rate_limit is the original gate kept for parity.
+    assert names[0] == "empty_response"
+    assert "rate_limit_message" in names
+    assert "placeholder_response" in names
+    assert "refusal" in names
 
 
 @pytest.mark.asyncio
@@ -414,5 +502,7 @@ async def test_run_cli_streaming_raises_on_rate_limit_text(tmp_path: Path) -> No
             timeout_s=10.0, inactivity_timeout_s=5.0,
         )
     msg = str(exc_info.value)
-    assert "rate-limit-style message" in msg
+    # The gate-registry exception names the gate that fired so retry
+    # logs can attribute the trip without grepping the marker tables.
+    assert "rate_limit_message" in msg
     assert "session limit" in msg
