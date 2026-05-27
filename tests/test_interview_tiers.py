@@ -128,12 +128,18 @@ def test_derive_tier2_defaults_audience_external() -> None:
     assert out["audience"] == "external"
 
 
-def test_derive_tier2_defaults_clarify_auto_and_single_reviewer() -> None:
-    """clarify_mode=auto and review_panel=[] are the cost-conscious
-    defaults the smart-default helpers pin."""
+def test_derive_tier2_defaults_clarify_auto_and_three_persona_panel() -> None:
+    """clarify_mode=auto and a 3-persona review panel are the
+    smart-default helpers' picks. The panel default flipped from
+    [] (single reviewer, cost-conscious) to the 3-persona list
+    because the methodologist must fire for the non-bypassable
+    must-flag enforcement to take effect — defaulting to no panel
+    silently loses that protection."""
     out = derive_tier2({"topic": "x", "paper_format": "generic"})
     assert out["clarify_mode"] == "auto"
-    assert out["review_panel"] == []
+    assert out["review_panel"] == [
+        "methodologist", "statistician", "devil_advocate",
+    ]
 
 
 def test_smart_default_audience_and_clarify_are_static() -> None:
@@ -143,7 +149,9 @@ def test_smart_default_audience_and_clarify_are_static() -> None:
     assert smart_default_audience({}) == "external"
     assert smart_default_audience({"topic": "anything", "paper_format": "report"}) == "external"
     assert smart_default_clarify_mode({}) == "auto"
-    assert smart_default_review_panel({}) == []
+    assert smart_default_review_panel({}) == [
+        "methodologist", "statistician", "devil_advocate",
+    ]
 
 
 # ---- Tier-3 contract ----
