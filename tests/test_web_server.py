@@ -318,6 +318,141 @@ def test_app_start_400_on_invalid_yaml(tmp_path: Path) -> None:
     assert r2.status_code == 400
 
 
+# --- human-review endpoints ----------------------------------------------
+
+
+def test_human_review_get_returns_not_pending_when_nothing_registered(
+    tmp_path: Path,
+) -> None:
+    _mk_quest_dir(tmp_path, "qhr")
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.get("/api/quests/qhr/human-review")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pending"] is False
+    assert body["snapshot"] is None
+
+
+def test_human_review_get_reads_disk_snapshot_when_no_in_process_future(
+    tmp_path: Path,
+) -> None:
+    """Subprocess-launched quests don't register an in-process future;
+    instead the engine wrote ``human_review.json`` to disk. The
+    endpoint reads it so the dashboard can show the gate state."""
+    qid = "qhrdisk"
+    q = _mk_quest_dir(tmp_path, qid)
+    snap = {"verdict": "revise", "score": 2, "iteration": 0,
+            "must_flag_hits": ["[methodologist] circular_evaluation"]}
+    (q / ".fi" / "human_review.json").write_text(
+        json.dumps(snap), encoding="utf-8",
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.get(f"/api/quests/{qid}/human-review")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pending"] is True
+    assert body["source"] == "disk"
+    assert body["snapshot"]["verdict"] == "revise"
+    assert "circular_evaluation" in body["snapshot"]["must_flag_hits"][0]
+
+
+def test_human_review_get_treats_resolved_answer_file_as_not_pending(
+    tmp_path: Path,
+) -> None:
+    """When the user has already posted an answer (so
+    ``human_review_answer.json`` exists alongside the snapshot), the
+    UI should not show the banner again — the resume is queued."""
+    qid = "qhrresolved"
+    q = _mk_quest_dir(tmp_path, qid)
+    (q / ".fi" / "human_review.json").write_text(
+        json.dumps({"verdict": "accept"}), encoding="utf-8",
+    )
+    (q / ".fi" / "human_review_answer.json").write_text(
+        json.dumps({"action": "accept", "feedback": ""}), encoding="utf-8",
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.get(f"/api/quests/{qid}/human-review")
+    body = r.json()
+    assert body["pending"] is False
+
+
+def test_human_review_post_resolves_in_process_future(
+    tmp_path: Path,
+) -> None:
+    """In-process spawn path: registry has a pending future; POST
+    fills it; ``in_process_resolved`` is True."""
+    qid = "qhrinproc"
+    _mk_quest_dir(tmp_path, qid)
+    app = make_app(tmp_path)
+    reg = app.state.registry
+    fut = reg.register_human_review(qid, {"verdict": "accept"})
+
+    client = TestClient(app)
+    r = client.post(
+        f"/api/quests/{qid}/human-review",
+        json={"action": "accept", "feedback": ""},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["in_process_resolved"] is True
+    assert fut.done()
+    assert fut.result() == {"action": "accept", "feedback": ""}
+
+
+def test_human_review_post_writes_disk_answer_for_subprocess_resume(
+    tmp_path: Path,
+) -> None:
+    """Subprocess path: no in-process future, but the POST should
+    still land the answer on disk so a later ``--resume`` consumes
+    it. ``in_process_resolved`` is False, request still succeeds."""
+    qid = "qhrsub"
+    q = _mk_quest_dir(tmp_path, qid)
+    (q / ".fi" / "human_review.json").write_text(
+        json.dumps({"verdict": "accept"}), encoding="utf-8",
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        f"/api/quests/{qid}/human-review",
+        json={"action": "refine", "feedback": "tighten methods"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["in_process_resolved"] is False
+    answer_path = q / ".fi" / "human_review_answer.json"
+    assert answer_path.is_file()
+    data = json.loads(answer_path.read_text(encoding="utf-8"))
+    assert data == {"action": "refine", "feedback": "tighten methods"}
+
+
+def test_human_review_post_400_on_bad_action(tmp_path: Path) -> None:
+    _mk_quest_dir(tmp_path, "qbad")
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        "/api/quests/qbad/human-review",
+        json={"action": "delete-everything"},
+    )
+    assert r.status_code == 400
+
+
+def test_human_review_post_400_on_refine_without_feedback(
+    tmp_path: Path,
+) -> None:
+    _mk_quest_dir(tmp_path, "qref")
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    r = client.post(
+        "/api/quests/qref/human-review",
+        json={"action": "refine", "feedback": "   "},
+    )
+    assert r.status_code == 400
+
+
 def test_app_index_html_loads(tmp_path: Path) -> None:
     """The root `/` returns the HTMX shell from web/static/index.html."""
     app = make_app(tmp_path)

@@ -360,6 +360,28 @@ python launch.py --fleet quests/a.yaml quests/b.yaml quests/c.yaml \
 
 Each YAML is independent; the runner just bounds how many run at once.
 
+For unattended fleet runs that still want a human in the loop on the *interesting* cases:
+
+```bash
+python launch.py --fleet quests/*.yaml --auto-accept-on-pass
+```
+
+Clean papers (LLM verdict `accept` AND no methodologist must-flag hits) auto-finalise; flagged or revise-verdict papers pause for human review (snapshot at `<quest_root>/.fi/human_review.json`). Resume each paused quest from the dashboard or by dropping the decision into `<quest_root>/.fi/human_review_answer.json` and running `python launch.py --config <yaml> --resume <quest_id>`.
+
+### Review every paper before it lands
+
+The human-review gate (`engine.human_feedback_gate: after_review`, on by default) pauses the quest after the LLM review so you can accept, reject, or refine the result before the paper is final. Three interfaces:
+
+| Interface | How |
+|---|---|
+| Web dashboard (`--serve`) | Banner on `/quest/<id>` with Accept / Reject / Refine buttons + a textarea for refine feedback. |
+| CLI | `python launch.py --config <yaml> --interactive` — prompts on stdin for action + feedback. |
+| VSCode chat | The `@fi /start` chat panel renders the verdict + must-flag hits + suggestions; QuickPick collects the action; refine opens an input box for the feedback text. |
+
+Refine feedback **accumulates** across iterations: a later revise pass sees every prior refinement ask, not just the most recent. To skip the gate (e.g. for unattended CI) set `engine.human_feedback_gate: off` in the YAML, or use `--auto-accept-on-pass` to only auto-finalise the clean cases.
+
+The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are **non-bypassable**: a non-empty `must_flag_hits` list forces another revise pass even when `review_loop: false` would otherwise short-circuit.
+
 ### Use a different model per node
 
 Cheap model for clarify/cross_check, strong model for write/review:

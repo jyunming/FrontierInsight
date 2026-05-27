@@ -132,6 +132,11 @@ class QuestState(TypedDict, total=False):
     # the user's freeform text on refine, which the design node reads
     # on the next revise loop. Pre-resume the dict is empty.
     human_feedback: dict[str, Any]
+    # Cumulative refinement asks across the quest's revise iterations.
+    # One entry per refine round: ``{"iteration": int, "text": str}``.
+    # The design node reads ALL of these on every revise pass so a
+    # later iteration doesn't drop an earlier ask. Pre-resume empty.
+    feedback_history: list[dict[str, Any]]
     # Per-persona reviews from the panel, before moderation.
     # One entry per `engine.review_panel` member, each with the same
     # JSON shape the single reviewer produces plus a `persona` field.
@@ -168,6 +173,7 @@ class Engine:
         *,
         supervisor: ProxySupervisor | None = None,
         resume_quest_id: str | None = None,
+        auto_accept_on_pass: bool | None = None,
     ) -> None:
         self.config = config
         _warn_if_unsanctioned_provider(config.provider.name)
@@ -217,6 +223,20 @@ class Engine:
         # interval" check trivially passes.
         self._heartbeat_last_logged: dict[str, float] = {}
         self._heartbeat_log_interval_s: float = 30.0
+        # When True, the human-review interrupt auto-resumes with
+        # ``accept`` for clean papers (verdict == "accept" AND no
+        # must-flag hits). Flagged or revise-verdict papers still
+        # pause so a human can read them. Used by ``--fleet
+        # --auto-accept-on-pass`` so the production fleet runner
+        # doesn't block on every clean quest. The constructor arg
+        # wins when explicitly set; otherwise the engine reads
+        # ``config.engine.auto_accept_on_pass`` so YAML / fixtures
+        # can configure it without touching the constructor.
+        self.auto_accept_on_pass = (
+            bool(auto_accept_on_pass)
+            if auto_accept_on_pass is not None
+            else bool(config.engine.auto_accept_on_pass)
+        )
 
     async def run(
         self,
@@ -362,24 +382,78 @@ class Engine:
                             )
                             break
                         # human_feedback node raised `interrupt(...)`.
-                        # Hand the review snapshot to the callback and
-                        # resume with whatever action it returns.
+                        # Three resolution paths, in order:
+                        #   1. ``--auto-accept-on-pass`` AND the paper
+                        #      is clean (verdict=accept AND no
+                        #      must_flag_hits) → resume with accept
+                        #      automatically, no user interaction.
+                        #   2. ``human_feedback_callback`` wired → call
+                        #      it (CLI --interactive, web in-process,
+                        #      VSCode bridge).
+                        #   3. No callback → check
+                        #      ``<quest_root>/.fi/human_review_answer.json``
+                        #      for a pre-staged answer (the file the
+                        #      web POST endpoint writes). If present,
+                        #      consume and resume; otherwise pause-exit
+                        #      cleanly with rc=0 — the user finishes the
+                        #      review off-line and re-runs
+                        #      ``fi --resume <quest_id>``.
                         if "human_review" in intr_value:
                             snap = intr_value["human_review"]
-                            if human_feedback_callback is None:
-                                raise RuntimeError(
-                                    f"quest {self.quest_id} paused at human_feedback "
-                                    f"node but no human_feedback_callback was supplied; "
-                                    f"set engine.human_feedback_gate to 'off' for "
-                                    f"headless runs."
+                            verdict = snap.get("verdict")
+                            mfh = snap.get("must_flag_hits") or []
+                            if (
+                                self.auto_accept_on_pass
+                                and verdict == "accept"
+                                and not mfh
+                            ):
+                                self._log.info(
+                                    "[run] human_feedback auto-accept "
+                                    "(verdict=accept, no must_flag_hits)",
                                 )
+                                payload = Command(
+                                    resume={"action": "accept", "feedback": ""},
+                                )
+                                continue
+                            if human_feedback_callback is not None:
+                                self._log.info(
+                                    "[run] human_feedback interrupt fired (verdict=%s); "
+                                    "invoking callback", verdict,
+                                )
+                                answer = await human_feedback_callback(snap)
+                                payload = Command(resume=answer)
+                                continue
+                            answer_path = self.fi_dir / "human_review_answer.json"
+                            if answer_path.is_file():
+                                try:
+                                    answer = json.loads(
+                                        answer_path.read_text(encoding="utf-8"),
+                                    )
+                                except (OSError, json.JSONDecodeError) as e:
+                                    self._log.warning(
+                                        "[run] couldn't read %s: %r — pausing instead",
+                                        answer_path, e,
+                                    )
+                                    answer = None
+                                if isinstance(answer, dict) and "action" in answer:
+                                    self._log.info(
+                                        "[run] consuming pre-staged human-review answer "
+                                        "(action=%s)", answer.get("action"),
+                                    )
+                                    try:
+                                        answer_path.unlink()
+                                    except OSError:
+                                        pass
+                                    payload = Command(resume=answer)
+                                    continue
+                            data_paused = True
                             self._log.info(
-                                "[run] human_feedback interrupt fired (verdict=%s); "
-                                "invoking callback", snap.get("verdict"),
+                                "[FI] paused for human review: write your decision into "
+                                "%s/.fi/human_review_answer.json (action: accept/reject/refine, "
+                                "feedback: '...'), then run `fi --resume %s`",
+                                self.quest_root, self.quest_id,
                             )
-                            answer = await human_feedback_callback(snap)
-                            payload = Command(resume=answer)
-                            continue
+                            break
                         # Clarify node raised `interrupt(...)`. Hand the
                         # questions to the caller's callback for answers.
                         questions = intr_value.get("clarify_questions", {})
@@ -693,15 +767,30 @@ class Engine:
         return "write"
 
     def _route_after_review(self, state: QuestState) -> str:
-        # The human-feedback gate runs BEFORE the verdict-driven
-        # revise/done routing — the user gets a chance to override
-        # the LLM's verdict. Skipped silently when not configured so
-        # existing quests keep their fast finalisation path.
+        # Ordering is load-bearing:
+        #
+        # 1. ``must_flag_hits`` from any reviewer is non-bypassable.
+        #    A non-empty list forces another revise pass even when
+        #    ``review_loop = false`` would otherwise short-circuit
+        #    to done. This is the gate the methodologist persona's
+        #    MUST-FLAG checks (circular evaluation, single-point
+        #    evaluation, weak baseline without re-run, pseudo-units)
+        #    rely on to actually take effect.
+        # 2. ``human_feedback_gate == "after_review"`` routes through
+        #    the human-feedback node so the user gets a final say.
+        # 3. Otherwise fall through to the legacy verdict-driven routing.
+        review = state.get("review") or {}
+        must_flag = review.get("must_flag_hits") or []
+        if must_flag and state.get("iteration", 0) < self.config.engine.max_iterations:
+            self._log.info(
+                "[route] must_flag_hits=%s — forcing revise even if review_loop=False",
+                must_flag,
+            )
+            return "revise"
         if self.config.engine.human_feedback_gate == "after_review":
             return "human_feedback"
         if not self.config.engine.review_loop:
             return "done"
-        review = state.get("review") or {}
         verdict = review.get("verdict", "accept")
         if verdict == "revise" and state.get("iteration", 0) < self.config.engine.max_iterations:
             return "revise"
@@ -1450,14 +1539,27 @@ class Engine:
         # user picked "refine"). Folded into the same review_feedback
         # block the design prompt already reads — explicitly attributed
         # so the LLM understands this came from a real user, not the
-        # auto-review.
+        # auto-review. Uses the accumulated ``feedback_history`` so a
+        # later revise pass honours every prior ask, not just the most
+        # recent one. Falls back to the single-shot ``human_feedback``
+        # dict for legacy state shapes (resumed pre-history checkpoints).
+        history = list(state.get("feedback_history") or [])
         hf = state.get("human_feedback") or {}
-        if hf.get("action") == "refine" and hf.get("feedback"):
-            review_feedback = (
-                f"{review_feedback}\n\n"
-                f"--- USER FEEDBACK (priority over auto-review above) ---\n"
-                f"{hf['feedback']}\n"
-            ).strip()
+        if not history and hf.get("action") == "refine" and hf.get("feedback"):
+            history = [{"iteration": state.get("iteration", 1) - 1,
+                        "text": hf["feedback"]}]
+        if history:
+            blocks = "\n\n".join(
+                f"  (round {h.get('iteration', '?')}) {h.get('text', '')}".rstrip()
+                for h in history if (h.get("text") or "").strip()
+            )
+            if blocks:
+                review_feedback = (
+                    f"{review_feedback}\n\n"
+                    f"--- USER FEEDBACK (priority over auto-review above; "
+                    f"honour every round below, not only the most recent) ---\n"
+                    f"{blocks}\n"
+                ).strip()
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
@@ -2483,6 +2585,10 @@ class Engine:
             review = _parse_json_lenient(text) or {
                 "verdict": "accept", "score": 3, "suggestions": [],
             }
+            mfh = review.get("must_flag_hits") or []
+            if not isinstance(mfh, list):
+                mfh = []
+            review["must_flag_hits"] = [str(h).strip() for h in mfh if str(h).strip()]
             update: QuestState = {"review": review}
             if review.get("verdict") == "revise":
                 update["iteration"] = state.get("iteration", 0) + 1
@@ -2509,6 +2615,9 @@ class Engine:
             prompt = f"{prefix}\n\n{base_prompt}"
             text = await self._chat(prompt, node=f"review_panel.{name}")
             parsed = _parse_json_lenient(text) or {}
+            mfh = parsed.get("must_flag_hits") or []
+            if not isinstance(mfh, list):
+                mfh = []
             return {
                 "persona": name,
                 "verdict": parsed.get("verdict") or "accept",
@@ -2517,6 +2626,7 @@ class Engine:
                 "weaknesses": parsed.get("weaknesses") or [],
                 "suggestions": parsed.get("suggestions") or [],
                 "blocking": parsed.get("blocking") or "",
+                "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
             }
 
         panel_results = await asyncio.gather(
@@ -2602,8 +2712,13 @@ class Engine:
             "strengths": review.get("strengths") or [],
             "weaknesses": review.get("weaknesses") or [],
             "suggestions": review.get("suggestions") or [],
+            "must_flag_hits": review.get("must_flag_hits") or [],
             "rationale": review.get("rationale", ""),
             "paper_md_path": paper_md_path,
+            # Accumulated user-feedback history across refine
+            # iterations. Surfaced to the human-review UI so a
+            # reviewer can see what was asked for last time.
+            "feedback_history": list(state.get("feedback_history") or []),
         }
         # Best-effort disk snapshot so a web UI / VSCode chat can render
         # the gate state without re-loading the LangGraph checkpoint.
@@ -2641,12 +2756,22 @@ class Engine:
         # When the user refines, bump iteration so the loop budget is
         # consumed and the design node sees an explicit "we're in a
         # revise pass" signal (same convention the verdict-driven
-        # revise loop uses).
+        # revise loop uses). Also append to ``feedback_history`` so
+        # the design node sees the cumulative refinement requests
+        # instead of only the latest one — important when a quest
+        # goes through multiple revise passes and the user wants the
+        # rewriter to honour all prior asks, not just the last.
         if action == "refine":
             update["iteration"] = state.get("iteration", 0) + 1
+            history = list(state.get("feedback_history") or [])
+            history.append({
+                "iteration": state.get("iteration", 0),
+                "text": feedback,
+            })
+            update["feedback_history"] = history
             self._log.info(
-                "[human_feedback] refine → iteration %d (feedback len=%d)",
-                update["iteration"], len(feedback),
+                "[human_feedback] refine → iteration %d (feedback len=%d, total entries=%d)",
+                update["iteration"], len(feedback), len(history),
             )
         elif action == "reject":
             # Match the documented contract: the user "rejected" the
@@ -3797,7 +3922,8 @@ def _aggregate_panel_reviews(
         return {"verdict": fallback_verdict, "score": 3,
                 "rigor_score": 3, "depth_score": 3,
                 "agreement": "unanimous", "strengths": [],
-                "weaknesses": [], "suggestions": [], "blocking": ""}
+                "weaknesses": [], "suggestions": [], "blocking": "",
+                "must_flag_hits": []}
 
     verdicts = [(r.get("verdict") or "accept") for r in panel]
 
@@ -3882,12 +4008,29 @@ def _aggregate_panel_reviews(
             blocking = b
             break
 
+    # must_flag_hits: union across the panel, deduped, persona-attributed
+    # so the downstream router and the human-review UI can show which
+    # reviewer raised which fatal-methodology flag. A non-empty list
+    # forces a revise even if ``review_loop = false`` (see
+    # ``_route_after_review``).
+    mfh_out: list[str] = []
+    seen_mfh: set[str] = set()
+    for r in panel:
+        persona = r.get("persona", "?")
+        for h in (r.get("must_flag_hits") or []):
+            key = str(h).strip().lower()
+            if not key or key in seen_mfh:
+                continue
+            seen_mfh.add(key)
+            mfh_out.append(f"[{persona}] {h}")
+
     return {
         "verdict": verdict, "score": median,
         "rigor_score": rigor_median, "depth_score": depth_median,
         "agreement": agreement,
         "strengths": strengths, "weaknesses": weaknesses,
         "suggestions": suggestions, "blocking": blocking,
+        "must_flag_hits": mfh_out,
     }
 
 

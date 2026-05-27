@@ -23,6 +23,19 @@ import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
 
+// Sanitize a free-text fragment so it renders as plain prose
+// in the chat panel — strip / escape markdown that would
+// otherwise be interpreted (headings, fences, links, bold,
+// backticks, blockquote markers). Reasoning content + reviewer
+// snapshots can include arbitrary text the model is processing,
+// so the markdown escape here is load-bearing for safety.
+function escapeMd(s: string): string {
+    return s
+        .replace(/[`*_~|<>\[\]]/g, (c) => `\\${c}`)
+        .replace(/\r/g, "")
+        .split(/\n+/).map((l) => l.trim()).filter(Boolean).join(" / ");
+}
+
 interface LmRequest {
     type: "lm_request";
     id: number;
@@ -38,13 +51,29 @@ interface ClarifyRequest {
     questions: Record<string, { question: string; default: unknown }>;
 }
 
+interface HumanReviewRequest {
+    type: "human_review_request";
+    id: number;
+    snapshot: {
+        verdict?: string;
+        score?: number | null;
+        iteration?: number;
+        rationale?: string;
+        weaknesses?: string[];
+        suggestions?: string[];
+        must_flag_hits?: string[];
+        feedback_history?: Array<{ iteration?: number; text?: string }>;
+        paper_md_path?: string;
+    };
+}
+
 interface QuestEvent {
     type: "quest_event";
     event: string;
     [key: string]: unknown;
 }
 
-type IncomingMessage = LmRequest | ClarifyRequest | QuestEvent;
+type IncomingMessage = LmRequest | ClarifyRequest | HumanReviewRequest | QuestEvent;
 
 export interface BridgeOptions {
     progress: vscode.ChatResponseStream;
@@ -194,6 +223,8 @@ export class Bridge {
             await this.handleLmRequest(msg);
         } else if (msg.type === "clarify_request") {
             await this.handleClarifyRequest(msg);
+        } else if (msg.type === "human_review_request") {
+            await this.handleHumanReviewRequest(msg);
         } else if (msg.type === "quest_event") {
             this.handleQuestEvent(msg);
         }
@@ -255,6 +286,99 @@ export class Bridge {
             answers,
         });
         this.opts.progress.markdown("\n— clarify answers submitted; resuming…\n\n");
+    }
+
+    /**
+     * Render the engine's human-review snapshot in chat (verdict,
+     * must-flag hits, suggestions) and surface a QuickPick of
+     * Accept / Reject / Refine. Refine then opens a freeform input
+     * for the user's feedback text. The user can press Esc on either
+     * modal to cancel; we then send `human_review_cancelled` and the
+     * Python side raises BridgeError (engine catches → falls back to
+     * accept).
+     */
+    private async handleHumanReviewRequest(
+        req: HumanReviewRequest,
+    ): Promise<void> {
+        const snap = req.snapshot || {};
+        const verdict = snap.verdict || "(no verdict)";
+        const score = snap.score === null || snap.score === undefined
+            ? "-"
+            : String(snap.score);
+        const iter = String(snap.iteration ?? 0);
+        const mfh = snap.must_flag_hits || [];
+        const sugs = snap.suggestions || [];
+        const history = snap.feedback_history || [];
+        let md = "\n🟡 **Human review** — the engine paused after review.\n\n";
+        md += `- **Verdict:** \`${escapeMd(verdict)}\`\n`;
+        md += `- **Score:** \`${escapeMd(score)}\`\n`;
+        md += `- **Iteration:** \`${escapeMd(iter)}\`\n`;
+        if (snap.paper_md_path) {
+            md += `- **Paper:** \`${escapeMd(snap.paper_md_path)}\`\n`;
+        }
+        if (mfh.length) {
+            md += `- **Must-flag hits (non-bypassable):** ${mfh
+                .map((h) => `\`${escapeMd(h)}\``)
+                .join(", ")}\n`;
+        }
+        if (sugs.length) {
+            md += "\n**Suggestions:**\n";
+            for (const s of sugs.slice(0, 8)) {
+                md += `  - ${escapeMd(s)}\n`;
+            }
+        }
+        if (history.length) {
+            md += "\n**Prior refinement asks:**\n";
+            for (const h of history) {
+                md += `  - round ${escapeMd(String(h.iteration ?? "?"))}: ${escapeMd(h.text || "")}\n`;
+            }
+        }
+        this.opts.progress.markdown(md + "\n");
+        const pick = await vscode.window.showQuickPick(
+            [
+                { label: "Accept", description: "Finalise the quest as-is" },
+                { label: "Reject", description: "Mark verdict=rejected and finalise" },
+                { label: "Refine", description: "Loop back to design with feedback" },
+            ],
+            { title: "Human review", placeHolder: "Choose how to resolve this review", ignoreFocusOut: true },
+        );
+        if (!pick) {
+            this.send({ type: "human_review_cancelled", id: req.id });
+            this.opts.progress.markdown(
+                "\n— human-review cancelled by user; engine falls back to accept.\n\n",
+            );
+            return;
+        }
+        let action: "accept" | "reject" | "refine";
+        if (pick.label === "Accept") action = "accept";
+        else if (pick.label === "Reject") action = "reject";
+        else action = "refine";
+        let feedback = "";
+        if (action === "refine") {
+            const fb = await vscode.window.showInputBox({
+                title: "Refine — feedback for the next iteration",
+                prompt: "What should the rewriter change? (empty = downgrade to accept)",
+                ignoreFocusOut: true,
+            });
+            if (fb === undefined) {
+                this.send({ type: "human_review_cancelled", id: req.id });
+                this.opts.progress.markdown(
+                    "\n— refine cancelled by user; engine falls back to accept.\n\n",
+                );
+                return;
+            }
+            feedback = fb.trim();
+            if (!feedback) action = "accept";
+        }
+        this.send({
+            type: "human_review_response",
+            id: req.id,
+            action,
+            feedback,
+        });
+        this.opts.progress.markdown(
+            `\n— human review: **${action}**${feedback ? " (with feedback)" : ""}; resuming…\n\n`,
+        );
     }
 
     /**
@@ -356,17 +480,6 @@ export class Bridge {
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
             const nodeLabel = req.node || "(unnamed-node)";
-
-            // Sanitize a free-text fragment so it renders as plain prose
-            // in the chat panel — strip / escape markdown that would
-            // otherwise be interpreted (headings, fences, links, bold,
-            // backticks, blockquote markers). Reasoning content can
-            // include arbitrary text the model is processing, so the
-            // markdown escape here is load-bearing for safety.
-            const escapeMd = (s: string): string => s
-                .replace(/[`*_~|<>\[\]]/g, (c) => `\\${c}`)
-                .replace(/\r/g, "")
-                .split(/\n+/).map((l) => l.trim()).filter(Boolean).join(" / ");
 
             const flushThinking = (): void => {
                 if (!thinkingBuf) return;

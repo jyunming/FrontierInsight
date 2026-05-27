@@ -69,6 +69,12 @@ class _QuestRegistry:
         self._clarify_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._configs: dict[str, Config] = {}
         self._final_states: dict[str, dict[str, Any]] = {}
+        # Mirror of the clarify-future plumbing for the human-review
+        # gate. When the in-process engine pauses at the human_feedback
+        # node, the registered future is what the POST endpoint
+        # resolves with the user's decision so the engine resumes.
+        self._human_review_snapshots: dict[str, dict[str, Any]] = {}
+        self._human_review_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     def register_task(self, quest_id: str, task: asyncio.Task[Any], cfg: Config) -> None:
         self._tasks[quest_id] = task
@@ -107,6 +113,31 @@ class _QuestRegistry:
         if fut is None or fut.done():
             return False
         fut.set_result(answers)
+        return True
+
+    def register_human_review(
+        self, quest_id: str, snapshot: dict[str, Any],
+    ) -> asyncio.Future[dict[str, Any]]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._human_review_snapshots[quest_id] = snapshot
+        self._human_review_futures[quest_id] = fut
+        return fut
+
+    def pending_human_review(self, quest_id: str) -> dict[str, Any] | None:
+        return self._human_review_snapshots.get(quest_id)
+
+    def resolve_human_review(
+        self, quest_id: str, answer: dict[str, Any],
+    ) -> bool:
+        fut = self._human_review_futures.pop(quest_id, None)
+        self._human_review_snapshots.pop(quest_id, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(answer)
         return True
 
     def get_config(self, quest_id: str) -> Config | None:
@@ -1348,6 +1379,7 @@ def make_app(
                     "summary": None,
                     "alive": bool(launcher_status.get("alive")),
                     "pending_clarify": False,
+                    "pending_human_review": None,
                     "review": None,
                     "review_panel": None,
                     "pid": launcher_status.get("pid"),
@@ -1399,6 +1431,23 @@ def make_app(
             node_progress_lines, _KNOWN_NODES,
         )
         quest_failed = _read_quest_failed_md(quest_root)
+        # Human-review gate state for the dashboard banner:
+        #   - in-process pending future, OR
+        #   - on-disk snapshot with no answer-file present yet.
+        pending_hr_snap = registry.pending_human_review(quest_id)
+        pending_human_review: dict[str, Any] | None = None
+        if pending_hr_snap is not None:
+            pending_human_review = pending_hr_snap
+        else:
+            hr_path = quest_root / ".fi" / "human_review.json"
+            hr_answer = quest_root / ".fi" / "human_review_answer.json"
+            if hr_path.is_file() and not hr_answer.is_file():
+                try:
+                    pending_human_review = json.loads(
+                        hr_path.read_text(encoding="utf-8"),
+                    )
+                except (OSError, json.JSONDecodeError):
+                    pending_human_review = None
         return JSONResponse({
             "quest_id": quest_id,
             "quest_root": str(quest_root),
@@ -1422,6 +1471,7 @@ def make_app(
                 or bool(launcher_status.get("alive"))
             ),
             "pending_clarify": registry.pending_clarify(quest_id) is not None,
+            "pending_human_review": pending_human_review,
             "review": review,
             "review_panel": review_panel,
             # `quest_failed.md` summary when the engine wrote one
@@ -1506,6 +1556,90 @@ def make_app(
         if not registry.resolve_clarify(quest_id, answers):
             raise HTTPException(409, f"no pending clarify for quest {quest_id}")
         return JSONResponse({"ok": True})
+
+    @app.get("/api/quests/{quest_id}/human-review")
+    async def get_human_review(quest_id: str) -> JSONResponse:
+        """Return the current human-review snapshot for a quest. Two
+        sources, in order of authority:
+
+        1. The in-process registry — populated when a web-launched
+           quest's engine reaches the human_feedback interrupt and
+           awaits the GUI callback.
+        2. ``<quest_root>/.fi/human_review.json`` on disk — populated
+           by EVERY quest that hits the gate (CLI, subprocess,
+           VSCode), so the dashboard can render a review for any
+           paused quest even when no in-process future is wired.
+        """
+        snap = registry.pending_human_review(quest_id)
+        if snap is not None:
+            return JSONResponse({"pending": True, "source": "in_process",
+                                 "snapshot": snap})
+        try:
+            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        except HTTPException:
+            return JSONResponse({"pending": False, "source": None,
+                                 "snapshot": None})
+        on_disk = quest_root / ".fi" / "human_review.json"
+        if not on_disk.is_file():
+            return JSONResponse({"pending": False, "source": None,
+                                 "snapshot": None})
+        # Mid-quest the answer may already be staged on disk by an
+        # earlier POST; treat that as "no longer pending".
+        if (quest_root / ".fi" / "human_review_answer.json").is_file():
+            return JSONResponse({"pending": False, "source": "disk",
+                                 "snapshot": None})
+        try:
+            snap = json.loads(on_disk.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return JSONResponse({"pending": False, "source": None,
+                                 "snapshot": None})
+        return JSONResponse({"pending": True, "source": "disk",
+                             "snapshot": snap})
+
+    @app.post("/api/quests/{quest_id}/human-review")
+    async def post_human_review(
+        quest_id: str, request: Request,
+    ) -> JSONResponse:
+        """Submit the user's accept / reject / refine decision. Two
+        resolution paths:
+
+        1. An in-process future (the in-memory engine path used by
+           interview submit + launch=true) is resolved when present;
+           the engine resumes within the same Python process.
+        2. ``<quest_root>/.fi/human_review_answer.json`` is always
+           written so a subprocess- or CLI-launched engine can pick
+           up the decision on its next ``--resume``.
+        """
+        body = await request.json()
+        action_raw = str(body.get("action") or "").strip().lower()
+        if action_raw not in ("accept", "reject", "refine"):
+            raise HTTPException(
+                400, "action must be one of accept, reject, refine",
+            )
+        feedback = str(body.get("feedback") or "").strip()
+        if action_raw == "refine" and not feedback:
+            raise HTTPException(
+                400, "refine requires non-empty feedback",
+            )
+        answer = {"action": action_raw, "feedback": feedback}
+        in_process_resolved = registry.resolve_human_review(quest_id, answer)
+        # Always write the disk answer so an out-of-process
+        # ``--resume`` picks it up too. Best-effort; a missing
+        # quest_root means the in-process resolve was authoritative.
+        try:
+            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+            fi = quest_root / ".fi"
+            fi.mkdir(parents=True, exist_ok=True)
+            (fi / "human_review_answer.json").write_text(
+                json.dumps(answer, indent=2) + "\n", encoding="utf-8",
+            )
+        except HTTPException:
+            quest_root = None  # type: ignore[assignment]
+        if not in_process_resolved and quest_root is None:
+            raise HTTPException(
+                409, f"no pending human-review for quest {quest_id}",
+            )
+        return JSONResponse({"ok": True, "in_process_resolved": in_process_resolved})
 
     @app.get("/api/quests/{quest_id}/paper")
     async def get_paper(quest_id: str) -> FileResponse:
@@ -1800,9 +1934,22 @@ def make_app(
             fut = registry.register_clarify(quest_id, questions)
             return await fut
 
+        async def gui_human_review_callback(
+            snapshot: dict[str, Any],
+        ) -> dict[str, Any]:
+            # The web UI POSTs the user's action+feedback to
+            # /api/quests/<id>/human-review which resolves the future
+            # registered here. The engine then resumes with the
+            # accept / reject / refine decision.
+            fut = registry.register_human_review(quest_id, snapshot)
+            return await fut
+
         async def driver():
             try:
-                art = await engine.run(clarify_callback=gui_clarify_callback)
+                art = await engine.run(
+                    clarify_callback=gui_clarify_callback,
+                    human_feedback_callback=gui_human_review_callback,
+                )
                 # Snapshot review_panel + final review so the
                 # detail endpoint can render the per-persona reviews
                 # without re-reading the SqliteSaver checkpoint.

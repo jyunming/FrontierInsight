@@ -244,3 +244,182 @@ def test_human_feedback_writes_snapshot_json(gated_engine: Engine) -> None:
     assert snap["iteration"] == 1
     assert snap["score"] == 2
     assert "weaknesses" in snap and snap["weaknesses"] == ["unsupported claim in §3"]
+
+
+# ---------------------------------------------------------------------------
+# Must-flag hits are non-bypassable, even when review_loop is False.
+# ---------------------------------------------------------------------------
+
+
+def test_route_must_flag_forces_revise_even_with_review_loop_off(
+    tmp_path: Path,
+) -> None:
+    """The whole point of the must_flag mechanism: even when the
+    operator disables ``review_loop`` (intending "ship after one
+    pass, no auto-revise"), a methodology must-flag hit (circular
+    eval, single-point eval, weak baseline, pseudo-units) MUST force
+    a revise pass. Otherwise the design errors the must-flag rules
+    exist to catch slip through silently."""
+    cfg = Config(
+        topic="t", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            clarify_mode="off", review_loop=False, max_iterations=3,
+            # Gate off so we're testing the must-flag short-circuit
+            # specifically, not the gate.
+            human_feedback_gate="off",
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    eng = Engine(cfg)
+    flagged_state = {
+        "review": {"verdict": "accept", "must_flag_hits": ["[methodologist] circular_evaluation"]},
+        "iteration": 0,
+    }
+    assert eng._route_after_review(flagged_state) == "revise"  # type: ignore[arg-type]
+
+
+def test_route_must_flag_respects_max_iterations(tmp_path: Path) -> None:
+    """A must-flag hit at the iteration cap can't loop forever — the
+    same ``max_iterations`` budget the verdict-driven loop respects
+    applies. Otherwise an LLM stuck flagging the same issue every
+    pass would prevent the quest from ever finalising."""
+    cfg = Config(
+        topic="t", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            clarify_mode="off", review_loop=False, max_iterations=2,
+            human_feedback_gate="off",
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    eng = Engine(cfg)
+    at_cap = {
+        "review": {"verdict": "accept", "must_flag_hits": ["[methodologist] single_point_eval"]},
+        "iteration": 2,
+    }
+    # iteration == max_iterations: fall through to legacy routing
+    # which (with review_loop=False) returns "done".
+    assert eng._route_after_review(at_cap) == "done"  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Accumulated feedback_history across refine rounds.
+# ---------------------------------------------------------------------------
+
+
+def test_human_feedback_refine_appends_to_history(
+    gated_engine: Engine,
+) -> None:
+    """First refine seeds the history; a second refine appends a
+    fresh entry rather than overwriting. The design node reads ALL
+    entries so a later iteration honours every prior ask."""
+    state = {
+        "review": {"verdict": "accept"},
+        "iteration": 0,
+        "feedback_history": [],
+    }
+    patch1 = _drive_node(
+        gated_engine, state,
+        {"action": "refine", "feedback": "tighten the abstract"},
+    )
+    assert patch1["human_feedback"]["action"] == "refine"
+    assert len(patch1["feedback_history"]) == 1
+    assert patch1["feedback_history"][0]["text"] == "tighten the abstract"
+    state2 = {
+        "review": {"verdict": "revise"},
+        "iteration": 1,
+        "feedback_history": patch1["feedback_history"],
+    }
+    patch2 = _drive_node(
+        gated_engine, state2,
+        {"action": "refine", "feedback": "add a control experiment"},
+    )
+    assert len(patch2["feedback_history"]) == 2
+    assert patch2["feedback_history"][1]["text"] == "add a control experiment"
+
+
+# ---------------------------------------------------------------------------
+# Auto-accept-on-pass behaviour (the engine.auto_accept_on_pass attr).
+# ---------------------------------------------------------------------------
+
+
+def test_auto_accept_on_pass_reads_config_default(tmp_path: Path) -> None:
+    """``Engine.auto_accept_on_pass`` is sourced from
+    ``config.engine.auto_accept_on_pass`` when no explicit constructor
+    arg is given — that's how fixtures + YAML opt in without touching
+    the Engine constructor signature."""
+    cfg = Config(
+        topic="t", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(auto_accept_on_pass=True),
+        execution=ExecutionConfig(),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    eng = Engine(cfg)
+    assert eng.auto_accept_on_pass is True
+
+
+def test_auto_accept_on_pass_constructor_arg_overrides_config(
+    tmp_path: Path,
+) -> None:
+    """Explicit constructor arg wins over the YAML/config value —
+    this is what ``launch.py --auto-accept-on-pass`` uses to force
+    on regardless of YAML."""
+    cfg = Config(
+        topic="t", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(auto_accept_on_pass=False),
+        execution=ExecutionConfig(),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    eng = Engine(cfg, auto_accept_on_pass=True)
+    assert eng.auto_accept_on_pass is True
+
+
+# ---------------------------------------------------------------------------
+# Aggregator unions ``must_flag_hits`` across the panel.
+# ---------------------------------------------------------------------------
+
+
+def test_aggregator_unions_must_flag_hits_across_panel() -> None:
+    """Each panel member can flag independently; the union (deduped,
+    persona-attributed) lands on the aggregated review so the router
+    sees every reviewer's must-flag concerns."""
+    from core.engine import _aggregate_panel_reviews
+    panel = [
+        {"persona": "methodologist", "verdict": "revise", "score": 2,
+         "strengths": [], "weaknesses": [], "suggestions": [], "blocking": "",
+         "must_flag_hits": ["circular_evaluation"]},
+        {"persona": "statistician", "verdict": "accept", "score": 4,
+         "strengths": [], "weaknesses": [], "suggestions": [], "blocking": "",
+         "must_flag_hits": []},
+        {"persona": "devil_advocate", "verdict": "revise", "score": 2,
+         "strengths": [], "weaknesses": [], "suggestions": [], "blocking": "",
+         "must_flag_hits": ["single_point_eval", "circular_evaluation"]},
+    ]
+    agg = _aggregate_panel_reviews(panel)
+    mfh = agg["must_flag_hits"]
+    # Two distinct hits across three personas; circular_evaluation
+    # was flagged twice but appears only once (deduped).
+    assert len(mfh) == 2
+    assert any("circular_evaluation" in s for s in mfh)
+    assert any("single_point_eval" in s for s in mfh)
+    # Each surviving entry is persona-attributed.
+    assert all(s.startswith("[") and "]" in s for s in mfh)
+
+
+def test_aggregator_empty_panel_returns_empty_must_flag_hits() -> None:
+    """The empty-panel fallback path must still include the
+    ``must_flag_hits: []`` key so downstream consumers can ``.get()``
+    without a KeyError."""
+    from core.engine import _aggregate_panel_reviews
+    agg = _aggregate_panel_reviews([])
+    assert "must_flag_hits" in agg
+    assert agg["must_flag_hits"] == []

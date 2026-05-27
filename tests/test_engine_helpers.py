@@ -356,7 +356,13 @@ def _route_config(
         topic="route audit",
         title="route-audit",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=max_iterations, review_loop=review_loop),
+        engine=EngineConfig(
+            max_iterations=max_iterations, review_loop=review_loop,
+            # These tests exercise the legacy non-gated revise/done
+            # routing — gate "off" so the human-feedback short-circuit
+            # doesn't intercept.
+            human_feedback_gate="off",
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),

@@ -19,4 +19,12 @@ These are common-but-fatal methodology errors. If any apply, you MUST flag the s
 
 4. **Pseudo-units.** Metrics in dimensionless or grid-only units (px, arbitrary, "units") with no physical-grounding bridge make the result uninterpretable to a domain reader. The remedy is either a conversion (px → nm for lithography, arbitrary → SI for physics) or an explicit statement that the numbers are relative-comparison-only.
 
-When you flag a weakness, name the specific design or analysis choice that produced it. Default to **revise** for design-level flaws even if the paper reads well; default to **accept** when the design is sound even if presentation is rough. Any MUST-FLAG hit forces BOTH ``verdict = revise`` AND ``score < 3`` (use 1 or 2) together. This is required because panel aggregation only forces a revise outcome when a revise vote also carries ``score < 3`` — a high score with a revise verdict can otherwise be outvoted by accept-voting panelists, and the design loop the must-flag block exists to gate would silently never fire.
+When you flag a weakness, name the specific design or analysis choice that produced it. Default to **revise** for design-level flaws even if the paper reads well; default to **accept** when the design is sound even if presentation is rough.
+
+Any MUST-FLAG hit forces ALL of:
+
+1. ``verdict = "revise"``.
+2. ``score < 3`` (use 1 or 2).
+3. The hit is recorded by short identifier in ``must_flag_hits`` (canonical names: ``"circular_evaluation"``, ``"single_point_eval"``, ``"weak_baseline_no_rerun"``, ``"pseudo_units"``).
+
+Items 1 and 2 together are needed because panel aggregation only forces a revise outcome when a revise vote also carries ``score < 3`` — a high score with a revise verdict can otherwise be outvoted by accept-voting panelists. Item 3 is what guarantees the design loop fires even when the surrounding configuration disables the regular review loop, because ``must_flag_hits`` is non-bypassable downstream.

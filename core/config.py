@@ -269,20 +269,33 @@ class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = 2
     review_loop: bool = True
-    # Human-feedback gate. When ``"after_review"``, the engine pauses
-    # AFTER the review node fires and waits for the user to
-    # accept / reject / refine the result before finalising. The
+    # Human-feedback gate. ``"after_review"`` (the default) pauses
+    # the quest AFTER the review node fires and waits for the user
+    # to accept / reject / refine the result before finalising. The
     # ``after_review`` callback receives the review verdict + scores +
-    # paper md and returns one of:
+    # paper md + any must-flag hits and returns one of:
     #
     #   {"action": "accept"}                     # finalise the quest as-is
     #   {"action": "reject"}                     # finalise with verdict=rejected
     #   {"action": "refine", "feedback": "..."}  # bump iteration; back to design
     #                                            #   with feedback injected
     #
-    # ``"off"`` (default) keeps today's behaviour: the engine's
-    # review-loop verdict drives revise/done routing without a pause.
-    human_feedback_gate: HumanFeedbackGate = "off"
+    # ``"off"`` skips the gate and lets the engine's review-loop
+    # verdict drive revise/done routing without a pause. Useful for
+    # fully unattended runs where downstream review happens out-of-band.
+    # Headless invocations (no callback wired) get an automatic
+    # pause-exit + on-disk snapshot at ``<quest_root>/.fi/human_review.json``
+    # instead of blocking forever — drop a response at
+    # ``human_review_answer.json`` and ``--resume`` to continue.
+    human_feedback_gate: HumanFeedbackGate = "after_review"
+    # When True, the human-review gate auto-resumes with ``accept`` for
+    # *clean* papers — verdict == "accept" AND ``must_flag_hits`` is
+    # empty. Flagged or revise-verdict papers still pause for human
+    # review. Use with ``--fleet`` so the production runner doesn't
+    # block on every clean quest, and in tests so e2e fixtures finalise
+    # without wiring a callback. The CLI flag ``--auto-accept-on-pass``
+    # forces this to True at the launcher level.
+    auto_accept_on_pass: bool = False
     # Pre-flight clarification (`clarify` node before `ideate`).
     #
     #   "off"         — skip the node entirely. Default for tests and fleet.

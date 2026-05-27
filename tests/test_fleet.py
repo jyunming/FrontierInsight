@@ -84,7 +84,12 @@ def _make_cfg(tmp_path: Path, slug: str) -> Config:
         topic=f"fleet smoke {slug}",
         title=f"fleet-{slug}",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            # Default gate is "after_review"; auto-accept-on-pass
+            # finalises the clean-verdict happy path without a callback.
+            auto_accept_on_pass=True,
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),

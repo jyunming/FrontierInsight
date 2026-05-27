@@ -47,6 +47,9 @@ _QUEST_YAML = textwrap.dedent("""\
       max_iterations: 1
       review_loop: false
       clarify_mode: interactive
+      # Default gate is "after_review"; auto-accept finalises the
+      # clean-verdict path without wiring a callback in tests.
+      auto_accept_on_pass: true
 
     execution:
       sandbox: venv

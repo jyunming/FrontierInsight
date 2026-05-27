@@ -59,6 +59,9 @@ def cfg(tmp_path: Path) -> Config:
             clarify_mode="off", ideate_reflect=False,
             exec_reflect_max_iterations=3,
             enable_analyze_reroute=True,
+            # Default gate is "after_review"; auto-accept finalises
+            # the clean-verdict happy path without a callback.
+            auto_accept_on_pass=True,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
