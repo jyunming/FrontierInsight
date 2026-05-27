@@ -26,14 +26,24 @@ import { ChildProcess } from "child_process";
 // Sanitize a free-text fragment so it renders as plain prose
 // in the chat panel — strip / escape markdown that would
 // otherwise be interpreted (headings, fences, links, bold,
-// backticks, blockquote markers). Reasoning content + reviewer
-// snapshots can include arbitrary text the model is processing,
-// so the markdown escape here is load-bearing for safety.
+// backticks, blockquote markers, list markers, numbered lists).
+// Reasoning content + reviewer snapshots can include arbitrary
+// text the model is processing, so the markdown escape here is
+// load-bearing for safety.
 function escapeMd(s: string): string {
     return s
+        // Inline markers: backticks, emphasis, tables, html.
         .replace(/[`*_~|<>\[\]]/g, (c) => `\\${c}`)
+        // Drop carriage returns and collapse multiline text to a
+        // single line so block-level markers stop being meaningful.
         .replace(/\r/g, "")
-        .split(/\n+/).map((l) => l.trim()).filter(Boolean).join(" / ");
+        .split(/\n+/).map((l) => l.trim()).filter(Boolean).join(" / ")
+        // Leading block markers after collapse: a stray '#' / '-' / '+'
+        // / '> ' / '1.' at the start of the final single-line string
+        // would still parse as a heading or list item. Escape just
+        // those leading characters so the body text stays inert.
+        .replace(/^([#>\-+])/, "\\$1")
+        .replace(/^(\d+)\./, "$1\\.");
 }
 
 interface LmRequest {

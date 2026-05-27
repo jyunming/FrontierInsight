@@ -119,7 +119,7 @@
       <div id="human-review-must-flag" class="hidden flex flex-col gap-1"></div>
       <div id="human-review-suggestions" class="font-body-md text-body-md text-on-surface-variant"></div>
       <div id="human-review-history" class="hidden flex flex-col gap-2"></div>
-      <form id="human-review-form" class="fi-form flex flex-col gap-3" onsubmit="return submitHumanReview(event)">
+      <form id="human-review-form" class="fi-form flex flex-col gap-3" onsubmit="event.preventDefault(); return false;">
         <label class="font-label-sm text-label-sm text-outline uppercase" for="hr-feedback">Feedback (required for refine)</label>
         <textarea id="hr-feedback" rows="4" class="w-full bg-surface-low border border-white/10 rounded p-3 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none" placeholder="What should the next iteration change?"></textarea>
         <div class="flex flex-wrap gap-3">
@@ -572,9 +572,16 @@
       form.dataset.bound = '1';
     }
   }
-  async function submitHumanReview(actionOrEvent) {
-    let action = actionOrEvent;
-    if (actionOrEvent && actionOrEvent.preventDefault) { actionOrEvent.preventDefault(); action = 'accept'; }
+  async function submitHumanReview(action) {
+    // Action MUST be passed explicitly by one of the three button
+    // handlers — there is no "default" action. Earlier this function
+    // accepted a form-submit event and defaulted to ``accept`` when
+    // invoked that way, which made Enter-key in the textarea
+    // silently accept the paper. The form's ``onsubmit`` now
+    // ``preventDefault`` and returns false so the only path to this
+    // function is a button click. Guard here in case a caller goes
+    // through anyway.
+    if (!action || !["accept", "reject", "refine"].includes(action)) return false;
     const feedback = (document.getElementById('hr-feedback').value || '').trim();
     if (action === 'refine' && !feedback) {
       alert('Refine requires feedback text.');

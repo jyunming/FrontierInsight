@@ -423,3 +423,53 @@ def test_aggregator_empty_panel_returns_empty_must_flag_hits() -> None:
     agg = _aggregate_panel_reviews([])
     assert "must_flag_hits" in agg
     assert agg["must_flag_hits"] == []
+
+
+# ---------------------------------------------------------------------------
+# Iteration must be consumed when must_flag_hits forces revise — even when
+# the LLM verdict is "accept". Without this, _route_after_review's
+# non-bypassable revise path could loop unbounded.
+# ---------------------------------------------------------------------------
+
+
+def test_node_review_bumps_iteration_when_must_flag_hits_with_accept_verdict(
+    tmp_path: Path,
+) -> None:
+    """A malformed reviewer that records verdict=accept *and* a must-flag
+    hit would otherwise route to revise via _route_after_review without
+    consuming the iteration budget — the loop could run unbounded."""
+    import asyncio
+    eng = _engine_with_gate(tmp_path, "off")
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001
+        return json.dumps({
+            "verdict": "accept",
+            "score": 4,
+            "suggestions": [],
+            "must_flag_hits": ["circular_evaluation"],
+        })
+    eng._chat = fake_chat  # type: ignore[assignment]
+    state = {"topic": "t", "iteration": 0, "review": {}}
+    patch = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
+    assert patch["iteration"] == 1
+    assert patch["review"]["must_flag_hits"] == ["circular_evaluation"]
+
+
+def test_node_review_no_iteration_bump_on_clean_accept(tmp_path: Path) -> None:
+    """Complement: a clean accept (no must_flag_hits) must NOT bump
+    iteration — happy-path finalises without consuming budget."""
+    import asyncio
+    eng = _engine_with_gate(tmp_path, "off")
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001
+        return json.dumps({
+            "verdict": "accept",
+            "score": 4,
+            "suggestions": [],
+            "must_flag_hits": [],
+        })
+    eng._chat = fake_chat  # type: ignore[assignment]
+    state = {"topic": "t", "iteration": 0, "review": {}}
+    patch = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
+    assert "iteration" not in patch
+    assert patch["review"]["must_flag_hits"] == []

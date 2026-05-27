@@ -1624,22 +1624,39 @@ def make_app(
         answer = {"action": action_raw, "feedback": feedback}
         in_process_resolved = registry.resolve_human_review(quest_id, answer)
         # Always write the disk answer so an out-of-process
-        # ``--resume`` picks it up too. Best-effort; a missing
-        # quest_root means the in-process resolve was authoritative.
+        # ``--resume`` picks it up too. Best-effort: an OSError on the
+        # disk write (full disk, permission flip) MUST NOT return 5xx
+        # when the in-process future already resolved — the engine is
+        # already resuming and the UI would think the submission failed
+        # while the quest happily finalises in the background. Log + warn
+        # in the response instead so the user knows about the disk-write
+        # failure but the submission itself is acknowledged.
+        disk_write_error: str | None = None
+        quest_root: Path | None = None
         try:
             quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-            fi = quest_root / ".fi"
-            fi.mkdir(parents=True, exist_ok=True)
-            (fi / "human_review_answer.json").write_text(
-                json.dumps(answer, indent=2) + "\n", encoding="utf-8",
-            )
         except HTTPException:
-            quest_root = None  # type: ignore[assignment]
+            quest_root = None
+        if quest_root is not None:
+            try:
+                fi = quest_root / ".fi"
+                fi.mkdir(parents=True, exist_ok=True)
+                (fi / "human_review_answer.json").write_text(
+                    json.dumps(answer, indent=2) + "\n", encoding="utf-8",
+                )
+            except OSError as e:
+                disk_write_error = f"{type(e).__name__}: {e}"
         if not in_process_resolved and quest_root is None:
             raise HTTPException(
                 409, f"no pending human-review for quest {quest_id}",
             )
-        return JSONResponse({"ok": True, "in_process_resolved": in_process_resolved})
+        payload = {
+            "ok": True,
+            "in_process_resolved": in_process_resolved,
+        }
+        if disk_write_error is not None:
+            payload["disk_write_warning"] = disk_write_error
+        return JSONResponse(payload)
 
     @app.get("/api/quests/{quest_id}/paper")
     async def get_paper(quest_id: str) -> FileResponse:

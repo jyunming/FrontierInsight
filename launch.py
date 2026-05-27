@@ -804,7 +804,14 @@ def _pick_clarify_callback(
         # works because by the time clarify_callback fires, the
         # clarify NODE has already made one LLM call (to generate the
         # questions), which lazy-initialized the bridge.
-        port = int(cfg.provider.extra.get("bridge_port", 0))
+        # Defensive parse — hand-edited YAMLs can leave bridge_port as
+        # a non-numeric string. Treat that as "no callback wired"
+        # rather than crashing the run.
+        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
+        try:
+            port = int(extra.get("bridge_port", 0))
+        except (TypeError, ValueError):
+            port = 0
         if port <= 0:
             return None
 
@@ -848,7 +855,18 @@ def _pick_human_feedback_callback(
     if interactive:
         return _cli_human_feedback_callback
     if cfg.provider.name == "vscode_extension":
-        port = int((cfg.provider.extra or {}).get("bridge_port", 0))
+        # Defensive parse: a hand-crafted YAML could leave
+        # ``provider.extra.bridge_port`` as a non-numeric string (or
+        # ``provider.extra`` as a list/None instead of a mapping).
+        # Falling back to "no callback wired" is the right move there
+        # — the engine then pause-exits cleanly with the on-disk
+        # snapshot, which is the same behaviour as any other
+        # non-VSCode headless run.
+        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
+        try:
+            port = int(extra.get("bridge_port", 0))
+        except (TypeError, ValueError):
+            port = 0
         if port <= 0:
             return None
 

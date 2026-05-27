@@ -402,6 +402,22 @@ class Engine:
                             snap = intr_value["human_review"]
                             verdict = snap.get("verdict")
                             mfh = snap.get("must_flag_hits") or []
+                            snapshot_path = self.fi_dir / "human_review.json"
+                            answer_path = self.fi_dir / "human_review_answer.json"
+
+                            def _consume_snapshot() -> None:
+                                # Remove the on-disk snapshot when the gate
+                                # resolves so the dashboard's "snapshot
+                                # present + no answer-file" pending check
+                                # doesn't continue to show a stale banner.
+                                # Best-effort: an unlink failure is not
+                                # quest-fatal.
+                                for p in (snapshot_path, answer_path):
+                                    try:
+                                        p.unlink()
+                                    except OSError:
+                                        pass
+
                             if (
                                 self.auto_accept_on_pass
                                 and verdict == "accept"
@@ -411,6 +427,7 @@ class Engine:
                                     "[run] human_feedback auto-accept "
                                     "(verdict=accept, no must_flag_hits)",
                                 )
+                                _consume_snapshot()
                                 payload = Command(
                                     resume={"action": "accept", "feedback": ""},
                                 )
@@ -421,9 +438,9 @@ class Engine:
                                     "invoking callback", verdict,
                                 )
                                 answer = await human_feedback_callback(snap)
+                                _consume_snapshot()
                                 payload = Command(resume=answer)
                                 continue
-                            answer_path = self.fi_dir / "human_review_answer.json"
                             if answer_path.is_file():
                                 try:
                                     answer = json.loads(
@@ -440,10 +457,7 @@ class Engine:
                                         "[run] consuming pre-staged human-review answer "
                                         "(action=%s)", answer.get("action"),
                                     )
-                                    try:
-                                        answer_path.unlink()
-                                    except OSError:
-                                        pass
+                                    _consume_snapshot()
                                     payload = Command(resume=answer)
                                     continue
                             data_paused = True
@@ -2590,9 +2604,20 @@ class Engine:
                 mfh = []
             review["must_flag_hits"] = [str(h).strip() for h in mfh if str(h).strip()]
             update: QuestState = {"review": review}
-            if review.get("verdict") == "revise":
+            # Iteration is consumed when EITHER the verdict says revise
+            # OR the must-flag hits force one. Bumping on must_flag_hits
+            # alone (even with verdict=accept) makes ``_route_after_review``'s
+            # non-bypassable revise path deterministic with respect to the
+            # ``max_iterations`` budget — without this, a malformed
+            # ``revise`` route from must-flag wouldn't have consumed the
+            # iteration and the loop could run unbounded.
+            if review.get("verdict") == "revise" or review["must_flag_hits"]:
                 update["iteration"] = state.get("iteration", 0) + 1
-                self._log.info("[review] verdict=revise -> iteration %d", update["iteration"])
+                self._log.info(
+                    "[review] verdict=%s must_flag_hits=%s -> iteration %d",
+                    review.get("verdict"), review["must_flag_hits"],
+                    update["iteration"],
+                )
             else:
                 self._log.info(
                     "[review] verdict=%s score=%s",
@@ -2663,10 +2688,16 @@ class Engine:
             review["suggestions"] = [str(s) for s in mod_suggs]
 
         update: QuestState = {"review": review, "review_panel": panel_results}
-        if review.get("verdict") == "revise":
+        # Bump iteration on EITHER verdict=revise OR a non-empty
+        # must_flag_hits list. Without the must-flag clause, a malformed
+        # persona response that recorded ``verdict=accept`` alongside a
+        # must-flag hit would route to revise (via _route_after_review)
+        # without consuming iteration budget — the loop could spin.
+        if review.get("verdict") == "revise" or (review.get("must_flag_hits") or []):
             update["iteration"] = state.get("iteration", 0) + 1
             self._log.info(
-                "[review] panel verdict=revise (agreement=%s, score=%s) -> iteration %d",
+                "[review] panel verdict=%s must_flag_hits=%s (agreement=%s, score=%s) -> iteration %d",
+                review.get("verdict"), review.get("must_flag_hits") or [],
                 agg.get("agreement"), agg.get("score"), update["iteration"],
             )
         else:
