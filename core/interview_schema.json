@@ -359,6 +359,44 @@
       "tier": 2
     },
     {
+      "id": "pause_for_user_input",
+      "label": "Pause for user-supplied papers / datasets",
+      "prompt": "Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "never",
+          "label": "Never (default)",
+          "description": "Engine runs to completion without pause-drop opportunities."
+        },
+        {
+          "value": "after_design",
+          "label": "Pause after design",
+          "description": "Drop reference papers / data BEFORE the implement → execute → analyze stages spend compute."
+        },
+        {
+          "value": "after_paper",
+          "label": "Pause after paper draft",
+          "description": "Drop reference papers / data AFTER the first paper.md is written; useful for revise iterations."
+        },
+        {
+          "value": "both",
+          "label": "Both",
+          "description": "Pause after design AND after paper — most cost. Use for high-stakes manual review."
+        }
+      ],
+      "placeholder": "",
+      "default": "never",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
       "id": "knowledge_enabled",
       "label": "Knowledge layer (Axon)",
       "prompt": "Auto-detected from the Axon sidecar status. Override only if you have a specific reason.",
@@ -940,6 +978,7 @@
     "max_iterations",
     "output_kinds",
     "paper_format",
+    "pause_for_user_input",
     "review_panel",
     "study_depth",
     "success_metric"
