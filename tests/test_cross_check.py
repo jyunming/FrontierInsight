@@ -198,6 +198,172 @@ async def test_cross_check_does_not_bump_when_publishing(tmp_path: Path) -> None
     assert "iteration" not in patch
 
 
+# --- CoVe verification pass ------------------------------------------------
+
+
+def _mk_cfg_with_verify(tmp_path: Path) -> Config:
+    cfg = _mk_cfg(tmp_path)
+    cfg.engine.cross_check_verify = True
+    return cfg
+
+
+@pytest.mark.asyncio
+async def test_cross_check_verify_pass_revises_classification(tmp_path: Path) -> None:
+    """When cross_check_verify is on AND the first pass produced
+    non-neutral assignments, a second LLM call fires that can revise
+    the classification. This test verifies the verified output is what
+    lands in state['cross_check'], and that the first-pass snapshot is
+    preserved alongside for audit."""
+    eng = Engine(_mk_cfg_with_verify(tmp_path))
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(
+                content="Topically related but doesn't actually weigh in.",
+                metadata={"title": "Tangential 2023", "doi": "10.X/Y"},
+            ),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    # First pass: claims supporting. Verification pass downgrades to neutral.
+    chat_responses = [
+        json.dumps({
+            "verdict": "supporting",
+            "supporting": [{"index": 1, "why": "abstract mentions the same topic"}],
+            "conflicting": [],
+            "neutral": [],
+            "summary": "broadly supports",
+        }),
+        json.dumps({
+            "verdict": "neutral",
+            "supporting": [],
+            "conflicting": [],
+            "neutral": [{"index": 1, "why": "abstract is too thin to weigh in"}],
+            "verification_notes": [{
+                "index": 1,
+                "question": "does the abstract actually quantify the finding?",
+                "answer": "no, only mentions the topic name",
+            }],
+            "summary": "downgraded after verification",
+        }),
+    ]
+    chat_mock = AsyncMock(side_effect=chat_responses)
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    patch = await eng._node_cross_check({
+        "topic": "x",
+        "analysis": {"key_findings": ["f"], "next_step": "publish"},
+    })
+    first = patch["cross_check"][0]
+    # The verified version is what lands in supporting/neutral/etc.
+    assert first["neutral"]
+    assert not first["supporting"]
+    # The first-pass snapshot is preserved for audit.
+    assert first["first_pass"]["supporting"]
+    # Verification notes recorded.
+    assert first["verification_notes"]
+    assert "topic name" in first["verification_notes"][0]["answer"]
+    # Two LLM calls per finding when verification fires.
+    assert chat_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cross_check_verify_skipped_when_first_pass_all_neutral(
+    tmp_path: Path,
+) -> None:
+    """The verification pass only fires when the first pass produced
+    non-neutral assignments. If everything was already neutral, there's
+    nothing to verify — saves the extra LLM call."""
+    eng = Engine(_mk_cfg_with_verify(tmp_path))
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(
+                content="Off-topic paper",
+                metadata={"title": "OffTopic 2022", "doi": "10.X/Z"},
+            ),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    chat_mock = AsyncMock(return_value=json.dumps({
+        "verdict": "neutral",
+        "supporting": [],
+        "conflicting": [],
+        "neutral": [{"index": 1, "why": "off-topic"}],
+        "summary": "no evidence either way",
+    }))
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    await eng._node_cross_check({
+        "topic": "x",
+        "analysis": {"key_findings": ["f"], "next_step": "publish"},
+    })
+    # Only ONE LLM call — verification skipped.
+    assert chat_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_check_verify_skipped_when_disabled(tmp_path: Path) -> None:
+    """When cross_check_verify is False (default), no verification call
+    fires even if the first pass produced supporting assignments."""
+    eng = Engine(_mk_cfg(tmp_path))  # cross_check_verify default = False
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(content="x", metadata={"title": "t", "doi": "10.X/A"}),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    chat_mock = AsyncMock(return_value=json.dumps({
+        "verdict": "supporting",
+        "supporting": [{"index": 1, "why": "consistent"}],
+        "conflicting": [],
+        "neutral": [],
+        "summary": "supports",
+    }))
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    await eng._node_cross_check({
+        "topic": "x",
+        "analysis": {"key_findings": ["f"], "next_step": "publish"},
+    })
+    # Only ONE LLM call — verification disabled by default.
+    assert chat_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_check_verify_failure_keeps_first_pass(tmp_path: Path) -> None:
+    """Verification is advisory — a transient failure on the verify
+    call MUST NOT block the quest. The first-pass classification is
+    still emitted, with empty verification_notes."""
+    eng = Engine(_mk_cfg_with_verify(tmp_path))
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(content="x", metadata={"title": "t", "doi": "10.X/A"}),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    first_pass = json.dumps({
+        "verdict": "supporting",
+        "supporting": [{"index": 1, "why": "consistent"}],
+        "conflicting": [],
+        "neutral": [],
+        "summary": "supports",
+    })
+    chat_mock = AsyncMock(side_effect=[first_pass, RuntimeError("provider blew up")])
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    patch = await eng._node_cross_check({
+        "topic": "x",
+        "analysis": {"key_findings": ["f"], "next_step": "publish"},
+    })
+    first = patch["cross_check"][0]
+    # First-pass classification preserved despite verify failure.
+    assert first["supporting"]
+    assert first["verification_notes"] == []
+
+
 # --- routing function -------------------------------------------------------
 
 

@@ -320,6 +320,17 @@ class EngineConfig(BaseModel):
     # the original topic) and classify hits as supporting / conflicting
     # / neutral. Per-finding top-K passed to the knowledge layer.
     cross_check_per_finding_k: int = Field(default=3, ge=0)
+    # CoVe-style verification pass on each finding's first-pass
+    # classification. A second LLM call (per finding) asks pointed
+    # verification questions about each supporting/conflicting
+    # assignment, then revises the classification — downgrading
+    # over-claimed supports to neutral, flipping sign-errors, etc.
+    # Cost: one extra LLM call per finding (typically 1–5 findings,
+    # so +1–5 calls per quest). Off by default to keep the cost
+    # baseline lean; enable for higher-stakes papers where the
+    # citation-direction risk matters. When the first pass produces
+    # no non-neutral assignments, the verification call is skipped.
+    cross_check_verify: bool = False
     # Also enables the `next_step` re-route emitted by analyze:
     # `publish` (default) / `re_experiment` / `broaden_lit`. Both
     # non-default values route back to `design` (via cross_check first)
