@@ -147,11 +147,13 @@ class QuestState(TypedDict, total=False):
     # later iteration doesn't drop an earlier ask. Pre-resume empty.
     feedback_history: list[dict[str, Any]]
     # Names of pause-points the engine has already paused at on this
-    # quest (e.g., ``"after_design"`` / ``"after_paper"``). On resume
-    # the engine re-enters the node that fired the interrupt; this
-    # set lets the node know "already paused here once, don't pause
-    # again" so the user isn't forced through the same drop screen
-    # twice. Pre-resume empty.
+    # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
+    # secondary "already paused" signal for test paths that mock the
+    # interrupt out; the authoritative signal in the real engine is
+    # the disk marker ``<quest_root>/.fi/paused_at_<stage>.flag``
+    # because LangGraph's ``interrupt()`` raises BEFORE a node returns
+    # a state patch, so any partial state-list update never lands in
+    # the checkpoint. Pre-resume empty.
     user_pauses_fired: list[str]
     # Files the user dropped into ``<quest_root>/inputs/data/``. The
     # analyze node reads these on resume so its prompt can reference
@@ -539,16 +541,22 @@ class Engine:
                     await self.supervisor.release(self.config.provider.name)
 
             if data_paused:
-                # no-simulation pause-exit. The graph is checkpointed
-                # at the wait_for_data interrupt; return early with a
-                # partial QuestArtifacts so callers (launch.py / the
-                # VSCode bridge) can surface the "drop files here"
-                # message but don't try to compile a paper that doesn't
-                # exist yet. Skip _write_back_knowledge — we have
-                # nothing to write back; the quest hasn't been
-                # reviewed and accepted.
+                # Generic pause-exit. The flag is shared across four
+                # interrupt kinds: ``wait_for_data`` (no-simulation
+                # missing data), ``papers_required`` (literature pause
+                # for user papers), ``user_input_required`` (the
+                # pause-drop-anytime gate), and ``human_review``
+                # (after-review human gate, when no callback is wired).
+                # All of them want the same cleanup: skip
+                # ``_write_back_knowledge`` (the quest hasn't been
+                # accepted), return a partial QuestArtifacts so callers
+                # (launch.py / the VSCode bridge) can surface the
+                # "drop files here" / "respond and resume" message, and
+                # exit rc=0 cleanly. The specific message has already
+                # been logged by the interrupt handler above; this is
+                # just the shared "we're pausing" notice.
                 self._log.info(
-                    "quest %s paused for user data — exiting clean (rc=0)",
+                    "quest %s paused — exiting clean (rc=0)",
                     self.quest_id,
                 )
                 # Resume-from-failure clears the stale diagnostic too.
