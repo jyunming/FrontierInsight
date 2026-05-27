@@ -146,6 +146,21 @@ class QuestState(TypedDict, total=False):
     # The design node reads ALL of these on every revise pass so a
     # later iteration doesn't drop an earlier ask. Pre-resume empty.
     feedback_history: list[dict[str, Any]]
+    # Names of pause-points the engine has already paused at on this
+    # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
+    # secondary "already paused" signal for test paths that mock the
+    # interrupt out; the authoritative signal in the real engine is
+    # the disk marker ``<quest_root>/.fi/paused_at_<stage>.flag``
+    # because LangGraph's ``interrupt()`` raises BEFORE a node returns
+    # a state patch, so any partial state-list update never lands in
+    # the checkpoint. Pre-resume empty.
+    user_pauses_fired: list[str]
+    # Files the user dropped into ``<quest_root>/inputs/data/``. The
+    # analyze node reads these on resume so its prompt can reference
+    # user-supplied datasets alongside the engine's RESULT_JSON.
+    # Populated by ``_pick_up_user_dropped_datasets`` on the
+    # post-pause re-entry. Empty on quests that never paused.
+    user_supplied_datasets: list[str]
     # Per-persona reviews from the panel, before moderation.
     # One entry per `engine.review_panel` member, each with the same
     # JSON shape the single reviewer produces plus a `persona` field.
@@ -373,6 +388,23 @@ class Engine:
                                 data_dir, self.quest_id,
                             )
                             break
+                        if intr_value.get("user_input_required"):
+                            # Generic pause-drop-anytime. Pause-exit
+                            # clean rc=0; user drops files into
+                            # inputs/{papers,data}/ then ``fi --resume``.
+                            data_paused = True
+                            stage = intr_value.get("stage", "?")
+                            inputs_dir = intr_value.get(
+                                "inputs_dir",
+                                str(self.quest_root / "inputs"),
+                            )
+                            self._log.info(
+                                "[FI] paused at stage=%s for user input: drop "
+                                "files into %s/{papers,data}/ then run "
+                                "`fi --resume %s`",
+                                stage, inputs_dir, self.quest_id,
+                            )
+                            break
                         if intr_value.get("papers_required"):
                             # literature node's pause-for-user-papers
                             # gate fired. Same pause-exit semantics as
@@ -509,16 +541,22 @@ class Engine:
                     await self.supervisor.release(self.config.provider.name)
 
             if data_paused:
-                # no-simulation pause-exit. The graph is checkpointed
-                # at the wait_for_data interrupt; return early with a
-                # partial QuestArtifacts so callers (launch.py / the
-                # VSCode bridge) can surface the "drop files here"
-                # message but don't try to compile a paper that doesn't
-                # exist yet. Skip _write_back_knowledge — we have
-                # nothing to write back; the quest hasn't been
-                # reviewed and accepted.
+                # Generic pause-exit. The flag is shared across four
+                # interrupt kinds: ``wait_for_data`` (no-simulation
+                # missing data), ``papers_required`` (literature pause
+                # for user papers), ``user_input_required`` (the
+                # pause-drop-anytime gate), and ``human_review``
+                # (after-review human gate, when no callback is wired).
+                # All of them want the same cleanup: skip
+                # ``_write_back_knowledge`` (the quest hasn't been
+                # accepted), return a partial QuestArtifacts so callers
+                # (launch.py / the VSCode bridge) can surface the
+                # "drop files here" / "respond and resume" message, and
+                # exit rc=0 cleanly. The specific message has already
+                # been logged by the interrupt handler above; this is
+                # just the shared "we're pausing" notice.
                 self._log.info(
-                    "quest %s paused for user data — exiting clean (rc=0)",
+                    "quest %s paused — exiting clean (rc=0)",
                     self.quest_id,
                 )
                 # Resume-from-failure clears the stale diagnostic too.
@@ -1663,7 +1701,122 @@ class Engine:
             # already carries the count; the full list lives here for any
             # caller that wants to render it).
             out["design_objections"] = objections
+
+        # Generic pause-drop-anytime: when configured, pause AFTER the
+        # design lands so the user can drop reference papers and/or
+        # datasets BEFORE the implement/execute spends LLM + venv
+        # compute. On a post-pause resume, ``user_pauses_fired``
+        # carries "after_design" and the gate falls through. Files
+        # the user dropped under ``inputs/data/`` get walked into
+        # ``user_supplied_datasets`` so the analyze node sees them.
+        self._maybe_pause_for_user_input(state, "after_design")
+        # _maybe_pause_for_user_input either fires interrupt() (which
+        # never returns) or no-ops. If it no-ops and there are user
+        # data files to pick up, surface them on the patch.
+        ds_added = _pick_up_user_dropped_datasets(self.quest_root)
+        if ds_added:
+            existing = list(state.get("user_supplied_datasets") or [])
+            merged = list(dict.fromkeys(existing + ds_added))
+            out["user_supplied_datasets"] = merged
+            self._log.info(
+                "[design] picked up %d user-supplied dataset(s) from inputs/data/",
+                len(ds_added),
+            )
         return out
+
+    def _maybe_pause_for_user_input(
+        self, state: QuestState, stage: str,
+    ) -> None:
+        """Fire a LangGraph ``interrupt()`` at the named stage when
+        ``engine.pause_for_user_input`` opts in AND this stage hasn't
+        already fired for this quest. ``stage`` is one of
+        ``"after_design"`` / ``"after_paper"``. ``state['user_pauses_fired']``
+        tracks per-quest fired pause names so a resume re-entry doesn't
+        force a second pause at the same stage.
+
+        On pause, the engine writes a README under
+        ``<quest_root>/inputs/README.md`` explaining the drop zones,
+        then raises interrupt(). The user drops files and re-runs
+        ``fi --resume <quest_id>``; the resume picks up the files via
+        the normal literature / analyze paths.
+        """
+        cfg_value = self.config.engine.pause_for_user_input
+        if cfg_value == "never":
+            return
+        if cfg_value not in ("both", stage):
+            return
+        # Disk marker is the authoritative "already paused at this
+        # stage" signal — same pattern as wait_for_data uses with the
+        # data dir's file count. Using a state list (``user_pauses_fired``)
+        # alone would fail on the pause-exit + --resume flow because
+        # LangGraph's ``interrupt()`` raises BEFORE the node returns
+        # a state patch, so the partial-state update never lands in
+        # the checkpoint. Disk markers survive any resume path.
+        inputs_dir = self.quest_root / "inputs"
+        papers_dir = inputs_dir / "papers"
+        data_dir = inputs_dir / "data"
+        papers_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        marker = self.fi_dir / f"paused_at_{stage}.flag"
+        already = list(state.get("user_pauses_fired") or [])
+        if marker.is_file() or stage in already:
+            self._log.info(
+                "[%s] pause-for-user-input already fired this quest; "
+                "skipping (resume path)", stage,
+            )
+            return
+        # Drop a fresh README on every pause (each stage writes its own
+        # header — after_design's text differs from after_paper's, so
+        # the second pause shouldn't show stale-stage prose). Best-effort;
+        # an OSError on the write isn't quest-fatal.
+        readme = inputs_dir / "README.md"
+        try:
+            readme.write_text(
+                f"# User input drop zones for quest {self.quest_id}\n\n"
+                f"This quest is paused at stage **{stage}** because "
+                f"`engine.pause_for_user_input: {cfg_value}` was set.\n\n"
+                f"## Drop reference papers here\n"
+                f"`inputs/papers/` — PDFs and Markdown files. Picked up "
+                f"by the literature node's next pass; they become "
+                f"`user_supplied` literature entries the design / write "
+                f"nodes can cite.\n\n"
+                f"## Drop datasets here\n"
+                f"`inputs/data/` — CSVs, JSON, TSV, anything tabular. "
+                f"The analyze node surfaces these in its prompt as "
+                f"`user_supplied_datasets` so it can reason about your "
+                f"data alongside the generated experiment's RESULT_JSON.\n\n"
+                f"## When you're done\n"
+                f"Run `python launch.py --config <yaml> --resume {self.quest_id}` "
+                f"(or `@fi /resume {self.quest_id}` in VSCode) to continue.\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning(
+                "[%s] couldn't write inputs/README.md: %r", stage, e,
+            )
+        # Commit the "this stage paused" marker BEFORE firing interrupt
+        # so a --resume of the (checkpointed) graph re-enters this node
+        # and the marker.is_file() check above falls through.
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(stage, encoding="utf-8")
+        except OSError as e:
+            self._log.warning(
+                "[%s] couldn't write pause marker %s: %r", stage, marker, e,
+            )
+        self._log.info(
+            "[%s] paused for user input: drop files into %s/{papers,data}/ "
+            "then run `fi --resume %s`",
+            stage, inputs_dir, self.quest_id,
+        )
+        interrupt({
+            "user_input_required": True,
+            "stage": stage,
+            "quest_id": self.quest_id,
+            "inputs_dir": str(inputs_dir),
+            "papers_dir": str(papers_dir),
+            "data_dir": str(data_dir),
+        })
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
         """Agent-side data collection via Axon, run BEFORE
@@ -2403,27 +2556,45 @@ class Engine:
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
         exec_result = state.get("exec_result") or {}
+        # Pick up any datasets the user dropped into inputs/data/ (e.g.
+        # via the pause-drop-anytime gate). The design node also picks
+        # these up on a post-pause resume; we run again here so a quest
+        # that hit ``after_paper`` (where design didn't re-fire) still
+        # surfaces fresh drops to analyze. Merge dedup'd with what's
+        # already on state.
+        ds_added = _pick_up_user_dropped_datasets(self.quest_root)
+        existing_ds = list(state.get("user_supplied_datasets") or [])
+        all_ds = list(dict.fromkeys(existing_ds + ds_added))
         # Multi-seed replication: when the execute node produced more
         # than one replicate, render the per-seed JSONs PLUS a mean ± std
         # aggregate of numeric fields into the analyze prompt. The
         # primary ``result_json`` (seed 0) is the headline value; the
         # ``replicates`` block lets the LLM discuss variance honestly
         # rather than treating a single-seed result as ground truth.
+        # We also splice user-supplied datasets (when the user dropped
+        # any via the pause-drop gate) into the same block so analyze
+        # sees them alongside.
         replicates = state.get("result_json_replicates") or []
         if replicates and len(replicates) > 1:
             agg = _aggregate_result_json_replicates(replicates)
-            result_json_block = json.dumps({
+            payload: dict[str, Any] = {
                 "result_json_seed_0": state.get("result_json") or {},
                 "replicates": replicates,
                 "aggregate_mean_std": agg,
                 "n_replicates": len(replicates),
-            }, indent=2)
+            }
+            if all_ds:
+                payload["_user_supplied_datasets"] = all_ds
+            result_json_block = json.dumps(payload, indent=2)
             self._log.info(
                 "[analyze] using replicate aggregate (n=%d, %d numeric keys)",
                 len(replicates), len(agg),
             )
         else:
-            result_json_block = json.dumps(state.get("result_json") or {}, indent=2)
+            result_json_block_data: dict[str, Any] = dict(state.get("result_json") or {})
+            if all_ds:
+                result_json_block_data["_user_supplied_datasets"] = all_ds
+            result_json_block = json.dumps(result_json_block_data, indent=2)
         prompt = self._prompts["analyze"].substitute(
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
@@ -2464,7 +2635,10 @@ class Engine:
         # Default `next_step` to publish when the LLM omits it (older
         # prompts, parse failures) so the route doesn't break.
         analysis.setdefault("next_step", "publish")
-        return {"analysis": analysis}
+        patch: QuestState = {"analysis": analysis}
+        if all_ds:
+            patch["user_supplied_datasets"] = all_ds
+        return patch
 
     async def _node_cross_check(self, state: QuestState) -> QuestState:
         """For each key finding, search literature with the
@@ -2714,6 +2888,13 @@ class Engine:
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
+        # Generic pause-drop-anytime: when configured, pause AFTER
+        # paper.md lands so the user can drop reference papers (for
+        # the next revise pass to cite) and/or datasets (for analyze
+        # on the next iteration to incorporate). On a post-pause
+        # resume, ``user_pauses_fired`` carries "after_paper" and the
+        # gate falls through to review.
+        self._maybe_pause_for_user_input(state, "after_paper")
         return {"paper_md": str(paper_path)}
 
     async def _node_review(self, state: QuestState) -> QuestState:
@@ -4909,6 +5090,38 @@ def _papers_dir_has_files(quest_root: Path) -> bool:
         if p.suffix.lower() in (".pdf", ".md", ".txt"):
             return True
     return False
+
+
+_USER_DATA_SUFFIXES: frozenset[str] = frozenset({
+    ".csv", ".tsv", ".json", ".jsonl", ".parquet", ".xlsx",
+    ".npy", ".npz", ".txt",
+})
+
+
+def _pick_up_user_dropped_datasets(quest_root: Path) -> list[str]:
+    """Walk ``<quest_root>/inputs/data/`` and return a sorted list of
+    relative file paths for tabular / scientific-data files the user
+    dropped on a pause cycle. Skips dotfiles, the auto-generated
+    README.md, and unknown extensions (we don't want to feed a stray
+    binary to the analyze prompt).
+
+    Returns paths relative to ``quest_root`` so downstream consumers
+    can render a short list without leaking absolute paths into the
+    prompt. Empty list when the dir is missing or empty.
+    """
+    data_dir = quest_root / "inputs" / "data"
+    if not data_dir.is_dir():
+        return []
+    out: list[str] = []
+    for p in sorted(data_dir.rglob("*")):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if p.name == "README.md":
+            continue
+        if p.suffix.lower() not in _USER_DATA_SUFFIXES:
+            continue
+        out.append(str(p.relative_to(quest_root)).replace("\\", "/"))
+    return out
 
 
 def _write_paper_need_stubs(

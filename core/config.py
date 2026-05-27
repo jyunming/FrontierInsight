@@ -263,6 +263,14 @@ class NodeEnsembleConfig(BaseModel):
 
 ClarifyMode = Literal["off", "auto", "interactive"]
 HumanFeedbackGate = Literal["off", "after_review"]
+# Pause-drop-anytime points. The engine pauses with an interrupt at the
+# selected stage(s); the user drops files into ``<quest_root>/inputs/papers/``
+# (PDFs/MDs, ingested by the literature node) and/or ``<quest_root>/inputs/data/``
+# (CSVs/datasets, picked up by analyze on resume), then runs
+# ``fi --resume <quest_id>``. "never" (default) keeps today's flow.
+PauseForUserInput = Literal[
+    "never", "after_design", "after_paper", "both",
+]
 
 
 class EngineConfig(BaseModel):
@@ -341,6 +349,17 @@ class EngineConfig(BaseModel):
     # the spread in its summary. Cost: N executions per design pass.
     # Default 1 (no replication, current behaviour).
     execute_replicates: int = Field(default=1, ge=1)
+    # Generic mid-quest user-input pause point. When set, the engine
+    # pauses (LangGraph ``interrupt()``) AFTER the named stage and
+    # exits cleanly with rc=0; the user drops files into
+    # ``<quest_root>/inputs/papers/`` (added to the literature on
+    # the literature node's next pass) and/or
+    # ``<quest_root>/inputs/data/`` (read by analyze as
+    # ``user_supplied_datasets``), then runs ``fi --resume <quest_id>``.
+    # A disk marker at ``<quest_root>/.fi/paused_at_<stage>.flag``
+    # tracks which stages have already paused so a resume doesn't
+    # loop the user through the same drop screen twice.
+    pause_for_user_input: PauseForUserInput = "never"
     # Also enables the `next_step` re-route emitted by analyze:
     # `publish` (default) / `re_experiment` / `broaden_lit`. Both
     # non-default values route back to `design` (via cross_check first)

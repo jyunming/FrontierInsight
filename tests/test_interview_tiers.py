@@ -87,13 +87,15 @@ def test_tier2_covers_the_derived_fields() -> None:
     screen. New fields land here when they're cheaply derivable
     from tier-1 answers — ``knowledge_top_k`` joined this tier
     when the Axon RAG cap became user-tunable (separate from the
-    web/external cap)."""
+    web/external cap), and ``pause_for_user_input`` joined when
+    the mid-quest pause-drop gate was added."""
     ids = [q.id for q in questions_for_tier(2, "cli")]
     assert set(ids) == {
         "title",
         "no_simulation",
         "clarify_mode",
         "review_panel",
+        "pause_for_user_input",
         "knowledge_enabled",
         "audience",
         "knowledge_top_k",

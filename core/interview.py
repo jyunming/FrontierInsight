@@ -469,6 +469,25 @@ QUESTIONS: tuple[Question, ...] = (
         tier=2,
     ),
     Question(
+        id="pause_for_user_input",
+        label="Pause for user-supplied papers / datasets",
+        prompt="Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
+        kind="single",
+        choices=(
+            Choice("never", "Never (default)",
+                   "Engine runs to completion without pause-drop opportunities."),
+            Choice("after_design", "Pause after design",
+                   "Drop reference papers / data BEFORE the implement → execute → analyze stages spend compute."),
+            Choice("after_paper", "Pause after paper draft",
+                   "Drop reference papers / data AFTER the first paper.md is written; useful for revise iterations."),
+            Choice("both", "Both",
+                   "Pause after design AND after paper — most cost. Use for high-stakes manual review."),
+        ),
+        default="never",
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    Question(
         id="knowledge_enabled",
         label="Knowledge layer (Axon)",
         prompt="Auto-detected from the Axon sidecar status. Override only if you have a specific reason.",
@@ -990,6 +1009,7 @@ class InterviewAnswers:
     clarify_mode: str
     review_panel: list[str]
     knowledge_enabled: bool
+    pause_for_user_input: str = "never"
     # CLI / serve only — VSCode pins ``vscode_extension`` silently.
     provider: str = "vscode_extension"
     provider_model: str | None = None
@@ -1125,6 +1145,12 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
             lines.append(f"{indent}{indent}- {json.dumps(persona)}")
     else:
         lines.append(f"{indent}review_panel: []")
+    # Pause-drop-anytime opt-in. Default "never" elides the line so
+    # hand-edited YAMLs stay tidy; any explicit choice gets written.
+    if answers.pause_for_user_input and answers.pause_for_user_input != "never":
+        lines.append(
+            f"{indent}pause_for_user_input: {json.dumps(answers.pause_for_user_input)}"
+        )
 
     # Clarify overrides — pin the three topic-tuned slots + study_depth +
     # paper_venue + output_kinds + simulatability so the clarify node
