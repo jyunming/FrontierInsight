@@ -189,10 +189,11 @@ CLARIFY_MODES: tuple[Choice, ...] = (
 
 
 REVIEW_PANELS: tuple[Choice, ...] = (
-    Choice([], "Single reviewer (cheapest)",
-           "1 LLM call per review pass."),
-    Choice(["methodologist", "statistician", "devil_advocate"], "3-persona panel",
-           "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost."),
+    Choice(["methodologist", "statistician", "devil_advocate"], "3-persona panel (default)",
+           "Methodologist + Statistician + Devil's-advocate + moderator. ~4× the review cost. "
+           "Methodologist is the must-flag-rule reviewer — drop the panel and you lose those checks."),
+    Choice([], "Single reviewer (cheapest, no must-flag enforcement)",
+           "1 LLM call per review pass. Loses the methodologist must-flag rules."),
     Choice(["methodologist", "statistician", "devil_advocate", "reproducibility"], "4-persona panel",
            "Adds Reproducibility reviewer. ~5× the review cost."),
 )
@@ -666,10 +667,17 @@ def smart_default_clarify_mode(_partial: dict[str, Any]) -> str:
 
 
 def smart_default_review_panel(_partial: dict[str, Any]) -> list[str]:
-    """Single reviewer (empty panel list) is the cost-conscious
-    default. Multi-persona panels cost ~4× per review pass; users
-    who want them flip the slot consciously."""
-    return []
+    """Three-persona heterogeneous panel by default. Three personas
+    cost ~3× per review pass relative to single-reviewer, but each
+    persona enforces a distinct rubric — methodologist owns the
+    non-bypassable must-flag rules (circular evaluation, single-point
+    eval, weak baseline, pseudo-units), statistician owns numbers
+    and uncertainties, devil_advocate owns load-bearing assumptions.
+    Without the methodologist firing, the must-flag mechanism added
+    in the always-on-review-gate change has no enforcement surface.
+    Cost-conscious users flip back to single-reviewer with an empty
+    list (and lose the must-flag enforcement)."""
+    return ["methodologist", "statistician", "devil_advocate"]
 
 
 def smart_default_audience(_partial: dict[str, Any]) -> str:
