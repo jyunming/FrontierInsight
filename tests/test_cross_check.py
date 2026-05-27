@@ -362,6 +362,58 @@ async def test_cross_check_verify_failure_keeps_first_pass(tmp_path: Path) -> No
     # First-pass classification preserved despite verify failure.
     assert first["supporting"]
     assert first["verification_notes"] == []
+    # ``first_pass`` is the "was verified" sentinel and is omitted
+    # entirely (not set to None) when verification didn't produce
+    # a usable revision — including the transient-failure path here.
+    assert "first_pass" not in first
+
+
+@pytest.mark.asyncio
+async def test_cross_check_verify_drops_payload_with_missing_verdict(
+    tmp_path: Path,
+) -> None:
+    """If the verification call returns a JSON object with classification
+    lists but a missing / None ``verdict``, the engine MUST drop the
+    payload and keep the first-pass result rather than write a
+    None-verdict snapshot to ``first_pass``."""
+    eng = Engine(_mk_cfg_with_verify(tmp_path))
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        return [
+            RetrievedDoc(content="x", metadata={"title": "t", "doi": "10.X/A"}),
+        ]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+
+    first_pass = json.dumps({
+        "verdict": "supporting",
+        "supporting": [{"index": 1, "why": "consistent"}],
+        "conflicting": [],
+        "neutral": [],
+        "summary": "supports",
+    })
+    # Verification returns classification lists but no verdict — engine
+    # should reject the revision.
+    broken_verified = json.dumps({
+        "supporting": [],
+        "conflicting": [],
+        "neutral": [{"index": 1, "why": "thin"}],
+        "summary": "downgraded",
+        # NOTE: no "verdict" key.
+    })
+    chat_mock = AsyncMock(side_effect=[first_pass, broken_verified])
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+
+    patch = await eng._node_cross_check({
+        "topic": "x",
+        "analysis": {"key_findings": ["f"], "next_step": "publish"},
+    })
+    first = patch["cross_check"][0]
+    # First-pass classification preserved — the engine refused the
+    # malformed verification payload.
+    assert first["supporting"]
+    assert not first["neutral"]
+    # No first_pass key — verification didn't produce a usable revision.
+    assert "first_pass" not in first
 
 
 # --- routing function -------------------------------------------------------

@@ -461,10 +461,14 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="review_panel",
         label="Reviewer panel",
-        prompt="Single reviewer is fine for most. Use the panel when correctness matters more than cost.",
+        prompt=(
+            "Recommended: 3-persona panel — the methodologist is the must-flag-rule reviewer; "
+            "dropping the panel loses those checks. Single-reviewer is cheaper but ships "
+            "without the non-bypassable design-quality enforcement."
+        ),
         kind="single",
         choices=REVIEW_PANELS,
-        default=[],
+        default=["methodologist", "statistician", "devil_advocate"],
         mid_quest_editable=True,
         tier=2,
     ),

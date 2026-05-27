@@ -1769,13 +1769,15 @@ class LLMClient:
                 and _is_bridge_error_transient(str(exc))
             )
 
-        # Budget: 6 attempts with 5 inter-attempt waits of
-        # 4/8/16/32/60s = ~2 minutes of cumulative backoff. Sustained
-        # Copilot HTTP/2 outages have been observed lasting 30-90s;
-        # the prior 3-attempt / ~14s budget was too tight and crashed
-        # quests on transient upstream issues. The TS-side bridge
-        # also retries 4x, so total wall time before a real failure
-        # exceeds 2 min.
+        # Budget: 6 attempts. Each inter-attempt wait is drawn
+        # uniformly from ``[0, 2 · 2^attempt]`` seconds, capped at 60
+        # — typical expected total ~2 minutes of cumulative backoff,
+        # spread randomly so concurrent fleet clients don't synchronise
+        # on a shared upstream blip. Sustained Copilot HTTP/2 outages
+        # have been observed lasting 30–90 s; the prior 3-attempt /
+        # ~14 s budget was too tight and crashed quests on transient
+        # upstream issues. The TS-side bridge also retries 4×, so
+        # total wall time before a real failure exceeds 2 minutes.
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(6),

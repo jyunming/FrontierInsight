@@ -38,13 +38,21 @@ async def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     )
-    body_prompt_path = Path(r"C:\Users\jyunm\AppData\Local\Temp\body_prompt_utf8.txt")
+    # Path to the prompt file under test. Override via env var
+    # ``FI_VERIFY_PROMPT_PATH`` so the script runs on any machine; the
+    # Windows-temp default is a developer convenience, not a contract.
+    import os
+    default_path = (
+        str(Path.home() / "AppData/Local/Temp/body_prompt_utf8.txt")
+        if os.name == "nt" else "/tmp/body_prompt_utf8.txt"
+    )
+    body_prompt_path = Path(os.environ.get("FI_VERIFY_PROMPT_PATH", default_path))
     if not body_prompt_path.is_file():
-        # Fallback to the regular path
-        body_prompt_path = Path(r"C:\Users\jyunm\AppData\Local\Temp\body_prompt.txt")
-        if not body_prompt_path.is_file():
-            print(f"ERROR: body prompt file not found")
-            return 1
+        print(
+            f"ERROR: body prompt file not found at {body_prompt_path} — "
+            f"set FI_VERIFY_PROMPT_PATH to point at one, or drop a prompt at the default."
+        )
+        return 1
 
     prompt = body_prompt_path.read_text(encoding="utf-8", errors="replace")
     print(f"loaded prompt ({len(prompt)} chars)")
