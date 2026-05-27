@@ -402,16 +402,15 @@ def test_rate_limit_marker_matcher_ignores_empty_and_short_unmatched() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_output_gate_registry_catches_empty_response() -> None:
-    """An empty response is broken (a real LLM answer is at least one
-    token). The ``empty_response`` gate is the first one in the
-    registry so this is what fires for ``""``."""
+def test_output_gate_registry_does_not_fire_on_empty_response() -> None:
+    """Empty responses are NOT treated as transient — some legitimate
+    paths (mocked-CLI unit tests asserting argv shape against an
+    empty-stdout fake; engine status checks) return empty stdout, and
+    the engine's execute_reflect loop handles empty result_json
+    downstream. Gating empty would burn 4× retry budget for no
+    upstream benefit."""
     from core.provider import _check_output_gates
-    hit = _check_output_gates("")
-    assert hit is not None
-    name, marker = hit
-    assert name == "empty_response"
-    assert marker == "<empty>"
+    assert _check_output_gates("") is None
 
 
 def test_output_gate_registry_catches_rate_limit_message() -> None:
@@ -470,14 +469,12 @@ def test_output_gate_registry_ignores_unmatched_short_text() -> None:
 
 def test_output_gate_registry_first_match_wins() -> None:
     """Gates are tried in declaration order and the first match wins
-    so the retry log can name a single gate. Empty fires before
-    rate-limit, etc.; this test pins the order."""
+    so the retry log can name a single gate. Rate-limit fires first
+    because it's the original gate (and the OPC-quest bug pattern
+    motivating the registry); the rest follow."""
     from core.provider import _OUTPUT_GATES
     names = [g.name for g in _OUTPUT_GATES]
-    # Empty must come first (it's the catch-all for the degenerate
-    # case); rate_limit is the original gate kept for parity.
-    assert names[0] == "empty_response"
-    assert "rate_limit_message" in names
+    assert names[0] == "rate_limit_message"
     assert "placeholder_response" in names
     assert "refusal" in names
 

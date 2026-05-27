@@ -619,21 +619,13 @@ def _short_marker_check(
     return _check
 
 
-def _empty_response_check(text: str) -> str | None:
-    """Fires when the model returns nothing at all after strip. A real
-    response — even a one-token "yes" — is non-empty. Empty is broken
-    and worth retrying."""
-    if text is None or text == "":
-        return "<empty>"
-    return None
-
-
+# Note: there is intentionally no ``empty_response`` gate here even
+# though an empty CLI response is degenerate. Some legitimate paths
+# return empty (mock-CLI unit tests assert argv shape against an
+# empty-stdout fake; the engine itself handles empty-result-json via
+# the execute_reflect loop). Adding a transient retry on empty would
+# burn 4× retry budget on those paths for no upstream benefit.
 _OUTPUT_GATES: tuple[_ContentGate, ...] = (
-    _ContentGate(
-        name="empty_response",
-        description="model returned no content at all",
-        check=_empty_response_check,
-    ),
     _ContentGate(
         name="rate_limit_message",
         description="upstream rate-limit / session-limit text delivered as content",
