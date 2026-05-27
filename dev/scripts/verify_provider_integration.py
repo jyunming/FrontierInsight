@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,17 @@ from core.config import ProviderConfig  # noqa: E402
 from core.provider import LLMClient, resolve_endpoint  # noqa: E402
 
 
-PROMPT_PATH = Path(r"C:\Users\jyunm\AppData\Local\Temp\body_prompt_utf8.txt")
+# Path to the prompt file under test. Override via env var
+# ``FI_VERIFY_PROMPT_PATH`` so the script runs on any machine; the
+# Windows-temp default is a developer convenience, not a contract.
+PROMPT_PATH = Path(
+    os.environ.get(
+        "FI_VERIFY_PROMPT_PATH",
+        str(Path.home() / "AppData/Local/Temp/body_prompt_utf8.txt")
+        if os.name == "nt"
+        else "/tmp/body_prompt_utf8.txt",
+    )
+)
 
 
 async def run_one(label: str, provider_cfg: ProviderConfig,

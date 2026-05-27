@@ -2764,16 +2764,34 @@ class Engine:
                         verify_prompt, node="cross_check_verify",
                     )
                     verified = _parse_json_lenient(verify_resp) or {}
-                    if isinstance(verified, dict) and (
+                    # Require BOTH a usable revised classification AND a
+                    # non-None verdict in the verified payload before
+                    # adopting it — a parse that drops verdict (or
+                    # returns ``None`` for it) would leave the merged
+                    # ``parsed`` and ``first_pass`` carrying ``None``
+                    # verdicts which downstream verdict tally and audit
+                    # logs read as "no opinion" rather than the actual
+                    # first-pass direction.
+                    has_classification = isinstance(verified, dict) and (
                         verified.get("supporting") is not None
                         or verified.get("conflicting") is not None
                         or verified.get("neutral") is not None
-                    ):
+                    )
+                    has_verdict = (
+                        isinstance(verified, dict)
+                        and isinstance(verified.get("verdict"), str)
+                        and verified.get("verdict")
+                    )
+                    if has_classification and has_verdict:
                         # Verification produced a usable revision —
                         # adopt it. Track the original classification
-                        # alongside for the write/audit downstream.
+                        # alongside for the write/audit downstream. The
+                        # ``verdict`` fallback in the snapshot mirrors
+                        # the first-pass prompt's default behaviour so
+                        # a malformed first-pass that omitted verdict
+                        # still leaves a defensible audit record.
                         first_pass_snapshot = {
-                            "verdict": parsed.get("verdict"),
+                            "verdict": parsed.get("verdict") or "neutral",
                             "supporting": parsed.get("supporting") or [],
                             "conflicting": parsed.get("conflicting") or [],
                             "neutral": parsed.get("neutral") or [],
@@ -2789,6 +2807,15 @@ class Engine:
                             "[cross_check] verified finding %r (notes=%d)",
                             text[:60], len(verification_notes),
                         )
+                    elif isinstance(verified, dict):
+                        # Verification call succeeded but the payload
+                        # was unusable. Log + fall through with the
+                        # first-pass result preserved.
+                        self._log.warning(
+                            "[cross_check] verification dropped (verdict=%r, "
+                            "classifications=%s) — keeping first pass",
+                            verified.get("verdict"), has_classification,
+                        )
                 except Exception as e:
                     # Verification is advisory — a transient failure
                     # MUST NOT block the quest; the first-pass result
@@ -2797,7 +2824,7 @@ class Engine:
                         "[cross_check] verification pass failed (kept first pass): %s", e,
                     )
 
-            out.append({
+            entry: dict[str, Any] = {
                 "finding": text,
                 "supporting": parsed.get("supporting") or [],
                 "conflicting": parsed.get("conflicting") or [],
@@ -2805,8 +2832,17 @@ class Engine:
                 "summary": parsed.get("summary") or "",
                 "candidates": candidates,
                 "verification_notes": verification_notes,
-                "first_pass": parsed.get("first_pass"),
-            })
+            }
+            # ``first_pass`` is only emitted when verification actually
+            # ran AND produced a usable revision (the ``parsed`` dict
+            # then carries it). When verification was disabled / skipped
+            # / dropped, the key is omitted entirely rather than written
+            # as ``null`` — keeps the JSON tighter and lets consumers
+            # use ``"first_pass" in entry`` as the "was verified"
+            # sentinel.
+            if parsed.get("first_pass") is not None:
+                entry["first_pass"] = parsed.get("first_pass")
+            out.append(entry)
         self._log.info("[cross_check] checked %d findings", len(out))
         patch: QuestState = {"cross_check": out}
         # Cross-check iteration accounting: if analyze flagged a re-route AND
