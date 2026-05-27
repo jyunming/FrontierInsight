@@ -78,7 +78,16 @@ async def test_quest_writeback_invokes_axon_when_enabled(
         topic="memory writeback test",
         title="memory-test",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            # These tests pin write-back behaviour against fake LLM
+            # responses that can include verdict=revise; the human-
+            # feedback gate (default "after_review") would otherwise
+            # intercept the route. Gate off so the legacy revise/done
+            # routing decides outcome, and write-back behaviour is
+            # what's being verified.
+            human_feedback_gate="off",
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(enabled=True, write_back_quests=True),
         output=OutputConfig(output_dir=tmp_path / "out"),
@@ -167,7 +176,16 @@ async def test_quest_writeback_skipped_when_verdict_revise_and_accept_gate_on(
         provider=ProviderConfig(name="openai"),
         # max_iterations=1 + review_loop=False means a single pass; the
         # review-node verdict goes straight to "done" regardless.
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            # These tests pin write-back behaviour against fake LLM
+            # responses that can include verdict=revise; the human-
+            # feedback gate (default "after_review") would otherwise
+            # intercept the route. Gate off so the legacy revise/done
+            # routing decides outcome, and write-back behaviour is
+            # what's being verified.
+            human_feedback_gate="off",
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(
             enabled=True, write_back_quests=True, write_back_only_on_accept=True,
@@ -210,7 +228,16 @@ async def test_quest_writeback_runs_on_revise_when_accept_gate_off(
         topic="ungated writeback test",
         title="ungated-test",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            # These tests pin write-back behaviour against fake LLM
+            # responses that can include verdict=revise; the human-
+            # feedback gate (default "after_review") would otherwise
+            # intercept the route. Gate off so the legacy revise/done
+            # routing decides outcome, and write-back behaviour is
+            # what's being verified.
+            human_feedback_gate="off",
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(
             enabled=True, write_back_quests=True, write_back_only_on_accept=False,

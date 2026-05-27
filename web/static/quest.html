@@ -112,6 +112,23 @@
       <div class="fi-banner fi-banner-info"><b>Paused for clarification.</b> Fill in the answers below to resume.</div>
       <form id="clarify-form" class="fi-form" onsubmit="return submitClarify(event)"></form>
     </div>
+    <!-- Human-review panel -->
+    <div id="human-review-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <div class="fi-banner fi-banner-warning"><b>Paused for human review.</b> Confirm the verdict, reject, or refine with feedback to resume.</div>
+      <div id="human-review-summary" class="font-body-md text-body-md text-on-surface-variant flex flex-col gap-2"></div>
+      <div id="human-review-must-flag" class="hidden flex flex-col gap-1"></div>
+      <div id="human-review-suggestions" class="font-body-md text-body-md text-on-surface-variant"></div>
+      <div id="human-review-history" class="hidden flex flex-col gap-2"></div>
+      <form id="human-review-form" class="fi-form flex flex-col gap-3" onsubmit="event.preventDefault(); return false;">
+        <label class="font-label-sm text-label-sm text-outline uppercase" for="hr-feedback">Feedback (required for refine)</label>
+        <textarea id="hr-feedback" rows="4" class="w-full bg-surface-low border border-white/10 rounded p-3 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none" placeholder="What should the next iteration change?"></textarea>
+        <div class="flex flex-wrap gap-3">
+          <button type="button" data-action="accept" class="bg-secondary text-on-secondary px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Accept</button>
+          <button type="button" data-action="reject" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Reject</button>
+          <button type="button" data-action="refine" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Refine</button>
+        </div>
+      </form>
+    </div>
     <!-- Figures -->
     <div id="figures-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
       <h3 class="font-label-sm text-label-sm text-outline uppercase">Generated Figures</h3>
@@ -175,6 +192,9 @@
     } else if (data.pending_clarify) {
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (clarify)</span>';
       badge.className = baseCls + ' bg-surface-mid';
+    } else if (data.pending_human_review) {
+      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
+      badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {
       const v = data.summary?.verdict || data.review?.verdict || 'complete';
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-secondary"></span><span class="text-secondary">${escapeHtml(v)}</span>`;
@@ -232,6 +252,12 @@
       loadClarifyPanel();
     } else {
       const sec = document.getElementById('clarify-section');
+      sec.classList.add('hidden'); sec.classList.remove('flex');
+    }
+    if (data.pending_human_review) {
+      renderHumanReviewPanel(data.pending_human_review);
+    } else {
+      const sec = document.getElementById('human-review-section');
       sec.classList.add('hidden'); sec.classList.remove('flex');
     }
     refreshFiles();
@@ -494,6 +520,88 @@
     const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers }) });
     if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
     form.dataset.loaded = '0'; refresh();
+    return false;
+  }
+
+  function renderHumanReviewPanel(snap) {
+    const sec = document.getElementById('human-review-section');
+    sec.classList.remove('hidden'); sec.classList.add('flex');
+    const summary = document.getElementById('human-review-summary');
+    const verdict = snap.verdict || '(no verdict)';
+    const score = (snap.score === null || snap.score === undefined) ? '-' : snap.score;
+    summary.innerHTML =
+      `<div><b>Verdict:</b> <code class="font-code-md text-secondary">${escapeHtml(verdict)}</code> &nbsp; ` +
+      `<b>Score:</b> <code class="font-code-md text-secondary">${escapeHtml(String(score))}</code> &nbsp; ` +
+      `<b>Iteration:</b> <code class="font-code-md text-secondary">${escapeHtml(String(snap.iteration ?? 0))}</code></div>` +
+      (snap.rationale ? `<div class="text-on-surface-variant">${escapeHtml(snap.rationale)}</div>` : '') +
+      (snap.paper_md_path ? `<div class="font-code-md text-code-md text-outline">paper: ${escapeHtml(snap.paper_md_path)}</div>` : '');
+    const mfh = document.getElementById('human-review-must-flag');
+    const hits = snap.must_flag_hits || [];
+    if (hits.length) {
+      mfh.classList.remove('hidden'); mfh.classList.add('flex');
+      mfh.innerHTML = '<div class="text-error font-label-sm uppercase">Must-flag hits (non-bypassable):</div>' +
+        '<div class="flex flex-wrap gap-2">' +
+        hits.map(h => `<span class="bg-error/10 border border-error/40 text-error rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(h)}</span>`).join('') +
+        '</div>';
+    } else {
+      mfh.classList.add('hidden'); mfh.classList.remove('flex');
+      mfh.innerHTML = '';
+    }
+    const suggestions = snap.suggestions || [];
+    document.getElementById('human-review-suggestions').innerHTML = suggestions.length
+      ? '<b>Suggestions:</b><ul class="list-disc list-inside">' +
+        suggestions.map(s => `<li>${escapeHtml(s)}</li>`).join('') + '</ul>'
+      : '';
+    const histEl = document.getElementById('human-review-history');
+    const history = snap.feedback_history || [];
+    if (history.length) {
+      histEl.classList.remove('hidden'); histEl.classList.add('flex');
+      histEl.innerHTML = '<div class="font-label-sm text-label-sm text-outline uppercase">Prior refinement asks (this quest)</div>' +
+        history.map(h =>
+          `<div class="bg-surface-low border border-white/10 rounded p-2 font-code-md text-code-md text-on-surface">round ${escapeHtml(String(h.iteration ?? '?'))}: ${escapeHtml(h.text || '')}</div>`,
+        ).join('');
+    } else {
+      histEl.classList.add('hidden'); histEl.classList.remove('flex');
+      histEl.innerHTML = '';
+    }
+    const form = document.getElementById('human-review-form');
+    if (form.dataset.bound !== '1') {
+      form.querySelectorAll('button[data-action]').forEach(btn => {
+        btn.addEventListener('click', () => submitHumanReview(btn.dataset.action));
+      });
+      form.dataset.bound = '1';
+    }
+  }
+  async function submitHumanReview(action) {
+    // Action MUST be passed explicitly by one of the three button
+    // handlers — there is no "default" action. Earlier this function
+    // accepted a form-submit event and defaulted to ``accept`` when
+    // invoked that way, which made Enter-key in the textarea
+    // silently accept the paper. The form's ``onsubmit`` now
+    // ``preventDefault`` and returns false so the only path to this
+    // function is a button click. Guard here in case a caller goes
+    // through anyway.
+    if (!action || !["accept", "reject", "refine"].includes(action)) return false;
+    const feedback = (document.getElementById('hr-feedback').value || '').trim();
+    if (action === 'refine' && !feedback) {
+      alert('Refine requires feedback text.');
+      return false;
+    }
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/human-review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, feedback }),
+    });
+    if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
+    document.getElementById('hr-feedback').value = '';
+    const payload = await res.json().catch(() => ({}));
+    if (payload && payload.in_process_resolved === false) {
+      try {
+        await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
+        if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+      } catch (_) {}
+    }
+    refresh();
     return false;
   }
 

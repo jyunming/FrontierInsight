@@ -246,6 +246,35 @@ class VSCodeBridgeClient:
             raise BridgeError(f"clarify response was not a dict: {result!r}")
         return result
 
+    async def human_review(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Pause for human-in-the-loop review after the review node.
+        The extension renders the verdict + must-flag hits + suggestions
+        and asks the user to accept / reject / refine. Returns a dict
+        ``{"action": "...", "feedback": "..."}``.
+
+        Raises ``BridgeError`` if the user cancelled or the bridge
+        dropped — the engine's caller should catch that and fall back
+        to ``accept`` (today's default) rather than crashing the quest.
+        """
+        if self._writer is None:
+            await self.connect()
+        req_id = self._next_id
+        self._next_id += 1
+        fut: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._send({
+            "type": "human_review_request",
+            "id": req_id,
+            "snapshot": snapshot,
+        })
+        try:
+            result = await fut
+        finally:
+            self._pending.pop(req_id, None)
+        if not isinstance(result, dict):
+            raise BridgeError(f"human_review response was not a dict: {result!r}")
+        return result
+
     async def emit_event(self, event: str, **fields: Any) -> None:
         """Push a one-way ``quest_event`` to the extension for UI
         rendering. Best-effort: bridge failures here are logged but
@@ -343,6 +372,24 @@ class VSCodeBridgeClient:
                 return
             fut.set_exception(BridgeError(
                 "user cancelled the clarify panel"
+            ))
+        elif mtype == "human_review_response":
+            req_id = int(msg.get("id", 0))
+            fut = self._pending.get(req_id)
+            if fut is None or fut.done():
+                return
+            action = str(msg.get("action") or "accept").lower()
+            if action not in ("accept", "reject", "refine"):
+                action = "accept"
+            feedback = str(msg.get("feedback") or "")
+            fut.set_result({"action": action, "feedback": feedback})
+        elif mtype == "human_review_cancelled":
+            req_id = int(msg.get("id", 0))
+            fut = self._pending.get(req_id)
+            if fut is None or fut.done():
+                return
+            fut.set_exception(BridgeError(
+                "user cancelled the human-review panel"
             ))
         else:
             _log.info("bridge: ignoring message type=%r", mtype)

@@ -161,7 +161,13 @@ def smoke_config(tmp_path: Path) -> Config:
         topic="smoke-test topic for the engine",
         title="engine-smoke",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            # The default human-feedback gate is "after_review"; in this
+            # smoke fixture the fake review verdict is "accept" so
+            # auto-accept-on-pass resolves the gate without a callback.
+            auto_accept_on_pass=True,
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         # Disable knowledge so we don't try to import axon during the test.
         knowledge=KnowledgeConfig(enabled=False),
@@ -201,6 +207,7 @@ async def test_engine_runs_with_clarify_auto(
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=1, review_loop=False, clarify_mode="auto",
+            auto_accept_on_pass=True,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(enabled=False),
@@ -238,6 +245,7 @@ async def test_engine_runs_with_clarify_interactive_via_callback(
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=1, review_loop=False, clarify_mode="interactive",
+            auto_accept_on_pass=True,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(enabled=False),

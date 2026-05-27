@@ -488,6 +488,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "Single-quest mode only — fleet runs are headless.",
     )
     p.add_argument(
+        "--auto-accept-on-pass",
+        action="store_true",
+        help="Auto-accept the human-review gate for clean papers — "
+             "verdict='accept' AND no must-flag hits. Flagged or "
+             "revise-verdict papers still pause for human review "
+             "(write the response to "
+             "<quest_root>/.fi/human_review_answer.json then "
+             "--resume <quest_id>). Intended for --fleet so the "
+             "production runner doesn't block on every clean quest.",
+    )
+    p.add_argument(
         "--draft-only",
         action="store_true",
         help="With --new: write the generated `outputs/_drafts/<id>.yaml` "
@@ -793,7 +804,14 @@ def _pick_clarify_callback(
         # works because by the time clarify_callback fires, the
         # clarify NODE has already made one LLM call (to generate the
         # questions), which lazy-initialized the bridge.
-        port = int(cfg.provider.extra.get("bridge_port", 0))
+        # Defensive parse — hand-edited YAMLs can leave bridge_port as
+        # a non-numeric string. Treat that as "no callback wired"
+        # rather than crashing the run.
+        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
+        try:
+            port = int(extra.get("bridge_port", 0))
+        except (TypeError, ValueError):
+            port = 0
         if port <= 0:
             return None
 
@@ -813,6 +831,57 @@ def _pick_clarify_callback(
                 await bridge.connect()
                 engine._client._bridge = bridge
             return await bridge.clarify(dict(questions))
+
+        return callback
+    return None
+
+
+def _pick_human_feedback_callback(
+    cfg: Config, engine: Engine, interactive: bool,
+) -> object:
+    """Select the right human-feedback-gate callback for this run.
+
+    * Terminal ``--interactive``: prompt the user via stdin
+      (``_cli_human_feedback_callback``).
+    * ``provider.name == "vscode_extension"``: route the snapshot
+      through the same bridge the LLM calls use so the FI VSCode
+      extension can render the verdict + must-flag hits and accept
+      a decision back via chat.
+    * Otherwise: None — the engine pause-exits the quest with a
+      ``human_review.json`` snapshot on disk, and the user finishes
+      the review via the web dashboard or by editing
+      ``human_review_answer.json`` and running ``--resume``.
+    """
+    if interactive:
+        return _cli_human_feedback_callback
+    if cfg.provider.name == "vscode_extension":
+        # Defensive parse: a hand-crafted YAML could leave
+        # ``provider.extra.bridge_port`` as a non-numeric string (or
+        # ``provider.extra`` as a list/None instead of a mapping).
+        # Falling back to "no callback wired" is the right move there
+        # — the engine then pause-exits cleanly with the on-disk
+        # snapshot, which is the same behaviour as any other
+        # non-VSCode headless run.
+        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
+        try:
+            port = int(extra.get("bridge_port", 0))
+        except (TypeError, ValueError):
+            port = 0
+        if port <= 0:
+            return None
+
+        async def callback(snapshot: dict[str, object]) -> dict[str, object]:
+            assert engine._client is not None, (
+                "_pick_human_feedback_callback was called before "
+                "Engine.run() created the LLMClient"
+            )
+            bridge = engine._client._bridge
+            if bridge is None:
+                from core.vscode_bridge import VSCodeBridgeClient
+                bridge = VSCodeBridgeClient(host="127.0.0.1", port=port)
+                await bridge.connect()
+                engine._client._bridge = bridge
+            return await bridge.human_review(dict(snapshot))
 
         return callback
     return None
@@ -925,13 +994,18 @@ async def run_one(
     interactive: bool = False,
     resume_quest_id: str | None = None,
     source_yaml_path: Path | None = None,
+    auto_accept_on_pass: bool | None = None,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
     # runs — instead of creating a second Engine here with a fresh
     # quest_id and stranding the status-line one). When omitted, build.
     if engine is None:
-        engine = Engine(cfg, supervisor=supervisor, resume_quest_id=resume_quest_id)
+        engine = Engine(
+            cfg, supervisor=supervisor,
+            resume_quest_id=resume_quest_id,
+            auto_accept_on_pass=auto_accept_on_pass,
+        )
     if resume_quest_id is not None:
         print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name}")
     else:
@@ -958,18 +1032,16 @@ async def run_one(
     #                            (the engine catches this and produces
     #                            a clear RuntimeError).
     callback = _pick_clarify_callback(cfg, engine, interactive)
-    # Wire the human-feedback gate callback only when --interactive is
-    # set. Without that, the CLI callback would block on ``input()``
-    # in a non-interactive run (CI, fleet, headless). The engine
-    # raises a clear RuntimeError when the gate is on but no callback
-    # is wired, so the user gets a "you need --interactive" pointer
-    # instead of a silent hang.
+    # Wire the human-feedback gate callback when the gate is on. CLI
+    # ``--interactive`` gets terminal prompts; ``vscode_extension``
+    # provider gets a bridge round-trip. Headless runs (no flag, not
+    # via VSCode) get no callback, which the engine now treats as
+    # pause-exit + on-disk snapshot — the user picks up the review
+    # via the web dashboard or by hand-editing
+    # ``human_review_answer.json`` and running ``--resume``.
     hf_callback: object = None
-    if (
-        cfg.engine.human_feedback_gate == "after_review"
-        and interactive
-    ):
-        hf_callback = _cli_human_feedback_callback
+    if cfg.engine.human_feedback_gate == "after_review":
+        hf_callback = _pick_human_feedback_callback(cfg, engine, interactive)
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
         human_feedback_callback=hf_callback,
@@ -1132,6 +1204,7 @@ async def run_fleet(
     max_concurrent: int,
     memory_cap_mb: int | None,
     profile: bool,
+    auto_accept_on_pass: bool = False,
 ) -> int:
     # Accept either bare configs (test-friendly) OR (yaml_path, config)
     # tuples (production: lets us drop config.yaml into each quest dir).
@@ -1168,7 +1241,10 @@ async def run_fleet(
             # Previously a second Engine (with a fresh quest_id) was
             # built inside run_one, leaving a stranded sibling quest_dir
             # on disk and breaking per-quest accounting.
-            engine = Engine(cfg, supervisor=supervisor)
+            engine = Engine(
+                cfg, supervisor=supervisor,
+                auto_accept_on_pass=auto_accept_on_pass,
+            )
             _status_line(engine.quest_id, "start")
             try:
                 summary = await run_one(
@@ -1372,6 +1448,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 interactive=args.interactive,
                 resume_quest_id=args.resume,
                 source_yaml_path=args.config.resolve(),
+                auto_accept_on_pass=args.auto_accept_on_pass,
             )
             return 0
 
@@ -1385,6 +1462,7 @@ async def main_async(args: argparse.Namespace) -> int:
             max_concurrent=args.max_concurrent,
             memory_cap_mb=args.memory_cap_mb,
             profile=args.profile,
+            auto_accept_on_pass=args.auto_accept_on_pass,
         )
     finally:
         await supervisor.shutdown()
