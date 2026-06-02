@@ -503,3 +503,50 @@ async def test_run_cli_streaming_raises_on_rate_limit_text(tmp_path: Path) -> No
     # logs can attribute the trip without grepping the marker tables.
     assert "rate_limit_message" in msg
     assert "session limit" in msg
+
+@pytest.mark.asyncio
+async def test_run_cli_streaming_captures_stderr_on_no_output_reap_timeout() -> None:
+    from unittest.mock import AsyncMock, MagicMock, Mock, patch
+    # We mock asyncio.create_subprocess_exec to return a mock process.
+    mock_proc = AsyncMock()
+    mock_proc.kill = Mock()
+    mock_stdin = MagicMock()
+    mock_stdin.drain = AsyncMock()
+    mock_proc.stdin = mock_stdin
+    
+    # Mock stdout to close immediately (EOF).
+    mock_stdout = AsyncMock()
+    mock_stdout.readline.return_value = b""
+    mock_proc.stdout = mock_stdout
+    
+    # Mock stderr to return our error message.
+    mock_stderr = AsyncMock()
+    mock_stderr.read.return_value = b"fatal: API rate limit exceeded"
+    mock_proc.stderr = mock_stderr
+    
+    # Mock wait to simulate a timeout by sleeping longer than the timeout.
+    async def mock_wait():
+        await asyncio.sleep(5.0)
+        return 0
+    mock_proc.wait = mock_wait
+
+    spec = _CliSpec(
+        argv=(sys.executable,),
+        pass_prompt_via="stdin",
+        output_via="stream_json",
+        model_flag=None,
+    )
+
+    with patch("core.provider.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(_CliTransientError) as exc_info:
+            await _run_cli(
+                spec, "any prompt",
+                timeout_s=30.0,
+                inactivity_timeout_s=30.0,
+                post_eof_reap_timeout_s=0.1,  # short timeout
+            )
+        assert "fatal: API rate limit exceeded" in str(exc_info.value)
+        assert "no output collected" in str(exc_info.value)
+
+
+
