@@ -93,6 +93,8 @@ def ensure_axon_up(
     *,
     boot_timeout: float = 30.0,
     poll_interval: float = 0.5,
+    offline: bool | None = None,
+    models_dir: "os.PathLike[str] | str | None" = None,
     log: Callable[[str], None] | None = None,
 ) -> AxonStatus:
     """Make sure an Axon API sidecar is reachable on ``host:port``.
@@ -105,6 +107,14 @@ def ensure_axon_up(
     this call (not the env), so the URL we tell callers about is the
     URL we actually start it on.
 
+    ``offline`` / ``models_dir`` mirror ``knowledge.offline`` /
+    ``knowledge.models_dir``: when set, the spawned sidecar gets
+    ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE`` (and ``HF_HOME``
+    pointed at the local model cache) so it loads embedding weights from
+    disk with no network — the air-gapped path. Without this, the
+    sidecar would still try to download even when FI is configured
+    offline.
+
     ``log`` defaults to a friendly stderr printer; pass ``None`` to
     silence, or any callable taking one string.
     """
@@ -112,6 +122,19 @@ def ensure_axon_up(
         def _default_log(msg: str) -> None:
             print(f"[FI/axon] {msg}", file=sys.stderr)
         log = _default_log
+
+    # The sidecar is launched once at process startup — before any
+    # per-quest YAML is parsed — so the cross-process source of truth for
+    # offline config is the env, not config. Resolve unset params from
+    # ``FI_OFFLINE`` / ``FI_MODELS_DIR`` (same env knobs that seed
+    # ``KnowledgeConfig.offline`` / ``.models_dir``). An explicit arg
+    # always wins. Kept in sync with ``core.config._offline_env_default``.
+    if offline is None:
+        offline = os.environ.get("FI_OFFLINE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+    if models_dir is None:
+        models_dir = os.environ.get("FI_MODELS_DIR") or None
 
     status = axon_status(host, port, timeout=1.0)
     if status["running"]:
@@ -123,6 +146,11 @@ def ensure_axon_up(
     env = os.environ.copy()
     env["AXON_HOST"] = host
     env["AXON_PORT"] = str(port)
+    if offline:
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+    if models_dir:
+        env["HF_HOME"] = os.path.expanduser(str(models_dir))
 
     # Spawn fully detached so the sidecar outlives this FI process —
     # the *next* CLI quest or web reload then hits a warm one.

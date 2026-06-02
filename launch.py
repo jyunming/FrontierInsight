@@ -170,6 +170,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "doesn't land silently.",
     )
     mode.add_argument(
+        "--export-models",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Download the knowledge-layer models into an HF-cache-layout "
+             "directory (<DIR>/hub/models--...) so they can be copied to an "
+             "air-gapped machine. Exports the embedding model "
+             "(sentence-transformers/all-MiniLM-L6-v2, ~92 MB) and the "
+             "reranker (cross-encoder/ms-marco-MiniLM-L-6-v2, ~92 MB). On "
+             "the offline machine, copy <DIR> over and set "
+             "knowledge.models_dir (or FI_MODELS_DIR) to it plus "
+             "knowledge.offline: true (or FI_OFFLINE=1). Requires network.",
+    )
+    mode.add_argument(
         "--list-drafts",
         action="store_true",
         help="List proposal drafts (YAML companions) that ``--proposal`` "
@@ -1280,6 +1294,7 @@ async def main_async(args: argparse.Namespace) -> int:
         getattr(args, "install_tectonic", False)
         or getattr(args, "install_tectonic_from", None) is not None
         or getattr(args, "list_drafts", False)
+        or getattr(args, "export_models", None) is not None
     )
     if not args.no_axon_sidecar and not _axon_inert_modes:
         from core.axon_sidecar import ensure_axon_up
@@ -1312,6 +1327,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.install_tectonic_from is not None:
             return _install_tectonic_from_local(args.install_tectonic_from)
+
+        if args.export_models is not None:
+            return _export_models(args.export_models)
 
         if args.list_drafts:
             return _list_drafts(args.output_root)
@@ -2375,6 +2393,65 @@ _TECTONIC_ASSET_NAMES: dict[tuple[str, str], str] = {
     ("darwin", "x86_64"): f"tectonic-{_TECTONIC_VERSION}-x86_64-apple-darwin.tar.gz",
     ("linux", "x86_64"): f"tectonic-{_TECTONIC_VERSION}-x86_64-unknown-linux-musl.tar.gz",
 }
+
+
+def _export_models(dest: Path) -> int:
+    """Download the knowledge-layer models into an HF-cache-layout dir
+    so they can be copied to an air-gapped machine.
+
+    Routes ``huggingface_hub.snapshot_download`` through ``HF_HOME=dest``
+    so files land in ``<dest>/hub/models--<org>--<name>/...`` — the exact
+    layout ``knowledge.models_dir`` / ``FI_MODELS_DIR`` + ``HF_HOME``
+    expect on the offline side. Exports whatever embedding + reranker
+    Axon is configured to use (its defaults unless a custom axon_config
+    overrides them).
+    """
+    dest = dest.expanduser().resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    embed = "sentence-transformers/all-MiniLM-L6-v2"
+    reranker = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    try:
+        from axon import AxonConfig  # type: ignore[import-not-found]
+        ac = AxonConfig()
+        embed = (getattr(ac, "embedding_model", None) or embed)
+        if "/" not in embed:
+            # Bare sentence-transformers name → canonical repo id.
+            embed = f"sentence-transformers/{embed}"
+        reranker = (getattr(ac, "reranker_model", None) or reranker)
+    except Exception:
+        pass  # Axon not importable → ship the FI defaults.
+
+    # Force online for the export itself, and point the HF cache at dest.
+    os.environ["HF_HOME"] = str(dest)
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:  # noqa: BLE001
+        print(f"[FI] huggingface_hub unavailable: {e}", file=sys.stderr)
+        return 1
+
+    ok = True
+    for repo in (embed, reranker):
+        print(f"[FI] downloading {repo} -> {dest / 'hub'} ...", file=sys.stderr)
+        try:
+            snapshot_download(repo_id=repo)
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f"[FI] FAILED to download {repo}: {e}", file=sys.stderr)
+
+    if not ok:
+        print("[FI] one or more model downloads failed — see above.", file=sys.stderr)
+        return 1
+    print(
+        f"[FI] models exported to {dest}\n"
+        f"[FI] On the offline machine: copy this dir over, then set "
+        f"knowledge.models_dir (or FI_MODELS_DIR) to it AND "
+        f"knowledge.offline: true (or FI_OFFLINE=1).",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def _install_tectonic() -> int:

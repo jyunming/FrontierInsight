@@ -61,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -87,6 +88,32 @@ except Exception as e:
     AxonBrain = None  # type: ignore[assignment]
     AxonConfig = None  # type: ignore[assignment]
     AxonRetriever = None  # type: ignore[assignment]
+
+
+def _apply_offline_env(cfg: KnowledgeConfig) -> None:
+    """Set Hugging Face offline / local-cache env vars from FI config.
+
+    Enforced at the HF library level (below Axon), so sentence-transformers
+    and transformers load the embedding + reranker weights from the local
+    cache with no network call:
+
+    - ``offline`` → ``HF_HUB_OFFLINE=1`` + ``TRANSFORMERS_OFFLINE=1``. This
+      sidesteps the ``huggingface_hub`` closed-client crash that a missing
+      or flaky network triggers at quest start.
+    - ``models_dir`` → ``HF_HOME`` points at the shipped HF-cache root
+      (``<models_dir>/hub/models--...``). Produce one on a connected
+      machine with ``launch.py --export-models <dir>``.
+
+    Only sets a var when the corresponding knob is active, so a process
+    that already exported its own HF env (and runs with FI defaults off)
+    is left untouched. Process-global by nature — also inherited by the
+    Axon sidecar via ``os.environ.copy()``.
+    """
+    if cfg.offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    if cfg.models_dir:
+        os.environ["HF_HOME"] = str(cfg.models_dir)
 
 
 # Dedicated Axon project name for FI's corpus. Quest write-back and
@@ -1363,6 +1390,10 @@ class Knowledge:
 
     @staticmethod
     def _build_brain(cfg: KnowledgeConfig) -> Any:
+        # Force offline / local-model loading BEFORE Axon constructs the
+        # embedding model — otherwise transformers makes a network HEAD
+        # check to huggingface.co that crashes on air-gapped machines.
+        _apply_offline_env(cfg)
         if cfg.axon_config is None:
             brain = AxonBrain(AxonConfig())  # type: ignore[misc]
         elif isinstance(cfg.axon_config, Path):

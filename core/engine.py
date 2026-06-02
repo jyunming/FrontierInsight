@@ -129,6 +129,11 @@ class QuestState(TypedDict, total=False):
     exec_reflect_iter: int
     exec_reflect_history: list[dict[str, Any]]
     exec_give_up_reason: str
+    # Set by the execute-repair loop when a script exits 0 but every
+    # numeric metric is ~0 (a degenerate run) and the repair attempts
+    # couldn't produce real numbers. analyze/write/review read this so a
+    # broken run is framed as a failure note, not a real result.
+    degenerate_result: bool
     analysis: dict[str, Any]
     # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
@@ -260,6 +265,13 @@ class Engine:
             bool(auto_accept_on_pass)
             if auto_accept_on_pass is not None
             else bool(config.engine.auto_accept_on_pass)
+        )
+        # Wall-clock cap on the human-review callback await. 0 = wait
+        # forever (legacy). On timeout the run loop falls through to the
+        # headless answer-file / pause-exit path so an orphaned UI prompt
+        # can't park the quest indefinitely.
+        self.human_feedback_timeout_s = float(
+            config.engine.human_feedback_timeout_s
         )
 
     async def run(
@@ -478,10 +490,28 @@ class Engine:
                                     "[run] human_feedback interrupt fired (verdict=%s); "
                                     "invoking callback", verdict,
                                 )
-                                answer = await human_feedback_callback(snap)
-                                _consume_snapshot()
-                                payload = Command(resume=answer)
-                                continue
+                                t = self.human_feedback_timeout_s
+                                try:
+                                    if t and t > 0:
+                                        answer = await asyncio.wait_for(
+                                            human_feedback_callback(snap), t,
+                                        )
+                                    else:
+                                        answer = await human_feedback_callback(snap)
+                                    _consume_snapshot()
+                                    payload = Command(resume=answer)
+                                    continue
+                                except asyncio.TimeoutError:
+                                    # Orphaned UI prompt (e.g. a VSCode QuickPick
+                                    # tied to a stale chat turn) — stop waiting and
+                                    # fall through to the answer-file / pause-exit
+                                    # path so the quest checkpoints and can resume
+                                    # rather than blocking forever.
+                                    self._log.warning(
+                                        "[run] human_feedback callback timed out after "
+                                        "%ss — falling back to answer-file / pause-exit",
+                                        t,
+                                    )
                             if answer_path.is_file():
                                 try:
                                     answer = json.loads(
@@ -771,14 +801,23 @@ class Engine:
         result = state.get("exec_result") or {}
         rc = result.get("returncode", 0)
         has_result_json = state.get("result_json") is not None
-        # Success path: nothing to repair.
-        if rc == 0 and has_result_json:
-            return "proceed"
-        # Give-up sentinel set by the reflect node OR iterations exhausted.
+        # Give-up sentinel set by the reflect node OR iterations exhausted
+        # always win — otherwise the degenerate-retry below could loop
+        # past the budget.
         if state.get("exec_give_up_reason"):
             return "proceed"
         iters = state.get("exec_reflect_iter", 0)
         if iters >= self.config.engine.exec_reflect_max_iterations:
+            return "proceed"
+        if rc == 0 and has_result_json:
+            # Clean exit + parsed metrics — but an all-zero/degenerate
+            # result is a soft failure: loop back so the reflect node can
+            # patch the underlying bug before we write a paper.
+            if (
+                self.config.engine.degenerate_run_guard
+                and _is_degenerate_result(state.get("result_json") or {})
+            ):
+                return "retry"
             return "proceed"
         return "retry"
 
@@ -2466,15 +2505,26 @@ class Engine:
         exec_result = state.get("exec_result") or {}
         rc = exec_result.get("returncode", 0)
         has_result_json = state.get("result_json") is not None
+        degenerate = bool(
+            rc == 0
+            and has_result_json
+            and self.config.engine.degenerate_run_guard
+            and _is_degenerate_result(state.get("result_json") or {})
+        )
 
-        if rc == 0 and has_result_json:
+        # Clean success (and not a degenerate all-zero run) → no-op.
+        if rc == 0 and has_result_json and not degenerate:
             self._log.info("[execute_reflect] script succeeded; skipping repair")
             return {}
 
         iters = state.get("exec_reflect_iter", 0)
         if iters >= self.config.engine.exec_reflect_max_iterations:
+            # Proceed regardless; analyze owns the authoritative degenerate
+            # flag against the final result (covers max_iterations=0 too).
             self._log.warning(
-                "[execute_reflect] iterations exhausted (%d); proceeding to analyze with broken state",
+                "[execute_reflect] %s after %d attempt(s); proceeding to analyze",
+                "result still degenerate (all metrics ~0)" if degenerate
+                else "iterations exhausted",
                 iters,
             )
             return {}
@@ -2482,14 +2532,46 @@ class Engine:
         history = list(state.get("exec_reflect_history") or [])
         history_block = _format_reflect_history(history)
 
+        # For a degenerate (rc=0) run, reframe the repair prompt: the
+        # script DIDN'T crash, it ran and produced silent zeros. Tell the
+        # LLM to fix the underlying bug (sampling/grid, threshold sentinel,
+        # normalization) — reusing the crash-repair template's existing
+        # fields rather than adding a new placeholder.
+        if degenerate:
+            self._log.warning(
+                "[execute_reflect] rc=0 but result is degenerate (all metrics ~0) "
+                "— attempting repair (iter %d)",
+                iters + 1,
+            )
+            rj_preview = json.dumps(state.get("result_json") or {}, indent=2)[:1500]
+            stdout_for_prompt = (
+                "DEGENERATE RESULT: the script exited 0 but EVERY numeric metric "
+                "is ~0. This is almost certainly a bug — e.g. a grid/sampling "
+                "mismatch so the signal of interest is missed, a threshold/edge "
+                "finder returning a zero sentinel when it finds no crossing, or "
+                "a normalization that flattens the output — NOT a real result. "
+                "Diagnose and fix the code so it emits real, non-zero metrics. If "
+                "the quantity is genuinely zero/unresolvable, make the script SAY "
+                "so explicitly (print a clear diagnostic) instead of emitting "
+                "silent zeros.\n\nRESULT_JSON was:\n"
+                f"{rj_preview}\n\nOriginal stdout tail:\n"
+                + exec_result.get("stdout_tail", "")[:1000]
+            )
+            returncode_for_prompt = "0 (ran, but result is degenerate)"
+            result_json_note = "yes (degenerate — all metrics ~0)"
+        else:
+            stdout_for_prompt = exec_result.get("stdout_tail", "")[:2000]
+            returncode_for_prompt = str(rc)
+            result_json_note = "yes" if has_result_json else "no"
+
         prompt = self._prompts["execute_reflect"].substitute(
             previous_code=(state.get("code") or "")[:8000],
-            returncode=str(rc),
-            stdout_tail=exec_result.get("stdout_tail", "")[:2000],
+            returncode=returncode_for_prompt,
+            stdout_tail=stdout_for_prompt,
             stderr_tail=exec_result.get("stderr_tail", "")[:2000],
             duration_s=f"{exec_result.get('duration_s', 0):.2f}",
             figures_count=str(len(state.get("figures") or [])),
-            result_json_present="yes" if has_result_json else "no",
+            result_json_present=result_json_note,
             reflect_history_block=history_block,
             design_block=json.dumps(state.get("design") or {}, indent=2),
             clarify_block=_format_clarify(state),
@@ -2556,6 +2638,20 @@ class Engine:
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
         exec_result = state.get("exec_result") or {}
+        # Authoritative degenerate-run detection against the FINAL result
+        # the analysis will describe (the execute-repair loop may have
+        # exhausted its budget without producing real numbers). When set,
+        # we (a) prepend a banner to the analyze prompt so the write node
+        # frames an honest failure note, and (b) flag state for review.
+        degenerate = bool(
+            self.config.engine.degenerate_run_guard
+            and _is_degenerate_result(state.get("result_json") or {})
+        )
+        if degenerate:
+            self._log.warning(
+                "[analyze] result is degenerate (all metrics ~0) — framing as a "
+                "failure note, not a real result",
+            )
         # Pick up any datasets the user dropped into inputs/data/ (e.g.
         # via the pause-drop-anytime gate). The design node also picks
         # these up on a post-pause resume; we run again here so a quest
@@ -2595,13 +2691,23 @@ class Engine:
             if all_ds:
                 result_json_block_data["_user_supplied_datasets"] = all_ds
             result_json_block = json.dumps(result_json_block_data, indent=2)
+        stdout_for_analyze = exec_result.get("stdout_tail", "")[:2000]
+        if degenerate:
+            stdout_for_analyze = (
+                "[FI NOTE] The experiment ran but every numeric metric is ~0 — "
+                "a degenerate/broken run, not a real result. Write this up as an "
+                "honest failure note: state plainly that no usable measurement was "
+                "produced, hypothesize the likely cause (sampling/grid, threshold, "
+                "or normalization bug), and do NOT report the zeros as findings.\n\n"
+                + stdout_for_analyze
+            )
         prompt = self._prompts["analyze"].substitute(
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             returncode=str(exec_result.get("returncode")),
             duration_s=f"{exec_result.get('duration_s', 0):.1f}",
             timed_out=str(exec_result.get("timed_out", False)),
-            stdout_tail=exec_result.get("stdout_tail", "")[:2000],
+            stdout_tail=stdout_for_analyze,
             stderr_tail=exec_result.get("stderr_tail", "")[:1000],
             result_json=result_json_block,
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
@@ -2636,6 +2742,8 @@ class Engine:
         # prompts, parse failures) so the route doesn't break.
         analysis.setdefault("next_step", "publish")
         patch: QuestState = {"analysis": analysis}
+        if degenerate:
+            patch["degenerate_result"] = True
         if all_ds:
             patch["user_supplied_datasets"] = all_ds
         return patch
@@ -4742,6 +4850,46 @@ def _extract_result_json(stdout: str) -> dict[str, Any] | None:
         return json.loads(matches[-1].group(1))
     except json.JSONDecodeError:
         return None
+
+
+def _is_degenerate_result(rj: dict[str, Any]) -> bool:
+    """True when a RESULT_JSON has numeric metrics that are ALL ~0.
+
+    A script can exit 0 yet still be broken — e.g. a lithography
+    aerial-image sim that reports ``contrast=NILS=CD=...=0`` because the
+    grid missed the diffraction orders, or a threshold/edge finder that
+    returns a zero sentinel when it finds no crossing. We flag
+    ">=2 numeric leaves, every one within 1e-12 of zero" as degenerate so
+    the execute-repair loop can fix the bug before a paper is written.
+
+    Deliberately conservative to avoid false positives: any non-zero
+    value, a NaN, or fewer than two numeric leaves → not degenerate.
+    Booleans are not counted as metrics. Walks nested dicts and lists.
+    """
+    if not isinstance(rj, dict) or not rj:
+        return False
+    for k in ("degenerate", "_degenerate"):
+        val = rj.get(k)
+        if val is False or (isinstance(val, str) and val.lower() == "false"):
+            return False
+    nums: list[float] = []
+
+    def _walk(v: Any) -> None:
+        if isinstance(v, bool):
+            return  # a flag, not a metric
+        if isinstance(v, (int, float)):
+            nums.append(float(v))
+        elif isinstance(v, dict):
+            for x in v.values():
+                _walk(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                _walk(x)
+
+    _walk(rj)
+    if len(nums) < 2:
+        return False
+    return all(abs(n) <= 1e-12 for n in nums)
 
 
 _PKG_TO_MODULE = {

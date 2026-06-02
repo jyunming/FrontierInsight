@@ -115,6 +115,8 @@ The active Copilot model is captured automatically into `provider.model` so the 
 - `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.
 - `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api` on `127.0.0.1:8000`) is reachable. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking).
 
+**Air-gapped machines:** the knowledge layer downloads ~184 MB of embedding + reranker models from Hugging Face on first use. To run with no network, on a connected machine run `python launch.py --export-models <dir>`, copy `<dir>` to the offline machine, and set `FI_MODELS_DIR=<dir>` + `FI_OFFLINE=1` (or `knowledge.models_dir` / `knowledge.offline` in YAML). See `docs/INSTALL.md`.
+
 ### Note on Copilot billing units
 
 Copilot bills **per call** — one "premium request" per LLM call regardless of how many tokens the prompt + completion contain. This is meaningfully different from `openai` / `claude_cli` / `gemini_cli`, which bill **per token**. For a 50-call quest with 10K-token prompts, Copilot is 50 units (flat); a token-priced provider could be substantially cheaper or more expensive depending on the prompt size. The web UI's `/quest/<id>` page shows per-quest cost for token-priced providers; Copilot calls show as $0 because the engine can't see the premium-request count from inside FI.

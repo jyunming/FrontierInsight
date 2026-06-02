@@ -173,3 +173,88 @@ def test_ensure_axon_up_spawns_when_sidecar_down(
     # not-running status with a timeout error, not a hard exception.
     assert status["running"] is False
     assert "boot timeout" in (status["error"] or "")
+
+
+def _spawn_env_with(
+    monkeypatch: pytest.MonkeyPatch, **kwargs: object,
+) -> dict[str, str]:
+    """Drive ``ensure_axon_up`` with a down sidecar + fake Popen and
+    return the env dict the spawned process would have received."""
+    monkeypatch.setattr(
+        axon_sidecar.urllib.request, "urlopen",
+        lambda _url, timeout=None: (_ for _ in ()).throw(
+            axon_sidecar.urllib.error.URLError("refused"),
+        ),
+    )
+    captured: dict[str, dict] = {}
+
+    class _FakeProc:
+        pid = 1
+
+    def fake_popen(argv, env=None, **kw):  # type: ignore[no-untyped-def]
+        captured["env"] = dict(env or {})
+        return _FakeProc()
+
+    monkeypatch.setattr(axon_sidecar.subprocess, "Popen", fake_popen)
+    axon_sidecar.ensure_axon_up(
+        host="127.0.0.1", port=8765,
+        boot_timeout=0.02, poll_interval=0.01,
+        log=lambda _m: None, **kwargs,  # type: ignore[arg-type]
+    )
+    return captured["env"]
+
+
+def test_ensure_axon_up_injects_offline_env_from_explicit_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``offline=True`` + ``models_dir`` → the spawned sidecar gets the HF
+    offline env vars + HF_HOME so it loads embedding weights locally with
+    no network (the air-gapped path)."""
+    monkeypatch.delenv("FI_OFFLINE", raising=False)
+    monkeypatch.delenv("FI_MODELS_DIR", raising=False)
+    env = _spawn_env_with(monkeypatch, offline=True, models_dir=r"D:\fi-models")
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["TRANSFORMERS_OFFLINE"] == "1"
+    assert env["HF_HOME"] == r"D:\fi-models"
+
+
+def test_ensure_axon_up_resolves_offline_env_from_FI_envvars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No explicit args, but ``FI_OFFLINE`` / ``FI_MODELS_DIR`` set →
+    resolved from env (the cross-process knobs that also seed
+    KnowledgeConfig). The sidecar is launched before per-quest YAML, so
+    env is the source of truth for it."""
+    monkeypatch.setenv("FI_OFFLINE", "1")
+    monkeypatch.setenv("FI_MODELS_DIR", r"E:\models")
+    env = _spawn_env_with(monkeypatch)
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["TRANSFORMERS_OFFLINE"] == "1"
+    assert env["HF_HOME"] == r"E:\models"
+
+
+def test_ensure_axon_up_no_offline_leaves_hf_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (online) path must NOT inject HF offline vars — a normal
+    machine keeps fetching from huggingface.co as before."""
+    for _k in ("FI_OFFLINE", "FI_MODELS_DIR", "HF_HUB_OFFLINE",
+               "TRANSFORMERS_OFFLINE", "HF_HOME"):
+        monkeypatch.delenv(_k, raising=False)
+    env = _spawn_env_with(monkeypatch)
+    assert "HF_HUB_OFFLINE" not in env
+    assert "TRANSFORMERS_OFFLINE" not in env
+
+
+def test_ensure_axon_up_expands_tilde_in_models_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If models_dir starts with ~, ensure_axon_up expands it to an absolute
+    path before injecting HF_HOME."""
+    monkeypatch.delenv("FI_OFFLINE", raising=False)
+    monkeypatch.delenv("FI_MODELS_DIR", raising=False)
+    env = _spawn_env_with(monkeypatch, offline=True, models_dir="~/fi-models")
+    import os
+    expected = os.path.expanduser("~/fi-models")
+    assert env["HF_HOME"] == expected
+

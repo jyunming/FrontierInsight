@@ -17,7 +17,53 @@ import httpx
 import pytest
 
 from core.config import KnowledgeConfig
-from core.knowledge import Knowledge, RetrievedDoc
+from core.knowledge import Knowledge, RetrievedDoc, _apply_offline_env
+
+
+# --- offline env application -------------------------------------------------
+
+
+_HF_ENV_KEYS = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HOME")
+
+
+@pytest.fixture
+def clean_hf_env():
+    """Snapshot + restore HF env around a test. ``_apply_offline_env``
+    mutates ``os.environ`` directly (it's process-global by design), so a
+    plain monkeypatch can't undo it — without this, the offline vars leak
+    into later tests in the same pytest process."""
+    import os
+    saved = {k: os.environ.get(k) for k in _HF_ENV_KEYS}
+    for k in _HF_ENV_KEYS:
+        os.environ.pop(k, None)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_apply_offline_env_sets_hf_vars(clean_hf_env) -> None:
+    """offline=True + models_dir → HF offline vars + HF_HOME, so model
+    loads stay local and never hit huggingface.co."""
+    import os
+    _apply_offline_env(
+        KnowledgeConfig(enabled=False, offline=True, models_dir=Path("/tmp/m"))
+    )
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    assert os.environ["HF_HOME"] == str(Path("/tmp/m"))
+
+
+def test_apply_offline_env_noop_when_off(clean_hf_env) -> None:
+    """offline=False, no models_dir → leaves HF env untouched."""
+    import os
+    _apply_offline_env(KnowledgeConfig(enabled=False, offline=False))
+    assert "HF_HUB_OFFLINE" not in os.environ
+    assert "TRANSFORMERS_OFFLINE" not in os.environ
 
 
 # --- disabled-path contract --------------------------------------------------

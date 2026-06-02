@@ -7,6 +7,7 @@ expand `~` on load via mode='before' validators.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -68,6 +69,21 @@ def _expand(v: object) -> object:
     if isinstance(v, Path):
         return v.expanduser()
     return v
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _offline_env_default() -> bool:
+    """``knowledge.offline`` default — on when ``FI_OFFLINE`` is truthy."""
+    return _truthy_env("FI_OFFLINE")
+
+
+def _models_dir_env_default() -> Path | None:
+    """``knowledge.models_dir`` default — from ``FI_MODELS_DIR`` if set."""
+    v = os.environ.get("FI_MODELS_DIR")
+    return Path(v).expanduser() if v else None
 
 
 class ProviderConfig(BaseModel):
@@ -304,6 +320,16 @@ class EngineConfig(BaseModel):
     # without wiring a callback. The CLI flag ``--auto-accept-on-pass``
     # forces this to True at the launcher level.
     auto_accept_on_pass: bool = False
+    # Max seconds to wait at the human-review gate for a wired callback
+    # (web POST, VSCode QuickPick) to return. When it elapses, the engine
+    # stops waiting and falls back to the headless path: it checks for an
+    # on-disk ``human_review_answer.json`` and, failing that, pause-exits
+    # cleanly (rc=0, checkpoint saved, resume hint logged) — so an orphaned
+    # UI prompt can never park a quest forever. ``0`` disables the timeout
+    # (wait indefinitely, legacy behaviour). Has no practical effect on the
+    # CLI ``--interactive`` gate, whose blocking ``input()`` implies a human
+    # is present.
+    human_feedback_timeout_s: float = Field(default=1800.0, ge=0)
     # Pre-flight clarification (`clarify` node before `ideate`).
     #
     #   "off"         — skip the node entirely. Default for tests and fleet.
@@ -323,6 +349,16 @@ class EngineConfig(BaseModel):
     # this many times. Default 3 — covers typo / import-error / shape
     # mismatch / NaN bugs without runaway looping.
     exec_reflect_max_iterations: int = Field(default=3, ge=0)
+    # Degenerate-run guard. When True (default), a script that exits 0
+    # but emits a RESULT_JSON whose numeric metrics are ALL ~0 is treated
+    # as a soft failure: the execute-repair loop gets a chance to fix the
+    # underlying bug (wrong grid/sampling, a threshold/edge finder
+    # returning a zero sentinel, bad normalization) before a paper is
+    # written, bounded by ``exec_reflect_max_iterations``. If the result
+    # is still degenerate after repair, the quest proceeds with a
+    # ``degenerate_result`` flag so analyze/review frame it as a failure
+    # note. Set False to accept all-zero results as-is.
+    degenerate_run_guard: bool = True
     # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just
     # the original topic) and classify hits as supporting / conflicting
@@ -492,6 +528,20 @@ class KnowledgeConfig(BaseModel):
 
     enabled: bool = True
     axon_config: Path | dict[str, Any] | None = None
+    # Air-gapped / offline model loading. ``models_dir`` is a local
+    # Hugging Face cache root (HF-cache layout) that holds the embedding
+    # + reranker models — set it on machines with no network access so
+    # Axon loads weights from disk instead of huggingface.co. ``offline``
+    # forces ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE`` (and Axon's
+    # ``local_assets_only``) so a missing/flaky network can never trigger
+    # a download (and the ``huggingface_hub`` closed-client crash) at
+    # quest start. Both honour env fallbacks (``FI_MODELS_DIR`` /
+    # ``FI_OFFLINE``) so all three surfaces (CLI/Web/VSCode) and the Axon
+    # sidecar pick them up without per-quest YAML. Produce a shippable
+    # ``models_dir`` on a connected machine via ``launch.py
+    # --export-models <dir>``.
+    models_dir: Path | None = Field(default_factory=lambda: _models_dir_env_default())
+    offline: bool = Field(default_factory=lambda: _offline_env_default())
     # Axon (RAG) retrieval cap. Small-k because dense embedding hits
     # are precise — 8 strong matches beat 20 medium ones for the writer
     # prompt. The literature node uses this when querying Axon.
@@ -610,6 +660,17 @@ class KnowledgeConfig(BaseModel):
         if isinstance(v, (str, Path)):
             return _expand(v)
         return v
+
+    @field_validator("models_dir", mode="before")
+    @classmethod
+    def _expand_models_dir(cls, v: object) -> object:
+        # Explicit value present in input: `~`-expand it. Empty string
+        # means "no local models dir" (overrides the FI_MODELS_DIR env
+        # default). When the field is absent the default_factory reads
+        # FI_MODELS_DIR, so this validator only runs on explicit input.
+        if v in (None, ""):
+            return None
+        return _expand(v)
 
 
 class OutputConfig(BaseModel):
