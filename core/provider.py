@@ -1057,13 +1057,13 @@ async def _collect_via_streaming(
                 )
             return _finalise_stream_content(aggregated, spec)
         # No output AND no exit — genuinely stuck.
+        await _kill_and_reap(proc, spec.argv[0])
         stderr_b = b""
         if proc.stderr is not None:
             try:
                 stderr_b = await asyncio.wait_for(proc.stderr.read(), timeout=2.0)
             except asyncio.TimeoutError:
                 pass
-        await _kill_and_reap(proc, spec.argv[0])
         raise _CliTransientError(
             f"{spec.argv[0]} stdout closed but child didn't exit within "
             f"{post_eof_reap_timeout_s:g}s "
