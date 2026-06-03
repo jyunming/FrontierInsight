@@ -146,6 +146,7 @@ class ProviderConfig(BaseModel):
             # finish well before the ceiling.
             "implement": 1800.0,
             "execute_reflect": 900.0,
+            "design_self_critique": 900.0,
         }
     )
     # Per-node MODEL ESCALATION on tenacity retry. Maps an engine
