@@ -148,6 +148,29 @@ of `slides.html`, etc.):
 | Docker Desktop | `execution.sandbox: docker` | docker.com/products/docker-desktop |
 | Axon | Knowledge layer (literature search + cross-quest memory) | `pip install axon-rag` |
 
+## Web search (Brave Search API — optional)
+
+FI runs a general web search alongside the academic sources so non-academic
+topics (company financials, markets, current events) retrieve real pages
+instead of irrelevant papers. It works **with no setup** using the keyless
+DuckDuckGo backend, but for materially better relevance + rate limits, add a
+[Brave Search API key](https://brave.com/search/api/) (free tier ~2,000
+queries/month). This is the same `BRAVE_API_KEY` Axon uses, so one key serves
+both.
+
+```bash
+# macOS / Linux
+export BRAVE_API_KEY=BSA...your-key...
+
+# Windows (PowerShell)
+$env:BRAVE_API_KEY = "BSA...your-key..."
+```
+
+Or set it per-quest in YAML (`knowledge.brave_api_key: BSA...`). Disable web
+search entirely with `knowledge.web_search: false`; force a backend with
+`knowledge.web_search_backend: brave | duckduckgo` (default `auto` = Brave
+when a key is present, else DuckDuckGo).
+
 ## Air-gapped / no-network machines
 
 The knowledge layer loads two models from Hugging Face on first use —

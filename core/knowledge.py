@@ -528,6 +528,227 @@ def _google_scholar_search(query: str, top_k: int, *, timeout_s: float = 30.0) -
     return out
 
 
+# ---------------------------------------------------------------------------
+# General web search — Brave (keyed) with a keyless DuckDuckGo fallback.
+#
+# The academic adapters above only cover scholarly literature. A
+# non-academic question ("SpaceX revenue by year", "Belgium vs Taiwan work
+# culture") has no arXiv/Crossref match, so those adapters return
+# irrelevant nearest-neighbours. These adapters add a general-web layer so
+# such topics retrieve real sources. Every hit carries its ``url`` / ``site``
+# / ``title`` so it can be cited in the paper / poster / slides References.
+# ---------------------------------------------------------------------------
+
+
+def _url_host(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _html_to_text(html: str) -> str:
+    """Best-effort HTML → readable plain text with no heavy dependency.
+    Drops script/style/nav/chrome blocks, turns block elements into line
+    breaks, strips remaining tags, unescapes entities, and collapses
+    whitespace. Good enough for the writer to quote and for the plot step
+    to pull numbers out of; not a full article extractor."""
+    import html as _htmlmod
+    # Remove non-content blocks wholesale (with their inner text).
+    text = re.sub(
+        r"(?is)<(script|style|noscript|nav|header|footer|aside|form|svg)\b.*?</\1>",
+        " ", html,
+    )
+    # Block-level closers / breaks → newlines so structure survives.
+    text = re.sub(r"(?i)<li\b[^>]*>", "\n- ", text)
+    text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/ul|/ol)\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)          # strip all remaining tags
+    text = _htmlmod.unescape(text)
+    lines = [ln.strip() for ln in text.splitlines()]
+    text = "\n".join(ln for ln in lines if ln)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _brave_search(
+    query: str, top_k: int, *, api_key: str, timeout_s: float = 10.0,
+) -> list[RetrievedDoc]:
+    """Brave Search API (https://brave.com/search/api/). Mirrors the
+    request shape Axon uses (``X-Subscription-Token`` header). Best-effort:
+    any error / missing key returns []."""
+    if not query.strip() or not api_key:
+        return []
+    count = max(1, min(top_k, 20))
+    try:
+        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
+            r = c.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query.strip(), "count": count},
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip",
+                    "X-Subscription-Token": api_key,
+                    "User-Agent": "FrontierInsight/1.0",
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        _log.info("brave web search failed: %s", e)
+        return []
+    out: list[RetrievedDoc] = []
+    for item in ((data.get("web") or {}).get("results") or [])[:count]:
+        title = item.get("title") or ""
+        url = item.get("url") or ""
+        # Brave wraps matched terms in <strong>; strip the markup.
+        snippet = re.sub(r"<[^>]+>", "", item.get("description") or "").strip()
+        site = (item.get("meta_url") or {}).get("hostname") or _url_host(url)
+        published = item.get("page_age") or item.get("age") or ""
+        out.append(RetrievedDoc(
+            content=f"{title}\n\n{snippet}".strip(),
+            metadata={
+                "source": "web_search", "backend": "brave", "kind": "web_page",
+                "title": title, "url": url, "snippet": snippet,
+                "site": site, "published": published,
+            },
+        ))
+    _log.info("brave web search returned %d results for %r", len(out), query[:60])
+    return out
+
+
+def _ddg_decode(href: str) -> str:
+    """DuckDuckGo HTML results wrap targets in a ``/l/?uddg=<encoded>``
+    redirect; unwrap to the real URL."""
+    from urllib.parse import urlparse, parse_qs, unquote
+    if href.startswith("//"):
+        href = "https:" + href
+    if "uddg=" in href:
+        try:
+            q = parse_qs(urlparse(href).query)
+            if q.get("uddg"):
+                return unquote(q["uddg"][0])
+        except Exception:
+            return href
+    return href
+
+
+def _ddg_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0,
+) -> list[RetrievedDoc]:
+    """Keyless DuckDuckGo HTML endpoint — no API key, but scraped and
+    rate-limited/blockable. The no-key fallback so web search still works
+    out of the box. Best-effort: any error returns []."""
+    if not query.strip():
+        return []
+    try:
+        with httpx.Client(
+            timeout=timeout_s, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; FrontierInsight/1.0)"},
+        ) as c:
+            r = c.post("https://html.duckduckgo.com/html/", data={"q": query.strip()})
+            r.raise_for_status()
+            html = r.text
+    except Exception as e:
+        _log.info("duckduckgo search failed: %s", e)
+        return []
+    anchors = re.findall(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S,
+    )
+    snippets = re.findall(
+        r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html, re.S,
+    )
+    out: list[RetrievedDoc] = []
+    for i, (href, title_html) in enumerate(anchors[:top_k]):
+        url = _ddg_decode(href)
+        title = _html_to_text(title_html).strip()
+        snippet = _html_to_text(snippets[i]).strip() if i < len(snippets) else ""
+        out.append(RetrievedDoc(
+            content=f"{title}\n\n{snippet}".strip(),
+            metadata={
+                "source": "web_search", "backend": "duckduckgo", "kind": "web_page",
+                "title": title, "url": url, "snippet": snippet,
+                "site": _url_host(url), "published": "",
+            },
+        ))
+    _log.info("duckduckgo search returned %d results for %r", len(out), query[:60])
+    return out
+
+
+def _web_search(
+    query: str, top_k: int, *,
+    backend: str = "auto", api_key: str = "", timeout_s: float = 10.0,
+) -> list[RetrievedDoc]:
+    """Dispatch a general-web search. ``auto`` uses Brave when a key is
+    present (falling back to DuckDuckGo if Brave errors/returns empty),
+    else the keyless DuckDuckGo endpoint."""
+    backend = (backend or "auto").lower()
+    if backend == "duckduckgo":
+        return _ddg_search(query, top_k, timeout_s=timeout_s)
+    if backend == "brave":
+        if not api_key:
+            _log.info(
+                "web_search backend=brave but no BRAVE_API_KEY / "
+                "knowledge.brave_api_key set — skipping web search",
+            )
+            return []
+        return _brave_search(query, top_k, api_key=api_key, timeout_s=timeout_s)
+    # auto
+    if api_key:
+        docs = _brave_search(query, top_k, api_key=api_key, timeout_s=timeout_s)
+        if docs:
+            return docs
+        _log.info("brave returned nothing; falling back to keyless DuckDuckGo")
+    return _ddg_search(query, top_k, timeout_s=timeout_s)
+
+
+def _web_search_source(
+    query: str, top_k: int, *, timeout_s: float = 10.0,
+) -> list[RetrievedDoc]:
+    """Registry/​router entry point — reads the Brave key from the
+    environment (``Knowledge.asearch`` uses the config-aware path that also
+    honours a YAML-set ``knowledge.brave_api_key``)."""
+    import os
+    return _web_search(
+        query, top_k, backend="auto",
+        api_key=os.environ.get("BRAVE_API_KEY", "").strip(), timeout_s=timeout_s,
+    )
+
+
+def _fetch_web_page_text(
+    doc: RetrievedDoc, *, timeout_s: float, max_kb: int,
+) -> str | None:
+    """Fetch a web result's page and extract readable text so the writer
+    can quote real content (not just the snippet) and the plot step can
+    pull numbers out of it. HTML / plain-text only; PDFs are left to the
+    academic full-text path. Best-effort: returns None on any failure."""
+    url = doc.metadata.get("url") or ""
+    if not url:
+        return None
+    try:
+        with httpx.Client(
+            timeout=timeout_s, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; FrontierInsight/1.0)"},
+        ) as c:
+            r = c.get(url)
+            if r.status_code >= 400:
+                return None
+            ctype = (r.headers.get("content-type") or "").lower()
+            body = r.content
+    except Exception as e:
+        _log.info("web page fetch %s failed: %s", url, e)
+        return None
+    cap = max_kb * 1024
+    head = body[:2048].lstrip().lower()
+    if "html" in ctype or head.startswith(b"<!doctype html") or b"<html" in head:
+        text = _html_to_text(body.decode("utf-8", errors="replace"))
+        return text[:cap] if text.strip() else None
+    if ctype.startswith("text/") or not ctype:
+        text = body.decode("utf-8", errors="replace")
+        return text[:cap] if text.strip() else None
+    return None
+
+
 _SOURCE_REGISTRY = {
     "arxiv": _arxiv_search,
     "openalex": _openalex_search,
@@ -536,6 +757,7 @@ _SOURCE_REGISTRY = {
     "pubmed": _pubmed_search,
     "core": _core_search,
     "google_scholar": _google_scholar_search,
+    "web_search": _web_search_source,
 }
 
 
@@ -781,12 +1003,21 @@ async def _enrich_with_full_text(
     timeout_s: float,
     total_budget_s: float,
     max_kb: int,
+    fetch_fn: Any = None,
 ) -> list[RetrievedDoc]:
     """Batch-enrich a list of external-source docs with fetched full
     text where possible. Runs fetches in parallel (each in a thread so
     httpx-sync doesn't block the loop). Respects a total wall-clock
     budget; docs not enriched within the budget are returned unchanged.
-    Login walls / missing PDFs return the original doc untouched."""
+    Login walls / missing PDFs return the original doc untouched.
+
+    ``fetch_fn(doc, *, timeout_s, max_kb) -> str | None`` is the per-doc
+    fetcher — defaults to the academic PDF path (``_fetch_full_text``);
+    the web layer passes ``_fetch_web_page_text`` to pull HTML page text
+    instead. Resolved at call time (not bound as a default) so a test that
+    monkeypatches ``_fetch_full_text`` is honoured."""
+    if fetch_fn is None:
+        fetch_fn = _fetch_full_text
     if not docs:
         return docs
     targets = [
@@ -798,7 +1029,7 @@ async def _enrich_with_full_text(
 
     async def fetch_one(idx: int) -> tuple[int, str | None]:
         text = await asyncio.to_thread(
-            _fetch_full_text,
+            fetch_fn,
             docs[idx],
             timeout_s=timeout_s,
             max_kb=max_kb,
@@ -890,6 +1121,18 @@ async def _enrich_with_full_text(
 # step reads them back so users can extend the catalog by ingesting
 # their own knowledge into Axon (e.g., domain-specific venues).
 _SOURCE_CATALOG: list[dict[str, Any]] = [
+    {
+        "name": "web_search",
+        "title": "General web search (Brave, or keyless DuckDuckGo)",
+        "fields": ["all", "news", "business", "finance", "current events",
+                   "culture", "general reference", "non-academic"],
+        "access": "open (Brave key optional; DuckDuckGo keyless fallback)",
+        "has_search_adapter": True,
+        "when_to_use": "ANY non-academic or current-events question (company financials, "
+                       "markets, products, history, culture, how-to) where scholarly "
+                       "databases have no relevant match. Returns live web pages with "
+                       "citable URLs; runs in parallel with the academic sources.",
+    },
     {
         "name": "openalex",
         "title": "OpenAlex",
@@ -1094,6 +1337,12 @@ def _doc_dedup_key(d: RetrievedDoc) -> str:
         return f"arxiv:{m['arxiv_id']}"
     if m.get("pmid"):
         return f"pmid:{m['pmid']}"
+    # Web pages have no scholarly id — dedupe on the URL (normalized to
+    # ignore the scheme + a trailing slash) so the same page from Brave +
+    # DuckDuckGo collapses to one hit.
+    if m.get("source") == "web_search" and m.get("url"):
+        u = re.sub(r"^https?://", "", str(m["url"]).lower()).rstrip("/")
+        return f"url:{u}"
     title = (m.get("title") or "").lower().strip()
     normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", title))
     return f"title:{normalized}" if normalized else f"id:{id(d)}"
@@ -1484,30 +1733,33 @@ class Knowledge:
         chosen_idea: dict | None = None,
         chat_fn: Any | None = None,
     ) -> list[RetrievedDoc]:
-        """Async retrieval. Three layers, in order:
+        """Async retrieval. Layers, merged + de-duplicated:
 
         1. **Pinned local papers** — files in `knowledge.local_papers`
            (PDF/MD/TXT the user manually placed). Always at the head,
            never dedupped away.
         2. **Axon** — the FI long-term store. Fast in-process call.
-        3. **External router** — `crossref` / `openalex` / etc., either
-           agent-routed (`source_routing="auto"`) or YAML-configured.
+        3. **General web search** — Brave / DuckDuckGo. Runs IN PARALLEL
+           with Axon for *every* query when ``knowledge.web_search`` is on,
+           so non-academic topics (which have no scholarly match) get real
+           sources instead of irrelevant nearest-neighbour papers. Web hits
+           carry citable URLs.
+        4. **Academic router** — `crossref` / `openalex` / etc., either
+           agent-routed (`source_routing="auto"`) or YAML-configured. Fires
+           when Axon is empty (the scholarly-breadth fallback), still in
+           parallel with the web layer.
 
         Cap policy:
         * ``top_k`` (or ``self.cfg.top_k``) bounds the Axon RAG layer
           and the pinned-papers head — small-k because dense hits are
           precise.
-        * The external (web) layer is bounded by, in order of priority:
-          1. an explicit ``external_top_k`` kwarg (callers that want
-             broad web retrieval — e.g. the literature node — pass
-             ``self.cfg.external_top_k`` here),
-          2. otherwise the caller's ``top_k`` (so an ideate seed that
-             asks for 3 papers gets at most 3 external hits, not 20),
-          3. otherwise ``self.cfg.external_top_k`` (the default broad
-             cap when no caller cap was specified).
-        Local papers count toward the Axon cap so the user doesn't get
-        flooded; if they supplied 8 papers and top_k=5, only the first
-        5 are returned (and external sources aren't queried)."""
+        * The external (web + academic) layer is bounded by, in order of
+          priority: an explicit ``external_top_k`` kwarg → otherwise the
+          caller's ``top_k`` → otherwise ``self.cfg.external_top_k``.
+        The merged result is capped at ``max(k, external_k)`` so a broad
+        caller (the literature node) keeps web + Axon + academic breadth
+        while a narrow caller (an ideate seed asking for 3) stays small.
+        Local papers count toward the cap so the user isn't flooded."""
         k = top_k if top_k is not None else self.cfg.top_k
         if external_top_k is not None:
             external_k = external_top_k
@@ -1524,17 +1776,14 @@ class Knowledge:
         if len(pinned) >= k:
             return pinned
 
-        # Layer 2: Axon. If Axon returns anything, take it next.
+        # Layer 2: Axon — fast in-process call, done up front so the
+        # academic fallback can be gated on whether it returned anything.
         remaining = k - len(pinned)
         axon_docs = self._search_axon(query, top_k=remaining)
-        if axon_docs:
-            return pinned + axon_docs[:remaining]
 
-        # Layer 3: external router. The external cap is independent of
-        # the Axon cap — when Axon misses, web search returns coarser
-        # matches and breadth matters. Pinned still count toward the
-        # external cap so the head isn't double-billed.
-        remaining_ext = max(0, external_k - len(pinned))
+        # Decide the academic source list (router or YAML fallback). The
+        # web layer is handled separately (always-on), so strip any
+        # ``web_search`` entry the router/fallback may name.
         fallback = self._fallback_sources()
         if self.cfg.source_routing == "auto" and chat_fn is not None:
             sources = await _route_sources_with_llm(
@@ -1543,21 +1792,71 @@ class Knowledge:
             )
         else:
             sources = fallback
-        if not sources:
-            return pinned
-        external = await _route_external(query, remaining_ext, sources)
-        # Phase 2: opportunistic full-text fetch for external hits. Off
-        # by default; opt-in via `knowledge.try_fetch_full_text: true`.
-        # Login walls fail the Content-Type + %PDF magic-bytes check
-        # so the quest is unaffected when the host lacks access.
-        if self.cfg.try_fetch_full_text and external:
-            external = await _enrich_with_full_text(
-                external,
+        academic_sources = [s for s in sources if s != "web_search"]
+
+        # Network layer, run concurrently:
+        #   • web search — always when enabled (the new always-on breadth),
+        #   • academic router — only when Axon came back empty (preserves
+        #     the cost profile for corpus-backed academic quests).
+        tasks: list[Any] = []
+        want_web = bool(self.cfg.web_search)
+        if want_web:
+            tasks.append(asyncio.to_thread(
+                _web_search, query, self.cfg.web_search_top_k,
+                backend=self.cfg.web_search_backend,
+                api_key=self.cfg.brave_api_key,
+                timeout_s=self.cfg.full_text_fetch_timeout_s,
+            ))
+        run_academic = (not axon_docs) and bool(academic_sources)
+        if run_academic:
+            tasks.append(_route_external(query, external_k, academic_sources))
+
+        web_docs: list[RetrievedDoc] = []
+        academic_docs: list[RetrievedDoc] = []
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            idx = 0
+            if want_web:
+                web_docs = results[idx] or []
+                idx += 1
+            if run_academic:
+                academic_docs = results[idx] or []
+
+        # Enrichment: web hits get their page text (so the writer can quote
+        # real content and the plot step can mine numbers); academic hits
+        # opt into PDF full-text via the existing knob.
+        if want_web and web_docs and self.cfg.web_fetch_pages:
+            web_docs = await _enrich_with_full_text(
+                web_docs,
+                timeout_s=self.cfg.full_text_fetch_timeout_s,
+                total_budget_s=self.cfg.full_text_fetch_total_s,
+                max_kb=self.cfg.full_text_max_kb,
+                fetch_fn=_fetch_web_page_text,
+            )
+        if self.cfg.try_fetch_full_text and academic_docs:
+            academic_docs = await _enrich_with_full_text(
+                academic_docs,
                 timeout_s=self.cfg.full_text_fetch_timeout_s,
                 total_budget_s=self.cfg.full_text_fetch_total_s,
                 max_kb=self.cfg.full_text_max_kb,
             )
-        return pinned + external[:remaining_ext]
+
+        # Merge pinned → Axon → web → academic, de-duplicated. Web ahead of
+        # academic so that on a non-academic topic (Axon empty) the real
+        # web hits lead and any irrelevant scholarly nearest-neighbours
+        # trail (the relevance guard prunes those downstream).
+        seen: set[str] = set()
+        merged: list[RetrievedDoc] = []
+        cap = max(k, external_k)
+        for doc in (*pinned, *axon_docs, *web_docs, *academic_docs):
+            key = _doc_dedup_key(doc)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(doc)
+            if len(merged) >= cap:
+                break
+        return merged
 
     def search(self, query: str, *, top_k: int | None = None) -> list[RetrievedDoc]:
         """Synchronous wrapper for non-async callers (tests, scripts).

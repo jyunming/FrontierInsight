@@ -20,7 +20,9 @@ Compress the paper into an **A1 landscape (33"×23") 3-column poster**. Output a
 Layout convention:
 - **Left**: abstract / problem statement, motivation, headline finding callout (1 figure: hero result or experimental schematic).
 - **Middle**: methods, design, dataset, model details (1 figure: pipeline diagram or model structure).
-- **Right**: results, discussion, limitations, references (1 figure: parity plot, comparison bar chart, or feature-importance plot).
+- **Right**: results, discussion, limitations (1 figure: parity plot, comparison bar chart, or feature-importance plot).
+
+Do **NOT** write a References / Sources / Bibliography section — a numbered Sources band is auto-generated from the quest's actual retrieved sources and placed across the bottom of the poster. Spend the column space on content instead. You may still refer to a source inline by its site/author in prose where it strengthens a claim.
 
 # Output format
 Respond with a single JSON object, no prose, no markdown fence:

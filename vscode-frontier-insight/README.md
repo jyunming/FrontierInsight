@@ -195,21 +195,32 @@ You can also pass the quest_id directly:
 
 Some research questions can't honestly be answered by a Python
 experiment — cultural comparisons, historical analyses, qualitative
-cross-case studies, policy reviews. The `/new` interview's
+cross-case studies, policy reviews, or factual questions about
+companies / markets / current events. The `/new` interview's
 **Research approach** question covers this: pick *"observational"*
 and the generated YAML sets `engine.no_simulation: true`. The
 engine then skips `implement → execute` entirely and routes through
-`auto_collect_data → wait_for_data → data_load → analyze`.
+`auto_collect_data → wait_for_data → data_load → web_plots → analyze`.
 
 Before pausing, `auto_collect_data` runs:
 
-1. Axon retrieval against `topic + design.hypothesis`. Top hits
-   land as Markdown files under
+1. Knowledge retrieval against `topic + design.hypothesis` — Axon
+   **plus a general web search** (Brave when `BRAVE_API_KEY` is set,
+   else keyless DuckDuckGo), so non-academic topics get real web
+   pages, not irrelevant papers. Top hits land as Markdown files under
    `outputs/<id>/data/auto_collected/<rank>_<slug>.md` with YAML
-   provenance front matter.
+   provenance front matter (each web hit keeps its source URL). A
+   relevance guard drops confident-but-off-topic results.
 2. Each adapter in `engine.dataset_adapters` (e.g. `worldbank`,
    `wikipedia`) runs an external lookup and writes evidence into
    `outputs/<id>/data/auto_collected/<adapter>/`.
+
+The `web_plots` step then turns any quantitative data the sources
+contain into source-attributed matplotlib figures, so the paper /
+poster / slides aren't text-only — and every web source is cited by
+its URL across all three. Set a free [Brave Search API
+key](https://brave.com/search/api/) via the `BRAVE_API_KEY` env var
+for better relevance (optional; DuckDuckGo is the keyless default).
 
 If any files land, the chat panel shows the count and the quest
 continues — many no-simulation quests run end-to-end without

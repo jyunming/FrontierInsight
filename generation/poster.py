@@ -18,7 +18,11 @@ import subprocess
 from pathlib import Path
 
 from core.config import Config
-from core.engine import QuestArtifacts
+from core.engine import (
+    QuestArtifacts,
+    build_references,
+    render_poster_references_latex,
+)
 from core.provider import (
     LLMClient,
     ProxySupervisor,
@@ -76,6 +80,17 @@ class PosterGenerator:
         parsed = _lenient_json(text) or {
             "title": "Untitled", "left": "", "middle": "", "right": ""
         }
+        # Sources band — built from the quest's actual retrieved
+        # literature (web pages carry citable URLs) and injected straight
+        # into the template, NOT left to the LLM, so the poster always
+        # carries its references even when the 8000-char paper.md slice
+        # the LLM saw cut the References section off the end.
+        refs = build_references(
+            art.raw_state.get("literature") or [],
+            audience=self.config.output.audience,
+        )
+        references_tex = render_poster_references_latex(refs)
+
         # safe_substitute again: the LLM-supplied left/middle/right columns
         # are LaTeX with arbitrary `$math$` content that would break
         # substitute()'s strict placeholder matcher.
@@ -84,6 +99,7 @@ class PosterGenerator:
             left=parsed.get("left") or "",
             middle=parsed.get("middle") or "",
             right=parsed.get("right") or "",
+            references=references_tex,
         )
         poster_tex = out_dir / "poster.tex"
         poster_tex.write_text(body, encoding="utf-8")

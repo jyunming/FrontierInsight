@@ -701,6 +701,10 @@ class Engine:
         g.add_node("auto_collect_data", self._node_auto_collect_data)
         g.add_node("wait_for_data", self._node_wait_for_data)
         g.add_node("data_load", self._node_data_load)
+        # no-simulation mode only: turn the collected web/data content into
+        # figures so the paper/poster/slides aren't text-only. Passthrough
+        # in the simulation path (which makes its own figures in execute).
+        g.add_node("web_plots", self._node_web_plots)
 
         g.add_edge(START, "clarify")
         g.add_edge("clarify", "ideate")
@@ -744,7 +748,11 @@ class Engine:
         # didn't land any either. On resume (with files present), the
         # node returns and we proceed to data_load.
         g.add_edge("wait_for_data", "data_load")
-        g.add_edge("data_load", "analyze")
+        # data_load → web_plots → analyze. web_plots is a no-op in the
+        # simulation path; in no-simulation mode it derives figures from
+        # the collected sources before analyze/write consume them.
+        g.add_edge("data_load", "web_plots")
+        g.add_edge("web_plots", "analyze")
         g.add_edge("analyze", "cross_check")
         g.add_conditional_edges(
             "cross_check",
@@ -1953,21 +1961,47 @@ class Engine:
             return 0
         top_k = self.config.engine.auto_collect_top_k
         self._log.info(
-            "[auto_collect] querying Axon: top_k=%d query=%r",
+            "[auto_collect] querying knowledge layer (Axon + web): "
+            "top_k=%d query=%r",
             top_k, query[:120],
         )
         try:
-            docs = await self.knowledge.asearch(query, top_k=top_k)
+            # Pass chat_fn so the source router (source_routing="auto") can
+            # pick the right sources for the topic — crucially, for a
+            # non-academic question ("SpaceX revenue") it selects general
+            # web search and skips the scholarly adapters that would
+            # otherwise return irrelevant nearest-neighbour papers. The
+            # web layer runs in parallel regardless; routing just spares
+            # the wasted academic calls.
+            docs = await self.knowledge.asearch(
+                query,
+                top_k=top_k,
+                chat_fn=functools.partial(self._chat_messages, node="source_router"),
+            )
         except Exception as e:
             self._log.warning(
-                "[auto_collect] Axon search raised: %s — dataset "
+                "[auto_collect] knowledge search raised: %s — dataset "
                 "adapters may still run", e,
             )
             return 0
         if not docs:
             self._log.info(
-                "[auto_collect] Axon returned 0 docs — dataset "
+                "[auto_collect] knowledge layer returned 0 docs — dataset "
                 "adapters may still run",
+            )
+            return 0
+
+        # Relevance guard: a retrieval can come back full of confident-but-
+        # irrelevant hits (the classic failure: academic adapters returning
+        # physics preprints for a "SpaceX revenue" question). Drop the
+        # off-topic ones so we don't write a paper on garbage; if NOTHING
+        # is on-topic, return 0 so wait_for_data pauses for real user data
+        # instead of proceeding.
+        docs = await self._filter_relevant_docs(query, docs)
+        if not docs:
+            self._log.info(
+                "[auto_collect] relevance guard dropped every auto-collected "
+                "doc as off-topic — pausing for user-supplied sources",
             )
             return 0
 
@@ -1989,6 +2023,54 @@ class Engine:
                     target, e,
                 )
         return len(written_targets)
+
+    async def _filter_relevant_docs(self, topic: str, docs: list) -> list:
+        """Relevance guard: ask the model which of the retrieved docs are
+        actually on-topic and keep only those. A single cheap judging call
+        (not one per doc). On any failure — guard disabled, LLM error,
+        unparseable response — return the docs unchanged (fail-open: never
+        silently drop a quest's whole corpus because the judge hiccuped).
+        """
+        if not docs or not self.config.knowledge.relevance_guard:
+            return docs
+        listing_lines: list[str] = []
+        for i, d in enumerate(docs):
+            meta = getattr(d, "metadata", {}) or {}
+            title = meta.get("title") or meta.get("source") or ""
+            excerpt = (getattr(d, "content", "") or "")[:200].replace("\n", " ")
+            listing_lines.append(f"[{i}] {title} :: {excerpt}")
+        prompt = (
+            "You are a relevance filter for a research assistant. The user's "
+            "topic is:\n\n"
+            f"{topic[:600]}\n\n"
+            "Below are candidate sources the retriever returned. Some may be "
+            "confidently retrieved yet completely off-topic (e.g. physics "
+            "papers returned for a corporate-finance question). Return ONLY "
+            "the indices that are genuinely relevant to the topic.\n\n"
+            "# Candidates\n"
+            + "\n".join(listing_lines)
+            + "\n\nRespond with a single JSON object, no prose:\n"
+            '{"relevant_indices": [<int>, ...]}\n'
+            "If NONE are relevant, return an empty list."
+        )
+        try:
+            raw = await self._chat(prompt, node="relevance_guard")
+            parsed = _parse_json_lenient(raw, node="relevance_guard")
+            if not parsed or "relevant_indices" not in parsed:
+                return docs
+            idxs = parsed.get("relevant_indices") or []
+            keep_idx = {int(i) for i in idxs if isinstance(i, (int, float))}
+        except Exception as e:
+            self._log.info("[auto_collect] relevance guard failed: %s — keeping all", e)
+            return docs
+        kept = [d for i, d in enumerate(docs) if i in keep_idx]
+        dropped = len(docs) - len(kept)
+        if dropped:
+            self._log.info(
+                "[auto_collect] relevance guard kept %d/%d docs (%d off-topic dropped)",
+                len(kept), len(docs), dropped,
+            )
+        return kept
 
     async def _run_dataset_adapters(
         self, query: str, auto_dir: Path,
@@ -2634,6 +2716,118 @@ class Engine:
             existing = list(state.get("deps") or [])
             patch["deps"] = list(dict.fromkeys(existing + [str(d) for d in new_deps]))
         return patch
+
+    def _list_figures(self) -> list[str]:
+        fdir = self.quest_root / "figures"
+        if not fdir.is_dir():
+            return []
+        return sorted(
+            p.name for p in fdir.iterdir()
+            if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
+        )
+
+    def _gather_collected_text(self, state: QuestState, *, limit: int = 12) -> str:
+        """Concatenate the web/data content the collector gathered (full
+        page text + auto-collected files), each labelled with its source,
+        for the web-plots prompt to mine numbers from."""
+        parts: list[str] = []
+        for item in (state.get("literature") or [])[:limit]:
+            meta = item.get("metadata") or {}
+            if meta.get("source") == "web_search" or meta.get("kind") == "web_page":
+                title = meta.get("title") or ""
+                url = meta.get("url") or ""
+                content = (item.get("content") or "")[:2500]
+                if content.strip():
+                    parts.append(f"[SOURCE] {title} ({url})\n{content}")
+        auto_dir = self.quest_root / "data" / "auto_collected"
+        if auto_dir.is_dir():
+            for p in sorted(auto_dir.rglob("*.md"))[:limit]:
+                try:
+                    parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:2500]}")
+                except OSError:
+                    continue
+        return "\n\n".join(parts)
+
+    async def _node_web_plots(self, state: QuestState) -> QuestState:
+        """No-simulation mode: derive figures from the collected web/data
+        content. The no-sim path runs no experiment, so without this a
+        literature-driven quest is text-only. An LLM extracts the concrete
+        quantitative data it finds in the collected sources and writes a
+        self-contained matplotlib script (data inline — no file parsing,
+        no fabrication); we run it in the SAME sandbox the simulation path
+        uses and stamp each figure with its source. Best-effort: no
+        plottable data, a script error, or a missing matplotlib all leave
+        the quest figure-less and proceed — this never aborts the quest.
+        """
+        if not self.config.engine.web_derived_plots:
+            self._log.info("[web_plots] engine.web_derived_plots=False — skipping")
+            return {}
+        if not state.get("no_simulation_resolved"):
+            # The simulation path makes its own figures in `execute`.
+            return {}
+        sources_text = self._gather_collected_text(state)
+        if not sources_text.strip():
+            self._log.info("[web_plots] no collected content to plot — skipping")
+            return {}
+
+        prompt = self._prompts["web_plots"].safe_substitute(
+            topic=str(state.get("topic", ""))[:500],
+            result_json=json.dumps(
+                state.get("result_json") or {}, ensure_ascii=False,
+            )[:2000],
+            sources=sources_text[:12000],
+        )
+        try:
+            raw = await self._chat(prompt, node="web_plots")
+        except Exception as e:
+            self._log.warning("[web_plots] LLM call failed: %s — skipping", e)
+            return {}
+        script = _strip_outer_fence(raw).strip()
+        if (
+            not script
+            or script.upper().startswith("NO_PLOT")
+            or "matplotlib" not in script
+        ):
+            self._log.info(
+                "[web_plots] model reported no plottable data — skipping",
+            )
+            return {}
+
+        code_dir = self.quest_root / "code"
+        code_dir.mkdir(parents=True, exist_ok=True)
+        plot_script = code_dir / "web_plots.py"
+        plot_script.write_text(script, encoding="utf-8")
+
+        figs_before = set(self._list_figures())
+        install = await self.executor.install(
+            ["matplotlib"], quest_root=self.quest_root,
+        )
+        if install.returncode != 0:
+            self._log.warning(
+                "[web_plots] matplotlib install rc=%d stderr=%s — skipping plots",
+                install.returncode, install.stderr[-200:],
+            )
+            return {}
+        py = self.executor.python_path(self.quest_root)
+        result = await self.executor.execute(
+            [str(py), str(plot_script)],
+            cwd=self.quest_root,
+            timeout_s=min(self.config.execution.timeout_s, 300),
+        )
+        new_figs = [f for f in self._list_figures() if f not in figs_before]
+        if result.returncode != 0:
+            self._log.warning(
+                "[web_plots] plot script rc=%d stderr=%s",
+                result.returncode, result.stderr[-300:],
+            )
+        self._log.info(
+            "[web_plots] produced %d figure(s): %s", len(new_figs), new_figs,
+        )
+        if not new_figs:
+            return {}
+        existing = list(state.get("figures") or [])
+        merged = existing + [f for f in new_figs if f not in existing]
+        return {"figures": merged}
 
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
@@ -4096,6 +4290,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
+        "web_plots",        # no-simulation mode — chart the collected
+                            # web/data content (text-only outputs otherwise)
     )
     out: dict[str, string.Template] = {}
     for n in names:
@@ -4295,6 +4491,129 @@ def _format_lit_from_state(state: QuestState, audience: str = "external") -> str
     if not lines:
         return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
+
+
+def build_references(
+    literature: list[Any],
+    *,
+    audience: str = "external",
+    max_n: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build a clean, de-duplicated, numbered citation list from the
+    quest's retrieved literature (``state['literature']`` dict items
+    ``{content, metadata}`` or ``RetrievedDoc`` objects).
+
+    Applies the same citability + audience rules as the paper's
+    References (:func:`_is_citable` / :func:`_is_audience_appropriate`),
+    so a **web page** (title + URL) is a first-class citation and
+    FI-internal cross-quest memory artifacts are dropped. Shared by the
+    poster + slides generators so every output surfaces the same sources
+    the writer cited. Each entry: ``{n, title, authors, year, venue,
+    doi, arxiv_id, url, site, source}``."""
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in literature or []:
+        if isinstance(item, dict):
+            meta = item.get("metadata") or {}
+        else:
+            meta = getattr(item, "metadata", {}) or {}
+        if not _is_citable(meta) or not _is_audience_appropriate(meta, audience):
+            continue
+        key = (
+            meta.get("doi") or meta.get("arxiv_id") or meta.get("pmid")
+            or meta.get("url") or (meta.get("title") or "")
+        ).lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        authors = meta.get("authors") or []
+        if not isinstance(authors, list):
+            authors = [str(authors)]
+        refs.append({
+            "n": len(refs) + 1,
+            "title": (meta.get("title") or "").strip(),
+            "authors": [a for a in authors if a],
+            "year": meta.get("year") or (meta.get("published") or "")[:4] or "",
+            "venue": meta.get("venue") or meta.get("publisher") or "",
+            "doi": meta.get("doi") or "",
+            "arxiv_id": meta.get("arxiv_id") or "",
+            "url": meta.get("url") or "",
+            "site": meta.get("site") or "",
+            "source": meta.get("source") or "",
+        })
+        if max_n and len(refs) >= max_n:
+            break
+    return refs
+
+
+def _ref_citation_text(r: dict[str, Any]) -> str:
+    """One-line human citation: 'Authors (Year). Title. Venue. URL/DOI'.
+    Falls back gracefully when a web result has only title + URL."""
+    bits: list[str] = []
+    authors = r.get("authors") or []
+    if authors:
+        who = f"{authors[0]} et al." if len(authors) > 3 else ", ".join(authors)
+        bits.append(who + (f" ({r['year']})" if r.get("year") else ""))
+    elif r.get("year"):
+        bits.append(f"({r['year']})")
+    if r.get("title"):
+        bits.append(r["title"])
+    line = ". ".join(b for b in bits if b)
+    tail: list[str] = []
+    if r.get("venue"):
+        tail.append(r["venue"])
+    if r.get("doi"):
+        tail.append(f"DOI: {r['doi']}")
+    elif r.get("arxiv_id"):
+        tail.append(f"arXiv:{r['arxiv_id']}")
+    elif r.get("url"):
+        tail.append(r["url"])
+    if tail:
+        line = f"{line}. {' '.join(tail)}" if line else " ".join(tail)
+    return line.strip()
+
+
+def _latex_esc(s: str) -> str:
+    """Escape LaTeX specials in citation text (URLs carry ``_ & % # ~``).
+    Backslashes become ``/`` (URLs only) so we never collide with the
+    escape sequences we insert; braces are escaped before anything that
+    introduces a backslash."""
+    s = s.replace("\\", "/")
+    for a, b in (
+        ("{", r"\{"), ("}", r"\}"), ("&", r"\&"), ("%", r"\%"),
+        ("$", r"\$"), ("#", r"\#"), ("_", r"\_"),
+        ("~", r"\textasciitilde "), ("^", r"\textasciicircum "),
+    ):
+        s = s.replace(a, b)
+    return s
+
+
+def render_references_marp_slide(refs: list[dict[str, Any]], *, max_n: int = 18) -> str:
+    """A standalone Marp slide listing sources, appended after the LLM's
+    deck so a References slide always lands when sources exist."""
+    if not refs:
+        return ""
+    lines = ["---", "", "## References", ""]
+    lines += [f"{r['n']}. {_ref_citation_text(r)}" for r in refs[:max_n]]
+    if len(refs) > max_n:
+        lines.append(f"\n_(+{len(refs) - max_n} more sources)_")
+    return "\n".join(lines)
+
+
+def render_poster_references_latex(
+    refs: list[dict[str, Any]], *, max_n: int = 12,
+) -> str:
+    """A compact full-width Sources band for the poster footer — injected
+    by the template (not the LLM) so references always render."""
+    if not refs:
+        return ""
+    shown = refs[:max_n]
+    parts = [f"[{r['n']}]~{_latex_esc(_ref_citation_text(r))}" for r in shown]
+    more = "" if len(refs) <= max_n else f" \\quad (+{len(refs) - max_n} more)"
+    return (
+        "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n"
+        "{\\scriptsize\\textbf{Sources:}~ " + " \\quad ".join(parts) + more + "}\n"
+    )
 
 
 _CLARIFY_LABELS = {

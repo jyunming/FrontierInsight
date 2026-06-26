@@ -40,7 +40,11 @@ import string
 from pathlib import Path
 
 from core.config import Config
-from core.engine import QuestArtifacts
+from core.engine import (
+    QuestArtifacts,
+    build_references,
+    render_references_marp_slide,
+)
 from core.provider import (
     LLMClient,
     ProxySupervisor,
@@ -225,8 +229,22 @@ class SlideGenerator:
             if own_supervisor:
                 await sup.shutdown()
 
+        content = _strip_outer_fence(text)
+        # Append a References slide built from the quest's actual sources
+        # (web pages + papers), guaranteed rather than left to the LLM —
+        # the deck author only saw the first 8000 chars of paper.md and
+        # would usually miss the References section at the end. Skip if the
+        # LLM already produced one (avoid a duplicate).
+        refs = build_references(
+            art.raw_state.get("literature") or [],
+            audience=self.config.output.audience,
+        )
+        ref_slide = render_references_marp_slide(refs)
+        if ref_slide and "## References" not in content:
+            content = content.rstrip() + "\n\n" + ref_slide + "\n"
+
         slides_md = out_dir / "slides.md"
-        slides_md.write_text(_strip_outer_fence(text), encoding="utf-8")
+        slides_md.write_text(content, encoding="utf-8")
         _log.info("slides.md written (%d bytes)", slides_md.stat().st_size)
         return slides_md
 
