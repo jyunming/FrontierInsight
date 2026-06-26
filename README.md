@@ -239,6 +239,12 @@ execution:
 
 knowledge:
   enabled: false            # set true after installing Axon
+  # Air-gapped machines: ship the embedding + reranker models once with
+  # `python launch.py --export-models <dir>`, copy <dir> over, then set
+  # the two knobs below (or the FI_MODELS_DIR / FI_OFFLINE env vars) so
+  # no model load touches the network. See docs/INSTALL.md.
+  # models_dir: /path/to/fi-models
+  # offline: true
 
 output:
   kinds: [paper_md]

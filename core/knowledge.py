@@ -61,7 +61,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -87,6 +89,79 @@ except Exception as e:
     AxonBrain = None  # type: ignore[assignment]
     AxonConfig = None  # type: ignore[assignment]
     AxonRetriever = None  # type: ignore[assignment]
+
+
+# Serializes the read-modify-write of the process-global HF env vars in
+# ``_apply_offline_env``. In ``--fleet`` mode several engines build their
+# Knowledge layer around the same time; without the lock two quests could
+# interleave their env mutations, and a quest with a divergent
+# ``offline`` / ``models_dir`` could silently flip another quest's HF
+# config mid-build. The lock also gives us a safe point to detect that
+# divergence and warn instead of clobbering.
+_OFFLINE_ENV_LOCK = threading.Lock()
+
+# HF env values this process has already applied via ``_apply_offline_env``.
+# Lets a later quest's divergent config be recognized as ``--fleet``
+# cross-talk (warn + keep the first FI value) WITHOUT mistaking the user's
+# own pre-existing shell HF env for a conflict — the first apply still
+# overwrites the ambient value so an explicit FI offline/models_dir config
+# always takes effect on a single quest.
+_APPLIED_OFFLINE_ENV: dict[str, str] = {}
+
+
+def _apply_offline_env(cfg: KnowledgeConfig) -> None:
+    """Set Hugging Face offline / local-cache env vars from FI config.
+
+    Enforced at the HF library level (below Axon), so sentence-transformers
+    and transformers load the embedding + reranker weights from the local
+    cache with no network call:
+
+    - ``offline`` → ``HF_HUB_OFFLINE=1`` + ``TRANSFORMERS_OFFLINE=1``. This
+      sidesteps the ``huggingface_hub`` closed-client crash that a missing
+      or flaky network triggers at quest start.
+    - ``models_dir`` → ``HF_HOME`` points at the shipped HF-cache root
+      (``<models_dir>/hub/models--...``). Produce one on a connected
+      machine with ``launch.py --export-models <dir>``.
+
+    Only sets a var when the corresponding knob is active, so a process
+    that already exported its own HF env (and runs with FI defaults off)
+    is left untouched. Process-global by nature — also inherited by the
+    Axon sidecar via ``os.environ.copy()``.
+
+    These vars are process-global, so they can't be made per-quest: a
+    ``--fleet`` run shares one HF env across every quest in the process.
+    To keep that safe and deterministic the mutation runs under
+    ``_OFFLINE_ENV_LOCK`` and is *first-quest-wins*: the first apply still
+    overwrites whatever the shell exported (so an explicit FI config always
+    takes effect), but once FI has applied a value, a later quest whose
+    config would point the same var somewhere different keeps the existing
+    value and logs a warning — rather than yanking the cache out from under
+    a brain another quest may still be lazily loading. The practical
+    contract: a fleet must use a uniform ``offline`` / ``models_dir`` across
+    its quests; a divergent one is surfaced as a warning instead of silent
+    nondeterminism. (Tracking is keyed off ``_APPLIED_OFFLINE_ENV`` so a
+    pre-existing shell HF var is never mistaken for an FI-set one.)
+    """
+    def _set(key: str, value: str) -> None:
+        prior = _APPLIED_OFFLINE_ENV.get(key)
+        if prior is not None and prior != value:
+            _log.warning(
+                "offline-env conflict on %s: this process already applied "
+                "%r for an earlier quest but the current config wants %r. "
+                "HF env vars are process-global, so a --fleet run must use a "
+                "uniform offline/models_dir across its quests; keeping %r.",
+                key, prior, value, prior,
+            )
+            return
+        os.environ[key] = value
+        _APPLIED_OFFLINE_ENV[key] = value
+
+    with _OFFLINE_ENV_LOCK:
+        if cfg.offline:
+            _set("HF_HUB_OFFLINE", "1")
+            _set("TRANSFORMERS_OFFLINE", "1")
+        if cfg.models_dir:
+            _set("HF_HOME", str(cfg.models_dir))
 
 
 # Dedicated Axon project name for FI's corpus. Quest write-back and
@@ -1363,6 +1438,10 @@ class Knowledge:
 
     @staticmethod
     def _build_brain(cfg: KnowledgeConfig) -> Any:
+        # Force offline / local-model loading BEFORE Axon constructs the
+        # embedding model — otherwise transformers makes a network HEAD
+        # check to huggingface.co that crashes on air-gapped machines.
+        _apply_offline_env(cfg)
         if cfg.axon_config is None:
             brain = AxonBrain(AxonConfig())  # type: ignore[misc]
         elif isinstance(cfg.axon_config, Path):

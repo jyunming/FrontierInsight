@@ -16,6 +16,40 @@ def write_cfg(tmp_path: Path, body: dict) -> Path:
     return p
 
 
+def test_knowledge_offline_defaults_off(tmp_path: Path) -> None:
+    """Default: offline knobs are off / unset so normal machines keep
+    fetching models from huggingface.co."""
+    cfg = KnowledgeConfig()
+    assert cfg.offline is False
+    assert cfg.models_dir is None
+
+
+def test_knowledge_offline_from_yaml(tmp_path: Path) -> None:
+    """YAML can pin offline + a local models dir (with ~ expansion)."""
+    cfg = KnowledgeConfig.model_validate(
+        {"offline": True, "models_dir": "~/fi-models"}
+    )
+    assert cfg.offline is True
+    assert cfg.models_dir == Path("~/fi-models").expanduser()
+
+
+def test_knowledge_offline_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``FI_OFFLINE`` / ``FI_MODELS_DIR`` seed the defaults so a machine
+    can be configured offline without per-quest YAML."""
+    monkeypatch.setenv("FI_OFFLINE", "yes")
+    monkeypatch.setenv("FI_MODELS_DIR", str(Path.home() / "m"))
+    cfg = KnowledgeConfig()
+    assert cfg.offline is True
+    assert cfg.models_dir == (Path.home() / "m")
+
+
+def test_knowledge_yaml_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit ``offline: false`` in input wins over a truthy env."""
+    monkeypatch.setenv("FI_OFFLINE", "1")
+    cfg = KnowledgeConfig.model_validate({"offline": False})
+    assert cfg.offline is False
+
+
 def test_minimal_config_loads(tmp_path: Path) -> None:
     cfg = Config.from_yaml(
         write_cfg(tmp_path, {"topic": "test topic", "title": "test-title"})

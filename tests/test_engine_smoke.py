@@ -193,6 +193,65 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_human_feedback_callback_timeout_pause_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wired human-feedback callback that never returns must not park
+    the quest forever (the 2.5 h VSCode-QuickPick hang). After
+    ``human_feedback_timeout_s`` the engine stops waiting, falls back to
+    the headless pause-exit, and returns clean (rc=0) with the review
+    snapshot left on disk for ``--resume``."""
+    import asyncio
+
+    cfg = Config(
+        topic="smoke-test topic for human-feedback timeout",
+        title="hf-timeout-smoke",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            human_feedback_gate="after_review",
+            # auto_accept_on_pass stays False so the callback IS invoked
+            # (proves we exercised the timeout path, not auto-accept).
+            auto_accept_on_pass=False,
+            human_feedback_timeout_s=0.2,  # tiny so the test is fast
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    callback_entered = {"v": False}
+
+    async def hanging_cb(snapshot: dict) -> dict:
+        callback_entered["v"] = True
+        await asyncio.sleep(3600)  # never returns within the test window
+        return {"action": "accept"}  # pragma: no cover
+
+    # Bound the whole run so a regression (a real hang) fails the test
+    # instead of hanging the suite. The bound is generous because the
+    # pipeline does a real venv + pip install before reaching the gate;
+    # once the gate is hit, the internal 0.2 s timeout pause-exits in <1 s.
+    artifacts = await asyncio.wait_for(
+        engine.run(human_feedback_callback=hanging_cb), timeout=240,
+    )
+
+    # The callback was entered → we hit the timeout fallback, not the
+    # auto-accept short-circuit.
+    assert callback_entered["v"] is True
+    # Pause-exit leaves the snapshot on disk so the user can answer +
+    # resume; it is NOT consumed on the timeout path.
+    assert (engine.fi_dir / "human_review.json").is_file()
+    # A partial artifact bundle comes back (paper was written before
+    # review), and knowledge write-back is skipped (quest not accepted).
+    assert artifacts is not None
+
+
+@pytest.mark.asyncio
 async def test_engine_runs_with_clarify_auto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -148,6 +148,47 @@ of `slides.html`, etc.):
 | Docker Desktop | `execution.sandbox: docker` | docker.com/products/docker-desktop |
 | Axon | Knowledge layer (literature search + cross-quest memory) | `pip install axon-rag` |
 
+## Air-gapped / no-network machines
+
+The knowledge layer loads two models from Hugging Face on first use —
+an embedding model (`sentence-transformers/all-MiniLM-L6-v2`, ~92 MB)
+and a reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`, ~92 MB). On a
+machine with no internet that download fails and aborts the quest at
+startup. To run fully offline, ship the models once from a connected
+machine:
+
+1. **On a machine with network**, export the models into a portable
+   Hugging Face cache directory:
+   ```bash
+   python launch.py --export-models ./fi-models
+   ```
+   This produces `./fi-models/hub/models--.../` (~184 MB).
+
+2. **Copy** `fi-models/` to the offline machine (USB, share, etc.).
+
+3. **On the offline machine**, point the knowledge layer at it and turn
+   on offline mode — either per-quest in YAML:
+   ```yaml
+   knowledge:
+     models_dir: /path/to/fi-models
+     offline: true
+   ```
+   …or machine-wide via environment variables (recommended, because the
+   Axon sidecar is launched once at startup before any quest YAML is
+   read):
+   ```bash
+   # Windows (PowerShell)
+   $env:FI_MODELS_DIR = "C:\path\to\fi-models"; $env:FI_OFFLINE = "1"
+   # macOS / Linux
+   export FI_MODELS_DIR=/path/to/fi-models FI_OFFLINE=1
+   ```
+
+`offline` sets `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE`; `models_dir`
+points `HF_HOME` at the local cache. Both the in-process knowledge layer
+and the Axon sidecar honour them, so no model load ever touches the
+network. The env-var form applies across the CLI, web UI, and VSCode
+extension identically.
+
 ## VSCode extension
 
 The companion VSCode chat extension is published separately. Once

@@ -1,0 +1,10 @@
+topic: "low k1 DUV aerial profile simulation for pitch 74nm CD 37nm with extreme dipole source. Keep the simulation code extremely simple, concise and compact (fewer than 8 helper functions total)."
+title: "low_k1_duv_aerial_profile_gemini"
+provider:
+  name: "gemini_cli"
+  model: "gemini-2.5-pro"
+  node_model_fallbacks: {}
+engine:
+  clarify_mode: "off"
+  review_loop: true
+  degenerate_run_guard: true

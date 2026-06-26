@@ -365,6 +365,23 @@ def test_auto_accept_on_pass_reads_config_default(tmp_path: Path) -> None:
     assert eng.auto_accept_on_pass is True
 
 
+def test_human_feedback_timeout_reads_config_default(tmp_path: Path) -> None:
+    """``Engine.human_feedback_timeout_s`` is sourced from
+    ``config.engine.human_feedback_timeout_s`` — default 1800 s, and a
+    custom value flows through unchanged. ``0`` means wait-forever."""
+    eng_default = _engine_with_gate(tmp_path, "after_review")
+    assert eng_default.human_feedback_timeout_s == 1800.0
+    cfg = Config(
+        topic="t", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(human_feedback_timeout_s=0.5),
+        execution=ExecutionConfig(),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    assert Engine(cfg).human_feedback_timeout_s == 0.5
+
+
 def test_auto_accept_on_pass_constructor_arg_overrides_config(
     tmp_path: Path,
 ) -> None:
