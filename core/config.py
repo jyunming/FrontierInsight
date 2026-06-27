@@ -594,6 +594,16 @@ class KnowledgeConfig(BaseModel):
     # the plot step can pull numbers out of it. Budgeted by the same
     # ``full_text_fetch_*`` knobs below. Off → snippets only.
     web_fetch_pages: bool = True
+    # When a direct page fetch is blocked (HTTP 403 — common for
+    # Cloudflare-protected authoritative sites like IEA) or returns nothing,
+    # retry by rendering the page in a headless Chromium via Playwright,
+    # which executes JS and clears most anti-bot challenges so the full
+    # article text is recovered (the difference between a 2-sentence snippet
+    # and a full report). Requires the optional dependency:
+    # ``pip install playwright && playwright install chromium``. Degrades to
+    # a no-op (snippet only) when Playwright/Chromium isn't installed, so
+    # it's safe to leave on. Only fires on a blocked/empty direct fetch.
+    headless_fetch: bool = True
     # Relevance guard. After retrieval/auto-collect, score the gathered
     # docs against the topic; if they are clearly off-topic or empty
     # (e.g. an academic-only collector returning physics preprints for a

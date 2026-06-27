@@ -824,6 +824,30 @@ def test_web_search_drops_low_quality(monkeypatch) -> None:
     assert [d.metadata["url"] for d in out] == ["https://iea.org/x"]
 
 
+def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    class _Blocked:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock(); r.status_code = 403; return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Blocked)
+    monkeypatch.setattr(
+        "core.knowledge._playwright_fetch_html",
+        lambda url, *, timeout_s: "<html><body><article><p>Recovered full text 18%.</p></article></body></html>",
+    )
+    doc = RD("", {"url": "https://iea.example/blocked"})
+    # headless on → recovers via the renderer.
+    out = kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=True)
+    assert out and "Recovered full text 18%." in out
+    # headless off → blocked stays blocked (snippet only).
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
+
+
 def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:
     from core.knowledge import _fetch_web_page_text, RetrievedDoc as RD
 

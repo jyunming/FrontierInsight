@@ -56,6 +56,9 @@ from generation._skip_md import render_skip_md
 _log = logging.getLogger("frontier_insight.slides")
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "slides.md"
+# Custom Marp theme (a polished look layered on the default). Passed to the
+# Marp CLI with --theme; the deck's `theme: fi` front-matter selects it.
+THEME_PATH = Path(__file__).resolve().parent.parent / "templates" / "slides" / "fi.css"
 
 # Marp's stderr signature when its bundled chromium dependency is
 # missing on a fresh install (puppeteer downloads chromium on first
@@ -131,10 +134,15 @@ class SlideGenerator:
                 _MARP_INSTALL_RECIPE,
             )
         else:
+            # Apply the custom FI theme when its CSS is present; fall back to
+            # the deck's built-in theme otherwise.
+            theme_args = (
+                ["--theme", str(THEME_PATH)] if THEME_PATH.is_file() else []
+            )
             for ext in ("html", "pdf"):
                 out_path = out_dir / f"slides.{ext}"
                 ok, fail_reason = await _run_cli(
-                    [marp_exe, str(slides_md), "-o", str(out_path)],
+                    [marp_exe, str(slides_md), *theme_args, "-o", str(out_path)],
                     cwd=out_dir, label=f"marp {ext}",
                 )
                 if ok:

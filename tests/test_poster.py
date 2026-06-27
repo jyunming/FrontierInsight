@@ -108,7 +108,6 @@ async def test_poster_writes_tex_with_substituted_columns(
     payload = {
         "title": "On Toy Scaling",
         "left": r"\textbf{Abstract.} We study scaling.",
-        "middle": r"\textbf{Methods.} Plot \(y\) vs \(x\).",
         "right": r"\textbf{Results.} Monotonic curve.",
     }
 
@@ -127,10 +126,9 @@ async def test_poster_writes_tex_with_substituted_columns(
     tex = result["poster_tex"].read_text(encoding="utf-8")
     assert r"\title{On Toy Scaling}" in tex
     assert r"\textbf{Abstract.} We study scaling." in tex
-    assert r"\textbf{Methods.} Plot \(y\) vs \(x\)." in tex
     assert r"\textbf{Results.} Monotonic curve." in tex
-    # No leftover Python Template placeholders.
-    for placeholder in ("$title", "$left", "$middle", "$right"):
+    # No leftover Python Template placeholders (portrait template: 2 columns).
+    for placeholder in ("$title", "$left", "$right", "$references"):
         assert placeholder not in tex
     # No PDF when pdflatex is suppressed.
     assert "poster_pdf" not in result
@@ -149,8 +147,7 @@ async def test_poster_handles_inline_latex_math_in_llm_output(
     payload = {
         "title": "Energy $E=mc^2$",
         "left": r"Inline math: $\alpha + \beta = \gamma$ and $x^2$.",
-        "middle": r"Two equations: $f(x) = \int_0^1 g(t)\,dt$, $\sum_i a_i$.",
-        "right": r"Bare dollars too: cost is \$5 and value $v$.",
+        "right": r"Two equations: $f(x) = \int_0^1 g(t)\,dt$, $\sum_i a_i$. Bare dollars too: cost is \$5 and value $v$.",
     }
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001

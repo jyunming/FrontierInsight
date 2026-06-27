@@ -868,40 +868,134 @@ def _web_search_source(
     )
 
 
+class _FetchBlocked(Exception):
+    """Internal sentinel: the direct HTTP fetch was blocked (4xx)."""
+
+
+def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
+    """Render ``url`` in a headless Chromium via Playwright and return its
+    HTML. This executes JavaScript and clears most anti-bot challenges
+    (Cloudflare) that block a plain HTTP GET — recovering the full article
+    for authoritative sites (IEA, S&P, …). Optional dependency: returns
+    None (with an actionable one-time hint) when Playwright or its Chromium
+    browser isn't installed. Uses the SYNC API, which is valid here because
+    this runs inside an ``asyncio.to_thread`` worker (no event loop in the
+    thread)."""
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+    except ImportError:
+        if not getattr(_playwright_fetch_html, "_warned", False):
+            _log.info(
+                "knowledge.headless_fetch is on but Playwright isn't installed; "
+                "blocked pages fall back to snippets. Enable full rendering with "
+                "`pip install playwright && playwright install chromium`.",
+            )
+            _playwright_fetch_html._warned = True  # type: ignore[attr-defined]
+        return None
+    _CF_MARKERS = (
+        "just a moment", "performing security verification",
+        "challenge-platform", "checking your browser",
+    )
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                # Mask the most obvious automation signal (navigator.webdriver)
+                # so a JS challenge is more likely to auto-clear.
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                ctx = browser.new_context(
+                    user_agent=_BROWSER_HEADERS["User-Agent"],
+                    viewport={"width": 1280, "height": 900},
+                    locale="en-US",
+                )
+                page = ctx.new_page()
+                page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                # Wait (best-effort) for a Cloudflare-style interstitial to
+                # resolve into the real page before grabbing content.
+                deadline = time.monotonic() + min(timeout_s, 20.0)
+                html = page.content()
+                while time.monotonic() < deadline:
+                    low = html.lower()
+                    if not any(m in low for m in _CF_MARKERS):
+                        break
+                    page.wait_for_timeout(1000)
+                    html = page.content()
+                # If a strict managed challenge (IEA-class Cloudflare) never
+                # cleared, the "Just a moment…" interstitial is NOT content —
+                # return None so the caller keeps the search snippet instead
+                # of storing the challenge page as the source text.
+                if any(m in html.lower() for m in _CF_MARKERS):
+                    _log.info(
+                        "playwright: %s stayed on a bot-challenge page; "
+                        "keeping snippet", url,
+                    )
+                    return None
+                return html
+            finally:
+                browser.close()
+    except Exception as e:
+        _log.info("playwright render %s failed: %s", url, e)
+        return None
+
+
 def _fetch_web_page_text(
-    doc: RetrievedDoc, *, timeout_s: float, max_kb: int,
+    doc: RetrievedDoc, *, timeout_s: float, max_kb: int, headless: bool = False,
 ) -> str | None:
     """Fetch a web result's page and extract readable text so the writer
     can quote real content (not just the snippet) and the plot step can
     pull numbers out of it. Handles HTML, plain text, AND PDFs (a web
     result is often a report PDF — e.g. an IEA outlook). Uses browser-like
-    headers so authoritative sites don't 403 the request. Best-effort:
-    returns None on any failure."""
+    headers; when ``headless`` is set, a blocked (403) or empty direct
+    fetch is retried by rendering the page in headless Chromium via
+    Playwright (clears Cloudflare/JS). Best-effort: returns None on any
+    failure."""
     url = doc.metadata.get("url") or ""
     if not url:
         return None
+    cap = max_kb * 1024
+    blocked = False
     try:
         with httpx.Client(
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             r = c.get(url)
             if r.status_code >= 400:
-                return None
+                blocked = r.status_code in (401, 403, 429)
+                raise _FetchBlocked()
             ctype = (r.headers.get("content-type") or "").lower()
             body = r.content
+    except _FetchBlocked:
+        body = None
     except Exception as e:
         _log.info("web page fetch %s failed: %s", url, e)
-        return None
-    cap = max_kb * 1024
-    head = body[:2048].lstrip().lower()
-    if "application/pdf" in ctype or body[:5] == b"%PDF-":
-        return _pdf_bytes_to_text(body, cap=cap)
-    if "html" in ctype or head.startswith(b"<!doctype html") or b"<html" in head:
-        text = _html_to_text(body.decode("utf-8", errors="replace"))
-        return text[:cap] if text.strip() else None
-    if ctype.startswith("text/") or not ctype:
-        text = body.decode("utf-8", errors="replace")
-        return text[:cap] if text.strip() else None
+        body = None
+        blocked = True
+
+    if body is not None:
+        head = body[:2048].lstrip().lower()
+        if "application/pdf" in ctype or body[:5] == b"%PDF-":
+            text = _pdf_bytes_to_text(body, cap=cap)
+            if text:
+                return text
+        elif "html" in ctype or head.startswith(b"<!doctype html") or b"<html" in head:
+            text = _html_to_text(body.decode("utf-8", errors="replace"))
+            if text.strip():
+                return text[:cap]
+        elif ctype.startswith("text/") or not ctype:
+            text = body.decode("utf-8", errors="replace")
+            if text.strip():
+                return text[:cap]
+
+    # Direct fetch was blocked / empty / non-extractable. Try the headless
+    # renderer (which gets past Cloudflare and JS-only pages).
+    if headless:
+        html = _playwright_fetch_html(url, timeout_s=timeout_s)
+        if html:
+            text = _html_to_text(html)
+            if text.strip():
+                return text[:cap]
     return None
 
 
@@ -1982,12 +2076,15 @@ class Knowledge:
         # real content and the plot step can mine numbers); academic hits
         # opt into PDF full-text via the existing knob.
         if want_web and web_docs and self.cfg.web_fetch_pages:
+            import functools
             web_docs = await _enrich_with_full_text(
                 web_docs,
                 timeout_s=self.cfg.full_text_fetch_timeout_s,
                 total_budget_s=self.cfg.full_text_fetch_total_s,
                 max_kb=self.cfg.full_text_max_kb,
-                fetch_fn=_fetch_web_page_text,
+                fetch_fn=functools.partial(
+                    _fetch_web_page_text, headless=self.cfg.headless_fetch,
+                ),
             )
         if self.cfg.try_fetch_full_text and academic_docs:
             academic_docs = await _enrich_with_full_text(

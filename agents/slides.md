@@ -15,12 +15,12 @@ Compress the paper into a Marp slide deck of **8–12 slides**. Embed each figur
 - Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as scope ("Regional attribution beyond top-line shares is out of scope here"), not as a confession about tooling.
 - When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
 
-## Style — use a clean, professional theme
-Start the deck with this front-matter (gaia is a polished built-in Marp theme; far better than the bare default):
+## Style — use the project's clean theme
+Start the deck with exactly this front-matter (`fi` is Frontier Insight's polished custom theme, applied by the renderer):
 ```
 ---
 marp: true
-theme: gaia
+theme: fi
 paginate: true
 size: 16:9
 ---

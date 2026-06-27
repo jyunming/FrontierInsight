@@ -106,7 +106,7 @@ class PosterGenerator:
                 await sup.shutdown()
 
         parsed = _lenient_json(text) or {
-            "title": "Untitled", "left": "", "middle": "", "right": ""
+            "title": "Untitled", "left": "", "right": ""
         }
         # Sources band — built from the quest's actual retrieved
         # literature (web pages carry citable URLs) and injected straight
@@ -125,7 +125,6 @@ class PosterGenerator:
         body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
             title=parsed.get("title") or "Untitled",
             left=parsed.get("left") or "",
-            middle=parsed.get("middle") or "",
             right=parsed.get("right") or "",
             references=references_tex,
         )

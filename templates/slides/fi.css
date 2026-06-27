@@ -1,0 +1,82 @@
+/* @theme fi */
+/* Frontier Insight slide theme — a clean, modern deck look layered on
+   Marp's default. Passed to the Marp CLI via `--theme` by
+   generation/slides.py; the deck front-matter selects it with `theme: fi`. */
+
+@import 'default';
+
+:root {
+  --fi-ink: #1a202c;
+  --fi-accent: #2b6cb0;
+  --fi-accent-soft: #4299e1;
+  --fi-muted: #5b6776;
+  --fi-bg: #ffffff;
+  --fi-band: #eef3fb;
+}
+
+section {
+  font-family: "Segoe UI", "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif;
+  font-size: 26px;
+  line-height: 1.4;
+  color: var(--fi-ink);
+  background: var(--fi-bg);
+  padding: 56px 68px;
+}
+
+section h1 {
+  color: var(--fi-accent);
+  font-size: 1.7em;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.4em;
+}
+
+section h2 {
+  color: var(--fi-accent);
+  font-size: 1.25em;
+  font-weight: 700;
+  border-bottom: 3px solid var(--fi-accent-soft);
+  padding-bottom: 0.18em;
+  margin: 0 0 0.6em;
+}
+
+section strong { color: var(--fi-accent); font-weight: 700; }
+section em { color: var(--fi-muted); }
+section a { color: var(--fi-accent-soft); text-decoration: none; }
+
+section ul { margin-top: 0.2em; }
+section li { margin: 0.28em 0; }
+section li::marker { color: var(--fi-accent-soft); }
+
+section blockquote {
+  border-left: 5px solid var(--fi-accent-soft);
+  background: var(--fi-band);
+  color: var(--fi-ink);
+  padding: 0.5em 0.9em;
+  font-style: normal;
+  border-radius: 4px;
+}
+
+section table { font-size: 0.9em; }
+section th { background: var(--fi-band); color: var(--fi-accent); }
+
+section img { border-radius: 6px; }
+
+/* Centered emphasis for the title / closing slides (<!-- _class: lead -->). */
+section.lead {
+  justify-content: center;
+  text-align: center;
+  background: linear-gradient(160deg, #ffffff 0%, var(--fi-band) 100%);
+}
+section.lead h1 { font-size: 2.2em; }
+section.lead h2 { border: none; color: var(--fi-muted); font-weight: 600; }
+
+/* Page number + a subtle bottom rule. */
+section::after {
+  color: var(--fi-muted);
+  font-size: 0.6em;
+}
+
+/* The auto-appended References slide: smaller so many sources fit. */
+section h2#references + ol,
+section:has(h2 + ol) ol { font-size: 0.7em; line-height: 1.3; }

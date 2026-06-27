@@ -158,6 +158,23 @@ DuckDuckGo backend, but for materially better relevance + rate limits, add a
 queries/month). This is the same `BRAVE_API_KEY` Axon uses, so one key serves
 both.
 
+**Full-page fetch on protected sites (optional).** Many authoritative sources
+(IEA, S&P, …) sit behind Cloudflare and return `403` to a plain request, so FI
+only sees the search snippet. Install Playwright to let FI render those pages
+in a headless browser and recover the full article (controlled by
+`knowledge.headless_fetch`, on by default — a no-op until Playwright is
+installed):
+
+```bash
+pip install playwright
+playwright install chromium   # one-time ~110 MB browser download
+```
+
+It recovers most blocked pages; the very strictest managed-challenge sites
+(e.g. iea.org itself) still block headless browsers — for those, FI falls
+back to the snippet, and the site's PDF / open-data version (which FI does
+extract) is the reliable path.
+
 ```bash
 # macOS / Linux
 export BRAVE_API_KEY=BSA...your-key...
