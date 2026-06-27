@@ -22,7 +22,11 @@ Layout convention (portrait, 2 columns):
 
 Do **NOT** write a References / Sources / Bibliography section — a numbered Sources band is auto-generated from the quest's actual retrieved sources and placed across the bottom of the poster. Spend the column space on content instead. You may still refer to a source inline by its site/author in prose where it strengthens a claim.
 
-**Present findings, not process.** A poster is read by an audience — lead with what the research found (numbers, trends, comparisons). Do NOT narrate the pipeline ("this run", "the collector", "the dataset was not recovered", "snippets", "auto-collected"). Keep any caveats to a short scope note, not a tooling confession. Avoid emoji and non-ASCII symbols (they break the LaTeX compile).
+**Lead with concrete numbers, not caveats.** A poster must open with the strongest, most specific findings you have — real percentages, volumes, growth rates, rankings (e.g. "Norway 95%, Sweden 60%", "US 1.6M sales", "+40% to 1.3M"). Those are the headline. If the source paper dwells on what's *missing* or *unresolved*, IGNORE that framing and mine it for the positive datapoints instead. Hard limits:
+- The FIRST block of EACH column must be a concrete finding, never a limitation.
+- Limitations get **at most one short line** total ("Regional/powertrain split beyond top-line shares is out of scope"). Never a "What Cannot Be Claimed" block, never a column of caveats.
+- Do NOT narrate the pipeline ("this run", "the collector", "not measured here", "remains unresolved", "snippets", "auto-collected").
+- Avoid emoji and non-ASCII symbols (they break the LaTeX compile).
 
 # Output format
 Respond with a single JSON object, no prose, no markdown fence:
