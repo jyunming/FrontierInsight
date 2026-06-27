@@ -151,13 +151,30 @@ def test_jobs_endpoint_discovers_cli_quest_via_run_log(tmp_path: Path) -> None:
 
     r = client.get("/api/jobs")
     assert r.status_code == 200
-    ids = {j["job_id"] for j in r.json()["jobs"]}
-    assert "1700000000-cli-quest-aaaa11" in ids
+    jobs = {j["job_id"]: j for j in r.json()["jobs"]}
+    assert "1700000000-cli-quest-aaaa11" in jobs
+    # Recent run.log + no summary.json → inferred running (alive), even
+    # though the launcher never spawned it.
+    assert jobs["1700000000-cli-quest-aaaa11"]["alive"] is True
 
     # And its log is readable via the job-detail endpoint (run.log fallback).
     r2 = client.get("/api/jobs/1700000000-cli-quest-aaaa11")
     assert r2.status_code == 200
     assert any("authoring paper.md" in ln for ln in r2.json().get("log_tail", []))
+    assert r2.json()["alive"] is True
+
+
+def test_jobs_endpoint_finished_cli_quest_not_alive(tmp_path: Path) -> None:
+    """A finished CLI quest (has a summary.json) shows up but NOT as alive."""
+    _mk_quest_dir(
+        tmp_path, "1700000000-done-bbbb22",
+        log_body="[1700000000-done-bbbb22] [review] done\n",
+        summary={"quest_id": "1700000000-done-bbbb22", "provider": "openai"},
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    jobs = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["1700000000-done-bbbb22"]["alive"] is False
 
 
 def test_app_quest_detail_endpoint(tmp_path: Path) -> None:
