@@ -166,6 +166,14 @@ export BRAVE_API_KEY=BSA...your-key...
 $env:BRAVE_API_KEY = "BSA...your-key..."
 ```
 
+Or drop it in a **`.env`** file at the repo root (FI loads `.env` at
+startup; real environment variables still win over it, and `.env` is
+git-ignored):
+
+```env
+BRAVE_API_KEY=BSA...your-key...
+```
+
 Or set it per-quest in YAML (`knowledge.brave_api_key: BSA...`). Disable web
 search entirely with `knowledge.web_search: false`; force a backend with
 `knowledge.web_search_backend: brave | duckduckgo` (default `auto` = Brave

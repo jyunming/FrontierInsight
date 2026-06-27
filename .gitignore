@@ -31,3 +31,7 @@ outputs/
 tstex_modules/
 tools/
 .claude/
+
+# Local secrets (Brave / CORE API keys, etc.) — never commit
+.env
+.env.*

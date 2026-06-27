@@ -137,6 +137,29 @@ def test_app_list_quests_endpoint_returns_quest_dirs(tmp_path: Path) -> None:
     assert ids == {"q1", "q2"}
 
 
+def test_jobs_endpoint_discovers_cli_quest_via_run_log(tmp_path: Path) -> None:
+    """A quest started directly via `python launch.py` writes .fi/run.log
+    but no .fi/launch.log. It must still appear in the Jobs tab — the
+    frontend has to be consistent regardless of how the quest was started."""
+    # CLI-style quest: run.log only, no launch.log.
+    _mk_quest_dir(
+        tmp_path, "1700000000-cli-quest-aaaa11",
+        log_body="[1700000000-cli-quest-aaaa11] [write] authoring paper.md\n",
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    r = client.get("/api/jobs")
+    assert r.status_code == 200
+    ids = {j["job_id"] for j in r.json()["jobs"]}
+    assert "1700000000-cli-quest-aaaa11" in ids
+
+    # And its log is readable via the job-detail endpoint (run.log fallback).
+    r2 = client.get("/api/jobs/1700000000-cli-quest-aaaa11")
+    assert r2.status_code == 200
+    assert any("authoring paper.md" in ln for ln in r2.json().get("log_tail", []))
+
+
 def test_app_quest_detail_endpoint(tmp_path: Path) -> None:
     _mk_quest_dir(
         tmp_path, "q-detail",

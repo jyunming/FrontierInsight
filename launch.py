@@ -999,6 +999,39 @@ async def _cli_human_feedback_callback(
     return {"action": action, "feedback": feedback}
 
 
+def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:
+    """For a quest started directly (``python launch.py``), drop a small
+    launch record at ``<quest>/.fi/launch.log`` so every quest — however it
+    was started — carries the same artifact and appears in the dashboard
+    Jobs tab. Skipped when ``FI_LAUNCH_LOG_CAPTURED=1`` (the web/VSCode
+    launcher already captures the subprocess stdout to that file, and a
+    second writer would race it) or when the file already exists.
+    Best-effort: never fails the run. Live node-by-node progress always
+    lives in ``run.log``; this is the launch-level breadcrumb."""
+    if os.environ.get("FI_LAUNCH_LOG_CAPTURED") == "1":
+        return
+    try:
+        fi_dir = engine.quest_root / ".fi"
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        log_path = fi_dir / "launch.log"
+        if log_path.exists():
+            return
+        import datetime as _dt
+        now = _dt.datetime.now().isoformat(timespec="seconds")
+        action = "resume" if resume else "start"
+        log_path.write_text(
+            "[FI] launch.log — quest started directly via `python launch.py`\n"
+            f"[FI] {action} quest_id={engine.quest_id}\n"
+            f"[FI] provider={cfg.provider.name} "
+            f"model={cfg.provider.model or '(cli-default)'}\n"
+            f"[FI] started_at={now}\n"
+            "[FI] live node-by-node progress is in run.log (same folder).\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
 async def run_one(
     cfg: Config,
     *,
@@ -1024,6 +1057,7 @@ async def run_one(
         print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name}")
     else:
         print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
+    _write_launch_record(engine, cfg, resume=resume_quest_id is not None)
     # Drop a copy of the source YAML into the quest dir so future
     # `--resume`s (and the VSCode `/resume` command) can find the
     # config trivially at `<quest_root>/config.yaml` instead of
@@ -2878,7 +2912,38 @@ def _list_drafts(output_root: Path) -> int:
     return 0
 
 
+def _load_dotenv(path: str = ".env") -> None:
+    """Minimal zero-dependency ``.env`` loader. Reads ``KEY=VALUE`` lines
+    from a ``.env`` in the working directory (if present) into
+    ``os.environ`` WITHOUT overriding values already set in the real
+    environment (env wins over ``.env`` — the dotenv convention). Lets
+    users keep secrets like ``BRAVE_API_KEY`` / ``CORE_API_KEY`` out of
+    their YAML and shell profile. Silently no-ops if the file is absent or
+    unreadable. Mirrors how the Axon sidecar already loads its ``.env``."""
+    p = Path(path)
+    if not p.is_file():
+        return
+    try:
+        for raw in p.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[len("export "):].strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except OSError:
+        return
+
+
 def main() -> int:
+    # Load .env before anything reads the environment (KnowledgeConfig's
+    # brave_api_key / offline defaults resolve BRAVE_API_KEY / FI_* at
+    # Config construction time).
+    _load_dotenv()
     args = parse_args()
     try:
         return asyncio.run(main_async(args))

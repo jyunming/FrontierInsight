@@ -971,12 +971,19 @@ def make_app(
             if stat is not None:
                 candidates.append((jid, lp, stat[0], stat[1]))
 
-        # 1a. Per-quest launch logs at <quest>/.fi/launch.log.
+        # 1a. Per-quest logs at <quest>/.fi/. Prefer the captured-stdout
+        # launch.log (written when the quest was spawned by the launcher),
+        # but fall back to the engine's run.log — which EVERY quest writes
+        # regardless of how it was started — so a quest launched directly
+        # via `python launch.py` (no launcher subprocess, no launch.log)
+        # still appears in the Jobs tab, consistent with web/VSCode runs.
         if out_root.is_dir():
             for quest_dir in out_root.iterdir():
                 if not quest_dir.is_dir() or quest_dir.name.startswith("_"):
                     continue
                 lp = quest_dir / ".fi" / "launch.log"
+                if not lp.is_file():
+                    lp = quest_dir / ".fi" / "run.log"
                 if lp.is_file():
                     _add(quest_dir.name, lp)
         # 1b. Per-tool-job logs at _jobs/<job_id>/launch.log.
@@ -1136,6 +1143,10 @@ def make_app(
         log_path: Path | None = None
         for candidate in (
             out_root / job_id / ".fi" / "launch.log",
+            # Fall back to the engine's run.log so a quest started directly
+            # via `python launch.py` (no captured-stdout launch.log) still
+            # has a readable log in the Jobs tab — same as web/VSCode runs.
+            out_root / job_id / ".fi" / "run.log",
             out_root / "_jobs" / job_id / "launch.log",
             out_root / "_logs" / f"{job_id}.log",
         ):
