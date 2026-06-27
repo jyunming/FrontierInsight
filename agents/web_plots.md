@@ -10,10 +10,13 @@ $result_json
 $sources
 
 # Your task
-If — and ONLY if — the sources contain concrete quantitative data that would be clearer as a chart, write a SINGLE self-contained Python script using matplotlib that produces **a figure for every distinct quantitative series the sources support** — be thorough, aim for **4–6 figures when the data allows** (only fewer if the sources genuinely lack the numbers). Mine the sources for every chartable angle:
+Write a SINGLE self-contained Python script using matplotlib that charts the quantitative data in the sources. **Be generous, not all-or-nothing:** if the sources contain ANY numbers worth showing — even a few regional shares, a couple of yearly values, or a single ranking — produce a chart for them. Aim for **as many figures as the data supports (up to ~6)**, but **always produce at least one or two** whenever any numbers are present. Even 3–4 datapoints (e.g. "China 65%, Europe 17%, US 7%") make a perfectly good bar chart.
 
+Mine the sources for every chartable angle:
 - **time series** (a metric by year), **breakdowns** (shares by region / category / segment), **comparisons** (entities side by side), **rankings** (top-N), **distributions**, and **before/after** contrasts.
 - Each figure should answer one question. Prefer several focused charts over one cramped multi-panel.
+
+Only emit `NO_PLOT` (below) when the sources are **purely qualitative** — literally no numbers to plot. A thin-but-numeric source is still a plot, not a NO_PLOT.
 
 The script must:
 
