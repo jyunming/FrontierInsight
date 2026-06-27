@@ -763,6 +763,69 @@ def test_html_to_text_strips_chrome_and_tags() -> None:
     assert "- one" in out and "- two" in out
 
 
+def test_html_to_text_appends_figure_captions_and_prefers_article() -> None:
+    from core.knowledge import _html_to_text
+    html = (
+        "<html><body><nav>chrome junk</nav>"
+        "<article><h1>EV Report</h1><p>BEV share hit 18%.</p>"
+        "<figure><img src='x.png' alt='EV sales by region 2024'>"
+        "<figcaption>Figure 1: regional EV shares</figcaption></figure>"
+        "</article><footer>more junk</footer></body></html>"
+    )
+    out = _html_to_text(html)
+    assert "BEV share hit 18%." in out
+    assert "chrome junk" not in out          # nav dropped
+    assert "[FIGURES IN SOURCE]" in out
+    assert "Figure 1: regional EV shares" in out
+    assert "EV sales by region 2024" in out  # img alt surfaced
+
+
+def test_brave_search_folds_extra_snippets(monkeypatch) -> None:
+    from core.knowledge import _brave_search
+    payload = _brave_payload({
+        "title": "EV outlook", "url": "https://e.com/x",
+        "description": "BEV share rose.",
+        "extra_snippets": ["China led at 35%.", "Europe held ~21%."],
+    })
+
+    class _Ok:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, params=None, headers=None, **_):
+            r = MagicMock(); r.json = lambda: payload; r.raise_for_status = MagicMock()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Ok)
+    docs = _brave_search("ev", 3, api_key="BSAk")
+    snip = docs[0].metadata["snippet"]
+    assert "BEV share rose." in snip
+    assert "China led at 35%." in snip and "Europe held ~21%." in snip
+
+
+def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:
+    from core.knowledge import _fetch_web_page_text, RetrievedDoc as RD
+
+    class _PdfResp:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "application/pdf"}
+            r.content = b"%PDF-1.7\nfake"
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _PdfResp)
+    monkeypatch.setattr(
+        "core.knowledge._pdf_bytes_to_text",
+        lambda body, *, cap: "EXTRACTED PDF TEXT",
+    )
+    doc = RD("", {"url": "https://iea.example/report.pdf"})
+    assert _fetch_web_page_text(doc, timeout_s=5, max_kb=32) == "EXTRACTED PDF TEXT"
+
+
 def _fake_retriever(docs):
     class _R:
         def invoke(self, _q):

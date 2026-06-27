@@ -243,6 +243,57 @@ def test_web_plots_passthrough_in_simulation_mode(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# No-sim collector reuses already-retrieved literature (no web re-query)
+# ---------------------------------------------------------------------------
+
+
+def test_literature_seed_writes_files_with_source_urls(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    auto_dir = eng.quest_root / "data" / "auto_collected"
+    state = {"literature": [
+        {"content": "EV outlook body", "metadata": {
+            "source": "web_search", "kind": "web_page",
+            "title": "IEA Global EV Outlook", "url": "https://iea.org/ev"}},
+        {"content": "internal", "metadata": {"kind": "fi_paper_spine", "title": "mem"}},
+        {"content": "x", "metadata": {}},  # no title/url → skipped
+    ]}
+    n = eng._literature_seed_step(state, auto_dir)
+    assert n == 1
+    files = list(auto_dir.glob("*.md"))
+    assert len(files) == 1
+    txt = files[0].read_text(encoding="utf-8")
+    assert "https://iea.org/ev" in txt   # source URL preserved in front matter
+    assert "EV outlook body" in txt
+
+
+def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
+    """The fix for the live-run failure: when the literature node already
+    fetched sources, the no-sim collector writes those to disk and does NOT
+    re-query the web (which can be rate-limited and come back empty)."""
+    eng = _engine(tmp_path)
+    called = {"asearch": False}
+
+    async def fake_asearch(*a, **k):
+        called["asearch"] = True
+        return []
+    eng.knowledge.asearch = fake_asearch
+    eng.knowledge.enabled = True
+
+    state = {
+        "no_simulation_resolved": True, "topic": "ev market share",
+        "literature": [{
+            "content": "2018: 2.0M, 2024: 17M EVs sold",
+            "metadata": {"source": "web_search", "kind": "web_page",
+                         "title": "IEA EV Outlook", "url": "https://iea.org/ev"}},
+        ],
+    }
+    out = asyncio.run(eng._node_auto_collect_data(state))
+    assert out["auto_collected_count"] >= 1
+    assert called["asearch"] is False  # reused literature; no redundant web query
+    assert (eng.quest_root / "data" / "auto_collected").is_dir()
+
+
+# ---------------------------------------------------------------------------
 # References land in poster + slides (end-to-end through the generators)
 # ---------------------------------------------------------------------------
 

@@ -548,19 +548,119 @@ def _url_host(url: str) -> str:
         return ""
 
 
-def _html_to_text(html: str) -> str:
-    """Best-effort HTML → readable plain text with no heavy dependency.
-    Drops script/style/nav/chrome blocks, turns block elements into line
-    breaks, strips remaining tags, unescapes entities, and collapses
-    whitespace. Good enough for the writer to quote and for the plot step
-    to pull numbers out of; not a full article extractor."""
+# A realistic browser header set. Many authoritative sites (IEA, S&P
+# Global, etc.) return 403 to a request whose User-Agent advertises a bot
+# (our old ``compatible; FrontierInsight/1.0``). These headers look like an
+# ordinary Chrome request and clear the simple UA filters — NOT Cloudflare-
+# grade JS challenges, which need a real browser and are out of scope.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "application/pdf;q=0.9,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+}
+
+
+def _pdf_bytes_to_text(body: bytes, *, cap: int) -> str | None:
+    """Extract text from in-memory PDF bytes via pypdf, capped at ``cap``
+    bytes. Returns None when pypdf is missing or the parse fails."""
+    try:
+        import pypdf  # type: ignore[import-not-found]
+        from io import BytesIO
+    except ImportError:
+        _log.info("pypdf not installed; cannot extract fetched PDF text")
+        return None
+    try:
+        reader = pypdf.PdfReader(BytesIO(body))
+    except Exception as e:
+        _log.info("fetched PDF parse failed: %s", e)
+        return None
+    parts: list[str] = []
+    total = 0
+    for page in reader.pages:
+        try:
+            txt = page.extract_text() or ""
+        except Exception:
+            continue
+        if not txt.strip():
+            continue
+        parts.append(txt)
+        total += len(txt.encode("utf-8", errors="replace"))
+        if total >= cap:
+            break
+    if not parts:
+        return None
+    return "\n\n".join(parts)[:cap]
+
+
+def _main_region(html: str) -> str:
+    """Inner HTML of the first sizeable ``<article>`` / ``<main>`` element
+    (drops site chrome) when present; else the whole document."""
+    for tag in ("article", "main"):
+        m = re.search(rf"(?is)<{tag}\b[^>]*>(.*?)</{tag}>", html)
+        if m and len(m.group(1)) > 200:
+            return m.group(1)
+    return html
+
+
+def _figure_note(html: str) -> str:
+    """Collect figure captions + image alt-text from the page so the writer
+    knows what visuals the source carried — datapoints often live in chart
+    captions. We surface them as text; we do NOT download the images
+    (licensing + relevance make auto-embedding unsafe). '' when none."""
     import html as _htmlmod
-    # Remove non-content blocks wholesale (with their inner text).
+    caps: list[str] = []
+    for m in re.finditer(r"(?is)<figcaption\b[^>]*>(.*?)</figcaption>", html):
+        t = _htmlmod.unescape(re.sub(r"<[^>]+>", " ", m.group(1))).strip()
+        if t:
+            caps.append(t)
+    for m in re.finditer(r'(?is)<img\b[^>]*\balt=["\']([^"\']{8,200})["\']', html):
+        caps.append(m.group(1).strip())
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for c in caps:
+        k = c.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(c)
+        if len(uniq) >= 8:
+            break
+    if not uniq:
+        return ""
+    return "\n\n[FIGURES IN SOURCE]\n" + "\n".join(f"- {c}" for c in uniq)
+
+
+def _html_to_text(html: str) -> str:
+    """HTML → readable text. Prefers ``trafilatura`` main-content extraction
+    when it's installed (clean article body, drops boilerplate); otherwise
+    isolates the ``<article>`` / ``<main>`` region and strips tags. Appends
+    a short list of the source's figure captions / image alt-text so the
+    writer is aware of the visuals (we don't fetch the images themselves)."""
+    figs = _figure_note(html)
+    # 1. Best path: trafilatura main-content extraction, if available.
+    try:
+        import trafilatura  # type: ignore[import-not-found]
+        extracted = trafilatura.extract(
+            html, include_comments=False, include_tables=True,
+        )
+        if extracted and extracted.strip():
+            return (extracted.strip() + figs).strip()
+    except Exception:
+        pass
+    # 2. Fallback: prefer the main article region, then strip tags.
+    import html as _htmlmod
+    region = _main_region(html)
     text = re.sub(
         r"(?is)<(script|style|noscript|nav|header|footer|aside|form|svg)\b.*?</\1>",
-        " ", html,
+        " ", region,
     )
-    # Block-level closers / breaks → newlines so structure survives.
     text = re.sub(r"(?i)<li\b[^>]*>", "\n- ", text)
     text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/ul|/ol)\s*/?>", "\n", text)
     text = re.sub(r"<[^>]+>", " ", text)          # strip all remaining tags
@@ -568,7 +668,7 @@ def _html_to_text(html: str) -> str:
     lines = [ln.strip() for ln in text.splitlines()]
     text = "\n".join(ln for ln in lines if ln)
     text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
+    return (text.strip() + figs).strip()
 
 
 def _brave_search(
@@ -603,13 +703,22 @@ def _brave_search(
         url = item.get("url") or ""
         # Brave wraps matched terms in <strong>; strip the markup.
         snippet = re.sub(r"<[^>]+>", "", item.get("description") or "").strip()
+        # Brave returns up to ~5 ``extra_snippets`` per result — extra
+        # sentences pulled from the page. Fold them in so even a result
+        # whose page later 403s the fetch still contributes several
+        # datapoints to the research.
+        extras = item.get("extra_snippets") or []
+        extra_text = "\n".join(
+            re.sub(r"<[^>]+>", "", e).strip() for e in extras if e
+        ).strip()
+        full_snippet = f"{snippet}\n{extra_text}".strip() if extra_text else snippet
         site = (item.get("meta_url") or {}).get("hostname") or _url_host(url)
         published = item.get("page_age") or item.get("age") or ""
         out.append(RetrievedDoc(
-            content=f"{title}\n\n{snippet}".strip(),
+            content=f"{title}\n\n{full_snippet}".strip(),
             metadata={
                 "source": "web_search", "backend": "brave", "kind": "web_page",
-                "title": title, "url": url, "snippet": snippet,
+                "title": title, "url": url, "snippet": full_snippet,
                 "site": site, "published": published,
             },
         ))
@@ -643,8 +752,7 @@ def _ddg_search(
         return []
     try:
         with httpx.Client(
-            timeout=timeout_s, follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; FrontierInsight/1.0)"},
+            timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             r = c.post("https://html.duckduckgo.com/html/", data={"q": query.strip()})
             r.raise_for_status()
@@ -720,15 +828,16 @@ def _fetch_web_page_text(
 ) -> str | None:
     """Fetch a web result's page and extract readable text so the writer
     can quote real content (not just the snippet) and the plot step can
-    pull numbers out of it. HTML / plain-text only; PDFs are left to the
-    academic full-text path. Best-effort: returns None on any failure."""
+    pull numbers out of it. Handles HTML, plain text, AND PDFs (a web
+    result is often a report PDF — e.g. an IEA outlook). Uses browser-like
+    headers so authoritative sites don't 403 the request. Best-effort:
+    returns None on any failure."""
     url = doc.metadata.get("url") or ""
     if not url:
         return None
     try:
         with httpx.Client(
-            timeout=timeout_s, follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; FrontierInsight/1.0)"},
+            timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             r = c.get(url)
             if r.status_code >= 400:
@@ -740,6 +849,8 @@ def _fetch_web_page_text(
         return None
     cap = max_kb * 1024
     head = body[:2048].lstrip().lower()
+    if "application/pdf" in ctype or body[:5] == b"%PDF-":
+        return _pdf_bytes_to_text(body, cap=cap)
     if "html" in ctype or head.startswith(b"<!doctype html") or b"<html" in head:
         text = _html_to_text(body.decode("utf-8", errors="replace"))
         return text[:cap] if text.strip() else None

@@ -1915,19 +1915,28 @@ class Engine:
         query = f"{topic} {hypothesis}".strip() or topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
-        # ---- Axon retrieval ----------------------------------------
-        # Independent failure mode from dataset adapters — when Axon
-        # is disabled / raises / returns nothing, we still want
-        # dataset adapters to run (a user who configured
-        # ``dataset_adapters: [worldbank]`` would otherwise get
-        # nothing whenever the corpus is empty/broken). All three
-        # short-circuits here only skip the AXON branch.
-        axon_written = await self._axon_collect_step(query, auto_dir)
+        # ---- Reuse already-retrieved literature --------------------
+        # The literature node ran earlier in the graph and already
+        # fetched (and, with web_fetch_pages, read the full text of) a
+        # set of web/Axon sources into state["literature"]. Persist those
+        # to disk FIRST so the no-simulation path reuses them instead of
+        # re-querying the web — which both wastes the work and, on the
+        # keyless DuckDuckGo backend, can get rate-limited (HTTP 302 →
+        # 50x) on the Nth query of a quest and come back empty.
+        lit_written = self._literature_seed_step(state, auto_dir)
+
+        # ---- Axon / web retrieval (top-up) -------------------------
+        # Only fire a fresh knowledge-layer query when the literature
+        # node gave us nothing to reuse — avoids the redundant,
+        # rate-limit-prone re-search in the common case.
+        axon_written = 0
+        if lit_written == 0:
+            axon_written = await self._axon_collect_step(query, auto_dir)
 
         # ---- Dataset adapters --------------------------------------
         adapter_written = await self._run_dataset_adapters(query, auto_dir)
 
-        written = axon_written + adapter_written
+        written = lit_written + axon_written + adapter_written
         # If neither side wrote anything, clean up any empty top-level
         # auto_collected/ dir that might have been created mid-flight.
         if written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
@@ -1940,10 +1949,54 @@ class Engine:
                 )
         self._log.info(
             "[auto_collect] wrote %d total file(s) under %s "
-            "(axon=%d, adapters=%d)",
-            written, auto_dir, axon_written, adapter_written,
+            "(literature_reuse=%d, axon=%d, adapters=%d)",
+            written, auto_dir, lit_written, axon_written, adapter_written,
         )
         return {"auto_collected_count": written}
+
+    def _literature_seed_step(self, state: QuestState, auto_dir: Path) -> int:
+        """Persist the web/Axon sources the literature node already fetched
+        (``state['literature']``) into ``auto_dir`` as Markdown files so the
+        no-simulation path reuses them instead of re-querying. Returns the
+        count written. Keeps only real, citable entries (a title or URL);
+        skips FI-internal cross-quest artifacts. Each file carries the
+        source URL/title in its front matter (via ``_render_auto_collected_md``)
+        so it stays cite-able downstream."""
+        lit = state.get("literature") or []
+        if not lit:
+            return 0
+        written = 0
+        for idx, item in enumerate(lit, start=1):
+            if isinstance(item, dict):
+                meta = item.get("metadata") or {}
+                content = item.get("content") or ""
+            else:
+                meta = getattr(item, "metadata", {}) or {}
+                content = getattr(item, "content", "") or ""
+            if not (meta.get("title") or meta.get("url")):
+                continue
+            if meta.get("kind") in _FI_INTERNAL_KINDS:
+                continue
+            slug = _slugify(
+                str(meta.get("title") or meta.get("source") or f"lit{idx}")
+            )[:40] or f"lit{idx}"
+            target = auto_dir / f"lit_{idx:03d}_{slug}.md"
+            body = _render_auto_collected_md(idx, meta, content)
+            try:
+                auto_dir.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding="utf-8")
+                written += 1
+            except OSError as e:
+                self._log.warning(
+                    "[auto_collect] failed to write literature seed %s: %s "
+                    "— skipping", target, e,
+                )
+        if written:
+            self._log.info(
+                "[auto_collect] reused %d already-retrieved literature doc(s) "
+                "as data (no re-query needed)", written,
+            )
+        return written
 
     async def _axon_collect_step(self, query: str, auto_dir: Path) -> int:
         """Axon-backed retrieval. Returns the
