@@ -24,6 +24,8 @@ Layout convention:
 
 Do **NOT** write a References / Sources / Bibliography section — a numbered Sources band is auto-generated from the quest's actual retrieved sources and placed across the bottom of the poster. Spend the column space on content instead. You may still refer to a source inline by its site/author in prose where it strengthens a claim.
 
+**Present findings, not process.** A poster is read by an audience — lead with what the research found (numbers, trends, comparisons). Do NOT narrate the pipeline ("this run", "the collector", "the dataset was not recovered", "snippets", "auto-collected"). Keep any caveats to a short scope note, not a tooling confession. Avoid emoji and non-ASCII symbols (they break the LaTeX compile).
+
 # Output format
 Respond with a single JSON object, no prose, no markdown fence:
 

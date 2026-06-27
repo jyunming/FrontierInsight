@@ -533,10 +533,12 @@ class Engine:
                                     continue
                             data_paused = True
                             self._log.info(
-                                "[FI] paused for human review: write your decision into "
-                                "%s/.fi/human_review_answer.json (action: accept/reject/refine, "
-                                "feedback: '...'), then run `fi --resume %s`",
-                                self.quest_root, self.quest_id,
+                                "[FI] paused for human review. Decide with ONE command:\n"
+                                "      accept:  python launch.py --config <yaml> --resume %s --accept\n"
+                                "      reject:  python launch.py --config <yaml> --resume %s --reject\n"
+                                "      refine:  python launch.py --config <yaml> --resume %s --refine \"your feedback\"\n"
+                                "      (or, in the web UI / VSCode, click Accept / Reject / Refine.)",
+                                self.quest_id, self.quest_id, self.quest_id,
                             )
                             break
                         # Clarify node raised `interrupt(...)`. Hand the

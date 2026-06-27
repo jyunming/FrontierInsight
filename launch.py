@@ -534,6 +534,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "over. Single-quest mode only (use --config). Useful when a "
              "long Copilot outage exhausts the bridge retry budget mid-quest.",
     )
+    # One-shot human-review decision for a quest paused at the review gate.
+    # Saves hand-editing .fi/human_review_answer.json: just resume with the
+    # decision, e.g. `--resume <id> --accept`.
+    review = p.add_mutually_exclusive_group()
+    review.add_argument(
+        "--accept", action="store_true",
+        help="With --resume: accept the paused review and finalize the quest "
+             "(generate paper/poster/slides). No JSON editing needed.",
+    )
+    review.add_argument(
+        "--reject", action="store_true",
+        help="With --resume: reject the paused review and stop the quest.",
+    )
+    review.add_argument(
+        "--refine", type=str, default=None, metavar="FEEDBACK",
+        help="With --resume: send the quest back to revise with this feedback, "
+             "e.g. --refine \"tighten the methods section\".",
+    )
     p.add_argument(
         "--vscode-bridge-port",
         type=int,
@@ -997,6 +1015,31 @@ async def _cli_human_feedback_callback(
     print("=" * 72)
     print()
     return {"action": action, "feedback": feedback}
+
+
+def _apply_review_decision(args: argparse.Namespace, output_dir: Path) -> None:
+    """When ``--resume`` is combined with ``--accept`` / ``--reject`` /
+    ``--refine "..."``, write the decision into the quest's
+    ``.fi/human_review_answer.json`` so the engine's human-review gate reads
+    it on resume — no hand-editing. A no-op when none of the flags is set."""
+    if getattr(args, "accept", False):
+        decision = {"action": "accept", "feedback": ""}
+    elif getattr(args, "reject", False):
+        decision = {"action": "reject", "feedback": ""}
+    elif getattr(args, "refine", None) is not None:
+        decision = {"action": "refine", "feedback": args.refine}
+    else:
+        return
+    fi_dir = output_dir / args.resume / ".fi"
+    try:
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        (fi_dir / "human_review_answer.json").write_text(
+            json.dumps(decision), encoding="utf-8",
+        )
+        tail = f" — {decision['feedback']}" if decision["feedback"] else ""
+        print(f"[FI] review decision: {decision['action']}{tail}")
+    except OSError as e:
+        print(f"[FI] could not write review decision: {e!r}", file=sys.stderr)
 
 
 def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:
@@ -1495,6 +1538,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 if resume_err is not None:
                     print(f"[FI] {resume_err}", file=sys.stderr)
                     return 1
+                _apply_review_decision(args, cfg.output.output_dir)
             await run_one(
                 cfg, supervisor=supervisor, profile=args.profile,
                 interactive=args.interactive,

@@ -548,6 +548,42 @@ def _url_host(url: str) -> str:
         return ""
 
 
+# Domains that rank well on commercial queries but are low-signal: SEO
+# "market report" / press-release farms whose pages are vendor pitches,
+# "request a free sample" gates, and recycled forecasts rather than
+# primary data. Dropping them keeps the citation list to real sources
+# (IEA, BNEF, government, OWID, journals, company filings). Curated and
+# conservative — only well-known offenders, matched by registered domain.
+_LOW_QUALITY_DOMAINS = frozenset({
+    "marketsandmarkets.com", "grandviewresearch.com", "mordorintelligence.com",
+    "fortunebusinessinsights.com", "alliedmarketresearch.com",
+    "precedenceresearch.com", "marketresearchfuture.com", "imarcgroup.com",
+    "researchandmarkets.com", "futuremarketinsights.com", "marknteladvisors.com",
+    "verifiedmarketresearch.com", "polarismarketresearch.com",
+    "globenewswire.com", "prnewswire.com", "businesswire.com",
+    "evwire.com", "recharged.com", "expertmarketresearch.com",
+    "coherentmarketinsights.com", "datamintelligence.com",
+})
+
+
+def _is_low_quality_domain(url: str) -> bool:
+    """True for known SEO/market-report domains or tell-tale URL paths."""
+    if not url:
+        return False
+    host = _url_host(url).lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if any(host == d or host.endswith("." + d) for d in _LOW_QUALITY_DOMAINS):
+        return True
+    low = url.lower()
+    return any(
+        s in low for s in (
+            "/market-report", "market-size", "market-share-report",
+            "request-sample", "request-a-sample", "-market-report-",
+        )
+    )
+
+
 # A realistic browser header set. Many authoritative sites (IEA, S&P
 # Global, etc.) return 403 to a request whose User-Agent advertises a bot
 # (our old ``compatible; FrontierInsight/1.0``). These headers look like an
@@ -789,25 +825,34 @@ def _web_search(
 ) -> list[RetrievedDoc]:
     """Dispatch a general-web search. ``auto`` uses Brave when a key is
     present (falling back to DuckDuckGo if Brave errors/returns empty),
-    else the keyless DuckDuckGo endpoint."""
+    else the keyless DuckDuckGo endpoint. Low-signal SEO / market-report
+    domains are dropped from the results so the paper cites real sources."""
     backend = (backend or "auto").lower()
     if backend == "duckduckgo":
-        return _ddg_search(query, top_k, timeout_s=timeout_s)
-    if backend == "brave":
+        docs = _ddg_search(query, top_k, timeout_s=timeout_s)
+    elif backend == "brave":
         if not api_key:
             _log.info(
                 "web_search backend=brave but no BRAVE_API_KEY / "
                 "knowledge.brave_api_key set — skipping web search",
             )
             return []
-        return _brave_search(query, top_k, api_key=api_key, timeout_s=timeout_s)
-    # auto
-    if api_key:
         docs = _brave_search(query, top_k, api_key=api_key, timeout_s=timeout_s)
-        if docs:
-            return docs
-        _log.info("brave returned nothing; falling back to keyless DuckDuckGo")
-    return _ddg_search(query, top_k, timeout_s=timeout_s)
+    else:  # auto
+        docs = _brave_search(query, top_k, api_key=api_key, timeout_s=timeout_s) if api_key else []
+        if not docs:
+            if api_key:
+                _log.info("brave returned nothing; falling back to keyless DuckDuckGo")
+            docs = _ddg_search(query, top_k, timeout_s=timeout_s)
+    filtered = [
+        d for d in docs if not _is_low_quality_domain(d.metadata.get("url", ""))
+    ]
+    if len(filtered) != len(docs):
+        _log.info(
+            "web_search dropped %d low-signal SEO/market-report result(s)",
+            len(docs) - len(filtered),
+        )
+    return filtered
 
 
 def _web_search_source(

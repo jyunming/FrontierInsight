@@ -17,12 +17,40 @@ import string
 import subprocess
 from pathlib import Path
 
+import re as _re
+
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
     build_references,
     render_poster_references_latex,
 )
+from generation.paper import _sanitize_unicode_for_latex
+
+# Emoji / pictographs / dingbats / regional-indicator ranges. pdflatex
+# (utf8 inputenc) hard-errors on these ("Unicode character … not set up
+# for use with LaTeX"), and an LLM column or a scraped source title can
+# easily carry one (a "📊 Global EV Sales Report" citation is what first
+# broke poster.pdf). We strip them outright — they carry no meaning the
+# poster needs.
+_EMOJI_RE = _re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"   # emoji + symbols + pictographs
+    "\U00002600-\U000027BF"   # misc symbols + dingbats
+    "\U0001F1E6-\U0001F1FF"   # regional indicators (flags)
+    "\U00002B00-\U00002BFF"   # misc symbols and arrows
+    "\U0000FE00-\U0000FE0F"   # variation selectors
+    "\U00002190-\U000021FF"   # arrows
+    "]+",
+    flags=_re.UNICODE,
+)
+
+
+def _latex_safe_body(body: str) -> str:
+    """Make a fully-substituted poster.tex safe for pdflatex: map common
+    Unicode typography to LaTeX equivalents (shared with the paper
+    generator) and strip emoji/pictographs that have no LaTeX mapping."""
+    return _EMOJI_RE.sub("", _sanitize_unicode_for_latex(body))
 from core.provider import (
     LLMClient,
     ProxySupervisor,
@@ -101,6 +129,11 @@ class PosterGenerator:
             right=parsed.get("right") or "",
             references=references_tex,
         )
+        # Make the substituted LaTeX safe for pdflatex — strip emoji and
+        # map Unicode typography that would otherwise hard-error the
+        # compile (an LLM column or a scraped citation title can carry a
+        # stray 📊 / ≈ / smart-quote).
+        body = _latex_safe_body(body)
         poster_tex = out_dir / "poster.tex"
         poster_tex.write_text(body, encoding="utf-8")
         result: dict[str, Path] = {"poster_tex": poster_tex}

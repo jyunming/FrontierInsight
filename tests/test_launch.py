@@ -576,3 +576,30 @@ def test_write_launch_record_skipped_when_captured(tmp_path, monkeypatch) -> Non
     )
     launch._write_launch_record(eng, cfg, resume=False)
     assert not (tmp_path / "q" / ".fi" / "launch.log").exists()
+
+
+# --- human-review decision flags (--accept/--reject/--refine on resume) -----
+
+
+def test_apply_review_decision_writes_accept(tmp_path) -> None:
+    import json as _json
+    args = launch.parse_args(["--config", "x.yaml", "--resume", "q-1", "--accept"])
+    launch._apply_review_decision(args, tmp_path)
+    ans = _json.loads((tmp_path / "q-1" / ".fi" / "human_review_answer.json").read_text())
+    assert ans == {"action": "accept", "feedback": ""}
+
+
+def test_apply_review_decision_writes_refine(tmp_path) -> None:
+    import json as _json
+    args = launch.parse_args(
+        ["--config", "x.yaml", "--resume", "q-2", "--refine", "tighten methods"]
+    )
+    launch._apply_review_decision(args, tmp_path)
+    ans = _json.loads((tmp_path / "q-2" / ".fi" / "human_review_answer.json").read_text())
+    assert ans == {"action": "refine", "feedback": "tighten methods"}
+
+
+def test_apply_review_decision_noop_without_flags(tmp_path) -> None:
+    args = launch.parse_args(["--config", "x.yaml", "--resume", "q-3"])
+    launch._apply_review_decision(args, tmp_path)
+    assert not (tmp_path / "q-3" / ".fi").exists()

@@ -803,6 +803,27 @@ def test_brave_search_folds_extra_snippets(monkeypatch) -> None:
     assert "China led at 35%." in snip and "Europe held ~21%." in snip
 
 
+def test_low_quality_domains_filtered() -> None:
+    from core.knowledge import _is_low_quality_domain
+    assert _is_low_quality_domain("https://www.marketsandmarkets.com/Market-Reports/ev-209.html")
+    assert _is_low_quality_domain("https://grandviewresearch.com/industry-analysis/ev-market")
+    assert _is_low_quality_domain("https://evwire.com/p/x")
+    assert not _is_low_quality_domain("https://www.iea.org/reports/global-ev-outlook-2024/x")
+    assert not _is_low_quality_domain("https://ourworldindata.org/electric-car-sales")
+    assert not _is_low_quality_domain("")
+
+
+def test_web_search_drops_low_quality(monkeypatch) -> None:
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+    monkeypatch.setattr("core.knowledge._ddg_search", lambda q, tk, *, timeout_s=10.0: [
+        RD("good", {"source": "web_search", "url": "https://iea.org/x"}),
+        RD("junk", {"source": "web_search", "url": "https://marketsandmarkets.com/Market-Reports/y"}),
+    ])
+    out = kn._web_search("ev", 5, backend="duckduckgo")
+    assert [d.metadata["url"] for d in out] == ["https://iea.org/x"]
+
+
 def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:
     from core.knowledge import _fetch_web_page_text, RetrievedDoc as RD
 

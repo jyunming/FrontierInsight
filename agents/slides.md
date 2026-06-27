@@ -7,7 +7,25 @@ $paper_md
 $figure_list
 
 # Your task
-Compress the paper into a Marp slide deck of **8–12 slides**. Use the standard Marp front-matter and `---` separators between slides. Embed each figure exactly once. Keep total spoken duration about 10 minutes.
+Compress the paper into a Marp slide deck of **8–12 slides**. Embed each figure exactly once. Keep total spoken duration about 10 minutes.
+
+## This is an audience-facing presentation — present FINDINGS, not process
+- Lead with what the research **found**. Each content slide should make one substantive point about the topic (a number, a trend, a comparison), supported by the evidence.
+- **Do NOT narrate the pipeline.** Never mention "this run", "the collector", "the dataset was not recovered", "the planned analysis was not produced", "snippets", "auto-collected", or how the data was gathered. That is internal machinery, not content for an audience.
+- Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as scope ("Regional attribution beyond top-line shares is out of scope here"), not as a confession about tooling.
+- When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
+
+## Style — use a clean, professional theme
+Start the deck with this front-matter (gaia is a polished built-in Marp theme; far better than the bare default):
+```
+---
+marp: true
+theme: gaia
+paginate: true
+size: 16:9
+---
+```
+Put `<!-- _class: lead -->` as the FIRST line of the title slide and the closing slide for centered emphasis (per-slide scope — do NOT put `class: lead` in the global front-matter or every slide gets centered). Use `##` for slide titles, short bolded lead-ins, and tight bullet lists (3–5 items max per slide — never a wall of text).
 
 ## Figure sizing — pick the right Marp directive for the figure's shape
 
