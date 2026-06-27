@@ -1,82 +1,190 @@
 /* @theme fi */
-/* Frontier Insight slide theme — a clean, modern deck look layered on
-   Marp's default. Passed to the Marp CLI via `--theme` by
-   generation/slides.py; the deck front-matter selects it with `theme: fi`. */
+/*
+ * Frontier Insight — "Research Briefing" deck theme.
+ * A premium, editorial look for data-driven research decks: serif
+ * headlines, a system-sans body, and a monospace utility face for the
+ * evidence-first signatures (eyebrows, captions, sources, page numbers).
+ * One restrained accent (deep teal). All fonts are OS-bundled so it
+ * renders offline in the Marp CLI.
+ */
 
 @import 'default';
 
 :root {
-  --fi-ink: #1a202c;
-  --fi-accent: #2b6cb0;
-  --fi-accent-soft: #4299e1;
-  --fi-muted: #5b6776;
-  --fi-bg: #ffffff;
-  --fi-band: #eef3fb;
+  --ink:      #16222b;   /* near-black slate — primary text + dark slides */
+  --paper:    #f8f7f3;   /* warm off-white background */
+  --muted:    #65727c;   /* secondary text */
+  --faint:    #8a949b;   /* captions / footer */
+  --hair:     #e4e2da;   /* hairlines + figure frames */
+  --accent:   #0e6e6b;   /* deep teal — the single accent */
+  --accent-2: #0a4f4d;   /* darker teal for depth */
+
+  --serif: "Palatino Linotype", "Book Antiqua", "Iowan Old Style", Georgia, Cambria, serif;
+  --sans:  "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono:  "Consolas", "SFMono-Regular", ui-monospace, "Liberation Mono", monospace;
 }
 
 section {
-  font-family: "Segoe UI", "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif;
-  font-size: 26px;
-  line-height: 1.4;
-  color: var(--fi-ink);
-  background: var(--fi-bg);
-  padding: 56px 68px;
+  font-family: var(--sans);
+  font-size: 25px;
+  line-height: 1.46;
+  color: var(--ink);
+  background-color: var(--paper);
+  padding: 64px 76px 72px;
+  letter-spacing: 0.1px;
 }
 
-section h1 {
-  color: var(--fi-accent);
-  font-size: 1.7em;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.4em;
+/* Thin teal accent rail along the top of every content slide. */
+section::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 7px;
+  background: var(--accent);
 }
 
+/* ---- Headings -------------------------------------------------------- */
+/* H2 is the per-slide title: serif, with a short teal "kicker" rule above
+   it that encodes the evidence-first structure without extra markup. */
 section h2 {
-  color: var(--fi-accent);
-  font-size: 1.25em;
+  font-family: var(--serif);
   font-weight: 700;
-  border-bottom: 3px solid var(--fi-accent-soft);
-  padding-bottom: 0.18em;
-  margin: 0 0 0.6em;
+  font-size: 1.46em;
+  line-height: 1.12;
+  letter-spacing: -0.2px;
+  color: var(--ink);
+  margin: 0.1em 0 0.5em;
+  padding-top: 0.42em;
+  position: relative;
+}
+section h2::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;
+  width: 56px; height: 3px;
+  background: var(--accent);
 }
 
-section strong { color: var(--fi-accent); font-weight: 700; }
-section em { color: var(--fi-muted); }
-section a { color: var(--fi-accent-soft); text-decoration: none; }
+section h3 {
+  font-family: var(--sans);
+  font-size: 0.74em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--accent-2);
+  margin: 0.8em 0 0.3em;
+}
 
-section ul { margin-top: 0.2em; }
-section li { margin: 0.28em 0; }
-section li::marker { color: var(--fi-accent-soft); }
+/* ---- Body ------------------------------------------------------------ */
+section strong { color: var(--accent-2); font-weight: 700; }
+section em { color: var(--muted); font-style: italic; }
+section a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--hair); }
 
+section ul, section ol { margin: 0.3em 0; padding-left: 1.15em; }
+section li { margin: 0.34em 0; padding-left: 0.15em; }
+section li::marker { color: var(--accent); }
+
+/* Block quotes become an editorial pull-callout. */
 section blockquote {
-  border-left: 5px solid var(--fi-accent-soft);
-  background: var(--fi-band);
-  color: var(--fi-ink);
-  padding: 0.5em 0.9em;
-  font-style: normal;
-  border-radius: 4px;
+  font-family: var(--serif);
+  font-size: 1.05em;
+  font-style: italic;
+  color: var(--ink);
+  border: none;
+  border-left: 4px solid var(--accent);
+  background: transparent;
+  margin: 0.6em 0;
+  padding: 0.15em 0 0.15em 0.85em;
 }
 
-section table { font-size: 0.9em; }
-section th { background: var(--fi-band); color: var(--fi-accent); }
-
-section img { border-radius: 6px; }
-
-/* Centered emphasis for the title / closing slides (<!-- _class: lead -->). */
-section.lead {
-  justify-content: center;
-  text-align: center;
-  background: linear-gradient(160deg, #ffffff 0%, var(--fi-band) 100%);
+/* ---- Figures --------------------------------------------------------- */
+/* Centered, hairline-framed, with breathing room. The takeaway line the
+   pipeline writes under each figure renders as ordinary body text. */
+section img {
+  display: block;
+  margin: 0.45em auto;
+  background: #fff;
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  box-shadow: 0 2px 14px rgba(22, 34, 43, 0.07);
 }
-section.lead h1 { font-size: 2.2em; }
-section.lead h2 { border: none; color: var(--fi-muted); font-weight: 600; }
 
-/* Page number + a subtle bottom rule. */
+/* ---- Tables ---------------------------------------------------------- */
+section table { font-size: 0.86em; border-collapse: collapse; }
+section th {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--accent-2);
+  background: #eef1ee;
+  border-bottom: 2px solid var(--accent);
+  text-align: left;
+}
+section td { border-bottom: 1px solid var(--hair); }
+
+/* ---- Pagination + footer mark --------------------------------------- */
 section::after {
-  color: var(--fi-muted);
+  font-family: var(--mono);
   font-size: 0.6em;
+  letter-spacing: 1px;
+  color: var(--faint);
+  right: 40px; bottom: 26px;
 }
 
-/* The auto-appended References slide: smaller so many sources fit. */
-section h2#references + ol,
-section:has(h2 + ol) ol { font-size: 0.7em; line-height: 1.3; }
+/* ---- Title / closing slides ( <!-- _class: lead --> ) ---------------- */
+section.lead {
+  background-color: var(--ink);
+  color: var(--paper);
+  justify-content: center;
+  padding: 76px 88px;
+}
+section.lead::before { background: var(--accent); height: 9px; }
+section.lead h1 {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 2.65em;
+  line-height: 1.08;
+  letter-spacing: -0.5px;
+  color: var(--paper);
+  margin: 0;
+  max-width: 18ch;
+}
+/* Teal kicker rule under the lead title. */
+section.lead h1::after {
+  content: "";
+  display: block;
+  width: 96px; height: 4px;
+  background: var(--accent);
+  margin: 0.5em 0 0;
+}
+section.lead h2 {
+  font-family: var(--mono);
+  font-size: 0.72em;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 2.5px;
+  color: #9fb4b3;
+  margin-top: 0.9em;
+  padding-top: 0;
+}
+section.lead h2::before { display: none; }
+section.lead strong, section.lead a { color: var(--paper); }
+section.lead a { border-bottom-color: rgba(255,255,255,0.25); }
+
+/* ---- References slide ----------------------------------------------- */
+/* Auto-appended `## References` + numbered list — keep it compact + mono so
+   many sources fit, with teal numerals. */
+section:has(h2#references) ol,
+section:has(h2 + ol) ol {
+  font-family: var(--mono);
+  font-size: 0.6em;
+  line-height: 1.42;
+  color: var(--muted);
+  columns: 2;
+  column-gap: 2.4em;
+}
+section:has(h2#references) li::marker,
+section:has(h2 + ol) li::marker { color: var(--accent); }
+section:has(h2#references) a,
+section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }

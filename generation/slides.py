@@ -142,7 +142,12 @@ class SlideGenerator:
             for ext in ("html", "pdf"):
                 out_path = out_dir / f"slides.{ext}"
                 ok, fail_reason = await _run_cli(
-                    [marp_exe, str(slides_md), *theme_args, "-o", str(out_path)],
+                    # --allow-local-files: without it Marp silently refuses to
+                    # load the quest's figures/*.png (its default file-access
+                    # block), leaving every figure slide blank. The inputs are
+                    # our own generated figures, so it's safe to allow.
+                    [marp_exe, str(slides_md), "--allow-local-files",
+                     *theme_args, "-o", str(out_path)],
                     cwd=out_dir, label=f"marp {ext}",
                 )
                 if ok:

@@ -25,7 +25,17 @@ paginate: true
 size: 16:9
 ---
 ```
-Put `<!-- _class: lead -->` as the FIRST line of the title slide and the closing slide for centered emphasis (per-slide scope — do NOT put `class: lead` in the global front-matter or every slide gets centered). Use `##` for slide titles, short bolded lead-ins, and tight bullet lists (3–5 items max per slide — never a wall of text).
+The **title slide** and **closing slide** must start with `<!-- _class: lead -->` (per-slide scope — never `class: lead` in the global front-matter, or every slide centers), then:
+```
+<!-- _class: lead -->
+
+# The deck's main thesis as one strong sentence
+
+## A short kicker / subtitle
+```
+The `# H1` is the big serif hero — give it the actual finding ("China anchors a three-part EV market"), not a generic label. The `## H2` is a short kicker below it.
+
+**Content slides** use a `## H2` title (the finding), a short bolded lead-in, and a tight bullet list (3–5 items, never a wall of text).
 
 ## Figure sizing — pick the right Marp directive for the figure's shape
 
@@ -39,11 +49,11 @@ Slides are 16:9 (960×540). Default Marp behavior stretches images to fill, whic
   ```
   ![h:380](figures/feature_importances.png)
   ```
-- **Side-by-side with prose** (figure + 1-2 paragraphs on the same slide) — pin the figure to the right 38% and leave room for body text on the left:
+- **Chart + text on one slide** (the common case for a data chart) — put the chart on the right and the discussion on the left. **Always include `fit`** so the WHOLE chart (its title, axes, legend) stays visible; without `fit` Marp crops the image to fill the panel and cuts off the chart's title:
   ```
-  ![bg right:38%](figures/<name>)
+  ![bg right:40% fit](figures/<name>)
   ```
-  **Never use bare `![bg right](...)` without a percentage** — it covers the whole right half regardless of aspect ratio and stretches square figures.
+  Use `right:38%`–`right:44%` depending on how wide the chart is. Never use a bare `![bg right]` without a percentage.
 - **Hero / cover figure** (single dominant image, no body text needed):
   ```
   ![bg](figures/<name>)
