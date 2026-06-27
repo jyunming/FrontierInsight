@@ -147,6 +147,10 @@ class ProviderConfig(BaseModel):
             "implement": 1800.0,
             "execute_reflect": 900.0,
             "design_self_critique": 900.0,
+            # web_plots writes a short matplotlib script — it should be
+            # quick. A tight ceiling kills a stuck codex_cli call fast
+            # instead of letting it dribble output past the default budget.
+            "web_plots": 180.0,
         }
     )
     # Per-node MODEL ESCALATION on tenacity retry. Maps an engine
@@ -504,6 +508,12 @@ class EngineConfig(BaseModel):
     # paper/poster/slides stay text + tables only. Honours the same
     # execution sandbox as the simulation path.
     web_derived_plots: bool = True
+    # Hard wall-clock cap (seconds) on the whole web_plots node — its LLM
+    # call + matplotlib install + plot-script run. It's best-effort, so on
+    # timeout the quest just proceeds figure-less rather than hanging (a
+    # stuck codex_cli call once wedged a run for hours when the
+    # provider-level timeout didn't fire).
+    web_plots_timeout_s: float = 360.0
     # User-pinned answers to the clarify slots, supplied by the
     # interview frontends (`launch.py --new`, the VSCode `@fi /new`
     # extension, the `--serve` web UI) or hand-written into YAML. When

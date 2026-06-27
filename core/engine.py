@@ -2825,6 +2825,29 @@ class Engine:
             self._log.info("[web_plots] no collected content to plot — skipping")
             return {}
 
+        # Hard wall-clock cap on the whole node. web_plots is best-effort
+        # (skipping it just leaves the quest figure-less), so it must NEVER
+        # hang the quest — a slow/stuck codex_cli call once wedged a run for
+        # ~2 h here when the provider-level timeout didn't catch it. On
+        # timeout we skip plots and proceed.
+        budget = float(self.config.engine.web_plots_timeout_s)
+        try:
+            return await asyncio.wait_for(
+                self._web_plots_render(state, sources_text), timeout=budget,
+            )
+        except asyncio.TimeoutError:
+            self._log.warning(
+                "[web_plots] exceeded %.0fs budget — skipping plots "
+                "(quest continues figure-less)", budget,
+            )
+            return {}
+        except Exception as e:
+            self._log.warning("[web_plots] failed: %s — skipping plots", e)
+            return {}
+
+    async def _web_plots_render(self, state: QuestState, sources_text: str) -> QuestState:
+        """The slow part of web_plots (LLM script + install + execute),
+        wrapped by ``_node_web_plots`` in a hard timeout."""
         prompt = self._prompts["web_plots"].safe_substitute(
             topic=str(state.get("topic", ""))[:500],
             result_json=json.dumps(
@@ -2867,7 +2890,7 @@ class Engine:
         result = await self.executor.execute(
             [str(py), str(plot_script)],
             cwd=self.quest_root,
-            timeout_s=min(self.config.execution.timeout_s, 300),
+            timeout_s=min(self.config.execution.timeout_s, 120),
         )
         new_figs = [f for f in self._list_figures() if f not in figs_before]
         if result.returncode != 0:

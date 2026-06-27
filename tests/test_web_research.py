@@ -218,6 +218,21 @@ def test_web_plots_no_plot_sentinel_skips(tmp_path: Path) -> None:
     assert eng.executor.executed is False  # never ran the sandbox
 
 
+def test_web_plots_times_out_gracefully(tmp_path: Path) -> None:
+    """web_plots must never hang the quest: if the render (LLM + run)
+    exceeds the budget, the node skips plots and returns cleanly."""
+    eng = _engine(tmp_path, web_derived_plots=True)
+    eng.config.engine.web_plots_timeout_s = 0.05
+
+    async def slow_render(state, sources_text):
+        await asyncio.sleep(1.0)  # far past the 0.05s budget
+        return {"figures": ["never.png"]}
+    eng._web_plots_render = slow_render
+
+    out = asyncio.run(eng._node_web_plots(dict(_NOSIM_STATE)))
+    assert out == {}  # timed out → skipped, no hang
+
+
 def test_web_plots_passthrough_when_disabled(tmp_path: Path) -> None:
     eng = _engine(tmp_path, web_derived_plots=False)
 
