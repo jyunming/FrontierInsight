@@ -156,6 +156,7 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
     quest dir is any subdirectory containing a ``.fi/`` folder."""
     if not output_root.exists():
         return []
+    now = time.time()
     out: list[dict[str, Any]] = []
     for d in sorted(output_root.iterdir(), reverse=True):
         if not d.is_dir():
@@ -164,16 +165,24 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         if not fi_dir.is_dir():
             continue
         summary_path = d / "frontier_insight_summary.json"
-        verdict = "(running)"
         score: Any = None
         provider = ""
         if summary_path.exists():
+            verdict = "complete"
             try:
                 data = json.loads(summary_path.read_text(encoding="utf-8"))
-                verdict = "complete"
                 provider = data.get("provider", "")
             except Exception:
                 pass
+        elif _quest_looks_running(d, now):
+            # No summary yet, but the engine wrote run.log recently → live.
+            verdict = "(running)"
+        else:
+            # A quest dir with no summary and no recent activity was
+            # interrupted (crashed / killed / cancelled) before finishing —
+            # NOT running. Marking it "(running)" forever is what made the
+            # dashboard show stale quests as active.
+            verdict = "incomplete"
         paper_md = d / "paper" / "paper.md"
         out.append({
             "quest_id": d.name,

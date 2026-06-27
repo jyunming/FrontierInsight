@@ -77,6 +77,25 @@ def test_scan_quests_finds_quest_dirs_with_dot_fi(tmp_path: Path) -> None:
     assert by_id["1700000000-foo-aaaa11"]["verdict"] == "(running)"
 
 
+def test_scan_quests_stale_quest_is_incomplete_not_running(tmp_path: Path) -> None:
+    """A quest with no summary AND a stale run.log was interrupted — it must
+    NOT be reported as running (that's the 'N running' over-count bug)."""
+    import os
+    import time
+    q = _mk_quest_dir(tmp_path, "1700000000-stale-aaaa11", log_body="[x] [ideate]\n")
+    old = time.time() - 3600  # an hour ago, no recent activity
+    os.utime(q / ".fi" / "run.log", (old, old))
+    quests = {x["quest_id"]: x for x in _scan_quests(tmp_path)}
+    assert quests["1700000000-stale-aaaa11"]["verdict"] == "incomplete"
+
+
+def test_scan_quests_active_quest_is_running(tmp_path: Path) -> None:
+    """No summary + a freshly-written run.log → genuinely running."""
+    _mk_quest_dir(tmp_path, "1700000000-active-bbbb22", log_body="[x] [write]\n")
+    quests = {x["quest_id"]: x for x in _scan_quests(tmp_path)}
+    assert quests["1700000000-active-bbbb22"]["verdict"] == "(running)"
+
+
 def test_read_log_tail_returns_recent_lines(tmp_path: Path) -> None:
     log = tmp_path / "log.txt"
     log.write_text("\n".join(f"line {i}" for i in range(50)) + "\n", encoding="utf-8")
