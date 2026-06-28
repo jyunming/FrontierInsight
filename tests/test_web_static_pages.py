@@ -702,6 +702,7 @@ def test_wanted_papers_and_upload_endpoints(tmp_path: Path) -> None:
     """The papers panel endpoints: GET wanted-papers returns the manifest +
     dropped list; POST papers saves sanitised PDFs into inputs/papers/ and
     rejects path-traversal / wrong-extension uploads."""
+    pytest.importorskip("multipart")  # FastAPI form/file routes need python-multipart
     import io
     output_root = tmp_path / "outputs"
     output_root.mkdir()
