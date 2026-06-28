@@ -750,9 +750,11 @@ def test_next_step_endpoint_surfaces_paused_quest(tmp_path: Path) -> None:
     assert r0.status_code == 200
     assert r0.json()["waiting"] is False
 
-    # A pause wrote NEXT_STEP.md → waiting, headline parsed, supply interaction.
+    # A SUPPLY pause wrote NEXT_STEP.md → waiting, headline parsed, interaction
+    # classified from the verb the unified core stamped in.
     (quest / "NEXT_STEP.md").write_text(
         "# Action needed — download 2 paywalled paper(s)\n\n"
+        "Quest **q** is paused and waiting for you (**SUPPLY**).\n\n"
         "## What to do\n1. Drop the PDFs into `inputs/papers/`.\n",
         encoding="utf-8",
     )
@@ -762,3 +764,12 @@ def test_next_step_endpoint_surfaces_paused_quest(tmp_path: Path) -> None:
     assert body["headline"] == "Action needed — download 2 paywalled paper(s)"
     assert body["interaction"] == "supply"
     assert "inputs/papers/" in body["markdown"]
+
+    # An ANSWER pause (e.g. clarify/review answered via files + resume) is
+    # classified from the NEXT_STEP.md verb even with no in-process registry.
+    (quest / "NEXT_STEP.md").write_text(
+        "# Action needed — confirm the research setup\n\n"
+        "Quest **q** is paused and waiting for you (**ANSWER**).\n",
+        encoding="utf-8",
+    )
+    assert client.get(f"/api/quests/{qid}/next-step").json()["interaction"] == "answer"

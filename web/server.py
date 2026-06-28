@@ -952,14 +952,20 @@ def make_app(
             if line.startswith("#"):
                 headline = line.lstrip("# ").strip()
                 break
-        # An ANSWER pause also has a live in-process panel (clarify / review);
-        # a SUPPLY pause is resolved by dropping files + Resume.
-        interaction = (
-            "answer"
-            if (registry.pending_clarify(quest_id) is not None
-                or registry.pending_human_review(quest_id) is not None)
-            else "supply"
-        )
+        # Interaction kind comes from the verb the unified pause core stamped
+        # into NEXT_STEP.md ("(**ANSWER**)" / "(**SUPPLY**)") — authoritative on
+        # every path, including a headless ANSWER pause answered via on-disk
+        # files + resume (where the in-process registry is empty). Fall back to
+        # the live registry, then default to supply.
+        if "ANSWER" in markdown:
+            interaction = "answer"
+        elif "SUPPLY" in markdown:
+            interaction = "supply"
+        elif (registry.pending_clarify(quest_id) is not None
+              or registry.pending_human_review(quest_id) is not None):
+            interaction = "answer"
+        else:
+            interaction = "supply"
         return JSONResponse({
             "quest_id": quest_id,
             "waiting": bool(markdown),

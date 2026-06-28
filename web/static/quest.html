@@ -298,20 +298,25 @@
   }
 
   async function refreshNextStep() {
+    const banner = document.getElementById('next-step-banner');
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/next-step`);
-      if (!res.ok) return;
+      // On any non-OK response, hide the banner rather than leave a stale
+      // "Action needed" showing after the pause was resolved.
+      if (!res.ok) { banner.classList.add('hidden'); return; }
       const data = await res.json();
-      const banner = document.getElementById('next-step-banner');
       if (!data.waiting) { banner.classList.add('hidden'); return; }
       banner.classList.remove('hidden');
       document.getElementById('next-step-headline').textContent =
         data.headline || 'Action needed';
+      // The headline is rendered separately above, so drop the duplicate
+      // leading heading from the markdown body before rendering it.
+      const body = (data.markdown || '').replace(/^\s*#.*(?:\r?\n)+/, '');
       const bodyEl = document.getElementById('next-step-body');
       bodyEl.innerHTML = window.fi_renderMarkdown
-        ? window.fi_renderMarkdown(data.markdown)
-        : escapeHtml(data.markdown);
-    } catch (e) { /* best-effort */ }
+        ? window.fi_renderMarkdown(body)
+        : escapeHtml(body);
+    } catch (e) { banner.classList.add('hidden'); }
   }
 
   async function refreshWantedPapers() {
