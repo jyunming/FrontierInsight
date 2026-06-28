@@ -29,6 +29,7 @@ The script must:
 - Create the output directory with `import os; os.makedirs("figures", exist_ok=True)` and save each figure to `figures/<descriptive_snake_case_name>.png` at `dpi=150` with `bbox_inches="tight"`.
 - Gives every figure a clear title and axis labels, and stamps the source onto the figure itself, e.g. `plt.figtext(0.99, 0.01, "Source: example.com", ha="right", va="bottom", fontsize=7, color="gray")`. When a figure combines several sources, list the sites.
 - Uses a non-interactive backend (`import matplotlib; matplotlib.use("Agg")`) and only matplotlib + the Python standard library (no seaborn, no pandas, no network).
+- Does NOT set its own visual theme. A Frontier Insight house style (Palatino-style serif, a teal-anchored palette, a warm off-white background, a hairline grid, no top/right spines) is applied automatically before your code runs. So: do NOT call `plt.style.use(...)`, do NOT hard-code hex colours for bars/lines (let them take the default colour cycle), and do NOT override the figure/axes background. If you must colour specific series distinctly, use the brand names already defined for you — `FI_TEAL, FI_GOLD, FI_SLATE, FI_CLAY, FI_MIST, FI_OLIVE, FI_CORAL` — rather than arbitrary colours. (For the source stamp, `color="gray"` is fine.)
 - Closes each figure (`plt.close()`) after saving.
 
 If the sources contain no real reported numbers worth plotting (qualitative text only, or only numbers you'd have to manufacture), output exactly:

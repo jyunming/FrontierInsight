@@ -1972,15 +1972,17 @@ class Engine:
         query = f"{topic} {hypothesis}".strip() or topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
-        # ---- Reuse already-retrieved literature --------------------
-        # The literature node ran earlier in the graph and already
-        # fetched (and, with web_fetch_pages, read the full text of) a
-        # set of web/Axon sources into state["literature"]. Persist those
-        # to disk FIRST so the no-simulation path reuses them instead of
-        # re-querying the web — which both wastes the work and, on the
-        # keyless DuckDuckGo backend, can get rate-limited (HTTP 302 →
-        # 50x) on the Nth query of a quest and come back empty.
-        lit_written = self._literature_seed_step(state, auto_dir)
+        # ---- Reuse already-downloaded literature -------------------
+        # The literature node ran earlier in the graph and already fetched
+        # (and, with web_fetch_pages, read the full text of) a set of
+        # web/Axon sources into state["literature"] AND wrote them to
+        # data/literature/. data_load walks the whole data/ tree, so we
+        # reuse those directly — counting them here (so the no-sim gate
+        # doesn't pause) WITHOUT writing a duplicate copy under
+        # auto_collected/. Avoids re-querying the web (wasteful, and the
+        # keyless DuckDuckGo backend can rate-limit the Nth query) and
+        # avoids double-feeding the same content into the analysis.
+        lit_written = self._literature_seed_step(state)
 
         # ---- Axon / web retrieval (top-up) -------------------------
         # Only fire a fresh knowledge-layer query when the literature
@@ -2011,34 +2013,43 @@ class Engine:
         )
         return {"auto_collected_count": written}
 
-    def _literature_seed_step(self, state: QuestState, auto_dir: Path) -> int:
-        """Persist the web/Axon sources the literature node already fetched
-        (``state['literature']``) into ``auto_dir`` as Markdown files so the
-        no-simulation path reuses them instead of re-querying. Returns the
-        count written. Keeps only real, citable entries (a title or URL);
-        skips FI-internal cross-quest artifacts. Each file carries the
-        source URL/title in its front matter (via ``_render_auto_collected_md``)
-        so it stays cite-able downstream."""
-        lit = state.get("literature") or []
-        if not lit:
-            return 0
-        written = self._write_literature_files(lit, auto_dir)
-        if written:
+    def _literature_seed_step(self, state: QuestState) -> int:
+        """Count the web/Axon sources the literature node already fetched
+        (``state['literature']``) so the no-simulation gate
+        (``auto_collected_count``) treats the quest as having data and
+        doesn't pause for user uploads.
+
+        Does NOT write a second copy: those sources were already downloaded
+        to ``data/literature/`` (the literature node does this for every
+        quest), and ``data_load`` walks the whole ``data/`` tree — so a
+        duplicate copy under ``auto_collected/`` only double-feeds the same
+        content into the analysis. Counts the same citable entries
+        ``_write_literature_files`` would keep (a title or URL, not an
+        FI-internal artifact)."""
+        n = 0
+        for item in state.get("literature") or []:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata") or {}
+            if not (meta.get("title") or meta.get("url")):
+                continue
+            if meta.get("kind") in _FI_INTERNAL_KINDS:
+                continue
+            n += 1
+        if n:
             self._log.info(
-                "[auto_collect] reused %d already-retrieved literature doc(s) "
-                "as data (no re-query needed)", written,
+                "[auto_collect] reusing %d already-downloaded literature "
+                "doc(s) from data/literature/ (no duplicate copy written)", n,
             )
-        return written
+        return n
 
     def _write_literature_files(self, lit: list, out_dir: Path) -> int:
         """Write each citable literature entry to ``out_dir`` as a
         ``lit_NNN_slug.md`` file (YAML front matter + content, via
-        ``_render_auto_collected_md``). Shared by two call sites:
-
-        * the ``literature`` node's always-on download into
-          ``data/literature/`` (runs for EVERY quest, sim or no-sim), and
-        * the no-simulation ``auto_collect_data`` reuse into
-          ``data/auto_collected/`` (``_literature_seed_step``).
+        ``_render_auto_collected_md``). Called by the ``literature`` node's
+        always-on download into ``data/literature/`` (runs for EVERY quest,
+        sim or no-sim) — the single on-disk copy of the retrieved sources,
+        which ``data_load`` then reuses on the no-simulation path.
 
         Skips entries with no title/url and FI-internal cross-quest
         artifacts. ``out_dir`` is created lazily so a corpus with nothing
@@ -2950,6 +2961,11 @@ class Engine:
                 "[web_plots] model reported no plottable data — skipping",
             )
             return {}
+
+        # Prepend the FI house style so the figures match the paper/poster/
+        # slides identity. It sets rcParams (font, palette, ground, grid),
+        # which the script's own `import matplotlib.pyplot` then inherits.
+        script = _FI_MPL_PREAMBLE + "\n" + script
 
         code_dir = self.quest_root / "code"
         code_dir.mkdir(parents=True, exist_ok=True)
@@ -5176,6 +5192,49 @@ _FENCE_RE = re.compile(r"^```(?:\w+)?\n(.*)\n```$", re.DOTALL)
 def _strip_outer_fence(text: str) -> str:
     m = _FENCE_RE.match(text.strip())
     return m.group(1) if m else text
+
+
+# Frontier Insight house figure style, prepended to every web-plots script so
+# the matplotlib figures match the paper / poster / slides identity (Palatino
+# serif, teal-anchored palette, warm off-white ground, hairline grid, no top/
+# right spines) instead of the default matplotlib look. Self-contained so it
+# runs in the quest's sandbox venv; the palette names are exposed for a script
+# that needs to colour specific series on-brand.
+_FI_MPL_PREAMBLE = '''# --- Frontier Insight house figure style (auto-injected) ---
+import matplotlib as _mpl
+_mpl.use("Agg")
+from cycler import cycler as _cycler
+FI_TEAL  = "#0E6E6B"   # primary
+FI_GOLD  = "#C0892D"
+FI_SLATE = "#3F6663"
+FI_CLAY  = "#9C6B3F"
+FI_MIST  = "#7FA8A5"
+FI_OLIVE = "#7A8A57"
+FI_CORAL = "#B5524A"
+FI_INK   = "#1A2E2C"
+_mpl.rcParams.update({
+    "figure.facecolor": "#FBFAF7", "axes.facecolor": "#FBFAF7",
+    "savefig.facecolor": "#FBFAF7", "savefig.edgecolor": "#FBFAF7",
+    "font.family": "serif",
+    "font.serif": ["Palatino Linotype", "Palatino", "Book Antiqua",
+                   "Georgia", "DejaVu Serif"],
+    "font.size": 11,
+    "axes.titlesize": 15, "axes.titleweight": "bold",
+    "axes.titlelocation": "left", "axes.titlecolor": FI_INK, "axes.titlepad": 12,
+    "axes.labelcolor": FI_SLATE, "axes.labelsize": 11,
+    "axes.edgecolor": "#4A4A48", "axes.linewidth": 0.8,
+    "axes.grid": True, "axes.axisbelow": True,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "grid.color": "#D9D5CC", "grid.linewidth": 0.7,
+    "xtick.color": "#4A4A48", "ytick.color": "#4A4A48",
+    "xtick.labelsize": 10, "ytick.labelsize": 10, "text.color": FI_INK,
+    "legend.frameon": False, "legend.fontsize": 10,
+    "axes.prop_cycle": _cycler(color=[FI_TEAL, FI_GOLD, FI_SLATE, FI_CLAY,
+                                      FI_MIST, FI_OLIVE, FI_CORAL]),
+    "figure.dpi": 150, "savefig.dpi": 150, "savefig.bbox": "tight",
+})
+# --- end Frontier Insight style ---
+'''
 
 
 def _parse_json_lenient(

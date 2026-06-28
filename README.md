@@ -330,7 +330,7 @@ knowledge:
   # brave_api_key: BSA...        # or set the BRAVE_API_KEY env var instead
 ```
 
-For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. If the sources carry no plottable numbers it skips cleanly.
+For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. The charts are drawn in the **Frontier Insight house style** (Palatino-style serif, teal-anchored palette, warm ground, hairline grid) so they match the paper, poster, and slides rather than looking like default matplotlib. If the sources carry no plottable numbers it skips cleanly.
 
 ### Watch progress in a browser instead of the terminal
 

@@ -262,9 +262,8 @@ def test_web_plots_passthrough_in_simulation_mode(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_literature_seed_writes_files_with_source_urls(tmp_path: Path) -> None:
+def test_literature_seed_counts_without_duplicating(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    auto_dir = eng.quest_root / "data" / "auto_collected"
     state = {"literature": [
         {"content": "EV outlook body", "metadata": {
             "source": "web_search", "kind": "web_page",
@@ -272,13 +271,12 @@ def test_literature_seed_writes_files_with_source_urls(tmp_path: Path) -> None:
         {"content": "internal", "metadata": {"kind": "fi_paper_spine", "title": "mem"}},
         {"content": "x", "metadata": {}},  # no title/url → skipped
     ]}
-    n = eng._literature_seed_step(state, auto_dir)
-    assert n == 1
-    files = list(auto_dir.glob("*.md"))
-    assert len(files) == 1
-    txt = files[0].read_text(encoding="utf-8")
-    assert "https://iea.org/ev" in txt   # source URL preserved in front matter
-    assert "EV outlook body" in txt
+    n = eng._literature_seed_step(state)
+    assert n == 1   # one citable web source counted (internal + untitled skipped)
+    # No duplicate copy is written: the sources already live in
+    # data/literature/ (written by the literature node) and data_load walks
+    # the whole data/ tree, so a second copy would only double-feed them.
+    assert not (eng.quest_root / "data" / "auto_collected").exists()
 
 
 def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
@@ -305,7 +303,9 @@ def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
     out = asyncio.run(eng._node_auto_collect_data(state))
     assert out["auto_collected_count"] >= 1
     assert called["asearch"] is False  # reused literature; no redundant web query
-    assert (eng.quest_root / "data" / "auto_collected").is_dir()
+    # The reuse path counts the already-downloaded sources but writes NO
+    # duplicate copy — they already live in data/literature/.
+    assert not (eng.quest_root / "data" / "auto_collected").exists()
 
 
 def test_write_literature_files_persists_citable_corpus(tmp_path: Path) -> None:
@@ -467,3 +467,29 @@ async def test_slides_appends_references_slide(tmp_path, monkeypatch) -> None:
     md = result["slides_md"].read_text(encoding="utf-8")
     assert "## References" in md
     assert "https://payloadspace.com/spacex-2023" in md
+
+
+# ---------------------------------------------------------------------------
+# Web-plot house style — every web_plots script is prefixed with the FI
+# brand style so the figures match the paper / poster / slides identity.
+# ---------------------------------------------------------------------------
+
+def test_fi_mpl_preamble_applies_brand_style() -> None:
+    """The injected house-style preamble compiles and brands matplotlib:
+    teal leads the colour cycle, the font is serif, top/right spines off."""
+    pytest.importorskip("matplotlib")
+    import matplotlib as mpl
+    from core.engine import _FI_MPL_PREAMBLE
+
+    saved = mpl.rcParams.copy()
+    try:
+        ns: dict = {}
+        exec(compile(_FI_MPL_PREAMBLE, "<fi_preamble>", "exec"), ns)
+        assert ns["FI_TEAL"] == "#0E6E6B"
+        colors = mpl.rcParams["axes.prop_cycle"].by_key()["color"]
+        assert colors[0] == "#0E6E6B"               # teal leads the cycle
+        assert mpl.rcParams["font.family"] == ["serif"]
+        assert mpl.rcParams["axes.spines.top"] is False
+        assert mpl.rcParams["axes.spines.right"] is False
+    finally:
+        mpl.rcParams.update(saved)
