@@ -97,6 +97,7 @@ def test_tier2_covers_the_derived_fields() -> None:
         "review_panel",
         "pause_for_user_input",
         "knowledge_enabled",
+        "web_research",
         "audience",
         "knowledge_top_k",
     }
