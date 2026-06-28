@@ -836,9 +836,16 @@ def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
             r = MagicMock(); r.status_code = 403; return r
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _Blocked)
+    # Realistic recovered article body (> _MIN_FULL_TEXT_CHARS) — a real
+    # render returns a full article, not a one-liner, and the fetcher now
+    # rejects sub-threshold stubs as block pages.
+    _body = "Recovered full text 18%. " + (
+        "The renderer cleared the challenge and returned the real article "
+        "body with substantive content for the writer to quote. " * 6
+    )
     monkeypatch.setattr(
         "core.knowledge._playwright_fetch_html",
-        lambda url, *, timeout_s: "<html><body><article><p>Recovered full text 18%.</p></article></body></html>",
+        lambda url, *, timeout_s: f"<html><body><article><p>{_body}</p></article></body></html>",
     )
     doc = RD("", {"url": "https://iea.example/blocked"})
     # headless on → recovers via the renderer.
@@ -846,6 +853,155 @@ def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
     assert out and "Recovered full text 18%." in out
     # headless off → blocked stays blocked (snippet only).
     assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
+
+
+def test_looks_like_bot_challenge() -> None:
+    import core.knowledge as kn
+    assert kn._looks_like_bot_challenge("")                       # empty
+    assert kn._looks_like_bot_challenge(
+        "Checking your browser - reCAPTCHA. Click here if not redirected."
+    )
+    assert kn._looks_like_bot_challenge(
+        "Please enable JavaScript and cookies to continue."
+    )
+    # A long real article that merely MENTIONS recaptcha is not a challenge.
+    article = "This paper studies how reCAPTCHA affects user behaviour. " * 60
+    assert not kn._looks_like_bot_challenge(article)
+    # Short text with no challenge marker is not flagged here (the
+    # snippet-relative gate in _fetch_web_page_text drops stubs that don't
+    # beat the snippet).
+    assert not kn._looks_like_bot_challenge("A legitimate short abstract sentence.")
+
+
+def test_fetch_web_page_text_rejects_200_challenge_page(monkeypatch) -> None:
+    """A 200 that's actually a reCAPTCHA / cookie wall (PMC, MDPI, …) must
+    be rejected, not stored as 165-byte 'full text'."""
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    challenge = (
+        "<html><body>Checking your browser - reCAPTCHA. "
+        "Click here if you are not automatically redirected.</body></html>"
+    )
+
+    class _Chal:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "text/html"}
+            r.content = challenge.encode()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Chal)
+    # Non-academic URL → the open-access API fallback is a no-op, so the
+    # result is None (the caller keeps the real search snippet).
+    doc = RD("snippet", {"url": "https://example.com/blocked"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
+
+
+def test_keep_fetched_text_is_snippet_relative() -> None:
+    """The fetched-text gate is relative to the snippet we already have:
+    keep page text only when it beats the snippet (so a legitimately short
+    page survives), drop a stub no longer than the snippet, and always drop
+    a bot-challenge regardless of length."""
+    import core.knowledge as kn
+    snippet = "A short search-result snippet we already have on file"
+    # Longer than the snippet → kept, even though it's well under the old
+    # absolute 300-char floor (a real short press release / stats page).
+    assert kn._keep_fetched_text(snippet + " plus genuinely new content.", snippet)
+    # No longer than the snippet → no improvement, drop it (keep snippet).
+    assert not kn._keep_fetched_text("shorter than the snippet", snippet)
+    # A challenge marker is dropped however long relative to the snippet.
+    assert not kn._keep_fetched_text(
+        "Checking your browser - reCAPTCHA. " + "x" * 40, snippet
+    )
+    # With no snippet to beat, fall back to the substance floor.
+    assert not kn._keep_fetched_text("tiny", "")
+    assert kn._keep_fetched_text("y" * (kn._MIN_FULL_TEXT_CHARS + 1), "")
+    assert not kn._keep_fetched_text(None, snippet)
+
+
+def test_fetch_web_page_text_keeps_short_page_beating_snippet(monkeypatch) -> None:
+    """A legit short page (press release / stats page) that's under the old
+    300-char floor but longer than the search snippet is now KEPT, not
+    dropped — the gate is snippet-relative, not an absolute length floor."""
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    page_text = (
+        "Renewable capacity rose 12 percent in 2025, the agency said in a "
+        "brief release, reaching a new annual record across all regions."
+    )
+    body = f"<html><body><p>{page_text}</p></body></html>"
+
+    class _Ok:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "text/html"}
+            r.content = body.encode()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Ok)
+    doc = RD("Short snippet.", {"url": "https://example.com/press"})
+    out = kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False)
+    assert out and "12 percent" in out
+    assert len(out) < kn._MIN_FULL_TEXT_CHARS  # would've been dropped before
+
+
+def test_xml_to_text_decodes_entities() -> None:
+    """JATS flattening decodes named AND numeric entities (em dash, accents)
+    via html.unescape, not a 3-entity allowlist."""
+    import core.knowledge as kn
+    xml = (
+        "<p>Effect size&#x2014;large&#8212;was r &gt; 0.5 for caf&eacute; "
+        "&amp; tea in the H&#246;lzel study.</p>"
+    )
+    out = kn._xml_to_text(xml)
+    assert "—" in out        # &#x2014; / &#8212; → em dash
+    assert "r > 0.5" in out       # &gt;
+    assert "café" in out     # &eacute;
+    assert "Hölzel" in out   # &#246;
+    assert "& tea" in out         # &amp; preserved as literal ampersand
+    assert "&#" not in out and "&amp;" not in out  # no leftover entity tokens
+
+
+def test_sanitize_search_query_collapses_and_caps() -> None:
+    """A multi-line, paragraph-length topic is collapsed to a single line
+    and trimmed under Brave's length cap (Brave 422s on newlines / very
+    long queries; DuckDuckGo returns nothing), so web search still works."""
+    import core.knowledge as kn
+    topic = "Line one about greenness\nand mortality.\n\n  Extra   spaces here.\n"
+    q = kn._sanitize_search_query(topic)
+    assert "\n" not in q and "  " not in q
+    assert q == "Line one about greenness and mortality. Extra spaces here."
+    # A long topic is capped under the limit at a word boundary (no half word).
+    capped = kn._sanitize_search_query("word " * 200, max_chars=380)
+    assert len(capped) <= 380
+    assert capped.split()[-1] == "word"  # cut on a boundary, not mid-word
+    # A short query passes through untouched.
+    assert kn._sanitize_search_query("greenness and health") == "greenness and health"
+
+
+def test_web_search_sanitizes_query_before_dispatch(monkeypatch) -> None:
+    """_web_search collapses the multi-line topic before handing it to a
+    backend, so the backend never sees newlines (which 422 Brave)."""
+    import core.knowledge as kn
+    seen = {}
+
+    def _fake_ddg(query, top_k, *, timeout_s=10.0):
+        seen["query"] = query
+        return []
+
+    monkeypatch.setattr("core.knowledge._ddg_search", _fake_ddg)
+    kn._web_search("multi\nline\n\ntopic   blob", 5, backend="duckduckgo")
+    assert seen["query"] == "multi line topic blob"
 
 
 def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:
