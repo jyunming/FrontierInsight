@@ -917,9 +917,11 @@ def make_app(
         wanted = quest_root / "needs" / "WANTED_PAPERS.md"
         markdown = wanted.read_text(encoding="utf-8") if wanted.is_file() else ""
         papers_dir = quest_root / "inputs" / "papers"
+        # Walk recursively — the literature node ingests any subfolder too.
         dropped = (
             sorted(
-                p.name for p in papers_dir.iterdir()
+                str(p.relative_to(papers_dir)).replace("\\", "/")
+                for p in papers_dir.rglob("*")
                 if p.is_file() and p.suffix.lower() in _PAPER_UPLOAD_SUFFIXES
                 and p.name != "README.md"
             )
@@ -952,7 +954,9 @@ def make_app(
             if not name or Path(name).suffix.lower() not in _PAPER_UPLOAD_SUFFIXES:
                 skipped.append(f.filename or "(unnamed)")
                 continue
-            data = await f.read()
+            # Read at most cap+1 bytes so an oversized upload can't be slurped
+            # fully into memory just to be rejected.
+            data = await f.read(_MAX_PAPER_UPLOAD_BYTES + 1)
             if not data or len(data) > _MAX_PAPER_UPLOAD_BYTES:
                 skipped.append(name)
                 continue

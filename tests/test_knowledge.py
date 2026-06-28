@@ -1999,6 +1999,9 @@ def test_local_papers_accepts_directory(tmp_path) -> None:
     (tmp_path / "sub" / "b.txt").write_text("paper b", encoding="utf-8")
     (tmp_path / "ignore.csv").write_text("x", encoding="utf-8")    # unsupported
     (tmp_path / ".hidden.md").write_text("x", encoding="utf-8")    # dotfile
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config.md").write_text("x", encoding="utf-8")  # hidden dir
     files = _expand_local_paper_paths([tmp_path, tmp_path / "a.md"])
     names = sorted(p.name for p in files)
-    assert names == ["a.md", "b.txt"]            # recursive; csv/dotfile/dup excluded
+    # recursive; csv / dotfile / hidden-dir contents / duplicate all excluded
+    assert names == ["a.md", "b.txt"]

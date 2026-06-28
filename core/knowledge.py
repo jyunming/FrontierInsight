@@ -1640,7 +1640,9 @@ def _expand_local_paper_paths(paths: list[Path]) -> list[Path]:
                 f for f in sorted(p.rglob("*"))
                 if f.is_file()
                 and f.suffix.lower() in _LOCAL_PAPER_SUFFIXES
-                and not f.name.startswith(".")
+                # Skip dotfiles AND anything under a hidden dir (.git/.venv/…),
+                # so pointing at a repo root doesn't walk huge trees.
+                and not any(part.startswith(".") for part in f.relative_to(p).parts)
             ]
             if not candidates:
                 _log.warning("local_papers dir %s holds no .pdf/.md/.txt files", p)

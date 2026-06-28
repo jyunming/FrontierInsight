@@ -848,7 +848,7 @@ async function runQuest(
         const outputsDir = path.isAbsolute(outDirSetting)
             ? outDirSetting
             : path.join(repoPath, outDirSetting);
-        await surfaceWantedPapers(outputsDir, stream);
+        await surfaceWantedPapers(outputsDir, stream, resumeQuestId);
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
@@ -871,19 +871,33 @@ async function runQuest(
 async function surfaceWantedPapers(
     outputsDir: string,
     stream: vscode.ChatResponseStream,
+    knownQuestId?: string,
 ): Promise<void> {
     try {
-        const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
-        let best: { id: string; mtime: number } | null = null;
-        for (const e of entries) {
-            if (!e.isDirectory() || e.name.startsWith("_")) { continue; }
-            const wanted = path.join(outputsDir, e.name, "needs", "WANTED_PAPERS.md");
+        let questId: string | null = null;
+        if (knownQuestId) {
+            // /resume <id>: check that quest directly — no mtime guessing.
             try {
-                const st = await fsPromises.stat(wanted);
-                if (!best || st.mtimeMs > best.mtime) { best = { id: e.name, mtime: st.mtimeMs }; }
-            } catch { /* no needs file in this quest */ }
+                await fsPromises.stat(path.join(outputsDir, knownQuestId, "needs", "WANTED_PAPERS.md"));
+                questId = knownQuestId;
+            } catch { return; }
+        } else {
+            // /new: the engine assigned the id — pick the quest whose
+            // WANTED_PAPERS.md was written most recently (this run's).
+            const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
+            let best: { id: string; mtime: number } | null = null;
+            for (const e of entries) {
+                if (!e.isDirectory() || e.name.startsWith("_")) { continue; }
+                const wanted = path.join(outputsDir, e.name, "needs", "WANTED_PAPERS.md");
+                try {
+                    const st = await fsPromises.stat(wanted);
+                    if (!best || st.mtimeMs > best.mtime) { best = { id: e.name, mtime: st.mtimeMs }; }
+                } catch { /* no needs file in this quest */ }
+            }
+            if (!best) { return; }
+            questId = best.id;
         }
-        if (!best) { return; }
+        const best = { id: questId };
         const papersDir = path.join(outputsDir, best.id, "inputs", "papers");
         try {
             const dropped = (await fsPromises.readdir(papersDir)).filter(

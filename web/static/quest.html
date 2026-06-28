@@ -144,12 +144,12 @@
   <!-- Papers to download (paywalled / abstract-only) -->
   <section id="papers-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
     <h3 class="font-label-sm text-label-sm text-outline uppercase">Papers to download</h3>
-    <p class="text-on-surface-variant text-body-sm">The agent could only get the abstract for these papers. Download the ones that matter, drop the PDFs below, then <span class="text-on-surface">Resume</span>.</p>
+    <p class="text-on-surface-variant text-body-sm">The agent could only get the abstract for these papers. Download the ones that matter, add the files below (.pdf / .md / .txt), then <span class="text-on-surface">Resume</span>.</p>
     <div id="wanted-papers-md" class="fi-md-body"></div>
     <div id="papers-dropped" class="font-code-md text-code-md text-on-surface-variant"></div>
     <div class="flex flex-wrap items-center gap-3">
       <input id="papers-file" type="file" accept=".pdf,.md,.txt" multiple class="text-on-surface text-body-sm"/>
-      <button id="papers-upload-btn" onclick="uploadPapers()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Upload PDFs</button>
+      <button id="papers-upload-btn" onclick="uploadPapers()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Upload papers</button>
       <span id="papers-upload-status" class="text-on-surface-variant text-body-sm"></span>
     </div>
   </section>
