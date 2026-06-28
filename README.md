@@ -551,13 +551,18 @@ The digest also lands in Axon (kind `fi_digest`) so future quests can retrieve "
 
 ### Drop a paywalled PDF you downloaded yourself
 
+Pre-load papers you already have — a **file or a whole folder** (scanned recursively for `.pdf` / `.md` / `.txt`):
+
 ```yaml
 knowledge:
   local_papers:
     - ~/papers/that-paywalled-paper-you-grabbed-on-VPN.pdf
+    - ~/research/spie-lithography/          # a folder of resources — all ingested
 ```
 
-The agent will read it and cite it. Requires `pip install pypdf` for PDF support.
+The agent reads them and cites them. Requires `pip install pypdf` for PDF support.
+
+**Or let the agent ask.** Turn on **Supply paywalled papers** in the interview (`knowledge.pause_for_user_papers: true`). When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason. Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions.
 
 ---
 

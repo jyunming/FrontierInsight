@@ -200,6 +200,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         knowledge_top_k=_coerce_int(knowledge.get("top_k", 8), 8),
         knowledge_external_top_k=_coerce_int(knowledge.get("external_top_k", 20), 20),
         web_research=bool(knowledge.get("web_search", True)),
+        supply_papers=bool(knowledge.get("pause_for_user_papers", False)),
         ensemble_profile=ensemble_profile,
         max_iterations=_coerce_int(engine.get("max_iterations", 2), 2),
     )
@@ -512,6 +513,7 @@ async def run_update_flow(
             "knowledge_external_top_k", current.knowledge_external_top_k,
         ),
         web_research=bool(new_partial.get("web_research", current.web_research)),
+        supply_papers=bool(new_partial.get("supply_papers", current.supply_papers)),
         ensemble_profile=str(new_partial.get(
             "ensemble_profile", current.ensemble_profile,
         )),

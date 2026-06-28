@@ -70,6 +70,11 @@ export interface InterviewAnswers {
     // of knowledge_enabled (the Axon corpus toggle). Must stay in sync
     // with core/interview.py:InterviewAnswers.
     web_research?: boolean;
+    // When true, pause on a paywalled / abstract-only relevant paper and
+    // write needs/WANTED_PAPERS.md so the user can drop the PDF into
+    // inputs/papers/ and resume. Maps to knowledge.pause_for_user_papers.
+    // Off by default. Must stay in sync with core/interview.py.
+    supply_papers?: boolean;
     // Multi-model ensemble preset. "off" (default) keeps single-call
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
@@ -259,6 +264,9 @@ export function answersToYaml(answers: InterviewAnswers): string {
     const webResearch = answers.web_research !== false;
     lines.push(`${indent}web_search: ${webResearch ? "true" : "false"}`);
     lines.push(`${indent}web_fetch_pages: ${webResearch ? "true" : "false"}`);
+    if (answers.supply_papers === true) {
+        lines.push(`${indent}pause_for_user_papers: true`);
+    }
     if (!answers.knowledge_enabled) {
         lines.push(`${indent}external_fallback: ["openalex", "arxiv", "crossref"]`);
         // `source_routing: manual` skips the LLM-driven catalog source

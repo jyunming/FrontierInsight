@@ -1988,3 +1988,20 @@ def test_preprint_fulltext_arxiv_html(monkeypatch) -> None:
     monkeypatch.setattr(kn.httpx, "Client", _Client)
     out = kn._preprint_fulltext({"arxiv_id": "2401.01234", "doi": ""}, timeout_s=5, cap=100000)
     assert out and "ArXiv full text body" in out
+
+
+def test_local_papers_accepts_directory(tmp_path) -> None:
+    """knowledge.local_papers may point at a FOLDER — it's scanned
+    recursively for .pdf/.md/.txt, deduped against explicit file entries."""
+    from core.knowledge import _expand_local_paper_paths
+    (tmp_path / "a.md").write_text("paper a", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").write_text("paper b", encoding="utf-8")
+    (tmp_path / "ignore.csv").write_text("x", encoding="utf-8")    # unsupported
+    (tmp_path / ".hidden.md").write_text("x", encoding="utf-8")    # dotfile
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config.md").write_text("x", encoding="utf-8")  # hidden dir
+    files = _expand_local_paper_paths([tmp_path, tmp_path / "a.md"])
+    names = sorted(p.name for p in files)
+    # recursive; csv / dotfile / hidden-dir contents / duplicate all excluded
+    assert names == ["a.md", "b.txt"]

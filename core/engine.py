@@ -1660,7 +1660,9 @@ class Engine:
         ):
             needed = [d for d in docs if _is_abstract_only(d)]
             if needed:
-                _write_paper_need_stubs(self.quest_root, needed, self._log)
+                _write_paper_need_stubs(
+                    self.quest_root, needed, self._log, query=_lit_query(state),
+                )
                 self._log.info(
                     "[literature] pausing — %d paper(s) abstract-only; "
                     "drop PDFs into %s/inputs/papers/ and re-run",
@@ -5918,7 +5920,8 @@ This quest's literature search returned only abstracts for a handful
 of papers — full text wasn't available from the open-web sources FI
 tries (arXiv / OpenAlex / Crossref / Semantic Scholar / ...).
 
-**Drop the PDFs the agent flagged in ``../needs/`` into THIS directory**
+See **``../needs/WANTED_PAPERS.md``** for the ranked list (most relevant
+first) with a download link for each. **Drop the PDFs into THIS directory**
 (or anywhere under it — FI walks recursively). Then re-run:
 
 ```
@@ -6025,11 +6028,18 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     md = doc.metadata or {}
     if md.get("abstract_only"):
         return True
-    if md.get("fetched_full_text"):
+    if md.get("fetched_full_text") or md.get("content_quality") == "full_text":
         return False
     if md.get("source") in ("local_paper", "user_supplied"):
         return False
-    return len(doc.content or "") < _ABSTRACT_ONLY_CHAR_THRESHOLD
+    # Flag only a real, resolvable PAPER the user can actually download — one
+    # that carries a DOI / arXiv-id / PMID, or came from an academic adapter
+    # — for which we have only the abstract (no full text recovered). A
+    # generic web page (source=web_search, no identifier) is content the
+    # agent uses as-is, not something to ask the user to fetch.
+    has_id = bool(md.get("doi") or md.get("arxiv_id") or md.get("pmid"))
+    from_academic_adapter = md.get("source") not in (None, "", "web_search")
+    return has_id or from_academic_adapter
 
 
 def _papers_dir_has_files(quest_root: Path) -> bool:
@@ -6081,20 +6091,107 @@ def _pick_up_user_dropped_datasets(quest_root: Path) -> list[str]:
     return out
 
 
+def _paper_resolve_link(md: dict[str, Any]) -> str:
+    """A clickable link to find/download a paper: DOI resolver, arXiv abs,
+    else the source URL."""
+    if md.get("doi"):
+        return f"https://doi.org/{str(md['doi']).strip()}"
+    if md.get("arxiv_id"):
+        return f"https://arxiv.org/abs/{str(md['arxiv_id']).strip()}"
+    return str(md.get("url") or md.get("pdf_url") or "").strip()
+
+
+def _paper_gist(content: str, md: dict[str, Any]) -> str:
+    """One-line 'what it's about' for the wanted-papers manifest — the first
+    sentence of the abstract (title stripped)."""
+    text = (content or "").strip()
+    title = str(md.get("title") or "")
+    if title and text.startswith(title):
+        text = text[len(title):].strip()
+    m = re.match(r"(.{40,240}?[.!?])(?:\s|$)", text)
+    return re.sub(r"\s+", " ", (m.group(1) if m else text[:200])).strip()
+
+
+def _rank_papers_by_relevance(
+    docs: list["RetrievedDoc"], query: str,
+) -> list["RetrievedDoc"]:
+    """Order papers most-relevant-first by lexical overlap of their
+    title+abstract with the quest question (deterministic; no model)."""
+    if not query.strip() or len(docs) <= 1:
+        return list(docs)
+    from core.passages import _lexical_scores
+    blobs = [f"{(d.metadata or {}).get('title', '')} {d.content or ''}" for d in docs]
+    scores = _lexical_scores(blobs, query)
+    return [docs[i] for i in sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)]
+
+
+def _write_wanted_papers_md(
+    quest_root: Path, ranked: list["RetrievedDoc"], *, topic: str,
+) -> None:
+    """Write a single human-friendly, RANKED ``needs/WANTED_PAPERS.md`` —
+    most relevant first, each with a download link, what it's about, and the
+    open-access status — so the user can grab the few that matter."""
+    lines = [
+        f"# Papers to download — {topic[:120].strip()}",
+        "",
+        "The agent found these papers relevant but could only get the "
+        "abstract; no open-access full text was reachable. Download the ones "
+        "that matter — **most relevant first** — drop the PDFs into "
+        "`inputs/papers/`, then re-run the quest. You don't have to get them "
+        "all; even the top few sharpen the research.",
+        "",
+    ]
+    for i, doc in enumerate(ranked, 1):
+        md = doc.metadata or {}
+        title = str(md.get("title") or md.get("name") or f"paper-{i}")
+        lines.append(f"## {i}. {title}")
+        link = _paper_resolve_link(md)
+        if link:
+            lines.append(f"- **Get it:** {link}")
+        authors = md.get("authors") or md.get("author")
+        if authors:
+            if isinstance(authors, (list, tuple)):
+                authors = ", ".join(str(a) for a in authors[:4])
+            lines.append(f"- **Authors:** {str(authors)[:160]}")
+        gist = _paper_gist(doc.content or "", md)
+        if gist:
+            lines.append(f"- **What it's about:** {gist}")
+        lines.append(
+            "- **Status:** full text not retrieved (likely paywalled / "
+            "subscription) — manual download needed"
+        )
+        lines.append("")
+    lines.append(
+        "Drop the PDFs into `inputs/papers/` (any subfolder works), then "
+        f"`fi --resume {quest_root.name}`."
+    )
+    try:
+        (quest_root / "needs" / "WANTED_PAPERS.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _write_paper_need_stubs(
     quest_root: Path,
     needed: list["RetrievedDoc"],
     log: logging.Logger,
+    *,
+    query: str = "",
 ) -> None:
-    """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with
-    the metadata FI knows (title, authors, DOI, URL, source) so the
-    user can resolve the citation and download the right PDF. Also
-    creates ``<quest_root>/inputs/papers/README.md`` with resume
+    """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with the
+    metadata FI knows (title, authors, DOI, URL, source) so the user can
+    resolve the citation and download the right PDF, PLUS a single ranked,
+    human-friendly ``needs/WANTED_PAPERS.md`` (most relevant to ``query``
+    first). Also creates ``<quest_root>/inputs/papers/README.md`` with resume
     instructions so the user knows what to do next."""
     needs_dir = quest_root / "needs"
     papers_dir = quest_root / "inputs" / "papers"
     needs_dir.mkdir(parents=True, exist_ok=True)
     papers_dir.mkdir(parents=True, exist_ok=True)
+    needed = _rank_papers_by_relevance(needed, query)
+    _write_wanted_papers_md(quest_root, needed, topic=query or quest_root.name)
     readme = papers_dir / "README.md"
     if not readme.exists():
         try:

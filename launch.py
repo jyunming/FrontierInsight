@@ -2162,6 +2162,7 @@ async def _run_new(
         knowledge_top_k=int(derived.get("knowledge_top_k", 8) or 8),
         knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
         web_research=bool(derived.get("web_research", True)),
+        supply_papers=bool(advanced.get("supply_papers", False)),
         ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
         max_iterations=int(advanced.get("max_iterations", 2) or 2),
     )

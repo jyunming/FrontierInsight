@@ -36,6 +36,10 @@ tqdb>=0.8.4
 # is used; the rest of FI runs without invoking it.
 fastapi>=0.110
 uvicorn>=0.27
+# Multipart form parsing — required by the GUI's paper-upload endpoint
+# (POST /api/quests/{id}/papers). FastAPI hard-errors on a form/file route
+# without it.
+python-multipart>=0.0.9
 
 # Optional sandbox executor. Used when execution.sandbox=docker.
 # Requires Docker Desktop on Windows/macOS or `dockerd` on Linux.

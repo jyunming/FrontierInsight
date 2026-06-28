@@ -223,6 +223,14 @@ WEB_RESEARCH_CHOICES: tuple[Choice, ...] = (
 )
 
 
+SUPPLY_PAPERS_CHOICES: tuple[Choice, ...] = (
+    Choice(False, "Off (default)",
+           "Use whatever the open-web / open-access fetch can get. Paywalled papers (SPIE, IEEE, …) are cited by their abstract only."),
+    Choice(True, "Pause for my PDFs",
+           "When the agent can only get the abstract of a relevant paper, it pauses and writes a ranked needs/WANTED_PAPERS.md (download links + why each matters). Drop the PDFs into inputs/papers/ and resume — they're ingested as full text. Tip: you can also pre-load a folder of papers via knowledge.local_papers."),
+)
+
+
 ENSEMBLE_PROFILES: tuple[Choice, ...] = (
     Choice("off", "Single model (default, cheapest)",
            "One LLM call per node. Cost baseline = 1×."),
@@ -531,6 +539,16 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     # ─── Tier 3 — advanced, behind a [Show advanced] toggle ──────────
     Question(
+        id="supply_papers",
+        label="Supply paywalled papers",
+        prompt="When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, pause and list the papers to download (ranked, with links) so you can drop the PDFs into inputs/papers/ and resume with real full text. Off by default.",
+        kind="single",
+        choices=SUPPLY_PAPERS_CHOICES,
+        default=False,
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
         id="comparative_baseline",
         label="Comparative baseline",
         prompt="What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
@@ -647,6 +665,7 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # download. Re-fetch literature and re-write so the new corpus
     # reaches the paper (mirrors knowledge_top_k below).
     "web_research": ("literature", "write"),
+    "supply_papers": ("literature",),
     # max_iterations is the design/review-loop hard cap. Lowering it
     # mid-quest just means the next review-revise iteration won't fire;
     # raising it gives the loop more attempts. Either way no node
@@ -1058,6 +1077,10 @@ class InterviewAnswers:
     # Maps to ``knowledge.web_search`` + ``web_fetch_pages``. Independent
     # of ``knowledge_enabled`` (the Axon corpus toggle).
     web_research: bool = True
+    # When True, pause on a paywalled/abstract-only relevant paper and write
+    # needs/WANTED_PAPERS.md so the user can drop the PDF into inputs/papers/
+    # and resume → ``knowledge.pause_for_user_papers``.
+    supply_papers: bool = False
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1221,6 +1244,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     # self-documents the interview choice. Independent of `enabled` above.
     lines.append(f"{indent}web_search: {'true' if answers.web_research else 'false'}")
     lines.append(f"{indent}web_fetch_pages: {'true' if answers.web_research else 'false'}")
+    if answers.supply_papers:
+        lines.append(f"{indent}pause_for_user_papers: true")
     if not answers.knowledge_enabled:
         lines.append(f"{indent}external_fallback: [\"openalex\", \"arxiv\", \"crossref\"]")
         lines.append(f"{indent}source_routing: \"manual\"")

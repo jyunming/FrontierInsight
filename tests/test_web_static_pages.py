@@ -696,3 +696,40 @@ def test_get_quest_file_404_when_real_file_truly_missing(tmp_path: Path) -> None
         params={"path": "paper/missing.md?preventCache=12345"},
     )
     assert res.status_code == 404
+
+
+def test_wanted_papers_and_upload_endpoints(tmp_path: Path) -> None:
+    """The papers panel endpoints: GET wanted-papers returns the manifest +
+    dropped list; POST papers saves sanitised PDFs into inputs/papers/ and
+    rejects path-traversal / wrong-extension uploads."""
+    pytest.importorskip("multipart")  # FastAPI form/file routes need python-multipart
+    import io
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    qid = "1782000000-test-quest-abc"
+    needs = output_root / qid / "needs"
+    needs.mkdir(parents=True)
+    (needs / "WANTED_PAPERS.md").write_text(
+        "# Papers to download\n\n## 1. SPIE overlay\n- **Get it:** https://doi.org/10.1117/x\n",
+        encoding="utf-8",
+    )
+    client = TestClient(make_app(output_root))
+
+    r = client.get(f"/api/quests/{qid}/wanted-papers")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["has_needs"] is True
+    assert "SPIE overlay" in body["wanted_markdown"]
+    assert body["dropped"] == []
+
+    files = [
+        ("files", ("my paper.pdf", io.BytesIO(b"%PDF-1.4 fake"), "application/pdf")),
+        ("files", ("../evil.exe", io.BytesIO(b"x"), "application/octet-stream")),
+    ]
+    r2 = client.post(f"/api/quests/{qid}/papers", files=files)
+    assert r2.status_code == 200
+    assert r2.json()["saved"] == ["my_paper.pdf"]            # sanitised
+    assert "../evil.exe" in r2.json()["skipped"]             # traversal / .exe rejected
+    on_disk = sorted(p.name for p in (output_root / qid / "inputs" / "papers").iterdir())
+    assert on_disk == ["my_paper.pdf"]
+    assert client.get(f"/api/quests/{qid}/wanted-papers").json()["dropped"] == ["my_paper.pdf"]

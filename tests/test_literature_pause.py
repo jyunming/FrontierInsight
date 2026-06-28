@@ -49,12 +49,16 @@ def test_abstract_only_explicit_flag_wins() -> None:
     assert _is_abstract_only(doc) is True
 
 
-def test_abstract_only_short_content_flagged() -> None:
-    """Without an explicit flag, short content (< 1500 chars) is
-    treated as abstract-only — covers today's arxiv/openalex/crossref
-    returns, which sit in the 800-1400 char range."""
-    doc = RetrievedDoc(content="x" * 800, metadata={})
-    assert _is_abstract_only(doc) is True
+def test_abstract_only_flags_real_papers_not_web_pages() -> None:
+    """A real, resolvable PAPER (DOI / arXiv-id / PMID, or an academic
+    adapter) with only the abstract is flagged for the user to fetch; a
+    generic web page or a bare doc with no identifier is content the agent
+    uses as-is, not something to ask the user to download."""
+    for md in ({"doi": "10.1117/12.1"}, {"arxiv_id": "2401.001"},
+               {"pmid": "123"}, {"source": "crossref"}, {"source": "pubmed"}):
+        assert _is_abstract_only(RetrievedDoc("x" * 800, md)) is True, md
+    for md in ({"source": "web_search"}, {}, {"url": "https://blog.example/x"}):
+        assert _is_abstract_only(RetrievedDoc("x" * 800, md)) is False, md
 
 
 def test_abstract_only_long_content_not_flagged() -> None:
@@ -241,3 +245,31 @@ def test_ingest_user_papers_no_dir_returns_zero(tmp_path: Path) -> None:
     out, added = _ingest_user_dropped_papers(tmp_path, merged, seen, _log())
     assert out is merged  # identity, not copy
     assert added == 0
+
+
+def test_wanted_papers_md_ranked_with_links(tmp_path: Path) -> None:
+    """_write_paper_need_stubs emits a ranked WANTED_PAPERS.md — most
+    relevant first, each with a resolve link — alongside the JSON stubs."""
+    docs = [
+        RetrievedDoc(
+            "Unrelated cooking blog\n\nHow to bake sourdough.",
+            {"title": "Sourdough basics", "url": "https://blog.example/bread",
+             "source": "crossref"},
+        ),
+        RetrievedDoc(
+            "DUV lithography overlay metrology\n\nA 193nm immersion overlay "
+            "budget with measured TIS for advanced nodes.",
+            {"title": "DUV lithography overlay metrology",
+             "doi": "10.1117/12.2222", "authors": ["A. Lee"], "source": "crossref"},
+        ),
+    ]
+    _write_paper_need_stubs(
+        tmp_path, docs, _log(), query="DUV lithography overlay metrology nodes",
+    )
+    md = (tmp_path / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
+    # The relevant paper ranks first (before the off-topic blog).
+    assert md.index("DUV lithography overlay metrology") < md.index("Sourdough")
+    assert "https://doi.org/10.1117/12.2222" in md          # DOI resolve link
+    assert "manual download needed" in md
+    # Per-paper JSON stubs still written.
+    assert (tmp_path / "needs" / "duv-lithography-overlay-metrology.json").is_file()
