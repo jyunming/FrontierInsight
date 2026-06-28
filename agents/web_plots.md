@@ -10,13 +10,18 @@ $result_json
 $sources
 
 # Your task
-Write a SINGLE self-contained Python script using matplotlib that charts the quantitative data in the sources. **Be generous, not all-or-nothing:** if the sources contain ANY numbers worth showing — even a few regional shares, a couple of yearly values, or a single ranking — produce a chart for them. Aim for **as many figures as the data supports (up to ~6)**, but **always produce at least one or two** whenever any numbers are present. Even 3–4 datapoints (e.g. "China 65%, Europe 17%, US 7%") make a perfectly good bar chart.
+Write a SINGLE self-contained Python script using matplotlib that charts the **real, reported numbers** in the sources, so the paper / poster / slides aren't text-only.
 
-Mine the sources for every chartable angle:
-- **time series** (a metric by year), **breakdowns** (shares by region / category / segment), **comparisons** (entities side by side), **rankings** (top-N), **distributions**, and **before/after** contrasts.
-- Each figure should answer one question. Prefer several focused charts over one cramped multi-panel.
+**Plot only numbers a source actually states.** Every value you chart must be a quantity reported in the sources above — a percentage, count, year-value, sample size (N), effect size, growth/decline rate, or ranking — that you could literally point to in the source text. Mine the sources for every chartable angle the *reported data* supports (up to ~6 figures):
+- **time series** (a metric by year), **breakdowns** (shares by region / category reported as numbers), **comparisons** (entities with reported values side by side), **rankings** (top-N with numbers), **distributions**, **before/after** contrasts.
+- Each figure answers one question. Prefer several focused charts over one cramped multi-panel.
 
-Only emit `NO_PLOT` (below) when the sources are **purely qualitative** — literally no numbers to plot. A thin-but-numeric source is still a plot, not a NO_PLOT.
+**Do NOT manufacture data — this is the most important rule:**
+- Do NOT fabricate, interpolate, or "estimate" numbers. Use ONLY values actually stated in the sources. If a figure needs a number the sources don't give, leave it out.
+- Do NOT turn YOUR OWN qualitative categorization into a chart. Grouping concepts yourself and then plotting "4 of 6 → 66.7%" as a pie is **fabricated data** — that percentage is your tally, not a source's finding. A count is chartable only when a SOURCE reports it (e.g. "12 of 18 studies found an effect", "N = 240 participants").
+- Every datapoint must be traceable to a specific source statement.
+
+**It is correct and expected to output `NO_PLOT` for a qualitative topic.** Many literature-review topics (mechanisms, debates, conceptual syntheses) report few or no hard numbers — for those, NO_PLOT is the honest answer. A fabricated category-count pie is WORSE than no plot. Only chart when the sources give you real numbers to stand on.
 
 The script must:
 
@@ -26,7 +31,7 @@ The script must:
 - Uses a non-interactive backend (`import matplotlib; matplotlib.use("Agg")`) and only matplotlib + the Python standard library (no seaborn, no pandas, no network).
 - Closes each figure (`plt.close()`) after saving.
 
-If the sources do NOT contain data worth plotting (purely qualitative text, no usable numbers), output exactly:
+If the sources contain no real reported numbers worth plotting (qualitative text only, or only numbers you'd have to manufacture), output exactly:
 
 NO_PLOT
 
