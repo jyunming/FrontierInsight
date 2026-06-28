@@ -51,6 +51,49 @@ def _latex_safe_body(body: str) -> str:
     Unicode typography to LaTeX equivalents (shared with the paper
     generator) and strip emoji/pictographs that have no LaTeX mapping."""
     return _EMOJI_RE.sub("", _sanitize_unicode_for_latex(body))
+
+
+# Bare LaTeX specials that hard-error pdflatex when an LLM writes them as
+# literal prose in a poster column (a stray 'Microlensing & Timing' / '50%').
+# Posters are blocks + itemize, never tabular, so a bare ``&`` is always a
+# literal ampersand. Already-escaped specials (``\&``) are skipped via the
+# negative lookbehind; backslashes and braces are untouched. A bare
+# ``&``/``%``/``#`` inside ``$math$`` would also be escaped, but poster column
+# prose doesn't carry math with literal specials, so that's safe here.
+_LATEX_TEXT_SPECIAL_RE = _re.compile(r"(?<!\\)([&%#])")
+
+
+def _escape_latex_text_specials(s: str) -> str:
+    """Escape bare ``&``, ``%``, ``#`` in LLM-authored poster column text so
+    a literal ampersand or percent doesn't fatally break the compile."""
+    return _LATEX_TEXT_SPECIAL_RE.sub(r"\\\1", s or "")
+
+
+# LaTeX scratch pdflatex/tectonic leave next to poster.pdf — pure compile
+# byproducts. We delete them once we have the PDF so the quest dir holds the
+# deliverables (poster.pdf + poster.tex), not a pile of poster.aux/.out/…
+_POSTER_AUX_EXTS = (
+    ".aux", ".out", ".nav", ".snm", ".toc", ".vrb",
+    ".fls", ".fdb_latexmk", ".synctex.gz",
+)
+
+
+def _cleanup_poster_artifacts(out_dir: Path, *, keep_log: bool) -> None:
+    """Delete the LaTeX scratch files beside poster.pdf, keeping the source
+    (poster.tex) and — on a failed compile (``keep_log=True``) — poster.log
+    for debugging. Best-effort: a locked file is skipped."""
+    exts = list(_POSTER_AUX_EXTS)
+    if not keep_log:
+        exts.append(".log")
+    for ext in exts:
+        p = out_dir / f"poster{ext}"
+        if p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
 from core.provider import (
     LLMClient,
     ProxySupervisor,
@@ -269,10 +312,10 @@ class PosterGenerator:
         # are LaTeX with arbitrary `$math$` content that would break
         # substitute()'s strict placeholder matcher.
         body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
-            title=parsed.get("title") or "Untitled",
-            left=parsed.get("left") or "",
-            right=parsed.get("right") or "",
-            references=references_tex,
+            title=_escape_latex_text_specials(parsed.get("title") or "Untitled"),
+            left=_escape_latex_text_specials(parsed.get("left") or ""),
+            right=_escape_latex_text_specials(parsed.get("right") or ""),
+            references=references_tex,   # already LaTeX-escaped by build step
             brandlogo=brandlogo,
         )
         # Make the substituted LaTeX safe for pdflatex — strip emoji and
@@ -369,6 +412,7 @@ class PosterGenerator:
                     encoding="utf-8",
                 )
                 result["poster_pdf_skipped"] = diag_path
+                _cleanup_poster_artifacts(out_dir, keep_log=True)
                 return result
             if r.returncode != 0:
                 # Both pdflatex and tectonic write LaTeX errors to stdout
@@ -396,6 +440,7 @@ class PosterGenerator:
                     encoding="utf-8",
                 )
                 result["poster_pdf_skipped"] = diag_path
+                _cleanup_poster_artifacts(out_dir, keep_log=True)
                 return result
             if not out_pdf.exists():
                 # rc=0 but the engine produced no .pdf on disk. Rare —
@@ -428,6 +473,7 @@ class PosterGenerator:
                     encoding="utf-8",
                 )
                 result["poster_pdf_skipped"] = diag_path
+                _cleanup_poster_artifacts(out_dir, keep_log=True)
                 return result
             # Compiled OK at this scale. Accept it unless it overflows AND
             # a smaller scale remains to try.
@@ -453,6 +499,9 @@ class PosterGenerator:
                 diag_path.unlink()
             except OSError:
                 pass
+        # Drop the LaTeX scratch (.aux/.log/.out/…) now that poster.pdf
+        # exists — keep only poster.pdf + poster.tex.
+        _cleanup_poster_artifacts(out_dir, keep_log=False)
         return result
 
 

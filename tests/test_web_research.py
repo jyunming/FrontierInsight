@@ -262,9 +262,8 @@ def test_web_plots_passthrough_in_simulation_mode(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_literature_seed_writes_files_with_source_urls(tmp_path: Path) -> None:
+def test_literature_seed_counts_without_duplicating(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    auto_dir = eng.quest_root / "data" / "auto_collected"
     state = {"literature": [
         {"content": "EV outlook body", "metadata": {
             "source": "web_search", "kind": "web_page",
@@ -272,13 +271,12 @@ def test_literature_seed_writes_files_with_source_urls(tmp_path: Path) -> None:
         {"content": "internal", "metadata": {"kind": "fi_paper_spine", "title": "mem"}},
         {"content": "x", "metadata": {}},  # no title/url → skipped
     ]}
-    n = eng._literature_seed_step(state, auto_dir)
-    assert n == 1
-    files = list(auto_dir.glob("*.md"))
-    assert len(files) == 1
-    txt = files[0].read_text(encoding="utf-8")
-    assert "https://iea.org/ev" in txt   # source URL preserved in front matter
-    assert "EV outlook body" in txt
+    n = eng._literature_seed_step(state)
+    assert n == 1   # one citable web source counted (internal + untitled skipped)
+    # No duplicate copy is written: the sources already live in
+    # data/literature/ (written by the literature node) and data_load walks
+    # the whole data/ tree, so a second copy would only double-feed them.
+    assert not (eng.quest_root / "data" / "auto_collected").exists()
 
 
 def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
@@ -305,7 +303,9 @@ def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
     out = asyncio.run(eng._node_auto_collect_data(state))
     assert out["auto_collected_count"] >= 1
     assert called["asearch"] is False  # reused literature; no redundant web query
-    assert (eng.quest_root / "data" / "auto_collected").is_dir()
+    # The reuse path counts the already-downloaded sources but writes NO
+    # duplicate copy — they already live in data/literature/.
+    assert not (eng.quest_root / "data" / "auto_collected").exists()
 
 
 def test_write_literature_files_persists_citable_corpus(tmp_path: Path) -> None:
@@ -467,3 +467,102 @@ async def test_slides_appends_references_slide(tmp_path, monkeypatch) -> None:
     md = result["slides_md"].read_text(encoding="utf-8")
     assert "## References" in md
     assert "https://payloadspace.com/spacex-2023" in md
+
+
+# ---------------------------------------------------------------------------
+# Web-plot house style — every web_plots script is prefixed with the FI
+# brand style so the figures match the paper / poster / slides identity.
+# ---------------------------------------------------------------------------
+
+def test_fi_mpl_preamble_applies_brand_style() -> None:
+    """The injected house-style preamble compiles and brands matplotlib:
+    teal leads the colour cycle, the font is serif, top/right spines off."""
+    pytest.importorskip("matplotlib")
+    import matplotlib as mpl
+    from core.engine import _FI_MPL_PREAMBLE
+
+    saved = mpl.rcParams.copy()
+    try:
+        ns: dict = {}
+        exec(compile(_FI_MPL_PREAMBLE, "<fi_preamble>", "exec"), ns)
+        assert ns["FI_TEAL"] == "#0E6E6B"
+        colors = mpl.rcParams["axes.prop_cycle"].by_key()["color"]
+        assert colors[0] == "#0E6E6B"               # teal leads the cycle
+        assert mpl.rcParams["font.family"] == ["serif"]
+        assert mpl.rcParams["axes.spines.top"] is False
+        assert mpl.rcParams["axes.spines.right"] is False
+    finally:
+        mpl.rcParams.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# web_figures node — license-clean illustrative figures with attribution
+# ---------------------------------------------------------------------------
+
+def test_web_figures_node_embeds_and_credits(monkeypatch, tmp_path: Path) -> None:
+    import core.figure_sources as fsmod
+    from core.figure_sources import WebFigure
+
+    eng = _engine(tmp_path, web_derived_plots=True)
+    eng.config.knowledge.fetch_web_figures = True
+    eng.config.knowledge.web_figures_max = 1
+    figdir = eng.quest_root / "figures"
+    figdir.mkdir(parents=True, exist_ok=True)
+    a = figdir / "webfig_arxiv_x.png"; a.write_bytes(b"\x89PNG\r\n")
+    b = figdir / "webfig_commons_y.png"; b.write_bytes(b"\x89PNG\r\n")
+    cands = [
+        WebFigure(a, "Detection methods overview", "https://arxiv.org/abs/x",
+                  "CC BY 4.0", "arXiv:x", "oa_paper"),
+        WebFigure(b, "Off-topic image", "https://commons.example/y",
+                  "CC0", "Someone", "commons"),
+    ]
+    monkeypatch.setattr(fsmod, "collect_topic_figures", lambda *a, **k: cands)
+    monkeypatch.setattr("core.engine._stamp_figure_credit", lambda *a, **k: None)
+
+    async def fake_chat(prompt, *, node=None):
+        assert node == "web_figures"
+        return "[0]"  # keep only the arXiv (cited-paper) figure
+
+    eng._chat = fake_chat
+    state = {"no_simulation_resolved": True, "topic": "exoplanet detection",
+             "literature": [], "figures": ["existing.png"]}
+    out = asyncio.run(eng._node_web_figures(state))
+    assert out["figures"] == ["existing.png", "webfig_arxiv_x.png"]
+    assert [c["license"] for c in out["figure_credits"]] == ["CC BY 4.0"]
+    assert a.exists()          # selected, kept
+    assert not b.exists()      # not selected → removed
+
+
+def test_web_figures_node_off_by_default(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, web_derived_plots=True)  # fetch_web_figures defaults False
+    state = {"no_simulation_resolved": True, "topic": "t", "literature": [], "figures": []}
+    assert asyncio.run(eng._node_web_figures(state)) == {}
+
+
+def test_figure_list_for_prompt_annotates_credits() -> None:
+    from core.engine import _figure_list_for_prompt
+    state = {
+        "figures": ["chart.png", "webfig_arxiv_x.png"],
+        "figure_credits": [{
+            "file": "webfig_arxiv_x.png", "caption": "Detection methods tree",
+            "source_url": "https://arxiv.org/abs/x", "license": "CC BY 4.0",
+        }],
+    }
+    block = _figure_list_for_prompt(state)
+    assert "- figures/chart.png" in block            # plain chart unannotated
+    assert "ILLUSTRATIVE" in block and "Detection methods tree" in block
+    assert "CC BY 4.0" in block and "arxiv.org/abs/x" in block
+
+
+def test_arxiv_ids_from_literature_old_and_new_style(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    state = {"literature": [
+        {"content": "", "metadata": {"url": "https://arxiv.org/abs/2404.09143"}},
+        {"content": "", "metadata": {"url": "https://arxiv.org/pdf/hep-th/9701001v2"}},
+        {"content": "", "metadata": {"arxiv_id": "2210.04940"}},
+        {"content": "", "metadata": {"url": "https://example.com/not-arxiv"}},
+    ]}
+    ids = eng._arxiv_ids_from_literature(state)
+    assert "2404.09143" in ids          # new-style from URL
+    assert "hep-th/9701001" in ids      # old-style from URL (Copilot fix)
+    assert "2210.04940" in ids          # from metadata

@@ -280,7 +280,7 @@ The YAML's `provider` block is honored on resume; everything else (topic, design
 
 ### Pull more (or fewer) prior-work citations
 
-Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by the interview's **Web research** toggle (`knowledge.web_search`, on by default; independent of the Axon knowledge layer). The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
+Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by the interview's **Web research** toggle (`knowledge.web_search`, on by default; independent of the Axon knowledge layer). The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block fits comfortably in the writer prompt alongside the design + analysis blocks; each source contributes up to `knowledge.literature_excerpt_chars` (default 4000) of its **most relevant** passages, not its first N characters. Override per-quest:
 
 ```yaml
 knowledge:
@@ -306,6 +306,13 @@ output:
 
 The academic sources (arXiv / OpenAlex / Crossref / …) only cover scholarly literature. For a non-academic question — a company's financials, market sizes, current events, culture, a how-to — they return irrelevant nearest-neighbour papers. FI runs a **general web search in parallel** with Axon and the academic adapters on every quest, merges and de-duplicates the results, and (by default) fetches the readable text of each result page so the writer can quote real content. Every web hit is cited by its URL in the paper, poster, and slides.
 
+High-quality content is the foundation of the research, so the fetch layer works hard to get **real full text**, not a two-sentence snippet:
+
+- **Clean extraction.** Pages run through `trafilatura` (when installed) to isolate the article body and drop nav / menus / reference cruft; a built-in extractor is the fallback.
+- **Open-access full-text cascade.** For an academic source (PMC, a DOI, a preprint, a major publisher) FI resolves the `PMCID` / `DOI` / arXiv-id and pulls the clean open-access full text directly — preferring the **PMC BioC API** (section-labelled, no HTML cruft), then **Europe PMC**, the **preprint** server (arXiv / bioRxiv / medRxiv), **Unpaywall** (every OA location, repository copies first), and **Semantic Scholar** / **CORE** when a key is set.
+- **Walls rejected, not stored.** reCAPTCHA / "checking your browser" interstitials and paywall / abstract-only stubs (detected via a schema.org `isAccessibleForFree` / paywall-vendor check) are discarded; the real search snippet is kept instead of challenge garbage, and the cascade above is tried for the genuine full text.
+- **Relevance-selected excerpts.** Full text is stored uncapped on disk, but each node's prompt gets the passages most relevant to the question — so a number buried mid-document reaches the writer, not just the abstract.
+
 It works out of the box with the keyless DuckDuckGo backend. For better relevance set a [Brave Search API key](https://brave.com/search/api/) (free tier ~2k queries/mo) — the same `BRAVE_API_KEY` Axon uses:
 
 ```bash
@@ -313,15 +320,19 @@ export BRAVE_API_KEY=BSA...your-key...
 ```
 ```yaml
 knowledge:
-  web_search: true            # default on
-  web_search_backend: auto    # Brave if a key is present, else DuckDuckGo
+  web_search: true              # default on
+  web_search_backend: auto      # Brave if a key is present, else DuckDuckGo
   web_search_top_k: 10
-  web_fetch_pages: true        # fetch full page text, not just snippets
-  relevance_guard: true        # drop confident-but-off-topic hits; pause if nothing fits
-  # brave_api_key: BSA...      # or set the BRAVE_API_KEY env var instead
+  web_fetch_pages: true          # fetch full page text, not just snippets
+  literature_excerpt_chars: 4000 # relevant chars of each source put into a prompt
+  passage_ranking: lexical       # "embed" for semantic (sentence-transformer) ranking
+  relevance_guard: true          # drop confident-but-off-topic hits; pause if nothing fits
+  # brave_api_key: BSA...        # or set the BRAVE_API_KEY env var instead
 ```
 
-For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. If the sources carry no plottable numbers it skips cleanly.
+For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. The charts are drawn in the **Frontier Insight house style** (Palatino-style serif, teal-anchored palette, warm ground, hairline grid) so they match the paper, poster, and slides rather than looking like default matplotlib. If the sources carry no plottable numbers it skips cleanly.
+
+Beyond charting numbers, `knowledge.fetch_web_figures` (off by default) embeds a couple of **license-clean illustrative figures** so a study carries a visual point of view — a real figure from a **cited CC-licensed arXiv paper**, plus **Wikimedia Commons** diagrams under CC / public-domain. It only ever embeds free-licensed images (CC BY / CC BY-SA / CC0 / public domain; NC/ND rejected), runs an LLM relevance gate to drop off-topic matches, and stamps each figure with its source + license so every embedded image is properly attributed.
 
 ### Watch progress in a browser instead of the terminal
 

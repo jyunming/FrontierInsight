@@ -418,3 +418,40 @@ async def test_poster_uses_same_engine_discovery_as_paper(
         "Poster MUST invoke whichever binary find_pdf_engine returned; "
         f"got {captured_cmd[0]!r} expected {sentinel[1]!r}"
     )
+
+
+def test_escape_latex_text_specials() -> None:
+    """Bare &, %, # in LLM column text are escaped (a literal ampersand is a
+    fatal pdflatex 'Misplaced alignment tab' otherwise); already-escaped
+    specials and math/macros are left alone."""
+    from generation.poster import _escape_latex_text_specials as esc
+    assert esc("Microlensing & Timing") == r"Microlensing \& Timing"
+    assert esc("50% done, item #1") == r"50\% done, item \#1"
+    assert esc(r"keep \& and \% intact") == r"keep \& and \% intact"
+    assert esc(r"$x^2$ \textbf{bold}") == r"$x^2$ \textbf{bold}"
+    assert esc("") == ""
+
+
+def test_cleanup_poster_artifacts_success_keeps_pdf_and_tex(tmp_path: Path) -> None:
+    from generation.poster import _cleanup_poster_artifacts
+    for name in ("poster.pdf", "poster.tex", "poster.aux", "poster.log",
+                 "poster.out", "poster.nav", "poster.toc"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    _cleanup_poster_artifacts(tmp_path, keep_log=False)
+    assert sorted(p.name for p in tmp_path.glob("poster.*")) == [
+        "poster.pdf", "poster.tex",
+    ]
+
+
+def test_cleanup_poster_artifacts_failure_keeps_log(tmp_path: Path) -> None:
+    from generation.poster import _cleanup_poster_artifacts
+    for name in ("poster.tex", "poster.log", "poster.aux", "poster.out"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    (tmp_path / "poster_pdf_skipped.md").write_text("x", encoding="utf-8")
+    _cleanup_poster_artifacts(tmp_path, keep_log=True)
+    remaining = sorted(p.name for p in tmp_path.glob("poster*"))
+    assert "poster.tex" in remaining            # source kept
+    assert "poster.log" in remaining            # error log kept for debugging
+    assert "poster_pdf_skipped.md" in remaining  # diagnostic kept
+    assert "poster.aux" not in remaining         # scratch dropped
+    assert "poster.out" not in remaining

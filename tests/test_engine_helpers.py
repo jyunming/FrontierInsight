@@ -451,14 +451,16 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # edge, plus a conditional `execute_reflect → execute | analyze`.
     assert ("execute", "execute_reflect") in plain_edges
     # no-simulation chain: auto_collect_data → wait_for_data →
-    # data_load → web_plots → analyze. auto_collect_data is the
-    # agent-side retrieval (Axon + web) that runs BEFORE the user-data
-    # pause; web_plots derives figures from the collected sources before
-    # analyze consumes them.
+    # data_load → web_plots → web_figures → analyze. auto_collect_data is
+    # the agent-side retrieval (Axon + web) that runs BEFORE the user-data
+    # pause; web_plots derives figures from the collected sources and
+    # web_figures embeds license-clean illustrative figures before analyze
+    # consumes them.
     assert ("auto_collect_data", "wait_for_data") in plain_edges
     assert ("wait_for_data", "data_load") in plain_edges
     assert ("data_load", "web_plots") in plain_edges
-    assert ("web_plots", "analyze") in plain_edges
+    assert ("web_plots", "web_figures") in plain_edges
+    assert ("web_figures", "analyze") in plain_edges
     # `analyze → cross_check` replaces the old `analyze → write` edge,
     # plus a conditional `cross_check → write | design` edge.
     assert ("analyze", "cross_check") in plain_edges

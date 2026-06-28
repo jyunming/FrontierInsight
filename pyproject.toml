@@ -69,6 +69,10 @@ dependencies = [
 pdf = ["pypdf>=4.0"]
 docker = ["docker>=7.1"]
 knowledge = ["axon-rag>=0.4"]
+# Web-research full-text extraction (main-content / boilerplate removal).
+# Optional: the knowledge layer falls back to a built-in extractor when
+# absent, but trafilatura gives markedly cleaner article bodies.
+web = ["trafilatura>=1.8"]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
@@ -91,6 +95,7 @@ all = [
   "pypdf>=4.0",
   "docker>=7.1",
   "axon-rag>=0.4",
+  "trafilatura>=1.8",
 ]
 
 [project.urls]

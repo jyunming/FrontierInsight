@@ -52,6 +52,12 @@ psutil>=5.9
 # but .pdf files are skipped with a warning.
 pypdf>=4.0
 
+# Web-research full-text extraction. trafilatura isolates the main article
+# body (drops nav / menus / related-article / reference cruft) far better
+# than a tag-strip; the knowledge layer falls back to a built-in extractor
+# when it's absent, so this is optional but strongly recommended.
+trafilatura>=1.8
+
 # ---- Dev / test ----------------------------------------------------------
 # Used by `python -m pytest`. Not strictly required for runtime FI usage.
 

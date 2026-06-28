@@ -79,6 +79,12 @@ from .config import KnowledgeConfig
 
 _log = logging.getLogger("frontier_insight.knowledge")
 
+# trafilatura logs an ERROR ("empty HTML tree", "wrong data type") whenever
+# it's handed an empty / non-HTML stub — which is routine here (we fall back
+# to the built-in extractor on any miss). Silence its non-actionable noise so
+# the quest log stays readable; real failures are handled by the fallback.
+logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
+
 try:
     from axon import AxonBrain, AxonConfig  # type: ignore[import-not-found]
     from axon.integrations.langchain import AxonRetriever  # type: ignore[import-not-found]
@@ -549,6 +555,31 @@ def _url_host(url: str) -> str:
         return ""
 
 
+# Hosts whose clean full text is better obtained from the OA APIs
+# (PMC BioC / Europe PMC / Unpaywall / preprint servers) than by scraping
+# the publisher HTML — which is either a reCAPTCHA / cookie wall or a
+# boilerplate-laden article page. For these we run the OA cascade *first*.
+_ACADEMIC_HOST_RE = re.compile(
+    r"(?:^|\.)(?:"
+    r"ncbi\.nlm\.nih\.gov|europepmc\.org|arxiv\.org|biorxiv\.org|medrxiv\.org|"
+    r"doi\.org|sciencedirect\.com|springer\.com|wiley\.com|tandfonline\.com|"
+    r"sagepub\.com|mdpi\.com|nature\.com|plos\.org|frontiersin\.org|"
+    r"ieee\.org|acm\.org|oup\.com|cambridge\.org|jstor\.org|bmj\.com|"
+    r"cell\.com|pnas\.org|ssrn\.com|researchgate\.net|semanticscholar\.org|"
+    r"academic\.oup\.com"
+    r")$",
+    re.I,
+)
+
+
+def _is_academic_source(url: str) -> bool:
+    """True for URLs (PMC, preprint servers, DOI resolvers, major academic
+    publishers) whose clean full text the OA cascade recovers better than an
+    HTML scrape."""
+    host = _url_host(url)
+    return bool(host) and bool(_ACADEMIC_HOST_RE.search(host))
+
+
 # Domains that rank well on commercial queries but are low-signal: SEO
 # "market report" / press-release farms whose pages are vendor pitches,
 # "request a free sample" gates, and recycled forecasts rather than
@@ -682,11 +713,20 @@ def _html_to_text(html: str) -> str:
     writer is aware of the visuals (we don't fetch the images themselves)."""
     figs = _figure_note(html)
     # 1. Best path: trafilatura main-content extraction, if available.
+    #    favor_recall keeps short paragraphs / captions / results sentences
+    #    that scientific bodies depend on (the precision default drops them);
+    #    older trafilatura without the kwarg falls back to the plain call.
     try:
         import trafilatura  # type: ignore[import-not-found]
-        extracted = trafilatura.extract(
-            html, include_comments=False, include_tables=True,
-        )
+        try:
+            extracted = trafilatura.extract(
+                html, include_comments=False, include_tables=True,
+                favor_recall=True,
+            )
+        except TypeError:
+            extracted = trafilatura.extract(
+                html, include_comments=False, include_tables=True,
+            )
         if extracted and extracted.strip():
             return (extracted.strip() + figs).strip()
     except Exception:
@@ -958,6 +998,53 @@ def _keep_fetched_text(text: str | None, snippet: str) -> bool:
     return len(text) >= _MIN_FULL_TEXT_CHARS
 
 
+# Paywall / metered-content infrastructure: the presence of one of these
+# vendor scripts in the HTML means the page is gated, so the extractable
+# text is a teaser, not the article.
+_PAYWALL_SCRIPT_MARKERS = (
+    "piano.io", "tinypass.com", "poool.fr", "sophi.io", "evolok.net",
+    "js.pelcro.com", "cxense.com", "blueconic.net", "steadyhq.com",
+    "/leaky-paywall/",
+)
+# Paywall call-to-action phrases. Real long articles can mention these in a
+# footer, so a match only counts alongside a short body (see below).
+_PAYWALL_TEXT_MARKERS = (
+    "get access to the full", "purchase pdf", "purchase access", "buy article",
+    "buy this article", "subscribe to read", "subscribe to view",
+    "institutional login", "access through your institution",
+    "rent this article", "sign in to read the full",
+    "to read the full-text of this research",
+)
+# schema.org paywall flag (Google-endorsed) — the cleanest single signal.
+_NOT_FREE_RE = re.compile(
+    r'"isaccessibleforfree"\s*:\s*'
+    r'(?:false|"false"|"https?://schema\.org/false")',
+    re.I,
+)
+
+
+def _is_paywall_or_stub(html: str, text: str) -> bool:
+    """Is this fetched page a paywall landing / abstract-only stub rather
+    than real article content? Combines schema.org ``isAccessibleForFree:
+    false``, known paywall-vendor scripts, and paywall call-to-action text.
+    Conservative: every signal is corroborated by a short extracted body, so
+    a genuine long article that merely links 'institutional login' in its
+    header (or carries a partial-paywall ``hasPart`` flag) is NOT dropped."""
+    if not html:
+        return False
+    low_html = html.lower()
+    # A real, fully-extracted article body comfortably clears this; a teaser
+    # / abstract-only stub does not.
+    short = len(text) < 4000
+    if short and _NOT_FREE_RE.search(low_html):
+        return True
+    if short and any(m in low_html for m in _PAYWALL_SCRIPT_MARKERS):
+        return True
+    if len(text) < 1800 and any(m in text.lower() for m in _PAYWALL_TEXT_MARKERS):
+        return True
+    return False
+
+
 def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
     """Render ``url`` in a headless Chromium via Playwright and return its
     HTML. This executes JavaScript and clears most anti-bot challenges
@@ -1034,89 +1121,188 @@ def _xml_to_text(xml: str) -> str:
     return re.sub(r"\s+", " ", decoded).strip()
 
 
-def _europepmc_fulltext(
-    doc: RetrievedDoc, *, timeout_s: float, cap: int,
-) -> str | None:
-    """Recover open-access full text from the Europe PMC REST API for a
-    PMC / PubMed / DOI source whose publisher HTML is bot-walled. Derives
-    the PMCID from a ``pmc.ncbi.nlm.nih.gov/articles/PMC…`` URL, or resolves
-    it from the DOI via Europe PMC search, then pulls the OA ``fullTextXML``
-    (only open-access articles expose it; others 404 → None)."""
+def _normalize_pmcid(raw: str) -> str:
+    """Canonical ``PMC<digits>`` form for any PMCID-bearing string, or ''."""
+    m = re.search(r"PMC\s*0*(\d+)", raw or "", re.I)
+    return f"PMC{m.group(1)}" if m else ""
+
+
+def _arxiv_id_from(url: str, md: dict) -> str:
+    """Extract an arXiv id from metadata or an arxiv.org URL (version
+    suffix stripped)."""
+    raw = str(md.get("arxiv_id") or md.get("arxivId") or "").strip()
+    if raw:
+        return re.sub(r"v\d+$", "", raw)
+    m = re.search(
+        r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})",
+        url or "", re.I,
+    )
+    return m.group(1) if m else ""
+
+
+def _resolve_ids(doc: RetrievedDoc, *, timeout_s: float) -> dict:
+    """Best-effort ``{doi, pmcid, arxiv_id}`` for a doc, from metadata, the
+    source URL, and one Europe PMC cross-resolution call (DOI<->PMCID).
+    Academic web-search hits routinely carry only a PMC link or only a DOI;
+    filling in the missing id gives the OA cascade keys to work with."""
     md = doc.metadata
     url = str(md.get("url") or "")
-    doi = str(md.get("doi") or "").strip()
-    pmcid = str(md.get("pmcid") or "").strip()
-    if not pmcid:
-        m = re.search(r"PMC(\d+)", url)
+    doi = str(md.get("doi") or "").strip().lower()
+    pmcid = _normalize_pmcid(str(md.get("pmcid") or "")) or _normalize_pmcid(url)
+    arxiv_id = _arxiv_id_from(url, md)
+    if not doi:  # a bare DOI (incl. bioRxiv/medRxiv 10.1101/…) in the URL
+        m = re.search(r"10\.\d{4,9}/[^\s\"'<>?#]+", url)
         if m:
-            pmcid = "PMC" + m.group(1)
-    base = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+            doi = m.group(0).rstrip(".").lower()
+    # Cross-resolve DOI<->PMCID via one Europe PMC search when exactly one is
+    # known — the search result carries both ids.
+    if bool(doi) != bool(pmcid):
+        query = f"DOI:{doi}" if doi else f"PMCID:{pmcid}"
+        try:
+            r = httpx.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={"query": query, "format": "json",
+                        "resultType": "lite", "pageSize": 1},
+                headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
+            )
+            if r.status_code == 200:
+                res = ((r.json().get("resultList") or {}).get("result") or [{}])[0]
+                doi = doi or str(res.get("doi") or "").lower()
+                pmcid = pmcid or _normalize_pmcid(str(res.get("pmcid") or ""))
+        except Exception:
+            pass
+    return {"doi": doi, "pmcid": pmcid, "arxiv_id": arxiv_id}
+
+
+# BioC passage section types that are reference dumps / boilerplate — we
+# drop them so the recovered body is article prose, not a citation list.
+_BIOC_SKIP_SECTIONS = {"REF", "REFERENCES", "ACK_FUND", "COMP_INT", "SUPPL"}
+
+
+def _pmc_bioc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
+    """Pull clean, structured full text from the PMC BioC API — the
+    highest-quality PMC route (no HTML nav boilerplate, no reCAPTCHA wall).
+    Assembles the article body from BioC passages, skipping reference-list /
+    funding sections. None when the article isn't in the PMC OA subset."""
+    if not pmcid:
+        return None
+    url = (
+        "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/"
+        f"pmcoa.cgi/BioC_json/{pmcid}/unicode"
+    )
+    try:
+        r = httpx.get(
+            url, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
+        )
+        if r.status_code != 200 or not r.content:
+            return None
+        data = r.json()
+    except Exception as e:
+        _log.info("pmc bioc %s failed: %s", pmcid, e)
+        return None
+    collections = data if isinstance(data, list) else [data]
+    parts: list[str] = []
+    for coll in collections:
+        for d in (coll or {}).get("documents", []):
+            for p in d.get("passages", []):
+                sect = str((p.get("infons") or {}).get("section_type") or "").upper()
+                if sect in _BIOC_SKIP_SECTIONS:
+                    continue
+                t = (p.get("text") or "").strip()
+                if t:
+                    parts.append(t)
+    text = "\n".join(parts).strip()
+    if len(text) >= _MIN_FULL_TEXT_CHARS:
+        _log.info("pmc bioc: recovered %d chars for %s", len(text), pmcid)
+        return text[:cap]
+    return None
+
+
+def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
+    """OA full text as JATS XML from Europe PMC — second choice after BioC
+    (the XML→text flatten loses structure). Only OA-subset articles expose
+    ``fullTextXML``; others 404.
+
+    NOTE: the path is ``/{PMCID}/fullTextXML`` with the ``PMC``-prefixed id
+    and NO ``/PMC/`` path segment — ``/PMC/{id}/fullTextXML`` 404s for every
+    article, OA or not."""
+    if not pmcid:
+        return None
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+    try:
+        r = httpx.get(
+            url, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
+        )
+        if r.status_code != 200 or not r.content:
+            return None
+        text = _xml_to_text(r.text)
+        if len(text) >= _MIN_FULL_TEXT_CHARS:
+            _log.info("europepmc: recovered %d chars for %s", len(text), pmcid)
+            return text[:cap]
+    except Exception as e:
+        _log.info("europepmc fulltext %s failed: %s", pmcid, e)
+    return None
+
+
+def _pdf_or_html_text(resp: Any, *, cap: int) -> str | None:
+    """Extract text from a fetched response that may be a PDF or HTML,
+    rejecting bot-challenge pages. Shared by the OA-PDF routes."""
+    body = resp.content
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if "application/pdf" in ctype or body[:5] == b"%PDF-":
+        return _pdf_bytes_to_text(body, cap=cap)
+    if "html" in ctype or b"<html" in body[:2048].lower():
+        t = _html_to_text(body.decode("utf-8", errors="replace"))
+        return None if _looks_like_bot_challenge(t) else t
+    return None
+
+
+def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
+    """Full text for arXiv / bioRxiv / medRxiv preprints (always OA). arXiv:
+    the HTML render (``arxiv.org/html``) then the PDF; bioRxiv/medRxiv: the
+    ``.full.pdf`` for the ``10.1101/…`` DOI."""
+    arxiv_id = ids.get("arxiv_id") or ""
+    doi = ids.get("doi") or ""
     try:
         with httpx.Client(
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
-            if not pmcid and doi:
-                r = c.get(
-                    f"{base}/search",
-                    params={"query": f"DOI:{doi}", "format": "json",
-                            "resultType": "lite", "pageSize": 1},
-                )
-                if r.status_code == 200:
-                    results = (r.json().get("resultList") or {}).get("result") or []
-                    if results:
-                        pmcid = str(results[0].get("pmcid") or "")
-            if not pmcid:
-                return None
-            r = c.get(f"{base}/PMC/{pmcid}/fullTextXML")
-            if r.status_code != 200 or not r.content:
-                return None
-            text = _xml_to_text(r.text)
-            if text:
-                _log.info("europepmc: recovered OA full text for %s", pmcid)
-                return text[:cap]
+            if arxiv_id:
+                rr = c.get(f"https://arxiv.org/html/{arxiv_id}")
+                if rr.status_code == 200 and b"<html" in rr.content[:2048].lower():
+                    t = _html_to_text(rr.text)
+                    if len(t) >= _MIN_FULL_TEXT_CHARS:
+                        _log.info("arxiv: recovered HTML full text for %s", arxiv_id)
+                        return t[:cap]
+                rr = c.get(f"https://arxiv.org/pdf/{arxiv_id}")
+                if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
+                    t = _pdf_bytes_to_text(rr.content, cap=cap)
+                    if t and len(t) >= _MIN_FULL_TEXT_CHARS:
+                        _log.info("arxiv: recovered PDF full text for %s", arxiv_id)
+                        return t[:cap]
+            if doi.startswith("10.1101/"):  # bioRxiv / medRxiv share the prefix
+                for server in ("biorxiv", "medrxiv"):
+                    try:
+                        rr = c.get(f"https://www.{server}.org/content/{doi}v1.full.pdf")
+                    except Exception:
+                        continue
+                    if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
+                        t = _pdf_bytes_to_text(rr.content, cap=cap)
+                        if t and len(t) >= _MIN_FULL_TEXT_CHARS:
+                            _log.info("%s: recovered full text for %s", server, doi)
+                            return t[:cap]
     except Exception as e:
-        _log.info("europepmc fulltext %s failed: %s", pmcid or doi, e)
+        _log.info("preprint fetch failed (%s / %s): %s", arxiv_id, doi, e)
     return None
 
 
-def _resolve_doi(doc: RetrievedDoc, *, timeout_s: float) -> str:
-    """Best-effort DOI for a doc. Uses ``metadata.doi`` when present; else,
-    for a ``pmc.ncbi.nlm.nih.gov/articles/PMC…`` URL (web-search results
-    carry the PMC link but no DOI), resolves the DOI from the PMCID via
-    Europe PMC search."""
-    doi = str(doc.metadata.get("doi") or "").strip()
-    if doi:
-        return doi
-    m = re.search(r"PMC(\d+)", str(doc.metadata.get("url") or ""))
-    if not m:
-        return ""
-    try:
-        r = httpx.get(
-            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-            params={"query": f"PMCID:PMC{m.group(1)}", "format": "json",
-                    "resultType": "lite", "pageSize": 1},
-            headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
-        )
-        if r.status_code == 200:
-            res = (r.json().get("resultList") or {}).get("result") or []
-            if res:
-                return str(res[0].get("doi") or "")
-    except Exception:
-        pass
-    return ""
-
-
-def _unpaywall_fulltext(
-    doc: RetrievedDoc, *, timeout_s: float, cap: int,
-) -> str | None:
+def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
     """Recover open-access full text via Unpaywall. The publisher's OA copy
-    is often itself bot-walled (MDPI / SAGE / … return 403), so we iterate
-    EVERY ``oa_location`` — repository copies first (university repos, etc.,
-    which rarely block) — fetch each PDF/HTML, and return the first that
-    yields real content (not a challenge page, above the min length).
-    Unpaywall needs a contact email — ``FI_UNPAYWALL_EMAIL`` /
-    ``FI_CONTACT_EMAIL`` env, else a no-reply placeholder."""
-    doi = _resolve_doi(doc, timeout_s=timeout_s)
+    is often itself bot-walled (MDPI / SAGE / … 403), so we try EVERY
+    ``oa_location`` — published version + direct-PDF + repository copies
+    first (university repos rarely block) — and return the first that yields
+    real content. Unpaywall needs a real contact email
+    (``FI_UNPAYWALL_EMAIL`` / ``FI_CONTACT_EMAIL`` env, else a no-reply)."""
     if not doi:
         return None
     email = (
@@ -1124,6 +1310,17 @@ def _unpaywall_fulltext(
         or os.environ.get("FI_CONTACT_EMAIL")
         or "frontier-insight@users.noreply.github.com"
     )
+
+    def _loc_rank(loc: dict) -> tuple:
+        # published > accepted > submitted; direct PDF before landing page;
+        # repository host before publisher (publisher OA PDFs 403 most).
+        ver = {"publishedVersion": 0, "acceptedVersion": 1}.get(
+            loc.get("version") or "", 2,
+        )
+        has_pdf = 0 if loc.get("url_for_pdf") else 1
+        repo = 0 if loc.get("host_type") == "repository" else 1
+        return (ver, has_pdf, repo)
+
     try:
         with httpx.Client(
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
@@ -1131,14 +1328,11 @@ def _unpaywall_fulltext(
             r = c.get(f"https://api.unpaywall.org/v2/{doi}", params={"email": email})
             if r.status_code != 200:
                 return None
-            locs = list(r.json().get("oa_locations") or [])
-            # Repository copies (host_type='repository') before publisher
-            # copies — the latter are the ones that 403 on a direct GET.
-            locs.sort(key=lambda L: 0 if L.get("host_type") == "repository" else 1)
+            locs = sorted(r.json().get("oa_locations") or [], key=_loc_rank)
             candidates: list[str] = []
-            for L in locs:
+            for loc in locs:
                 for key in ("url_for_pdf", "url"):
-                    u = L.get(key)
+                    u = loc.get(key)
                     if u and u not in candidates:
                         candidates.append(u)
             for u in candidates:
@@ -1148,15 +1342,7 @@ def _unpaywall_fulltext(
                     continue
                 if rr.status_code != 200 or not rr.content:
                     continue
-                body = rr.content
-                ctype = (rr.headers.get("content-type") or "").lower()
-                if "application/pdf" in ctype or body[:5] == b"%PDF-":
-                    text = _pdf_bytes_to_text(body, cap=cap)
-                elif "html" in ctype or b"<html" in body[:2048].lower():
-                    t = _html_to_text(body.decode("utf-8", errors="replace"))
-                    text = None if _looks_like_bot_challenge(t) else t
-                else:
-                    continue
+                text = _pdf_or_html_text(rr, cap=cap)
                 if text and len(text) >= _MIN_FULL_TEXT_CHARS:
                     _log.info(
                         "unpaywall: recovered OA full text for DOI %s via %s",
@@ -1168,18 +1354,98 @@ def _unpaywall_fulltext(
     return None
 
 
+def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
+    """Semantic Scholar ``openAccessPdf`` locator (best-effort). The shared
+    unauth pool 429s readily — set ``SEMANTIC_SCHOLAR_API_KEY`` for a stable
+    1 req/s lane; without a key this silently no-ops on a 429."""
+    if not doi:
+        return None
+    headers = dict(_BROWSER_HEADERS)
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    if key:
+        headers["x-api-key"] = key
+    try:
+        r = httpx.get(
+            f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}",
+            params={"fields": "openAccessPdf"},
+            headers=headers, timeout=timeout_s, follow_redirects=True,
+        )
+        if r.status_code != 200:
+            return None
+        pdf = (r.json().get("openAccessPdf") or {}).get("url") or ""
+        if not pdf:
+            return None
+        rr = httpx.get(
+            pdf, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
+        )
+        if rr.status_code == 200:
+            text = _pdf_or_html_text(rr, cap=cap)
+            if text and len(text) >= _MIN_FULL_TEXT_CHARS:
+                _log.info("s2: recovered OA full text for DOI %s", doi)
+                return text[:cap]
+    except Exception as e:
+        _log.info("s2 oa pdf %s failed: %s", doi, e)
+    return None
+
+
+def _core_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
+    """CORE v3 aggregated full text (deepest green-OA repository coverage).
+    Requires a free ``CORE_API_KEY`` — without it CORE returns the literal
+    'Not available for public API users', so this no-ops when unset."""
+    key = os.environ.get("CORE_API_KEY", "").strip()
+    if not doi or not key:
+        return None
+    try:
+        r = httpx.get(
+            "https://api.core.ac.uk/v3/search/works",
+            params={"q": f'doi:"{doi}"', "limit": 1},
+            headers={"Authorization": f"Bearer {key}", **_BROWSER_HEADERS},
+            timeout=timeout_s, follow_redirects=True,
+        )
+        if r.status_code != 200:
+            return None
+        results = r.json().get("results") or []
+        if results:
+            ft = (results[0].get("fullText") or "").strip()
+            if len(ft) >= _MIN_FULL_TEXT_CHARS:
+                _log.info("core: recovered %d chars for DOI %s", len(ft), doi)
+                return ft[:cap]
+    except Exception as e:
+        _log.info("core fulltext %s failed: %s", doi, e)
+    return None
+
+
 def _fetch_via_open_apis(
     doc: RetrievedDoc, *, timeout_s: float, cap: int,
 ) -> str | None:
-    """Open-access full-text fallback for academic sources whose publisher
-    HTML is bot-walled: Europe PMC (PMC/PubMed/DOI) then Unpaywall (any
-    DOI). Returns the recovered text, or None when neither has an OA copy."""
-    text = _europepmc_fulltext(doc, timeout_s=timeout_s, cap=cap)
-    if text and len(text) >= _MIN_FULL_TEXT_CHARS:
-        return text
-    text = _unpaywall_fulltext(doc, timeout_s=timeout_s, cap=cap)
-    if text and len(text) >= _MIN_FULL_TEXT_CHARS:
-        return text
+    """Open-access full-text cascade for academic sources whose publisher
+    HTML is bot-walled or paywalled. Resolves ids once, then tries the
+    routes in descending order of text quality / reliability, stopping at
+    the first that yields real full text:
+
+        PMC BioC → Europe PMC XML → preprint (arXiv/bioRxiv/medRxiv) →
+        Unpaywall OA copy → Semantic Scholar → CORE (last two env-gated).
+
+    Returns the recovered text, or None when no OA copy is reachable."""
+    ids = _resolve_ids(doc, timeout_s=timeout_s)
+    pmcid, doi, arxiv_id = ids["pmcid"], ids["doi"], ids["arxiv_id"]
+    routes: list[Any] = []
+    if pmcid:
+        routes.append(lambda: _pmc_bioc_fulltext(pmcid, timeout_s=timeout_s, cap=cap))
+        routes.append(lambda: _europepmc_fulltext(pmcid, timeout_s=timeout_s, cap=cap))
+    if arxiv_id or doi.startswith("10.1101/"):
+        routes.append(lambda: _preprint_fulltext(ids, timeout_s=timeout_s, cap=cap))
+    if doi:
+        routes.append(lambda: _unpaywall_fulltext(doi, timeout_s=timeout_s, cap=cap))
+        routes.append(lambda: _s2_oa_pdf(doi, timeout_s=timeout_s, cap=cap))
+        routes.append(lambda: _core_fulltext(doi, timeout_s=timeout_s, cap=cap))
+    for route in routes:
+        try:
+            text = route()
+        except Exception:
+            text = None
+        if text and len(text) >= _MIN_FULL_TEXT_CHARS:
+            return text
     return None
 
 
@@ -1199,6 +1465,14 @@ def _fetch_web_page_text(
         return None
     cap = max_kb * 1024
     snippet = doc.content or ""
+    # Academic sources (PMC, preprints, DOIs, major publishers): the OA
+    # cascade gives cleaner full text than the publisher HTML (a wall or
+    # boilerplate-laden page), so try it FIRST and only scrape on a miss.
+    academic = _is_academic_source(url)
+    if academic:
+        api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
+        if api_text:
+            return api_text
     blocked = False
     try:
         with httpx.Client(
@@ -1224,13 +1498,14 @@ def _fetch_web_page_text(
             if text:
                 return text
         elif "html" in ctype or head.startswith(b"<!doctype html") or b"<html" in head:
-            text = _html_to_text(body.decode("utf-8", errors="replace"))
+            raw = body.decode("utf-8", errors="replace")
+            text = _html_to_text(raw)
             # A 200 can still be a bot-challenge / cookie wall (PMC's
-            # reCAPTCHA, MDPI, …) whose extracted text is tiny garbage.
-            # Reject that, and any stub no better than the snippet we
-            # already have, so we fall through to the headless render /
-            # API fallbacks instead of storing it.
-            if _keep_fetched_text(text, snippet):
+            # reCAPTCHA, MDPI, …) whose extracted text is tiny garbage, or a
+            # paywall / abstract-only stub. Reject those, and any stub no
+            # better than the snippet, so we fall through to the headless
+            # render / API fallbacks instead of storing it.
+            if _keep_fetched_text(text, snippet) and not _is_paywall_or_stub(raw, text):
                 return text[:cap]
         elif ctype.startswith("text/") or not ctype:
             text = body.decode("utf-8", errors="replace")
@@ -1243,15 +1518,16 @@ def _fetch_web_page_text(
         html = _playwright_fetch_html(url, timeout_s=timeout_s)
         if html:
             text = _html_to_text(html)
-            if _keep_fetched_text(text, snippet):
+            if _keep_fetched_text(text, snippet) and not _is_paywall_or_stub(html, text):
                 return text[:cap]
 
-    # Last resort: open-access full-text APIs (Europe PMC / Unpaywall)
-    # for academic sources whose publisher HTML is bot-walled but whose
-    # full text is freely available by DOI / PMCID.
-    api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
-    if _keep_fetched_text(api_text, snippet):
-        return api_text
+    # Last resort for pages we didn't classify as academic: the OA cascade
+    # can still resolve a DOI from a publisher URL and recover full text.
+    # (Academic URLs already tried the cascade first, above.)
+    if not academic:
+        api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
+        if _keep_fetched_text(api_text, snippet):
+            return api_text
     return None
 
 
@@ -1469,7 +1745,10 @@ def _fetch_full_text(
             return None
 
     if not pdf_bytes:
-        return None
+        # No direct publisher PDF — fall back to the open-access cascade
+        # (PMC BioC / Europe PMC / preprint / Unpaywall / …) which recovers
+        # clean full text by PMCID / DOI / arXiv-id.
+        return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
 
     # Extract text via pypdf. Cap to max_kb so we don't blow up the
     # downstream prompt.

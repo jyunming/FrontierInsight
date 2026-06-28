@@ -113,6 +113,11 @@ class QuestState(TypedDict, total=False):
     deps: list[str]
     exec_result: dict[str, Any]
     figures: list[str]
+    # Attribution for license-clean illustrative figures pulled from the web
+    # (knowledge.fetch_web_figures): one dict per figure with file / caption /
+    # source_url / license / attribution, so the writer captions them and the
+    # references record their provenance.
+    figure_credits: list[dict[str, Any]]
     result_json: dict[str, Any]
     # Multi-seed replication: when ``engine.execute_replicates > 1``,
     # ``_node_execute`` runs the script N times with different seeds
@@ -707,6 +712,7 @@ class Engine:
         # figures so the paper/poster/slides aren't text-only. Passthrough
         # in the simulation path (which makes its own figures in execute).
         g.add_node("web_plots", self._node_web_plots)
+        g.add_node("web_figures", self._node_web_figures)
 
         g.add_edge(START, "clarify")
         g.add_edge("clarify", "ideate")
@@ -754,7 +760,8 @@ class Engine:
         # simulation path; in no-simulation mode it derives figures from
         # the collected sources before analyze/write consume them.
         g.add_edge("data_load", "web_plots")
-        g.add_edge("web_plots", "analyze")
+        g.add_edge("web_plots", "web_figures")
+        g.add_edge("web_figures", "analyze")
         g.add_edge("analyze", "cross_check")
         g.add_conditional_edges(
             "cross_check",
@@ -1295,7 +1302,7 @@ class Engine:
         )
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
-            literature_block=_format_lit(seeded),
+            literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
             clarify_block=_format_clarify(state),
         )
         # Multi-model ensemble path: when the YAML carries
@@ -1529,6 +1536,18 @@ class Engine:
             "outcome": "swapped" if winner_idx != initial_idx else "confirmed",
         }
 
+    def _lit_kwargs(self, state: QuestState) -> dict[str, Any]:
+        """Relevance-selection kwargs for the ``_format_lit*`` helpers, from
+        the quest state + knowledge config — so each node's prompt gets the
+        passages most relevant to the question, within the configured
+        per-source character budget."""
+        k = self.config.knowledge
+        return {
+            "query": _lit_query(state),
+            "budget": k.literature_excerpt_chars,
+            "mode": k.passage_ranking,
+        }
+
     async def _node_literature(self, state: QuestState) -> QuestState:
         chosen = state.get("chosen_idea") or {}
         prior = list(state.get("literature") or [])
@@ -1560,8 +1579,25 @@ class Engine:
             chosen_idea=chosen,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
+        # Keep the FULL fetched text (no truncation): it lands uncapped on
+        # disk under data/literature/ for audit, and the prompt builders
+        # relevance-select the passages each node needs (see
+        # _format_lit_excerpt / knowledge.literature_excerpt_chars) rather
+        # than the old first-2000-chars slice that usually held only the
+        # abstract. content_quality records whether real full text was
+        # recovered or only the search snippet survived.
         new_entries = [
-            {"content": d.content[:2000], "metadata": d.metadata} for d in docs
+            {
+                "content": d.content,
+                "metadata": {
+                    **d.metadata,
+                    "content_quality": (
+                        "full_text" if d.metadata.get("fetched_full_text")
+                        else "snippet_only"
+                    ),
+                },
+            }
+            for d in docs
         ]
         # Dedup-merge: identity is DOI when present, otherwise the
         # canonical URL, otherwise the first 200 chars of content.
@@ -1600,6 +1636,15 @@ class Engine:
             "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
             "+%d user-supplied, total=%d)",
             len(docs), this_iter, added, user_added, len(merged),
+        )
+        full_n = sum(
+            1 for e in merged
+            if (e.get("metadata") or {}).get("content_quality") == "full_text"
+        )
+        self._log.info(
+            "[literature] full-text coverage: %d/%d sources have real full "
+            "text (%d snippet-only)",
+            full_n, len(merged), len(merged) - full_n,
         )
 
         # Pause-for-user-papers gate. Fires only when the user opted in
@@ -1690,7 +1735,7 @@ class Engine:
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
-            literature_block=_format_lit_from_state(state),
+            literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             clarify_block=_format_clarify(state),
@@ -1934,15 +1979,17 @@ class Engine:
         query = f"{topic} {hypothesis}".strip() or topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
-        # ---- Reuse already-retrieved literature --------------------
-        # The literature node ran earlier in the graph and already
-        # fetched (and, with web_fetch_pages, read the full text of) a
-        # set of web/Axon sources into state["literature"]. Persist those
-        # to disk FIRST so the no-simulation path reuses them instead of
-        # re-querying the web — which both wastes the work and, on the
-        # keyless DuckDuckGo backend, can get rate-limited (HTTP 302 →
-        # 50x) on the Nth query of a quest and come back empty.
-        lit_written = self._literature_seed_step(state, auto_dir)
+        # ---- Reuse already-downloaded literature -------------------
+        # The literature node ran earlier in the graph and already fetched
+        # (and, with web_fetch_pages, read the full text of) a set of
+        # web/Axon sources into state["literature"] AND wrote them to
+        # data/literature/. data_load walks the whole data/ tree, so we
+        # reuse those directly — counting them here (so the no-sim gate
+        # doesn't pause) WITHOUT writing a duplicate copy under
+        # auto_collected/. Avoids re-querying the web (wasteful, and the
+        # keyless DuckDuckGo backend can rate-limit the Nth query) and
+        # avoids double-feeding the same content into the analysis.
+        lit_written = self._literature_seed_step(state)
 
         # ---- Axon / web retrieval (top-up) -------------------------
         # Only fire a fresh knowledge-layer query when the literature
@@ -1955,10 +2002,13 @@ class Engine:
         # ---- Dataset adapters --------------------------------------
         adapter_written = await self._run_dataset_adapters(query, auto_dir)
 
-        written = lit_written + axon_written + adapter_written
-        # If neither side wrote anything, clean up any empty top-level
-        # auto_collected/ dir that might have been created mid-flight.
-        if written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
+        # lit_written is a COUNT of sources reused from data/literature/ (no
+        # files written there); only axon + adapters write into auto_dir.
+        files_written = axon_written + adapter_written
+        written = lit_written + files_written
+        # If nothing landed in auto_collected/, clean up any empty top-level
+        # dir that might have been created mid-flight.
+        if files_written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
             try:
                 auto_dir.rmdir()
             except OSError as e:
@@ -1967,40 +2017,50 @@ class Engine:
                     "leftover %s: %s", auto_dir, e,
                 )
         self._log.info(
-            "[auto_collect] wrote %d total file(s) under %s "
-            "(literature_reuse=%d, axon=%d, adapters=%d)",
-            written, auto_dir, lit_written, axon_written, adapter_written,
+            "[auto_collect] %d source(s) available for analysis "
+            "(literature_reuse=%d from data/literature/, axon=%d + "
+            "adapters=%d written to auto_collected/)",
+            written, lit_written, axon_written, adapter_written,
         )
         return {"auto_collected_count": written}
 
-    def _literature_seed_step(self, state: QuestState, auto_dir: Path) -> int:
-        """Persist the web/Axon sources the literature node already fetched
-        (``state['literature']``) into ``auto_dir`` as Markdown files so the
-        no-simulation path reuses them instead of re-querying. Returns the
-        count written. Keeps only real, citable entries (a title or URL);
-        skips FI-internal cross-quest artifacts. Each file carries the
-        source URL/title in its front matter (via ``_render_auto_collected_md``)
-        so it stays cite-able downstream."""
-        lit = state.get("literature") or []
-        if not lit:
-            return 0
-        written = self._write_literature_files(lit, auto_dir)
-        if written:
+    def _literature_seed_step(self, state: QuestState) -> int:
+        """Count the web/Axon sources the literature node already fetched
+        (``state['literature']``) so the no-simulation gate
+        (``auto_collected_count``) treats the quest as having data and
+        doesn't pause for user uploads.
+
+        Does NOT write a second copy: those sources were already downloaded
+        to ``data/literature/`` (the literature node does this for every
+        quest), and ``data_load`` walks the whole ``data/`` tree — so a
+        duplicate copy under ``auto_collected/`` only double-feeds the same
+        content into the analysis. Counts the same citable entries
+        ``_write_literature_files`` would keep (a title or URL, not an
+        FI-internal artifact)."""
+        n = 0
+        for item in state.get("literature") or []:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata") or {}
+            if not (meta.get("title") or meta.get("url")):
+                continue
+            if meta.get("kind") in _FI_INTERNAL_KINDS:
+                continue
+            n += 1
+        if n:
             self._log.info(
-                "[auto_collect] reused %d already-retrieved literature doc(s) "
-                "as data (no re-query needed)", written,
+                "[auto_collect] reusing %d already-downloaded literature "
+                "doc(s) from data/literature/ (no duplicate copy written)", n,
             )
-        return written
+        return n
 
     def _write_literature_files(self, lit: list, out_dir: Path) -> int:
         """Write each citable literature entry to ``out_dir`` as a
         ``lit_NNN_slug.md`` file (YAML front matter + content, via
-        ``_render_auto_collected_md``). Shared by two call sites:
-
-        * the ``literature`` node's always-on download into
-          ``data/literature/`` (runs for EVERY quest, sim or no-sim), and
-        * the no-simulation ``auto_collect_data`` reuse into
-          ``data/auto_collected/`` (``_literature_seed_step``).
+        ``_render_auto_collected_md``). Called by the ``literature`` node's
+        always-on download into ``data/literature/`` (runs for EVERY quest,
+        sim or no-sim) — the single on-disk copy of the retrieved sources,
+        which ``data_load`` then reuses on the no-simulation path.
 
         Skips entries with no title/url and FI-internal cross-quest
         artifacts. ``out_dir`` is created lazily so a corpus with nothing
@@ -2818,21 +2878,29 @@ class Engine:
     def _gather_collected_text(self, state: QuestState, *, limit: int = 12) -> str:
         """Concatenate the web/data content the collector gathered (full
         page text + auto-collected files), each labelled with its source,
-        for the web-plots prompt to mine numbers from."""
+        for the web-plots prompt to mine numbers from. Each source's text is
+        relevance-selected to the quest question (the passages carrying the
+        numbers), not truncated to its first N chars."""
+        from .passages import select_relevant_excerpt
+        opts = self._lit_kwargs(state)
+        query, budget, mode = opts["query"], opts["budget"], opts["mode"]
         parts: list[str] = []
         for item in (state.get("literature") or [])[:limit]:
             meta = item.get("metadata") or {}
             if meta.get("source") == "web_search" or meta.get("kind") == "web_page":
                 title = meta.get("title") or ""
                 url = meta.get("url") or ""
-                content = (item.get("content") or "")[:2500]
+                content = select_relevant_excerpt(
+                    item.get("content") or "", query,
+                    budget_chars=budget, mode=mode,
+                )
                 if content.strip():
                     parts.append(f"[SOURCE] {title} ({url})\n{content}")
         auto_dir = self.quest_root / "data" / "auto_collected"
         if auto_dir.is_dir():
             for p in sorted(auto_dir.rglob("*.md"))[:limit]:
                 try:
-                    parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:2500]}")
+                    parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:budget]}")
                 except OSError:
                     continue
         return "\n\n".join(parts)
@@ -2905,6 +2973,11 @@ class Engine:
             )
             return {}
 
+        # Prepend the FI house style so the figures match the paper/poster/
+        # slides identity. It sets rcParams (font, palette, ground, grid),
+        # which the script's own `import matplotlib.pyplot` then inherits.
+        script = _FI_MPL_PREAMBLE + "\n" + script
+
         code_dir = self.quest_root / "code"
         code_dir.mkdir(parents=True, exist_ok=True)
         plot_script = code_dir / "web_plots.py"
@@ -2940,6 +3013,120 @@ class Engine:
         existing = list(state.get("figures") or [])
         merged = existing + [f for f in new_figs if f not in existing]
         return {"figures": merged}
+
+    def _arxiv_ids_from_literature(self, state: QuestState) -> list[str]:
+        """arXiv ids of the papers in this quest's literature (from metadata
+        or an arxiv.org URL) — candidate sources for a cited-paper figure."""
+        ids: list[str] = []
+        for item in state.get("literature") or []:
+            md = (item.get("metadata") or {}) if isinstance(item, dict) else {}
+            aid = str(md.get("arxiv_id") or "").strip()
+            if not aid:
+                # New-style (2007+) 2401.01234 AND old-style hep-th/9701001.
+                m = re.search(
+                    r"arxiv\.org/(?:abs|pdf|html)/"
+                    r"(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})",
+                    str(md.get("url") or ""), re.I,
+                )
+                aid = m.group(1) if m else ""
+            aid = re.sub(r"v\d+$", "", aid)
+            if aid and aid not in ids:
+                ids.append(aid)
+        return ids
+
+    async def _select_relevant_figures(self, topic: str, cands: list) -> list:
+        """LLM gate: keep only figures genuinely relevant + appropriate as an
+        illustration for the topic. A wrong image is worse than none, so on
+        any error we fail SAFE — keep cited-paper (arXiv) figures, which are
+        inherently on-topic, and drop the keyword-searched Commons ones."""
+        lines = "\n".join(
+            f"[{i}] ({c.kind}) {c.caption[:160]}" for i, c in enumerate(cands)
+        )
+        prompt = (
+            f"Topic: {topic[:400]}\n\nCandidate illustrative figures:\n{lines}\n\n"
+            "Return ONLY a JSON array of the indices that are genuinely "
+            "relevant AND appropriate as an illustration for THIS topic. Drop "
+            "anything off-topic, misleading, or only superficially keyword-"
+            'matching (e.g. atmospheric "gravity waves" for a gravitational-'
+            "wave topic). Fewer, on-point figures are better. Example: [0, 2]"
+        )
+        try:
+            raw = await self._chat(prompt, node="web_figures")
+            m = re.search(r"\[[^\]]*\]", raw or "")
+            idxs = json.loads(m.group(0)) if m else []
+            keep = [cands[i] for i in idxs
+                    if isinstance(i, int) and 0 <= i < len(cands)]
+            return keep
+        except Exception as e:
+            self._log.info(
+                "[web_figures] selection failed (%s); keeping cited-paper "
+                "figures only", e,
+            )
+            return [c for c in cands if c.kind == "oa_paper"]
+
+    async def _node_web_figures(self, state: QuestState) -> QuestState:
+        """No-simulation mode: embed a few LICENSE-CLEAN illustrative figures
+        (a real figure from a cited CC-licensed arXiv paper + Wikimedia
+        Commons diagrams) so the study carries a visual point of view beyond
+        its own charts. Each figure is attribution-stamped and recorded in
+        ``figure_credits`` for the writer + references. Best-effort: any miss
+        leaves the quest unchanged."""
+        k = self.config.knowledge
+        if not k.fetch_web_figures or k.web_figures_max <= 0:
+            return {}
+        if not state.get("no_simulation_resolved"):
+            return {}
+        from .figure_sources import collect_topic_figures
+
+        topic = str(state.get("topic", ""))
+        out_dir = self.quest_root / "figures"
+        maxn = k.web_figures_max
+        try:
+            cands = await asyncio.to_thread(
+                collect_topic_figures, topic,
+                self._arxiv_ids_from_literature(state),
+                out_dir=out_dir, max_n=maxn + 2,   # over-fetch for selection
+                timeout_s=float(k.full_text_fetch_timeout_s),
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            self._log.warning("[web_figures] collection failed: %s — skipping", e)
+            return {}
+        if not cands:
+            self._log.info("[web_figures] no license-clean figures found")
+            return {}
+
+        keep = (await self._select_relevant_figures(topic, cands))[:maxn]
+        kept = {f.local_path for f in keep}
+        for c in cands:  # drop the unselected downloads
+            if c.local_path not in kept and c.local_path.exists():
+                try:
+                    c.local_path.unlink()
+                except OSError:
+                    pass
+        if not keep:
+            self._log.info("[web_figures] no candidate passed the relevance gate")
+            return {}
+
+        credits: list[dict[str, Any]] = []
+        for f in keep:
+            _stamp_figure_credit(f.local_path, f.source_url, f.license)
+            credits.append({
+                "file": f.local_path.name, "caption": f.caption,
+                "source_url": f.source_url, "license": f.license,
+                "attribution": f.attribution, "kind": f.kind,
+            })
+        existing = list(state.get("figures") or [])
+        merged = existing + [c["file"] for c in credits if c["file"] not in existing]
+        # Accumulate credits (don't clobber any already in state on a re-entry),
+        # deduped by file so a re-run doesn't double-list the same figure.
+        prior_credits = list(state.get("figure_credits") or [])
+        seen = {c.get("file") for c in prior_credits}
+        all_credits = prior_credits + [c for c in credits if c["file"] not in seen]
+        self._log.info(
+            "[web_figures] embedded %d license-clean illustrative figure(s): %s",
+            len(credits), [c["file"] for c in credits],
+        )
+        return {"figures": merged, "figure_credits": all_credits}
 
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
@@ -3016,7 +3203,7 @@ class Engine:
             stdout_tail=stdout_for_analyze,
             stderr_tail=exec_result.get("stderr_tail", "")[:1000],
             result_json=result_json_block,
-            figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
+            figure_list=_figure_list_for_prompt(state),
         )
         # Multi-model ensemble path: when the YAML carries
         # provider.node_ensemble["analyze"], fan out N parallel calls
@@ -3095,7 +3282,7 @@ class Engine:
             # provider.node_ensemble["cross_check"] is configured —
             # majority verdict wins per-finding, ties surfaced. Either
             # way ``parsed`` carries the same shape downstream.
-            cand_block = _format_lit(hits)
+            cand_block = _format_lit(hits, **self._lit_kwargs(state))
             prompt = self._prompts["cross_check"].substitute(
                 topic=state.get("topic", "")[:1000],
                 finding=text,
@@ -3327,8 +3514,9 @@ class Engine:
             # not what to publish.
             literature_block=_format_lit_from_state(
                 state, audience=self.config.output.audience,
+                **self._lit_kwargs(state),
             ),
-            figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
+            figure_list=_figure_list_for_prompt(state),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
         )
@@ -4488,22 +4676,37 @@ def _format_lit_header(meta: dict[str, Any], i: int) -> str:
     return line1
 
 
-def _format_lit_excerpt(content: str, title: str) -> str:
-    """Trim the leading-title duplication out of arXiv-style excerpts.
+def _format_lit_excerpt(
+    content: str,
+    title: str,
+    *,
+    query: str = "",
+    budget: int | None = None,
+    mode: str = "lexical",
+) -> str:
+    """Excerpt a source's content for a prompt. When ``query`` is given and
+    the content exceeds ``budget``, the excerpt is the passages most
+    RELEVANT to the question (relevance-ranked, see
+    :mod:`core.passages`) rather than the first ``budget`` chars — so a
+    result, table, or number buried mid-document still reaches the LLM.
+    Without a query it degrades to the leading slice (back-compatible).
 
-    Most loaders set ``content = f"{title}\\n\\n{abstract}"`` (see
-    knowledge.py:166, 199, 290) so the LLM saw ``[i] Title\\nTitle.
-    abstract...`` and propagated the title-twice pattern into the
-    References section. Stripping the duplicated title here gives the
-    writer a clean abstract excerpt to draw on without the visual
-    noise that previously seeded the bug."""
-    excerpt = content[:_LIT_EXCERPT_CHARS]
+    Also trims the leading-title duplication out of arXiv-style excerpts:
+    most loaders set ``content = f"{title}\\n\\n{abstract}"`` so the LLM
+    used to see ``[i] Title\\nTitle. abstract...`` and propagated the
+    title-twice pattern into the References section."""
+    budget = _LIT_EXCERPT_CHARS if budget is None else budget
+    if query and len(content) > budget:
+        from .passages import select_relevant_excerpt
+        excerpt = select_relevant_excerpt(
+            content, query, budget_chars=budget, mode=mode,
+        )
+    else:
+        excerpt = content[:budget]
     if title and excerpt.lstrip().startswith(title):
         # Drop the leading title + immediately-following separator
-        # (newline or ". "). Keep everything after as the real
-        # abstract.
-        trimmed = excerpt.lstrip()[len(title):].lstrip(".\n ")
-        return trimmed
+        # (newline or ". "). Keep everything after as the real abstract.
+        return excerpt.lstrip()[len(title):].lstrip(".\n ")
     return excerpt
 
 
@@ -4562,7 +4765,28 @@ def _is_audience_appropriate(meta: dict[str, Any], audience: str) -> bool:
     return kind not in _FI_INTERNAL_KINDS
 
 
-def _format_lit(docs: list[RetrievedDoc], audience: str = "external") -> str:
+def _lit_query(state: QuestState) -> str:
+    """The relevance query for selecting literature passages into a prompt:
+    the quest topic plus, when available, the chosen idea title and the
+    design hypothesis, so passages are picked for THIS question."""
+    parts = [state.get("topic") or ""]
+    chosen = state.get("chosen_idea") or {}
+    if isinstance(chosen, dict) and chosen.get("title"):
+        parts.append(str(chosen["title"]))
+    design = state.get("design") or {}
+    if isinstance(design, dict) and design.get("hypothesis"):
+        parts.append(str(design["hypothesis"]))
+    return " ".join(p for p in parts if p)[:500]
+
+
+def _format_lit(
+    docs: list[RetrievedDoc],
+    audience: str = "external",
+    *,
+    query: str = "",
+    budget: int | None = None,
+    mode: str = "lexical",
+) -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
@@ -4576,14 +4800,23 @@ def _format_lit(docs: list[RetrievedDoc], audience: str = "external") -> str:
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
         header = _format_lit_header(meta, keep_idx)
-        excerpt = _format_lit_excerpt(d.content, title)
+        excerpt = _format_lit_excerpt(
+            d.content, title, query=query, budget=budget, mode=mode,
+        )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
 
 
-def _format_lit_from_state(state: QuestState, audience: str = "external") -> str:
+def _format_lit_from_state(
+    state: QuestState,
+    audience: str = "external",
+    *,
+    query: str = "",
+    budget: int | None = None,
+    mode: str = "lexical",
+) -> str:
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
@@ -4598,7 +4831,10 @@ def _format_lit_from_state(state: QuestState, audience: str = "external") -> str
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
         header = _format_lit_header(meta, keep_idx)
-        excerpt = _format_lit_excerpt(item.get("content", "") or "", title)
+        excerpt = _format_lit_excerpt(
+            item.get("content", "") or "", title,
+            query=query, budget=budget, mode=mode,
+        )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return "(no prior work surfaced from the knowledge base)"
@@ -5081,6 +5317,112 @@ _FENCE_RE = re.compile(r"^```(?:\w+)?\n(.*)\n```$", re.DOTALL)
 def _strip_outer_fence(text: str) -> str:
     m = _FENCE_RE.match(text.strip())
     return m.group(1) if m else text
+
+
+# Frontier Insight house figure style, prepended to every web-plots script so
+# the matplotlib figures match the paper / poster / slides identity (Palatino
+# serif, teal-anchored palette, warm off-white ground, hairline grid, no top/
+# right spines) instead of the default matplotlib look. Self-contained so it
+# runs in the quest's sandbox venv; the palette names are exposed for a script
+# that needs to colour specific series on-brand.
+_FI_MPL_PREAMBLE = '''# --- Frontier Insight house figure style (auto-injected) ---
+import matplotlib as _mpl
+_mpl.use("Agg")
+from cycler import cycler as _cycler
+# Brand palette — teal-anchored with warm, muted neutrals. Reference these
+# names if you must colour specific series; otherwise let the cycle apply.
+FI_TEAL  = "#0E6E6B"   # primary
+FI_DEEP  = "#0A4F4D"   # deep teal — titles
+FI_GOLD  = "#C28A2C"
+FI_CLAY  = "#B5654A"   # terracotta
+FI_SLATE = "#41706D"
+FI_SAGE  = "#8FA98A"
+FI_SAND  = "#C9A66B"
+FI_PLUM  = "#7C5E72"
+FI_INK   = "#16302E"
+FI_GROUND = "#FBFAF7"  # warm off-white
+FI_GRID  = "#E2DED4"
+_mpl.rcParams.update({
+    "figure.facecolor": FI_GROUND, "axes.facecolor": FI_GROUND,
+    "savefig.facecolor": FI_GROUND, "savefig.edgecolor": FI_GROUND,
+    "figure.figsize": (8.0, 5.2),
+    "font.family": "serif",
+    "font.serif": ["Palatino Linotype", "Palatino", "Book Antiqua",
+                   "Georgia", "DejaVu Serif"],
+    "font.size": 11.5,
+    # Title: large, deep teal, left-aligned with generous breathing room.
+    "axes.titlesize": 16.5, "axes.titleweight": "bold",
+    "axes.titlelocation": "left", "axes.titlecolor": FI_DEEP, "axes.titlepad": 16,
+    "axes.labelcolor": FI_SLATE, "axes.labelsize": 11.5, "axes.labelpad": 7,
+    "axes.edgecolor": "#6E6A60", "axes.linewidth": 1.0,
+    # A single baseline; the light horizontal grid carries the values, so
+    # the left/top/right spines and the tick marks are dropped for a clean,
+    # editorial read.
+    "axes.spines.top": False, "axes.spines.right": False,
+    "axes.spines.left": False, "axes.spines.bottom": True,
+    "axes.grid": True, "axes.grid.axis": "y", "axes.axisbelow": True,
+    "grid.color": FI_GRID, "grid.linewidth": 0.9,
+    "xtick.color": FI_SLATE, "ytick.color": FI_SLATE,
+    "xtick.major.size": 0, "ytick.major.size": 0,
+    "ytick.left": False, "xtick.bottom": True,
+    "xtick.labelsize": 10.5, "ytick.labelsize": 10.5, "text.color": FI_INK,
+    "legend.frameon": False, "legend.fontsize": 10.5,
+    "lines.linewidth": 2.2, "lines.markersize": 6,
+    "patch.edgecolor": FI_GROUND, "patch.linewidth": 0.8,  # thin gap between bars
+    "axes.prop_cycle": _cycler(color=[FI_TEAL, FI_GOLD, FI_CLAY, FI_SLATE,
+                                      FI_SAGE, FI_SAND, FI_PLUM]),
+    "figure.dpi": 150, "savefig.dpi": 150, "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.3,
+})
+# --- end Frontier Insight style ---
+'''
+
+
+def _stamp_figure_credit(path: Path, source_url: str, license_str: str) -> None:
+    """Burn a small attribution line onto the bottom of a fetched figure so
+    the source + license travel with the image wherever it is embedded.
+    Best-effort: no-ops if PIL is unavailable or the image won't open (the
+    writer's caption still carries the credit)."""
+    try:
+        from urllib.parse import urlparse
+
+        from PIL import Image, ImageDraw  # type: ignore[import-not-found]
+
+        img = Image.open(path).convert("RGB")
+        host = urlparse(source_url).hostname or source_url
+        text = f"Source: {host}  -  {license_str}"
+        bar = 20
+        out = Image.new("RGB", (img.width, img.height + bar), (251, 250, 247))
+        out.paste(img, (0, 0))
+        ImageDraw.Draw(out).text((8, img.height + 4), text, fill=(65, 112, 109))
+        out.save(path)
+    except Exception:  # noqa: BLE001 — attribution also lives in the caption
+        pass
+
+
+def _figure_list_for_prompt(state: QuestState) -> str:
+    """The figure list for a writer/analysis prompt. Plain charts are listed
+    by path; license-clean web figures (``figure_credits``) additionally
+    carry their caption + source + license, and are flagged ILLUSTRATIVE so
+    the writer credits them and does NOT present them as the quest's own
+    results."""
+    figs = state.get("figures") or []
+    if not figs:
+        return "(none)"
+    credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
+    lines: list[str] = []
+    for f in figs:
+        c = credits.get(f)
+        if c:
+            lines.append(
+                f"- figures/{f} — ILLUSTRATIVE (a sourced figure, not your "
+                f"own data): {str(c.get('caption', ''))[:140]} "
+                f"[the caption MUST credit: Source {c.get('source_url', '')}, "
+                f"{c.get('license', '')}]"
+            )
+        else:
+            lines.append(f"- figures/{f}")
+    return "\n".join(lines)
 
 
 def _parse_json_lenient(
