@@ -56,6 +56,16 @@
     </div>
   </div>
 
+  <!-- Unified "Action needed" banner — shown whenever the quest paused for
+       you (any of clarify / papers / supply / data / review). Sourced from the
+       single NEXT_STEP.md every pause writes. -->
+  <div id="next-step-banner" class="hidden fi-banner fi-banner-warning">
+    <div class="flex flex-col gap-2 w-full">
+      <b id="next-step-headline">Action needed</b>
+      <div id="next-step-body" class="fi-md-body text-on-surface-variant"></div>
+    </div>
+  </div>
+
   <!-- Bento Grid -->
   <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter">
     <!-- Tags (Col 1-4) -->
@@ -275,6 +285,7 @@
     }
     refreshFiles();
     refreshWantedPapers();
+    refreshNextStep();
     const terminal = !data.alive && data.summary;
     document.getElementById('cancel-btn').disabled = terminal || !data.alive;
     if (terminal && pollHandle) {
@@ -284,6 +295,28 @@
         alreadyNotified = true;
       }
     }
+  }
+
+  async function refreshNextStep() {
+    const banner = document.getElementById('next-step-banner');
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/next-step`);
+      // On any non-OK response, hide the banner rather than leave a stale
+      // "Action needed" showing after the pause was resolved.
+      if (!res.ok) { banner.classList.add('hidden'); return; }
+      const data = await res.json();
+      if (!data.waiting) { banner.classList.add('hidden'); return; }
+      banner.classList.remove('hidden');
+      document.getElementById('next-step-headline').textContent =
+        data.headline || 'Action needed';
+      // The headline is rendered separately above, so drop the duplicate
+      // leading heading from the markdown body before rendering it.
+      const body = (data.markdown || '').replace(/^\s*#.*(?:\r?\n)+/, '');
+      const bodyEl = document.getElementById('next-step-body');
+      bodyEl.innerHTML = window.fi_renderMarkdown
+        ? window.fi_renderMarkdown(body)
+        : escapeHtml(body);
+    } catch (e) { banner.classList.add('hidden'); }
   }
 
   async function refreshWantedPapers() {

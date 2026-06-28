@@ -271,7 +271,9 @@ def test_yaml_round_trips_through_config_cli_frontend() -> None:
     cfg = Config.model_validate(data)
     assert cfg.provider.name == "openai"
     assert cfg.provider.model == "gpt-4o"
-    assert cfg.engine.clarify_mode == "auto"
+    # clarify is now emitted under the unified `pauses:` namespace
+    # (interview "auto" maps to pauses.clarify "auto").
+    assert cfg.pauses.clarify == "auto"
     assert cfg.engine.no_simulation is False
     assert cfg.output.paper_format == "generic"
     assert sorted(cfg.engine.clarify_overrides.keys()) == sorted([

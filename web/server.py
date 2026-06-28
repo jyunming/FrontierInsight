@@ -934,6 +934,46 @@ def make_app(
             "dropped": dropped,
         })
 
+    @app.get("/api/quests/{quest_id}/next-step")
+    async def next_step(quest_id: str) -> JSONResponse:
+        """The unified *Action needed* descriptor for a paused quest. Every
+        pause (clarify / papers / supply / data / review) writes one
+        ``NEXT_STEP.md`` at the quest root saying why it stopped and what to
+        do; a finished quest deletes it. So its presence == "waiting for you",
+        and its content is the single thing the banner needs to render."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        nxt = quest_root / "NEXT_STEP.md"
+        markdown = nxt.read_text(encoding="utf-8") if nxt.is_file() else ""
+        # Headline = the "# Action needed — <X>" first line, stripped of markup.
+        headline = ""
+        for line in markdown.splitlines():
+            if line.startswith("#"):
+                headline = line.lstrip("# ").strip()
+                break
+        # Interaction kind comes from the verb the unified pause core stamped
+        # into NEXT_STEP.md ("(**ANSWER**)" / "(**SUPPLY**)") — authoritative on
+        # every path, including a headless ANSWER pause answered via on-disk
+        # files + resume (where the in-process registry is empty). Fall back to
+        # the live registry, then default to supply.
+        if "ANSWER" in markdown:
+            interaction = "answer"
+        elif "SUPPLY" in markdown:
+            interaction = "supply"
+        elif (registry.pending_clarify(quest_id) is not None
+              or registry.pending_human_review(quest_id) is not None):
+            interaction = "answer"
+        else:
+            interaction = "supply"
+        return JSONResponse({
+            "quest_id": quest_id,
+            "waiting": bool(markdown),
+            "headline": headline,
+            "interaction": interaction,
+            "markdown": markdown,
+        })
+
     @app.post("/api/quests/{quest_id}/papers")
     async def upload_papers(
         quest_id: str, files: list[UploadFile] = File(...),

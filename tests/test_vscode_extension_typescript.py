@@ -217,9 +217,10 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
     yaml_blob = proc.stdout
     assert "topic:" in yaml_blob
     assert "rk4-vs-euler" in yaml_blob
-    # clarify_mode is double-quoted to defeat YAML 1.1's Norway problem
-    # (unquoted `off` / `no` / `false` get coerced to booleans).
-    assert 'clarify_mode: "auto"' in yaml_blob
+    # clarify is emitted under the unified `pauses:` namespace, double-quoted
+    # to defeat YAML 1.1's Norway problem (unquoted `off`/`no` coerce to bool).
+    assert "pauses:" in yaml_blob
+    assert 'clarify: "auto"' in yaml_blob
     # Reviewer panel rendered as a YAML list of double-quoted strings.
     assert '- "methodologist"' in yaml_blob
     assert '- "statistician"' in yaml_blob
@@ -237,7 +238,7 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         # The fields the interview definitely sets must round-trip.
         assert cfg.title == "rk4-vs-euler"
         assert "Compare two numerical integrators" in cfg.topic
-        assert cfg.engine.clarify_mode == "auto"
+        assert cfg.pauses.clarify == "auto"
         assert cfg.engine.review_panel == ["methodologist", "statistician"]
         assert cfg.output.kinds == ["paper_md", "slides"]
         assert cfg.knowledge.enabled is False
@@ -337,10 +338,12 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
     assert proc.returncode == 0, proc.stderr
     yaml_blob = proc.stdout
 
-    # The Norway-problem fix: clarify_mode must be quoted so YAML
-    # parses it as a string, not a boolean.
-    assert f'clarify_mode: "{clarify_mode}"' in yaml_blob, (
-        f"clarify_mode is unquoted; YAML will coerce {clarify_mode!r} "
+    # The Norway-problem fix: the clarify pause value must be quoted so YAML
+    # parses it as a string, not a boolean. clarify is now under `pauses:`
+    # with the canonical vocabulary (interactive → ask).
+    expected = "ask" if clarify_mode == "interactive" else clarify_mode
+    assert f'clarify: "{expected}"' in yaml_blob, (
+        f"pauses.clarify is unquoted; YAML will coerce {expected!r} "
         f"to a boolean and pydantic will reject it.\nGenerated YAML:\n{yaml_blob}"
     )
 
@@ -354,7 +357,7 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
     try:
         from core.config import Config
         cfg = Config.from_yaml(Path(tmp_path_str))
-        assert cfg.engine.clarify_mode == clarify_mode
+        assert cfg.pauses.clarify == expected
         # Title with "no" / "yes" / "off" tokens survives as a string,
         # not a coerced boolean.
         assert cfg.title == "no-yes-off-test"

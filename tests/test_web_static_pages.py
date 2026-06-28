@@ -733,3 +733,43 @@ def test_wanted_papers_and_upload_endpoints(tmp_path: Path) -> None:
     on_disk = sorted(p.name for p in (output_root / qid / "inputs" / "papers").iterdir())
     assert on_disk == ["my_paper.pdf"]
     assert client.get(f"/api/quests/{qid}/wanted-papers").json()["dropped"] == ["my_paper.pdf"]
+
+
+def test_next_step_endpoint_surfaces_paused_quest(tmp_path: Path) -> None:
+    """The unified Action-needed endpoint: NEXT_STEP.md present → waiting,
+    with a headline parsed from its first heading; absent → not waiting."""
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    qid = "1782000001-test-quest-pause"
+    quest = output_root / qid
+    (quest / ".fi").mkdir(parents=True)
+    client = TestClient(make_app(output_root))
+
+    # No NEXT_STEP.md yet → not waiting.
+    r0 = client.get(f"/api/quests/{qid}/next-step")
+    assert r0.status_code == 200
+    assert r0.json()["waiting"] is False
+
+    # A SUPPLY pause wrote NEXT_STEP.md → waiting, headline parsed, interaction
+    # classified from the verb the unified core stamped in.
+    (quest / "NEXT_STEP.md").write_text(
+        "# Action needed — download 2 paywalled paper(s)\n\n"
+        "Quest **q** is paused and waiting for you (**SUPPLY**).\n\n"
+        "## What to do\n1. Drop the PDFs into `inputs/papers/`.\n",
+        encoding="utf-8",
+    )
+    r1 = client.get(f"/api/quests/{qid}/next-step")
+    body = r1.json()
+    assert body["waiting"] is True
+    assert body["headline"] == "Action needed — download 2 paywalled paper(s)"
+    assert body["interaction"] == "supply"
+    assert "inputs/papers/" in body["markdown"]
+
+    # An ANSWER pause (e.g. clarify/review answered via files + resume) is
+    # classified from the NEXT_STEP.md verb even with no in-process registry.
+    (quest / "NEXT_STEP.md").write_text(
+        "# Action needed — confirm the research setup\n\n"
+        "Quest **q** is paused and waiting for you (**ANSWER**).\n",
+        encoding="utf-8",
+    )
+    assert client.get(f"/api/quests/{qid}/next-step").json()["interaction"] == "answer"

@@ -1131,7 +1131,7 @@ async def run_one(
     # via the web dashboard or by hand-editing
     # ``human_review_answer.json`` and running ``--resume``.
     hf_callback: object = None
-    if cfg.engine.human_feedback_gate == "after_review":
+    if cfg.pauses.review == "ask":
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive)
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,

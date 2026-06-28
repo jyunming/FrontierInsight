@@ -256,6 +256,55 @@ Run it: `python launch.py --config my_quest.yaml`
 
 ---
 
+## When the quest needs you
+
+A quest runs on its own and only stops when it genuinely needs you. Every stop is one of just **two kinds of interaction**:
+
+- **ANSWER** — the quest asks you something (the setup questions; accept / reject / refine at the end).
+- **SUPPLY** — the quest needs files (a paywalled paper it found; a dataset).
+
+There are five places it can stop, all configured in one place — the `pauses:` section of your YAML:
+
+```
+   you set up ──▶ the quest runs on its own, stopping only when it needs you:
+
+   clarify ─ literature ─ design ─ (build·run │ gather data) ─ analyse ─ write ─ review
+      ▲          ▲           ▲            ▲                                        ▲
+   ANSWER      SUPPLY      SUPPLY       SUPPLY                                  ANSWER
+   setup       paywalled   any papers   a dataset                             accept /
+   questions   papers it   or data                                            reject /
+               listed                                                         refine
+```
+
+| When it stops | Kind | What it wants | Turn it on with |
+|---|---|---|---|
+| **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
+| **literature** | SUPPLY | download the paywalled papers it lists | `pauses.papers: true` |
+| **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` |
+| **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
+| **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
+
+**Every stop works the same way**, so there's nothing new to learn each time:
+
+1. The quest pauses and writes one file — **`NEXT_STEP.md`** at the quest root — saying *why* it stopped and *exactly what to do*.
+2. You **answer** (in the panel or at the CLI prompt), or **drop files** into the folder it names.
+3. You **resume**: `fi --resume <quest-id>` on the CLI, or click **Resume** in the Web GUI / VSCode, where an *Action needed* banner shows the same thing.
+
+```yaml
+# A quest that involves you at both ends and lets you feed it papers mid-run:
+pauses:
+  clarify: ask            # answer setup questions before it starts
+  papers: true            # pause to let you download paywalled papers it finds
+  supply: before_build    # one drop-in point for your own papers/data
+  review: ask             # accept / reject / refine before the paper is final
+```
+
+> Legacy flag names (`engine.clarify_mode`, `engine.human_feedback_gate`, `engine.pause_for_user_input`, `knowledge.pause_for_user_papers`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
+
+The sections below cover each pause in more detail.
+
+---
+
 ## Common things you might want next
 
 ### Resume a crashed quest
@@ -346,8 +395,8 @@ Then open <http://127.0.0.1:8765/>. You'll see every quest, live log, paper prev
 
 Add to your YAML:
 ```yaml
-engine:
-  clarify_mode: interactive
+pauses:
+  clarify: ask
 ```
 
 Run with `--interactive`:
@@ -409,7 +458,7 @@ Clean papers (LLM verdict `accept` AND no methodologist must-flag hits) auto-fin
 
 ### Review every paper before it lands
 
-The human-review gate (`engine.human_feedback_gate: after_review`, on by default) pauses the quest after the LLM review so you can accept, reject, or refine the result before the paper is final. Three interfaces:
+The human-review gate (`pauses.review: ask`, on by default) pauses the quest after the LLM review so you can accept, reject, or refine the result before the paper is final. Three interfaces:
 
 | Interface | How |
 |---|---|
@@ -417,7 +466,7 @@ The human-review gate (`engine.human_feedback_gate: after_review`, on by default
 | CLI | `python launch.py --config <yaml> --interactive` — prompts on stdin for action + feedback. |
 | VSCode chat | The `@fi /start` chat panel renders the verdict + must-flag hits + suggestions; QuickPick collects the action; refine opens an input box for the feedback text. |
 
-Refine feedback **accumulates** across iterations: a later revise pass sees every prior refinement ask, not just the most recent. To skip the gate (e.g. for unattended CI) set `engine.human_feedback_gate: off` in the YAML, or use `--auto-accept-on-pass` to only auto-finalise the clean cases.
+Refine feedback **accumulates** across iterations: a later revise pass sees every prior refinement ask, not just the most recent. To skip the gate (e.g. for unattended CI) set `pauses.review: off` in the YAML, or use `--auto-accept-on-pass` to only auto-finalise the clean cases.
 
 The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are **non-bypassable**: a non-empty `must_flag_hits` list forces another revise pass even when `review_loop: false` would otherwise short-circuit.
 
@@ -562,7 +611,7 @@ knowledge:
 
 The agent reads them and cites them. Requires `pip install pypdf` for PDF support.
 
-**Or let the agent ask.** Turn on **Supply paywalled papers** in the interview (`knowledge.pause_for_user_papers: true`). When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason. Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions.
+**Or let the agent ask.** Turn on **Supply paywalled papers** in the interview (`pauses.papers: true`). When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason (and `NEXT_STEP.md` points you there). Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions. See [When the quest needs you](#when-the-quest-needs-you) for how this fits the bigger picture.
 
 ---
 

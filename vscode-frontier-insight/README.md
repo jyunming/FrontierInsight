@@ -153,7 +153,9 @@ By default the engine pauses after the LLM review so you can accept, reject, or 
 
 The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are non-bypassable: a flagged paper forces another revise pass even when `engine.review_loop: false` is set.
 
-To skip the gate entirely, set `engine.human_feedback_gate: off` in the YAML.
+To skip the gate entirely, set `pauses.review: off` in the YAML.
+
+Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers: true`), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
 
 ### Fleet (multiple quests in parallel)
 
