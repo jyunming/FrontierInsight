@@ -79,6 +79,12 @@ from .config import KnowledgeConfig
 
 _log = logging.getLogger("frontier_insight.knowledge")
 
+# trafilatura logs an ERROR ("empty HTML tree", "wrong data type") whenever
+# it's handed an empty / non-HTML stub — which is routine here (we fall back
+# to the built-in extractor on any miss). Silence its non-actionable noise so
+# the quest log stays readable; real failures are handled by the fallback.
+logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
+
 try:
     from axon import AxonBrain, AxonConfig  # type: ignore[import-not-found]
     from axon.integrations.langchain import AxonRetriever  # type: ignore[import-not-found]
