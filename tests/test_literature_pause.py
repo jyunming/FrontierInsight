@@ -285,3 +285,20 @@ def test_wanted_papers_md_ranked_with_links(tmp_path: Path) -> None:
     assert "manual download needed" in md
     # Per-paper JSON stubs still written.
     assert (tmp_path / "needs" / "duv-lithography-overlay-metrology.json").is_file()
+
+
+def test_wanted_papers_md_title_falls_back_to_identifier(tmp_path: Path) -> None:
+    """A resolvable but title-less hit (DOI-only crossref record) renders its
+    identifier as the heading — never a bare ``paper-N``."""
+    docs = [
+        RetrievedDoc(
+            "Abstract with no usable title in metadata.",
+            {"doi": "10.1117/12.9999", "source": "crossref"},
+        ),
+    ]
+    _write_paper_need_stubs(tmp_path, docs, _log(), query="overlay metrology")
+    md = (tmp_path / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
+    assert "## 1. DOI 10.1117/12.9999" in md
+    assert "paper-1" not in md
+    # The slug is derived from the identifier, not a bare paper-N.
+    assert (tmp_path / "needs" / "doi-10-1117-12-9999.json").is_file()

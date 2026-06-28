@@ -6033,9 +6033,10 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     if md.get("source") in ("local_paper", "user_supplied"):
         return False
     # FI-internal cross-quest memory (prior papers / summaries / spines stored
-    # in Axon) is NOT a paper to download — it's already in the corpus and has
-    # no DOI/URL to resolve. Never flag it (it would show up as a titleless,
-    # link-less "paper-N" in WANTED_PAPERS.md).
+    # in Axon) is NOT a paper to download — it's already in the corpus. Never
+    # flag it: even when a spine carries a DOI/URL, the user has nothing to
+    # fetch, and it would otherwise pollute WANTED_PAPERS.md with our own
+    # artifacts instead of the external papers the user actually needs.
     kind = str(md.get("kind") or "")
     if kind in _FI_INTERNAL_KINDS or kind.startswith("fi_"):
         return False
@@ -6117,6 +6118,22 @@ def _paper_resolve_link(md: dict[str, Any]) -> str:
     return str(md.get("url") or md.get("pdf_url") or "").strip()
 
 
+def _paper_display_title(md: dict[str, Any], fallback: str) -> str:
+    """A non-empty, actionable label for a wanted paper. A real title wins; a
+    title-less but resolvable hit (e.g. a DOI-only crossref record) falls back
+    to its identifier so the manifest never shows a bare ``paper-N``."""
+    title = str(md.get("title") or md.get("name") or "").strip()
+    if title:
+        return title
+    if md.get("doi"):
+        return f"DOI {str(md['doi']).strip()}"
+    if md.get("arxiv_id"):
+        return f"arXiv:{str(md['arxiv_id']).strip()}"
+    if md.get("pmid"):
+        return f"PMID {str(md['pmid']).strip()}"
+    return fallback
+
+
 def _paper_gist(content: str, md: dict[str, Any]) -> str:
     """One-line 'what it's about' for the wanted-papers manifest — the first
     sentence of the abstract (title stripped)."""
@@ -6159,7 +6176,7 @@ def _write_wanted_papers_md(
     ]
     for i, doc in enumerate(ranked, 1):
         md = doc.metadata or {}
-        title = str(md.get("title") or md.get("name") or f"paper-{i}")
+        title = _paper_display_title(md, f"paper-{i}")
         lines.append(f"## {i}. {title}")
         link = _paper_resolve_link(md)
         if link:
@@ -6219,7 +6236,7 @@ def _write_paper_need_stubs(
             log.debug("[literature] papers README write failed: %r", e)
     for i, doc in enumerate(needed):
         md = doc.metadata or {}
-        title = str(md.get("title") or md.get("name") or f"paper-{i+1}")
+        title = _paper_display_title(md, f"paper-{i+1}")
         slug = _slugify(title)[:48] or f"paper-{i+1}"
         stub_path = needs_dir / f"{slug}.json"
         # Don't overwrite an existing stub — preserves user notes.
