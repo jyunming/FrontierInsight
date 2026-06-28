@@ -820,6 +820,21 @@ def _ddg_search(
     return out
 
 
+def _sanitize_search_query(query: str, *, max_chars: int = 380) -> str:
+    """Collapse a (possibly multi-line, paragraph-length) ``topic:`` into a
+    single-line web-search query. Brave's API rejects embedded newlines
+    with a 422 and caps query length (~400 chars); DuckDuckGo's HTML
+    endpoint returns nothing for the same blob. Collapse all whitespace to
+    single spaces and trim to a word boundary under the limit, so a rich
+    multi-line topic still yields real web results to fetch."""
+    q = re.sub(r"\s+", " ", query or "").strip()
+    if len(q) <= max_chars:
+        return q
+    cut = q[:max_chars]
+    sp = cut.rfind(" ")
+    return (cut[:sp] if sp > 0 else cut).strip()
+
+
 def _web_search(
     query: str, top_k: int, *,
     backend: str = "auto", api_key: str = "", timeout_s: float = 10.0,
@@ -829,6 +844,7 @@ def _web_search(
     else the keyless DuckDuckGo endpoint. Low-signal SEO / market-report
     domains are dropped from the results so the paper cites real sources."""
     backend = (backend or "auto").lower()
+    query = _sanitize_search_query(query)
     if backend == "duckduckgo":
         docs = _ddg_search(query, top_k, timeout_s=timeout_s)
     elif backend == "brave":

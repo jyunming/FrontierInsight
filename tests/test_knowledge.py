@@ -972,6 +972,38 @@ def test_xml_to_text_decodes_entities() -> None:
     assert "&#" not in out and "&amp;" not in out  # no leftover entity tokens
 
 
+def test_sanitize_search_query_collapses_and_caps() -> None:
+    """A multi-line, paragraph-length topic is collapsed to a single line
+    and trimmed under Brave's length cap (Brave 422s on newlines / very
+    long queries; DuckDuckGo returns nothing), so web search still works."""
+    import core.knowledge as kn
+    topic = "Line one about greenness\nand mortality.\n\n  Extra   spaces here.\n"
+    q = kn._sanitize_search_query(topic)
+    assert "\n" not in q and "  " not in q
+    assert q == "Line one about greenness and mortality. Extra spaces here."
+    # A long topic is capped under the limit at a word boundary (no half word).
+    capped = kn._sanitize_search_query("word " * 200, max_chars=380)
+    assert len(capped) <= 380
+    assert capped.split()[-1] == "word"  # cut on a boundary, not mid-word
+    # A short query passes through untouched.
+    assert kn._sanitize_search_query("greenness and health") == "greenness and health"
+
+
+def test_web_search_sanitizes_query_before_dispatch(monkeypatch) -> None:
+    """_web_search collapses the multi-line topic before handing it to a
+    backend, so the backend never sees newlines (which 422 Brave)."""
+    import core.knowledge as kn
+    seen = {}
+
+    def _fake_ddg(query, top_k, *, timeout_s=10.0):
+        seen["query"] = query
+        return []
+
+    monkeypatch.setattr("core.knowledge._ddg_search", _fake_ddg)
+    kn._web_search("multi\nline\n\ntopic   blob", 5, backend="duckduckgo")
+    assert seen["query"] == "multi line topic blob"
+
+
 def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:
     from core.knowledge import _fetch_web_page_text, RetrievedDoc as RD
 
