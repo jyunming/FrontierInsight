@@ -552,3 +552,17 @@ def test_figure_list_for_prompt_annotates_credits() -> None:
     assert "- figures/chart.png" in block            # plain chart unannotated
     assert "ILLUSTRATIVE" in block and "Detection methods tree" in block
     assert "CC BY 4.0" in block and "arxiv.org/abs/x" in block
+
+
+def test_arxiv_ids_from_literature_old_and_new_style(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    state = {"literature": [
+        {"content": "", "metadata": {"url": "https://arxiv.org/abs/2404.09143"}},
+        {"content": "", "metadata": {"url": "https://arxiv.org/pdf/hep-th/9701001v2"}},
+        {"content": "", "metadata": {"arxiv_id": "2210.04940"}},
+        {"content": "", "metadata": {"url": "https://example.com/not-arxiv"}},
+    ]}
+    ids = eng._arxiv_ids_from_literature(state)
+    assert "2404.09143" in ids          # new-style from URL
+    assert "hep-th/9701001" in ids      # old-style from URL (Copilot fix)
+    assert "2210.04940" in ids          # from metadata

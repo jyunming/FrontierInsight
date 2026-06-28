@@ -3022,9 +3022,11 @@ class Engine:
             md = (item.get("metadata") or {}) if isinstance(item, dict) else {}
             aid = str(md.get("arxiv_id") or "").strip()
             if not aid:
+                # New-style (2007+) 2401.01234 AND old-style hep-th/9701001.
                 m = re.search(
-                    r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})",
-                    str(md.get("url") or ""),
+                    r"arxiv\.org/(?:abs|pdf|html)/"
+                    r"(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})",
+                    str(md.get("url") or ""), re.I,
                 )
                 aid = m.group(1) if m else ""
             aid = re.sub(r"v\d+$", "", aid)
@@ -3115,11 +3117,16 @@ class Engine:
             })
         existing = list(state.get("figures") or [])
         merged = existing + [c["file"] for c in credits if c["file"] not in existing]
+        # Accumulate credits (don't clobber any already in state on a re-entry),
+        # deduped by file so a re-run doesn't double-list the same figure.
+        prior_credits = list(state.get("figure_credits") or [])
+        seen = {c.get("file") for c in prior_credits}
+        all_credits = prior_credits + [c for c in credits if c["file"] not in seen]
         self._log.info(
             "[web_figures] embedded %d license-clean illustrative figure(s): %s",
             len(credits), [c["file"] for c in credits],
         )
-        return {"figures": merged, "figure_credits": credits}
+        return {"figures": merged, "figure_credits": all_credits}
 
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")

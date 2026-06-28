@@ -57,7 +57,9 @@ def _latex_safe_body(body: str) -> str:
 # literal prose in a poster column (a stray 'Microlensing & Timing' / '50%').
 # Posters are blocks + itemize, never tabular, so a bare ``&`` is always a
 # literal ampersand. Already-escaped specials (``\&``) are skipped via the
-# negative lookbehind; backslashes, braces, and ``$math$`` are untouched.
+# negative lookbehind; backslashes and braces are untouched. A bare
+# ``&``/``%``/``#`` inside ``$math$`` would also be escaped, but poster column
+# prose doesn't carry math with literal specials, so that's safe here.
 _LATEX_TEXT_SPECIAL_RE = _re.compile(r"(?<!\\)([&%#])")
 
 
@@ -90,6 +92,8 @@ def _cleanup_poster_artifacts(out_dir: Path, *, keep_log: bool) -> None:
                 p.unlink()
             except OSError:
                 pass
+
+
 from core.provider import (
     LLMClient,
     ProxySupervisor,
