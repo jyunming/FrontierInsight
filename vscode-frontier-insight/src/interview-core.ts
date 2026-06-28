@@ -63,6 +63,13 @@ export interface InterviewAnswers {
     // reviews. Sized independently of ``knowledge_top_k`` because web
     // search is coarser than RAG and a literature scan needs breadth.
     knowledge_external_top_k?: number;
+    // Web research layer. When true (default), the literature node
+    // searches the public web (Brave/DuckDuckGo) and downloads sources
+    // into data/literature/ for every quest — sim and observational
+    // alike. Maps to knowledge.web_search + web_fetch_pages. Independent
+    // of knowledge_enabled (the Axon corpus toggle). Must stay in sync
+    // with core/interview.py:InterviewAnswers.
+    web_research?: boolean;
     // Multi-model ensemble preset. "off" (default) keeps single-call
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
@@ -244,6 +251,14 @@ export function answersToYaml(answers: InterviewAnswers): string {
     if (extK !== undefined && extK !== null && extK !== 20) {
         lines.push(`${indent}external_top_k: ${extK}`);
     }
+    // Web research layer — search the public web (Brave/DuckDuckGo) and
+    // download the sources into data/literature/, on top of academic
+    // retrieval. Emitted explicitly (on AND off) so the generated config
+    // self-documents the interview choice. Independent of `enabled`.
+    // Mirrors core/interview.py:answers_to_yaml.
+    const webResearch = answers.web_research !== false;
+    lines.push(`${indent}web_search: ${webResearch ? "true" : "false"}`);
+    lines.push(`${indent}web_fetch_pages: ${webResearch ? "true" : "false"}`);
     if (!answers.knowledge_enabled) {
         lines.push(`${indent}external_fallback: ["openalex", "arxiv", "crossref"]`);
         // `source_routing: manual` skips the LLM-driven catalog source

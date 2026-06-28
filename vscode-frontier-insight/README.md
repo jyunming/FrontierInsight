@@ -202,6 +202,13 @@ and the generated YAML sets `engine.no_simulation: true`. The
 engine then skips `implement → execute` entirely and routes through
 `auto_collect_data → wait_for_data → data_load → web_plots → analyze`.
 
+The `/new` interview also has a **Web research** question (on by
+default, independent of the Axon knowledge layer): when on, the
+literature node searches the public web (Brave / DuckDuckGo) and
+**downloads every retrieved source to `outputs/<id>/data/literature/`**
+— for *every* quest, simulation and observational alike, not just the
+no-simulation path. Turn it off to rely on academic sources only.
+
 Before pausing, `auto_collect_data` runs:
 
 1. Knowledge retrieval against `topic + design.hypothesis` — Axon

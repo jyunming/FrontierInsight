@@ -308,6 +308,81 @@ def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
     assert (eng.quest_root / "data" / "auto_collected").is_dir()
 
 
+def test_write_literature_files_persists_citable_corpus(tmp_path: Path) -> None:
+    """The shared writer drops one lit_NNN_slug.md per citable source and
+    skips entries with no title/url and FI-internal artifacts."""
+    eng = _engine(tmp_path)
+    out_dir = eng.quest_root / "data" / "literature"
+    lit = [
+        {"content": "RPK recovered to 103% of 2019 by 2024", "metadata": {
+            "source": "web_search", "kind": "web_page",
+            "title": "IATA Global Outlook", "url": "https://iata.org/x"}},
+        {"content": "internal", "metadata": {"kind": "fi_paper_spine", "title": "mem"}},
+        {"content": "z", "metadata": {}},  # no title/url → skipped
+    ]
+    n = eng._write_literature_files(lit, out_dir)
+    assert n == 1
+    files = list(out_dir.glob("lit_*.md"))
+    assert len(files) == 1
+    txt = files[0].read_text(encoding="utf-8")
+    assert "https://iata.org/x" in txt
+    assert "RPK recovered" in txt
+
+
+def test_write_literature_files_no_citable_leaves_no_dir(tmp_path: Path) -> None:
+    """Lazy mkdir: a corpus with nothing citable leaves no empty dir."""
+    eng = _engine(tmp_path)
+    out_dir = eng.quest_root / "data" / "literature"
+    n = eng._write_literature_files([{"content": "x", "metadata": {}}], out_dir)
+    assert n == 0
+    assert not out_dir.exists()
+
+
+def test_node_literature_downloads_corpus_for_every_quest(tmp_path: Path) -> None:
+    """The literature node downloads its retrieved sources to
+    data/literature/ for EVERY quest — including simulation quests, which
+    never reach auto_collect_data. Builds a simulation engine
+    (no_simulation=False) and asserts the corpus lands on disk."""
+    from core.knowledge import RetrievedDoc
+
+    cfg = Config(
+        topic="t", title="t", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(no_simulation=False, clarify_mode="off"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    eng = Engine(cfg)
+    qr = tmp_path / "quest"
+    qr.mkdir(exist_ok=True)
+    eng.quest_root = qr
+
+    docs = [
+        RetrievedDoc(content="IATA reports RPK back to 103% by 2024",
+                     metadata={"source": "web_search", "kind": "web_page",
+                               "title": "IATA Global Outlook",
+                               "url": "https://iata.org/outlook"}),
+        RetrievedDoc(content="x", metadata={}),  # no title/url → skipped
+    ]
+
+    async def fake_asearch(*a, **k):
+        return docs
+    eng.knowledge.asearch = fake_asearch  # type: ignore[method-assign]
+
+    out = asyncio.run(eng._node_literature({
+        "topic": "air travel recovery 2019-2024",
+        "chosen_idea": {"title": "Air travel recovery"},
+    }))
+    lit_dir = qr / "data" / "literature"
+    assert lit_dir.is_dir(), "simulation quest must still download data/literature/"
+    files = list(lit_dir.glob("lit_*.md"))
+    assert len(files) == 1  # only the citable source is written to disk
+    assert "https://iata.org/outlook" in files[0].read_text(encoding="utf-8")
+    # The node still returns BOTH retrieved docs for downstream nodes
+    # (the non-citable one is kept in state but not downloaded).
+    assert len(out["literature"]) == 2
+
+
 # ---------------------------------------------------------------------------
 # References land in poster + slides (end-to-end through the generators)
 # ---------------------------------------------------------------------------

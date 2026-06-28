@@ -62,6 +62,7 @@ slides.md                             ← if output.kinds: [slides]; Marp markdo
 slides.pptx                           ← real PowerPoint (if pandoc installed too)
 slides.html / slides.pdf              ← if marp CLI installed
 poster.tex, poster.pdf, talk.md       ← optional deliverables (poster.pdf if a LaTeX engine is installed)
+data/literature/lit_<NNN>_<slug>.md   ← EVERY quest (sim + observational): the web + academic sources the literature node searched and downloaded
 data/auto_collected/<rank>_<slug>.md  ← Axon hits (no-simulation mode, written before the user-data pause)
 data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldbank, wikipedia) under per-adapter subdirs
 .fi/run.log                           ← engine's structured node-by-node log
@@ -111,7 +112,7 @@ npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
 #   CLI:  code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, web research, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 
@@ -279,7 +280,7 @@ The YAML's `provider` block is honored on resume; everything else (topic, design
 
 ### Pull more (or fewer) prior-work citations
 
-Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
+Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by the interview's **Web research** toggle (`knowledge.web_search`, on by default; independent of the Axon knowledge layer). The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
 
 ```yaml
 knowledge:

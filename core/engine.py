@@ -1634,6 +1634,23 @@ class Engine:
                 # files, and the gate's else-branch falls through.
                 return {}
 
+        # Download the retrieved sources to disk for EVERY quest (sim and
+        # no-sim alike) so the collected web/academic literature is always
+        # auditable on disk under ``data/literature/``. The no-simulation
+        # path additionally reuses the same corpus as analysis data via
+        # auto_collect_data (``data/auto_collected/``); this write
+        # guarantees a downloaded corpus even on the SIMULATION path,
+        # where auto_collect_data never runs (design → implement →
+        # execute …). Empty corpus → no files, no empty directory.
+        downloaded = self._write_literature_files(
+            merged, self.quest_root / "data" / "literature",
+        )
+        if downloaded:
+            self._log.info(
+                "[literature] downloaded %d source(s) to data/literature/",
+                downloaded,
+            )
+
         return {
             "literature": merged,
             "literature_iter": this_iter,
@@ -1967,6 +1984,28 @@ class Engine:
         lit = state.get("literature") or []
         if not lit:
             return 0
+        written = self._write_literature_files(lit, auto_dir)
+        if written:
+            self._log.info(
+                "[auto_collect] reused %d already-retrieved literature doc(s) "
+                "as data (no re-query needed)", written,
+            )
+        return written
+
+    def _write_literature_files(self, lit: list, out_dir: Path) -> int:
+        """Write each citable literature entry to ``out_dir`` as a
+        ``lit_NNN_slug.md`` file (YAML front matter + content, via
+        ``_render_auto_collected_md``). Shared by two call sites:
+
+        * the ``literature`` node's always-on download into
+          ``data/literature/`` (runs for EVERY quest, sim or no-sim), and
+        * the no-simulation ``auto_collect_data`` reuse into
+          ``data/auto_collected/`` (``_literature_seed_step``).
+
+        Skips entries with no title/url and FI-internal cross-quest
+        artifacts. ``out_dir`` is created lazily so a corpus with nothing
+        citable leaves no empty directory behind. Returns the count
+        written."""
         written = 0
         for idx, item in enumerate(lit, start=1):
             if isinstance(item, dict):
@@ -1982,22 +2021,17 @@ class Engine:
             slug = _slugify(
                 str(meta.get("title") or meta.get("source") or f"lit{idx}")
             )[:40] or f"lit{idx}"
-            target = auto_dir / f"lit_{idx:03d}_{slug}.md"
+            target = out_dir / f"lit_{idx:03d}_{slug}.md"
             body = _render_auto_collected_md(idx, meta, content)
             try:
-                auto_dir.mkdir(parents=True, exist_ok=True)
+                out_dir.mkdir(parents=True, exist_ok=True)
                 target.write_text(body, encoding="utf-8")
                 written += 1
             except OSError as e:
                 self._log.warning(
-                    "[auto_collect] failed to write literature seed %s: %s "
-                    "— skipping", target, e,
+                    "[literature] failed to write %s: %s — skipping",
+                    target, e,
                 )
-        if written:
-            self._log.info(
-                "[auto_collect] reused %d already-retrieved literature doc(s) "
-                "as data (no re-query needed)", written,
-            )
         return written
 
     async def _axon_collect_step(self, query: str, auto_dir: Path) -> int:

@@ -305,6 +305,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             audience=new_answers.audience,
             knowledge_top_k=new_answers.knowledge_top_k,
             knowledge_external_top_k=new_answers.knowledge_external_top_k,
+            web_research=new_answers.web_research,
             ensemble_profile=new_answers.ensemble_profile,
             max_iterations=new_answers.max_iterations,
         )
@@ -428,6 +429,13 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         )
     if max_iterations < 1:
         raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
+    # web_research: optional bool (default on). Tolerate missing for
+    # backwards compat with older clients that posted the pre-web shape.
+    web_research = body.get("web_research", True)
+    if not isinstance(web_research, bool):
+        raise TypeError(
+            f"web_research must be bool, got {type(web_research).__name__}"
+        )
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -446,6 +454,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         audience=audience,
         knowledge_top_k=top_k,
         knowledge_external_top_k=external_top_k,
+        web_research=web_research,
         ensemble_profile=ensemble_profile,
         max_iterations=max_iterations,
     )
