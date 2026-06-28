@@ -7,6 +7,7 @@ expand `~` on load via mode='before' validators.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -292,6 +293,79 @@ HumanFeedbackGate = Literal["off", "after_review"]
 PauseForUserInput = Literal[
     "never", "after_design", "after_paper", "both",
 ]
+
+# ---------------------------------------------------------------------------
+# Unified human-in-the-loop ("pauses") namespace.
+#
+# Every place the quest can stop and wait for a human is one of two
+# interactions — ANSWER (the quest asks; you reply) or SUPPLY (the quest
+# needs files; you drop them in) — and all of them are configured under one
+# coherent ``pauses:`` section. The legacy flags (engine.clarify_mode,
+# engine.human_feedback_gate, engine.pause_for_user_input,
+# engine.auto_accept_on_pass, engine.human_feedback_timeout_s,
+# knowledge.pause_for_user_papers) still parse and are merged into ``pauses``
+# by Config's root validator, so existing YAML keeps working.
+ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
+ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
+SupplyPause = Literal[                              # was pause_for_user_input
+    "never", "before_build", "before_review", "both",
+]
+# Legacy value → canonical value, applied field-by-field in PausesConfig.
+_CLARIFY_ALIASES = {"interactive": "ask"}
+_REVIEW_ALIASES = {"after_review": "ask"}
+_SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review"}
+
+# Legacy flag location (section, old key) → canonical ``pauses`` field. Read by
+# Config's root validator so old YAML keeps working without touching read sites.
+_LEGACY_PAUSE_FLAGS = (
+    ("engine", "clarify_mode", "clarify"),
+    ("engine", "human_feedback_gate", "review"),
+    ("engine", "pause_for_user_input", "supply"),
+    ("engine", "auto_accept_on_pass", "auto_accept_on_pass"),
+    ("engine", "human_feedback_timeout_s", "timeout_s"),
+    ("knowledge", "pause_for_user_papers", "papers"),
+)
+
+
+class PausesConfig(BaseModel):
+    """When (and how) the quest stops to involve a human. See the README
+    section *When the quest needs you* for the full model."""
+
+    # ANSWER — pre-flight clarifying questions before the research starts.
+    #   "off"  skip · "auto" agent self-answers · "ask" pause for the human.
+    clarify: ClarifyPause = "off"
+    # SUPPLY — pause when a relevant paper came back abstract-only (paywalled)
+    # so the user can download it and drop the PDF into inputs/papers/.
+    papers: bool = False
+    # SUPPLY — fixed drop-in checkpoint(s) for papers/data.
+    #   "never" · "before_build" (after design) · "before_review" (after the
+    #   first draft) · "both".
+    supply: SupplyPause = "never"
+    # ANSWER — pause after the review verdict for accept / reject / refine.
+    #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
+    review: ReviewPause = "ask"
+    # At the review pause, auto-accept *clean* papers (verdict==accept AND no
+    # must-flag hits) instead of waiting — handy for --fleet.
+    auto_accept_on_pass: bool = False
+    # Max seconds to wait at an ANSWER pause for a wired callback (web POST /
+    # VSCode pick) before falling back to the headless pause-exit path. 0 =
+    # wait forever.
+    timeout_s: float = Field(default=1800.0, ge=0)
+
+    @field_validator("clarify", mode="before")
+    @classmethod
+    def _norm_clarify(cls, v: Any) -> Any:
+        return _CLARIFY_ALIASES.get(v, v)
+
+    @field_validator("review", mode="before")
+    @classmethod
+    def _norm_review(cls, v: Any) -> Any:
+        return _REVIEW_ALIASES.get(v, v)
+
+    @field_validator("supply", mode="before")
+    @classmethod
+    def _norm_supply(cls, v: Any) -> Any:
+        return _SUPPLY_ALIASES.get(v, v)
 
 
 class EngineConfig(BaseModel):
@@ -816,8 +890,48 @@ class Config(BaseModel):
     engine: EngineConfig = Field(default_factory=EngineConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    pauses: PausesConfig = Field(default_factory=PausesConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     extra_directives: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _merge_legacy_pauses(cls, data: Any) -> Any:
+        """Fold legacy scattered flags into the unified ``pauses`` section.
+        An explicit ``pauses.<field>`` always wins; a legacy flag only fills a
+        field the user didn't set under ``pauses``. Value translation
+        (interactive→ask, after_design→before_build, …) happens in
+        PausesConfig's field validators, so we copy values through verbatim."""
+        if not isinstance(data, dict):
+            return data
+        pauses = dict(data.get("pauses") or {})
+        used: list[str] = []
+        for section, old_key, new_key in _LEGACY_PAUSE_FLAGS:
+            if new_key in pauses:
+                continue  # explicit pauses.<field> always wins
+            src = data.get(section)
+            if isinstance(src, dict):
+                # YAML / dict path: only map a legacy key the user actually set.
+                if old_key in src:
+                    pauses[new_key] = src[old_key]
+                    used.append(f"{section}.{old_key}")
+            elif src is not None:
+                # Programmatic path: ``engine``/``knowledge`` passed as a model
+                # instance. Every legacy default equals the matching ``pauses``
+                # default, so copying the attribute through is always safe
+                # (no deprecation noise for in-process construction).
+                val = getattr(src, old_key, None)
+                if val is not None:
+                    pauses[new_key] = val
+        if pauses:
+            data["pauses"] = pauses
+        if used:
+            logging.getLogger("frontier_insight.config").info(
+                "config: legacy pause flag(s) %s mapped into the `pauses:` "
+                "section; prefer `pauses.*` going forward.",
+                ", ".join(sorted(set(used))),
+            )
+        return data
 
     @classmethod
     def from_yaml(cls, path: Path) -> "Config":

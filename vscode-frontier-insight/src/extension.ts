@@ -848,6 +848,7 @@ async function runQuest(
         const outputsDir = path.isAbsolute(outDirSetting)
             ? outDirSetting
             : path.join(repoPath, outDirSetting);
+        await surfaceNextStep(outputsDir, stream, resumeQuestId);
         await surfaceWantedPapers(outputsDir, stream, resumeQuestId);
     } else {
         const tail = stderrTail.join("\n");
@@ -859,6 +860,47 @@ async function runQuest(
                 : "stderr was empty. Check `outputs/<quest_id>/.fi/run.log` for whatever made it to the logger before the crash.\n"),
         );
     }
+}
+
+
+/**
+ * Best-effort: when a quest pauses for ANY reason (clarify / papers / supply /
+ * data / review), the engine writes one `NEXT_STEP.md` at the quest root and
+ * deletes it on completion. So its presence means "waiting for you" — surface
+ * it as the unified *Action needed* message. Mirrors the Web quest page's
+ * single Action-needed banner.
+ */
+async function surfaceNextStep(
+    outputsDir: string,
+    stream: vscode.ChatResponseStream,
+    knownQuestId?: string,
+): Promise<void> {
+    try {
+        let questId: string | null = null;
+        if (knownQuestId) {
+            try {
+                await fsPromises.stat(path.join(outputsDir, knownQuestId, "NEXT_STEP.md"));
+                questId = knownQuestId;
+            } catch { return; }
+        } else {
+            // /new: pick the quest whose NEXT_STEP.md was written most recently.
+            const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
+            let best: { id: string; mtime: number } | null = null;
+            for (const e of entries) {
+                if (!e.isDirectory() || e.name.startsWith("_")) { continue; }
+                try {
+                    const st = await fsPromises.stat(path.join(outputsDir, e.name, "NEXT_STEP.md"));
+                    if (!best || st.mtimeMs > best.mtime) { best = { id: e.name, mtime: st.mtimeMs }; }
+                } catch { /* no NEXT_STEP in this quest */ }
+            }
+            if (!best) { return; }
+            questId = best.id;
+        }
+        const md = await fsPromises.readFile(
+            path.join(outputsDir, questId, "NEXT_STEP.md"), "utf-8",
+        );
+        stream.markdown(`\n\n---\n\n⏸ **Action needed**\n\n${md}\n`);
+    } catch { /* best-effort */ }
 }
 
 

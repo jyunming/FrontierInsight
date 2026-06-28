@@ -264,19 +264,19 @@ class Engine:
         # --auto-accept-on-pass`` so the production fleet runner
         # doesn't block on every clean quest. The constructor arg
         # wins when explicitly set; otherwise the engine reads
-        # ``config.engine.auto_accept_on_pass`` so YAML / fixtures
+        # ``config.pauses.auto_accept_on_pass`` so YAML / fixtures
         # can configure it without touching the constructor.
         self.auto_accept_on_pass = (
             bool(auto_accept_on_pass)
             if auto_accept_on_pass is not None
-            else bool(config.engine.auto_accept_on_pass)
+            else bool(config.pauses.auto_accept_on_pass)
         )
         # Wall-clock cap on the human-review callback await. 0 = wait
         # forever (legacy). On timeout the run loop falls through to the
         # headless answer-file / pause-exit path so an orphaned UI prompt
         # can't park the quest indefinitely.
         self.human_feedback_timeout_s = float(
-            config.engine.human_feedback_timeout_s
+            config.pauses.timeout_s
         )
 
     async def run(
@@ -552,7 +552,7 @@ class Engine:
                         if clarify_callback is None:
                             raise RuntimeError(
                                 f"quest {self.quest_id} paused at clarify node but no "
-                                f"clarify_callback was supplied; set clarify_mode to "
+                                f"clarify_callback was supplied; set pauses.clarify to "
                                 f"'auto' or 'off' for headless runs."
                             )
                         self._log.info(
@@ -605,6 +605,14 @@ class Engine:
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
+            # Completion path only (NOT the pause-exit above): the quest reached
+            # its terminal node, so every pause it raised has been resolved —
+            # clear the unified NEXT_STEP.md so a finished quest never shows a
+            # stale "Action needed" pointer in the dashboard / on disk.
+            try:
+                (self.quest_root / "NEXT_STEP.md").unlink(missing_ok=True)
+            except OSError:
+                pass
             self._write_back_knowledge(artifacts, final_state)
             self._write_cost_summary()
             # Clean up any stale ``quest_failed.md`` from a PRIOR
@@ -904,7 +912,7 @@ class Engine:
                 must_flag,
             )
             return "revise"
-        if self.config.engine.human_feedback_gate == "after_review":
+        if self.config.pauses.review == "ask":
             return "human_feedback"
         if not self.config.engine.review_loop:
             return "done"
@@ -947,7 +955,7 @@ class Engine:
         Idempotent across restart: when ``clarify_done`` is already True
         (e.g. resuming after a kill), the node passes through.
         """
-        mode = self.config.engine.clarify_mode
+        mode = self.config.pauses.clarify
         if state.get("clarify_done"):
             return {}
         if mode == "off":
@@ -1080,11 +1088,18 @@ class Engine:
                 if isinstance(questions.get(slot), dict):
                     questions[slot]["default"] = value
         # Interactive: pause the graph until the caller resumes with answers.
-        self._log.info(
-            "[clarify] mode=interactive; pausing for human input (%d questions)",
-            len(questions),
+        payload = self._pause_for_human(
+            kind="clarify",
+            interaction="answer",
+            headline="confirm the research setup",
+            steps=[
+                f"Answer the {len(questions)} clarifying question(s) in the "
+                "panel (Web / VSCode) or at the CLI prompt.",
+                "Headless run? Write your answers into "
+                "`.fi/clarify_answer.json`, then resume.",
+            ],
+            payload={"clarify_questions": questions},
         )
-        payload = interrupt({"clarify_questions": questions})
         # payload is whatever the resume call sent. Accept either a
         # dict (the answers) or a dict that includes a "clarify_answers"
         # key (the GUI wraps it that way for forward-compat).
@@ -1655,7 +1670,7 @@ class Engine:
         # pause again — the resume path picks up the new files and
         # proceeds.
         if (
-            self.config.knowledge.pause_for_user_papers
+            self.config.pauses.papers
             and not _papers_dir_has_files(self.quest_root)
         ):
             needed = [d for d in docs if _is_abstract_only(d)]
@@ -1663,17 +1678,24 @@ class Engine:
                 _write_paper_need_stubs(
                     self.quest_root, needed, self._log, query=_lit_query(state),
                 )
-                self._log.info(
-                    "[literature] pausing — %d paper(s) abstract-only; "
-                    "drop PDFs into %s/inputs/papers/ and re-run",
-                    len(needed), self.quest_root,
+                self._pause_for_human(
+                    kind="papers",
+                    interaction="supply",
+                    headline=f"download {len(needed)} paywalled paper(s)",
+                    steps=[
+                        f"{len(needed)} relevant paper(s) came back abstract-only "
+                        "(paywalled). They're listed, most-relevant-first, in "
+                        "`needs/WANTED_PAPERS.md` with a download link each.",
+                        "Download the few that matter and drop the PDFs into "
+                        "`inputs/papers/` — they're ingested as full text.",
+                    ],
+                    payload={
+                        "papers_required": True,
+                        "quest_id": self.quest_id,
+                        "papers_dir": str(self.quest_root / "inputs" / "papers"),
+                        "needed_count": len(needed),
+                    },
                 )
-                interrupt({
-                    "papers_required": True,
-                    "quest_id": self.quest_id,
-                    "papers_dir": str(self.quest_root / "inputs" / "papers"),
-                    "needed_count": len(needed),
-                })
                 # Unreachable in practice (see ``wait_for_data`` for the
                 # same pattern): interrupt() raises GraphInterrupt; on
                 # resume this node is re-invoked from the checkpoint,
@@ -1819,10 +1841,10 @@ class Engine:
         # design lands so the user can drop reference papers and/or
         # datasets BEFORE the implement/execute spends LLM + venv
         # compute. On a post-pause resume, ``user_pauses_fired``
-        # carries "after_design" and the gate falls through. Files
+        # carries "before_build" and the gate falls through. Files
         # the user dropped under ``inputs/data/`` get walked into
         # ``user_supplied_datasets`` so the analyze node sees them.
-        self._maybe_pause_for_user_input(state, "after_design")
+        self._maybe_pause_for_user_input(state, "before_build")
         # _maybe_pause_for_user_input either fires interrupt() (which
         # never returns) or no-ops. If it no-ops and there are user
         # data files to pick up, surface them on the patch.
@@ -1837,23 +1859,97 @@ class Engine:
             )
         return out
 
+    def _write_next_step(
+        self,
+        *,
+        kind: str,
+        interaction: str,
+        headline: str,
+        steps: list[str],
+    ) -> None:
+        """Write the one consistent ``NEXT_STEP.md`` the user looks at whenever
+        the quest pauses — same shape for every pause, whether the quest is
+        asking a question (ANSWER) or waiting on files (SUPPLY). It says why it
+        stopped, exactly what to do, and the resume command. Best-effort; a
+        write failure is logged but never quest-fatal."""
+        verb = "ANSWER" if interaction == "answer" else "SUPPLY"
+        body = [
+            f"# Action needed — {headline}",
+            "",
+            f"Quest **{self.quest_id}** is paused and waiting for you "
+            f"(**{verb}**).",
+            "",
+            "## What to do",
+            *[f"{i}. {s}" for i, s in enumerate(steps, 1)],
+            "",
+            "## Then resume",
+            f"- **CLI:** `fi --resume {self.quest_id}`",
+            "- **Web / VSCode:** open the quest and click **Resume** — an "
+            "*Action needed* banner shows there too.",
+            "",
+        ]
+        try:
+            (self.quest_root / "NEXT_STEP.md").write_text(
+                "\n".join(body), encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[%s] couldn't write NEXT_STEP.md: %r", kind, e)
+
+    def _pause_for_human(
+        self,
+        *,
+        kind: str,
+        interaction: str,
+        headline: str,
+        steps: list[str],
+        payload: dict[str, Any],
+    ) -> Any:
+        """The single way the engine stops for a human. Writes the unified
+        ``NEXT_STEP.md``, logs a consistent line, then fires LangGraph's
+        ``interrupt()``.
+
+        ``kind`` is the pause id (clarify / papers / supply / data / review);
+        ``interaction`` is ``"answer"`` (the quest asks; resume returns the
+        answer) or ``"supply"`` (the quest needs files; resume re-enters and
+        re-checks). ``payload`` keeps each pause's existing keys so the CLI /
+        web / VSCode resume handlers are unchanged; a unified ``pause``
+        descriptor is added so those surfaces can render one *Action needed*
+        affordance without knowing each pause's bespoke shape.
+
+        Returns whatever the resume sent (ANSWER pauses). SUPPLY pauses
+        pause-exit: ``interrupt()`` raises ``GraphInterrupt`` and never returns.
+        """
+        self._write_next_step(
+            kind=kind, interaction=interaction, headline=headline, steps=steps,
+        )
+        self._log.info("[%s] paused — %s", kind, headline)
+        enriched = {
+            **payload,
+            "pause": {
+                "kind": kind,
+                "interaction": interaction,
+                "headline": headline,
+                "quest_id": self.quest_id,
+                "next_step_file": "NEXT_STEP.md",
+            },
+        }
+        return interrupt(enriched)
+
     def _maybe_pause_for_user_input(
         self, state: QuestState, stage: str,
     ) -> None:
         """Fire a LangGraph ``interrupt()`` at the named stage when
-        ``engine.pause_for_user_input`` opts in AND this stage hasn't
-        already fired for this quest. ``stage`` is one of
-        ``"after_design"`` / ``"after_paper"``. ``state['user_pauses_fired']``
-        tracks per-quest fired pause names so a resume re-entry doesn't
-        force a second pause at the same stage.
+        ``pauses.supply`` opts in AND this stage hasn't already fired for
+        this quest. ``stage`` is one of ``"before_build"`` / ``"before_review"``.
+        ``state['user_pauses_fired']`` tracks per-quest fired pause names so a
+        resume re-entry doesn't force a second pause at the same stage.
 
-        On pause, the engine writes a README under
-        ``<quest_root>/inputs/README.md`` explaining the drop zones,
-        then raises interrupt(). The user drops files and re-runs
-        ``fi --resume <quest_id>``; the resume picks up the files via
-        the normal literature / analyze paths.
+        On pause, the engine writes the unified ``<quest_root>/NEXT_STEP.md``
+        (via ``_pause_for_human``) explaining the drop zones, then raises
+        interrupt(). The user drops files and re-runs ``fi --resume <id>``;
+        the resume picks up the files via the normal literature / analyze paths.
         """
-        cfg_value = self.config.engine.pause_for_user_input
+        cfg_value = self.config.pauses.supply
         if cfg_value == "never":
             return
         if cfg_value not in ("both", stage):
@@ -1878,35 +1974,6 @@ class Engine:
                 "skipping (resume path)", stage,
             )
             return
-        # Drop a fresh README on every pause (each stage writes its own
-        # header — after_design's text differs from after_paper's, so
-        # the second pause shouldn't show stale-stage prose). Best-effort;
-        # an OSError on the write isn't quest-fatal.
-        readme = inputs_dir / "README.md"
-        try:
-            readme.write_text(
-                f"# User input drop zones for quest {self.quest_id}\n\n"
-                f"This quest is paused at stage **{stage}** because "
-                f"`engine.pause_for_user_input: {cfg_value}` was set.\n\n"
-                f"## Drop reference papers here\n"
-                f"`inputs/papers/` — PDFs and Markdown files. Picked up "
-                f"by the literature node's next pass; they become "
-                f"`user_supplied` literature entries the design / write "
-                f"nodes can cite.\n\n"
-                f"## Drop datasets here\n"
-                f"`inputs/data/` — CSVs, JSON, TSV, anything tabular. "
-                f"The analyze node surfaces these in its prompt as "
-                f"`user_supplied_datasets` so it can reason about your "
-                f"data alongside the generated experiment's RESULT_JSON.\n\n"
-                f"## When you're done\n"
-                f"Run `python launch.py --config <yaml> --resume {self.quest_id}` "
-                f"(or `@fi /resume {self.quest_id}` in VSCode) to continue.\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning(
-                "[%s] couldn't write inputs/README.md: %r", stage, e,
-            )
         # Commit the "this stage paused" marker BEFORE firing interrupt
         # so a --resume of the (checkpointed) graph re-enters this node
         # and the marker.is_file() check above falls through.
@@ -1917,19 +1984,28 @@ class Engine:
             self._log.warning(
                 "[%s] couldn't write pause marker %s: %r", stage, marker, e,
             )
-        self._log.info(
-            "[%s] paused for user input: drop files into %s/{papers,data}/ "
-            "then run `fi --resume %s`",
-            stage, inputs_dir, self.quest_id,
+        when = ("before the experiment is built / run" if stage == "before_build"
+                else "before the draft goes to review")
+        self._pause_for_human(
+            kind="supply",
+            interaction="supply",
+            headline=f"add any papers or data ({stage})",
+            steps=[
+                f"Optional — paused {when} so you can add your own sources.",
+                "Drop reference papers (PDF / Markdown) into `inputs/papers/` "
+                "— they become citable literature.",
+                "Drop datasets (CSV / JSON / TSV / Parquet) into `inputs/data/` "
+                "— the analyze node reasons over them.",
+            ],
+            payload={
+                "user_input_required": True,
+                "stage": stage,
+                "quest_id": self.quest_id,
+                "inputs_dir": str(inputs_dir),
+                "papers_dir": str(papers_dir),
+                "data_dir": str(data_dir),
+            },
         )
-        interrupt({
-            "user_input_required": True,
-            "stage": stage,
-            "quest_id": self.quest_id,
-            "inputs_dir": str(inputs_dir),
-            "papers_dir": str(papers_dir),
-            "data_dir": str(data_dir),
-        })
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
         """Agent-side data collection via Axon, run BEFORE
@@ -2328,20 +2404,27 @@ class Engine:
             )
         user_files = _list_user_data_files(data_dir)
         if not user_files:
-            self._log.info(
-                "[wait_for_data] no user data yet in %s — pausing for "
-                "user to drop files and re-run", data_dir,
-            )
             # Pause via LangGraph's interrupt mechanism. Engine.run
             # catches this and exits rc=0 cleanly. On resume the
             # interrupt re-fires; if the user has dropped files by
             # then, the resume payload carries them. (We don't trust
             # the payload — we re-walk the dir on every resume.)
-            interrupt({
-                "data_required": True,
-                "quest_id": self.quest_id,
-                "data_dir": str(data_dir),
-            })
+            self._pause_for_human(
+                kind="data",
+                interaction="supply",
+                headline="add a dataset to analyse",
+                steps=[
+                    "This observational quest has no data yet and runs no "
+                    "simulation.",
+                    "Drop your dataset (CSV / JSON / TSV / Parquet) into "
+                    "`data/` — see `data/README.md` for the specifics it expects.",
+                ],
+                payload={
+                    "data_required": True,
+                    "quest_id": self.quest_id,
+                    "data_dir": str(data_dir),
+                },
+            )
             # Unreachable in practice: interrupt() raises GraphInterrupt
             # which Engine.run catches above; on resume, the node is
             # re-invoked from the checkpoint and the early-return below
@@ -3532,9 +3615,9 @@ class Engine:
         # paper.md lands so the user can drop reference papers (for
         # the next revise pass to cite) and/or datasets (for analyze
         # on the next iteration to incorporate). On a post-pause
-        # resume, ``user_pauses_fired`` carries "after_paper" and the
+        # resume, ``user_pauses_fired`` carries "before_review" and the
         # gate falls through to review.
-        self._maybe_pause_for_user_input(state, "after_paper")
+        self._maybe_pause_for_user_input(state, "before_review")
         return {"paper_md": str(paper_path)}
 
     async def _node_review(self, state: QuestState) -> QuestState:
@@ -3739,11 +3822,20 @@ class Engine:
         except OSError as e:
             self._log.debug("[human_feedback] snapshot write failed: %r", e)
 
-        self._log.info(
-            "[human_feedback] pausing (verdict=%s, score=%s, iteration=%s)",
-            verdict, review.get("score"), state.get("iteration", 0),
+        payload = self._pause_for_human(
+            kind="review",
+            interaction="answer",
+            headline=f"review the result (verdict: {verdict}, "
+                     f"score: {review.get('score')})",
+            steps=[
+                "Accept, reject, or refine the paper in the panel "
+                "(Web / VSCode), or at the CLI prompt.",
+                "Headless run? "
+                f"`fi --resume {self.quest_id} --accept` (or `--reject` / "
+                "`--refine \"what to change\"`).",
+            ],
+            payload={"human_review": snapshot},
         )
-        payload = interrupt({"human_review": snapshot})
         # Resume: ``payload`` is what the callback / web POST returned.
         # Validate + normalise so a malformed answer doesn't propagate
         # into the routing layer.

@@ -1123,6 +1123,14 @@ def expand_ensemble_profile(
     return nodes
 
 
+# Interview answer vocabulary → canonical `pauses.*` vocabulary.
+_CLARIFY_TO_PAUSE = {"off": "off", "auto": "auto", "interactive": "ask"}
+_SUPPLY_TO_PAUSE = {
+    "never": "never", "after_design": "before_build",
+    "after_paper": "before_review", "both": "both",
+}
+
+
 def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     """Render the interview answers as a complete config.yaml string.
 
@@ -1184,7 +1192,6 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     lines.append(f"{indent}framework: \"langgraph\"")
     lines.append(f"{indent}max_iterations: {answers.max_iterations}")
     lines.append(f"{indent}review_loop: true")
-    lines.append(f"{indent}clarify_mode: {json.dumps(answers.clarify_mode)}")
     lines.append(f"{indent}no_simulation: {'true' if answers.no_simulation else 'false'}")
 
     # Cost-discipline trio — preserved for VSCode parity. CLI and
@@ -1200,12 +1207,6 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
             lines.append(f"{indent}{indent}- {json.dumps(persona)}")
     else:
         lines.append(f"{indent}review_panel: []")
-    # Pause-drop-anytime opt-in. Default "never" elides the line so
-    # hand-edited YAMLs stay tidy; any explicit choice gets written.
-    if answers.pause_for_user_input and answers.pause_for_user_input != "never":
-        lines.append(
-            f"{indent}pause_for_user_input: {json.dumps(answers.pause_for_user_input)}"
-        )
 
     # Clarify overrides — pin the three topic-tuned slots + study_depth +
     # paper_venue + output_kinds + simulatability so the clarify node
@@ -1227,6 +1228,22 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
             lines.append(f"{indent}{indent}{key}: {json.dumps(value)}")
     lines.append("")
 
+    # Unified human-in-the-loop section: every place the quest stops for you.
+    # Values use the coherent `pauses.*` vocabulary; legacy interview answers
+    # are translated here (interactive→ask, after_design→before_build, …).
+    lines.append("pauses:")
+    lines.append(
+        f"{indent}clarify: {json.dumps(_CLARIFY_TO_PAUSE.get(answers.clarify_mode, answers.clarify_mode))}"
+    )
+    _supply = _SUPPLY_TO_PAUSE.get(
+        answers.pause_for_user_input, answers.pause_for_user_input
+    )
+    if _supply and _supply != "never":
+        lines.append(f"{indent}supply: {json.dumps(_supply)}")
+    if answers.supply_papers:
+        lines.append(f"{indent}papers: true")
+    lines.append("")
+
     lines.append("execution:")
     lines.append(f"{indent}sandbox: \"venv\"")
     lines.append(f"{indent}timeout_s: 600")
@@ -1244,8 +1261,6 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     # self-documents the interview choice. Independent of `enabled` above.
     lines.append(f"{indent}web_search: {'true' if answers.web_research else 'false'}")
     lines.append(f"{indent}web_fetch_pages: {'true' if answers.web_research else 'false'}")
-    if answers.supply_papers:
-        lines.append(f"{indent}pause_for_user_papers: true")
     if not answers.knowledge_enabled:
         lines.append(f"{indent}external_fallback: [\"openalex\", \"arxiv\", \"crossref\"]")
         lines.append(f"{indent}source_routing: \"manual\"")

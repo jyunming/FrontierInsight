@@ -2,9 +2,8 @@
 
 Behaviour pinned:
 
-  1. ``engine.pause_for_user_input`` default ``never`` keeps existing
-     flow (no pause).
-  2. ``"after_design"`` / ``"after_paper"`` / ``"both"`` fire the
+  1. ``pauses.supply`` default ``never`` keeps existing flow (no pause).
+  2. ``"before_build"`` / ``"before_review"`` / ``"both"`` fire the
      interrupt at the right stage(s).
   3. The ``user_pauses_fired`` field prevents re-pausing at the same
      stage after resume.
@@ -24,7 +23,7 @@ import pytest
 
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig,
-    OutputConfig, ProviderConfig,
+    OutputConfig, PausesConfig, ProviderConfig,
 )
 from core.engine import Engine, _pick_up_user_dropped_datasets
 
@@ -34,11 +33,10 @@ def _mk_engine(tmp_path: Path, mode: str) -> Engine:
         topic="pause-drop tests",
         title="pause-drop",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(
-            max_iterations=1, review_loop=False,
-            clarify_mode="off",
-            pause_for_user_input=mode,  # type: ignore[arg-type]
-            human_feedback_gate="off",
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        pauses=PausesConfig(
+            clarify="off", review="off",
+            supply=mode,  # type: ignore[arg-type]
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
@@ -121,40 +119,40 @@ class _InterruptedSentinel(Exception):
 def test_pause_never_does_not_fire(tmp_path: Path) -> None:
     """Default mode is the no-op path — no pause regardless of stage."""
     eng = _mk_engine(tmp_path, "never")
-    fired, _ = _drive_pause(eng, {}, "after_design")
+    fired, _ = _drive_pause(eng, {}, "before_build")
     assert fired is False
-    fired, _ = _drive_pause(eng, {}, "after_paper")
+    fired, _ = _drive_pause(eng, {}, "before_review")
     assert fired is False
 
 
-def test_pause_after_design_only_fires_at_design(tmp_path: Path) -> None:
-    """``"after_design"`` fires when stage matches and no-ops at
-    the other gates so a config of after_design doesn't accidentally
-    pause at after_paper."""
-    eng = _mk_engine(tmp_path, "after_design")
-    fired_design, payload = _drive_pause(eng, {}, "after_design")
+def test_pause_before_build_only_fires_at_design(tmp_path: Path) -> None:
+    """``"before_build"`` fires when stage matches and no-ops at
+    the other gates so a config of before_build doesn't accidentally
+    pause at before_review."""
+    eng = _mk_engine(tmp_path, "before_build")
+    fired_design, payload = _drive_pause(eng, {}, "before_build")
     assert fired_design is True
     assert payload is not None
     assert payload["user_input_required"] is True
-    assert payload["stage"] == "after_design"
-    fired_paper, _ = _drive_pause(eng, {}, "after_paper")
+    assert payload["stage"] == "before_build"
+    fired_paper, _ = _drive_pause(eng, {}, "before_review")
     assert fired_paper is False
 
 
-def test_pause_after_paper_only_fires_at_paper(tmp_path: Path) -> None:
-    eng = _mk_engine(tmp_path, "after_paper")
-    fired_design, _ = _drive_pause(eng, {}, "after_design")
+def test_pause_before_review_only_fires_at_paper(tmp_path: Path) -> None:
+    eng = _mk_engine(tmp_path, "before_review")
+    fired_design, _ = _drive_pause(eng, {}, "before_build")
     assert fired_design is False
-    fired_paper, payload = _drive_pause(eng, {}, "after_paper")
+    fired_paper, payload = _drive_pause(eng, {}, "before_review")
     assert fired_paper is True
-    assert payload["stage"] == "after_paper"
+    assert payload["stage"] == "before_review"
 
 
 def test_pause_both_fires_at_both_stages(tmp_path: Path) -> None:
     eng = _mk_engine(tmp_path, "both")
-    fired_design, _ = _drive_pause(eng, {}, "after_design")
+    fired_design, _ = _drive_pause(eng, {}, "before_build")
     assert fired_design is True
-    fired_paper, _ = _drive_pause(eng, {}, "after_paper")
+    fired_paper, _ = _drive_pause(eng, {}, "before_review")
     assert fired_paper is True
 
 
@@ -165,9 +163,9 @@ def test_pause_does_not_refire_when_stage_already_in_user_pauses_fired(
     re-invokes the node that paused. ``user_pauses_fired`` carries
     the stage from the prior pause so the gate falls through this
     time instead of pausing the user again."""
-    eng = _mk_engine(tmp_path, "after_design")
-    state = {"user_pauses_fired": ["after_design"]}
-    fired, _ = _drive_pause(eng, state, "after_design")
+    eng = _mk_engine(tmp_path, "before_build")
+    state = {"user_pauses_fired": ["before_build"]}
+    fired, _ = _drive_pause(eng, state, "before_build")
     assert fired is False
 
 
@@ -177,12 +175,12 @@ def test_pause_does_not_refire_when_disk_marker_present(tmp_path: Path) -> None:
     fails because ``interrupt()`` raises BEFORE the node returns a
     state patch, so the prior pause's ``user_pauses_fired`` update
     never lands in the checkpoint. The marker survives any resume."""
-    eng = _mk_engine(tmp_path, "after_design")
+    eng = _mk_engine(tmp_path, "before_build")
     eng.fi_dir.mkdir(parents=True, exist_ok=True)
-    (eng.fi_dir / "paused_at_after_design.flag").write_text(
-        "after_design", encoding="utf-8",
+    (eng.fi_dir / "paused_at_before_build.flag").write_text(
+        "before_build", encoding="utf-8",
     )
-    fired, _ = _drive_pause(eng, {}, "after_design")
+    fired, _ = _drive_pause(eng, {}, "before_build")
     assert fired is False
 
 
@@ -190,21 +188,34 @@ def test_pause_writes_disk_marker_before_interrupt(tmp_path: Path) -> None:
     """First pause must write the disk marker BEFORE firing
     interrupt() — otherwise an immediate resume re-enters the node
     without the marker present and pauses again, looping the user."""
-    eng = _mk_engine(tmp_path, "after_design")
-    _drive_pause(eng, {}, "after_design")
-    assert (eng.fi_dir / "paused_at_after_design.flag").is_file()
+    eng = _mk_engine(tmp_path, "before_build")
+    _drive_pause(eng, {}, "before_build")
+    assert (eng.fi_dir / "paused_at_before_build.flag").is_file()
 
 
-def test_pause_writes_inputs_readme_with_drop_zone_hints(
+def test_collect_artifacts_keeps_next_step_on_pause(tmp_path: Path) -> None:
+    """Regression: ``_collect_artifacts`` is called on BOTH the pause-exit and
+    the completion paths, so it must NOT delete NEXT_STEP.md — otherwise a
+    paused quest's "Action needed" pointer is wiped the instant it pauses. The
+    deletion lives only in the completion branch of ``run``."""
+    eng = _mk_engine(tmp_path, "before_build")
+    nxt = tmp_path / "NEXT_STEP.md"
+    nxt.write_text("# Action needed — add any papers or data\n", encoding="utf-8")
+    eng._collect_artifacts({"topic": "t"})  # type: ignore[arg-type]
+    assert nxt.is_file(), "pause-exit must keep NEXT_STEP.md"
+
+
+def test_pause_writes_next_step_with_drop_zone_hints(
     tmp_path: Path,
 ) -> None:
-    """The README the gate drops alongside the pause makes the
+    """The unified NEXT_STEP.md the gate drops at the quest root makes the
     drop zones discoverable without consulting docs."""
-    eng = _mk_engine(tmp_path, "after_design")
-    _drive_pause(eng, {}, "after_design")
-    readme = tmp_path / "inputs" / "README.md"
-    assert readme.exists()
-    body = readme.read_text(encoding="utf-8")
+    eng = _mk_engine(tmp_path, "before_build")
+    _drive_pause(eng, {}, "before_build")
+    nxt = tmp_path / "NEXT_STEP.md"
+    assert nxt.exists()
+    body = nxt.read_text(encoding="utf-8")
+    assert "Action needed" in body
     assert "inputs/papers/" in body
     assert "inputs/data/" in body
     assert eng.quest_id in body  # resume command carries the quest id
@@ -213,10 +224,11 @@ def test_pause_writes_inputs_readme_with_drop_zone_hints(
 # --- yaml emitter ---------------------------------------------------------
 
 
-def test_interview_yaml_emits_pause_for_user_input_when_non_default() -> None:
-    """The interview YAML emitter only writes the line when the user
-    chose something other than ``never`` (default), so hand-edited
-    YAMLs stay tidy for the common case."""
+def test_interview_yaml_emits_supply_pause_when_non_default() -> None:
+    """The interview emits the supply pause under the unified ``pauses:``
+    section, translated from interview vocabulary (after_design →
+    before_build), and only when the user chose something other than the
+    ``never`` default so common-case YAMLs stay tidy."""
     from core.interview import InterviewAnswers, answers_to_yaml
 
     base_kwargs: dict[str, Any] = dict(
@@ -227,14 +239,15 @@ def test_interview_yaml_emits_pause_for_user_input_when_non_default() -> None:
         clarify_mode="off", review_panel=[], knowledge_enabled=False,
     )
     default = InterviewAnswers(**base_kwargs)
-    after_design = InterviewAnswers(
+    supply = InterviewAnswers(
         **{**base_kwargs, "pause_for_user_input": "after_design"},
     )
 
     yaml_default = answers_to_yaml(default, frontend="cli")
-    yaml_pause = answers_to_yaml(after_design, frontend="cli")
+    yaml_pause = answers_to_yaml(supply, frontend="cli")
 
-    # Default never → no line in YAML.
-    assert "pause_for_user_input" not in yaml_default
-    # Explicit choice → line is written.
-    assert "pause_for_user_input: \"after_design\"" in yaml_pause
+    # Default never → no supply line under pauses.
+    assert "supply:" not in yaml_default
+    # Explicit choice → supply line under pauses, translated to new vocab.
+    assert "pauses:" in yaml_pause
+    assert 'supply: "before_build"' in yaml_pause

@@ -72,7 +72,7 @@ export interface InterviewAnswers {
     web_research?: boolean;
     // When true, pause on a paywalled / abstract-only relevant paper and
     // write needs/WANTED_PAPERS.md so the user can drop the PDF into
-    // inputs/papers/ and resume. Maps to knowledge.pause_for_user_papers.
+    // inputs/papers/ and resume. Maps to pauses.papers.
     // Off by default. Must stay in sync with core/interview.py.
     supply_papers?: boolean;
     // Multi-model ensemble preset. "off" (default) keeps single-call
@@ -208,7 +208,6 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}framework: "langgraph"`);
     lines.push(`${indent}max_iterations: ${answers.max_iterations}`);
     lines.push(`${indent}review_loop: true`);
-    lines.push(`${indent}clarify_mode: "${answers.clarify_mode}"`);
     lines.push(`${indent}no_simulation: ${answers.no_simulation ? "true" : "false"}`);
     // ---- COST DISCIPLINE — these defaults are LOW so a basic quest is
     // ~6 LLM calls instead of ~26. Each line below switches off an
@@ -240,6 +239,18 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}${indent}budget: "${yamlEscape(answers.budget)}"`);
     lines.push("");
 
+    // Unified human-in-the-loop section: every place the quest stops for you.
+    // Uses the coherent `pauses.*` vocabulary (clarify interactive → ask).
+    // Mirrors the equivalent block in core/interview.py:answers_to_yaml.
+    const clarifyPause =
+        answers.clarify_mode === "interactive" ? "ask" : answers.clarify_mode;
+    lines.push("pauses:");
+    lines.push(`${indent}clarify: "${clarifyPause}"`);
+    if (answers.supply_papers === true) {
+        lines.push(`${indent}papers: true`);
+    }
+    lines.push("");
+
     lines.push("execution:");
     lines.push(`${indent}sandbox: "venv"`);
     lines.push(`${indent}timeout_s: 600`);
@@ -264,9 +275,6 @@ export function answersToYaml(answers: InterviewAnswers): string {
     const webResearch = answers.web_research !== false;
     lines.push(`${indent}web_search: ${webResearch ? "true" : "false"}`);
     lines.push(`${indent}web_fetch_pages: ${webResearch ? "true" : "false"}`);
-    if (answers.supply_papers === true) {
-        lines.push(`${indent}pause_for_user_papers: true`);
-    }
     if (!answers.knowledge_enabled) {
         lines.push(`${indent}external_fallback: ["openalex", "arxiv", "crossref"]`);
         // `source_routing: manual` skips the LLM-driven catalog source

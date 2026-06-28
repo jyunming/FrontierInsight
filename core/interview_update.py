@@ -157,6 +157,20 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
     output = raw.get("output") or {}
     provider = raw.get("provider") or {}
     knowledge = raw.get("knowledge") or {}
+    # Unified pauses section (canonical) with legacy-flag fallback, then
+    # translate back to the interview's vocabulary (ask→interactive, …) so the
+    # rest of the interview UI sees the values it expects.
+    pauses = raw.get("pauses") or {}
+    _rev_clarify = {"ask": "interactive"}
+    _rev_supply = {"before_build": "after_design", "before_review": "after_paper"}
+
+    def _pause(new_key: str, legacy: dict, legacy_key: str, default: Any) -> Any:
+        if new_key in pauses:
+            return pauses[new_key]
+        return legacy.get(legacy_key, default)
+
+    _clarify_raw = _pause("clarify", engine, "clarify_mode", "auto")
+    _supply_raw = _pause("supply", engine, "pause_for_user_input", "never")
 
     topic = raw.get("topic", "") or ""
     if isinstance(topic, list):
@@ -191,7 +205,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         comparative_baseline=str(overrides.get("comparative_baseline") or ""),
         success_metric=str(overrides.get("success_metric") or ""),
         budget=str(overrides.get("budget") or ""),
-        clarify_mode=str(engine.get("clarify_mode") or "auto"),
+        clarify_mode=str(_rev_clarify.get(_clarify_raw, _clarify_raw) or "auto"),
         review_panel=list(engine.get("review_panel") or []),
         knowledge_enabled=bool(knowledge.get("enabled", False)),
         provider=provider_name,
@@ -200,7 +214,8 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         knowledge_top_k=_coerce_int(knowledge.get("top_k", 8), 8),
         knowledge_external_top_k=_coerce_int(knowledge.get("external_top_k", 20), 20),
         web_research=bool(knowledge.get("web_search", True)),
-        supply_papers=bool(knowledge.get("pause_for_user_papers", False)),
+        supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", False)),
+        pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
         max_iterations=_coerce_int(engine.get("max_iterations", 2), 2),
     )
@@ -275,13 +290,22 @@ def rewrite_yaml_with_new_answers(
         ("topic",), ("title",),
         ("provider", "name"), ("provider", "model"),
         ("provider", "node_ensemble"),
-        ("engine", "clarify_mode"), ("engine", "no_simulation"),
+        ("engine", "no_simulation"),
         ("engine", "review_panel"), ("engine", "clarify_overrides"),
         ("engine", "max_iterations"),
         ("output", "kinds"), ("output", "paper_format"),
         ("output", "audience"),
         ("knowledge", "enabled"),
         ("knowledge", "top_k"), ("knowledge", "external_top_k"),
+        # Unified pauses section is fully interview-managed.
+        ("pauses", "clarify"), ("pauses", "supply"), ("pauses", "papers"),
+        # Strip legacy pause flags so a stale copy in `raw` can't silently
+        # override the freshly-emitted `pauses:` block (e.g. re-enabling a
+        # pause the user just turned off).
+        ("engine", "clarify_mode"), ("engine", "pause_for_user_input"),
+        ("engine", "human_feedback_gate"), ("engine", "auto_accept_on_pass"),
+        ("engine", "human_feedback_timeout_s"),
+        ("knowledge", "pause_for_user_papers"),
     }
     # Exception: when the user's chosen ``ensemble_profile`` is "off",
     # the interview emits nothing for ``provider.node_ensemble``. If we
