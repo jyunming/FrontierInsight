@@ -1995,10 +1995,13 @@ class Engine:
         # ---- Dataset adapters --------------------------------------
         adapter_written = await self._run_dataset_adapters(query, auto_dir)
 
-        written = lit_written + axon_written + adapter_written
-        # If neither side wrote anything, clean up any empty top-level
-        # auto_collected/ dir that might have been created mid-flight.
-        if written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
+        # lit_written is a COUNT of sources reused from data/literature/ (no
+        # files written there); only axon + adapters write into auto_dir.
+        files_written = axon_written + adapter_written
+        written = lit_written + files_written
+        # If nothing landed in auto_collected/, clean up any empty top-level
+        # dir that might have been created mid-flight.
+        if files_written == 0 and auto_dir.is_dir() and not any(auto_dir.iterdir()):
             try:
                 auto_dir.rmdir()
             except OSError as e:
@@ -2007,9 +2010,10 @@ class Engine:
                     "leftover %s: %s", auto_dir, e,
                 )
         self._log.info(
-            "[auto_collect] wrote %d total file(s) under %s "
-            "(literature_reuse=%d, axon=%d, adapters=%d)",
-            written, auto_dir, lit_written, axon_written, adapter_written,
+            "[auto_collect] %d source(s) available for analysis "
+            "(literature_reuse=%d from data/literature/, axon=%d + "
+            "adapters=%d written to auto_collected/)",
+            written, lit_written, axon_written, adapter_written,
         )
         return {"auto_collected_count": written}
 
