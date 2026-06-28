@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, StreamingResponse,
 )
@@ -228,6 +228,9 @@ def _read_log_tail(log_path: Path, n: int = 200) -> list[str]:
 
 
 _QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
+# Accepted user-supplied paper formats + per-file upload cap.
+_PAPER_UPLOAD_SUFFIXES = (".pdf", ".md", ".txt")
+_MAX_PAPER_UPLOAD_BYTES = 40 * 1024 * 1024
 
 
 def _dir_size(path: Path) -> int:
@@ -901,6 +904,65 @@ def make_app(
             "pid": launched.pid,
             "resumed": True,
         })
+
+    @app.get("/api/quests/{quest_id}/wanted-papers")
+    async def wanted_papers(quest_id: str) -> JSONResponse:
+        """The ranked ``needs/WANTED_PAPERS.md`` (papers the agent flagged as
+        paywalled / abstract-only) plus the PDFs already dropped into
+        ``inputs/papers/`` — so the quest page can show what to download and
+        what's been supplied."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        wanted = quest_root / "needs" / "WANTED_PAPERS.md"
+        markdown = wanted.read_text(encoding="utf-8") if wanted.is_file() else ""
+        papers_dir = quest_root / "inputs" / "papers"
+        dropped = (
+            sorted(
+                p.name for p in papers_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in _PAPER_UPLOAD_SUFFIXES
+                and p.name != "README.md"
+            )
+            if papers_dir.is_dir() else []
+        )
+        return JSONResponse({
+            "quest_id": quest_id,
+            "has_needs": bool(markdown),
+            "wanted_markdown": markdown,
+            "dropped": dropped,
+        })
+
+    @app.post("/api/quests/{quest_id}/papers")
+    async def upload_papers(
+        quest_id: str, files: list[UploadFile] = File(...),
+    ) -> JSONResponse:
+        """Save user-supplied paper PDFs/MD/TXT into
+        ``<quest>/inputs/papers/`` so a paused quest can be resumed with real
+        full text. Filenames are sanitised (no path traversal), extensions
+        restricted to .pdf/.md/.txt, and each file is size-capped."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        papers_dir = quest_root / "inputs" / "papers"
+        papers_dir.mkdir(parents=True, exist_ok=True)
+        saved: list[str] = []
+        skipped: list[str] = []
+        for f in files:
+            name = Path(f.filename or "").name  # strip any directory parts
+            if not name or Path(name).suffix.lower() not in _PAPER_UPLOAD_SUFFIXES:
+                skipped.append(f.filename or "(unnamed)")
+                continue
+            data = await f.read()
+            if not data or len(data) > _MAX_PAPER_UPLOAD_BYTES:
+                skipped.append(name)
+                continue
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "paper.pdf"
+            try:
+                (papers_dir / safe).write_bytes(data)
+                saved.append(safe)
+            except OSError:
+                skipped.append(safe)
+        return JSONResponse({"quest_id": quest_id, "saved": saved, "skipped": skipped})
 
     @app.get("/api/system/tectonic")
     async def tectonic_status(job_id: str | None = None) -> JSONResponse:

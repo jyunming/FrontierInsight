@@ -310,6 +310,8 @@ export async function runInterview(
         // Web research on by default — searches the public web and
         // downloads sources into data/literature/ for every quest.
         web_research: true,
+        // Pause-for-paywalled-papers off by default (opt-in power feature).
+        supply_papers: false,
     };
 
     // ─── Review block + action picker loop ──────────────────────────
@@ -386,6 +388,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
+    lines.push(`| Supply paywalled papers | ${a.supply_papers === true ? "pause for my PDFs" : "off"} |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
     // ``knowledge_top_k`` is Tier-2 in core/interview.py — show it in
     // the always-visible review block alongside the other defaults so
@@ -441,6 +444,7 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Reviewer panel", value: "review_panel" },
             { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
             { label: "Web research (download sources)", value: "web_research" },
+            { label: "Supply paywalled papers", value: "supply_papers" },
             { label: "Paper audience", value: "audience" },
             { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
         ],
@@ -528,6 +532,17 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
                 { title: "Web research (downloads into data/literature/)", ignoreFocusOut: true },
             );
             if (v) a.web_research = v.value;
+            return;
+        }
+        case "supply_papers": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(circle-slash) Off — use what open access can get", value: false },
+                    { label: "$(book) Pause for my PDFs — list paywalled papers to download", value: true },
+                ],
+                { title: "Supply paywalled papers (pause → drop PDFs into inputs/papers/)", ignoreFocusOut: true },
+            );
+            if (v) a.supply_papers = v.value;
             return;
         }
         case "audience": {

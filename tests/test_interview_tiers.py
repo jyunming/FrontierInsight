@@ -169,6 +169,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
     of tier-3 to tier-1 so the cost multiplier sits with provider/model."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
+        "supply_papers",
         "comparative_baseline",
         "success_metric",
         "budget",

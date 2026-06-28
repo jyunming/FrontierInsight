@@ -485,6 +485,34 @@
       "tier": 2
     },
     {
+      "id": "supply_papers",
+      "label": "Supply paywalled papers",
+      "prompt": "When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, pause and list the papers to download (ranked, with links) so you can drop the PDFs into inputs/papers/ and resume with real full text. Off by default.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "Off (default)",
+          "description": "Use whatever the open-web / open-access fetch can get. Paywalled papers (SPIE, IEEE, …) are cited by their abstract only."
+        },
+        {
+          "value": true,
+          "label": "Pause for my PDFs",
+          "description": "When the agent can only get the abstract of a relevant paper, it pauses and writes a ranked needs/WANTED_PAPERS.md (download links + why each matters). Drop the PDFs into inputs/papers/ and resume — they're ingested as full text. Tip: you can also pre-load a folder of papers via knowledge.local_papers."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "comparative_baseline",
       "label": "Comparative baseline",
       "prompt": "What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
@@ -1014,6 +1042,7 @@
     "review_panel",
     "study_depth",
     "success_metric",
+    "supply_papers",
     "web_research"
   ],
   "stage_invalidation": {
@@ -1051,6 +1080,9 @@
     "web_research": [
       "literature",
       "write"
+    ],
+    "supply_papers": [
+      "literature"
     ],
     "max_iterations": [],
     "audience": [

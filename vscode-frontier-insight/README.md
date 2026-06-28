@@ -219,6 +219,15 @@ Scholar / CORE. The full text is stored uncapped on disk, and each
 node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
+When a relevant paper is genuinely paywalled (SPIE / IEEE / Elsevier …)
+and only its abstract is reachable, turn on **Supply paywalled papers**
+in the interview: the quest pauses and writes a ranked
+`needs/WANTED_PAPERS.md` (download links + why each matters). After the
+run, the chat panel surfaces that list with instructions to drop the
+PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
+ingested as real full text. You can also pre-load a folder of papers via
+`knowledge.local_papers` (a directory is scanned recursively).
+
 Before pausing, `auto_collect_data` runs:
 
 1. Knowledge retrieval against `topic + design.hypothesis` — Axon

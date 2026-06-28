@@ -141,6 +141,19 @@
     </div>
   </section>
 
+  <!-- Papers to download (paywalled / abstract-only) -->
+  <section id="papers-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+    <h3 class="font-label-sm text-label-sm text-outline uppercase">Papers to download</h3>
+    <p class="text-on-surface-variant text-body-sm">The agent could only get the abstract for these papers. Download the ones that matter, drop the PDFs below, then <span class="text-on-surface">Resume</span>.</p>
+    <div id="wanted-papers-md" class="fi-md-body"></div>
+    <div id="papers-dropped" class="font-code-md text-code-md text-on-surface-variant"></div>
+    <div class="flex flex-wrap items-center gap-3">
+      <input id="papers-file" type="file" accept=".pdf,.md,.txt" multiple class="text-on-surface text-body-sm"/>
+      <button id="papers-upload-btn" onclick="uploadPapers()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Upload PDFs</button>
+      <span id="papers-upload-status" class="text-on-surface-variant text-body-sm"></span>
+    </div>
+  </section>
+
   <!-- SSE Log -->
   <section id="log-section" class="flex flex-col">
     <h3 class="font-label-sm text-label-sm text-outline uppercase mb-2 pl-2">System Log</h3>
@@ -261,6 +274,7 @@
       sec.classList.add('hidden'); sec.classList.remove('flex');
     }
     refreshFiles();
+    refreshWantedPapers();
     const terminal = !data.alive && data.summary;
     document.getElementById('cancel-btn').disabled = terminal || !data.alive;
     if (terminal && pollHandle) {
@@ -270,6 +284,41 @@
         alreadyNotified = true;
       }
     }
+  }
+
+  async function refreshWantedPapers() {
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/wanted-papers`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const sec = document.getElementById('papers-section');
+      if (!data.has_needs) { sec.classList.add('hidden'); sec.classList.remove('flex'); return; }
+      sec.classList.remove('hidden'); sec.classList.add('flex');
+      const mdEl = document.getElementById('wanted-papers-md');
+      mdEl.innerHTML = window.fi_renderMarkdown
+        ? window.fi_renderMarkdown(data.wanted_markdown)
+        : escapeHtml(data.wanted_markdown);
+      const dropped = data.dropped || [];
+      document.getElementById('papers-dropped').textContent =
+        dropped.length ? `Supplied so far: ${dropped.join(', ')}` : 'No PDFs supplied yet.';
+    } catch (e) { /* best-effort */ }
+  }
+
+  async function uploadPapers() {
+    const input = document.getElementById('papers-file');
+    const statusEl = document.getElementById('papers-upload-status');
+    if (!input.files || !input.files.length) { statusEl.textContent = 'Pick one or more .pdf / .md / .txt files first.'; return; }
+    const fd = new FormData();
+    for (const f of input.files) fd.append('files', f);
+    statusEl.textContent = 'Uploading…';
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/papers`, { method: 'POST', body: fd });
+      const data = await res.json();
+      const saved = (data.saved || []).length, skipped = (data.skipped || []).length;
+      statusEl.textContent = `Saved ${saved} file(s).` + (skipped ? ` Skipped ${skipped} (wrong type / too big).` : '') + ' Now press Resume.';
+      input.value = '';
+      refreshWantedPapers();
+    } catch (e) { statusEl.textContent = 'Upload failed.'; }
   }
 
   async function refreshFiles() {

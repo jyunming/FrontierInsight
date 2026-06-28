@@ -306,6 +306,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             knowledge_top_k=new_answers.knowledge_top_k,
             knowledge_external_top_k=new_answers.knowledge_external_top_k,
             web_research=new_answers.web_research,
+            supply_papers=new_answers.supply_papers,
             ensemble_profile=new_answers.ensemble_profile,
             max_iterations=new_answers.max_iterations,
         )
@@ -436,6 +437,11 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         raise TypeError(
             f"web_research must be bool, got {type(web_research).__name__}"
         )
+    supply_papers = body.get("supply_papers", False)
+    if not isinstance(supply_papers, bool):
+        raise TypeError(
+            f"supply_papers must be bool, got {type(supply_papers).__name__}"
+        )
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -455,6 +461,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         knowledge_top_k=top_k,
         knowledge_external_top_k=external_top_k,
         web_research=web_research,
+        supply_papers=supply_papers,
         ensemble_profile=ensemble_profile,
         max_iterations=max_iterations,
     )

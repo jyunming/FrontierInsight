@@ -1623,10 +1623,44 @@ def _extract_pdf_text(path: Path) -> str | None:
     return "\n\n".join(parts)
 
 
+_LOCAL_PAPER_SUFFIXES = (".pdf", ".md", ".txt", ".rst")
+
+
+def _expand_local_paper_paths(paths: list[Path]) -> list[Path]:
+    """Resolve each ``local_papers`` entry to concrete files. An entry may be
+    a FILE (.pdf / .md / .txt / .rst) or a DIRECTORY — a directory is scanned
+    recursively for supported files, so a quest can point ``local_papers`` at
+    a folder that already holds the research material. De-duped, order-stable."""
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            candidates = [
+                f for f in sorted(p.rglob("*"))
+                if f.is_file()
+                and f.suffix.lower() in _LOCAL_PAPER_SUFFIXES
+                and not f.name.startswith(".")
+            ]
+            if not candidates:
+                _log.warning("local_papers dir %s holds no .pdf/.md/.txt files", p)
+        else:
+            candidates = [p]
+        for f in candidates:
+            try:
+                key = f.resolve()
+            except OSError:
+                key = f
+            if key not in seen:
+                seen.add(key)
+                files.append(f)
+    return files
+
+
 def _load_local_papers(paths: list[Path]) -> list[RetrievedDoc]:
     out: list[RetrievedDoc] = []
-    for p in paths:
-        doc = _load_local_paper(Path(p))
+    for p in _expand_local_paper_paths(paths):
+        doc = _load_local_paper(p)
         if doc is not None:
             out.append(doc)
     if out:
