@@ -872,6 +872,58 @@ class _FetchBlocked(Exception):
     """Internal sentinel: the direct HTTP fetch was blocked (4xx)."""
 
 
+# Specific full-page interstitial phrases — safe to match against an
+# entire rendered HTML document (the headless path) without false
+# positives, because they only appear on a challenge page, never in a
+# real article's markup. "checking your browser" also covers PMC's
+# reCAPTCHA wall ("Checking your browser - reCAPTCHA").
+_INTERSTITIAL_MARKERS = (
+    "just a moment",
+    "performing security verification",
+    "challenge-platform",
+    "checking your browser",
+    "cf-browser-verification",
+    "request unsuccessful. incapsula",
+)
+
+# Broader bot-challenge / CAPTCHA phrases used ONLY for the length-gated
+# text check below. These (recaptcha / captcha / "verify you are human")
+# routinely appear in a real page's comment-widget markup, so they must
+# NOT be matched against full HTML — only against already-extracted text
+# that is also suspiciously short.
+_BOT_CHALLENGE_MARKERS = _INTERSTITIAL_MARKERS + (
+    "recaptcha",
+    "captcha",
+    "enable javascript and cookies",
+    "please enable javascript",
+    "verify you are human",
+    "are you a robot",
+    "ddos protection",
+    "access denied",
+)
+
+# Extracted text shorter than this is treated as a failed fetch — a real
+# article is far longer; a sub-threshold result is a block page, a cookie
+# wall, or an empty render, none of which should be stored as full text.
+# Kept conservative (the search snippet is ~250 chars, so this only
+# rejects results no better than the snippet we already have).
+_MIN_FULL_TEXT_CHARS = 300
+
+
+def _looks_like_bot_challenge(text: str) -> bool:
+    """True when ``text`` is a bot-challenge / CAPTCHA interstitial (or an
+    otherwise-empty block page) rather than real article content. A genuine
+    paper may *mention* "captcha"/"recaptcha" in its body, so the marker
+    match is gated on the text being short — a challenge page is tiny, an
+    article is not."""
+    if not text or not text.strip():
+        return True
+    low = text.lower()
+    if len(text) < 1500 and any(m in low for m in _BOT_CHALLENGE_MARKERS):
+        return True
+    return False
+
+
 def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
     """Render ``url`` in a headless Chromium via Playwright and return its
     HTML. This executes JavaScript and clears most anti-bot challenges
@@ -892,10 +944,7 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
             )
             _playwright_fetch_html._warned = True  # type: ignore[attr-defined]
         return None
-    _CF_MARKERS = (
-        "just a moment", "performing security verification",
-        "challenge-platform", "checking your browser",
-    )
+    _CF_MARKERS = _INTERSTITIAL_MARKERS
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -940,6 +989,165 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
         return None
 
 
+def _xml_to_text(xml: str) -> str:
+    """Flatten JATS / XML full-text markup to readable plain text — strip
+    tags + decode the common entities, collapse whitespace. Good enough to
+    feed the writer + plot steps; we don't need structural fidelity."""
+    no_tags = re.sub(r"<[^>]+>", " ", xml)
+    no_tags = no_tags.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    no_tags = re.sub(r"&[a-zA-Z#0-9]+;", " ", no_tags)
+    return re.sub(r"\s+", " ", no_tags).strip()
+
+
+def _europepmc_fulltext(
+    doc: RetrievedDoc, *, timeout_s: float, cap: int,
+) -> str | None:
+    """Recover open-access full text from the Europe PMC REST API for a
+    PMC / PubMed / DOI source whose publisher HTML is bot-walled. Derives
+    the PMCID from a ``pmc.ncbi.nlm.nih.gov/articles/PMC…`` URL, or resolves
+    it from the DOI via Europe PMC search, then pulls the OA ``fullTextXML``
+    (only open-access articles expose it; others 404 → None)."""
+    md = doc.metadata
+    url = str(md.get("url") or "")
+    doi = str(md.get("doi") or "").strip()
+    pmcid = str(md.get("pmcid") or "").strip()
+    if not pmcid:
+        m = re.search(r"PMC(\d+)", url)
+        if m:
+            pmcid = "PMC" + m.group(1)
+    base = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+    try:
+        with httpx.Client(
+            timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
+        ) as c:
+            if not pmcid and doi:
+                r = c.get(
+                    f"{base}/search",
+                    params={"query": f"DOI:{doi}", "format": "json",
+                            "resultType": "lite", "pageSize": 1},
+                )
+                if r.status_code == 200:
+                    results = (r.json().get("resultList") or {}).get("result") or []
+                    if results:
+                        pmcid = str(results[0].get("pmcid") or "")
+            if not pmcid:
+                return None
+            r = c.get(f"{base}/PMC/{pmcid}/fullTextXML")
+            if r.status_code != 200 or not r.content:
+                return None
+            text = _xml_to_text(r.text)
+            if text:
+                _log.info("europepmc: recovered OA full text for %s", pmcid)
+                return text[:cap]
+    except Exception as e:
+        _log.info("europepmc fulltext %s failed: %s", pmcid or doi, e)
+    return None
+
+
+def _resolve_doi(doc: RetrievedDoc, *, timeout_s: float) -> str:
+    """Best-effort DOI for a doc. Uses ``metadata.doi`` when present; else,
+    for a ``pmc.ncbi.nlm.nih.gov/articles/PMC…`` URL (web-search results
+    carry the PMC link but no DOI), resolves the DOI from the PMCID via
+    Europe PMC search."""
+    doi = str(doc.metadata.get("doi") or "").strip()
+    if doi:
+        return doi
+    m = re.search(r"PMC(\d+)", str(doc.metadata.get("url") or ""))
+    if not m:
+        return ""
+    try:
+        r = httpx.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={"query": f"PMCID:PMC{m.group(1)}", "format": "json",
+                    "resultType": "lite", "pageSize": 1},
+            headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
+        )
+        if r.status_code == 200:
+            res = (r.json().get("resultList") or {}).get("result") or []
+            if res:
+                return str(res[0].get("doi") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _unpaywall_fulltext(
+    doc: RetrievedDoc, *, timeout_s: float, cap: int,
+) -> str | None:
+    """Recover open-access full text via Unpaywall. The publisher's OA copy
+    is often itself bot-walled (MDPI / SAGE / … return 403), so we iterate
+    EVERY ``oa_location`` — repository copies first (university repos, etc.,
+    which rarely block) — fetch each PDF/HTML, and return the first that
+    yields real content (not a challenge page, above the min length).
+    Unpaywall needs a contact email — ``FI_UNPAYWALL_EMAIL`` /
+    ``FI_CONTACT_EMAIL`` env, else a no-reply placeholder."""
+    doi = _resolve_doi(doc, timeout_s=timeout_s)
+    if not doi:
+        return None
+    email = (
+        os.environ.get("FI_UNPAYWALL_EMAIL")
+        or os.environ.get("FI_CONTACT_EMAIL")
+        or "frontier-insight@users.noreply.github.com"
+    )
+    try:
+        with httpx.Client(
+            timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
+        ) as c:
+            r = c.get(f"https://api.unpaywall.org/v2/{doi}", params={"email": email})
+            if r.status_code != 200:
+                return None
+            locs = list(r.json().get("oa_locations") or [])
+            # Repository copies (host_type='repository') before publisher
+            # copies — the latter are the ones that 403 on a direct GET.
+            locs.sort(key=lambda L: 0 if L.get("host_type") == "repository" else 1)
+            candidates: list[str] = []
+            for L in locs:
+                for key in ("url_for_pdf", "url"):
+                    u = L.get(key)
+                    if u and u not in candidates:
+                        candidates.append(u)
+            for u in candidates:
+                try:
+                    rr = c.get(u)
+                except Exception:
+                    continue
+                if rr.status_code != 200 or not rr.content:
+                    continue
+                body = rr.content
+                ctype = (rr.headers.get("content-type") or "").lower()
+                if "application/pdf" in ctype or body[:5] == b"%PDF-":
+                    text = _pdf_bytes_to_text(body, cap=cap)
+                elif "html" in ctype or b"<html" in body[:2048].lower():
+                    t = _html_to_text(body.decode("utf-8", errors="replace"))
+                    text = None if _looks_like_bot_challenge(t) else t
+                else:
+                    continue
+                if text and len(text) >= _MIN_FULL_TEXT_CHARS:
+                    _log.info(
+                        "unpaywall: recovered OA full text for DOI %s via %s",
+                        doi, u[:70],
+                    )
+                    return text[:cap]
+    except Exception as e:
+        _log.info("unpaywall fulltext %s failed: %s", doi, e)
+    return None
+
+
+def _fetch_via_open_apis(
+    doc: RetrievedDoc, *, timeout_s: float, cap: int,
+) -> str | None:
+    """Open-access full-text fallback for academic sources whose publisher
+    HTML is bot-walled: Europe PMC (PMC/PubMed/DOI) then Unpaywall (any
+    DOI). Returns the recovered text, or None when neither has an OA copy."""
+    text = _europepmc_fulltext(doc, timeout_s=timeout_s, cap=cap)
+    if text and len(text) >= _MIN_FULL_TEXT_CHARS:
+        return text
+    text = _unpaywall_fulltext(doc, timeout_s=timeout_s, cap=cap)
+    if text and len(text) >= _MIN_FULL_TEXT_CHARS:
+        return text
+    return None
+
+
 def _fetch_web_page_text(
     doc: RetrievedDoc, *, timeout_s: float, max_kb: int, headless: bool = False,
 ) -> str | None:
@@ -981,21 +1189,41 @@ def _fetch_web_page_text(
                 return text
         elif "html" in ctype or head.startswith(b"<!doctype html") or b"<html" in head:
             text = _html_to_text(body.decode("utf-8", errors="replace"))
-            if text.strip():
+            # A 200 can still be a bot-challenge / cookie wall (PMC's
+            # reCAPTCHA, MDPI, …) whose extracted text is tiny garbage.
+            # Reject it (and any sub-threshold stub) so we fall through to
+            # the headless render / API fallbacks instead of storing it.
+            if (
+                len(text) >= _MIN_FULL_TEXT_CHARS
+                and not _looks_like_bot_challenge(text)
+            ):
                 return text[:cap]
         elif ctype.startswith("text/") or not ctype:
             text = body.decode("utf-8", errors="replace")
-            if text.strip():
+            if (
+                len(text) >= _MIN_FULL_TEXT_CHARS
+                and not _looks_like_bot_challenge(text)
+            ):
                 return text[:cap]
 
-    # Direct fetch was blocked / empty / non-extractable. Try the headless
-    # renderer (which gets past Cloudflare and JS-only pages).
+    # Direct fetch was blocked / empty / a challenge page. Try the headless
+    # renderer (which clears Cloudflare and JS-only pages).
     if headless:
         html = _playwright_fetch_html(url, timeout_s=timeout_s)
         if html:
             text = _html_to_text(html)
-            if text.strip():
+            if (
+                len(text) >= _MIN_FULL_TEXT_CHARS
+                and not _looks_like_bot_challenge(text)
+            ):
                 return text[:cap]
+
+    # Last resort: open-access full-text APIs (Europe PMC / Unpaywall)
+    # for academic sources whose publisher HTML is bot-walled but whose
+    # full text is freely available by DOI / PMCID.
+    api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
+    if api_text and len(api_text) >= _MIN_FULL_TEXT_CHARS:
+        return api_text
     return None
 
 

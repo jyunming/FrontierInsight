@@ -836,15 +836,68 @@ def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
             r = MagicMock(); r.status_code = 403; return r
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _Blocked)
+    # Realistic recovered article body (> _MIN_FULL_TEXT_CHARS) — a real
+    # render returns a full article, not a one-liner, and the fetcher now
+    # rejects sub-threshold stubs as block pages.
+    _body = "Recovered full text 18%. " + (
+        "The renderer cleared the challenge and returned the real article "
+        "body with substantive content for the writer to quote. " * 6
+    )
     monkeypatch.setattr(
         "core.knowledge._playwright_fetch_html",
-        lambda url, *, timeout_s: "<html><body><article><p>Recovered full text 18%.</p></article></body></html>",
+        lambda url, *, timeout_s: f"<html><body><article><p>{_body}</p></article></body></html>",
     )
     doc = RD("", {"url": "https://iea.example/blocked"})
     # headless on → recovers via the renderer.
     out = kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=True)
     assert out and "Recovered full text 18%." in out
     # headless off → blocked stays blocked (snippet only).
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
+
+
+def test_looks_like_bot_challenge() -> None:
+    import core.knowledge as kn
+    assert kn._looks_like_bot_challenge("")                       # empty
+    assert kn._looks_like_bot_challenge(
+        "Checking your browser - reCAPTCHA. Click here if not redirected."
+    )
+    assert kn._looks_like_bot_challenge(
+        "Please enable JavaScript and cookies to continue."
+    )
+    # A long real article that merely MENTIONS recaptcha is not a challenge.
+    article = "This paper studies how reCAPTCHA affects user behaviour. " * 60
+    assert not kn._looks_like_bot_challenge(article)
+    # Short text with no challenge marker is not flagged here (the length
+    # floor in _fetch_web_page_text handles tiny non-marker stubs).
+    assert not kn._looks_like_bot_challenge("A legitimate short abstract sentence.")
+
+
+def test_fetch_web_page_text_rejects_200_challenge_page(monkeypatch) -> None:
+    """A 200 that's actually a reCAPTCHA / cookie wall (PMC, MDPI, …) must
+    be rejected, not stored as 165-byte 'full text'."""
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    challenge = (
+        "<html><body>Checking your browser - reCAPTCHA. "
+        "Click here if you are not automatically redirected.</body></html>"
+    )
+
+    class _Chal:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "text/html"}
+            r.content = challenge.encode()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Chal)
+    # Non-academic URL → the open-access API fallback is a no-op, so the
+    # result is None (the caller keeps the real search snippet).
+    doc = RD("snippet", {"url": "https://example.com/blocked"})
     assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
 
 
