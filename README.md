@@ -62,6 +62,7 @@ slides.md                             ← if output.kinds: [slides]; Marp markdo
 slides.pptx                           ← real PowerPoint (if pandoc installed too)
 slides.html / slides.pdf              ← if marp CLI installed
 poster.tex, poster.pdf, talk.md       ← optional deliverables (poster.pdf if a LaTeX engine is installed)
+data/literature/lit_<NNN>_<slug>.md   ← EVERY quest (sim + observational): the web + academic sources the literature node searched and downloaded
 data/auto_collected/<rank>_<slug>.md  ← Axon hits (no-simulation mode, written before the user-data pause)
 data/auto_collected/<adapter>/<rank>_<slug>.md  ← dataset-adapter hits (worldbank, wikipedia) under per-adapter subdirs
 .fi/run.log                           ← engine's structured node-by-node log
@@ -111,7 +112,7 @@ npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
 #   CLI:  code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, web research, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 
@@ -279,7 +280,7 @@ The YAML's `provider` block is honored on resume; everything else (topic, design
 
 ### Pull more (or fewer) prior-work citations
 
-Each quest's literature step retrieves `knowledge.top_k` documents from Axon (+ the external router fallback when Axon is empty), and those are what end up in the paper's References. The default is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
+Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by the interview's **Web research** toggle (`knowledge.web_search`, on by default; independent of the Axon knowledge layer). The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block (5 × ~2000-char excerpt = ~2500 tokens) fits comfortably in the writer prompt alongside the design + analysis blocks. Override per-quest:
 
 ```yaml
 knowledge:
@@ -300,6 +301,27 @@ output:
   paper_format: report
   audience: internal   # default is "external"
 ```
+
+### Research the open web (not just academic papers)
+
+The academic sources (arXiv / OpenAlex / Crossref / …) only cover scholarly literature. For a non-academic question — a company's financials, market sizes, current events, culture, a how-to — they return irrelevant nearest-neighbour papers. FI runs a **general web search in parallel** with Axon and the academic adapters on every quest, merges and de-duplicates the results, and (by default) fetches the readable text of each result page so the writer can quote real content. Every web hit is cited by its URL in the paper, poster, and slides.
+
+It works out of the box with the keyless DuckDuckGo backend. For better relevance set a [Brave Search API key](https://brave.com/search/api/) (free tier ~2k queries/mo) — the same `BRAVE_API_KEY` Axon uses:
+
+```bash
+export BRAVE_API_KEY=BSA...your-key...
+```
+```yaml
+knowledge:
+  web_search: true            # default on
+  web_search_backend: auto    # Brave if a key is present, else DuckDuckGo
+  web_search_top_k: 10
+  web_fetch_pages: true        # fetch full page text, not just snippets
+  relevance_guard: true        # drop confident-but-off-topic hits; pause if nothing fits
+  # brave_api_key: BSA...      # or set the BRAVE_API_KEY env var instead
+```
+
+For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. If the sources carry no plottable numbers it skips cleanly.
 
 ### Watch progress in a browser instead of the terminal
 
@@ -335,7 +357,7 @@ engine:
   dataset_adapters: [worldbank, wikipedia]  # opt-in external lookups
 ```
 
-The engine skips `implement → execute` entirely. Instead, `auto_collect_data` queries Axon for relevant docs, runs each enabled adapter (WorldBank pulls country-indicator tables, Wikipedia fetches article summaries), and writes everything into `outputs/<id>/data/auto_collected/`. If any files land, the quest continues through `analyze → cross_check → write → review`. If nothing lands (Axon empty + adapters returned nothing), the engine pauses cleanly with a `data/README.md` telling you what to drop. Drop your own files into `data/` and re-run:
+The engine skips `implement → execute` entirely. Instead, `auto_collect_data` queries Axon **and the general web** for relevant sources, runs each enabled adapter (WorldBank pulls country-indicator tables, Wikipedia fetches article summaries), and writes everything into `outputs/<id>/data/auto_collected/`. A relevance guard drops confident-but-off-topic hits; the `web_plots` step then turns any quantitative data it found into source-attributed figures. If real sources land, the quest continues through `analyze → cross_check → write → review`. If nothing on-topic lands, the engine pauses cleanly with a `data/README.md` telling you what to drop. Drop your own files into `data/` and re-run:
 
 ```bash
 python launch.py --config <yaml> --resume <quest_id>

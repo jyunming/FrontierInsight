@@ -215,6 +215,14 @@ NO_SIMULATION_CHOICES: tuple[Choice, ...] = (
 )
 
 
+WEB_RESEARCH_CHOICES: tuple[Choice, ...] = (
+    Choice(True, "On (recommended)",
+           "Search the public web (Brave / DuckDuckGo) for current sources and download them into the quest's data/literature/ folder — for BOTH simulation and observational quests. Adds real-world reports / news on top of academic retrieval."),
+    Choice(False, "Off",
+           "Skip the general web layer; rely on academic sources (and Axon, if enabled) only. No web pages are searched or downloaded."),
+)
+
+
 ENSEMBLE_PROFILES: tuple[Choice, ...] = (
     Choice("off", "Single model (default, cheapest)",
            "One LLM call per node. Cost baseline = 1×."),
@@ -502,6 +510,16 @@ QUESTIONS: tuple[Question, ...] = (
         tier=2,
     ),
     Question(
+        id="web_research",
+        label="Web research",
+        prompt="Search the public web for current sources and download them into the quest's data/literature/ folder. Runs for simulation AND observational quests, on top of academic retrieval. Independent of the Axon knowledge layer above.",
+        kind="single",
+        choices=WEB_RESEARCH_CHOICES,
+        default=True,
+        mid_quest_editable=True,
+        tier=2,
+    ),
+    Question(
         id="audience",
         label="Paper audience",
         prompt="External-facing (journal, open web) drops FI-internal cross-quest entries from the References; internal-facing keeps everything (good for project reports, memos, onboarding docs).",
@@ -625,6 +643,10 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # knowledge changes are warned, not invalidated: Axon retrievals
     # already happened (or didn't). Future calls use the new setting.
     "knowledge_enabled": (),
+    # web_research flips the web-search layer + the data/literature/
+    # download. Re-fetch literature and re-write so the new corpus
+    # reaches the paper (mirrors knowledge_top_k below).
+    "web_research": ("literature", "write"),
     # max_iterations is the design/review-loop hard cap. Lowering it
     # mid-quest just means the next review-revise iteration won't fire;
     # raising it gives the loop more attempts. Either way no node
@@ -1030,6 +1052,12 @@ class InterviewAnswers:
     # S2 / ...) hits to fetch when Axon misses. Bigger than the Axon
     # cap because web search is coarser; default 20 → 30 for surveys.
     knowledge_external_top_k: int = 20
+    # Web research layer. When True (default), the literature node searches
+    # the public web (Brave/DuckDuckGo) and downloads sources into
+    # data/literature/ for every quest — sim and observational alike.
+    # Maps to ``knowledge.web_search`` + ``web_fetch_pages``. Independent
+    # of ``knowledge_enabled`` (the Axon corpus toggle).
+    web_research: bool = True
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1187,6 +1215,12 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         lines.append(f"{indent}top_k: {answers.knowledge_top_k}")
     if answers.knowledge_external_top_k != 20:
         lines.append(f"{indent}external_top_k: {answers.knowledge_external_top_k}")
+    # Web research layer — search the public web (Brave/DuckDuckGo) and
+    # download the sources into data/literature/, on top of academic
+    # retrieval. Emitted explicitly (on AND off) so the generated config
+    # self-documents the interview choice. Independent of `enabled` above.
+    lines.append(f"{indent}web_search: {'true' if answers.web_research else 'false'}")
+    lines.append(f"{indent}web_fetch_pages: {'true' if answers.web_research else 'false'}")
     if not answers.knowledge_enabled:
         lines.append(f"{indent}external_fallback: [\"openalex\", \"arxiv\", \"crossref\"]")
         lines.append(f"{indent}source_routing: \"manual\"")

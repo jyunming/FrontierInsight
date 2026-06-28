@@ -136,6 +136,12 @@ class QuestLauncher:
                 **os.environ,
                 "PYTHONUNBUFFERED": "1",
                 "FI_PRESEED_QUEST_ID": quest_id,
+                # We capture the child's stdout to .fi/launch.log below, so
+                # tell the child NOT to also write its own launch record to
+                # that file (it would race/clobber our capture). A direct
+                # `python launch.py` run has this unset and self-writes the
+                # record so it still shows up in the Jobs tab.
+                "FI_LAUNCH_LOG_CAPTURED": "1",
             }
             # Capture the child's stdout + stderr next to the quest's
             # other artifacts at ``<quest_root>/.fi/launch.log``, so a

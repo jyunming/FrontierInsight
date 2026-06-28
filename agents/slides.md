@@ -7,7 +7,35 @@ $paper_md
 $figure_list
 
 # Your task
-Compress the paper into a Marp slide deck of **8–12 slides**. Use the standard Marp front-matter and `---` separators between slides. Embed each figure exactly once. Keep total spoken duration about 10 minutes.
+Compress the paper into a Marp slide deck of **8–12 slides**. Embed each figure exactly once. Keep total spoken duration about 10 minutes.
+
+## This is an audience-facing presentation — present FINDINGS, not process
+- Lead with what the research **found**. Each content slide should make one substantive point about the topic (a number, a trend, a comparison), supported by the evidence.
+- **Do NOT narrate the pipeline.** Never mention "this run", "the collector", "the dataset was not recovered", "the planned analysis was not produced", "snippets", "auto-collected", or how the data was gathered. That is internal machinery, not content for an audience.
+- Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as scope ("Regional attribution beyond top-line shares is out of scope here"), not as a confession about tooling.
+- When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
+
+## Style — use the project's clean theme
+Start the deck with exactly this front-matter (`fi` is Frontier Insight's polished custom theme, applied by the renderer):
+```
+---
+marp: true
+theme: fi
+paginate: true
+size: 16:9
+---
+```
+The **title slide** and **closing slide** must start with `<!-- _class: lead -->` (per-slide scope — never `class: lead` in the global front-matter, or every slide centers), then:
+```
+<!-- _class: lead -->
+
+# The deck's main thesis as one strong sentence
+
+## A short kicker / subtitle
+```
+The `# H1` is the big serif hero — give it the actual finding ("China anchors a three-part EV market"), not a generic label. The `## H2` is a short kicker below it.
+
+**Content slides** use a `## H2` title (the finding), a short bolded lead-in, and a tight bullet list (3–5 items, never a wall of text).
 
 ## Figure sizing — pick the right Marp directive for the figure's shape
 
@@ -21,11 +49,11 @@ Slides are 16:9 (960×540). Default Marp behavior stretches images to fill, whic
   ```
   ![h:380](figures/feature_importances.png)
   ```
-- **Side-by-side with prose** (figure + 1-2 paragraphs on the same slide) — pin the figure to the right 38% and leave room for body text on the left:
+- **Chart + text on one slide** (the common case for a data chart) — put the chart on the right and the discussion on the left. **Always include `fit`** so the WHOLE chart (its title, axes, legend) stays visible; without `fit` Marp crops the image to fill the panel and cuts off the chart's title:
   ```
-  ![bg right:38%](figures/<name>)
+  ![bg right:40% fit](figures/<name>)
   ```
-  **Never use bare `![bg right](...)` without a percentage** — it covers the whole right half regardless of aspect ratio and stretches square figures.
+  Use `right:38%`–`right:44%` depending on how wide the chart is. Never use a bare `![bg right]` without a percentage.
 - **Hero / cover figure** (single dominant image, no body text needed):
   ```
   ![bg](figures/<name>)

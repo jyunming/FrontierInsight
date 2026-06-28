@@ -307,6 +307,9 @@ export async function runInterview(
         audience: "external",
         knowledge_top_k: compReview ? 12 : 8,
         knowledge_external_top_k: compReview ? 30 : 20,
+        // Web research on by default — searches the public web and
+        // downloads sources into data/literature/ for every quest.
+        web_research: true,
     };
 
     // ─── Review block + action picker loop ──────────────────────────
@@ -382,6 +385,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Clarify mode | \`${a.clarify_mode}\` |`);
     lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
+    lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
     // ``knowledge_top_k`` is Tier-2 in core/interview.py — show it in
     // the always-visible review block alongside the other defaults so
@@ -427,7 +431,7 @@ function validatePositiveInt(s: string): string | null {
 }
 
 
-/** Inline editor for the six tier-2 defaults. */
+/** Inline editor for the seven tier-2 defaults. */
 async function editTier2Field(a: InterviewAnswers): Promise<void> {
     const which = await vscode.window.showQuickPick(
         [
@@ -436,6 +440,7 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Clarify mode", value: "clarify_mode" },
             { label: "Reviewer panel", value: "review_panel" },
             { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
+            { label: "Web research (download sources)", value: "web_research" },
             { label: "Paper audience", value: "audience" },
             { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
         ],
@@ -512,6 +517,17 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
                 { title: "Knowledge layer", ignoreFocusOut: true },
             );
             if (v) a.knowledge_enabled = v.value;
+            return;
+        }
+        case "web_research": {
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(globe) On — search & download web sources", value: true },
+                    { label: "$(circle-slash) Off — academic sources only", value: false },
+                ],
+                { title: "Web research (downloads into data/literature/)", ignoreFocusOut: true },
+            );
+            if (v) a.web_research = v.value;
             return;
         }
         case "audience": {

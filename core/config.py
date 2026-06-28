@@ -147,6 +147,10 @@ class ProviderConfig(BaseModel):
             "implement": 1800.0,
             "execute_reflect": 900.0,
             "design_self_critique": 900.0,
+            # web_plots writes a short matplotlib script — it should be
+            # quick. A tight ceiling kills a stuck codex_cli call fast
+            # instead of letting it dribble output past the default budget.
+            "web_plots": 180.0,
         }
     )
     # Per-node MODEL ESCALATION on tenacity retry. Maps an engine
@@ -495,6 +499,21 @@ class EngineConfig(BaseModel):
     # right cost trade-off. 3 indicators × a few countries each =
     # enough comparative baseline for most no-simulation quests.
     dataset_adapter_top_k: int = Field(default=3, ge=1)
+    # In no-simulation mode, derive figures from the web/Axon content the
+    # collector gathered: a small data-extraction + matplotlib step turns
+    # quoted numbers (e.g. a revenue-by-year table scraped from sources)
+    # into charts saved under ``figures/``, each annotated with the source
+    # it came from. The no-simulation path runs NO experiment code, so this
+    # is the only way a literature-driven quest gets plots. Off → the
+    # paper/poster/slides stay text + tables only. Honours the same
+    # execution sandbox as the simulation path.
+    web_derived_plots: bool = True
+    # Hard wall-clock cap (seconds) on the whole web_plots node — its LLM
+    # call + matplotlib install + plot-script run. It's best-effort, so on
+    # timeout the quest just proceeds figure-less rather than hanging (a
+    # stuck codex_cli call once wedged a run for hours when the
+    # provider-level timeout didn't fire).
+    web_plots_timeout_s: float = 360.0
     # User-pinned answers to the clarify slots, supplied by the
     # interview frontends (`launch.py --new`, the VSCode `@fi /new`
     # extension, the `--serve` web UI) or hand-written into YAML. When
@@ -554,6 +573,54 @@ class KnowledgeConfig(BaseModel):
     # genuinely needs that many hits. Set independently of ``top_k`` so
     # users can tune RAG precision without starving web breadth.
     external_top_k: int = Field(default=20, ge=1)
+    # ---- General web search (Brave / DuckDuckGo) ----------------------
+    # The academic adapters above (arxiv/openalex/crossref/...) only cover
+    # scholarly literature; a non-academic question ("SpaceX revenue by
+    # year", "Belgium vs Taiwan work culture") has no arXiv match and the
+    # academic APIs return irrelevant nearest-neighbours. ``web_search``
+    # adds a general-web layer that runs IN PARALLEL with Axon + academic
+    # for every quest and is merged/deduped with them — so non-academic
+    # topics get real sources instead of nonsense. Web hits carry their
+    # URL/title/site as citation metadata and flow into the paper /
+    # poster / slides References.
+    web_search: bool = True
+    # Backend selection. ``auto`` uses Brave when ``brave_api_key`` (or the
+    # ``BRAVE_API_KEY`` env var) is present, else falls back to the keyless
+    # DuckDuckGo HTML endpoint so web search still works with no config.
+    # Pin to ``brave`` to require the key (disabled with a clear log when
+    # missing) or ``duckduckgo`` to always use the keyless backend.
+    web_search_backend: Literal["auto", "brave", "duckduckgo"] = "auto"
+    # Brave Search API key. Env fallback ``BRAVE_API_KEY`` (the same var
+    # Axon uses) so a single key serves both. Free tier ~2k queries/mo.
+    brave_api_key: str = Field(
+        default_factory=lambda: os.environ.get("BRAVE_API_KEY", "").strip()
+    )
+    # Number of web results to request per query. Independent of
+    # ``external_top_k`` (which caps the merged external set) so users can
+    # widen web breadth without changing the academic cap.
+    web_search_top_k: int = Field(default=10, ge=1)
+    # When True, fetch + extract the readable text of each web result's
+    # page (not just the snippet) so the writer can quote real content and
+    # the plot step can pull numbers out of it. Budgeted by the same
+    # ``full_text_fetch_*`` knobs below. Off → snippets only.
+    web_fetch_pages: bool = True
+    # When a direct page fetch is blocked (HTTP 403 — common for
+    # Cloudflare-protected authoritative sites like IEA) or returns nothing,
+    # retry by rendering the page in a headless Chromium via Playwright,
+    # which executes JS and clears most anti-bot challenges so the full
+    # article text is recovered (the difference between a 2-sentence snippet
+    # and a full report). Requires the optional dependency:
+    # ``pip install playwright && playwright install chromium``. Degrades to
+    # a no-op (snippet only) when Playwright/Chromium isn't installed, so
+    # it's safe to leave on. Only fires on a blocked/empty direct fetch.
+    headless_fetch: bool = True
+    # Relevance guard. After retrieval/auto-collect, score the gathered
+    # docs against the topic; if they are clearly off-topic or empty
+    # (e.g. an academic-only collector returning physics preprints for a
+    # finance question), pause for user-supplied sources / escalate rather
+    # than letting analyze+write produce an honest-but-useless "pipeline
+    # failure" paper on garbage. Off → legacy behaviour (proceed anyway).
+    relevance_guard: bool = True
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2

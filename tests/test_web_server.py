@@ -77,6 +77,25 @@ def test_scan_quests_finds_quest_dirs_with_dot_fi(tmp_path: Path) -> None:
     assert by_id["1700000000-foo-aaaa11"]["verdict"] == "(running)"
 
 
+def test_scan_quests_stale_quest_is_incomplete_not_running(tmp_path: Path) -> None:
+    """A quest with no summary AND a stale run.log was interrupted — it must
+    NOT be reported as running (that's the 'N running' over-count bug)."""
+    import os
+    import time
+    q = _mk_quest_dir(tmp_path, "1700000000-stale-aaaa11", log_body="[x] [ideate]\n")
+    old = time.time() - 3600  # an hour ago, no recent activity
+    os.utime(q / ".fi" / "run.log", (old, old))
+    quests = {x["quest_id"]: x for x in _scan_quests(tmp_path)}
+    assert quests["1700000000-stale-aaaa11"]["verdict"] == "incomplete"
+
+
+def test_scan_quests_active_quest_is_running(tmp_path: Path) -> None:
+    """No summary + a freshly-written run.log → genuinely running."""
+    _mk_quest_dir(tmp_path, "1700000000-active-bbbb22", log_body="[x] [write]\n")
+    quests = {x["quest_id"]: x for x in _scan_quests(tmp_path)}
+    assert quests["1700000000-active-bbbb22"]["verdict"] == "(running)"
+
+
 def test_read_log_tail_returns_recent_lines(tmp_path: Path) -> None:
     log = tmp_path / "log.txt"
     log.write_text("\n".join(f"line {i}" for i in range(50)) + "\n", encoding="utf-8")
@@ -135,6 +154,46 @@ def test_app_list_quests_endpoint_returns_quest_dirs(tmp_path: Path) -> None:
     body = r.json()
     ids = {q["quest_id"] for q in body["quests"]}
     assert ids == {"q1", "q2"}
+
+
+def test_jobs_endpoint_discovers_cli_quest_via_run_log(tmp_path: Path) -> None:
+    """A quest started directly via `python launch.py` writes .fi/run.log
+    but no .fi/launch.log. It must still appear in the Jobs tab — the
+    frontend has to be consistent regardless of how the quest was started."""
+    # CLI-style quest: run.log only, no launch.log.
+    _mk_quest_dir(
+        tmp_path, "1700000000-cli-quest-aaaa11",
+        log_body="[1700000000-cli-quest-aaaa11] [write] authoring paper.md\n",
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+
+    r = client.get("/api/jobs")
+    assert r.status_code == 200
+    jobs = {j["job_id"]: j for j in r.json()["jobs"]}
+    assert "1700000000-cli-quest-aaaa11" in jobs
+    # Recent run.log + no summary.json → inferred running (alive), even
+    # though the launcher never spawned it.
+    assert jobs["1700000000-cli-quest-aaaa11"]["alive"] is True
+
+    # And its log is readable via the job-detail endpoint (run.log fallback).
+    r2 = client.get("/api/jobs/1700000000-cli-quest-aaaa11")
+    assert r2.status_code == 200
+    assert any("authoring paper.md" in ln for ln in r2.json().get("log_tail", []))
+    assert r2.json()["alive"] is True
+
+
+def test_jobs_endpoint_finished_cli_quest_not_alive(tmp_path: Path) -> None:
+    """A finished CLI quest (has a summary.json) shows up but NOT as alive."""
+    _mk_quest_dir(
+        tmp_path, "1700000000-done-bbbb22",
+        log_body="[1700000000-done-bbbb22] [review] done\n",
+        summary={"quest_id": "1700000000-done-bbbb22", "provider": "openai"},
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    jobs = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["1700000000-done-bbbb22"]["alive"] is False
 
 
 def test_app_quest_detail_endpoint(tmp_path: Path) -> None:

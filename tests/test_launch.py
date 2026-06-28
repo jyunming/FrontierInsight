@@ -544,3 +544,62 @@ def test_main_catches_keyboard_interrupt_cleanly(
     # No tracebacks in the captured streams.
     assert "Traceback" not in captured.err
     assert "Traceback" not in captured.out
+
+
+# --- launch record (job-consistency: CLI runs write .fi/launch.log) --------
+
+
+def test_write_launch_record_writes_for_direct_run(tmp_path, monkeypatch) -> None:
+    """A direct `python launch.py` run drops a .fi/launch.log breadcrumb so
+    the quest shows up in the dashboard Jobs tab like web/VSCode runs."""
+    import types
+    monkeypatch.delenv("FI_LAUNCH_LOG_CAPTURED", raising=False)
+    eng = types.SimpleNamespace(quest_root=tmp_path / "q", quest_id="123-direct")
+    cfg = types.SimpleNamespace(
+        provider=types.SimpleNamespace(name="codex_cli", model="gpt-5.5")
+    )
+    launch._write_launch_record(eng, cfg, resume=False)
+    lp = tmp_path / "q" / ".fi" / "launch.log"
+    assert lp.is_file()
+    body = lp.read_text(encoding="utf-8")
+    assert "123-direct" in body and "codex_cli" in body
+
+
+def test_write_launch_record_skipped_when_captured(tmp_path, monkeypatch) -> None:
+    """When the launcher captures the child's stdout to launch.log itself
+    (FI_LAUNCH_LOG_CAPTURED=1), the child must NOT also write it (would race)."""
+    import types
+    monkeypatch.setenv("FI_LAUNCH_LOG_CAPTURED", "1")
+    eng = types.SimpleNamespace(quest_root=tmp_path / "q", quest_id="x")
+    cfg = types.SimpleNamespace(
+        provider=types.SimpleNamespace(name="codex_cli", model=None)
+    )
+    launch._write_launch_record(eng, cfg, resume=False)
+    assert not (tmp_path / "q" / ".fi" / "launch.log").exists()
+
+
+# --- human-review decision flags (--accept/--reject/--refine on resume) -----
+
+
+def test_apply_review_decision_writes_accept(tmp_path) -> None:
+    import json as _json
+    args = launch.parse_args(["--config", "x.yaml", "--resume", "q-1", "--accept"])
+    launch._apply_review_decision(args, tmp_path)
+    ans = _json.loads((tmp_path / "q-1" / ".fi" / "human_review_answer.json").read_text())
+    assert ans == {"action": "accept", "feedback": ""}
+
+
+def test_apply_review_decision_writes_refine(tmp_path) -> None:
+    import json as _json
+    args = launch.parse_args(
+        ["--config", "x.yaml", "--resume", "q-2", "--refine", "tighten methods"]
+    )
+    launch._apply_review_decision(args, tmp_path)
+    ans = _json.loads((tmp_path / "q-2" / ".fi" / "human_review_answer.json").read_text())
+    assert ans == {"action": "refine", "feedback": "tighten methods"}
+
+
+def test_apply_review_decision_noop_without_flags(tmp_path) -> None:
+    args = launch.parse_args(["--config", "x.yaml", "--resume", "q-3"])
+    launch._apply_review_decision(args, tmp_path)
+    assert not (tmp_path / "q-3" / ".fi").exists()

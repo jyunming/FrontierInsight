@@ -429,6 +429,34 @@
       "tier": 2
     },
     {
+      "id": "web_research",
+      "label": "Web research",
+      "prompt": "Search the public web for current sources and download them into the quest's data/literature/ folder. Runs for simulation AND observational quests, on top of academic retrieval. Independent of the Axon knowledge layer above.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": true,
+          "label": "On (recommended)",
+          "description": "Search the public web (Brave / DuckDuckGo) for current sources and download them into the quest's data/literature/ folder — for BOTH simulation and observational quests. Adds real-world reports / news on top of academic retrieval."
+        },
+        {
+          "value": false,
+          "label": "Off",
+          "description": "Skip the general web layer; rely on academic sources (and Axon, if enabled) only. No web pages are searched or downloaded."
+        }
+      ],
+      "placeholder": "",
+      "default": true,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
       "id": "audience",
       "label": "Paper audience",
       "prompt": "External-facing (journal, open web) drops FI-internal cross-quest entries from the References; internal-facing keeps everything (good for project reports, memos, onboarding docs).",
@@ -985,7 +1013,8 @@
     "pause_for_user_input",
     "review_panel",
     "study_depth",
-    "success_metric"
+    "success_metric",
+    "web_research"
   ],
   "stage_invalidation": {
     "paper_format": [
@@ -1019,6 +1048,10 @@
       "review"
     ],
     "knowledge_enabled": [],
+    "web_research": [
+      "literature",
+      "write"
+    ],
     "max_iterations": [],
     "audience": [
       "write"

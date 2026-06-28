@@ -35,7 +35,12 @@ Produce a single Markdown paper. **Structure depends on the persona block above:
 - If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats.
 - If the persona block is empty (scientific venues — `generic` / `neurips` / `iclr` / `ieee_access` / `nature_mi`), use **IMRAD** (Introduction, Methods, Results, Discussion).
 
-Include all figures using `![caption](figures/<filename>)`.
+**Figures must be numbered, referenced, and discussed — never dropped in silently.** For every figure you include:
+1. Caption it `![**Figure N.** <one-sentence description of what it shows and its source>](figures/<filename>)`, numbering sequentially (Figure 1, Figure 2, …) in the order they appear.
+2. Reference it **by number in the prose** at the point you discuss it — e.g. "Figure 1 shows that China accounted for roughly two-thirds of 2024 EV sales…". A figure that is shown but never mentioned in the text is a defect; either discuss it or remove it.
+3. State the concrete takeaway the figure supports (the number/trend the reader should take away), not just that it exists.
+
+Include all available figures this way.
 
 **Length is determined by the `Study depth` slot in the clarifications block above.** Honor it:
 

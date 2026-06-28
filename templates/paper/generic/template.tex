@@ -15,10 +15,22 @@
 % then calls \refstepcounter{none} internally, so the counter must exist.
 \newcounter{none}
 \usepackage{hyperref}
+\usepackage{xurl}
+% URLs in the body font and breakable at ANY character via xurl, with
+% links shown without the default colored boxes. With pandoc's
+% autolink_bare_uris (generation/paper.py), long reference URLs wrap
+% inside the text column instead of running into the right margin.
+\urlstyle{same}
+\hypersetup{hidelinks}
+\setlength{\emergencystretch}{3em}
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
 \usepackage{listings}
 \usepackage{titling}
+\usepackage{fancyhdr}
+% xcolor for the muted Frontier Insight footer wordmark (see brandfoot
+% block below). hyperref alone does not expose \textcolor.
+\usepackage{xcolor}
 
 % Pandoc-compatibility preamble. The standard pandoc latex template
 % defines these commands and the Shaded env; when we override with a
@@ -69,6 +81,18 @@ $highlighting-macros$
 % would land as raw LaTeX outside \begin{document}, killing the
 % compile with "Missing \begin{document}".
 \hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
+
+% Subtle Frontier Insight brand mark, bottom-left foot of every page:
+% the palette-native teal glyph + teal wordmark (matches the slide
+% corner mark). `brandfoot` is set by generation/paper.py only when the
+% mark asset was copied next to the source, so this no-ops without it.
+$if(brandfoot)$
+\pagestyle{fancy}
+\fancyhf{}
+\rfoot{\small\thepage}
+\lfoot{\raisebox{-0.30\height}{\includegraphics[height=12pt]{fi_icon.png}}\hspace{4pt}\textcolor[HTML]{0E6E6B}{\small Frontier Insight}}
+\renewcommand{\headrulewidth}{0pt}
+$endif$
 
 \begin{document}
 \maketitle

@@ -148,6 +148,54 @@ of `slides.html`, etc.):
 | Docker Desktop | `execution.sandbox: docker` | docker.com/products/docker-desktop |
 | Axon | Knowledge layer (literature search + cross-quest memory) | `pip install axon-rag` |
 
+## Web search (Brave Search API — optional)
+
+FI runs a general web search alongside the academic sources so non-academic
+topics (company financials, markets, current events) retrieve real pages
+instead of irrelevant papers. It works **with no setup** using the keyless
+DuckDuckGo backend, but for materially better relevance + rate limits, add a
+[Brave Search API key](https://brave.com/search/api/) (free tier ~2,000
+queries/month). This is the same `BRAVE_API_KEY` Axon uses, so one key serves
+both.
+
+**Full-page fetch on protected sites (optional).** Many authoritative sources
+(IEA, S&P, …) sit behind Cloudflare and return `403` to a plain request, so FI
+only sees the search snippet. Install Playwright to let FI render those pages
+in a headless browser and recover the full article (controlled by
+`knowledge.headless_fetch`, on by default — a no-op until Playwright is
+installed):
+
+```bash
+pip install playwright
+playwright install chromium   # one-time ~110 MB browser download
+```
+
+It recovers most blocked pages; the very strictest managed-challenge sites
+(e.g. iea.org itself) still block headless browsers — for those, FI falls
+back to the snippet, and the site's PDF / open-data version (which FI does
+extract) is the reliable path.
+
+```bash
+# macOS / Linux
+export BRAVE_API_KEY=BSA...your-key...
+
+# Windows (PowerShell)
+$env:BRAVE_API_KEY = "BSA...your-key..."
+```
+
+Or drop it in a **`.env`** file at the repo root (FI loads `.env` at
+startup; real environment variables still win over it, and `.env` is
+git-ignored):
+
+```env
+BRAVE_API_KEY=BSA...your-key...
+```
+
+Or set it per-quest in YAML (`knowledge.brave_api_key: BSA...`). Disable web
+search entirely with `knowledge.web_search: false`; force a backend with
+`knowledge.web_search_backend: brave | duckduckgo` (default `auto` = Brave
+when a key is present, else DuckDuckGo).
+
 ## Air-gapped / no-network machines
 
 The knowledge layer loads two models from Hugging Face on first use —

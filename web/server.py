@@ -156,6 +156,7 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
     quest dir is any subdirectory containing a ``.fi/`` folder."""
     if not output_root.exists():
         return []
+    now = time.time()
     out: list[dict[str, Any]] = []
     for d in sorted(output_root.iterdir(), reverse=True):
         if not d.is_dir():
@@ -164,16 +165,27 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         if not fi_dir.is_dir():
             continue
         summary_path = d / "frontier_insight_summary.json"
-        verdict = "(running)"
         score: Any = None
         provider = ""
         if summary_path.exists():
             try:
                 data = json.loads(summary_path.read_text(encoding="utf-8"))
-                verdict = "complete"
                 provider = data.get("provider", "")
+                # Only "complete" once the summary actually PARSES — a
+                # present-but-truncated/unreadable summary is a partial
+                # write from an interrupted finalize, not a finished quest.
+                verdict = "complete"
             except Exception:
-                pass
+                verdict = "incomplete"
+        elif _quest_looks_running(d, now):
+            # No summary yet, but the engine wrote run.log recently → live.
+            verdict = "(running)"
+        else:
+            # A quest dir with no summary and no recent activity was
+            # interrupted (crashed / killed / cancelled) before finishing —
+            # NOT running. Marking it "(running)" forever is what made the
+            # dashboard show stale quests as active.
+            verdict = "incomplete"
         paper_md = d / "paper" / "paper.md"
         out.append({
             "quest_id": d.name,
@@ -185,6 +197,21 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
             "age_s": int(time.time() - fi_dir.stat().st_mtime),
         })
     return out
+
+
+def _quest_looks_running(quest_dir: Path, now: float, *, window_s: float = 300.0) -> bool:
+    """Heuristic liveness for a quest the launcher didn't spawn (a direct
+    ``python launch.py`` run, a cron job, …): running if it has NOT yet
+    written a final ``frontier_insight_summary.json`` AND its engine
+    ``run.log`` was updated within ``window_s``. Keyed on run.log (the live,
+    per-node engine log) — NOT the static launch.log breadcrumb a CLI run
+    drops once at start, whose mtime would make a live quest look idle."""
+    if (quest_dir / "frontier_insight_summary.json").exists():
+        return False
+    try:
+        return (now - (quest_dir / ".fi" / "run.log").stat().st_mtime) < window_s
+    except OSError:
+        return False
 
 
 def _read_log_tail(log_path: Path, n: int = 200) -> list[str]:
@@ -971,14 +998,25 @@ def make_app(
             if stat is not None:
                 candidates.append((jid, lp, stat[0], stat[1]))
 
-        # 1a. Per-quest launch logs at <quest>/.fi/launch.log.
+        # 1a. Per-quest logs at <quest>/.fi/. A quest may have BOTH a
+        # captured-stdout launch.log (written when the launcher spawned it)
+        # AND the engine's run.log (which EVERY quest writes, regardless of
+        # how it was started). A direct `python launch.py` run now writes a
+        # launch.log breadcrumb too, so preferring launch.log unconditionally
+        # would surface a STALE mtime/size and hide live progress. Pick
+        # whichever was written most recently — same selection as get_job —
+        # so the Jobs list tracks the live run.log once the engine starts.
         if out_root.is_dir():
             for quest_dir in out_root.iterdir():
                 if not quest_dir.is_dir() or quest_dir.name.startswith("_"):
                     continue
-                lp = quest_dir / ".fi" / "launch.log"
-                if lp.is_file():
-                    _add(quest_dir.name, lp)
+                fi = quest_dir / ".fi"
+                logs = [p for p in (fi / "launch.log", fi / "run.log") if p.is_file()]
+                if logs:
+                    newest = max(
+                        logs, key=lambda p: (_stat_or_none(p) or (0.0, 0))[0],
+                    )
+                    _add(quest_dir.name, newest)
         # 1b. Per-tool-job logs at _jobs/<job_id>/launch.log.
         jobs_root = out_root / "_jobs"
         if jobs_root.is_dir():
@@ -997,16 +1035,27 @@ def make_app(
 
         # Most-recent-first, capped at 200 to keep the response small.
         candidates.sort(key=lambda row: row[2], reverse=True)
+        now = time.time()
         for jid, _lp, mtime, size in candidates[:200]:
             if jid in seen:
                 # If both new and legacy layouts have an entry for the
                 # same id (unlikely but possible during migration),
                 # the newer-first sort already picked the freshest.
                 continue
+            # A quest the launcher spawned is "alive" per its registry. A
+            # quest started OUTSIDE the launcher (`python launch.py`, a
+            # cron job, …) is never in that registry, so infer liveness:
+            # it's running if it has written a log very recently AND not
+            # yet produced a final summary. Matches the "(running)" verdict
+            # the Quests list already shows, so the Jobs tab is consistent
+            # regardless of how the quest was started.
+            alive = jid in live
+            if not alive and _classify_job(jid) == "quest":
+                alive = _quest_looks_running(out_root / jid, now)
             seen[jid] = {
                 "job_id": jid,
                 "kind": _classify_job(jid),
-                "alive": jid in live,
+                "alive": alive,
                 "log_mtime": mtime,
                 "log_size": size,
             }
@@ -1134,14 +1183,31 @@ def make_app(
         # → legacy _logs/<id>.log. First match wins.
         out_root = app.state.output_root
         log_path: Path | None = None
-        for candidate in (
-            out_root / job_id / ".fi" / "launch.log",
-            out_root / "_jobs" / job_id / "launch.log",
-            out_root / "_logs" / f"{job_id}.log",
-        ):
-            if candidate.is_file():
-                log_path = candidate
-                break
+        # A quest has two possible logs under .fi/: launch.log (captured
+        # subprocess stdout — live for launcher-spawned quests, a static
+        # start breadcrumb for direct `python launch.py` runs) and run.log
+        # (the live per-node engine log). Show whichever was written most
+        # recently so a running quest always surfaces live progress, no
+        # matter how it was started.
+        quest_logs = [
+            p for p in (
+                out_root / job_id / ".fi" / "launch.log",
+                out_root / job_id / ".fi" / "run.log",
+            ) if p.is_file()
+        ]
+        if quest_logs:
+            try:
+                log_path = max(quest_logs, key=lambda p: p.stat().st_mtime)
+            except OSError:
+                log_path = quest_logs[0]
+        else:
+            for candidate in (
+                out_root / "_jobs" / job_id / "launch.log",
+                out_root / "_logs" / f"{job_id}.log",
+            ):
+                if candidate.is_file():
+                    log_path = candidate
+                    break
         st = app.state.launcher.status_for(job_id)
         log_lines: list[str] = []
         log_mtime = None
@@ -1173,7 +1239,15 @@ def make_app(
             if "exit_code" in st:
                 out["exit_code"] = st["exit_code"]
         else:
-            out["alive"] = False  # known only via log file → already finished
+            # Not in the launcher registry. For a quest, infer "running"
+            # the same way list_jobs does (recent log + no final summary)
+            # so an externally-started quest shows live progress instead of
+            # looking already-finished.
+            running = (
+                _classify_job(job_id) == "quest"
+                and _quest_looks_running(out_root / job_id, time.time())
+            )
+            out["alive"] = running
         return JSONResponse(out)
 
     @app.post("/api/system/install-tectonic")

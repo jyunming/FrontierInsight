@@ -109,10 +109,12 @@ def test_apply_offline_env_first_wins_on_divergent_models_dir(
 
 
 def test_search_returns_empty_when_disabled_and_no_external_fallback() -> None:
-    # With Axon disabled AND no external sources, search returns [].
-    # (With external sources configured, the router still runs — the
-    # arxiv/openalex/crossref fallback tests cover that path.)
-    k = Knowledge(KnowledgeConfig(enabled=False, external_fallback="none"))
+    # With Axon disabled AND no external sources AND web search off, search
+    # returns []. (web_search is the always-on layer — it's disabled here to
+    # isolate the academic/Axon path; its own tests cover the web layer.)
+    k = Knowledge(KnowledgeConfig(
+        enabled=False, external_fallback="none", web_search=False,
+    ))
     assert k.enabled is False
     assert k.search("any query") == []
     assert k.search("any query", top_k=10) == []
@@ -616,9 +618,10 @@ def test_local_papers_pinned_to_head_of_asearch(tmp_path: Path, monkeypatch) -> 
     b = tmp_path / "local_b.md"; b.write_text("BBB local two", encoding="utf-8")
 
     cfg = KnowledgeConfig(enabled=False, source_routing="manual",
-                          external_fallback="none", local_papers=[a, b], top_k=5)
+                          external_fallback="none", web_search=False,
+                          local_papers=[a, b], top_k=5)
     k = Knowledge(cfg)
-    # No Axon, no external; asearch returns just the pinned papers.
+    # No Axon, no external, no web; asearch returns just the pinned papers.
     import asyncio
     docs = asyncio.run(k.asearch("anything"))
     assert len(docs) == 2
@@ -669,7 +672,7 @@ def test_local_papers_supplement_external_when_few(tmp_path: Path, monkeypatch) 
     # head-of-list invariant (local paper first, then external).
     cfg = KnowledgeConfig(
         enabled=False, source_routing="manual",
-        external_fallback=["arxiv"], local_papers=[local],
+        external_fallback=["arxiv"], web_search=False, local_papers=[local],
         top_k=4, external_top_k=4,
     )
     k = Knowledge(cfg)
@@ -678,6 +681,281 @@ def test_local_papers_supplement_external_when_few(tmp_path: Path, monkeypatch) 
     assert len(docs) == 4
     assert docs[0].metadata["source"] == "local_paper"
     assert all(d.metadata["source"] == "fake" for d in docs[1:])
+
+
+# ---------------------------------------------------------------------------
+# General web search — Brave / DuckDuckGo adapters + always-parallel asearch
+# ---------------------------------------------------------------------------
+
+
+def _brave_payload(*results: dict) -> dict:
+    return {"web": {"results": list(results)}}
+
+
+def test_brave_search_parses_results(monkeypatch) -> None:
+    from core.knowledge import _brave_search
+
+    payload = _brave_payload(
+        {"title": "SpaceX revenue 2023", "url": "https://e.com/a",
+         "description": "SpaceX booked <strong>$8B</strong> in 2023",
+         "meta_url": {"hostname": "e.com"}, "page_age": "2024-01-02"},
+        {"title": "Falcon 9", "url": "https://x.org/b", "description": "launch"},
+    )
+
+    class _Ok:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, params=None, headers=None, **_):
+            assert "brave.com" in url
+            assert headers["X-Subscription-Token"] == "BSAkey"
+            r = MagicMock(); r.json = lambda: payload; r.raise_for_status = MagicMock()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Ok)
+    docs = _brave_search("spacex revenue", 5, api_key="BSAkey")
+    assert len(docs) == 2
+    d = docs[0]
+    assert d.metadata["source"] == "web_search" and d.metadata["backend"] == "brave"
+    assert d.metadata["url"] == "https://e.com/a"
+    assert d.metadata["site"] == "e.com"
+    # <strong> markup stripped from the snippet.
+    assert d.metadata["snippet"] == "SpaceX booked $8B in 2023"
+
+
+def test_brave_search_returns_empty_without_key() -> None:
+    from core.knowledge import _brave_search
+    assert _brave_search("anything", 5, api_key="") == []
+
+
+def test_web_search_auto_falls_back_to_ddg_without_key(monkeypatch) -> None:
+    from core.knowledge import RetrievedDoc as RD
+    import core.knowledge as kn
+
+    called = {}
+    def fake_ddg(q, tk, *, timeout_s=10.0):
+        called["ddg"] = True
+        return [RD(content="x", metadata={"source": "web_search", "backend": "duckduckgo"})]
+    monkeypatch.setattr("core.knowledge._ddg_search", fake_ddg)
+
+    out = kn._web_search("q", 3, backend="auto", api_key="")
+    assert called.get("ddg") is True
+    assert out and out[0].metadata["backend"] == "duckduckgo"
+
+
+def test_ddg_decodes_redirect_links() -> None:
+    from core.knowledge import _ddg_decode
+    href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage%3Fa%3D1&rut=x"
+    assert _ddg_decode(href) == "https://example.com/page?a=1"
+    assert _ddg_decode("https://plain.example/p") == "https://plain.example/p"
+
+
+def test_html_to_text_strips_chrome_and_tags() -> None:
+    from core.knowledge import _html_to_text
+    html = (
+        "<html><head><style>.x{}</style></head><body>"
+        "<nav>menu</nav><h1>Heading</h1><p>Body <strong>text</strong> here.</p>"
+        "<ul><li>one</li><li>two</li></ul><script>evil()</script></body></html>"
+    )
+    out = _html_to_text(html)
+    assert "menu" not in out and "evil" not in out and ".x{}" not in out
+    assert "Heading" in out and "Body text here." in out
+    assert "- one" in out and "- two" in out
+
+
+def test_html_to_text_appends_figure_captions_and_prefers_article() -> None:
+    from core.knowledge import _html_to_text
+    html = (
+        "<html><body><nav>chrome junk</nav>"
+        "<article><h1>EV Report</h1><p>BEV share hit 18%.</p>"
+        "<figure><img src='x.png' alt='EV sales by region 2024'>"
+        "<figcaption>Figure 1: regional EV shares</figcaption></figure>"
+        "</article><footer>more junk</footer></body></html>"
+    )
+    out = _html_to_text(html)
+    assert "BEV share hit 18%." in out
+    assert "chrome junk" not in out          # nav dropped
+    assert "[FIGURES IN SOURCE]" in out
+    assert "Figure 1: regional EV shares" in out
+    assert "EV sales by region 2024" in out  # img alt surfaced
+
+
+def test_brave_search_folds_extra_snippets(monkeypatch) -> None:
+    from core.knowledge import _brave_search
+    payload = _brave_payload({
+        "title": "EV outlook", "url": "https://e.com/x",
+        "description": "BEV share rose.",
+        "extra_snippets": ["China led at 35%.", "Europe held ~21%."],
+    })
+
+    class _Ok:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, params=None, headers=None, **_):
+            r = MagicMock(); r.json = lambda: payload; r.raise_for_status = MagicMock()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Ok)
+    docs = _brave_search("ev", 3, api_key="BSAk")
+    snip = docs[0].metadata["snippet"]
+    assert "BEV share rose." in snip
+    assert "China led at 35%." in snip and "Europe held ~21%." in snip
+
+
+def test_low_quality_domains_filtered() -> None:
+    from core.knowledge import _is_low_quality_domain
+    assert _is_low_quality_domain("https://www.marketsandmarkets.com/Market-Reports/ev-209.html")
+    assert _is_low_quality_domain("https://grandviewresearch.com/industry-analysis/ev-market")
+    assert _is_low_quality_domain("https://evwire.com/p/x")
+    assert not _is_low_quality_domain("https://www.iea.org/reports/global-ev-outlook-2024/x")
+    assert not _is_low_quality_domain("https://ourworldindata.org/electric-car-sales")
+    assert not _is_low_quality_domain("")
+
+
+def test_web_search_drops_low_quality(monkeypatch) -> None:
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+    monkeypatch.setattr("core.knowledge._ddg_search", lambda q, tk, *, timeout_s=10.0: [
+        RD("good", {"source": "web_search", "url": "https://iea.org/x"}),
+        RD("junk", {"source": "web_search", "url": "https://marketsandmarkets.com/Market-Reports/y"}),
+    ])
+    out = kn._web_search("ev", 5, backend="duckduckgo")
+    assert [d.metadata["url"] for d in out] == ["https://iea.org/x"]
+
+
+def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    class _Blocked:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock(); r.status_code = 403; return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Blocked)
+    monkeypatch.setattr(
+        "core.knowledge._playwright_fetch_html",
+        lambda url, *, timeout_s: "<html><body><article><p>Recovered full text 18%.</p></article></body></html>",
+    )
+    doc = RD("", {"url": "https://iea.example/blocked"})
+    # headless on → recovers via the renderer.
+    out = kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=True)
+    assert out and "Recovered full text 18%." in out
+    # headless off → blocked stays blocked (snippet only).
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
+
+
+def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:
+    from core.knowledge import _fetch_web_page_text, RetrievedDoc as RD
+
+    class _PdfResp:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "application/pdf"}
+            r.content = b"%PDF-1.7\nfake"
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _PdfResp)
+    monkeypatch.setattr(
+        "core.knowledge._pdf_bytes_to_text",
+        lambda body, *, cap: "EXTRACTED PDF TEXT",
+    )
+    doc = RD("", {"url": "https://iea.example/report.pdf"})
+    assert _fetch_web_page_text(doc, timeout_s=5, max_kb=32) == "EXTRACTED PDF TEXT"
+
+
+def _fake_retriever(docs):
+    class _R:
+        def invoke(self, _q):
+            out = []
+            for d in docs:
+                m = MagicMock(); m.page_content = d.content; m.metadata = d.metadata
+                out.append(m)
+            return out
+        def with_overrides(self, _):
+            return self
+    return _R()
+
+
+def test_asearch_runs_web_in_parallel_and_merges_with_axon(monkeypatch) -> None:
+    """web_search runs alongside Axon for every query and the two are
+    merged (Axon first, then web), even when Axon already returned hits."""
+    from core.knowledge import Knowledge, RetrievedDoc as RD
+
+    k = Knowledge(KnowledgeConfig(enabled=False))
+    k.enabled = True
+    k.cfg = KnowledgeConfig(
+        enabled=True, web_search=True, web_fetch_pages=False,
+        external_fallback="none", top_k=8, external_top_k=10,
+    )
+    k._retriever = _fake_retriever([RD(content="axon hit", metadata={"src": "axon"})])
+
+    def fake_web(query, top_k, *, backend, api_key, timeout_s):
+        return [
+            RD(content="w1", metadata={"source": "web_search", "url": "https://a/1"}),
+            RD(content="w2", metadata={"source": "web_search", "url": "https://a/2"}),
+        ]
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+
+    import asyncio
+    docs = asyncio.run(k.asearch("anything", top_k=8, external_top_k=10))
+    srcs = [d.metadata.get("src") or d.metadata.get("source") for d in docs]
+    assert srcs == ["axon", "web_search", "web_search"]
+
+
+def test_asearch_web_fills_when_axon_empty_and_no_academic(monkeypatch) -> None:
+    """The non-academic case (e.g. 'SpaceX revenue'): Axon empty, academic
+    fallback 'none' — web still supplies real results instead of nothing."""
+    from core.knowledge import Knowledge, RetrievedDoc as RD
+
+    k = Knowledge(KnowledgeConfig(enabled=False))
+    k.enabled = True
+    k.cfg = KnowledgeConfig(
+        enabled=True, web_search=True, web_fetch_pages=False,
+        external_fallback="none", top_k=8, external_top_k=10,
+    )
+    k._retriever = _fake_retriever([])  # Axon returns nothing
+
+    def fake_web(query, top_k, *, backend, api_key, timeout_s):
+        return [RD(content="real spacex page",
+                   metadata={"source": "web_search", "url": "https://sec.example/x"})]
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+
+    import asyncio
+    docs = asyncio.run(k.asearch("SpaceX revenue", top_k=8, external_top_k=10))
+    assert len(docs) == 1
+    assert docs[0].metadata["source"] == "web_search"
+
+
+def test_asearch_dedupes_web_by_url(monkeypatch) -> None:
+    from core.knowledge import Knowledge, RetrievedDoc as RD
+
+    k = Knowledge(KnowledgeConfig(enabled=False))
+    k.enabled = True
+    k.cfg = KnowledgeConfig(
+        enabled=True, web_search=True, web_fetch_pages=False,
+        external_fallback="none", top_k=8, external_top_k=10,
+    )
+    k._retriever = _fake_retriever([])
+
+    def fake_web(query, top_k, *, backend, api_key, timeout_s):
+        # Same page from two backends (trailing slash + scheme differ).
+        return [
+            RD(content="a", metadata={"source": "web_search", "url": "https://site.com/p/"}),
+            RD(content="b", metadata={"source": "web_search", "url": "http://site.com/p"}),
+        ]
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+
+    import asyncio
+    docs = asyncio.run(k.asearch("q", top_k=8, external_top_k=10))
+    assert len(docs) == 1  # collapsed to one
 
 
 # ---------------------------------------------------------------------------

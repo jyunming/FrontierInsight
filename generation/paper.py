@@ -387,6 +387,31 @@ _log = logging.getLogger("frontier_insight.paper")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = REPO_ROOT / "templates" / "paper"
+# Frontier Insight brand mark — copied next to the pandoc source at
+# compile time so the FI house-style templates can \includegraphics it
+# as a subtle bottom-left footer mark (matches the slide/poster
+# branding). This is the palette-native TEAL monochrome glyph (no dark
+# chip), so it sits quietly on a white page next to the teal wordmark.
+# Only the FI house templates (generic, whitepaper, report,
+# policy_brief, essay) consume it; the venue-mimicking templates
+# (iclr, neurips, ieee_access, nature_mi) stay unbranded so they match
+# their real-venue formats.
+ICON_PNG = REPO_ROOT / "vscode-frontier-insight" / "images" / "fi_glyph_teal.png"
+
+
+def _copy_brand_icon(out_dir: Path) -> bool:
+    """Copy the FI icon into ``out_dir`` as ``fi_icon.png`` so a template
+    can reference it relative to the pandoc working directory. Returns
+    ``True`` when the icon is in place, ``False`` (no brand mark) if the
+    asset is missing or can't be copied — a paper still compiles either
+    way because the templates gate the mark behind ``$if(brandfoot)$``."""
+    if not ICON_PNG.is_file():
+        return False
+    try:
+        shutil.copyfile(ICON_PNG, out_dir / "fi_icon.png")
+        return True
+    except OSError:
+        return False
 
 
 @dataclass
@@ -679,7 +704,15 @@ class PaperGenerator:
             # requires the blank line and otherwise jams the entire
             # list into the paragraph as inline text ("Foo - a - b -
             # c.") — the bullets-rendered-as-prose failure mode.
-            "--from=markdown+lists_without_preceding_blankline",
+            #
+            # +autolink_bare_uris: wrap bare reference URLs in \url{} so
+            # the template's xurl can break them at ANY character. Without
+            # it, pandoc renders a bare URL as plain text with escaped
+            # underscores (\_) that never break — a wiki-style URL then
+            # runs straight into the right margin (the reference-URL
+            # overflow the FI house templates' xurl + \urlstyle{same}
+            # fix once the URL is a real \url{}).
+            "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris",
             # The first H1 is lifted into the YAML title above, so the
             # remaining H2/H3/... headings should shift up one level —
             # otherwise an article-class document numbers them as
@@ -691,6 +724,14 @@ class PaperGenerator:
         ]
         if title is not None:
             cmd.append("--shift-heading-level-by=-1")
+        # Copy the FI icon next to the source and flip the template's
+        # ``brandfoot`` switch so the house-style templates render a
+        # subtle footer corner mark + cover icon. Gated on a successful
+        # copy: if the asset is missing the variable stays unset and the
+        # template's ``$if(brandfoot)$`` blocks no-op, so the paper still
+        # compiles unbranded rather than failing on a missing image.
+        if _copy_brand_icon(out_dir):
+            cmd.extend(["-V", "brandfoot=true"])
         if template.exists():
             cmd.extend(["--template", str(template)])
         else:

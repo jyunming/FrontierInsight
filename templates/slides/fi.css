@@ -1,0 +1,208 @@
+/* @theme fi */
+/*
+ * Frontier Insight — "Research Briefing" deck theme.
+ * A premium, editorial look for data-driven research decks: serif
+ * headlines, a system-sans body, and a monospace utility face for the
+ * evidence-first signatures (eyebrows, captions, sources, page numbers).
+ * One restrained accent (deep teal). All fonts are OS-bundled so it
+ * renders offline in the Marp CLI.
+ */
+
+@import 'default';
+
+:root {
+  --ink:      #16222b;   /* near-black slate — primary text + dark slides */
+  --paper:    #f8f7f3;   /* warm off-white background */
+  --muted:    #65727c;   /* secondary text */
+  --faint:    #8a949b;   /* captions / footer */
+  --hair:     #e4e2da;   /* hairlines + figure frames */
+  --accent:   #0e6e6b;   /* deep teal — the single accent */
+  --accent-2: #0a4f4d;   /* darker teal for depth */
+
+  --serif: "Palatino Linotype", "Book Antiqua", "Iowan Old Style", Georgia, Cambria, serif;
+  --sans:  "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono:  "Consolas", "SFMono-Regular", ui-monospace, "Liberation Mono", monospace;
+}
+
+section {
+  font-family: var(--sans);
+  font-size: 25px;
+  line-height: 1.46;
+  color: var(--ink);
+  background-color: var(--paper);
+  /* Subtle Frontier Insight brand mark, bottom-left corner of every slide. */
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MzAgMTIwIiBmaWxsPSJub25lIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMzIsLTkpIHNjYWxlKDAuMjcpIiBzdHJva2U9IiMwZTZlNmIiIHN0cm9rZS13aWR0aD0iNDAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTI1NiAxMDBWNDEyIiBzdHJva2Utd2lkdGg9IjQ4Ii8+PHBhdGggZD0iTTI1NiAxNjBMMzIwIDE2MEwzNTAgMTMwTDQwMCAxODAiLz48cGF0aCBkPSJNMjU2IDI2MEgzNjAiLz48cGF0aCBkPSJNMTQwIDE4MEMxODAgMjAwIDIyMCAyNDAgMjU2IDI2MCIgb3BhY2l0eT0iMC4zMiIgc3Ryb2tlLXdpZHRoPSIzMiIvPjxwYXRoIGQ9Ik0xNDAgMzQwQzE4MCAzMjAgMjIwIDI4MCAyNTYgMjYwIiBvcGFjaXR5PSIwLjMyIiBzdHJva2Utd2lkdGg9IjMyIi8+PGNpcmNsZSBjeD0iMjU2IiBjeT0iMjYwIiByPSIxNCIgZmlsbD0iIzBhNGY0ZCIgc3Ryb2tlPSJub25lIi8+PC9nPjx0ZXh0IHg9IjEwNCIgeT0iNjAiIGZpbGw9IiMwZTZlNmIiIGZvbnQtZmFtaWx5PSJDb25zb2xhcyxTRk1vbm8tUmVndWxhcixtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMzAiIGZvbnQtd2VpZ2h0PSI2MDAiIGxldHRlci1zcGFjaW5nPSIyLjUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5GUk9OVElFUiBJTlNJR0hUPC90ZXh0Pjwvc3ZnPg==");
+  background-repeat: no-repeat;
+  background-position: bottom 24px left 72px;
+  background-size: 132px 37px;
+  padding: 64px 76px 72px;
+  letter-spacing: 0.1px;
+}
+
+/* Thin teal accent rail along the top of every content slide. */
+section::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 7px;
+  background: var(--accent);
+}
+
+/* ---- Headings -------------------------------------------------------- */
+/* H2 is the per-slide title: serif, with a short teal "kicker" rule above
+   it that encodes the evidence-first structure without extra markup. */
+section h2 {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 1.46em;
+  line-height: 1.12;
+  letter-spacing: -0.2px;
+  color: var(--ink);
+  margin: 0.1em 0 0.5em;
+  padding-top: 0.42em;
+  position: relative;
+}
+section h2::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;
+  width: 56px; height: 3px;
+  background: var(--accent);
+}
+
+section h3 {
+  font-family: var(--sans);
+  font-size: 0.74em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--accent-2);
+  margin: 0.8em 0 0.3em;
+}
+
+/* ---- Body ------------------------------------------------------------ */
+section strong { color: var(--accent-2); font-weight: 700; }
+section em { color: var(--muted); font-style: italic; }
+section a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--hair); }
+
+section ul, section ol { margin: 0.3em 0; padding-left: 1.15em; }
+section li { margin: 0.34em 0; padding-left: 0.15em; }
+section li::marker { color: var(--accent); }
+
+/* Block quotes become an editorial pull-callout. */
+section blockquote {
+  font-family: var(--serif);
+  font-size: 1.05em;
+  font-style: italic;
+  color: var(--ink);
+  border: none;
+  border-left: 4px solid var(--accent);
+  background: transparent;
+  margin: 0.6em 0;
+  padding: 0.15em 0 0.15em 0.85em;
+}
+
+/* ---- Figures --------------------------------------------------------- */
+/* Centered, hairline-framed, with breathing room. The takeaway line the
+   pipeline writes under each figure renders as ordinary body text. */
+section img {
+  display: block;
+  margin: 0.45em auto;
+  background: #fff;
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  box-shadow: 0 2px 14px rgba(22, 34, 43, 0.07);
+  /* Length-aware safety net: cap inline figures so a `![w:800]` chart
+     can't grow tall enough to push the slide's text off the bottom (the
+     #1 overflow cause). `width:auto !important` overrides Marp's explicit
+     w:NNN so the cap preserves aspect ratio instead of distorting — the
+     figure scales down to fit within the slide, text stays on-page.
+     `![bg right]` side figures are backgrounds, not <img>, so they're
+     unaffected and keep their split-screen sizing. */
+  max-width: 100%;
+  max-height: 48vh;
+  width: auto !important;
+  height: auto !important;
+}
+
+/* ---- Tables ---------------------------------------------------------- */
+section table { font-size: 0.86em; border-collapse: collapse; }
+section th {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--accent-2);
+  background: #eef1ee;
+  border-bottom: 2px solid var(--accent);
+  text-align: left;
+}
+section td { border-bottom: 1px solid var(--hair); }
+
+/* ---- Pagination + footer mark --------------------------------------- */
+section::after {
+  font-family: var(--mono);
+  font-size: 0.6em;
+  letter-spacing: 1px;
+  color: var(--faint);
+  right: 40px; bottom: 26px;
+}
+
+/* ---- Title / closing slides ( <!-- _class: lead --> ) ---------------- */
+section.lead {
+  background-color: var(--ink);
+  color: var(--paper);
+  justify-content: center;
+  padding: 76px 88px;
+  /* Light-teal mark variant so the brand glyph reads on the dark lead bg. */
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MzAgMTIwIiBmaWxsPSJub25lIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMzIsLTkpIHNjYWxlKDAuMjcpIiBzdHJva2U9IiM5ZmI0YjMiIHN0cm9rZS13aWR0aD0iNDAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTI1NiAxMDBWNDEyIiBzdHJva2Utd2lkdGg9IjQ4Ii8+PHBhdGggZD0iTTI1NiAxNjBMMzIwIDE2MEwzNTAgMTMwTDQwMCAxODAiLz48cGF0aCBkPSJNMjU2IDI2MEgzNjAiLz48cGF0aCBkPSJNMTQwIDE4MEMxODAgMjAwIDIyMCAyNDAgMjU2IDI2MCIgb3BhY2l0eT0iMC4zMiIgc3Ryb2tlLXdpZHRoPSIzMiIvPjxwYXRoIGQ9Ik0xNDAgMzQwQzE4MCAzMjAgMjIwIDI4MCAyNTYgMjYwIiBvcGFjaXR5PSIwLjMyIiBzdHJva2Utd2lkdGg9IjMyIi8+PGNpcmNsZSBjeD0iMjU2IiBjeT0iMjYwIiByPSIxNCIgZmlsbD0iI2NmZTBkZSIgc3Ryb2tlPSJub25lIi8+PC9nPjx0ZXh0IHg9IjEwNCIgeT0iNjAiIGZpbGw9IiM5ZmI0YjMiIGZvbnQtZmFtaWx5PSJDb25zb2xhcyxTRk1vbm8tUmVndWxhcixtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMzAiIGZvbnQtd2VpZ2h0PSI2MDAiIGxldHRlci1zcGFjaW5nPSIyLjUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5GUk9OVElFUiBJTlNJR0hUPC90ZXh0Pjwvc3ZnPg==");
+}
+section.lead::before { background: var(--accent); height: 9px; }
+section.lead h1 {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 2.65em;
+  line-height: 1.08;
+  letter-spacing: -0.5px;
+  color: var(--paper);
+  margin: 0;
+  max-width: 18ch;
+}
+/* Teal kicker rule under the lead title. */
+section.lead h1::after {
+  content: "";
+  display: block;
+  width: 96px; height: 4px;
+  background: var(--accent);
+  margin: 0.5em 0 0;
+}
+section.lead h2 {
+  font-family: var(--mono);
+  font-size: 0.72em;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 2.5px;
+  color: #9fb4b3;
+  margin-top: 0.9em;
+  padding-top: 0;
+}
+section.lead h2::before { display: none; }
+section.lead strong, section.lead a { color: var(--paper); }
+section.lead a { border-bottom-color: rgba(255,255,255,0.25); }
+
+/* ---- References slide ----------------------------------------------- */
+/* Auto-appended `## References` + numbered list — keep it compact + mono so
+   many sources fit, with teal numerals. */
+section:has(h2#references) ol,
+section:has(h2 + ol) ol {
+  font-family: var(--mono);
+  font-size: 0.6em;
+  line-height: 1.42;
+  color: var(--muted);
+  columns: 2;
+  column-gap: 2.4em;
+}
+section:has(h2#references) li::marker,
+section:has(h2 + ol) li::marker { color: var(--accent); }
+section:has(h2#references) a,
+section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }

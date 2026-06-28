@@ -23,6 +23,20 @@
 \newcounter{none}
 \usepackage{amsmath, amssymb}
 \usepackage{hyperref}
+% Break long URLs (e.g. reference links) at ANY character so they wrap
+% inside the text column instead of running into the right margin — the
+% common "reference URL overflows the page" failure. xurl must load
+% after hyperref. emergencystretch gives TeX extra slack to avoid other
+% overfull lines (long unbreakable tokens, wide inline code).
+\usepackage{xurl}
+% URLs in the body font (not monospace) and breakable at ANY character
+% via xurl, with links shown without the default colored boxes. Combined
+% with pandoc's autolink_bare_uris (set in generation/paper.py), this
+% wraps long reference URLs inside the text column instead of running
+% them into the right margin (the "reference URL overflow" failure).
+\urlstyle{same}
+\hypersetup{hidelinks}
+\setlength{\emergencystretch}{3em}
 % helvet is universally available in minimal TeX Live installs;
 % opensans (an earlier choice) is not, and tripped paper_pdf compile
 % on stripped containers.
@@ -50,6 +64,14 @@ $highlighting-macros$
 \lhead{\small\textit{$title$}}
 \rfoot{\small\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
+% Subtle Frontier Insight brand mark, bottom-left foot of every page:
+% the palette-native teal glyph + teal wordmark (matches the slide
+% corner mark). `brandfoot` is set by generation/paper.py only when the
+% mark asset was copied next to the source, so this no-ops cleanly on
+% hosts without the asset.
+$if(brandfoot)$
+\lfoot{\raisebox{-0.30\height}{\includegraphics[height=12pt]{fi_icon.png}}\hspace{4pt}\textcolor[HTML]{0E6E6B}{\small Frontier Insight}}
+$endif$
 
 \title{\Huge\bfseries $title$}
 \author{Frontier Insight}
