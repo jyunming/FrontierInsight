@@ -566,7 +566,9 @@ _ACADEMIC_HOST_RE = re.compile(
     r"sagepub\.com|mdpi\.com|nature\.com|plos\.org|frontiersin\.org|"
     r"ieee\.org|acm\.org|oup\.com|cambridge\.org|jstor\.org|bmj\.com|"
     r"cell\.com|pnas\.org|ssrn\.com|researchgate\.net|semanticscholar\.org|"
-    r"academic\.oup\.com"
+    r"academic\.oup\.com|spiedigitallibrary\.org|spie\.org|"
+    r"dl\.acm\.org|ieeexplore\.ieee\.org|onlinelibrary\.wiley\.com|"
+    r"iopscience\.iop\.org|aip\.org|aps\.org|rsc\.org|acs\.org"
     r")$",
     re.I,
 )

@@ -49,15 +49,27 @@ def test_abstract_only_explicit_flag_wins() -> None:
     assert _is_abstract_only(doc) is True
 
 
-def test_abstract_only_flags_real_papers_not_web_pages() -> None:
-    """A real, resolvable PAPER (DOI / arXiv-id / PMID, or an academic
-    adapter) with only the abstract is flagged for the user to fetch; a
-    generic web page or a bare doc with no identifier is content the agent
-    uses as-is, not something to ask the user to download."""
-    for md in ({"doi": "10.1117/12.1"}, {"arxiv_id": "2401.001"},
-               {"pmid": "123"}, {"source": "crossref"}, {"source": "pubmed"}):
+def test_abstract_only_flags_real_resolvable_papers_only() -> None:
+    """Flag a real, RESOLVABLE paper the user can download — a DOI / arXiv-id
+    / PMID, or an academic-adapter hit WITH a title. Do NOT flag generic web
+    pages, identifier-less / title-less docs, or FI-internal cross-quest
+    memory (which has no DOI/URL and is already in the corpus)."""
+    for md in (
+        {"doi": "10.1117/12.1"}, {"arxiv_id": "2401.001"}, {"pmid": "123"},
+        {"source": "crossref", "title": "SPIE overlay"},
+        # a web-search hit on a paywalled publisher domain is a real paper too
+        {"source": "web_search", "title": "SPIE litho paper",
+         "url": "https://www.spiedigitallibrary.org/conference-proceedings/12053/10.1117/12.x"},
+    ):
         assert _is_abstract_only(RetrievedDoc("x" * 800, md)) is True, md
-    for md in ({"source": "web_search"}, {}, {"url": "https://blog.example/x"}):
+    for md in (
+        {"source": "web_search"},                       # generic web page
+        {},                                             # nothing to resolve
+        {"url": "https://blog.example/x"},
+        {"source": "crossref"},                         # academic but no title
+        {"kind": "fi_quest_paper", "source": "axon", "title": "prior quest"},
+        {"kind": "fi_paper_spine", "title": "spine"},   # FI-internal memory
+    ):
         assert _is_abstract_only(RetrievedDoc("x" * 800, md)) is False, md
 
 

@@ -6032,14 +6032,30 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
         return False
     if md.get("source") in ("local_paper", "user_supplied"):
         return False
-    # Flag only a real, resolvable PAPER the user can actually download — one
-    # that carries a DOI / arXiv-id / PMID, or came from an academic adapter
-    # — for which we have only the abstract (no full text recovered). A
-    # generic web page (source=web_search, no identifier) is content the
-    # agent uses as-is, not something to ask the user to fetch.
-    has_id = bool(md.get("doi") or md.get("arxiv_id") or md.get("pmid"))
-    from_academic_adapter = md.get("source") not in (None, "", "web_search")
-    return has_id or from_academic_adapter
+    # FI-internal cross-quest memory (prior papers / summaries / spines stored
+    # in Axon) is NOT a paper to download — it's already in the corpus and has
+    # no DOI/URL to resolve. Never flag it (it would show up as a titleless,
+    # link-less "paper-N" in WANTED_PAPERS.md).
+    kind = str(md.get("kind") or "")
+    if kind in _FI_INTERNAL_KINDS or kind.startswith("fi_"):
+        return False
+    # Flag only a real, RESOLVABLE paper the user can actually download: it
+    # carries a DOI / arXiv-id / PMID (so the manifest has a download link),
+    # or it's an academic-adapter hit WITH a real title (so the manifest entry
+    # is actionable). A generic web page, or a doc with neither id nor title,
+    # is content the agent uses as-is — not something to ask the user to fetch.
+    if md.get("doi") or md.get("arxiv_id") or md.get("pmid"):
+        return True
+    title = str(md.get("title") or "").strip()
+    if not title:
+        return False
+    # An academic-adapter hit (crossref / openalex / pubmed / …) is a paper.
+    if md.get("source") not in (None, "", "web_search"):
+        return True
+    # A web-search hit on a known academic publisher domain (SPIE / IEEE /
+    # Elsevier / Wiley / …) is also a real paywalled paper the user can fetch.
+    from core.knowledge import _is_academic_source
+    return _is_academic_source(str(md.get("url") or ""))
 
 
 def _papers_dir_has_files(quest_root: Path) -> bool:
