@@ -209,6 +209,16 @@ literature node searches the public web (Brave / DuckDuckGo) and
 — for *every* quest, simulation and observational alike, not just the
 no-simulation path. Turn it off to rely on academic sources only.
 
+When a source is fetched, FI works to get **real full text**, not a
+two-sentence snippet: HTML is cleaned with `trafilatura`; reCAPTCHA
+walls and paywall / abstract-only stubs are rejected; and for an
+academic source (PMC, a DOI, a preprint, a major publisher) the clean
+open-access full text is recovered directly via the PMC BioC API,
+Europe PMC, the preprint server, Unpaywall, and (with a key) Semantic
+Scholar / CORE. The full text is stored uncapped on disk, and each
+node's prompt receives the passages most relevant to the question
+(`knowledge.literature_excerpt_chars` / `passage_ranking`).
+
 Before pausing, `auto_collect_data` runs:
 
 1. Knowledge retrieval against `topic + design.hypothesis` — Axon

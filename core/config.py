@@ -693,6 +693,18 @@ class KnowledgeConfig(BaseModel):
     # Hard cap on extracted text per doc so a 200-page review doesn't
     # blow up downstream prompts. Truncates the middle.
     full_text_max_kb: int = 64
+    # How many characters of each source's fetched full text to put into a
+    # node's prompt. Selected by RELEVANCE to the quest question (see
+    # ``passage_ranking``) — the *relevant* N chars, not the first N — so
+    # the writer/plotter see the passages that actually carry the numbers,
+    # not just the abstract. The full text always lands on disk under
+    # ``data/literature/`` regardless of this budget.
+    literature_excerpt_chars: int = Field(default=4000, ge=500)
+    # How prompt excerpts are ranked against the quest question:
+    #   "lexical" — fast, dependency-free term overlap (default),
+    #   "embed"   — sentence-transformer cosine (semantic; loads a model),
+    #   "auto"    — embed when sentence-transformers is installed, else lexical.
+    passage_ranking: Literal["lexical", "embed", "auto"] = "lexical"
 
     @field_validator("local_papers", mode="before")
     @classmethod

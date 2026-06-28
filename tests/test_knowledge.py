@@ -750,7 +750,16 @@ def test_ddg_decodes_redirect_links() -> None:
     assert _ddg_decode("https://plain.example/p") == "https://plain.example/p"
 
 
-def test_html_to_text_strips_chrome_and_tags() -> None:
+def _force_fallback_extractor(monkeypatch) -> None:
+    """Make ``import trafilatura`` fail so _html_to_text uses its built-in
+    tag-strip fallback — the path under test here (and the one a no-extras
+    install actually runs)."""
+    import sys
+    monkeypatch.setitem(sys.modules, "trafilatura", None)
+
+
+def test_html_to_text_strips_chrome_and_tags(monkeypatch) -> None:
+    _force_fallback_extractor(monkeypatch)
     from core.knowledge import _html_to_text
     html = (
         "<html><head><style>.x{}</style></head><body>"
@@ -763,7 +772,8 @@ def test_html_to_text_strips_chrome_and_tags() -> None:
     assert "- one" in out and "- two" in out
 
 
-def test_html_to_text_appends_figure_captions_and_prefers_article() -> None:
+def test_html_to_text_appends_figure_captions_and_prefers_article(monkeypatch) -> None:
+    _force_fallback_extractor(monkeypatch)
     from core.knowledge import _html_to_text
     html = (
         "<html><body><nav>chrome junk</nav>"
@@ -778,6 +788,19 @@ def test_html_to_text_appends_figure_captions_and_prefers_article() -> None:
     assert "[FIGURES IN SOURCE]" in out
     assert "Figure 1: regional EV shares" in out
     assert "EV sales by region 2024" in out  # img alt surfaced
+
+
+def test_html_to_text_prefers_trafilatura_when_available(monkeypatch) -> None:
+    """When trafilatura is importable, _html_to_text returns its extraction
+    (plus the figure note) rather than the tag-strip fallback."""
+    import sys, types
+    fake = types.ModuleType("trafilatura")
+    fake.extract = lambda html, **kw: "TRAFILATURA BODY"
+    monkeypatch.setitem(sys.modules, "trafilatura", fake)
+    from core.knowledge import _html_to_text
+    out = _html_to_text("<html><body><p>raw tag-strip body</p></body></html>")
+    assert "TRAFILATURA BODY" in out
+    assert "raw tag-strip body" not in out
 
 
 def test_brave_search_folds_extra_snippets(monkeypatch) -> None:
@@ -1798,3 +1821,170 @@ def test_local_paper_ingestion_writes_spine_and_body() -> None:
     # back to the spine via metadata.
     assert body_meta["paper_id"] == spine_meta["paper_id"]
     assert body_meta["tag"] == spine_meta["tag"]
+
+
+# ---------------------------------------------------------------------------
+# OA full-text acquisition cascade (Phase 1) + paywall/stub gate (Phase 2)
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    def __init__(self, status=200, content=b"x", text=None, json_data=None, headers=None):
+        self.status_code = status
+        self.content = content if isinstance(content, bytes) else content.encode()
+        self.text = text if text is not None else (
+            content.decode() if isinstance(content, bytes) else content
+        )
+        self._json = json_data
+        self.headers = headers or {}
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no json")
+        return self._json
+
+
+def _fake_httpx_get(routes):
+    """routes: list of (url-substring, _FakeResp); first match wins, else 404."""
+    def _get(url, **kw):
+        for sub, resp in routes:
+            if sub in url:
+                return resp
+        return _FakeResp(status=404, content=b"")
+    return _get
+
+
+def test_normalize_pmcid_and_arxiv_id() -> None:
+    from core.knowledge import _normalize_pmcid, _arxiv_id_from
+    assert _normalize_pmcid("https://pmc.ncbi.nlm.nih.gov/articles/PMC6406785/") == "PMC6406785"
+    assert _normalize_pmcid("PMC0006406785") == "PMC6406785"   # leading zeros dropped
+    assert _normalize_pmcid("nothing here") == ""
+    assert _arxiv_id_from("https://arxiv.org/abs/2401.01234", {}) == "2401.01234"
+    assert _arxiv_id_from("https://arxiv.org/pdf/2401.01234v3", {}) == "2401.01234"
+    assert _arxiv_id_from("", {"arxiv_id": "2401.01234v2"}) == "2401.01234"
+    assert _arxiv_id_from("https://example.com/x", {}) == ""
+
+
+def test_is_academic_source() -> None:
+    from core.knowledge import _is_academic_source
+    assert _is_academic_source("https://pmc.ncbi.nlm.nih.gov/articles/PMC1/")
+    assert _is_academic_source("https://www.sciencedirect.com/science/article/pii/X")
+    assert _is_academic_source("https://arxiv.org/abs/2401.01234")
+    assert _is_academic_source("https://link.springer.com/article/x")
+    assert _is_academic_source("https://journals.plos.org/plosone/article?id=x")
+    assert not _is_academic_source("https://www.bbc.com/news/x")
+    assert not _is_academic_source("https://example.com/")
+    assert not _is_academic_source("")
+
+
+def test_pmc_bioc_fulltext_assembles_and_skips_refs(monkeypatch) -> None:
+    import core.knowledge as kn
+    bioc = [{"documents": [{"passages": [
+        {"infons": {"section_type": "TITLE"}, "text": "Greenspace and mortality"},
+        {"infons": {"section_type": "ABSTRACT"},
+         "text": "We studied greenness and all-cause mortality in a cohort. " * 8},
+        {"infons": {"section_type": "RESULTS"},
+         "text": "Hazard ratio 0.94 per IQR increase in NDVI. " * 5},
+        {"infons": {"section_type": "REF"}, "text": "Smith J. 2019. Some Journal 1:2."},
+    ]}]}]
+    monkeypatch.setattr(kn.httpx, "get", _fake_httpx_get([("pmcoa.cgi", _FakeResp(json_data=bioc))]))
+    out = kn._pmc_bioc_fulltext("PMC123", timeout_s=5, cap=100000)
+    assert out and "all-cause mortality" in out and "Hazard ratio 0.94" in out
+    assert "Smith J. 2019" not in out          # REF section dropped
+
+
+def test_europepmc_fulltext_uses_corrected_url(monkeypatch) -> None:
+    import core.knowledge as kn
+    captured = {}
+
+    def _get(url, **kw):
+        captured["url"] = url
+        return _FakeResp(status=200, text="<article><p>" + ("Full body text. " * 40) + "</p></article>")
+
+    monkeypatch.setattr(kn.httpx, "get", _get)
+    out = kn._europepmc_fulltext("PMC123", timeout_s=5, cap=100000)
+    assert out and "Full body text" in out
+    # The corrected path: PMC-prefixed id, NO /PMC/ segment (that 404s).
+    assert captured["url"].endswith("/PMC123/fullTextXML")
+    assert "/PMC/PMC123" not in captured["url"]
+
+
+def test_resolve_ids_cross_resolves_doi_from_pmc_url(monkeypatch) -> None:
+    import core.knowledge as kn
+    search = {"resultList": {"result": [{"pmcid": "PMC6406785", "doi": "10.3390/x"}]}}
+    monkeypatch.setattr(kn.httpx, "get", _fake_httpx_get([("europepmc", _FakeResp(json_data=search))]))
+    ids = kn._resolve_ids(
+        RetrievedDoc("", {"url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6406785/"}),
+        timeout_s=5,
+    )
+    assert ids["pmcid"] == "PMC6406785" and ids["doi"] == "10.3390/x"
+
+
+def test_resolve_ids_arxiv_no_network(monkeypatch) -> None:
+    import core.knowledge as kn
+    # An arXiv URL resolves locally with no DOI/PMCID → no cross-resolve call.
+    def _boom(*a, **k):
+        raise AssertionError("should not hit the network for a bare arXiv id")
+    monkeypatch.setattr(kn.httpx, "get", _boom)
+    ids = kn._resolve_ids(
+        RetrievedDoc("", {"url": "https://arxiv.org/abs/2401.01234"}), timeout_s=5,
+    )
+    assert ids == {"doi": "", "pmcid": "", "arxiv_id": "2401.01234"}
+
+
+def test_fetch_via_open_apis_cascade_stops_at_first_hit(monkeypatch) -> None:
+    import core.knowledge as kn
+    monkeypatch.setattr(
+        kn, "_resolve_ids",
+        lambda doc, *, timeout_s: {"doi": "10.1/x", "pmcid": "PMC9", "arxiv_id": ""},
+    )
+    calls: list[str] = []
+
+    def _bioc(p, *, timeout_s, cap):
+        calls.append("bioc"); return None        # miss
+    def _epmc(p, *, timeout_s, cap):
+        calls.append("epmc"); return "E" * 400    # hit
+    def _unpaywall(d, *, timeout_s, cap):
+        calls.append("unpaywall"); return "U" * 400
+
+    monkeypatch.setattr(kn, "_pmc_bioc_fulltext", _bioc)
+    monkeypatch.setattr(kn, "_europepmc_fulltext", _epmc)
+    monkeypatch.setattr(kn, "_unpaywall_fulltext", _unpaywall)
+    out = kn._fetch_via_open_apis(RetrievedDoc("", {"url": "x"}), timeout_s=5, cap=100000)
+    assert out == "E" * 400
+    assert calls == ["bioc", "epmc"]   # stopped at the first hit; unpaywall untouched
+
+
+def test_is_paywall_or_stub_flags_and_spares() -> None:
+    import core.knowledge as kn
+    pay = (
+        '<html><head><script type="application/ld+json">'
+        '{"isAccessibleForFree":false}</script></head><body><p>teaser</p></body></html>'
+    )
+    assert kn._is_paywall_or_stub(pay, "short teaser body")
+    vend = (
+        '<html><head><script src="https://cdn.tinypass.com/api.js"></script>'
+        '</head><body><p>teaser</p></body></html>'
+    )
+    assert kn._is_paywall_or_stub(vend, "short teaser body")
+    assert kn._is_paywall_or_stub("<html></html>", "Sign in to read the full article now")
+    # A long real article body is NOT flagged even if the page carries the flag.
+    assert not kn._is_paywall_or_stub(pay, "Real article content. " * 400)
+    assert not kn._is_paywall_or_stub("", "anything")
+
+
+def test_preprint_fulltext_arxiv_html(monkeypatch) -> None:
+    import core.knowledge as kn
+    body = "<html><body><p>" + ("ArXiv full text body. " * 40) + "</p></body></html>"
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **kw):
+            if "arxiv.org/html" in url:
+                return _FakeResp(status=200, content=body.encode())
+            return _FakeResp(status=404, content=b"")
+
+    monkeypatch.setattr(kn.httpx, "Client", _Client)
+    out = kn._preprint_fulltext({"arxiv_id": "2401.01234", "doi": ""}, timeout_s=5, cap=100000)
+    assert out and "ArXiv full text body" in out

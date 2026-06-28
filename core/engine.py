@@ -1295,7 +1295,7 @@ class Engine:
         )
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
-            literature_block=_format_lit(seeded),
+            literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
             clarify_block=_format_clarify(state),
         )
         # Multi-model ensemble path: when the YAML carries
@@ -1529,6 +1529,18 @@ class Engine:
             "outcome": "swapped" if winner_idx != initial_idx else "confirmed",
         }
 
+    def _lit_kwargs(self, state: QuestState) -> dict[str, Any]:
+        """Relevance-selection kwargs for the ``_format_lit*`` helpers, from
+        the quest state + knowledge config — so each node's prompt gets the
+        passages most relevant to the question, within the configured
+        per-source character budget."""
+        k = self.config.knowledge
+        return {
+            "query": _lit_query(state),
+            "budget": k.literature_excerpt_chars,
+            "mode": k.passage_ranking,
+        }
+
     async def _node_literature(self, state: QuestState) -> QuestState:
         chosen = state.get("chosen_idea") or {}
         prior = list(state.get("literature") or [])
@@ -1560,8 +1572,25 @@ class Engine:
             chosen_idea=chosen,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
+        # Keep the FULL fetched text (no truncation): it lands uncapped on
+        # disk under data/literature/ for audit, and the prompt builders
+        # relevance-select the passages each node needs (see
+        # _format_lit_excerpt / knowledge.literature_excerpt_chars) rather
+        # than the old first-2000-chars slice that usually held only the
+        # abstract. content_quality records whether real full text was
+        # recovered or only the search snippet survived.
         new_entries = [
-            {"content": d.content[:2000], "metadata": d.metadata} for d in docs
+            {
+                "content": d.content,
+                "metadata": {
+                    **d.metadata,
+                    "content_quality": (
+                        "full_text" if d.metadata.get("fetched_full_text")
+                        else "snippet_only"
+                    ),
+                },
+            }
+            for d in docs
         ]
         # Dedup-merge: identity is DOI when present, otherwise the
         # canonical URL, otherwise the first 200 chars of content.
@@ -1600,6 +1629,15 @@ class Engine:
             "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
             "+%d user-supplied, total=%d)",
             len(docs), this_iter, added, user_added, len(merged),
+        )
+        full_n = sum(
+            1 for e in merged
+            if (e.get("metadata") or {}).get("content_quality") == "full_text"
+        )
+        self._log.info(
+            "[literature] full-text coverage: %d/%d sources have real full "
+            "text (%d snippet-only)",
+            full_n, len(merged), len(merged) - full_n,
         )
 
         # Pause-for-user-papers gate. Fires only when the user opted in
@@ -1690,7 +1728,7 @@ class Engine:
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
-            literature_block=_format_lit_from_state(state),
+            literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             clarify_block=_format_clarify(state),
@@ -2818,21 +2856,29 @@ class Engine:
     def _gather_collected_text(self, state: QuestState, *, limit: int = 12) -> str:
         """Concatenate the web/data content the collector gathered (full
         page text + auto-collected files), each labelled with its source,
-        for the web-plots prompt to mine numbers from."""
+        for the web-plots prompt to mine numbers from. Each source's text is
+        relevance-selected to the quest question (the passages carrying the
+        numbers), not truncated to its first N chars."""
+        from .passages import select_relevant_excerpt
+        opts = self._lit_kwargs(state)
+        query, budget, mode = opts["query"], opts["budget"], opts["mode"]
         parts: list[str] = []
         for item in (state.get("literature") or [])[:limit]:
             meta = item.get("metadata") or {}
             if meta.get("source") == "web_search" or meta.get("kind") == "web_page":
                 title = meta.get("title") or ""
                 url = meta.get("url") or ""
-                content = (item.get("content") or "")[:2500]
+                content = select_relevant_excerpt(
+                    item.get("content") or "", query,
+                    budget_chars=budget, mode=mode,
+                )
                 if content.strip():
                     parts.append(f"[SOURCE] {title} ({url})\n{content}")
         auto_dir = self.quest_root / "data" / "auto_collected"
         if auto_dir.is_dir():
             for p in sorted(auto_dir.rglob("*.md"))[:limit]:
                 try:
-                    parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:2500]}")
+                    parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:budget]}")
                 except OSError:
                     continue
         return "\n\n".join(parts)
@@ -3095,7 +3141,7 @@ class Engine:
             # provider.node_ensemble["cross_check"] is configured —
             # majority verdict wins per-finding, ties surfaced. Either
             # way ``parsed`` carries the same shape downstream.
-            cand_block = _format_lit(hits)
+            cand_block = _format_lit(hits, **self._lit_kwargs(state))
             prompt = self._prompts["cross_check"].substitute(
                 topic=state.get("topic", "")[:1000],
                 finding=text,
@@ -3327,6 +3373,7 @@ class Engine:
             # not what to publish.
             literature_block=_format_lit_from_state(
                 state, audience=self.config.output.audience,
+                **self._lit_kwargs(state),
             ),
             figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
             clarify_block=_format_clarify(state),
@@ -4488,22 +4535,37 @@ def _format_lit_header(meta: dict[str, Any], i: int) -> str:
     return line1
 
 
-def _format_lit_excerpt(content: str, title: str) -> str:
-    """Trim the leading-title duplication out of arXiv-style excerpts.
+def _format_lit_excerpt(
+    content: str,
+    title: str,
+    *,
+    query: str = "",
+    budget: int | None = None,
+    mode: str = "lexical",
+) -> str:
+    """Excerpt a source's content for a prompt. When ``query`` is given and
+    the content exceeds ``budget``, the excerpt is the passages most
+    RELEVANT to the question (relevance-ranked, see
+    :mod:`core.passages`) rather than the first ``budget`` chars — so a
+    result, table, or number buried mid-document still reaches the LLM.
+    Without a query it degrades to the leading slice (back-compatible).
 
-    Most loaders set ``content = f"{title}\\n\\n{abstract}"`` (see
-    knowledge.py:166, 199, 290) so the LLM saw ``[i] Title\\nTitle.
-    abstract...`` and propagated the title-twice pattern into the
-    References section. Stripping the duplicated title here gives the
-    writer a clean abstract excerpt to draw on without the visual
-    noise that previously seeded the bug."""
-    excerpt = content[:_LIT_EXCERPT_CHARS]
+    Also trims the leading-title duplication out of arXiv-style excerpts:
+    most loaders set ``content = f"{title}\\n\\n{abstract}"`` so the LLM
+    used to see ``[i] Title\\nTitle. abstract...`` and propagated the
+    title-twice pattern into the References section."""
+    budget = _LIT_EXCERPT_CHARS if budget is None else budget
+    if query and len(content) > budget:
+        from .passages import select_relevant_excerpt
+        excerpt = select_relevant_excerpt(
+            content, query, budget_chars=budget, mode=mode,
+        )
+    else:
+        excerpt = content[:budget]
     if title and excerpt.lstrip().startswith(title):
         # Drop the leading title + immediately-following separator
-        # (newline or ". "). Keep everything after as the real
-        # abstract.
-        trimmed = excerpt.lstrip()[len(title):].lstrip(".\n ")
-        return trimmed
+        # (newline or ". "). Keep everything after as the real abstract.
+        return excerpt.lstrip()[len(title):].lstrip(".\n ")
     return excerpt
 
 
@@ -4562,7 +4624,28 @@ def _is_audience_appropriate(meta: dict[str, Any], audience: str) -> bool:
     return kind not in _FI_INTERNAL_KINDS
 
 
-def _format_lit(docs: list[RetrievedDoc], audience: str = "external") -> str:
+def _lit_query(state: QuestState) -> str:
+    """The relevance query for selecting literature passages into a prompt:
+    the quest topic plus, when available, the chosen idea title and the
+    design hypothesis, so passages are picked for THIS question."""
+    parts = [state.get("topic") or ""]
+    chosen = state.get("chosen_idea") or {}
+    if isinstance(chosen, dict) and chosen.get("title"):
+        parts.append(str(chosen["title"]))
+    design = state.get("design") or {}
+    if isinstance(design, dict) and design.get("hypothesis"):
+        parts.append(str(design["hypothesis"]))
+    return " ".join(p for p in parts if p)[:500]
+
+
+def _format_lit(
+    docs: list[RetrievedDoc],
+    audience: str = "external",
+    *,
+    query: str = "",
+    budget: int | None = None,
+    mode: str = "lexical",
+) -> str:
     if not docs:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
@@ -4576,14 +4659,23 @@ def _format_lit(docs: list[RetrievedDoc], audience: str = "external") -> str:
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
         header = _format_lit_header(meta, keep_idx)
-        excerpt = _format_lit_excerpt(d.content, title)
+        excerpt = _format_lit_excerpt(
+            d.content, title, query=query, budget=budget, mode=mode,
+        )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return "(no prior work surfaced from the knowledge base)"
     return "\n\n".join(lines)
 
 
-def _format_lit_from_state(state: QuestState, audience: str = "external") -> str:
+def _format_lit_from_state(
+    state: QuestState,
+    audience: str = "external",
+    *,
+    query: str = "",
+    budget: int | None = None,
+    mode: str = "lexical",
+) -> str:
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
@@ -4598,7 +4690,10 @@ def _format_lit_from_state(state: QuestState, audience: str = "external") -> str
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
         header = _format_lit_header(meta, keep_idx)
-        excerpt = _format_lit_excerpt(item.get("content", "") or "", title)
+        excerpt = _format_lit_excerpt(
+            item.get("content", "") or "", title,
+            query=query, budget=budget, mode=mode,
+        )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return "(no prior work surfaced from the knowledge base)"
