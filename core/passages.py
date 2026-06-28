@@ -95,7 +95,9 @@ def _embed_model():
     if _EMBED_TRIED:
         return _EMBED_MODEL
     _EMBED_TRIED = True
-    if os.environ.get("FI_OFFLINE"):
+    # Parse FI_OFFLINE the same way the rest of the codebase does, so
+    # FI_OFFLINE=0 / false does NOT disable embeddings.
+    if os.environ.get("FI_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
         _log.info("passages: FI_OFFLINE set — using lexical ranking")
         _EMBED_MODEL = None
         return _EMBED_MODEL
