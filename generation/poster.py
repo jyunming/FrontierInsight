@@ -64,6 +64,145 @@ _log = logging.getLogger("frontier_insight.poster")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = REPO_ROOT / "agents" / "poster.md"
 TEMPLATE_PATH = REPO_ROOT / "templates" / "poster" / "poster.tex"
+# Frontier Insight brand mark — copied next to poster.tex at compile time
+# so the `$brandmark` placeholder can \includegraphics it as a subtle
+# bottom-left corner mark (matches the slide/paper branding).
+ICON_PNG = REPO_ROOT / "vscode-frontier-insight" / "images" / "fi_glyph_teal.png"
+
+# Header brand LOCKUP for the headline band — the palette-native teal
+# glyph + a monospace wordmark (matches the slide deck's bottom-left
+# lockup, scaled up for the poster's masthead). Referenced relative to
+# the poster's working dir, where the generator copies ``fi_icon.png``.
+_POSTER_BRANDLOGO = (
+    r"\raisebox{-0.30\height}{\includegraphics[height=1.7cm]{fi_icon.png}}"
+    r"\hspace{0.4em}{\ttfamily\bfseries\color{fiteal}\Large FRONTIER INSIGHT}"
+)
+
+# Small mark prepended to the Sources band — the same teal glyph raised
+# to sit on the band's baseline, a quiet second copy of the masthead
+# lockup. Height kept modest so it reads as a corner mark, not a
+# competing element.
+_POSTER_ICON_TEX = (
+    r"\raisebox{-0.26\height}{\includegraphics[height=0.95cm]{fi_icon.png}}"
+    r"\hspace{0.45em}"
+)
+
+
+def _poster_rasteriser_available() -> bool:
+    """True when poster overflow can be detected — i.e. a PDF rasteriser
+    is reachable (PyMuPDF importable, or the ``pdftoppm`` CLI on PATH).
+    When False the generator compiles once at a conservative default
+    scale instead of auto-fitting, since it can't measure the result."""
+    try:
+        import fitz  # noqa: F401  (PyMuPDF)
+        return True
+    except Exception:
+        return shutil.which("pdftoppm") is not None
+
+
+def _render_poster_page(pdf_path: Path, out_dir: Path):
+    """Rasterise page 1 of ``pdf_path`` to a PIL image at ~40 DPI. Tries
+    PyMuPDF (in-process) first, then the ``pdftoppm`` CLI. Returns
+    ``None`` when neither is available or rendering fails — the caller
+    treats ``None`` as 'overflow undetectable, assume the page is fine'."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:  # 1) PyMuPDF — no external binary.
+        import fitz
+        doc = fitz.open(str(pdf_path))
+        try:
+            pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(40 / 72, 40 / 72))
+            return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        finally:
+            doc.close()
+    except Exception:
+        pass
+    exe = shutil.which("pdftoppm")  # 2) pdftoppm CLI.
+    if exe is None:
+        return None
+    prefix = out_dir / "_poster_fitcheck"
+    try:
+        subprocess.run(
+            [exe, "-png", "-r", "40", "-singlefile", str(pdf_path), str(prefix)],
+            capture_output=True, timeout=60,
+        )
+        png = prefix.with_suffix(".png")
+        if png.is_file():
+            img = Image.open(png).copy()
+            try:
+                png.unlink()
+            except OSError:
+                pass
+            return img
+    except Exception:
+        pass
+    return None
+
+
+def _poster_overflows(pdf_path: Path, out_dir: Path) -> bool:
+    """Detect whether the compiled poster overflows the A1 page.
+
+    beamerposter SILENTLY clips content that exceeds the page height — it
+    emits no ``Overfull \\vbox`` warning — so we rasterise page 1 and
+    check whether dark content reaches the very bottom of the page. A
+    fitting poster leaves a cream margin strip there; an overflowing one
+    is clipped flush to the bottom edge. Returns ``False`` ('can't tell,
+    assume fine') when no rasteriser is available.
+
+    Calibrated on a known overflow vs. fit poster at ~40 DPI: the darkest
+    pixel in the bottom 1%% of the page is ~0-24 when clipped (content)
+    and ~203 (cream) when it fits; 130 cleanly separates the two."""
+    img = _render_poster_page(pdf_path, out_dir)
+    if img is None:
+        return False
+    g = img.convert("L")
+    w, h = g.size
+    rows = max(1, int(h * 0.010))
+    lo, _hi = g.crop((0, h - rows, w, h)).getextrema()
+    return lo < 130
+
+
+def _copy_poster_icon(out_dir: Path) -> bool:
+    """Copy the FI teal glyph into ``out_dir`` as ``fi_icon.png`` so both
+    the headline lockup and the Sources-band mark can \\includegraphics it.
+    Returns ``True`` on success, ``False`` (no brand mark) if the asset is
+    missing or can't be copied — the poster still compiles either way
+    because the header lockup is gated on this and the band mark is only
+    injected when the copy succeeded."""
+    if not ICON_PNG.is_file():
+        return False
+    try:
+        shutil.copyfile(ICON_PNG, out_dir / "fi_icon.png")
+        return True
+    except OSError:
+        return False
+
+
+def _brand_references_band(references_tex: str, icon_ok: bool) -> str:
+    """Prepend the small teal glyph to the start of the Sources band (a
+    bottom-left corner mark). Placing it at the *start* of the band keeps
+    it co-located with the citations so a long source list can never push
+    it off the page. Returns ``references_tex`` unchanged when the icon
+    wasn't copied; when the band itself is empty, emits a minimal
+    icon-only band so the poster still carries the mark."""
+    if not icon_ok:
+        return references_tex
+    anchor = r"{\scriptsize\textbf{Sources:}"
+    if anchor in references_tex:
+        return references_tex.replace(anchor, _POSTER_ICON_TEX + anchor, 1)
+    if references_tex.strip():
+        # Band present but in an unexpected shape — prepend the icon so
+        # the mark still renders rather than silently dropping it.
+        return _POSTER_ICON_TEX + references_tex
+    # No sources at all: emit a minimal icon-only band so the poster is
+    # still branded in the bottom-left corner.
+    return (
+        "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n"
+        + _POSTER_ICON_TEX
+        + r"{\scriptsize\color{fimuted}\ttfamily FRONTIER INSIGHT}" + "\n"
+    )
 
 
 class PosterGenerator:
@@ -118,6 +257,13 @@ class PosterGenerator:
             audience=self.config.output.audience,
         )
         references_tex = render_poster_references_latex(refs)
+        # Copy the teal glyph next to poster.tex, then brand both the
+        # masthead (header lockup) and the Sources band (a small corner
+        # mark at the start of the band, so a long citation list can't
+        # push it off-page). Both are gated on the copy succeeding.
+        icon_ok = _copy_poster_icon(out_dir)
+        references_tex = _brand_references_band(references_tex, icon_ok)
+        brandlogo = _POSTER_BRANDLOGO if icon_ok else ""
 
         # safe_substitute again: the LLM-supplied left/middle/right columns
         # are LaTeX with arbitrary `$math$` content that would break
@@ -127,6 +273,7 @@ class PosterGenerator:
             left=parsed.get("left") or "",
             right=parsed.get("right") or "",
             references=references_tex,
+            brandlogo=brandlogo,
         )
         # Make the substituted LaTeX safe for pdflatex — strip emoji and
         # map Unicode typography that would otherwise hard-error the
@@ -173,112 +320,139 @@ class PosterGenerator:
         engine_name, engine_path = engine
         _log.info("poster.pdf: using engine=%s at %s", engine_name, engine_path)
 
+        # --- Length-aware auto-fit -------------------------------------
+        # beamerposter SILENTLY clips content that overflows the A1 page
+        # (no Overfull warning), so we compile at descending ``scale=``
+        # values and rasterise each result until the page no longer
+        # overflows. When no rasteriser (PyMuPDF / pdftoppm) is reachable
+        # we can't measure the result, so we compile ONCE at a
+        # conservative default scale instead of the template's maximum.
         # tectonic accepts the same ``.tex`` input as pdflatex; both
-        # honour ``-interaction=nonstopmode``. Pass the absolute path to
-        # the engine binary (mirroring the paper-generator pattern) so
-        # we bypass any PATH-disagreement between the resolving shell
-        # and the Python child process.
-        try:
-            r = subprocess.run(
-                [
-                    engine_path,
-                    "-interaction=nonstopmode",
-                    "-halt-on-error",
-                    str(poster_tex),
-                ],
-                capture_output=True, text=True, cwd=str(out_dir), timeout=180,
-            )
-        except subprocess.TimeoutExpired:
-            msg = f"{engine_name} poster timeout (>180s); skipped"
-            _log.warning(msg)
-            diag_path.write_text(
-                _render_poster_skip_md(
-                    code=f"{engine_name}_timeout",
-                    summary=msg,
-                    how_to_fix=(
-                        f"The {engine_name} compile took longer than 180s. "
-                        f"On a fresh tectonic install the first run downloads "
-                        f"CTAN packages (~30 s); retry once the cache is "
-                        f"populated. If it consistently times out, raise the "
-                        f"timeout in `generation/poster.py`."
-                    ),
-                ),
-                encoding="utf-8",
-            )
-            result["poster_pdf_skipped"] = diag_path
-            return result
-        if r.returncode != 0:
-            # Both pdflatex and tectonic write LaTeX errors to stdout
-            # (stderr usually empty); slice both for the diagnostic.
-            msg = (
-                f"{engine_name} poster rc={r.returncode}; poster.pdf skipped"
-            )
-            _log.warning(
-                "%s stdout=%s stderr=%s",
-                msg, r.stdout[-500:], r.stderr[-200:],
-            )
-            diag_path.write_text(
-                _render_poster_skip_md(
-                    code=f"{engine_name}_rc_{r.returncode}",
-                    summary=msg,
-                    how_to_fix=(
-                        f"The LaTeX engine errored on `poster.tex`. The most "
-                        f"common cause is a missing `beamerposter` package on "
-                        f"a fresh MiKTeX/TeX Live install; tectonic auto-fetches "
-                        f"it on first compile. stdout tail (last 500 chars):"
-                        f"\n\n```\n{r.stdout[-500:]}\n```"
-                    ),
-                ),
-                encoding="utf-8",
-            )
-            result["poster_pdf_skipped"] = diag_path
-            return result
+        # honour ``-interaction=nonstopmode``. The absolute engine path
+        # (mirroring the paper-generator pattern) bypasses any
+        # PATH-disagreement between the resolving shell and the child.
         out_pdf = out_dir / "poster.pdf"
-        if out_pdf.exists():
-            result["poster_pdf"] = out_pdf
-            # Success — remove any stale skip diagnostic from a prior
-            # failed run so the quest dir doesn't show both poster.pdf
-            # AND poster_pdf_skipped.md (confusing).
-            if diag_path.is_file():
-                try:
-                    diag_path.unlink()
-                except OSError:
-                    pass
-        else:
-            # rc=0 but the engine produced no .pdf on disk. Rare —
-            # usually filesystem-level (permission on out_dir, or the
-            # engine silently swallowed an internal error). Mirrors the
-            # analogous branch in ``PaperGenerator._compile_pdf`` so the
-            # user gets the same skip-diagnostic shape across both
-            # output kinds. Without this, the caller sees a missing
-            # ``poster_pdf`` and no ``poster_pdf_skipped.md`` — silent
-            # partial success.
-            msg = (
-                f"{engine_name} returned rc=0 but `poster.pdf` is not on "
-                f"disk in {out_dir}. The subprocess reported success but "
-                f"produced no output file."
+        scales = (
+            [1.15, 1.06, 0.98, 0.90, 0.83, 0.76]
+            if _poster_rasteriser_available() else [1.0]
+        )
+        for idx, s in enumerate(scales):
+            # The template ships ``scale=1.15``; rewrite it for this pass.
+            poster_tex.write_text(
+                body.replace("scale=1.15", f"scale={s:.2f}", 1), encoding="utf-8",
             )
-            _log.warning(msg)
-            diag_path.write_text(
-                _render_poster_skip_md(
-                    code="output_missing_after_success",
-                    summary=msg,
-                    how_to_fix=(
-                        f"Most likely a filesystem-level issue: "
-                        f"``{out_dir}`` may not be writable by the FI "
-                        f"process, or an antivirus/sync tool deleted "
-                        f"the file between subprocess exit and our "
-                        f"existence check. Verify the directory is "
-                        f"writable, re-run the quest, and if the "
-                        f"problem persists try running `{engine_name} "
-                        f"poster.tex` manually from {out_dir} to "
-                        f"isolate whether it's an engine bug or an "
-                        f"environment one."
+            try:
+                r = subprocess.run(
+                    [
+                        engine_path,
+                        "-interaction=nonstopmode",
+                        "-halt-on-error",
+                        str(poster_tex),
+                    ],
+                    capture_output=True, text=True, cwd=str(out_dir), timeout=180,
+                )
+            except subprocess.TimeoutExpired:
+                msg = f"{engine_name} poster timeout (>180s); skipped"
+                _log.warning(msg)
+                diag_path.write_text(
+                    _render_poster_skip_md(
+                        code=f"{engine_name}_timeout",
+                        summary=msg,
+                        how_to_fix=(
+                            f"The {engine_name} compile took longer than 180s. "
+                            f"On a fresh tectonic install the first run downloads "
+                            f"CTAN packages (~30 s); retry once the cache is "
+                            f"populated. If it consistently times out, raise the "
+                            f"timeout in `generation/poster.py`."
+                        ),
                     ),
-                ),
-                encoding="utf-8",
+                    encoding="utf-8",
+                )
+                result["poster_pdf_skipped"] = diag_path
+                return result
+            if r.returncode != 0:
+                # Both pdflatex and tectonic write LaTeX errors to stdout
+                # (stderr usually empty); slice both for the diagnostic.
+                # A compile error is scale-independent, so fail fast.
+                msg = (
+                    f"{engine_name} poster rc={r.returncode}; poster.pdf skipped"
+                )
+                _log.warning(
+                    "%s stdout=%s stderr=%s",
+                    msg, r.stdout[-500:], r.stderr[-200:],
+                )
+                diag_path.write_text(
+                    _render_poster_skip_md(
+                        code=f"{engine_name}_rc_{r.returncode}",
+                        summary=msg,
+                        how_to_fix=(
+                            f"The LaTeX engine errored on `poster.tex`. The most "
+                            f"common cause is a missing `beamerposter` package on "
+                            f"a fresh MiKTeX/TeX Live install; tectonic auto-fetches "
+                            f"it on first compile. stdout tail (last 500 chars):"
+                            f"\n\n```\n{r.stdout[-500:]}\n```"
+                        ),
+                    ),
+                    encoding="utf-8",
+                )
+                result["poster_pdf_skipped"] = diag_path
+                return result
+            if not out_pdf.exists():
+                # rc=0 but the engine produced no .pdf on disk. Rare —
+                # usually filesystem-level (permission on out_dir, or the
+                # engine silently swallowed an internal error). Mirrors the
+                # analogous branch in ``PaperGenerator._compile_pdf``.
+                msg = (
+                    f"{engine_name} returned rc=0 but `poster.pdf` is not on "
+                    f"disk in {out_dir}. The subprocess reported success but "
+                    f"produced no output file."
+                )
+                _log.warning(msg)
+                diag_path.write_text(
+                    _render_poster_skip_md(
+                        code="output_missing_after_success",
+                        summary=msg,
+                        how_to_fix=(
+                            f"Most likely a filesystem-level issue: "
+                            f"``{out_dir}`` may not be writable by the FI "
+                            f"process, or an antivirus/sync tool deleted "
+                            f"the file between subprocess exit and our "
+                            f"existence check. Verify the directory is "
+                            f"writable, re-run the quest, and if the "
+                            f"problem persists try running `{engine_name} "
+                            f"poster.tex` manually from {out_dir} to "
+                            f"isolate whether it's an engine bug or an "
+                            f"environment one."
+                        ),
+                    ),
+                    encoding="utf-8",
+                )
+                result["poster_pdf_skipped"] = diag_path
+                return result
+            # Compiled OK at this scale. Accept it unless it overflows AND
+            # a smaller scale remains to try.
+            at_floor = idx == len(scales) - 1
+            if at_floor or not _poster_overflows(out_pdf, out_dir):
+                if s != 1.15:
+                    _log.info(
+                        "poster.pdf: auto-fit to scale=%.2f%s", s,
+                        " (scale floor reached)" if at_floor else "",
+                    )
+                break
+            _log.info(
+                "poster.pdf: scale=%.2f overflows the A1 page; retrying smaller",
+                s,
             )
-            result["poster_pdf_skipped"] = diag_path
+
+        result["poster_pdf"] = out_pdf
+        # Success — remove any stale skip diagnostic from a prior failed
+        # run so the quest dir doesn't show both poster.pdf AND
+        # poster_pdf_skipped.md (confusing).
+        if diag_path.is_file():
+            try:
+                diag_path.unlink()
+            except OSError:
+                pass
         return result
 
 

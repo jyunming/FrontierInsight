@@ -1494,7 +1494,7 @@ def test_preprocessor_enables_list_extension_and_shifts_headings(
     PaperGenerator(cfg).generate(art, tmp_path / "out")
 
     cmd = state["cmd"]
-    assert "--from=markdown+lists_without_preceding_blankline" in cmd, (
+    assert "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris" in cmd, (
         "list-after-paragraph rendering depends on this extension"
     )
     assert "--shift-heading-level-by=-1" in cmd, (
@@ -1528,7 +1528,7 @@ def test_preprocessor_skips_heading_shift_when_no_title(
     PaperGenerator(cfg).generate(art, tmp_path / "out")
 
     cmd = state["cmd"]
-    assert "--from=markdown+lists_without_preceding_blankline" in cmd
+    assert "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris" in cmd
     assert "--shift-heading-level-by=-1" not in cmd, (
         "with no title to lift, shifting headings would mangle the "
         "author's intended hierarchy"

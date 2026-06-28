@@ -402,7 +402,11 @@ async def test_poster_uses_same_engine_discovery_as_paper(
     captured_cmd: list[str] = []
 
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        captured_cmd[:] = list(cmd)
+        # Record only the FIRST subprocess call — the LaTeX compile. The
+        # auto-fit overflow detector may make a SECOND call (pdftoppm) to
+        # rasterise the result, which must not clobber the assertion.
+        if not captured_cmd:
+            captured_cmd[:] = list(cmd)
         cwd = Path(_kwargs.get("cwd") or ".")
         (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")

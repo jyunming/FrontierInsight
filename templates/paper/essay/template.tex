@@ -27,8 +27,20 @@
 \usepackage{booktabs}
 \usepackage{amsmath, amssymb}
 \usepackage{hyperref}
+\usepackage{xurl}
+% URLs in the body font and breakable at ANY character via xurl, with
+% links shown without the default colored boxes. With pandoc's
+% autolink_bare_uris (generation/paper.py), long reference URLs wrap
+% inside the text column instead of running into the right margin.
+\urlstyle{same}
+\hypersetup{hidelinks}
+\setlength{\emergencystretch}{3em}
 \usepackage{setspace}
 \usepackage{microtype}
+\usepackage{fancyhdr}
+% xcolor for the muted Frontier Insight footer wordmark (see brandfoot
+% block below). hyperref alone does not expose \textcolor.
+\usepackage{xcolor}
 
 % Pandoc-compatibility preamble — see generic/template.tex.
 \providecommand{\tightlist}{%
@@ -38,6 +50,18 @@
 $highlighting-macros$
 
 \onehalfspacing
+
+% Subtle Frontier Insight brand mark, bottom-left foot of every page:
+% the palette-native teal glyph + teal wordmark (matches the slide
+% corner mark). Set by generation/paper.py only when the mark asset is
+% present; no-ops otherwise.
+$if(brandfoot)$
+\pagestyle{fancy}
+\fancyhf{}
+\rfoot{\small\thepage}
+\lfoot{\raisebox{-0.30\height}{\includegraphics[height=12pt]{fi_icon.png}}\hspace{4pt}\textcolor[HTML]{0E6E6B}{\small Frontier Insight}}
+\renewcommand{\headrulewidth}{0pt}
+$endif$
 
 \title{$title$}
 \author{Frontier Insight}

@@ -30,6 +30,11 @@ section {
   line-height: 1.46;
   color: var(--ink);
   background-color: var(--paper);
+  /* Subtle Frontier Insight brand mark, bottom-left corner of every slide. */
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MzAgMTIwIiBmaWxsPSJub25lIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMzIsLTkpIHNjYWxlKDAuMjcpIiBzdHJva2U9IiMwZTZlNmIiIHN0cm9rZS13aWR0aD0iNDAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTI1NiAxMDBWNDEyIiBzdHJva2Utd2lkdGg9IjQ4Ii8+PHBhdGggZD0iTTI1NiAxNjBMMzIwIDE2MEwzNTAgMTMwTDQwMCAxODAiLz48cGF0aCBkPSJNMjU2IDI2MEgzNjAiLz48cGF0aCBkPSJNMTQwIDE4MEMxODAgMjAwIDIyMCAyNDAgMjU2IDI2MCIgb3BhY2l0eT0iMC4zMiIgc3Ryb2tlLXdpZHRoPSIzMiIvPjxwYXRoIGQ9Ik0xNDAgMzQwQzE4MCAzMjAgMjIwIDI4MCAyNTYgMjYwIiBvcGFjaXR5PSIwLjMyIiBzdHJva2Utd2lkdGg9IjMyIi8+PGNpcmNsZSBjeD0iMjU2IiBjeT0iMjYwIiByPSIxNCIgZmlsbD0iIzBhNGY0ZCIgc3Ryb2tlPSJub25lIi8+PC9nPjx0ZXh0IHg9IjEwNCIgeT0iNjAiIGZpbGw9IiMwZTZlNmIiIGZvbnQtZmFtaWx5PSJDb25zb2xhcyxTRk1vbm8tUmVndWxhcixtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMzAiIGZvbnQtd2VpZ2h0PSI2MDAiIGxldHRlci1zcGFjaW5nPSIyLjUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5GUk9OVElFUiBJTlNJR0hUPC90ZXh0Pjwvc3ZnPg==");
+  background-repeat: no-repeat;
+  background-position: bottom 24px left 72px;
+  background-size: 132px 37px;
   padding: 64px 76px 72px;
   letter-spacing: 0.1px;
 }
@@ -107,6 +112,17 @@ section img {
   border: 1px solid var(--hair);
   border-radius: 3px;
   box-shadow: 0 2px 14px rgba(22, 34, 43, 0.07);
+  /* Length-aware safety net: cap inline figures so a `![w:800]` chart
+     can't grow tall enough to push the slide's text off the bottom (the
+     #1 overflow cause). `width:auto !important` overrides Marp's explicit
+     w:NNN so the cap preserves aspect ratio instead of distorting — the
+     figure scales down to fit within the slide, text stays on-page.
+     `![bg right]` side figures are backgrounds, not <img>, so they're
+     unaffected and keep their split-screen sizing. */
+  max-width: 100%;
+  max-height: 48vh;
+  width: auto !important;
+  height: auto !important;
 }
 
 /* ---- Tables ---------------------------------------------------------- */
@@ -138,6 +154,8 @@ section.lead {
   color: var(--paper);
   justify-content: center;
   padding: 76px 88px;
+  /* Light-teal mark variant so the brand glyph reads on the dark lead bg. */
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MzAgMTIwIiBmaWxsPSJub25lIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMzIsLTkpIHNjYWxlKDAuMjcpIiBzdHJva2U9IiM5ZmI0YjMiIHN0cm9rZS13aWR0aD0iNDAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTI1NiAxMDBWNDEyIiBzdHJva2Utd2lkdGg9IjQ4Ii8+PHBhdGggZD0iTTI1NiAxNjBMMzIwIDE2MEwzNTAgMTMwTDQwMCAxODAiLz48cGF0aCBkPSJNMjU2IDI2MEgzNjAiLz48cGF0aCBkPSJNMTQwIDE4MEMxODAgMjAwIDIyMCAyNDAgMjU2IDI2MCIgb3BhY2l0eT0iMC4zMiIgc3Ryb2tlLXdpZHRoPSIzMiIvPjxwYXRoIGQ9Ik0xNDAgMzQwQzE4MCAzMjAgMjIwIDI4MCAyNTYgMjYwIiBvcGFjaXR5PSIwLjMyIiBzdHJva2Utd2lkdGg9IjMyIi8+PGNpcmNsZSBjeD0iMjU2IiBjeT0iMjYwIiByPSIxNCIgZmlsbD0iI2NmZTBkZSIgc3Ryb2tlPSJub25lIi8+PC9nPjx0ZXh0IHg9IjEwNCIgeT0iNjAiIGZpbGw9IiM5ZmI0YjMiIGZvbnQtZmFtaWx5PSJDb25zb2xhcyxTRk1vbm8tUmVndWxhcixtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMzAiIGZvbnQtd2VpZ2h0PSI2MDAiIGxldHRlci1zcGFjaW5nPSIyLjUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5GUk9OVElFUiBJTlNJR0hUPC90ZXh0Pjwvc3ZnPg==");
 }
 section.lead::before { background: var(--accent); height: 9px; }
 section.lead h1 {
