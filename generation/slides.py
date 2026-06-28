@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import string
 from pathlib import Path
@@ -125,6 +126,12 @@ class SlideGenerator:
         # subprocess_exec` doesn't apply Windows PATHEXT, so spawning
         # bare "marp" fails on systems where marp lives as marp.CMD.
         marp_exe = shutil.which("marp")
+        # Security gate for --allow-local-files (see the flag's comment in
+        # the render call below). That flag lets Marp read ANY local file
+        # the deck references; since slides.md is LLM-authored and the repo
+        # now loads .env secrets, refuse to run Marp when the deck points at
+        # anything other than our own figures/, a remote URL, or a data URI.
+        unsafe_refs = _disallowed_local_image_refs(slides_md)
         if marp_exe is None:
             msg = "marp CLI not on PATH; slides.html/.pdf skipped"
             _log.warning(msg)
@@ -132,6 +139,25 @@ class SlideGenerator:
                 "no_marp",
                 msg,
                 _MARP_INSTALL_RECIPE,
+            )
+        elif unsafe_refs:
+            preview = ", ".join(unsafe_refs[:5])
+            msg = (
+                f"slides.html/.pdf skipped: the deck references local file(s) "
+                f"outside figures/ that Marp's --allow-local-files would embed "
+                f"into the rendered output: {preview}"
+            )
+            _log.warning(msg)
+            marp_skip = (
+                "unsafe_local_file_refs",
+                msg,
+                "Marp runs with --allow-local-files so it can load the quest's "
+                "figures/*.png. To avoid exposing arbitrary local files "
+                "(including .env secrets) in the rendered deck, FI only permits "
+                "image paths under figures/, http(s):// URLs, and data: URIs. "
+                "Edit slides.md so every image uses one of those forms, then "
+                "re-render with `marp slides.md --allow-local-files "
+                "-o slides.pdf`.",
             )
         else:
             # Apply the custom FI theme when its CSS is present; fall back to
@@ -260,6 +286,37 @@ class SlideGenerator:
         slides_md.write_text(content, encoding="utf-8")
         _log.info("slides.md written (%d bytes)", slides_md.stat().st_size)
         return slides_md
+
+
+# Markdown / Marp image reference: ``![alt](path ...)`` — captures the
+# path token up to the first whitespace or closing paren (so Marp size
+# hints like ``![bg fit](figures/x.png)`` and titles are excluded).
+_IMG_REF_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+
+
+def _disallowed_local_image_refs(slides_md: Path) -> list[str]:
+    """Return the image paths in ``slides_md`` that are NOT safe to expose
+    to Marp's ``--allow-local-files``. That flag makes Marp read any local
+    file the (LLM-authored) deck references — e.g. ``![](../../.env)`` —
+    so we permit only our own ``figures/`` outputs, ``http(s)://`` URLs,
+    and ``data:`` URIs. Absolute paths, parent-directory traversal, and
+    any other local path are flagged so the caller refuses to run Marp."""
+    try:
+        text = slides_md.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    bad: list[str] = []
+    for raw in _IMG_REF_RE.findall(text):
+        p = raw.strip().strip("\"'")
+        if p.lower().startswith(("http://", "https://", "data:")):
+            continue
+        # Local path: only figures/<name> with no parent-dir escape is OK.
+        norm = p.replace("\\", "/").lstrip("./")
+        segs = norm.split("/")
+        if norm.startswith("figures/") and ".." not in segs:
+            continue
+        bad.append(p)
+    return bad
 
 
 _MARP_INSTALL_RECIPE = (

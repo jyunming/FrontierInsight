@@ -26,7 +26,11 @@ from core.config import (
     ProviderConfig,
 )
 from core.engine import QuestArtifacts
-from generation.slides import SlideGenerator, _strip_outer_fence
+from generation.slides import (
+    SlideGenerator,
+    _disallowed_local_image_refs,
+    _strip_outer_fence,
+)
 from generation.speech import SpeechGenerator
 
 
@@ -116,6 +120,43 @@ def test_strip_outer_fence_no_fence_passthrough() -> None:
 def test_strip_outer_fence_handles_trailing_whitespace() -> None:
     raw = "  ```markdown\nhello\n```\n  "
     assert _strip_outer_fence(raw) == "hello"
+
+
+# ---------- --allow-local-files safety gate ----------
+
+
+def test_disallowed_local_image_refs_allows_figures_remote_and_data(tmp_path: Path) -> None:
+    """figures/, http(s)://, and data: URIs are all safe to expose to
+    Marp's --allow-local-files."""
+    md = tmp_path / "deck.md"
+    md.write_text(
+        "![bg right:40% fit](figures/a.png)\n"
+        "![w:700](figures/sub/b.png)\n"
+        "![](./figures/c.png)\n"
+        "![](https://example.com/d.png)\n"
+        "![](data:image/png;base64,AAAA)\n",
+        encoding="utf-8",
+    )
+    assert _disallowed_local_image_refs(md) == []
+
+
+def test_disallowed_local_image_refs_flags_traversal_and_absolute(tmp_path: Path) -> None:
+    """An LLM-authored deck pointing outside figures/ (e.g. ![](../../.env))
+    must be flagged so the caller refuses --allow-local-files instead of
+    embedding arbitrary local files (.env secrets) into the rendered deck."""
+    md = tmp_path / "deck.md"
+    md.write_text(
+        "![](figures/ok.png)\n"
+        "![](../../.env)\n"
+        "![secret](/etc/passwd)\n"
+        "![](figures/../../.env)\n",
+        encoding="utf-8",
+    )
+    bad = _disallowed_local_image_refs(md)
+    assert "../../.env" in bad
+    assert "/etc/passwd" in bad
+    assert "figures/../../.env" in bad
+    assert "figures/ok.png" not in bad
 
 
 # ---------- SlideGenerator ----------

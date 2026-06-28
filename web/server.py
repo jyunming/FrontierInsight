@@ -168,12 +168,15 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         score: Any = None
         provider = ""
         if summary_path.exists():
-            verdict = "complete"
             try:
                 data = json.loads(summary_path.read_text(encoding="utf-8"))
                 provider = data.get("provider", "")
+                # Only "complete" once the summary actually PARSES — a
+                # present-but-truncated/unreadable summary is a partial
+                # write from an interrupted finalize, not a finished quest.
+                verdict = "complete"
             except Exception:
-                pass
+                verdict = "incomplete"
         elif _quest_looks_running(d, now):
             # No summary yet, but the engine wrote run.log recently → live.
             verdict = "(running)"
@@ -995,21 +998,25 @@ def make_app(
             if stat is not None:
                 candidates.append((jid, lp, stat[0], stat[1]))
 
-        # 1a. Per-quest logs at <quest>/.fi/. Prefer the captured-stdout
-        # launch.log (written when the quest was spawned by the launcher),
-        # but fall back to the engine's run.log — which EVERY quest writes
-        # regardless of how it was started — so a quest launched directly
-        # via `python launch.py` (no launcher subprocess, no launch.log)
-        # still appears in the Jobs tab, consistent with web/VSCode runs.
+        # 1a. Per-quest logs at <quest>/.fi/. A quest may have BOTH a
+        # captured-stdout launch.log (written when the launcher spawned it)
+        # AND the engine's run.log (which EVERY quest writes, regardless of
+        # how it was started). A direct `python launch.py` run now writes a
+        # launch.log breadcrumb too, so preferring launch.log unconditionally
+        # would surface a STALE mtime/size and hide live progress. Pick
+        # whichever was written most recently — same selection as get_job —
+        # so the Jobs list tracks the live run.log once the engine starts.
         if out_root.is_dir():
             for quest_dir in out_root.iterdir():
                 if not quest_dir.is_dir() or quest_dir.name.startswith("_"):
                     continue
-                lp = quest_dir / ".fi" / "launch.log"
-                if not lp.is_file():
-                    lp = quest_dir / ".fi" / "run.log"
-                if lp.is_file():
-                    _add(quest_dir.name, lp)
+                fi = quest_dir / ".fi"
+                logs = [p for p in (fi / "launch.log", fi / "run.log") if p.is_file()]
+                if logs:
+                    newest = max(
+                        logs, key=lambda p: (_stat_or_none(p) or (0.0, 0))[0],
+                    )
+                    _add(quest_dir.name, newest)
         # 1b. Per-tool-job logs at _jobs/<job_id>/launch.log.
         jobs_root = out_root / "_jobs"
         if jobs_root.is_dir():
