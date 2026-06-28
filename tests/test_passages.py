@@ -3,6 +3,8 @@
 All deterministic + offline: the lexical ranker needs no model or network.
 """
 
+import pytest
+
 from core.passages import chunk_text, select_relevant_excerpt, _lexical_scores
 
 
@@ -83,6 +85,7 @@ def test_stopwords_keep_scientific_terms() -> None:
 
 
 def test_hybrid_surfaces_paraphrase_with_mocked_embedder(monkeypatch) -> None:
+    pytest.importorskip("numpy")  # embedding scoring needs numpy (minimal CI lacks it)
     import core.passages as p
 
     class _Fake:
