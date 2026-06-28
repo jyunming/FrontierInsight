@@ -867,8 +867,9 @@ def test_looks_like_bot_challenge() -> None:
     # A long real article that merely MENTIONS recaptcha is not a challenge.
     article = "This paper studies how reCAPTCHA affects user behaviour. " * 60
     assert not kn._looks_like_bot_challenge(article)
-    # Short text with no challenge marker is not flagged here (the length
-    # floor in _fetch_web_page_text handles tiny non-marker stubs).
+    # Short text with no challenge marker is not flagged here (the
+    # snippet-relative gate in _fetch_web_page_text drops stubs that don't
+    # beat the snippet).
     assert not kn._looks_like_bot_challenge("A legitimate short abstract sentence.")
 
 
@@ -899,6 +900,76 @@ def test_fetch_web_page_text_rejects_200_challenge_page(monkeypatch) -> None:
     # result is None (the caller keeps the real search snippet).
     doc = RD("snippet", {"url": "https://example.com/blocked"})
     assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False) is None
+
+
+def test_keep_fetched_text_is_snippet_relative() -> None:
+    """The fetched-text gate is relative to the snippet we already have:
+    keep page text only when it beats the snippet (so a legitimately short
+    page survives), drop a stub no longer than the snippet, and always drop
+    a bot-challenge regardless of length."""
+    import core.knowledge as kn
+    snippet = "A short search-result snippet we already have on file"
+    # Longer than the snippet → kept, even though it's well under the old
+    # absolute 300-char floor (a real short press release / stats page).
+    assert kn._keep_fetched_text(snippet + " plus genuinely new content.", snippet)
+    # No longer than the snippet → no improvement, drop it (keep snippet).
+    assert not kn._keep_fetched_text("shorter than the snippet", snippet)
+    # A challenge marker is dropped however long relative to the snippet.
+    assert not kn._keep_fetched_text(
+        "Checking your browser - reCAPTCHA. " + "x" * 40, snippet
+    )
+    # With no snippet to beat, fall back to the substance floor.
+    assert not kn._keep_fetched_text("tiny", "")
+    assert kn._keep_fetched_text("y" * (kn._MIN_FULL_TEXT_CHARS + 1), "")
+    assert not kn._keep_fetched_text(None, snippet)
+
+
+def test_fetch_web_page_text_keeps_short_page_beating_snippet(monkeypatch) -> None:
+    """A legit short page (press release / stats page) that's under the old
+    300-char floor but longer than the search snippet is now KEPT, not
+    dropped — the gate is snippet-relative, not an absolute length floor."""
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    page_text = (
+        "Renewable capacity rose 12 percent in 2025, the agency said in a "
+        "brief release, reaching a new annual record across all regions."
+    )
+    body = f"<html><body><p>{page_text}</p></body></html>"
+
+    class _Ok:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "text/html"}
+            r.content = body.encode()
+            return r
+
+    monkeypatch.setattr("core.knowledge.httpx.Client", _Ok)
+    doc = RD("Short snippet.", {"url": "https://example.com/press"})
+    out = kn._fetch_web_page_text(doc, timeout_s=5, max_kb=32, headless=False)
+    assert out and "12 percent" in out
+    assert len(out) < kn._MIN_FULL_TEXT_CHARS  # would've been dropped before
+
+
+def test_xml_to_text_decodes_entities() -> None:
+    """JATS flattening decodes named AND numeric entities (em dash, accents)
+    via html.unescape, not a 3-entity allowlist."""
+    import core.knowledge as kn
+    xml = (
+        "<p>Effect size&#x2014;large&#8212;was r &gt; 0.5 for caf&eacute; "
+        "&amp; tea in the H&#246;lzel study.</p>"
+    )
+    out = kn._xml_to_text(xml)
+    assert "—" in out        # &#x2014; / &#8212; → em dash
+    assert "r > 0.5" in out       # &gt;
+    assert "café" in out     # &eacute;
+    assert "Hölzel" in out   # &#246;
+    assert "& tea" in out         # &amp; preserved as literal ampersand
+    assert "&#" not in out and "&amp;" not in out  # no leftover entity tokens
 
 
 def test_fetch_web_page_text_routes_pdf_to_extractor(monkeypatch) -> None:

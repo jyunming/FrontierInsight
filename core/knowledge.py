@@ -59,6 +59,7 @@ The router parallelizes calls via `asyncio.to_thread` + `asyncio.gather`.
 from __future__ import annotations
 
 import asyncio
+import html as _htmlmod
 import json
 import logging
 import os
@@ -924,6 +925,23 @@ def _looks_like_bot_challenge(text: str) -> bool:
     return False
 
 
+def _keep_fetched_text(text: str | None, snippet: str) -> bool:
+    """Decide whether fetched page text is worth keeping over the search
+    snippet we already have. Rejects bot-challenge / empty pages, then
+    keeps the text only when it actually improves on the snippet — a
+    snippet-relative bar rather than a flat length floor, so a legitimately
+    short page (a press release, a stats page) is kept when it beats the
+    snippet, while a block stub no longer than the snippet is dropped. With
+    no snippet to compare against, requires a couple of sentences of
+    substance (``_MIN_FULL_TEXT_CHARS``)."""
+    if not text or _looks_like_bot_challenge(text):
+        return False
+    snippet_len = len((snippet or "").strip())
+    if snippet_len:
+        return len(text) > snippet_len
+    return len(text) >= _MIN_FULL_TEXT_CHARS
+
+
 def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
     """Render ``url`` in a headless Chromium via Playwright and return its
     HTML. This executes JavaScript and clears most anti-bot challenges
@@ -991,12 +1009,13 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
 
 def _xml_to_text(xml: str) -> str:
     """Flatten JATS / XML full-text markup to readable plain text — strip
-    tags + decode the common entities, collapse whitespace. Good enough to
-    feed the writer + plot steps; we don't need structural fidelity."""
+    tags + decode HTML entities, collapse whitespace. Good enough to feed
+    the writer + plot steps; we don't need structural fidelity."""
     no_tags = re.sub(r"<[^>]+>", " ", xml)
-    no_tags = no_tags.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-    no_tags = re.sub(r"&[a-zA-Z#0-9]+;", " ", no_tags)
-    return re.sub(r"\s+", " ", no_tags).strip()
+    # html.unescape decodes named *and* numeric entities (&#x2014;, &eacute;,
+    # …) so JATS punctuation/symbols survive, unlike a hand-rolled allowlist.
+    decoded = _htmlmod.unescape(no_tags)
+    return re.sub(r"\s+", " ", decoded).strip()
 
 
 def _europepmc_fulltext(
@@ -1163,6 +1182,7 @@ def _fetch_web_page_text(
     if not url:
         return None
     cap = max_kb * 1024
+    snippet = doc.content or ""
     blocked = False
     try:
         with httpx.Client(
@@ -1191,19 +1211,14 @@ def _fetch_web_page_text(
             text = _html_to_text(body.decode("utf-8", errors="replace"))
             # A 200 can still be a bot-challenge / cookie wall (PMC's
             # reCAPTCHA, MDPI, …) whose extracted text is tiny garbage.
-            # Reject it (and any sub-threshold stub) so we fall through to
-            # the headless render / API fallbacks instead of storing it.
-            if (
-                len(text) >= _MIN_FULL_TEXT_CHARS
-                and not _looks_like_bot_challenge(text)
-            ):
+            # Reject that, and any stub no better than the snippet we
+            # already have, so we fall through to the headless render /
+            # API fallbacks instead of storing it.
+            if _keep_fetched_text(text, snippet):
                 return text[:cap]
         elif ctype.startswith("text/") or not ctype:
             text = body.decode("utf-8", errors="replace")
-            if (
-                len(text) >= _MIN_FULL_TEXT_CHARS
-                and not _looks_like_bot_challenge(text)
-            ):
+            if _keep_fetched_text(text, snippet):
                 return text[:cap]
 
     # Direct fetch was blocked / empty / a challenge page. Try the headless
@@ -1212,17 +1227,14 @@ def _fetch_web_page_text(
         html = _playwright_fetch_html(url, timeout_s=timeout_s)
         if html:
             text = _html_to_text(html)
-            if (
-                len(text) >= _MIN_FULL_TEXT_CHARS
-                and not _looks_like_bot_challenge(text)
-            ):
+            if _keep_fetched_text(text, snippet):
                 return text[:cap]
 
     # Last resort: open-access full-text APIs (Europe PMC / Unpaywall)
     # for academic sources whose publisher HTML is bot-walled but whose
     # full text is freely available by DOI / PMCID.
     api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
-    if api_text and len(api_text) >= _MIN_FULL_TEXT_CHARS:
+    if _keep_fetched_text(api_text, snippet):
         return api_text
     return None
 
