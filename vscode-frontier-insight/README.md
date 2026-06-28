@@ -233,11 +233,16 @@ Before pausing, `auto_collect_data` runs:
    `outputs/<id>/data/auto_collected/<adapter>/`.
 
 The `web_plots` step then turns any quantitative data the sources
-contain into source-attributed matplotlib figures, so the paper /
-poster / slides aren't text-only — and every web source is cited by
-its URL across all three. Set a free [Brave Search API
-key](https://brave.com/search/api/) via the `BRAVE_API_KEY` env var
-for better relevance (optional; DuckDuckGo is the keyless default).
+contain into source-attributed matplotlib figures (drawn in the
+Frontier Insight house style), so the paper / poster / slides aren't
+text-only — and every web source is cited by its URL across all three.
+With `knowledge.fetch_web_figures` (off by default) FI also embeds a
+couple of **license-clean illustrative figures** — a real figure from a
+cited CC-licensed arXiv paper plus Wikimedia Commons diagrams (CC /
+public-domain only), each attributed to its source + license. Set a
+free [Brave Search API key](https://brave.com/search/api/) via the
+`BRAVE_API_KEY` env var for better relevance (optional; DuckDuckGo is
+the keyless default).
 
 If any files land, the chat panel shows the count and the quest
 continues — many no-simulation quests run end-to-end without

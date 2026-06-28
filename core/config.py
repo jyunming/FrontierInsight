@@ -705,6 +705,16 @@ class KnowledgeConfig(BaseModel):
     #   "embed"   — sentence-transformer cosine (semantic; loads a model),
     #   "auto"    — embed when sentence-transformers is installed, else lexical.
     passage_ranking: Literal["lexical", "embed", "auto"] = "lexical"
+    # Topic-figure enrichment (no-simulation path): pull a few LICENSE-CLEAN
+    # illustrative figures — a real figure from a cited CC-licensed arXiv
+    # paper, plus Wikimedia Commons diagrams under CC / public-domain — and
+    # embed them in the paper/poster/slides with attribution, so a study
+    # carries a visual point of view beyond its own charts. Off by default
+    # (it fetches + embeds external images); only ever embeds free-licensed
+    # images, each attributed to its source + license.
+    fetch_web_figures: bool = False
+    # Max illustrative figures to embed when ``fetch_web_figures`` is on.
+    web_figures_max: int = Field(default=2, ge=0, le=6)
 
     @field_validator("local_papers", mode="before")
     @classmethod

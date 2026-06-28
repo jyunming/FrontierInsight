@@ -113,6 +113,11 @@ class QuestState(TypedDict, total=False):
     deps: list[str]
     exec_result: dict[str, Any]
     figures: list[str]
+    # Attribution for license-clean illustrative figures pulled from the web
+    # (knowledge.fetch_web_figures): one dict per figure with file / caption /
+    # source_url / license / attribution, so the writer captions them and the
+    # references record their provenance.
+    figure_credits: list[dict[str, Any]]
     result_json: dict[str, Any]
     # Multi-seed replication: when ``engine.execute_replicates > 1``,
     # ``_node_execute`` runs the script N times with different seeds
@@ -707,6 +712,7 @@ class Engine:
         # figures so the paper/poster/slides aren't text-only. Passthrough
         # in the simulation path (which makes its own figures in execute).
         g.add_node("web_plots", self._node_web_plots)
+        g.add_node("web_figures", self._node_web_figures)
 
         g.add_edge(START, "clarify")
         g.add_edge("clarify", "ideate")
@@ -754,7 +760,8 @@ class Engine:
         # simulation path; in no-simulation mode it derives figures from
         # the collected sources before analyze/write consume them.
         g.add_edge("data_load", "web_plots")
-        g.add_edge("web_plots", "analyze")
+        g.add_edge("web_plots", "web_figures")
+        g.add_edge("web_figures", "analyze")
         g.add_edge("analyze", "cross_check")
         g.add_conditional_edges(
             "cross_check",
@@ -3007,6 +3014,113 @@ class Engine:
         merged = existing + [f for f in new_figs if f not in existing]
         return {"figures": merged}
 
+    def _arxiv_ids_from_literature(self, state: QuestState) -> list[str]:
+        """arXiv ids of the papers in this quest's literature (from metadata
+        or an arxiv.org URL) — candidate sources for a cited-paper figure."""
+        ids: list[str] = []
+        for item in state.get("literature") or []:
+            md = (item.get("metadata") or {}) if isinstance(item, dict) else {}
+            aid = str(md.get("arxiv_id") or "").strip()
+            if not aid:
+                m = re.search(
+                    r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})",
+                    str(md.get("url") or ""),
+                )
+                aid = m.group(1) if m else ""
+            aid = re.sub(r"v\d+$", "", aid)
+            if aid and aid not in ids:
+                ids.append(aid)
+        return ids
+
+    async def _select_relevant_figures(self, topic: str, cands: list) -> list:
+        """LLM gate: keep only figures genuinely relevant + appropriate as an
+        illustration for the topic. A wrong image is worse than none, so on
+        any error we fail SAFE — keep cited-paper (arXiv) figures, which are
+        inherently on-topic, and drop the keyword-searched Commons ones."""
+        lines = "\n".join(
+            f"[{i}] ({c.kind}) {c.caption[:160]}" for i, c in enumerate(cands)
+        )
+        prompt = (
+            f"Topic: {topic[:400]}\n\nCandidate illustrative figures:\n{lines}\n\n"
+            "Return ONLY a JSON array of the indices that are genuinely "
+            "relevant AND appropriate as an illustration for THIS topic. Drop "
+            "anything off-topic, misleading, or only superficially keyword-"
+            'matching (e.g. atmospheric "gravity waves" for a gravitational-'
+            "wave topic). Fewer, on-point figures are better. Example: [0, 2]"
+        )
+        try:
+            raw = await self._chat(prompt, node="web_figures")
+            m = re.search(r"\[[^\]]*\]", raw or "")
+            idxs = json.loads(m.group(0)) if m else []
+            keep = [cands[i] for i in idxs
+                    if isinstance(i, int) and 0 <= i < len(cands)]
+            return keep
+        except Exception as e:
+            self._log.info(
+                "[web_figures] selection failed (%s); keeping cited-paper "
+                "figures only", e,
+            )
+            return [c for c in cands if c.kind == "oa_paper"]
+
+    async def _node_web_figures(self, state: QuestState) -> QuestState:
+        """No-simulation mode: embed a few LICENSE-CLEAN illustrative figures
+        (a real figure from a cited CC-licensed arXiv paper + Wikimedia
+        Commons diagrams) so the study carries a visual point of view beyond
+        its own charts. Each figure is attribution-stamped and recorded in
+        ``figure_credits`` for the writer + references. Best-effort: any miss
+        leaves the quest unchanged."""
+        k = self.config.knowledge
+        if not k.fetch_web_figures or k.web_figures_max <= 0:
+            return {}
+        if not state.get("no_simulation_resolved"):
+            return {}
+        from .figure_sources import collect_topic_figures
+
+        topic = str(state.get("topic", ""))
+        out_dir = self.quest_root / "figures"
+        maxn = k.web_figures_max
+        try:
+            cands = await asyncio.to_thread(
+                collect_topic_figures, topic,
+                self._arxiv_ids_from_literature(state),
+                out_dir=out_dir, max_n=maxn + 2,   # over-fetch for selection
+                timeout_s=float(k.full_text_fetch_timeout_s),
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            self._log.warning("[web_figures] collection failed: %s — skipping", e)
+            return {}
+        if not cands:
+            self._log.info("[web_figures] no license-clean figures found")
+            return {}
+
+        keep = (await self._select_relevant_figures(topic, cands))[:maxn]
+        kept = {f.local_path for f in keep}
+        for c in cands:  # drop the unselected downloads
+            if c.local_path not in kept and c.local_path.exists():
+                try:
+                    c.local_path.unlink()
+                except OSError:
+                    pass
+        if not keep:
+            self._log.info("[web_figures] no candidate passed the relevance gate")
+            return {}
+
+        credits: list[dict[str, Any]] = []
+        for f in keep:
+            _stamp_figure_credit(f.local_path, f.source_url, f.license)
+            credits.append({
+                "file": f.local_path.name, "caption": f.caption,
+                "source_url": f.source_url, "license": f.license,
+                "attribution": f.attribution, "kind": f.kind,
+            })
+        existing = list(state.get("figures") or [])
+        merged = existing + [c["file"] for c in credits if c["file"] not in existing]
+        self._log.info(
+            "[web_figures] embedded %d license-clean illustrative figure(s): %s",
+            len(credits), [c["file"] for c in credits],
+        )
+        return {"figures": merged, "figure_credits": credits}
+
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
         exec_result = state.get("exec_result") or {}
@@ -3082,7 +3196,7 @@ class Engine:
             stdout_tail=stdout_for_analyze,
             stderr_tail=exec_result.get("stderr_tail", "")[:1000],
             result_json=result_json_block,
-            figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
+            figure_list=_figure_list_for_prompt(state),
         )
         # Multi-model ensemble path: when the YAML carries
         # provider.node_ensemble["analyze"], fan out N parallel calls
@@ -3395,7 +3509,7 @@ class Engine:
                 state, audience=self.config.output.audience,
                 **self._lit_kwargs(state),
             ),
-            figure_list="\n".join(f"- figures/{f}" for f in state.get("figures", [])) or "(none)",
+            figure_list=_figure_list_for_prompt(state),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
         )
@@ -5255,6 +5369,53 @@ _mpl.rcParams.update({
 })
 # --- end Frontier Insight style ---
 '''
+
+
+def _stamp_figure_credit(path: Path, source_url: str, license_str: str) -> None:
+    """Burn a small attribution line onto the bottom of a fetched figure so
+    the source + license travel with the image wherever it is embedded.
+    Best-effort: no-ops if PIL is unavailable or the image won't open (the
+    writer's caption still carries the credit)."""
+    try:
+        from urllib.parse import urlparse
+
+        from PIL import Image, ImageDraw  # type: ignore[import-not-found]
+
+        img = Image.open(path).convert("RGB")
+        host = urlparse(source_url).hostname or source_url
+        text = f"Source: {host}  -  {license_str}"
+        bar = 20
+        out = Image.new("RGB", (img.width, img.height + bar), (251, 250, 247))
+        out.paste(img, (0, 0))
+        ImageDraw.Draw(out).text((8, img.height + 4), text, fill=(65, 112, 109))
+        out.save(path)
+    except Exception:  # noqa: BLE001 — attribution also lives in the caption
+        pass
+
+
+def _figure_list_for_prompt(state: QuestState) -> str:
+    """The figure list for a writer/analysis prompt. Plain charts are listed
+    by path; license-clean web figures (``figure_credits``) additionally
+    carry their caption + source + license, and are flagged ILLUSTRATIVE so
+    the writer credits them and does NOT present them as the quest's own
+    results."""
+    figs = state.get("figures") or []
+    if not figs:
+        return "(none)"
+    credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
+    lines: list[str] = []
+    for f in figs:
+        c = credits.get(f)
+        if c:
+            lines.append(
+                f"- figures/{f} — ILLUSTRATIVE (a sourced figure, not your "
+                f"own data): {str(c.get('caption', ''))[:140]} "
+                f"[the caption MUST credit: Source {c.get('source_url', '')}, "
+                f"{c.get('license', '')}]"
+            )
+        else:
+            lines.append(f"- figures/{f}")
+    return "\n".join(lines)
 
 
 def _parse_json_lenient(

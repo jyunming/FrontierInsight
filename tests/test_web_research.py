@@ -493,3 +493,62 @@ def test_fi_mpl_preamble_applies_brand_style() -> None:
         assert mpl.rcParams["axes.spines.right"] is False
     finally:
         mpl.rcParams.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# web_figures node — license-clean illustrative figures with attribution
+# ---------------------------------------------------------------------------
+
+def test_web_figures_node_embeds_and_credits(monkeypatch, tmp_path: Path) -> None:
+    import core.figure_sources as fsmod
+    from core.figure_sources import WebFigure
+
+    eng = _engine(tmp_path, web_derived_plots=True)
+    eng.config.knowledge.fetch_web_figures = True
+    eng.config.knowledge.web_figures_max = 1
+    figdir = eng.quest_root / "figures"
+    figdir.mkdir(parents=True, exist_ok=True)
+    a = figdir / "webfig_arxiv_x.png"; a.write_bytes(b"\x89PNG\r\n")
+    b = figdir / "webfig_commons_y.png"; b.write_bytes(b"\x89PNG\r\n")
+    cands = [
+        WebFigure(a, "Detection methods overview", "https://arxiv.org/abs/x",
+                  "CC BY 4.0", "arXiv:x", "oa_paper"),
+        WebFigure(b, "Off-topic image", "https://commons.example/y",
+                  "CC0", "Someone", "commons"),
+    ]
+    monkeypatch.setattr(fsmod, "collect_topic_figures", lambda *a, **k: cands)
+    monkeypatch.setattr("core.engine._stamp_figure_credit", lambda *a, **k: None)
+
+    async def fake_chat(prompt, *, node=None):
+        assert node == "web_figures"
+        return "[0]"  # keep only the arXiv (cited-paper) figure
+
+    eng._chat = fake_chat
+    state = {"no_simulation_resolved": True, "topic": "exoplanet detection",
+             "literature": [], "figures": ["existing.png"]}
+    out = asyncio.run(eng._node_web_figures(state))
+    assert out["figures"] == ["existing.png", "webfig_arxiv_x.png"]
+    assert [c["license"] for c in out["figure_credits"]] == ["CC BY 4.0"]
+    assert a.exists()          # selected, kept
+    assert not b.exists()      # not selected → removed
+
+
+def test_web_figures_node_off_by_default(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, web_derived_plots=True)  # fetch_web_figures defaults False
+    state = {"no_simulation_resolved": True, "topic": "t", "literature": [], "figures": []}
+    assert asyncio.run(eng._node_web_figures(state)) == {}
+
+
+def test_figure_list_for_prompt_annotates_credits() -> None:
+    from core.engine import _figure_list_for_prompt
+    state = {
+        "figures": ["chart.png", "webfig_arxiv_x.png"],
+        "figure_credits": [{
+            "file": "webfig_arxiv_x.png", "caption": "Detection methods tree",
+            "source_url": "https://arxiv.org/abs/x", "license": "CC BY 4.0",
+        }],
+    }
+    block = _figure_list_for_prompt(state)
+    assert "- figures/chart.png" in block            # plain chart unannotated
+    assert "ILLUSTRATIVE" in block and "Detection methods tree" in block
+    assert "CC BY 4.0" in block and "arxiv.org/abs/x" in block

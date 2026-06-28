@@ -332,6 +332,8 @@ knowledge:
 
 For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. The charts are drawn in the **Frontier Insight house style** (Palatino-style serif, teal-anchored palette, warm ground, hairline grid) so they match the paper, poster, and slides rather than looking like default matplotlib. If the sources carry no plottable numbers it skips cleanly.
 
+Beyond charting numbers, `knowledge.fetch_web_figures` (off by default) embeds a couple of **license-clean illustrative figures** so a study carries a visual point of view — a real figure from a **cited CC-licensed arXiv paper**, plus **Wikimedia Commons** diagrams under CC / public-domain. It only ever embeds free-licensed images (CC BY / CC BY-SA / CC0 / public domain; NC/ND rejected), runs an LLM relevance gate to drop off-topic matches, and stamps each figure with its source + license so every embedded image is properly attributed.
+
 ### Watch progress in a browser instead of the terminal
 
 ```bash
