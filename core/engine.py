@@ -5208,34 +5208,50 @@ _FI_MPL_PREAMBLE = '''# --- Frontier Insight house figure style (auto-injected) 
 import matplotlib as _mpl
 _mpl.use("Agg")
 from cycler import cycler as _cycler
+# Brand palette — teal-anchored with warm, muted neutrals. Reference these
+# names if you must colour specific series; otherwise let the cycle apply.
 FI_TEAL  = "#0E6E6B"   # primary
-FI_GOLD  = "#C0892D"
-FI_SLATE = "#3F6663"
-FI_CLAY  = "#9C6B3F"
-FI_MIST  = "#7FA8A5"
-FI_OLIVE = "#7A8A57"
-FI_CORAL = "#B5524A"
-FI_INK   = "#1A2E2C"
+FI_DEEP  = "#0A4F4D"   # deep teal — titles
+FI_GOLD  = "#C28A2C"
+FI_CLAY  = "#B5654A"   # terracotta
+FI_SLATE = "#41706D"
+FI_SAGE  = "#8FA98A"
+FI_SAND  = "#C9A66B"
+FI_PLUM  = "#7C5E72"
+FI_INK   = "#16302E"
+FI_GROUND = "#FBFAF7"  # warm off-white
+FI_GRID  = "#E2DED4"
 _mpl.rcParams.update({
-    "figure.facecolor": "#FBFAF7", "axes.facecolor": "#FBFAF7",
-    "savefig.facecolor": "#FBFAF7", "savefig.edgecolor": "#FBFAF7",
+    "figure.facecolor": FI_GROUND, "axes.facecolor": FI_GROUND,
+    "savefig.facecolor": FI_GROUND, "savefig.edgecolor": FI_GROUND,
+    "figure.figsize": (8.0, 5.2),
     "font.family": "serif",
     "font.serif": ["Palatino Linotype", "Palatino", "Book Antiqua",
                    "Georgia", "DejaVu Serif"],
-    "font.size": 11,
-    "axes.titlesize": 15, "axes.titleweight": "bold",
-    "axes.titlelocation": "left", "axes.titlecolor": FI_INK, "axes.titlepad": 12,
-    "axes.labelcolor": FI_SLATE, "axes.labelsize": 11,
-    "axes.edgecolor": "#4A4A48", "axes.linewidth": 0.8,
-    "axes.grid": True, "axes.axisbelow": True,
+    "font.size": 11.5,
+    # Title: large, deep teal, left-aligned with generous breathing room.
+    "axes.titlesize": 16.5, "axes.titleweight": "bold",
+    "axes.titlelocation": "left", "axes.titlecolor": FI_DEEP, "axes.titlepad": 16,
+    "axes.labelcolor": FI_SLATE, "axes.labelsize": 11.5, "axes.labelpad": 7,
+    "axes.edgecolor": "#6E6A60", "axes.linewidth": 1.0,
+    # A single baseline; the light horizontal grid carries the values, so
+    # the left/top/right spines and the tick marks are dropped for a clean,
+    # editorial read.
     "axes.spines.top": False, "axes.spines.right": False,
-    "grid.color": "#D9D5CC", "grid.linewidth": 0.7,
-    "xtick.color": "#4A4A48", "ytick.color": "#4A4A48",
-    "xtick.labelsize": 10, "ytick.labelsize": 10, "text.color": FI_INK,
-    "legend.frameon": False, "legend.fontsize": 10,
-    "axes.prop_cycle": _cycler(color=[FI_TEAL, FI_GOLD, FI_SLATE, FI_CLAY,
-                                      FI_MIST, FI_OLIVE, FI_CORAL]),
+    "axes.spines.left": False, "axes.spines.bottom": True,
+    "axes.grid": True, "axes.grid.axis": "y", "axes.axisbelow": True,
+    "grid.color": FI_GRID, "grid.linewidth": 0.9,
+    "xtick.color": FI_SLATE, "ytick.color": FI_SLATE,
+    "xtick.major.size": 0, "ytick.major.size": 0,
+    "ytick.left": False, "xtick.bottom": True,
+    "xtick.labelsize": 10.5, "ytick.labelsize": 10.5, "text.color": FI_INK,
+    "legend.frameon": False, "legend.fontsize": 10.5,
+    "lines.linewidth": 2.2, "lines.markersize": 6,
+    "patch.edgecolor": FI_GROUND, "patch.linewidth": 0.8,  # thin gap between bars
+    "axes.prop_cycle": _cycler(color=[FI_TEAL, FI_GOLD, FI_CLAY, FI_SLATE,
+                                      FI_SAGE, FI_SAND, FI_PLUM]),
     "figure.dpi": 150, "savefig.dpi": 150, "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.3,
 })
 # --- end Frontier Insight style ---
 '''
