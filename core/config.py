@@ -701,10 +701,12 @@ class KnowledgeConfig(BaseModel):
     # ``data/literature/`` regardless of this budget.
     literature_excerpt_chars: int = Field(default=4000, ge=500)
     # How prompt excerpts are ranked against the quest question:
-    #   "lexical" — fast, dependency-free term overlap (default),
-    #   "embed"   — sentence-transformer cosine (semantic; loads a model),
-    #   "auto"    — embed when sentence-transformers is installed, else lexical.
-    passage_ranking: Literal["lexical", "embed", "auto"] = "lexical"
+    #   "auto"    — hybrid when a sentence-transformer model loads, else
+    #               lexical (default; skips the model under FI_OFFLINE),
+    #   "hybrid"  — blend of embedding cosine + lexical term overlap,
+    #   "embed"   — pure sentence-transformer cosine (lexical fallback),
+    #   "lexical" — fast, dependency-free term overlap.
+    passage_ranking: Literal["auto", "hybrid", "embed", "lexical"] = "auto"
     # Topic-figure enrichment (no-simulation path): pull a few LICENSE-CLEAN
     # illustrative figures — a real figure from a cited CC-licensed arXiv
     # paper, plus Wikimedia Commons diagrams under CC / public-domain — and

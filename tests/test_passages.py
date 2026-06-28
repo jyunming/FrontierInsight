@@ -3,6 +3,8 @@
 All deterministic + offline: the lexical ranker needs no model or network.
 """
 
+import pytest
+
 from core.passages import chunk_text, select_relevant_excerpt, _lexical_scores
 
 
@@ -72,3 +74,40 @@ def test_lexical_scores_rank_query_terms() -> None:
     assert scores[1] > scores[0]
     # An empty query yields no signal.
     assert _lexical_scores(chunks, "") == [0.0, 0.0]
+
+
+def test_stopwords_keep_scientific_terms() -> None:
+    from core.passages import _content_terms
+    terms = _content_terms("the study results show an effect and association")
+    for w in ("study", "results", "effect", "association"):
+        assert w in terms          # load-bearing scientific terms survive
+    assert "the" not in terms and "and" not in terms  # function words dropped
+
+
+def test_hybrid_surfaces_paraphrase_with_mocked_embedder(monkeypatch) -> None:
+    pytest.importorskip("numpy")  # embedding scoring needs numpy (minimal CI lacks it)
+    import core.passages as p
+
+    class _Fake:
+        def encode(self, texts, normalize_embeddings=True):
+            import numpy as np
+            # query + the paraphrase chunk share a direction; off-topic is orthogonal
+            return np.array([[1.0, 0.0] if ("mortality" in t or "death rate" in t)
+                             else [0.0, 1.0] for t in texts])
+
+    monkeypatch.setattr(p, "_EMBED_TRIED", True)
+    monkeypatch.setattr(p, "_EMBED_MODEL", _Fake())
+    chunks = ["off-topic weather and sports coverage",
+              "each rise in greenery cut the death rate among elders"]
+    scores = p._hybrid_scores(chunks, "mortality")
+    assert scores[1] > scores[0]   # paraphrase chunk wins via the embedding term
+
+
+def test_hybrid_falls_back_to_lexical_offline(monkeypatch) -> None:
+    import core.passages as p
+    monkeypatch.setenv("FI_OFFLINE", "1")
+    monkeypatch.setattr(p, "_EMBED_TRIED", False)
+    monkeypatch.setattr(p, "_EMBED_MODEL", None)
+    assert p._embed_model() is None   # FI_OFFLINE → no model download
+    chunks = ["mortality rose sharply", "weather and sports"]
+    assert p._hybrid_scores(chunks, "mortality") == p._lexical_scores(chunks, "mortality")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections import Counter
 
@@ -31,6 +32,9 @@ _GAP = "\n\n[...]\n\n"
 
 # Common English function words — dropped from the relevance query so a
 # chunk isn't ranked highly just for containing "the" / "of" / "and".
+# Deliberately KEEPS scientific content words (results / effect / study /
+# association / etc.): they are load-bearing in research queries and dropping
+# them was hiding the very passages a literature scan needs.
 _STOPWORDS = frozenset(
     """a an the of to in on for and or but with without within into from by as
     at is are was were be been being this that these those it its their his her
@@ -38,8 +42,7 @@ _STOPWORDS = frozenset(
     could may might will would shall should do does did done has have had not no
     nor than then so such over under between among across per via about against
     during before after above below up down out off only own same other more
-    most some any all each both few many much several use using used based study
-    studies paper results result effect effects associated association""".split()
+    most some any all each both few many much several""".split()
 )
 
 
@@ -85,12 +88,19 @@ _EMBED_TRIED = False
 
 
 def _embed_model():
-    """Lazily load + cache the sentence-transformer model, or None when
-    sentence-transformers isn't installed."""
+    """Lazily load + cache the sentence-transformer model, or None when it's
+    unavailable. Returns None under ``FI_OFFLINE`` so air-gapped / CI installs
+    never attempt a model download and stay on lexical ranking."""
     global _EMBED_MODEL, _EMBED_TRIED
     if _EMBED_TRIED:
         return _EMBED_MODEL
     _EMBED_TRIED = True
+    # Parse FI_OFFLINE the same way the rest of the codebase does, so
+    # FI_OFFLINE=0 / false does NOT disable embeddings.
+    if os.environ.get("FI_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
+        _log.info("passages: FI_OFFLINE set — using lexical ranking")
+        _EMBED_MODEL = None
+        return _EMBED_MODEL
     try:
         from sentence_transformers import SentenceTransformer
         _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
@@ -134,13 +144,38 @@ def _lexical_scores(chunks: list[str], query: str) -> list[float]:
     return scores
 
 
+def _minmax(xs: list[float]) -> list[float]:
+    lo, hi = min(xs), max(xs)
+    return [(x - lo) / (hi - lo) for x in xs] if hi > lo else [0.0] * len(xs)
+
+
+# Embedding weight in the hybrid blend — semantic recall leads, lexical
+# overlap keeps exact-term precision (a number/keyword that must literally
+# appear). Tuned conservatively; lexical never fully drowned out.
+_HYBRID_EMBED_WEIGHT = 0.65
+
+
+def _hybrid_scores(chunks: list[str], query: str) -> list[float]:
+    """Blend min-max-normalised embedding cosine with lexical overlap, so a
+    passage is ranked highly when it is semantically on-topic OR carries the
+    exact query terms. Falls back to pure lexical when no embedding model is
+    available (not installed, load failed, or ``FI_OFFLINE``)."""
+    emb = _embed_scores(chunks, query)
+    lex = _lexical_scores(chunks, query)
+    if emb is None:
+        return lex
+    e, l = _minmax(emb), _minmax(lex)
+    w = _HYBRID_EMBED_WEIGHT
+    return [w * e[i] + (1.0 - w) * l[i] for i in range(len(chunks))]
+
+
 def select_relevant_excerpt(
     content: str,
     query: str,
     *,
     budget_chars: int = 4000,
     chunk_chars: int = 1200,
-    mode: str = "lexical",
+    mode: str = "auto",
 ) -> str:
     """Return up to ``budget_chars`` of the passages in ``content`` most
     relevant to ``query``, in original document order (reading flow
@@ -148,9 +183,10 @@ def select_relevant_excerpt(
     orientation. Falls back to ``content[:budget_chars]`` when there's
     nothing to rank — short content, no query, or a single chunk.
 
-    ``mode``: ``"lexical"`` (default, fast, dependency-free term overlap),
-    ``"embed"`` (sentence-transformer cosine), or ``"auto"`` (embed when
-    available, else lexical)."""
+    ``mode``: ``"auto"`` (default — hybrid when a sentence-transformer model
+    loads, else lexical), ``"hybrid"`` (blend of embedding cosine + lexical
+    overlap), ``"embed"`` (pure cosine, lexical fallback), or ``"lexical"``
+    (fast, dependency-free term overlap)."""
     content = content or ""
     if not query or not query.strip() or len(content) <= budget_chars:
         return content[:budget_chars]
@@ -159,7 +195,9 @@ def select_relevant_excerpt(
         return content[:budget_chars]
 
     scores: list[float] | None = None
-    if mode in ("auto", "embed"):
+    if mode in ("auto", "hybrid"):
+        scores = _hybrid_scores(chunks, query)
+    elif mode == "embed":
         scores = _embed_scores(chunks, query)
     if scores is None:
         scores = _lexical_scores(chunks, query)
