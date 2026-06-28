@@ -6032,14 +6032,31 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
         return False
     if md.get("source") in ("local_paper", "user_supplied"):
         return False
-    # Flag only a real, resolvable PAPER the user can actually download — one
-    # that carries a DOI / arXiv-id / PMID, or came from an academic adapter
-    # — for which we have only the abstract (no full text recovered). A
-    # generic web page (source=web_search, no identifier) is content the
-    # agent uses as-is, not something to ask the user to fetch.
-    has_id = bool(md.get("doi") or md.get("arxiv_id") or md.get("pmid"))
-    from_academic_adapter = md.get("source") not in (None, "", "web_search")
-    return has_id or from_academic_adapter
+    # FI-internal cross-quest memory (prior papers / summaries / spines stored
+    # in Axon) is NOT a paper to download — it's already in the corpus. Never
+    # flag it: even when a spine carries a DOI/URL, the user has nothing to
+    # fetch, and it would otherwise pollute WANTED_PAPERS.md with our own
+    # artifacts instead of the external papers the user actually needs.
+    kind = str(md.get("kind") or "")
+    if kind in _FI_INTERNAL_KINDS or kind.startswith("fi_"):
+        return False
+    # Flag only a real, RESOLVABLE paper the user can actually download: it
+    # carries a DOI / arXiv-id / PMID (so the manifest has a download link),
+    # or it's an academic-adapter hit WITH a real title (so the manifest entry
+    # is actionable). A generic web page, or a doc with neither id nor title,
+    # is content the agent uses as-is — not something to ask the user to fetch.
+    if md.get("doi") or md.get("arxiv_id") or md.get("pmid"):
+        return True
+    title = str(md.get("title") or "").strip()
+    if not title:
+        return False
+    # An academic-adapter hit (crossref / openalex / pubmed / …) is a paper.
+    if md.get("source") not in (None, "", "web_search"):
+        return True
+    # A web-search hit on a known academic publisher domain (SPIE / IEEE /
+    # Elsevier / Wiley / …) is also a real paywalled paper the user can fetch.
+    from core.knowledge import _is_academic_source
+    return _is_academic_source(str(md.get("url") or ""))
 
 
 def _papers_dir_has_files(quest_root: Path) -> bool:
@@ -6101,6 +6118,22 @@ def _paper_resolve_link(md: dict[str, Any]) -> str:
     return str(md.get("url") or md.get("pdf_url") or "").strip()
 
 
+def _paper_display_title(md: dict[str, Any], fallback: str) -> str:
+    """A non-empty, actionable label for a wanted paper. A real title wins; a
+    title-less but resolvable hit (e.g. a DOI-only crossref record) falls back
+    to its identifier so the manifest never shows a bare ``paper-N``."""
+    title = str(md.get("title") or md.get("name") or "").strip()
+    if title:
+        return title
+    if md.get("doi"):
+        return f"DOI {str(md['doi']).strip()}"
+    if md.get("arxiv_id"):
+        return f"arXiv:{str(md['arxiv_id']).strip()}"
+    if md.get("pmid"):
+        return f"PMID {str(md['pmid']).strip()}"
+    return fallback
+
+
 def _paper_gist(content: str, md: dict[str, Any]) -> str:
     """One-line 'what it's about' for the wanted-papers manifest — the first
     sentence of the abstract (title stripped)."""
@@ -6143,7 +6176,7 @@ def _write_wanted_papers_md(
     ]
     for i, doc in enumerate(ranked, 1):
         md = doc.metadata or {}
-        title = str(md.get("title") or md.get("name") or f"paper-{i}")
+        title = _paper_display_title(md, f"paper-{i}")
         lines.append(f"## {i}. {title}")
         link = _paper_resolve_link(md)
         if link:
@@ -6203,7 +6236,7 @@ def _write_paper_need_stubs(
             log.debug("[literature] papers README write failed: %r", e)
     for i, doc in enumerate(needed):
         md = doc.metadata or {}
-        title = str(md.get("title") or md.get("name") or f"paper-{i+1}")
+        title = _paper_display_title(md, f"paper-{i+1}")
         slug = _slugify(title)[:48] or f"paper-{i+1}"
         stub_path = needs_dir / f"{slug}.json"
         # Don't overwrite an existing stub — preserves user notes.
