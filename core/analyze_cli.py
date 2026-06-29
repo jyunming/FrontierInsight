@@ -166,17 +166,20 @@ def build_analyze_config(
     *, topic: str, output_dir: Path, provider_name: str = "vscode_extension",
     title: Optional[str] = None,
 ) -> Config:
-    """Build a minimal Config for the analyze quest.
+    """Build a minimal Config for the analyze quest — **local-data-first**.
 
-    Defaults are tuned for the workflow:
-    * ``no_simulation: true`` — skip implement/execute.
-    * ``auto_collect_data: false`` — the user already supplied the
-      data; no need to ask Axon to find more (the user can pass a
-      ``--config`` override to flip this on).
-    * ``review_loop: false`` — analyze workflows usually want one
-      write+review pass, not a revise cycle.
-    * ``clarify_mode: off`` — the topic is the source of truth here;
-      the user has already decided what to analyze."""
+    The user already supplied the data, so this workflow does NOT ideate,
+    retrieve literature, or design an experiment; it loads and analyses the
+    local data directly. Concretely:
+    * ``analyze_local_first: true`` — ideate / literature / design run as
+      PASSTHROUGHS (no LLM call, no retrieval). Implies no_simulation.
+    * ``knowledge.enabled: false`` + ``web_search: false`` +
+      ``external_fallback: []`` — NO external retrieval, web or academic.
+      Without ``web_search: false`` the literature node would still web-
+      search, because ``web_search`` is independent of ``enabled``.
+    * ``auto_collect_data: false`` — no Axon collection either.
+    * ``review_loop: false`` — one write+review pass, not a revise cycle.
+    * ``clarify_mode: off`` — the topic is the source of truth here."""
     return Config(
         topic=topic,
         title=title or _slug(topic, max_chars=60),
@@ -187,13 +190,17 @@ def build_analyze_config(
             review_loop=False,
             clarify_mode="off",
             no_simulation=True,
+            analyze_local_first=True,
             auto_collect_data=False,
             ideate_reflect=False,
             cross_check_per_finding_k=0,
             enable_analyze_reroute=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=600),
-        knowledge=KnowledgeConfig(enabled=False, source_routing="manual"),
+        knowledge=KnowledgeConfig(
+            enabled=False, web_search=False, external_fallback=[],
+            source_routing="manual",
+        ),
         output=OutputConfig(
             kinds=["paper_md", "paper_pdf"],
             output_dir=output_dir,

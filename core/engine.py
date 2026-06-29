@@ -1500,6 +1500,12 @@ class Engine:
         return False
 
     async def _node_ideate(self, state: QuestState) -> QuestState:
+        if self.config.engine.analyze_local_first:
+            # --analyze: the user supplied the data; there's nothing to
+            # ideate. Passthrough (no LLM call) — downstream reads
+            # chosen_idea via .get() and tolerates its absence.
+            self._log.info("[ideate] analyze_local_first — skipping ideation")
+            return {}
         self._log.info("[ideate] topic=%s", state["topic"][:80].replace("\n", " "))
         # Pull a few related items from the knowledge base to ground ideation.
         # No chosen_idea yet — pass chat_fn so the source-router (if
@@ -1758,6 +1764,12 @@ class Engine:
         }
 
     async def _node_literature(self, state: QuestState) -> QuestState:
+        if self.config.engine.analyze_local_first:
+            # --analyze: local-data-first, so NO external literature is
+            # retrieved. Passthrough — the analysis rests on the user's
+            # data, not on fetched sources.
+            self._log.info("[literature] analyze_local_first — no retrieval")
+            return {}
         chosen = state.get("chosen_idea") or {}
         prior = list(state.get("literature") or [])
         prior_iter = int(state.get("literature_iter") or 0)
@@ -1921,6 +1933,12 @@ class Engine:
         }
 
     async def _node_design(self, state: QuestState) -> QuestState:
+        if self.config.engine.analyze_local_first:
+            # --analyze: no experiment to design — the data already exists.
+            # Passthrough; routing keys on no_simulation_resolved (set by
+            # clarify), so an empty design still flows to data_load.
+            self._log.info("[design] analyze_local_first — no experiment design")
+            return {}
         iteration = state.get("iteration", 0)
         self._log.info("[design] iteration=%d", iteration)
         review_feedback = ""
