@@ -3023,9 +3023,14 @@ def main() -> int:
     # Config construction time).
     _load_dotenv()
     args = parse_args()
+    # Hold the coroutine so we can close() it if asyncio.run never consumes
+    # it (e.g. a KeyboardInterrupt during loop startup). Without this, an
+    # un-awaited 'main_async' coroutine is GC'd with a RuntimeWarning.
+    coro = main_async(args)
     try:
-        return asyncio.run(main_async(args))
+        return asyncio.run(coro)
     except KeyboardInterrupt:
+        coro.close()
         # Ctrl-C on a long-running mode (--serve, --fleet, a single
         # quest mid-LLM-call) cleanly cancels uvicorn / the LangGraph
         # loop. The asyncio runner then re-raises KeyboardInterrupt
