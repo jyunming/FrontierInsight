@@ -99,7 +99,10 @@ def test_claim_check_grounds_and_writes_ledger(tmp_path: Path) -> None:
     state = {
         "topic": "overlay", "paper_md": _paper(tmp_path),
         "analysis": {"key_findings": ["Overlay error is 2.1 nm"]},
-        "result_json": {"overlay": 2.1}, "literature": [],
+        "result_json": {"overlay": 2.1},
+        # One real reference so citation_index=1 is valid.
+        "literature": [{"content": "x", "metadata": {
+            "title": "EUV vs DUV overlay", "doi": "10.1/x", "source": "crossref"}}],
     }
     out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
     g = out["claim_grounding"]
@@ -113,6 +116,27 @@ def test_claim_check_grounds_and_writes_ledger(tmp_path: Path) -> None:
     claims_md = (tmp_path / "paper" / "CLAIMS.md").read_text(encoding="utf-8")
     assert "2 of 4" in claims_md
     assert "cite [1]" in claims_md  # citation basis shows its index
+
+
+def test_claim_check_citation_without_valid_index_is_unsupported(tmp_path: Path) -> None:
+    """A `citation` claim that points at no real reference (missing /
+    non-numeric / out-of-range index) is downgraded to unsupported — a claim
+    naming no source isn't grounded."""
+    eng = _engine(tmp_path)
+    _set_chat(eng, json.dumps({"claims": [
+        {"claim": "A", "basis": "citation", "citation_index": None, "evidence": ""},
+        {"claim": "B", "basis": "citation", "citation_index": 9, "evidence": ""},
+        {"claim": "C", "basis": "citation", "citation_index": "x", "evidence": ""},
+    ], "summary": ""}))
+    # Only one real reference exists → index must be 1.
+    state = {"topic": "t", "paper_md": _paper(tmp_path),
+             "literature": [{"content": "x", "metadata": {
+                 "title": "Only ref", "doi": "10.1/x", "source": "crossref"}}]}
+    g = asyncio.run(eng._node_claim_check(state))["claim_grounding"]  # type: ignore[arg-type]
+    assert g["grounded"] == 0
+    assert sorted(g["unsupported"]) == ["A", "B", "C"]
+    assert all(c["basis"] == "unsupported" and c["citation_index"] is None
+               for c in g["claims"])
 
 
 def test_claim_check_no_paper_skips(tmp_path: Path) -> None:

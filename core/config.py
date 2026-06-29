@@ -452,7 +452,8 @@ class EngineConfig(BaseModel):
     # `unsupported`. A `paper/claims.json` + `paper/CLAIMS.md` ledger is
     # written, and any unsupported claims are surfaced to the reviewer, which
     # must-flags them and forces a bounded revise pass (capped by
-    # `max_iterations`). Set False to skip the node entirely (write → review).
+    # `max_iterations`). Set False to make the claim_check node a no-op
+    # passthrough (no LLM call, no ledger) — the graph edge stays.
     claim_grounding: bool = True
     # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just

@@ -3753,6 +3753,7 @@ class Engine:
         text = await self._chat(prompt, node="claim_check")
         parsed = _parse_json_lenient(text) or {}
         raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
+        n_refs = len(refs)
         claims: list[dict[str, Any]] = []
         for c in (raw_claims or []):
             if not isinstance(c, dict) or not str(c.get("claim") or "").strip():
@@ -3760,10 +3761,21 @@ class Engine:
             basis = str(c.get("basis") or "unsupported").strip().lower()
             if basis not in ("experiment", "citation", "unsupported"):
                 basis = "unsupported"
+            # A "citation" basis only counts if it points at a real reference:
+            # validate the index is an int in [1, n_refs], else it's effectively
+            # unsupported (a claim that names no source isn't grounded).
+            cite_idx = c.get("citation_index")
+            try:
+                cite_idx = int(cite_idx)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                cite_idx = None
+            if basis == "citation" and not (cite_idx and 1 <= cite_idx <= n_refs):
+                basis = "unsupported"
+                cite_idx = None
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
-                "citation_index": c.get("citation_index"),
+                "citation_index": cite_idx,
                 "evidence": str(c.get("evidence") or "").strip(),
             })
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
