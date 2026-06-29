@@ -7,7 +7,32 @@ from pathlib import Path
 import pytest
 import yaml
 
-from core.config import Config, KnowledgeConfig, OutputConfig
+from core.config import (
+    Config,
+    EngineConfig,
+    ExecutionConfig,
+    KnowledgeConfig,
+    OutputConfig,
+    ProviderConfig,
+)
+
+
+def test_negative_numeric_config_fields_fail_fast() -> None:
+    """Bad numeric settings must raise at construction, not silently run a
+    broken quest: negative iteration caps and non-positive timeouts."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        EngineConfig(max_iterations=-1)
+    with pytest.raises(ValidationError):
+        EngineConfig(web_plots_timeout_s=-10)
+    with pytest.raises(ValidationError):
+        ProviderConfig(cli_timeout_s=0)        # gt=0 → 0 rejected
+    with pytest.raises(ValidationError):
+        ExecutionConfig(timeout_s=0)
+    with pytest.raises(ValidationError):
+        KnowledgeConfig(full_text_fetch_timeout_s=-1)
+    # Sanity: the defaults still construct.
+    assert EngineConfig().max_iterations == 2
 
 
 def write_cfg(tmp_path: Path, body: dict) -> Path:

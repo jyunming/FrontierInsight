@@ -30,16 +30,18 @@
             │                        │                        │
             │  ┌─ no-simulation ─────┘                        │
             │  │  auto_collect_data → wait_for_data           │
-            │  │    └─ data_load                              │
+            │  │    └─ data_load → web_plots → web_figures    │
             │  └─────────────────────┬──────────────┐         │
             │                        ▼              │         │
             │                     analyze           │         │
             │                        │              │         │
             │                  cross_check ─(redesign)┘       │
             │                        │ (write)               │
-            │                     write → review → END        │
-            │                              │ (revise)         │
-            │                              └── design         │
+            │                  evidence_gate ─(broaden→literature)
+            │                        │                        │
+            │            write → claim_check → review → END    │
+            │                    │ (revise)  │ (ask)           │
+            │                    └─ design    human_feedback   │
             │                                                 │
             │  AsyncSqliteSaver (one per quest_root)          │
             └──┬───────────────┬─────────────────────┬────────┘
