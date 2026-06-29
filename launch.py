@@ -534,6 +534,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "over. Single-quest mode only (use --config). Useful when a "
              "long Copilot outage exhausts the bridge retry budget mid-quest.",
     )
+    p.add_argument(
+        "--rerun",
+        type=str,
+        default=None,
+        help="Re-open a FINISHED quest for another revision pass. Like "
+             "--resume, but when the quest already reached its terminal state "
+             "it re-enters at the design node (applying any saved refine "
+             "feedback) and runs back to the human-review gate, so a done "
+             "quest can be pushed further. Pass the quest_id.",
+    )
     # One-shot human-review decision for a quest paused at the review gate.
     # Saves hand-editing .fi/human_review_answer.json: just resume with the
     # decision, e.g. `--resume <id> --accept`.
@@ -1085,6 +1095,7 @@ async def run_one(
     resume_quest_id: str | None = None,
     source_yaml_path: Path | None = None,
     auto_accept_on_pass: bool | None = None,
+    reopen: bool = False,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -1135,7 +1146,7 @@ async def run_one(
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive)
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
-        human_feedback_callback=hf_callback,
+        human_feedback_callback=hf_callback, reopen=reopen,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
     written = await _run_generators(cfg, art, supervisor=supervisor)
@@ -1242,11 +1253,13 @@ async def _maybe_profiled(
     profile: bool,
     clarify_callback: object = None,
     human_feedback_callback: object = None,
+    reopen: bool = False,
 ) -> QuestArtifacts:
     if not profile:
         return await engine.run(
             clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
+            reopen=reopen,
         )
     try:
         from viztracer import VizTracer  # type: ignore[import-not-found]
@@ -1255,6 +1268,7 @@ async def _maybe_profiled(
         return await engine.run(
             clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
+            reopen=reopen,
         )
     trace_path = engine.fi_dir / "profile.json"
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
@@ -1262,6 +1276,7 @@ async def _maybe_profiled(
         art = await engine.run(
             clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
+            reopen=reopen,
         )
     print(f"[FI] {art.quest_id} profile -> {trace_path}")
     return art
@@ -1363,6 +1378,12 @@ async def run_fleet(
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    # --rerun is --resume + re-open-on-terminal: normalize it onto args.resume
+    # so all the resume plumbing (validation, checkpoint reuse) applies, and
+    # remember the re-open intent for run_one.
+    _reopen = bool(getattr(args, "rerun", None))
+    if _reopen and not args.resume:
+        args.resume = args.rerun
     # Ensure Axon sidecar is up before anything that touches the
     # knowledge layer. Idempotent: returns fast if already running.
     # Skipped for the install-tectonic / list-drafts modes that
@@ -1545,6 +1566,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 resume_quest_id=args.resume,
                 source_yaml_path=args.config.resolve(),
                 auto_accept_on_pass=args.auto_accept_on_pass,
+                reopen=_reopen,
             )
             return 0
 

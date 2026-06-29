@@ -288,6 +288,7 @@ class Engine:
         *,
         clarify_callback: ClarifyCallback | None = None,
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
+        reopen: bool = False,
     ) -> QuestArtifacts:
         """Run the quest to terminal state.
 
@@ -376,6 +377,26 @@ class Engine:
                             prior_snapshot.next,
                         )
                         payload = None
+                        # Re-open a FINISHED quest (next=()) for another pass:
+                        # re-enter at design via the refine route so it re-runs
+                        # write/review and lands back at the human-review gate,
+                        # applying any saved feedback_history. A no-op if the
+                        # quest isn't terminal (resume continues normally).
+                        if reopen and not prior_snapshot.next:
+                            await graph.aupdate_state(
+                                run_config,
+                                {"human_feedback": {
+                                    "action": "refine",
+                                    "feedback": "Re-opened from the dashboard for "
+                                                "another revision pass.",
+                                }},
+                                as_node="human_feedback",
+                            )
+                            reopened = await graph.aget_state(run_config)
+                            self._log.info(
+                                "[run] re-opened finished quest for another pass "
+                                "(next=%s)", reopened.next,
+                            )
                     else:
                         payload = initial
 

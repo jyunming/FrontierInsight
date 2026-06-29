@@ -304,12 +304,13 @@
     const resumable = !data.alive && data.has_config && !answerPause;
     const resumeBtn = document.getElementById('resume-btn');
     resumeBtn.classList.toggle('hidden', !resumable);
-    // Label it "Re-run" for a finished quest (apply updated settings), else
-    // "Resume" (continue a pause / crash).
-    const finished = data.summary && !data.pending_action;
+    // Label it "Re-run" for a finished quest (re-open for another pass / apply
+    // updated settings), else "Resume" (continue a pause / crash).
+    const finished = data.summary && !data.pending_action && !data.pending_human_review;
+    questFinishedForRerun = finished;
     resumeBtn.textContent = finished ? 'Re-run' : 'Resume';
     resumeBtn.title = finished
-      ? 'Re-run with the latest settings (use after Update settings — a changed research field re-runs the affected stages).'
+      ? 'Re-open this finished quest for another revision pass — it re-runs to the review gate (applying any saved refine feedback or updated settings).'
       : 'Resume this quest from where it paused.';
     // Config-less quests can't Update or Resume — disable + explain.
     const updateLink = document.getElementById('update-link');
@@ -843,8 +844,13 @@
     return false;
   }
 
+  // Set in refresh(): a finished quest re-runs via ?rerun=true (re-opens it),
+  // a paused/crashed quest plain-resumes.
+  let questFinishedForRerun = false;
   async function resumeQuest() {
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
+    const url = `/api/quests/${encodeURIComponent(questId)}/resume`
+      + (questFinishedForRerun ? '?rerun=true' : '');
+    const res = await fetch(url, { method: 'POST' });
     if (!res.ok) { alert('Resume failed: ' + await res.text()); return; }
     if (!pollHandle) pollHandle = setInterval(refresh, 3000);
     refresh();
