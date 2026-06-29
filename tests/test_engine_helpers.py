@@ -529,6 +529,31 @@ async def test_evidence_gate_shows_source_titles_to_the_agent(
     assert "Banana bread recipe" in captured["prompt"]
 
 
+async def test_analyze_reads_dropped_data_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user-dropped dataset (pause-drop gate → inputs/data/) must reach
+    analyze as its ACTUAL contents, not just a path string — otherwise the
+    data isn't analysed at all (the 120/80 in latency.csv must appear)."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    drop = engine.quest_root / "inputs" / "data"
+    drop.mkdir(parents=True, exist_ok=True)
+    (drop / "latency.csv").write_text(
+        "service,latency_ms\napi,120\nweb,80\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return '{"summary": "ok", "key_findings": []}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    await engine._node_analyze(
+        {"topic": "latency analysis", "exec_result": {}, "result_json": {}})
+    assert "latency.csv" in captured["prompt"]
+    assert "120" in captured["prompt"]   # the real value, not just the filename
+    assert "80" in captured["prompt"]
+
+
 async def test_evidence_gate_fails_open_on_malformed_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
