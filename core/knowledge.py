@@ -2594,7 +2594,15 @@ class Knowledge:
         #   • academic router — only when Axon came back empty (preserves
         #     the cost profile for corpus-backed academic quests).
         tasks: list[Any] = []
-        want_web = bool(self.cfg.web_search)
+        # ``knowledge.enabled`` is the master switch: when off, NOTHING
+        # reaches the network — not Axon, not the academic router, not web
+        # search. Previously ``want_web`` looked only at ``web_search`` (which
+        # defaults on), so ``enabled=False`` quietly still hit the web —
+        # surprising, and the reason ``--analyze`` had to also pin
+        # ``web_search=False``. Gate on ``cfg.enabled`` (the config flag) NOT
+        # ``self.enabled`` (which also requires Axon to be installed) — web
+        # search is independent of the Axon corpus when enabled=True.
+        want_web = bool(self.cfg.enabled and self.cfg.web_search)
         if want_web:
             tasks.append(asyncio.to_thread(
                 _web_search, query, self.cfg.web_search_top_k,
@@ -2602,7 +2610,9 @@ class Knowledge:
                 api_key=self.cfg.brave_api_key,
                 timeout_s=self.cfg.full_text_fetch_timeout_s,
             ))
-        run_academic = (not axon_docs) and bool(academic_sources)
+        run_academic = (
+            self.cfg.enabled and (not axon_docs) and bool(academic_sources)
+        )
         if run_academic:
             tasks.append(_route_external(query, external_k, academic_sources))
 
