@@ -789,6 +789,68 @@ def test_next_step_endpoint_surfaces_paused_quest(tmp_path: Path) -> None:
     assert client.get(f"/api/quests/{qid}/next-step").json()["interaction"] == "answer"
 
 
+def test_paused_quest_is_needs_you_not_complete(tmp_path: Path) -> None:
+    """A quest paused at human-review wrote a summary on its clean pause-exit,
+    but the dashboard must show 'needs_you', not 'complete' — and the detail
+    endpoint exposes the pending action + has_config."""
+    import json as _json
+    from web.server import _quest_pending
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    qid = "1782000010-test-quest-review"
+    quest = output_root / qid
+    (quest / ".fi").mkdir(parents=True)
+    # Pause-exit wrote a summary AND a pending human-review snapshot (no answer).
+    (quest / "frontier_insight_summary.json").write_text(
+        _json.dumps({"provider": "openai"}), encoding="utf-8")
+    (quest / ".fi" / "human_review.json").write_text(
+        _json.dumps({"verdict": "revise", "score": 2}), encoding="utf-8")
+    (quest / "config.yaml").write_text("topic: t\n", encoding="utf-8")
+
+    assert _quest_pending(quest) == "review"
+    client = TestClient(make_app(output_root))
+
+    # Dashboard list: needs_you, not complete.
+    rec = next(q for q in client.get("/api/quests").json()["quests"]
+               if q["quest_id"] == qid)
+    assert rec["verdict"] == "needs_you" and rec["pending"] == "review"
+
+    # Detail endpoint: pending_action + has_config.
+    detail = client.get(f"/api/quests/{qid}").json()
+    assert detail["pending_action"] == "review"
+    assert detail["has_config"] is True
+
+    # Once answered, it's no longer pending → complete.
+    (quest / ".fi" / "human_review_answer.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(quest) is None
+    rec2 = next(q for q in client.get("/api/quests").json()["quests"]
+                if q["quest_id"] == qid)
+    assert rec2["verdict"] == "complete"
+
+
+def test_quest_pending_signals(tmp_path: Path) -> None:
+    """_quest_pending recognises the unified pause markers + the clarify
+    snapshot, and reports None when nothing is pending."""
+    from web.server import _quest_pending
+    import json as _json
+    q = tmp_path / "q"
+    (q / ".fi").mkdir(parents=True)
+    assert _quest_pending(q) is None
+    # pause.json wins and carries the kind.
+    (q / ".fi" / "pause.json").write_text(_json.dumps({"kind": "supply"}), encoding="utf-8")
+    assert _quest_pending(q) == "supply"
+    (q / ".fi" / "pause.json").unlink()
+    # NEXT_STEP.md → generic paused.
+    (q / "NEXT_STEP.md").write_text("# Action needed", encoding="utf-8")
+    assert _quest_pending(q) == "paused"
+    (q / "NEXT_STEP.md").unlink()
+    # clarify questions without an answer → clarify.
+    (q / ".fi" / "clarify_questions.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(q) == "clarify"
+    (q / ".fi" / "clarify_answer.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(q) is None
+
+
 def test_clarify_disk_fallback_endpoints(tmp_path: Path) -> None:
     """A subprocess clarify pause has no in-process future, so the web reads the
     questions from .fi/clarify_questions.json and writes the answers to

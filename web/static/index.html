@@ -65,6 +65,7 @@
       <div class="relative">
         <select id="status-filter" onchange="applyFilter()" class="appearance-none px-4 py-2 pr-8 rounded-full bg-surface-high border border-white/10 font-label-sm text-label-sm text-on-surface uppercase hover:bg-surface-container transition-colors" style="border:1px solid rgba(255,255,255,0.1);padding:0.5rem 2rem 0.5rem 1rem;width:auto">
           <option value="">All statuses</option>
+          <option value="needs_you">Needs you</option>
           <option value="complete">Complete</option>
           <option value="(running)">In progress</option>
           <option value="revise">Needs revision</option>
@@ -210,6 +211,17 @@
   }
 
   function describeState(q) {
+    if (q.verdict === 'needs_you') {
+      const kind = { review: 'review', clarify: 'setup', papers: 'papers',
+                     supply: 'files', data: 'data' }[q.pending] || '';
+      return {
+        label: kind ? `Needs you · ${kind}` : 'Needs you',
+        pillBg: 'bg-status-warning/15', pillText: 'text-status-warning',
+        pillBorder: 'border-status-warning/40',
+        pillIcon: '<span class="w-1.5 h-1.5 rounded-full bg-status-warning glow-pulse"></span>',
+        scoreCls: 'text-status-warning',
+      };
+    }
     if (q.verdict === 'complete' || q.verdict === 'accept') return {
       label: 'Complete', pillBg: 'bg-secondary/10', pillText: 'text-secondary', pillBorder: 'border-secondary/30', pillIcon: '', scoreCls: 'text-secondary',
     };
