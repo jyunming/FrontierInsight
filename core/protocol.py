@@ -7,12 +7,20 @@ rules embedded in prompts. This module consolidates that into ONE typed,
 validated object derived from the already-resolved clarify answers + the
 engine config — no new LLM call.
 
-This first increment makes the implicit contract **explicit and typed**
-and hands it to the ``evidence_gate`` so its sufficiency judgement is
+The first increment made the implicit contract **explicit and typed**
+and handed it to the ``evidence_gate`` so its sufficiency judgement is
 contract-aware (it can see the declared topic type, source policy,
-baseline, and success metric). A later increment promotes ``topic_type``
-to a first-class graph route controller; the model is intentionally the
-foundation those follow-ups build on.
+baseline, and success metric).
+
+This increment promotes ``topic_type`` to a first-class routing input
+via ``ROUTE_MATRIX`` below: a single declarative table mapping every
+topic type to the graph path it expects (``simulation`` vs
+``no_simulation``) and the source policy it implies. The engine consults
+it at the design fork — the resolved ``no_simulation`` flag stays
+authoritative (config/clarify wins), but when the topic type's expected
+path disagrees with the resolved route the engine logs a route-mismatch
+WARNING so the divergence is visible in run.log. The same table is the
+single source of truth for each type's source policy.
 
 Pure-stdlib + Pydantic; no engine import (avoids a cycle — the engine
 imports this, not the reverse).
@@ -48,6 +56,45 @@ SourcePolicy = Literal[
                     # what the no-sim auto-collector gathered — not a simulation
     "mixed",        # academic + web both legitimate
 ]
+
+# The two outcomes of the design fork in ``_build_graph``:
+#   "simulation"     → design → implement → execute → execute_reflect → analyze
+#   "no_simulation"  → design → auto_collect_data → wait_for_data → data_load
+RoutePath = Literal["simulation", "no_simulation"]
+
+# Per-topic-type contract: the graph path the type expects + the source
+# policy it implies. SINGLE SOURCE OF TRUTH consulted in two places:
+#   * the design fork (``path``) — for the route-mismatch WARNING; the
+#     resolved ``no_simulation`` flag still decides the actual edge.
+#   * ``derive_protocol`` (``source_policy``) — the live protocol's policy.
+# ``engineering`` / ``market_current`` paths are forward-looking: the
+# current deterministic ``_derive_topic_type`` can't yet produce those
+# types (they await the LLM-classified deriver), but the table is ready.
+ROUTE_MATRIX: dict[str, dict[str, str]] = {
+    "simulation":        {"path": "simulation",    "source_policy": "academic"},
+    "data_analysis":     {"path": "no_simulation", "source_policy": "user_data"},
+    "literature_review": {"path": "no_simulation", "source_policy": "academic"},
+    "case_study":        {"path": "no_simulation", "source_policy": "mixed"},
+    "market_current":    {"path": "no_simulation", "source_policy": "web_current"},
+    "engineering":       {"path": "simulation",    "source_policy": "academic"},
+    "opinion":           {"path": "no_simulation", "source_policy": "mixed"},
+    "unknown":           {"path": "simulation",    "source_policy": "mixed"},
+}
+
+
+def route_for_topic_type(topic_type: str) -> RoutePath:
+    """The graph path a topic type expects: ``"simulation"`` (run code) or
+    ``"no_simulation"`` (analyse supplied/collected data). Falls back to
+    ``"simulation"`` (the historical default) for unrecognised types."""
+    entry = ROUTE_MATRIX.get(str(topic_type or ""), ROUTE_MATRIX["unknown"])
+    return entry["path"]  # type: ignore[return-value]
+
+
+def source_policy_for(topic_type: str) -> SourcePolicy:
+    """The source policy a topic type implies (academic / web_current /
+    user_data / mixed). Single source of truth = ``ROUTE_MATRIX``."""
+    entry = ROUTE_MATRIX.get(str(topic_type or ""), ROUTE_MATRIX["unknown"])
+    return entry["source_policy"]  # type: ignore[return-value]
 
 
 class ResearchProtocol(BaseModel):
@@ -96,30 +143,28 @@ class ResearchProtocol(BaseModel):
         return "\n".join(lines)
 
 
-# Default expected-evidence + source-policy per topic type. Deterministic
-# v1; a later LLM-classified deriver can override these per question.
-_TYPE_DEFAULTS: dict[str, tuple[str, SourcePolicy]] = {
-    "simulation": (
+# Default expected-evidence per topic type (the source policy lives in
+# ``ROUTE_MATRIX`` — single source of truth). Deterministic v1; a later
+# LLM-classified deriver can override these per question.
+_EXPECTED_EVIDENCE: dict[str, str] = {
+    "simulation":
         "quantitative results from a reproducible experiment, plus prior "
-        "work to contextualise them", "academic"),
-    "data_analysis": (
+        "work to contextualise them",
+    "data_analysis":
         "the user's / collected dataset, analysed; supporting literature",
-        "user_data"),
-    "literature_review": (
+    "literature_review":
         "a representative, on-topic body of published sources to synthesise",
-        "academic"),
-    "case_study": (
+    "case_study":
         "concrete evidence about the one system in question + comparable "
-        "prior cases", "mixed"),
-    "market_current": (
+        "prior cases",
+    "market_current":
         "recent, dated web sources (reports, filings, news) — not just "
-        "academic papers", "web_current"),
-    "engineering": (
+        "academic papers",
+    "engineering":
         "a concrete design/spec grounded in established techniques",
-        "academic"),
-    "opinion": (
-        "evidence for the specific claim the position rests on", "mixed"),
-    "unknown": ("evidence that directly addresses the question", "mixed"),
+    "opinion":
+        "evidence for the specific claim the position rests on",
+    "unknown": "evidence that directly addresses the question",
 }
 
 
@@ -148,8 +193,9 @@ def derive_protocol(state: dict[str, Any], config: Any) -> ResearchProtocol:
     no_simulation = bool(state.get("no_simulation_resolved"))
     topic_type = _derive_topic_type(
         str(answers.get("topic_shape") or ""), no_simulation)
-    expected_evidence, source_policy = _TYPE_DEFAULTS.get(
-        topic_type, _TYPE_DEFAULTS["unknown"])
+    expected_evidence = _EXPECTED_EVIDENCE.get(
+        topic_type, _EXPECTED_EVIDENCE["unknown"])
+    source_policy = source_policy_for(topic_type)
 
     def _clean(v: object) -> str:
         s = str(v or "").strip()

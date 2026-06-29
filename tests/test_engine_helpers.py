@@ -1779,6 +1779,66 @@ def test_route_after_design_no_sim_flag_routes_to_auto_collect_data(
     assert engine._route_after_design({}) == "implement"
 
 
+def _capture_engine_warnings(engine):
+    """Attach a sink handler to the per-quest logger (propagate=False, so
+    pytest's caplog never sees it) and return the captured-records list +
+    a detach callback. Mirrors the preflight-pdf warning tests below."""
+    import logging as _logging
+    records: list[_logging.LogRecord] = []
+    sink = _logging.Handler()
+    sink.setLevel(_logging.WARNING)
+    sink.emit = records.append  # type: ignore[assignment]
+    engine._log.addHandler(sink)
+    return records, (lambda: engine._log.removeHandler(sink))
+
+
+def test_route_after_design_warns_on_topic_type_route_mismatch(
+    tmp_path: Path,
+) -> None:
+    """ROUTE_MATRIX is consulted at the design fork: a 'review' topic
+    (topic_type=literature_review → expects the no_simulation path) that
+    resolved to SIMULATE must log a [route] WARNING — without changing
+    the actual edge (routing still follows no_simulation_resolved)."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    state = {
+        "topic": "Survey of overlay metrology methods",
+        "clarify_answers": {"topic_shape": "review"},
+        "no_simulation_resolved": False,  # SIMULATE — disagrees with the type
+    }
+    records, detach = _capture_engine_warnings(engine)
+    try:
+        edge = engine._route_after_design(state)
+    finally:
+        detach()
+    assert edge == "implement"  # routing NOT overridden by the matrix
+    route_warnings = [
+        r.getMessage() for r in records if "[route]" in r.getMessage()
+    ]
+    assert route_warnings, "expected a [route] mismatch warning"
+    assert "literature_review" in route_warnings[0]
+
+
+def test_route_after_design_no_warning_when_type_and_route_agree(
+    tmp_path: Path,
+) -> None:
+    """No spurious warning when the topic type's expected path matches the
+    resolved route (review + NO_SIMULATION is consistent)."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    state = {
+        "topic": "Survey of overlay metrology methods",
+        "clarify_answers": {"topic_shape": "review"},
+        "no_simulation_resolved": True,  # agrees with literature_review
+    }
+    records, detach = _capture_engine_warnings(engine)
+    try:
+        edge = engine._route_after_design(state)
+    finally:
+        detach()
+    assert edge == "auto_collect_data"
+    route_warnings = [r for r in records if "[route]" in r.getMessage()]
+    assert not route_warnings
+
+
 # ---- paper.pdf pre-flight check ------------------------------------------
 
 
