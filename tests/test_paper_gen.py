@@ -141,6 +141,50 @@ def _make_artifacts(tmp_path: Path, *, with_figures: bool = False, with_manifest
     )
 
 
+def test_references_bib_and_csl_json_emitted(tmp_path: Path) -> None:
+    """The bundle carries machine-readable references derived from the quest's
+    literature — references.bib (BibTeX) + references.csl.json (CSL-JSON)."""
+    import json
+
+    cfg = _make_config(tmp_path, ["paper_md"])
+    art = _make_artifacts(tmp_path)
+    art.raw_state = {
+        "literature": [
+            {"content": "abstract", "metadata": {
+                "title": "Overlay metrology for the 7nm node",
+                "authors": ["Smith, Jane A."], "year": "2021",
+                "venue": "Proc. SPIE", "doi": "10.1117/12.2222",
+                "source": "crossref"}},
+            {"content": "abstract", "metadata": {
+                "title": "A Transformer for EPE", "authors": ["Alex Doe"],
+                "year": "2023", "arxiv_id": "2301.01234", "source": "arxiv"}},
+        ],
+    }
+    out_dir = tmp_path / "out"
+    result = PaperGenerator(cfg).generate(art, out_dir)
+
+    assert "references_bib" in result and "references_csl_json" in result
+    # Grouped with the paper under paper/.
+    assert result["references_bib"] == out_dir / "paper" / "references.bib"
+    bib = (out_dir / "paper" / "references.bib").read_text(encoding="utf-8")
+    assert "@article{" in bib and "10.1117/12.2222" in bib
+    assert "archivePrefix = {arXiv}" in bib
+    items = json.loads(
+        (out_dir / "paper" / "references.csl.json").read_text(encoding="utf-8"))
+    assert len(items) == 2
+    assert items[0]["DOI"] == "10.1117/12.2222"
+
+
+def test_references_absent_when_no_literature(tmp_path: Path) -> None:
+    """No literature → no references files (and no crash)."""
+    cfg = _make_config(tmp_path, ["paper_md"])
+    art = _make_artifacts(tmp_path)  # raw_state defaults to {}
+    out_dir = tmp_path / "out"
+    result = PaperGenerator(cfg).generate(art, out_dir)
+    assert "references_bib" not in result
+    assert not (out_dir / "paper" / "references.bib").exists()
+
+
 def test_pandoc_missing_only_paper_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: None)
 

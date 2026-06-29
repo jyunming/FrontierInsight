@@ -56,6 +56,8 @@ Inside `outputs/<quest_id>/`:
 ```
 paper/paper.md                        ← the finished IMRAD paper
 paper/paper.pdf                       ← (if pandoc + LaTeX installed)
+paper/references.bib                  ← the paper's sources as BibTeX (drop into Zotero/Mendeley/LaTeX)
+paper/references.csl.json             ← the same sources as CSL-JSON (Pandoc/Zotero)
 figures/*.png                         ← every plot the experiment produced
 code/experiment.py                    ← the exact code that ran
 slides.md                             ← if output.kinds: [slides]; Marp markdown source

@@ -25,8 +25,10 @@ When you type `@fi /start config.yaml` in Copilot Chat, the extension:
 4. Streams the response back, renders progress in the chat panel.
 
 The engine runs to a finished paper, slide deck, figures, and a
-machine-readable summary in `outputs/<quest_id>/`. You see every node
-firing live in the chat panel.
+machine-readable summary in `outputs/<quest_id>/`. The paper's sources are
+also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
+(CSL-JSON) so they drop straight into Zotero / Mendeley / LaTeX. You see every
+node firing live in the chat panel.
 
 ## One-time setup
 
