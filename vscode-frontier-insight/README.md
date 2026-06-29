@@ -27,8 +27,9 @@ When you type `@fi /start config.yaml` in Copilot Chat, the extension:
 The engine runs to a finished paper, slide deck, figures, and a
 machine-readable summary in `outputs/<quest_id>/`. The paper's sources are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
-(CSL-JSON) so they drop straight into Zotero / Mendeley / LaTeX. You see every
-node firing live in the chat panel.
+(CSL-JSON), and a `paper/CLAIMS.md` ledger records which of the paper's claims
+trace to the experiment, a cited source, or are unsupported (unsupported claims
+force a revise). You see every node firing live in the chat panel.
 
 ## One-time setup
 

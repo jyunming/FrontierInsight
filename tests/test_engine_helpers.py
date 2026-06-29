@@ -464,7 +464,10 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # `analyze → cross_check` replaces the old `analyze → write` edge,
     # plus a conditional `cross_check → write | design` edge.
     assert ("analyze", "cross_check") in plain_edges
-    assert ("write", "review") in plain_edges
+    # `write → claim_check → review` (claim_check grounds each paper claim to
+    # evidence; it's a passthrough when engine.claim_grounding is off).
+    assert ("write", "claim_check") in plain_edges
+    assert ("claim_check", "review") in plain_edges
 
     # Conditional branches: review-revise, execute-reflect-retry,
     # cross-check-redesign, AND the new design → implement | wait_for_data.
