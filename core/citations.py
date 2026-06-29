@@ -58,10 +58,11 @@ def _authors(ref: dict[str, Any]) -> list[str]:
                 items = [str(a).strip() for a in parsed if str(a).strip()]
         except (ValueError, SyntaxError):
             pass
-    # A single delimited string ("A; B" / "A and B") → split into names.
-    if len(items) == 1 and re.search(r";| and |,\s*[A-Z][a-z]", items[0]):
-        items = [p.strip() for p in
-                 re.split(r"\s*(?:;| and |,(?=\s*[A-Z][a-z]))\s*", items[0])
+    # A single delimited string → split into names. Only ";" / " and " are
+    # safe delimiters; a comma is NOT, because the common single-name form is
+    # "Family, Given" (splitting it would invent a second author).
+    if len(items) == 1 and re.search(r";| and ", items[0]):
+        items = [p.strip() for p in re.split(r"\s*(?:;| and )\s*", items[0])
                  if p.strip()]
     return items
 
@@ -121,11 +122,11 @@ def _cite_key(ref: dict[str, Any], used: set[str]) -> str:
 
 def _bibtex_entry_type(ref: dict[str, Any]) -> str:
     if _is_web(ref):
-        return "misc"
+        return "misc"          # web page
     if ref.get("arxiv_id") and not ref.get("venue"):
         return "misc"          # bare preprint
-    if ref.get("venue") and (ref.get("doi") or _year(ref)):
-        return "article"
+    if ref.get("venue"):
+        return "article"       # published in a journal / proceedings
     return "misc"
 
 

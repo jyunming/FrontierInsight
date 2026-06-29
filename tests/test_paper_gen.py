@@ -164,10 +164,13 @@ def test_references_bib_and_csl_json_emitted(tmp_path: Path) -> None:
     result = PaperGenerator(cfg).generate(art, out_dir)
 
     assert "references_bib" in result and "references_csl_json" in result
-    bib = (out_dir / "references.bib").read_text(encoding="utf-8")
+    # Grouped with the paper under paper/.
+    assert result["references_bib"] == out_dir / "paper" / "references.bib"
+    bib = (out_dir / "paper" / "references.bib").read_text(encoding="utf-8")
     assert "@article{" in bib and "10.1117/12.2222" in bib
     assert "archivePrefix = {arXiv}" in bib
-    items = json.loads((out_dir / "references.csl.json").read_text(encoding="utf-8"))
+    items = json.loads(
+        (out_dir / "paper" / "references.csl.json").read_text(encoding="utf-8"))
     assert len(items) == 2
     assert items[0]["DOI"] == "10.1117/12.2222"
 
@@ -179,7 +182,7 @@ def test_references_absent_when_no_literature(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     result = PaperGenerator(cfg).generate(art, out_dir)
     assert "references_bib" not in result
-    assert not (out_dir / "references.bib").exists()
+    assert not (out_dir / "paper" / "references.bib").exists()
 
 
 def test_pandoc_missing_only_paper_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -447,9 +447,11 @@ class PaperGenerator:
             audience=self.config.output.audience,
         )
         if refs:
-            bib = out_dir / "references.bib"
-            csl = out_dir / "references.csl.json"
+            paper_sub = out_dir / "paper"
             try:
+                paper_sub.mkdir(parents=True, exist_ok=True)
+                bib = paper_sub / "references.bib"
+                csl = paper_sub / "references.csl.json"
                 bib.write_text(to_bibtex(refs), encoding="utf-8")
                 csl.write_text(to_csl_json(refs), encoding="utf-8")
                 result["references_bib"] = bib

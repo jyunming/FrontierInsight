@@ -114,6 +114,17 @@ def test_authors_accepts_delimited_string() -> None:
     assert len(items[0]["author"]) == 2
 
 
+def test_single_family_given_name_is_one_author() -> None:
+    """A lone "Family, Given" string is ONE author — the comma must not be
+    treated as a delimiter (that would invent a second author)."""
+    ref = {"title": "Overlay", "authors": "Smith, John", "year": "2022",
+           "doi": "10.1/x", "venue": "SPIE"}
+    items = json.loads(to_csl_json([ref]))
+    assert items[0]["author"] == [{"family": "Smith", "given": "John"}]
+    bib = to_bibtex([ref])
+    assert "author = {Smith, John}" in bib
+
+
 def test_authors_accepts_stringified_list() -> None:
     """A repr'd Python list (how on-disk literature serializes authors) is
     parsed back into separate authors, not rendered as one bogus name."""
