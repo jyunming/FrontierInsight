@@ -549,9 +549,12 @@ async def test_evidence_gate_fails_open_on_malformed_state(
     assert patch["research_protocol"]["topic_type"]
 
 
-def test_execute_reflect_retries_on_empty_result_json(tmp_path: Path) -> None:
-    """rc=0 but NO RESULT_JSON marker is stored as {} — that must trigger
-    repair (retry), not be mistaken for a parsed result and proceed."""
+def test_route_after_execute_reflect_retries_on_empty_result_json(
+    tmp_path: Path,
+) -> None:
+    """`_route_after_execute_reflect`: rc=0 but NO RESULT_JSON marker (stored
+    as {}) must route to retry/repair, not be mistaken for a parsed result
+    and proceed. Budget-exhausted still proceeds."""
     engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
     # Empty result + budget remaining → retry.
     assert engine._route_after_execute_reflect(
