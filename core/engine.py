@@ -3234,6 +3234,37 @@ class Engine:
                     parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:budget]}")
                 except OSError:
                     continue
+        # The user's OWN data files (e.g. a dropped data/ridership.csv, an
+        # --analyze-staged spreadsheet) were ignored — so web_plots reported
+        # "no collected content to plot" even when the numbers to chart were
+        # sitting right there. Read the ordinary data files too (via the
+        # summarizer, so csv/json AND xlsx/parquet all yield real content),
+        # skipping the literature / auto_collected subtrees covered above.
+        from .summarizer import _classify_extension, _read_text
+        data_dir = self.quest_root / "data"
+        if data_dir.is_dir():
+            _skip_top = {"literature", "auto_collected"}
+            # Collect matching files lazily and STOP after limit*2 — don't
+            # materialize + sort the whole data/ tree (could be large). Sort
+            # only the small collected set for deterministic prompt order,
+            # and filter BEFORE the cap so non-data files don't crowd it out.
+            collected: list[Path] = []
+            for p in data_dir.rglob("*"):
+                if not p.is_file() or p.name == "README.md":
+                    continue
+                rel = p.relative_to(data_dir)
+                if rel.parts and rel.parts[0] in _skip_top:
+                    continue
+                if _classify_extension(p.suffix) == "other":
+                    continue
+                collected.append(p)
+                if len(collected) >= limit * 2:
+                    break
+            for p in sorted(collected):
+                content = _read_text(p, _classify_extension(p.suffix))
+                if content.strip():
+                    rel = p.relative_to(data_dir)
+                    parts.append(f"[USER DATA] {rel.as_posix()}\n{content[:budget]}")
         return "\n\n".join(parts)
 
     async def _node_web_plots(self, state: QuestState) -> QuestState:
