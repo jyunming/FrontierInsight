@@ -451,7 +451,6 @@ def test_disabled_knowledge_does_not_web_search(monkeypatch) -> None:
 
     # enabled=False + web_search=True → still no web.
     k = Knowledge(KnowledgeConfig(enabled=False, web_search=True))
-    k.cfg = KnowledgeConfig(enabled=False, web_search=True)
     asyncio.run(k.asearch("anything"))
     assert called["web"] == 0, "enabled=False must not web-search"
 
