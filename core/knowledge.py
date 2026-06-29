@@ -1780,44 +1780,16 @@ def _fetch_full_text(
                         pdf_bytes = _fetch_pdf_bytes(candidate, timeout_s=timeout_s)
         except Exception as e:
             _log.info("full-text landing-page %s failed: %s", landing, e)
-            return None
 
-    if not pdf_bytes:
-        # No direct publisher PDF — fall back to the open-access cascade
-        # (PMC BioC / Europe PMC / preprint / Unpaywall / …) which recovers
-        # clean full text by PMCID / DOI / arXiv-id.
-        return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
+    if pdf_bytes:
+        extracted = _pdf_bytes_to_text(pdf_bytes, cap=max_kb * 1024)
+        if extracted and len(extracted) >= _MIN_FULL_TEXT_CHARS:
+            return extracted
 
-    # Extract text via pypdf. Cap to max_kb so we don't blow up the
-    # downstream prompt.
-    try:
-        import pypdf  # type: ignore[import-not-found]
-        from io import BytesIO
-    except ImportError:
-        _log.info("pypdf not installed; cannot extract fetched PDF text")
-        return None
-    try:
-        reader = pypdf.PdfReader(BytesIO(pdf_bytes))
-    except Exception as e:
-        _log.info("fetched PDF parse failed: %s", e)
-        return None
-    parts: list[str] = []
-    total = 0
-    cap = max_kb * 1024
-    for page in reader.pages:
-        try:
-            txt = page.extract_text() or ""
-        except Exception:
-            continue
-        if not txt.strip():
-            continue
-        parts.append(txt)
-        total += len(txt.encode("utf-8", errors="replace"))
-        if total >= cap:
-            break
-    if not parts:
-        return None
-    return "\n\n".join(parts)[:cap]
+    # No direct publisher PDF or parse failed — fall back to the open-access cascade
+    # (PMC BioC / Europe PMC / preprint / Unpaywall / …) which recovers
+    # clean full text by PMCID / DOI / arXiv-id.
+    return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
 
 
 async def _enrich_with_full_text(

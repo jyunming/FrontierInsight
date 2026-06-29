@@ -529,6 +529,31 @@ async def test_evidence_gate_shows_source_titles_to_the_agent(
     assert "Banana bread recipe" in captured["prompt"]
 
 
+async def test_analyze_reads_dropped_data_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user-dropped dataset (pause-drop gate → inputs/data/) must reach
+    analyze as its ACTUAL contents, not just a path string — otherwise the
+    data isn't analysed at all (the 120/80 in latency.csv must appear)."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    drop = engine.quest_root / "inputs" / "data"
+    drop.mkdir(parents=True, exist_ok=True)
+    (drop / "latency.csv").write_text(
+        "service,latency_ms\napi,120\nweb,80\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return '{"summary": "ok", "key_findings": []}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    await engine._node_analyze(
+        {"topic": "latency analysis", "exec_result": {}, "result_json": {}})
+    assert "latency.csv" in captured["prompt"]
+    assert "120" in captured["prompt"]   # the real value, not just the filename
+    assert "80" in captured["prompt"]
+
+
 async def test_evidence_gate_fails_open_on_malformed_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -576,6 +601,27 @@ def test_web_plots_gathers_user_data_files(tmp_path: Path) -> None:
     text = engine._gather_collected_text({"topic": "ridership trend over time"})
     assert "ridership.csv" in text
     assert "100" in text and "200" in text
+
+
+def test_route_after_execute_reflect_retries_on_empty_result_json(
+    tmp_path: Path,
+) -> None:
+    """`_route_after_execute_reflect`: rc=0 but NO RESULT_JSON marker (stored
+    as {}) must route to retry/repair, not be mistaken for a parsed result
+    and proceed. Budget-exhausted still proceeds."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    # Empty result + budget remaining → retry.
+    assert engine._route_after_execute_reflect(
+        {"exec_result": {"returncode": 0}, "result_json": {},
+         "exec_reflect_iter": 0}) == "retry"
+    # A real (non-empty, non-degenerate) result → proceed.
+    assert engine._route_after_execute_reflect(
+        {"exec_result": {"returncode": 0}, "result_json": {"metric": 0.5},
+         "exec_reflect_iter": 0}) == "proceed"
+    # Empty result but retry budget exhausted → proceed (can't spin).
+    assert engine._route_after_execute_reflect(
+        {"exec_result": {"returncode": 0}, "result_json": {},
+         "exec_reflect_iter": 99}) == "proceed"
 
 
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:

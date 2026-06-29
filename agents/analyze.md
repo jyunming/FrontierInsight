@@ -24,6 +24,9 @@ $stderr_tail
 ## Result JSON line (last line of stdout, if present)
 $result_json
 
+## User-supplied data (dropped by the user — analyse the ACTUAL values below)
+$user_data_block
+
 ## Figures produced
 $figure_list
 

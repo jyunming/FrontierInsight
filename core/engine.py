@@ -332,6 +332,12 @@ class Engine:
             config.pauses.timeout_s
         )
 
+    def __del__(self) -> None:
+        try:
+            _close_quest_logger(self.quest_id)
+        except Exception:
+            pass
+
     async def run(
         self,
         *,
@@ -1004,7 +1010,11 @@ class Engine:
         (→ proceed to analyze)."""
         result = state.get("exec_result") or {}
         rc = result.get("returncode", 0)
-        has_result_json = state.get("result_json") is not None
+        # ``_node_execute`` stores ``result_json or {}``, so a script that
+        # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
+        # ``is not None`` wrongly counted as "parsed", skipping repair. Treat
+        # an empty result_json as no usable result so execute_reflect retries.
+        has_result_json = bool(state.get("result_json"))
         # Give-up sentinel set by the reflect node OR iterations exhausted
         # always win — otherwise the degenerate-retry below could loop
         # past the budget.
@@ -3052,7 +3062,11 @@ class Engine:
         """
         exec_result = state.get("exec_result") or {}
         rc = exec_result.get("returncode", 0)
-        has_result_json = state.get("result_json") is not None
+        # ``_node_execute`` stores ``result_json or {}``, so a script that
+        # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
+        # ``is not None`` wrongly counted as "parsed", skipping repair. Treat
+        # an empty result_json as no usable result so execute_reflect retries.
+        has_result_json = bool(state.get("result_json"))
         degenerate = bool(
             rc == 0
             and has_result_json
@@ -3540,6 +3554,40 @@ class Engine:
                 "or normalization bug), and do NOT report the zeros as findings.\n\n"
                 + stdout_for_analyze
             )
+        # Read the ACTUAL contents of any user-dropped data (the pause-drop
+        # gate writes to inputs/data/). Previously only the file PATHS were
+        # surfaced, so analyze never saw the numbers — a dropped latency.csv
+        # showed up as a filename, not its rows. Render the real content via
+        # the same summarizer the no-sim data_load uses, budgeted.
+        user_data_block = "(none)"
+        drop_dir = self.quest_root / "inputs" / "data"
+        if drop_dir.is_dir():
+            from .summarizer import (
+                _render_content_blocks,
+                _render_file_manifest,
+                _walk_folder,
+            )
+            try:
+                # Filter the FI-authored README.md (the "drop your data here"
+                # instructions) so it doesn't leak into the prompt as a
+                # "source" — same guard as _node_data_load — and re-number
+                # idents so the manifest stays sequential.
+                entries = [
+                    e for e in _walk_folder(drop_dir)
+                    if not (e.rel_path == "README.md"
+                            and (drop_dir / "README.md").is_file())
+                ]
+                for new_id, e in enumerate(entries, start=1):
+                    e.ident = new_id
+                if entries:
+                    # Manifest first so _render_content_blocks' "files
+                    # elided" note ("the manifest above") is truthful and
+                    # binary/unreadable files are still visible to the model.
+                    manifest = _render_file_manifest(entries)
+                    blocks = _render_content_blocks(entries, total_budget_chars=8000)
+                    user_data_block = f"{manifest}\n\n{blocks}".strip() or "(none)"
+            except OSError as e:
+                self._log.debug("[analyze] could not read dropped data: %r", e)
         prompt = self._prompts["analyze"].substitute(
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
@@ -3549,6 +3597,7 @@ class Engine:
             stdout_tail=stdout_for_analyze,
             stderr_tail=exec_result.get("stderr_tail", "")[:1000],
             result_json=result_json_block,
+            user_data_block=user_data_block,
             figure_list=_figure_list_for_prompt(state),
         )
         # Multi-model ensemble path: when the YAML carries
