@@ -2035,3 +2035,45 @@ def test_local_papers_accepts_directory(tmp_path) -> None:
     names = sorted(p.name for p in files)
     # recursive; csv / dotfile / hidden-dir contents / duplicate all excluded
     assert names == ["a.md", "b.txt"]
+
+
+def test_fetch_full_text_landing_page_failure_fallback(monkeypatch) -> None:
+    """When direct PDF or landing-page fetch raises an exception, the
+    fetcher falls back to the open-access API cascade instead of returning None."""
+    from core.knowledge import _fetch_full_text, RetrievedDoc as RD
+    import core.knowledge as kn
+
+    # 1. Mock _resolve_ids to provide a PMCID, triggering the open-access cascade
+    monkeypatch.setattr(kn, "_resolve_ids", lambda doc, timeout_s: {
+        "pmcid": "PMC99999", "doi": "10.1000/xyz123", "arxiv_id": ""
+    })
+
+    # 2. Mock the open-access API PMC BioC route to return a valid full text
+    expected_body = "This is a dummy PMC BioC full text body. " * 15  # > 300 chars
+    monkeypatch.setattr(kn, "_pmc_bioc_fulltext", lambda pmcid, timeout_s, cap: expected_body)
+
+    # 3. Create a document with landing page URL that will fail (or throw during Client GET)
+    doc = RD(
+        content="some snippet",
+        metadata={
+            "source": "crossref",
+            "url": "https://broken-landing-page.com/article",
+        }
+    )
+
+    # 4. Mock httpx Client to raise an exception, simulating network/DNS failure
+    class MockClient:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, url, **kw):
+            raise ConnectionError("DNS Lookup Failed")
+
+    monkeypatch.setattr(kn.httpx, "Client", MockClient)
+
+    # Call _fetch_full_text
+    res = _fetch_full_text(doc, timeout_s=5, max_kb=64)
+
+    # The returned text should match our open-access cascade mocked body
+    assert res == expected_body
+
