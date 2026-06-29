@@ -39,9 +39,13 @@ A single \`/start\` or \`/new\` quest fires roughly **8–18 LLM calls** dependi
 | `implement` | 1–3 | Hits 2-3× if the execute-repair loop fires. |
 | `execute_reflect` | 0–3 | Only on a `rc != 0` execution; same retry cap. |
 | `analyze` | 1 | |
-| `cross_check` | 1–3 | One per finding, up to 3 findings typical. |
+| `cross_check` | 0–3 | One per finding (skipped when `cross_check_per_finding_k = 0`). |
+| `evidence_gate` | 0–1 | One sufficiency call before write (`engine.evidence_gate`, default on); a `broaden` verdict re-enters literature once. |
+| `web_plots` | 0–1 | No-simulation mode only — one LLM call to chart the collected data (`engine.web_derived_plots`). |
 | `write` | 1–2 | Possibly twice if `review` returns `revise`. |
+| `claim_check` | 0–1 | Grounds each paper claim to evidence before review (`engine.claim_grounding`, default on). |
 | `review` | 1 *or* N+1 | 1 for the single-reviewer flow; with a reviewer panel of N personas → N + 1 moderator. |
+| `human_feedback` | 0 | No LLM call — pauses for the user's accept/reject/refine when the gate is on. |
 
 Floor (~8): clarify off, every loop hits its happy path, single reviewer.  
 Ceiling (~18): full clarify + reflect + 1 design retry + 1 implement retry + 1 execute_reflect retry + 3 cross-check findings + 3-persona reviewer panel + 1 revise loop.

@@ -107,7 +107,7 @@ class ProviderConfig(BaseModel):
     # bounded so a silent stall can't wedge the engine indefinitely.
     # HTTP providers use their own httpx-level timeout (``timeout_s``
     # on :class:`LLMClient`) and ignore this field.
-    cli_timeout_s: float = 300.0
+    cli_timeout_s: float = Field(default=300.0, gt=0)
     # Soft inactivity watchdog for the streaming reader. Resets on
     # every stdout line (or stream-json event); the child is killed if
     # this many seconds pass with no output even when the overall
@@ -377,7 +377,7 @@ class PausesConfig(BaseModel):
 
 class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
-    max_iterations: int = 2
+    max_iterations: int = Field(default=2, ge=0)
     review_loop: bool = True
     # Human-feedback gate. ``"after_review"`` (the default) pauses
     # the quest AFTER the review node fires and waits for the user
@@ -626,7 +626,7 @@ class EngineConfig(BaseModel):
     # timeout the quest just proceeds figure-less rather than hanging (a
     # stuck codex_cli call once wedged a run for hours when the
     # provider-level timeout didn't fire).
-    web_plots_timeout_s: float = 360.0
+    web_plots_timeout_s: float = Field(default=360.0, gt=0)
     # User-pinned answers to the clarify slots, supplied by the
     # interview frontends (`launch.py --new`, the VSCode `@fi /new`
     # extension, the `--serve` web UI) or hand-written into YAML. When
@@ -646,7 +646,7 @@ class EngineConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     sandbox: SandboxKind = "venv"
-    timeout_s: int = 60 * 30
+    timeout_s: int = Field(default=60 * 30, gt=0)
     python_version: str = "3.11"
     docker_image: str = "python:3.11-slim"
 
@@ -799,7 +799,7 @@ class KnowledgeConfig(BaseModel):
     # paywalled venue. Off by default — opt-in per quest.
     try_fetch_full_text: bool = False
     # Per-doc HTTP timeout (landing-page GET, PDF GET). Short is good.
-    full_text_fetch_timeout_s: float = 15.0
+    full_text_fetch_timeout_s: float = Field(default=15.0, gt=0)
     # Total budget across all docs in one literature batch — caps wall
     # time so a slow VPN can't stall the literature node indefinitely.
     full_text_fetch_total_s: float = 90.0

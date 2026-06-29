@@ -10,10 +10,14 @@
 ## Architecture in one paragraph
 
 `launch.py` parses YAML → `Config` → constructs an `Engine` per quest →
-the Engine compiles an async `StateGraph`
-(`clarify → ideate → literature → design → implement → execute →
-execute_reflect → analyze → cross_check → write → review`) with three
-feedback loops → `AsyncSqliteSaver` checkpoints state at
+the Engine compiles an async `StateGraph` — `clarify → ideate →
+literature → design →` then either `implement → execute →
+execute_reflect` (simulation) or `auto_collect_data → wait_for_data →
+data_load → web_plots → web_figures` (no-simulation) `→ analyze →
+cross_check → evidence_gate → write → claim_check → review →
+human_feedback` — with four feedback loops (see
+`core/engine.py:_build_graph` for the authoritative edge set) →
+`AsyncSqliteSaver` checkpoints state at
 `<quest_root>/.fi/state.sqlite` → on completion, the generators
 (`PaperGenerator`, `SlideGenerator`, `PosterGenerator`,
 `SpeechGenerator`) consume the `QuestArtifacts` and produce the
@@ -28,7 +32,12 @@ For exact YAML field semantics see [`capabilities.md`](capabilities.md);
 for the layered design see [`architecture.md`](architecture.md).
 
 ### Engine
-- 11-node async LangGraph DAG with three feedback loops.
+- ~20-node async LangGraph DAG with four feedback loops (clarify, ideate,
+  literature, design, implement_outline/implement, execute/execute_reflect
+  or the no-simulation chain auto_collect_data → wait_for_data → data_load
+  → web_plots → web_figures, analyze, cross_check, evidence_gate, write,
+  claim_check, review, human_feedback). `core/engine.py:_build_graph` is
+  authoritative; `capabilities.md` describes each node.
 - `AsyncSqliteSaver` checkpointing → resumability via
   `--resume <quest_id>` or `@fi /resume`.
 - Stateless `Engine` so N parallel quests can share one process
