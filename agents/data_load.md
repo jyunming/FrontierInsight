@@ -1,6 +1,6 @@
-You are reading user-supplied empirical data for a research quest running in **no-simulation mode**. The user collected this data themselves; your job is to synthesize it into a structured `result_json` payload that downstream nodes (analyze → cross_check → write → review) can treat as the experimental result.
+You are reading the **collected evidence** for a research quest running in **no-simulation mode**. The files below are whatever this quest gathered into its data dir — these may be **datasets the user supplied**, and/or **sources the engine auto-retrieved** (web pages and academic literature downloaded to `data/literature/`). Treat each file as evidence to be summarized faithfully, attributing claims to the file they came from. Your job is to synthesize it into a structured `result_json` payload that downstream nodes (analyze → cross_check → write → review) can treat as the basis for the analysis.
 
-You are NOT running a simulation. You are NOT inventing data. You are summarizing what the user actually dropped into the data dir.
+You are NOT running a simulation. You are NOT inventing data. You are summarizing what is actually in the collected files — do not assert the user personally produced data that came from a retrieved source, and don't claim a measurement the files don't contain.
 
 ## Quest topic
 
