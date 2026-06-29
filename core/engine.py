@@ -3500,6 +3500,21 @@ class Engine:
                 "or normalization bug), and do NOT report the zeros as findings.\n\n"
                 + stdout_for_analyze
             )
+        # Read the ACTUAL contents of any user-dropped data (the pause-drop
+        # gate writes to inputs/data/). Previously only the file PATHS were
+        # surfaced, so analyze never saw the numbers — a dropped latency.csv
+        # showed up as a filename, not its rows. Render the real content via
+        # the same summarizer the no-sim data_load uses, budgeted.
+        user_data_block = "(none)"
+        if all_ds:
+            from .summarizer import _render_content_blocks, _walk_folder
+            try:
+                entries = _walk_folder(self.quest_root / "inputs" / "data")
+                rendered = _render_content_blocks(entries, total_budget_chars=8000)
+                if rendered.strip():
+                    user_data_block = rendered
+            except OSError as e:
+                self._log.debug("[analyze] could not read dropped data: %r", e)
         prompt = self._prompts["analyze"].substitute(
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
@@ -3509,6 +3524,7 @@ class Engine:
             stdout_tail=stdout_for_analyze,
             stderr_tail=exec_result.get("stderr_tail", "")[:1000],
             result_json=result_json_block,
+            user_data_block=user_data_block,
             figure_list=_figure_list_for_prompt(state),
         )
         # Multi-model ensemble path: when the YAML carries
