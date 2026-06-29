@@ -252,6 +252,52 @@ async def test_human_feedback_callback_timeout_pause_exits(
 
 
 @pytest.mark.asyncio
+async def test_human_refine_loops_past_max_iterations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: an explicit human refine re-runs the design→…→review pass
+    even with ``max_iterations=1`` and ``review_loop=False`` — the callback is
+    invoked TWICE (refine, then accept), proving the refine wasn't silently
+    dropped at the iteration cap (the bug a user hit clicking Refine)."""
+    import asyncio
+
+    cfg = Config(
+        topic="smoke-test topic for human refine loop",
+        title="hf-refine-smoke",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            human_feedback_gate="after_review", auto_accept_on_pass=False,
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    calls: list[dict] = []
+
+    async def cb(snapshot: dict) -> dict:
+        calls.append(snapshot)
+        # Refine once (forces a revision past the cap), then accept.
+        if len(calls) == 1:
+            return {"action": "refine", "feedback": "tighten the methods"}
+        return {"action": "accept"}
+
+    artifacts = await asyncio.wait_for(
+        engine.run(human_feedback_callback=cb), timeout=300,
+    )
+    # The refine looped back to design and returned to the gate → 2 calls.
+    # (Pre-fix it routed straight to done after the first refine → 1 call.)
+    assert len(calls) == 2
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+
+
+@pytest.mark.asyncio
 async def test_engine_runs_with_clarify_auto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

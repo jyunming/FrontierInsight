@@ -83,15 +83,16 @@ def test_route_after_human_feedback_refine_loops_to_design(tmp_path: Path) -> No
     assert eng._route_after_human_feedback(state) == "revise"  # type: ignore[arg-type]
 
 
-def test_route_after_human_feedback_refine_respects_max_iterations(tmp_path: Path) -> None:
-    """A user who clicks "refine" past max_iterations can't outrun the
-    loop budget — the route falls to ``done`` so the quest finalises."""
+def test_route_after_human_feedback_refine_honored_past_max_iterations(tmp_path: Path) -> None:
+    """An EXPLICIT human refine is honored even past max_iterations — the cap
+    bounds the unattended auto-loop, not a deliberate user click. Earlier this
+    routed to ``done`` and silently dropped the user's refine."""
     eng = _engine_with_gate(tmp_path, "after_review")
     state = {
         "human_feedback": {"action": "refine", "feedback": "x"},
-        "iteration": 2,  # already at max_iterations=2
+        "iteration": 5,  # well past max_iterations
     }
-    assert eng._route_after_human_feedback(state) == "done"  # type: ignore[arg-type]
+    assert eng._route_after_human_feedback(state) == "revise"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("action", ["accept", "reject"])
