@@ -765,11 +765,93 @@ def test_next_step_endpoint_surfaces_paused_quest(tmp_path: Path) -> None:
     assert body["interaction"] == "supply"
     assert "inputs/papers/" in body["markdown"]
 
+    # The structured pause.json descriptor is authoritative for kind +
+    # upload_targets (what the banner's inline upload posts to).
+    import json as _json
+    (quest / ".fi" / "pause.json").write_text(
+        _json.dumps({"kind": "papers", "interaction": "supply",
+                     "headline": "download 2 paywalled paper(s)",
+                     "upload_targets": ["papers"]}),
+        encoding="utf-8",
+    )
+    body2 = client.get(f"/api/quests/{qid}/next-step").json()
+    assert body2["kind"] == "papers"
+    assert body2["upload_targets"] == ["papers"]
+
     # An ANSWER pause (e.g. clarify/review answered via files + resume) is
     # classified from the NEXT_STEP.md verb even with no in-process registry.
+    (quest / ".fi" / "pause.json").unlink()
     (quest / "NEXT_STEP.md").write_text(
         "# Action needed — confirm the research setup\n\n"
         "Quest **q** is paused and waiting for you (**ANSWER**).\n",
         encoding="utf-8",
     )
     assert client.get(f"/api/quests/{qid}/next-step").json()["interaction"] == "answer"
+
+
+def test_clarify_disk_fallback_endpoints(tmp_path: Path) -> None:
+    """A subprocess clarify pause has no in-process future, so the web reads the
+    questions from .fi/clarify_questions.json and writes the answers to
+    .fi/clarify_answer.json for the next --resume to consume."""
+    import json as _json
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    qid = "1782000002-test-quest-clarify"
+    fi = output_root / qid / ".fi"
+    fi.mkdir(parents=True)
+    client = TestClient(make_app(output_root))
+
+    # No questions on disk → not pending.
+    assert client.get(f"/api/quests/{qid}/clarify").json()["pending"] is False
+
+    (fi / "clarify_questions.json").write_text(
+        _json.dumps({"success_metric": {"prompt": "How to measure success?",
+                                        "default": "accuracy"}}),
+        encoding="utf-8",
+    )
+    r = client.get(f"/api/quests/{qid}/clarify").json()
+    assert r["pending"] is True and r["source"] == "disk"
+    assert "success_metric" in r["questions"]
+    # get_quest also reports the pause from disk.
+    assert client.get(f"/api/quests/{qid}").json()["pending_clarify"] is True
+
+    # Submitting writes the answer file (no in-process future for a subprocess).
+    p = client.post(f"/api/quests/{qid}/clarify",
+                    json={"answers": {"success_metric": "F1"}})
+    assert p.status_code == 200 and p.json()["in_process_resolved"] is False
+    assert _json.loads((fi / "clarify_answer.json").read_text())["success_metric"] == "F1"
+    # With the answer staged, the gate is no longer pending.
+    assert client.get(f"/api/quests/{qid}/clarify").json()["pending"] is False
+
+
+def test_generalized_upload_targets(tmp_path: Path) -> None:
+    """POST /upload routes files to inputs/papers, inputs/data, or data/ by
+    target, filtering by that target's extensions."""
+    pytest.importorskip("multipart")
+    import io
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    qid = "1782000003-test-quest-upload"
+    (output_root / qid / ".fi").mkdir(parents=True)
+    client = TestClient(make_app(output_root))
+
+    # data → inputs/data, accepting .csv but not .pdf.
+    files = [
+        ("files", ("samples.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv")),
+        ("files", ("paper.pdf", io.BytesIO(b"%PDF"), "application/pdf")),
+    ]
+    r = client.post(f"/api/quests/{qid}/upload", data={"target": "data"}, files=files)
+    assert r.status_code == 200
+    assert r.json()["saved"] == ["samples.csv"]
+    assert "paper.pdf" in r.json()["skipped"]
+    assert (output_root / qid / "inputs" / "data" / "samples.csv").is_file()
+
+    # root_data → data/ (the no-sim data pause).
+    r2 = client.post(f"/api/quests/{qid}/upload", data={"target": "root_data"},
+                     files=[("files", ("d.json", io.BytesIO(b"{}"), "application/json"))])
+    assert r2.json()["saved"] == ["d.json"]
+    assert (output_root / qid / "data" / "d.json").is_file()
+
+    # Unknown target → 400.
+    assert client.post(f"/api/quests/{qid}/upload", data={"target": "nope"},
+                       files=[("files", ("x.csv", io.BytesIO(b"x"), "text/csv"))]).status_code == 400

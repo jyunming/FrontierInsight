@@ -60,9 +60,20 @@
        you (any of clarify / papers / supply / data / review). Sourced from the
        single NEXT_STEP.md every pause writes. -->
   <div id="next-step-banner" class="hidden fi-banner fi-banner-warning">
-    <div class="flex flex-col gap-2 w-full">
+    <div class="flex flex-col gap-3 w-full">
       <b id="next-step-headline">Action needed</b>
       <div id="next-step-body" class="fi-md-body text-on-surface-variant"></div>
+      <!-- ANSWER pauses: jump to the form below. -->
+      <div id="next-step-answer" class="hidden">
+        <button id="next-step-answer-btn" onclick="jumpToAnswerForm()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Answer now ↓</button>
+      </div>
+      <!-- SUPPLY pauses: drop files straight into the named folder(s) + Resume. -->
+      <div id="next-step-supply" class="hidden flex flex-wrap items-center gap-3">
+        <input id="next-step-file" type="file" multiple class="text-on-surface text-body-sm"/>
+        <button id="next-step-upload-btn" onclick="uploadNextStep()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Upload &amp; stage</button>
+        <button onclick="resumeQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume</button>
+        <span id="next-step-supply-status" class="text-on-surface-variant text-body-sm"></span>
+      </div>
     </div>
   </div>
 
@@ -297,8 +308,13 @@
     }
   }
 
+  // The upload target(s) for the current SUPPLY pause (e.g. ["papers","data"]).
+  let nextStepTargets = [];
+
   async function refreshNextStep() {
     const banner = document.getElementById('next-step-banner');
+    const answerEl = document.getElementById('next-step-answer');
+    const supplyEl = document.getElementById('next-step-supply');
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/next-step`);
       // On any non-OK response, hide the banner rather than leave a stale
@@ -316,7 +332,57 @@
       bodyEl.innerHTML = window.fi_renderMarkdown
         ? window.fi_renderMarkdown(body)
         : escapeHtml(body);
+      // Wire the affordance: ANSWER → jump to the form; SUPPLY → inline upload.
+      nextStepTargets = data.upload_targets || [];
+      if (data.interaction === 'answer') {
+        answerEl.classList.remove('hidden');
+        supplyEl.classList.add('hidden');
+      } else if (nextStepTargets.length) {
+        supplyEl.classList.remove('hidden');
+        answerEl.classList.add('hidden');
+      } else {
+        answerEl.classList.add('hidden');
+        supplyEl.classList.add('hidden');
+      }
     } catch (e) { banner.classList.add('hidden'); }
+  }
+
+  // ANSWER pause: reveal + scroll to whichever form is pending (clarify/review).
+  function jumpToAnswerForm() {
+    const target = !document.getElementById('clarify-section').classList.contains('hidden')
+      ? 'clarify-section'
+      : (!document.getElementById('human-review-section').classList.contains('hidden')
+          ? 'human-review-section' : null);
+    if (target) document.getElementById(target).scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  // SUPPLY pause: upload the dropped files to each named target folder, then
+  // tell the user to press Resume.
+  async function uploadNextStep() {
+    const input = document.getElementById('next-step-file');
+    const statusEl = document.getElementById('next-step-supply-status');
+    if (!input.files || !input.files.length) { statusEl.textContent = 'Pick one or more files first.'; return; }
+    if (!nextStepTargets.length) { statusEl.textContent = 'Nothing to upload here.'; return; }
+    statusEl.textContent = 'Uploading…';
+    // A file is offered to every target and lands wherever its extension is
+    // accepted; track DISTINCT staged filenames so a file accepted by one
+    // target (and skipped by another) isn't double-counted.
+    const total = input.files.length;
+    const stagedNames = new Set();
+    try {
+      for (const target of nextStepTargets) {
+        const fd = new FormData();
+        fd.append('target', target);
+        for (const f of input.files) fd.append('files', f);
+        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/upload`, { method: 'POST', body: fd });
+        if (res.ok) { const d = await res.json(); (d.saved || []).forEach(n => stagedNames.add(n)); }
+      }
+      const staged = stagedNames.size;
+      const noFit = total - staged;
+      statusEl.textContent = `Staged ${staged} file(s)` + (noFit > 0 ? ` (${noFit} didn't fit a target type)` : '') + '. Now press Resume.';
+      input.value = '';
+      refreshWantedPapers();
+    } catch (e) { statusEl.textContent = 'Upload failed.'; }
   }
 
   async function refreshWantedPapers() {
@@ -601,7 +667,17 @@
     }
     const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers }) });
     if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
-    form.dataset.loaded = '0'; refresh();
+    form.dataset.loaded = '0';
+    const payload = await res.json().catch(() => ({}));
+    // Subprocess / CLI quest (no in-process future): the answers were staged on
+    // disk — kick off the --resume so the quest continues without a separate click.
+    if (payload && payload.in_process_resolved === false) {
+      try {
+        await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
+        if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+      } catch (_) {}
+    }
+    refresh();
     return false;
   }
 

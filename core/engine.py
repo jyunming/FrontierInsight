@@ -546,21 +546,83 @@ class Engine:
                                 self.quest_id, self.quest_id, self.quest_id,
                             )
                             break
-                        # Clarify node raised `interrupt(...)`. Hand the
-                        # questions to the caller's callback for answers.
+                        # Clarify node raised `interrupt(...)`. Resolve answers
+                        # via (1) the in-process callback, (2) a pre-staged
+                        # on-disk answer file, or (3) clean pause-exit — the
+                        # same three-path pattern the human-review gate uses, so
+                        # a subprocess- / CLI-launched quest (no callback) pauses
+                        # cleanly instead of crashing.
                         questions = intr_value.get("clarify_questions", {})
-                        if clarify_callback is None:
-                            raise RuntimeError(
-                                f"quest {self.quest_id} paused at clarify node but no "
-                                f"clarify_callback was supplied; set pauses.clarify to "
-                                f"'auto' or 'off' for headless runs."
+                        clarify_answer_path = self.fi_dir / "clarify_answer.json"
+                        if clarify_callback is not None:
+                            try:
+                                self._log.info(
+                                    "[run] clarify interrupt fired with %d questions; "
+                                    "invoking callback", len(questions),
+                                )
+                                if self.human_feedback_timeout_s > 0:
+                                    answers = await asyncio.wait_for(
+                                        clarify_callback(questions),
+                                        timeout=self.human_feedback_timeout_s,
+                                    )
+                                else:
+                                    answers = await clarify_callback(questions)
+                                self._clear_clarify_snapshot()
+                                payload = Command(resume=answers)
+                                continue
+                            except asyncio.TimeoutError:
+                                self._log.warning(
+                                    "[run] clarify callback timed out after %ss — "
+                                    "falling back to answer-file / pause-exit",
+                                    self.human_feedback_timeout_s,
+                                )
+                        if clarify_answer_path.is_file():
+                            try:
+                                answers = json.loads(
+                                    clarify_answer_path.read_text(encoding="utf-8"),
+                                )
+                            except (OSError, json.JSONDecodeError) as e:
+                                # A corrupt answer file would re-fail on every
+                                # resume and strand the quest — drop it so the
+                                # user can re-stage a fresh answer.
+                                self._log.warning(
+                                    "[run] couldn't read %s: %r — discarding it "
+                                    "and pausing instead", clarify_answer_path, e,
+                                )
+                                try:
+                                    clarify_answer_path.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                                answers = None
+                            if isinstance(answers, dict) and answers:
+                                self._log.info(
+                                    "[run] consuming pre-staged clarify answers",
+                                )
+                                self._clear_clarify_snapshot()
+                                payload = Command(resume=answers)
+                                continue
+                        # Genuine pause (no callback, no staged answer): persist
+                        # the questions so the web can render a form for this
+                        # subprocess quest. Only here — never on the resume path
+                        # above — so a consumed answer isn't re-shown as pending.
+                        try:
+                            self.fi_dir.mkdir(parents=True, exist_ok=True)
+                            (self.fi_dir / "clarify_questions.json").write_text(
+                                json.dumps(questions, indent=2) + "\n",
+                                encoding="utf-8",
                             )
+                        except OSError as e:
+                            self._log.debug(
+                                "[clarify] questions snapshot write failed: %r", e,
+                            )
+                        data_paused = True
                         self._log.info(
-                            "[run] clarify interrupt fired with %d questions; "
-                            "invoking callback", len(questions),
+                            "[FI] paused for clarify. Answer in the web / VSCode "
+                            "panel, or write your answers into %s and re-run "
+                            "`fi --resume %s`.",
+                            clarify_answer_path, self.quest_id,
                         )
-                        answers = await clarify_callback(questions)
-                        payload = Command(resume=answers)
+                        break
             finally:
                 # Guard against early failure: if ``resolve_endpoint_async``
                 # raised (unknown provider / proxy spawn failure / etc.),
@@ -607,12 +669,19 @@ class Engine:
             artifacts = self._collect_artifacts(final_state)
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
-            # clear the unified NEXT_STEP.md so a finished quest never shows a
-            # stale "Action needed" pointer in the dashboard / on disk.
-            try:
-                (self.quest_root / "NEXT_STEP.md").unlink(missing_ok=True)
-            except OSError:
-                pass
+            # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
+            # snapshots so a finished quest never shows a stale "Action needed"
+            # (a clarify node re-executes on resume, re-writing its snapshot).
+            for p in (
+                self.quest_root / "NEXT_STEP.md",
+                self.fi_dir / "pause.json",
+                self.fi_dir / "clarify_questions.json",
+                self.fi_dir / "clarify_answer.json",
+            ):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self._write_back_knowledge(artifacts, final_state)
             self._write_cost_summary()
             # Clean up any stale ``quest_failed.md`` from a PRIOR
@@ -1087,6 +1156,11 @@ class Engine:
             for slot, value in overrides.items():
                 if isinstance(questions.get(slot), dict):
                     questions[slot]["default"] = value
+        # NB: the on-disk ``.fi/clarify_questions.json`` snapshot (so a
+        # subprocess quest can render a web form) is written by ``Engine.run``'s
+        # clarify pause-exit branch, NOT here — the node re-executes on resume
+        # (interrupt() returns the answer), so writing it here would re-create
+        # the file the run loop just consumed and falsely re-show the form.
         # Interactive: pause the graph until the caller resumes with answers.
         payload = self._pause_for_human(
             kind="clarify",
@@ -1695,6 +1769,7 @@ class Engine:
                         "papers_dir": str(self.quest_root / "inputs" / "papers"),
                         "needed_count": len(needed),
                     },
+                    upload_targets=["papers"],
                 )
                 # Unreachable in practice (see ``wait_for_data`` for the
                 # same pattern): interrupt() raises GraphInterrupt; on
@@ -1903,6 +1978,7 @@ class Engine:
         headline: str,
         steps: list[str],
         payload: dict[str, Any],
+        upload_targets: list[str] | None = None,
     ) -> Any:
         """The single way the engine stops for a human. Writes the unified
         ``NEXT_STEP.md``, logs a consistent line, then fires LangGraph's
@@ -1922,18 +1998,29 @@ class Engine:
         self._write_next_step(
             kind=kind, interaction=interaction, headline=headline, steps=steps,
         )
-        self._log.info("[%s] paused — %s", kind, headline)
-        enriched = {
-            **payload,
-            "pause": {
-                "kind": kind,
-                "interaction": interaction,
-                "headline": headline,
-                "quest_id": self.quest_id,
-                "next_step_file": "NEXT_STEP.md",
-            },
+        descriptor = {
+            "kind": kind,
+            "interaction": interaction,
+            "headline": headline,
+            "quest_id": self.quest_id,
+            "next_step_file": "NEXT_STEP.md",
+            # For a SUPPLY pause: which upload target(s) the web banner should
+            # offer (papers → inputs/papers, data → inputs/data, root_data →
+            # data/). Empty for an ANSWER pause (the web reveals the form).
+            "upload_targets": list(upload_targets or []),
         }
-        return interrupt(enriched)
+        # Authoritative on-disk descriptor so the web can render the right
+        # affordance for a subprocess quest (the in-process payload below isn't
+        # visible across processes). Cleared with NEXT_STEP.md on completion.
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "pause.json").write_text(
+                json.dumps(descriptor, indent=2) + "\n", encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.debug("[%s] pause.json write failed: %r", kind, e)
+        self._log.info("[%s] paused — %s", kind, headline)
+        return interrupt({**payload, "pause": descriptor})
 
     def _maybe_pause_for_user_input(
         self, state: QuestState, stage: str,
@@ -2005,6 +2092,7 @@ class Engine:
                 "papers_dir": str(papers_dir),
                 "data_dir": str(data_dir),
             },
+            upload_targets=["papers", "data"],
         )
 
     async def _node_auto_collect_data(self, state: QuestState) -> QuestState:
@@ -2424,6 +2512,7 @@ class Engine:
                     "quest_id": self.quest_id,
                     "data_dir": str(data_dir),
                 },
+                upload_targets=["root_data"],
             )
             # Unreachable in practice: interrupt() raises GraphInterrupt
             # which Engine.run catches above; on resume, the node is
@@ -4071,6 +4160,17 @@ class Engine:
         )
         self._log_chat_cost(node=node or "")
         return response
+
+    def _clear_clarify_snapshot(self) -> None:
+        """Remove the on-disk clarify question/answer files once the clarify
+        gate resolves, so the web's "questions present + no answer-file"
+        pending check stops showing a stale form. Mirrors the human-review
+        ``_consume_snapshot``. Best-effort; an unlink failure is not fatal."""
+        for name in ("clarify_questions.json", "clarify_answer.json"):
+            try:
+                (self.fi_dir / name).unlink()
+            except OSError:
+                pass
 
     def _clear_stale_quest_failed_diagnostic(self) -> None:
         """Remove a stale ``quest_failed.md`` from a PRIOR failed run.

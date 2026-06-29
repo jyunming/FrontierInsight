@@ -238,3 +238,36 @@ def test_ingest_help_text_does_not_reference_knowledge_enabled(
     assert "--ingest" in help_text
     assert "knowledge.enabled" not in help_text
     assert "axon" in help_text.lower()
+
+
+def test_pauses_namespace_legacy_mapping_and_norway() -> None:
+    """The unified `pauses:` namespace: legacy flags map in, value vocab is
+    translated, and the YAML 1.1 'Norway problem' (unquoted `off` → bool
+    False) is coerced back so hand-edited blocks don't need quotes."""
+    from core.config import Config
+
+    # Legacy scattered flags fold into pauses with vocab translation.
+    legacy = Config.model_validate({
+        "topic": "t",
+        "engine": {"clarify_mode": "interactive", "human_feedback_gate": "after_review",
+                   "pause_for_user_input": "after_design"},
+        "knowledge": {"pause_for_user_papers": True},
+    })
+    assert legacy.pauses.clarify == "ask"
+    assert legacy.pauses.review == "ask"
+    assert legacy.pauses.supply == "before_build"
+    assert legacy.pauses.papers is True
+
+    # Unquoted `off` arrives as boolean False from YAML; coerce to "off".
+    norway = Config.model_validate({
+        "topic": "t", "pauses": {"clarify": False, "review": False},
+    })
+    assert norway.pauses.clarify == "off"
+    assert norway.pauses.review == "off"
+
+    # An explicit pauses.* value always wins over a legacy flag.
+    conflict = Config.model_validate({
+        "topic": "t", "engine": {"clarify_mode": "auto"},
+        "pauses": {"clarify": "ask"},
+    })
+    assert conflict.pauses.clarify == "ask"

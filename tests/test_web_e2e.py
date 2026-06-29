@@ -135,7 +135,10 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
             json={"answers": answers},
         )
         assert r.status_code == 200
-        assert r.json() == {"ok": True}
+        body = r.json()
+        assert body["ok"] is True
+        # In-process server quest → the clarify future resolves in-process.
+        assert body["in_process_resolved"] is True
 
         # 4. Wait for the background task to finish. We watch the
         #    paper.md to detect end-of-quest (the summary file is written

@@ -355,11 +355,18 @@ class PausesConfig(BaseModel):
     @field_validator("clarify", mode="before")
     @classmethod
     def _norm_clarify(cls, v: Any) -> Any:
+        # YAML 1.1 "Norway problem": an unquoted `off` parses as the boolean
+        # False before we see it — coerce it back so hand-edited `pauses:`
+        # blocks don't need to remember the quotes.
+        if v is False:
+            return "off"
         return _CLARIFY_ALIASES.get(v, v)
 
     @field_validator("review", mode="before")
     @classmethod
     def _norm_review(cls, v: Any) -> Any:
+        if v is False:
+            return "off"
         return _REVIEW_ALIASES.get(v, v)
 
     @field_validator("supply", mode="before")

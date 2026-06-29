@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, StreamingResponse,
 )
@@ -230,7 +230,16 @@ def _read_log_tail(log_path: Path, n: int = 200) -> list[str]:
 _QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
 # Accepted user-supplied paper formats + per-file upload cap.
 _PAPER_UPLOAD_SUFFIXES = (".pdf", ".md", ".txt")
+_DATA_UPLOAD_SUFFIXES = (
+    ".csv", ".tsv", ".json", ".jsonl", ".parquet", ".xlsx", ".npy", ".npz", ".txt",
+)
 _MAX_PAPER_UPLOAD_BYTES = 40 * 1024 * 1024
+# Where each SUPPLY pause wants its files: target name → (rel-path, suffixes).
+_UPLOAD_TARGETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "papers": (("inputs", "papers"), _PAPER_UPLOAD_SUFFIXES),     # literature / supply
+    "data": (("inputs", "data"), _DATA_UPLOAD_SUFFIXES),          # supply gate datasets
+    "root_data": (("data",), _DATA_UPLOAD_SUFFIXES),              # no-sim data pause
+}
 
 
 def _dir_size(path: Path) -> int:
@@ -946,52 +955,60 @@ def make_app(
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         nxt = quest_root / "NEXT_STEP.md"
         markdown = nxt.read_text(encoding="utf-8") if nxt.is_file() else ""
+        # The structured descriptor the unified pause core wrote — authoritative
+        # for kind / interaction / upload targets (the markdown is the human
+        # copy). Both are deleted on completion, so presence == "waiting".
+        descriptor: dict[str, Any] = {}
+        pause_json = quest_root / ".fi" / "pause.json"
+        if pause_json.is_file():
+            try:
+                descriptor = json.loads(pause_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                descriptor = {}
         # Headline = the "# Action needed — <X>" first line, stripped of markup.
-        headline = ""
-        for line in markdown.splitlines():
-            if line.startswith("#"):
-                headline = line.lstrip("# ").strip()
-                break
-        # Interaction kind comes from the verb the unified pause core stamped
-        # into NEXT_STEP.md ("(**ANSWER**)" / "(**SUPPLY**)") — authoritative on
-        # every path, including a headless ANSWER pause answered via on-disk
-        # files + resume (where the in-process registry is empty). Fall back to
-        # the live registry, then default to supply.
-        if "ANSWER" in markdown:
-            interaction = "answer"
-        elif "SUPPLY" in markdown:
-            interaction = "supply"
-        elif (registry.pending_clarify(quest_id) is not None
-              or registry.pending_human_review(quest_id) is not None):
-            interaction = "answer"
-        else:
-            interaction = "supply"
+        headline = str(descriptor.get("headline") or "")
+        if not headline:
+            for line in markdown.splitlines():
+                if line.startswith("#"):
+                    headline = line.lstrip("# ").strip()
+                    break
+        # Interaction: descriptor first, else the NEXT_STEP.md verb, else the
+        # live registry, else supply.
+        interaction = str(descriptor.get("interaction") or "")
+        if interaction not in ("answer", "supply"):
+            if "ANSWER" in markdown:
+                interaction = "answer"
+            elif "SUPPLY" in markdown:
+                interaction = "supply"
+            elif (registry.pending_clarify(quest_id) is not None
+                  or registry.pending_human_review(quest_id) is not None):
+                interaction = "answer"
+            else:
+                interaction = "supply"
         return JSONResponse({
             "quest_id": quest_id,
-            "waiting": bool(markdown),
+            # Either artifact means "paused, waiting for you" — don't miss a
+            # pause just because the NEXT_STEP.md write (best-effort) failed.
+            "waiting": bool(markdown) or bool(descriptor),
             "headline": headline,
             "interaction": interaction,
+            "kind": descriptor.get("kind") or "",
+            "upload_targets": descriptor.get("upload_targets") or [],
             "markdown": markdown,
         })
 
-    @app.post("/api/quests/{quest_id}/papers")
-    async def upload_papers(
-        quest_id: str, files: list[UploadFile] = File(...),
-    ) -> JSONResponse:
-        """Save user-supplied paper PDFs/MD/TXT into
-        ``<quest>/inputs/papers/`` so a paused quest can be resumed with real
-        full text. Filenames are sanitised (no path traversal), extensions
-        restricted to .pdf/.md/.txt, and each file is size-capped."""
-        if not _QUEST_ID_RE.match(quest_id):
-            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
-        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-        papers_dir = quest_root / "inputs" / "papers"
-        papers_dir.mkdir(parents=True, exist_ok=True)
+    async def _save_uploads(
+        dest_dir: Path, files: list[UploadFile], suffixes: tuple[str, ...],
+    ) -> tuple[list[str], list[str]]:
+        """Save uploaded files into ``dest_dir``, filtering by extension,
+        sanitising names (no path traversal), and size-capping each. Shared by
+        the papers panel and the generalised SUPPLY upload."""
+        dest_dir.mkdir(parents=True, exist_ok=True)
         saved: list[str] = []
         skipped: list[str] = []
         for f in files:
             name = Path(f.filename or "").name  # strip any directory parts
-            if not name or Path(name).suffix.lower() not in _PAPER_UPLOAD_SUFFIXES:
+            if not name or Path(name).suffix.lower() not in suffixes:
                 skipped.append(f.filename or "(unnamed)")
                 continue
             # Read at most cap+1 bytes so an oversized upload can't be slurped
@@ -1000,13 +1017,55 @@ def make_app(
             if not data or len(data) > _MAX_PAPER_UPLOAD_BYTES:
                 skipped.append(name)
                 continue
-            safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "paper.pdf"
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "upload"
             try:
-                (papers_dir / safe).write_bytes(data)
+                (dest_dir / safe).write_bytes(data)
                 saved.append(safe)
             except OSError:
                 skipped.append(safe)
+        return saved, skipped
+
+    @app.post("/api/quests/{quest_id}/papers")
+    async def upload_papers(
+        quest_id: str, files: list[UploadFile] = File(...),
+    ) -> JSONResponse:
+        """Save user-supplied paper PDFs/MD/TXT into
+        ``<quest>/inputs/papers/`` so a paused quest can be resumed with real
+        full text."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        saved, skipped = await _save_uploads(
+            quest_root / "inputs" / "papers", files, _PAPER_UPLOAD_SUFFIXES,
+        )
         return JSONResponse({"quest_id": quest_id, "saved": saved, "skipped": skipped})
+
+    @app.post("/api/quests/{quest_id}/upload")
+    async def upload_files(
+        quest_id: str,
+        target: str = Form(...),
+        files: list[UploadFile] = File(...),
+    ) -> JSONResponse:
+        """Generalised SUPPLY upload: ``target`` is one of ``papers`` (→
+        inputs/papers), ``data`` (→ inputs/data, for the supply gate), or
+        ``root_data`` (→ data/, for the no-simulation data pause). Lets the
+        Action-needed banner complete any file-drop pause from the web."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        spec = _UPLOAD_TARGETS.get(target)
+        if spec is None:
+            raise HTTPException(
+                400, f"target must be one of {sorted(_UPLOAD_TARGETS)}",
+            )
+        rel, suffixes = spec
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        saved, skipped = await _save_uploads(
+            quest_root.joinpath(*rel), files, suffixes,
+        )
+        return JSONResponse({
+            "quest_id": quest_id, "target": target,
+            "saved": saved, "skipped": skipped,
+        })
 
     @app.get("/api/system/tectonic")
     async def tectonic_status(job_id: str | None = None) -> JSONResponse:
@@ -1650,7 +1709,13 @@ def make_app(
                 registry.alive(quest_id)
                 or bool(launcher_status.get("alive"))
             ),
-            "pending_clarify": registry.pending_clarify(quest_id) is not None,
+            "pending_clarify": (
+                registry.pending_clarify(quest_id) is not None
+                or (
+                    (quest_root / ".fi" / "clarify_questions.json").is_file()
+                    and not (quest_root / ".fi" / "clarify_answer.json").is_file()
+                )
+            ),
             "pending_human_review": pending_human_review,
             "review": review,
             "review_panel": review_panel,
@@ -1722,20 +1787,71 @@ def make_app(
 
     @app.get("/api/quests/{quest_id}/clarify")
     async def get_clarify(quest_id: str) -> JSONResponse:
+        """Pending clarify questions. Two sources, like the human-review gate:
+        the in-process registry (web launch=true), else the on-disk
+        ``.fi/clarify_questions.json`` written by EVERY quest that pauses for
+        clarify (subprocess / CLI) — so a subprocess quest can render a form
+        even with no in-process future."""
         questions = registry.pending_clarify(quest_id)
-        if questions is None:
+        if questions is not None:
+            return JSONResponse({"pending": True, "source": "in_process",
+                                 "questions": questions})
+        try:
+            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        except HTTPException:
             return JSONResponse({"pending": False, "questions": None})
-        return JSONResponse({"pending": True, "questions": questions})
+        on_disk = quest_root / ".fi" / "clarify_questions.json"
+        answered = quest_root / ".fi" / "clarify_answer.json"
+        if not on_disk.is_file() or answered.is_file():
+            return JSONResponse({"pending": False, "questions": None})
+        try:
+            questions = json.loads(on_disk.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return JSONResponse({"pending": False, "questions": None})
+        return JSONResponse({"pending": True, "source": "disk",
+                             "questions": questions})
 
     @app.post("/api/quests/{quest_id}/clarify")
     async def post_clarify(quest_id: str, request: Request) -> JSONResponse:
+        """Submit clarify answers. Resolves the in-process future when present,
+        and always writes ``.fi/clarify_answer.json`` so a subprocess- / CLI-
+        launched engine picks them up on its next ``--resume``."""
         body = await request.json()
         answers = body.get("answers")
         if not isinstance(answers, dict):
             raise HTTPException(400, "request body must contain {'answers': {...}}")
-        if not registry.resolve_clarify(quest_id, answers):
+        in_process_resolved = registry.resolve_clarify(quest_id, answers)
+        quest_root: Path | None = None
+        try:
+            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        except HTTPException:
+            quest_root = None
+        # Only stage an on-disk answer when the quest is actually paused for
+        # clarify on disk (questions present, not yet answered) — a stray POST
+        # to a non-paused quest shouldn't drop an answer file that a later
+        # clarify pass would wrongly consume.
+        has_disk_pause = bool(
+            quest_root is not None
+            and (quest_root / ".fi" / "clarify_questions.json").is_file()
+            and not (quest_root / ".fi" / "clarify_answer.json").is_file()
+        )
+        disk_write_error: str | None = None
+        if has_disk_pause:
+            try:
+                fi = quest_root / ".fi"  # type: ignore[union-attr]
+                fi.mkdir(parents=True, exist_ok=True)
+                (fi / "clarify_answer.json").write_text(
+                    json.dumps(answers, indent=2) + "\n", encoding="utf-8",
+                )
+            except OSError as e:
+                disk_write_error = f"{type(e).__name__}: {e}"
+        if not in_process_resolved and not has_disk_pause:
             raise HTTPException(409, f"no pending clarify for quest {quest_id}")
-        return JSONResponse({"ok": True})
+        payload: dict[str, Any] = {"ok": True,
+                                   "in_process_resolved": in_process_resolved}
+        if disk_write_error is not None:
+            payload["disk_write_warning"] = disk_write_error
+        return JSONResponse(payload)
 
     @app.get("/api/quests/{quest_id}/human-review")
     async def get_human_review(quest_id: str) -> JSONResponse:
