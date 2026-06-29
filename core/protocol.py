@@ -44,7 +44,8 @@ TopicType = Literal[
 SourcePolicy = Literal[
     "academic",     # peer-reviewed / arXiv literature
     "web_current",  # recent web sources are mandatory (markets, current events)
-    "user_data",    # the user must supply the data
+    "user_data",    # analyses supplied/collected data — the user's drop, or
+                    # what the no-sim auto-collector gathered — not a simulation
     "mixed",        # academic + web both legitimate
 ]
 
@@ -63,7 +64,10 @@ class ResearchProtocol(BaseModel):
     baseline: str = ""
     # What number, moving which way, is the headline result ("" = unset).
     success_metric: str = ""
-    # Whether the quest needs the user to drop data/files to proceed.
+    # True for no-simulation studies, which run on supplied/collected data
+    # rather than a simulation and so MAY pause for the user to drop files
+    # (only if the auto-collector gathered nothing). Not a hard guarantee
+    # the quest will block — a signal that user data may be needed.
     requires_user_input: bool = False
     # How many independent runs back a quantitative claim (1 = single-shot).
     replication: int = Field(default=1, ge=1)
@@ -86,7 +90,7 @@ class ResearchProtocol(BaseModel):
             lines.append(f"- success metric: {self.success_metric}")
         lines.append(f"- replication: {self.replication} run(s)")
         if self.requires_user_input:
-            lines.append("- requires user-supplied data: yes")
+            lines.append("- may need user-supplied data: yes")
         if self.stopping_criteria:
             lines.append(f"- stopping criteria: {self.stopping_criteria}")
         return "\n".join(lines)
