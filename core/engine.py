@@ -382,14 +382,27 @@ class Engine:
                         # write/review and lands back at the human-review gate,
                         # applying any saved feedback_history. A no-op if the
                         # quest isn't terminal (resume continues normally).
+                        #
+                        # The injected ``human_feedback`` carries action=refine
+                        # with NO feedback text on purpose: re-opening is "run
+                        # another pass", not a new user ask. The design node
+                        # already reads the accumulated ``feedback_history``
+                        # (so a refine dropped past max_iterations finally
+                        # applies); a synthetic feedback string would instead
+                        # be embedded as spurious USER FEEDBACK whenever the
+                        # history is empty. We also bump ``iteration`` to mirror
+                        # the real refine path (``_node_human_feedback``), which
+                        # consumes a loop slot and guarantees the prior review
+                        # JSON is embedded (the design node skips it at
+                        # iteration==0).
                         if reopen and not prior_snapshot.next:
+                            _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             await graph.aupdate_state(
                                 run_config,
-                                {"human_feedback": {
-                                    "action": "refine",
-                                    "feedback": "Re-opened from the dashboard for "
-                                                "another revision pass.",
-                                }},
+                                {
+                                    "human_feedback": {"action": "refine"},
+                                    "iteration": _it + 1,
+                                },
                                 as_node="human_feedback",
                             )
                             reopened = await graph.aget_state(run_config)

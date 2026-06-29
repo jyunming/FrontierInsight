@@ -1380,8 +1380,18 @@ async def run_fleet(
 async def main_async(args: argparse.Namespace) -> int:
     # --rerun is --resume + re-open-on-terminal: normalize it onto args.resume
     # so all the resume plumbing (validation, checkpoint reuse) applies, and
-    # remember the re-open intent for run_one.
+    # remember the re-open intent for run_one. If a caller passes BOTH flags
+    # for different quests the intent is ambiguous (we'd re-open one id but
+    # resume another), so fail fast rather than silently picking one.
     _reopen = bool(getattr(args, "rerun", None))
+    if _reopen and args.resume and args.resume != args.rerun:
+        print(
+            "[FI] --resume and --rerun name different quests "
+            f"({args.resume!r} vs {args.rerun!r}); pass only one (--rerun "
+            "implies resume).",
+            file=sys.stderr,
+        )
+        return 2
     if _reopen and not args.resume:
         args.resume = args.rerun
     # Ensure Axon sidecar is up before anything that touches the
