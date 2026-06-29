@@ -212,26 +212,29 @@ class QuestState(TypedDict, total=False):
 # study, never as a report on the tool that produced it.
 _NO_SIM_DESIGN_DIRECTIVE = (
     "> **THIS IS A NO-SIMULATION STUDY.** The quest is configured "
-    "`no_simulation`: nothing will be executed and no code will run. "
+    "`no_simulation`: no experiment or simulation will be run. "
     "**Ignore the \"executable Python experiment\" / \"must produce a "
     "figure\" instructions below** — they do not apply. Instead design an "
     "**analytical or observational study** grounded in the literature (and "
     "any sources the user supplies): a derivation, a structured comparison, "
     "a synthesis, or an interpretation of existing evidence. `method` "
     "describes how that existing evidence is analyzed, NOT a program to "
-    "run. Set `\"dependencies\": []` and `\"figures_planned\": []` (a figure "
-    "may appear only if it comes directly from a source the user supplied, "
-    "never from a script you expect to execute). There is no 'planned "
-    "experiment' that could later be 'not run' — frame the study as "
-    "complete in its own right.\n"
+    "run. Set `\"dependencies\": []` and `\"figures_planned\": []` — do not "
+    "plan an executable experiment to produce figures (any figures come "
+    "later from charting the numbers your sources actually report, not "
+    "from code you specify here). There is no 'planned experiment' that "
+    "could later be 'not run' — frame the study as complete in its own "
+    "right.\n"
 )
 _NO_SIM_WRITE_NOTE = (
     "**This is a no-simulation study — by design, no experiment or "
     "simulation was run.** Write it as a deliberate literature / "
     "observational analysis that stands on its own. Do NOT describe a "
     "'planned experiment', a 'simulation', or their absence as a failure, "
-    "and do NOT treat the lack of computed measurements as a gap to "
-    "apologise for — the study was never meant to run code.\n"
+    "and do NOT treat the lack of an experiment as a gap to apologise for "
+    "— this study was never meant to run an executable experiment. (Any "
+    "figures present were charted from numbers the sources report; cite "
+    "them normally.)\n"
 )
 
 

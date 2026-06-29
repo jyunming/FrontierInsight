@@ -80,13 +80,16 @@ explain *why* the evidence is missing in terms of the run.
 $study_mode_note
 ## Honesty constraints — read this section, do not skip
 
-The experiment may have failed, produced implausible numbers, or
-contradicted the hypothesis. The analysis block above will say so
-plainly. **When that happens, the paper MUST say so plainly too.** This
-means reporting a result as null, implausible, or inconclusive **in
-scientific terms** (the measurement, the expected range, the
-discrepancy) — never by narrating the engine that ran it (see the
-section above). Do not paper over a broken experiment by:
+If this study ran an experiment, it may have failed, produced
+implausible numbers, or contradicted the hypothesis; the analysis block
+above will say so plainly, and **when it does, the paper MUST say so
+plainly too.** (A no-simulation study ran no experiment — see the
+study-mode note above — so there is nothing of this kind to report;
+skip straight to the scientific framing.) Reporting a weak result means
+calling it null, implausible, or inconclusive **in scientific terms**
+(the measurement, the expected range, the discrepancy) — never by
+narrating the engine that ran it (see the section above). Do not paper
+over a broken experiment by:
 
 1. **Reporting numbers that the analysis flagged as implausible** as if they were real findings. The analysis is upstream of the writer for a reason — its caveats are your source of truth.
 2. **Inventing additional measurements** that weren't actually computed in the methods. Every number you cite in Results MUST be in the analysis block.
