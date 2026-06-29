@@ -445,6 +445,15 @@ class EngineConfig(BaseModel):
     # ``degenerate_result`` flag so analyze/review frame it as a failure
     # note. Set False to accept all-zero results as-is.
     degenerate_run_guard: bool = True
+    # Claim grounding (claim_check node, between write and review). When
+    # True (default), one LLM pass extracts the paper's substantive claims and
+    # grounds each as `experiment` (traces to the run's result_json / a key
+    # finding), `citation` (traces to a specific [N] reference), or
+    # `unsupported`. A `paper/claims.json` + `paper/CLAIMS.md` ledger is
+    # written, and any unsupported claims are surfaced to the reviewer, which
+    # must-flags them and forces a bounded revise pass (capped by
+    # `max_iterations`). Set False to skip the node entirely (write → review).
+    claim_grounding: bool = True
     # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just
     # the original topic) and classify hits as supporting / conflicting

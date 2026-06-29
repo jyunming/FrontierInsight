@@ -58,6 +58,7 @@ paper/paper.md                        ← the finished IMRAD paper
 paper/paper.pdf                       ← (if pandoc + LaTeX installed)
 paper/references.bib                  ← the paper's sources as BibTeX (drop into Zotero/Mendeley/LaTeX)
 paper/references.csl.json             ← the same sources as CSL-JSON (Pandoc/Zotero)
+paper/claims.json, paper/CLAIMS.md    ← claim-grounding ledger: which claims trace to the experiment / a cited source / unsupported
 figures/*.png                         ← every plot the experiment produced
 code/experiment.py                    ← the exact code that ran
 slides.md                             ← if output.kinds: [slides]; Marp markdown source

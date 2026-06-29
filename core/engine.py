@@ -144,6 +144,9 @@ class QuestState(TypedDict, total=False):
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
     paper_md: str
+    # Claim grounding: which paper claims trace to evidence
+    # (experiment / citation / unsupported), from the claim_check node.
+    claim_grounding: dict[str, Any]
     review: dict[str, Any]
     # Human-feedback gate state. Populated by ``_node_human_feedback``
     # when ``engine.human_feedback_gate == "after_review"``. ``action``
@@ -776,6 +779,7 @@ class Engine:
         # analyze → cross_check (always) → write OR design
         g.add_node("cross_check", self._node_cross_check)
         g.add_node("write", self._node_write)
+        g.add_node("claim_check", self._node_claim_check)
         g.add_node("review", self._node_review)
         g.add_node("human_feedback", self._node_human_feedback)
         # no-simulation mode: design → auto_collect_data → wait_for_data
@@ -849,7 +853,10 @@ class Engine:
                 "broaden_lit": "literature",
             },
         )
-        g.add_edge("write", "review")
+        # write → claim_check → review. claim_check grounds each paper claim to
+        # evidence (a no-op passthrough when engine.claim_grounding is off).
+        g.add_edge("write", "claim_check")
+        g.add_edge("claim_check", "review")
         g.add_conditional_edges(
             "review",
             self._route_after_review,
@@ -3709,6 +3716,104 @@ class Engine:
         self._maybe_pause_for_user_input(state, "before_review")
         return {"paper_md": str(paper_path)}
 
+    async def _node_claim_check(self, state: QuestState) -> QuestState:
+        """Ground each substantive claim in the written paper to evidence — the
+        quest's own experiment results, a cited reference, or flag it
+        ``unsupported``. Writes a ``paper/claims.json`` + ``paper/CLAIMS.md``
+        ledger and stashes the result in state so the reviewer must-flags any
+        unsupported claims (forcing a bounded revise). No-op passthrough when
+        ``engine.claim_grounding`` is off."""
+        if not self.config.engine.claim_grounding:
+            return {}
+        paper_md = state.get("paper_md")
+        if not paper_md or not Path(paper_md).is_file():
+            self._log.info("[claim_check] no paper to check; skipping")
+            return {}
+        paper_text = Path(paper_md).read_text(encoding="utf-8")[:16000]
+        refs = build_references(
+            state.get("literature") or [], audience=self.config.output.audience,
+        )
+        refs_block = "\n".join(
+            f"[{r['n']}] {r['title']}"
+            + (f" · DOI:{r['doi']}" if r.get("doi") else "")
+            for r in refs
+        ) or "(no references)"
+        analysis = state.get("analysis") or {}
+        evidence = {
+            "key_findings": analysis.get("key_findings") or [],
+            "claims_supported": analysis.get("claims_supported") or [],
+            "result_json": state.get("result_json") or {},
+        }
+        prompt = self._prompts["claim_check"].substitute(
+            topic=state["topic"],
+            evidence_block=json.dumps(evidence, indent=2)[:4000],
+            references=refs_block,
+            paper=paper_text,
+        )
+        text = await self._chat(prompt, node="claim_check")
+        parsed = _parse_json_lenient(text) or {}
+        raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
+        claims: list[dict[str, Any]] = []
+        for c in (raw_claims or []):
+            if not isinstance(c, dict) or not str(c.get("claim") or "").strip():
+                continue
+            basis = str(c.get("basis") or "unsupported").strip().lower()
+            if basis not in ("experiment", "citation", "unsupported"):
+                basis = "unsupported"
+            claims.append({
+                "claim": str(c["claim"]).strip(),
+                "basis": basis,
+                "citation_index": c.get("citation_index"),
+                "evidence": str(c.get("evidence") or "").strip(),
+            })
+        unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
+        grounding = {
+            "claims": claims,
+            "summary": str(parsed.get("summary") or "").strip(),
+            "total": len(claims),
+            "grounded": len(claims) - len(unsupported),
+            "unsupported": unsupported,
+        }
+        self._log.info(
+            "[claim_check] %d/%d claims grounded (%d unsupported)",
+            grounding["grounded"], grounding["total"], len(unsupported),
+        )
+        self._write_claims_ledger(grounding)
+        return {"claim_grounding": grounding}
+
+    def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
+        """Persist the claim-grounding result as a transparency ledger:
+        ``paper/claims.json`` (structured) + ``paper/CLAIMS.md`` (readable).
+        Best-effort; a write failure is logged, never quest-fatal."""
+        paper_dir = self.quest_root / "paper"
+        try:
+            paper_dir.mkdir(parents=True, exist_ok=True)
+            (paper_dir / "claims.json").write_text(
+                json.dumps(grounding, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            lines = [
+                "# Claim grounding",
+                "",
+                f"**{grounding['grounded']} of {grounding['total']}** substantive "
+                "claims trace to evidence "
+                f"({len(grounding['unsupported'])} unsupported).",
+                "",
+                grounding.get("summary", ""),
+                "",
+                "## Claims",
+            ]
+            for c in grounding["claims"]:
+                tag = (f"cite [{c['citation_index']}]"
+                       if c["basis"] == "citation" else c["basis"])
+                lines.append(f"- **[{tag}]** {c['claim']}"
+                             + (f" — {c['evidence']}" if c["evidence"] else ""))
+            (paper_dir / "CLAIMS.md").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[claim_check] ledger write failed: %r", e)
+
     async def _node_review(self, state: QuestState) -> QuestState:
         """Single-reviewer (default) OR panel-mode review.
 
@@ -3734,6 +3839,7 @@ class Engine:
             clarify_block=_format_clarify(state),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
+            claim_grounding_block=_format_claim_grounding(state),
             # 16 KB ≈ ~4 K tokens — fits a comprehensive-review-length
             # paper plus an abstract + references block. The 8 KB cap
             # was truncating mid-Discussion on journal-length papers
@@ -4780,6 +4886,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "execute_reflect", "analyze",
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
+        "claim_check",          # ground each paper claim to evidence
         "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
@@ -5470,6 +5577,37 @@ def _aggregate_panel_reviews(
         "suggestions": suggestions, "blocking": blocking,
         "must_flag_hits": mfh_out,
     }
+
+
+def _format_claim_grounding(state: QuestState) -> str:
+    """Render the claim-grounding result for the review prompt's
+    `$claim_grounding_block`, calling out unsupported claims so the reviewer
+    must-flags them."""
+    g = state.get("claim_grounding") or {}
+    if not g:
+        return "(claim grounding not run)"
+    unsupported = g.get("unsupported") or []
+    lines = [
+        f"{g.get('grounded', 0)}/{g.get('total', 0)} substantive claims trace "
+        "to evidence (this quest's results or a cited source).",
+    ]
+    if g.get("summary"):
+        lines.append(g["summary"])
+    if unsupported:
+        lines.append("")
+        lines.append(
+            f"UNSUPPORTED CLAIMS ({len(unsupported)}) — neither this quest's "
+            "results nor a cited source backs these:"
+        )
+        lines.extend(f"  - {c}" for c in unsupported)
+        lines.append("")
+        lines.append(
+            "You MUST add an `unsupported_claim` entry to must_flag_hits and "
+            "set verdict=revise for the unsupported claims listed above."
+        )
+    else:
+        lines.append("No unsupported claims were detected.")
+    return "\n".join(lines)
 
 
 def _format_cross_check(state: QuestState) -> str:
