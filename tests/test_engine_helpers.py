@@ -588,6 +588,27 @@ async def test_evidence_gate_fails_open_on_malformed_state(
     assert patch["research_protocol"]["topic_type"]
 
 
+def test_route_after_execute_reflect_retries_on_empty_result_json(
+    tmp_path: Path,
+) -> None:
+    """`_route_after_execute_reflect`: rc=0 but NO RESULT_JSON marker (stored
+    as {}) must route to retry/repair, not be mistaken for a parsed result
+    and proceed. Budget-exhausted still proceeds."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    # Empty result + budget remaining → retry.
+    assert engine._route_after_execute_reflect(
+        {"exec_result": {"returncode": 0}, "result_json": {},
+         "exec_reflect_iter": 0}) == "retry"
+    # A real (non-empty, non-degenerate) result → proceed.
+    assert engine._route_after_execute_reflect(
+        {"exec_result": {"returncode": 0}, "result_json": {"metric": 0.5},
+         "exec_reflect_iter": 0}) == "proceed"
+    # Empty result but retry budget exhausted → proceed (can't spin).
+    assert engine._route_after_execute_reflect(
+        {"exec_result": {"returncode": 0}, "result_json": {},
+         "exec_reflect_iter": 99}) == "proceed"
+
+
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
     """Verify topology: linear ideate->...->review and conditional review->design|END."""
     from langgraph.graph import END, START

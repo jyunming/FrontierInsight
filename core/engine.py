@@ -1004,7 +1004,11 @@ class Engine:
         (→ proceed to analyze)."""
         result = state.get("exec_result") or {}
         rc = result.get("returncode", 0)
-        has_result_json = state.get("result_json") is not None
+        # ``_node_execute`` stores ``result_json or {}``, so a script that
+        # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
+        # ``is not None`` wrongly counted as "parsed", skipping repair. Treat
+        # an empty result_json as no usable result so execute_reflect retries.
+        has_result_json = bool(state.get("result_json"))
         # Give-up sentinel set by the reflect node OR iterations exhausted
         # always win — otherwise the degenerate-retry below could loop
         # past the budget.
@@ -3052,7 +3056,11 @@ class Engine:
         """
         exec_result = state.get("exec_result") or {}
         rc = exec_result.get("returncode", 0)
-        has_result_json = state.get("result_json") is not None
+        # ``_node_execute`` stores ``result_json or {}``, so a script that
+        # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
+        # ``is not None`` wrongly counted as "parsed", skipping repair. Treat
+        # an empty result_json as no usable result so execute_reflect retries.
+        has_result_json = bool(state.get("result_json"))
         degenerate = bool(
             rc == 0
             and has_result_json
