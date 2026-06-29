@@ -493,6 +493,17 @@ provider:
     review_moderator:            gpt-4o-mini    # cheap synthesis
 ```
 
+### Report results with confidence intervals, not bare numbers
+
+Run the experiment across several seeds and the paper reports **uncertainty** instead of a single point estimate:
+
+```yaml
+engine:
+  execute_replicates: 5     # run experiment.py with 5 seeds (FI_REPLICATE_SEED)
+```
+
+The analyze node aggregates every numeric metric with mean ± std, **standard error, and a 95% confidence interval** (pure stdlib — no numpy/scipy needed), so Results reads `RMSE 0.045 (95% CI 0.041–0.049, n=5)`. When results break down by a factor (methods, classes, datasets), it also computes the **effect size** (Cohen's d) between strata and a **multiple-comparison guard** (the comparison count + a Bonferroni-corrected α), and the writer is told not to over-claim a difference that wouldn't survive correction. A single seed honestly reports "no replication → no CI."
+
 ### Have a panel of reviewers debate the paper
 
 ```yaml

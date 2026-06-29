@@ -41,6 +41,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from . import stats as _stats
 from .config import (
     Config,
     NON_SCIENTIFIC_PAPER_FORMATS,
@@ -3350,15 +3351,22 @@ class Engine:
             payload: dict[str, Any] = {
                 "result_json_seed_0": state.get("result_json") or {},
                 "replicates": replicates,
+                # Each metric carries mean/std/n/min/max + se + 95% CI bounds.
                 "aggregate_mean_std": agg,
                 "n_replicates": len(replicates),
             }
+            # Per-stratum CIs + pairwise effect sizes + multiple-comparison
+            # guard for any by_<factor> breakdowns (empty otherwise).
+            comparison_stats = _result_comparison_stats(replicates)
+            if comparison_stats:
+                payload["comparison_stats"] = comparison_stats
             if all_ds:
                 payload["_user_supplied_datasets"] = all_ds
             result_json_block = json.dumps(payload, indent=2)
             self._log.info(
-                "[analyze] using replicate aggregate (n=%d, %d numeric keys)",
-                len(replicates), len(agg),
+                "[analyze] using replicate aggregate (n=%d, %d numeric keys, "
+                "%d comparison(s))", len(replicates), len(agg),
+                (comparison_stats.get("comparisons") or {}).get("n", 0),
             )
         else:
             result_json_block_data: dict[str, Any] = dict(state.get("result_json") or {})
@@ -5452,8 +5460,112 @@ def _aggregate_result_json_replicates(
             "n": n,
             "min": min(vals),
             "max": max(vals),
+            # Standard error + 95% CI of the mean (None for n<2 — a single
+            # seed has no spread to estimate, so we don't fake an interval).
+            **_stats.confidence_interval(vals),
         }
     return out
+
+
+def _stratum_series(
+    replicates: list[dict[str, Any]], factor: str, stratum: str, metric: str,
+) -> list[float] | None:
+    """The per-seed values of ``replicates[*][factor][stratum][metric]`` — only
+    when it's a scalar number in EVERY replicate (else None: can't compare it)."""
+    vals: list[float] = []
+    for r in replicates:
+        by = r.get(factor) if isinstance(r, dict) else None
+        st = by.get(stratum) if isinstance(by, dict) else None
+        v = st.get(metric) if isinstance(st, dict) else None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        vals.append(float(v))
+    return vals
+
+
+def _result_comparison_stats(
+    replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
+) -> dict[str, Any]:
+    """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the
+    ``by_<factor>`` strata the experiment broke results down by, plus a
+    multiple-comparison guard. Lets the paper report *how big* a between-group
+    difference is and whether it survives correction for the number of
+    comparisons — not just its direction.
+
+    Returns ``{"strata": {factor: {stratum: {metric: {mean, ci_lower,
+    ci_upper, n}}}}, "effect_sizes": [{factor, metric, a, b, cohens_d,
+    magnitude}], "comparisons": {"n", "bonferroni_alpha", "many"}}``. Empty
+    when no ``by_*`` factor has ≥2 numeric strata to compare."""
+    if not replicates:
+        return {}
+    # Factors present (and a dict) in EVERY replicate.
+    factors = sorted({
+        k for k in (replicates[0] if isinstance(replicates[0], dict) else {})
+        if k.startswith("by_")
+        and all(isinstance(r.get(k), dict) for r in replicates)
+    })
+    strata_out: dict[str, Any] = {}
+    effect_sizes: list[dict[str, Any]] = []
+    n_comparisons = 0
+    for factor in factors:
+        # Strata present in every replicate's factor dict.
+        strata = sorted(
+            set(replicates[0][factor])
+            .intersection(*(set(r[factor]) for r in replicates))
+        )
+        if len(strata) < 2:
+            continue
+        # Metrics scalar-numeric across all reps for at least one stratum.
+        metrics: set[str] = set()
+        for st in strata:
+            metrics.update(
+                m for m in replicates[0][factor].get(st, {})
+                if _stratum_series(replicates, factor, st, m) is not None
+            )
+        per_stratum: dict[str, Any] = {}
+        for st in strata:
+            cell: dict[str, Any] = {}
+            for m in sorted(metrics):
+                series = _stratum_series(replicates, factor, st, m)
+                if series is None:
+                    continue
+                mean, _, n = _stats.mean_std(series)
+                cell[m] = {"mean": mean, "n": n,
+                           **_stats.confidence_interval(series)}
+            if cell:
+                per_stratum[st] = cell
+        if per_stratum:
+            strata_out[factor] = per_stratum
+        # Pairwise effect sizes between strata, per shared metric.
+        for m in sorted(metrics):
+            for i in range(len(strata)):
+                for j in range(i + 1, len(strata)):
+                    a = _stratum_series(replicates, factor, strata[i], m)
+                    b = _stratum_series(replicates, factor, strata[j], m)
+                    if a is None or b is None:
+                        continue
+                    n_comparisons += 1
+                    d = _stats.cohens_d(a, b)
+                    effect_sizes.append({
+                        "factor": factor, "metric": m,
+                        "a": strata[i], "b": strata[j],
+                        "cohens_d": d,
+                        "magnitude": _stats.effect_magnitude(d),
+                    })
+    if not strata_out and not effect_sizes:
+        return {}
+    # Surface the largest effects first; cap the list so the analyze prompt
+    # isn't flooded on a heavily-stratified run.
+    effect_sizes.sort(key=lambda e: abs(e["cohens_d"] or 0.0), reverse=True)
+    return {
+        "strata": strata_out,
+        "effect_sizes": effect_sizes[:max_effect_sizes],
+        "comparisons": {
+            "n": n_comparisons,
+            "bonferroni_alpha": _stats.bonferroni_alpha(n_comparisons),
+            "many": n_comparisons > 5,
+        },
+    }
 
 
 def _aggregate_panel_reviews(
