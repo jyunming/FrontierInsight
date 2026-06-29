@@ -364,18 +364,22 @@
     if (!input.files || !input.files.length) { statusEl.textContent = 'Pick one or more files first.'; return; }
     if (!nextStepTargets.length) { statusEl.textContent = 'Nothing to upload here.'; return; }
     statusEl.textContent = 'Uploading…';
-    let saved = 0, skipped = 0;
+    // A file is offered to every target and lands wherever its extension is
+    // accepted; track DISTINCT staged filenames so a file accepted by one
+    // target (and skipped by another) isn't double-counted.
+    const total = input.files.length;
+    const stagedNames = new Set();
     try {
       for (const target of nextStepTargets) {
         const fd = new FormData();
         fd.append('target', target);
         for (const f of input.files) fd.append('files', f);
         const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/upload`, { method: 'POST', body: fd });
-        if (res.ok) { const d = await res.json(); saved += (d.saved || []).length; skipped += (d.skipped || []).length; }
+        if (res.ok) { const d = await res.json(); (d.saved || []).forEach(n => stagedNames.add(n)); }
       }
-      // Each file is offered to every target; it lands wherever its extension
-      // is accepted, so report distinct files staged rather than raw counts.
-      statusEl.textContent = `Staged ${saved} file(s)` + (skipped ? ` (${skipped} didn't fit a target type)` : '') + '. Now press Resume.';
+      const staged = stagedNames.size;
+      const noFit = total - staged;
+      statusEl.textContent = `Staged ${staged} file(s)` + (noFit > 0 ? ` (${noFit} didn't fit a target type)` : '') + '. Now press Resume.';
       input.value = '';
       refreshWantedPapers();
     } catch (e) { statusEl.textContent = 'Upload failed.'; }

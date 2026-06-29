@@ -346,7 +346,9 @@ def test_app_clarify_post_resolves_pending(tmp_path: Path) -> None:
         json={"answers": {"x": "chosen"}},
     )
     assert r.status_code == 200
-    assert r.json() == {"ok": True}
+    body = r.json()
+    assert body["ok"] is True
+    assert body["in_process_resolved"] is True
     # The future has been set.
     assert fut.done()
     assert fut.result() == {"x": "chosen"}

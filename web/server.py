@@ -987,7 +987,9 @@ def make_app(
                 interaction = "supply"
         return JSONResponse({
             "quest_id": quest_id,
-            "waiting": bool(markdown),
+            # Either artifact means "paused, waiting for you" — don't miss a
+            # pause just because the NEXT_STEP.md write (best-effort) failed.
+            "waiting": bool(markdown) or bool(descriptor),
             "headline": headline,
             "interaction": interaction,
             "kind": descriptor.get("kind") or "",
@@ -1824,17 +1826,26 @@ def make_app(
             quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         except HTTPException:
             quest_root = None
+        # Only stage an on-disk answer when the quest is actually paused for
+        # clarify on disk (questions present, not yet answered) — a stray POST
+        # to a non-paused quest shouldn't drop an answer file that a later
+        # clarify pass would wrongly consume.
+        has_disk_pause = bool(
+            quest_root is not None
+            and (quest_root / ".fi" / "clarify_questions.json").is_file()
+            and not (quest_root / ".fi" / "clarify_answer.json").is_file()
+        )
         disk_write_error: str | None = None
-        if quest_root is not None:
+        if has_disk_pause:
             try:
-                fi = quest_root / ".fi"
+                fi = quest_root / ".fi"  # type: ignore[union-attr]
                 fi.mkdir(parents=True, exist_ok=True)
                 (fi / "clarify_answer.json").write_text(
                     json.dumps(answers, indent=2) + "\n", encoding="utf-8",
                 )
             except OSError as e:
                 disk_write_error = f"{type(e).__name__}: {e}"
-        if not in_process_resolved and quest_root is None:
+        if not in_process_resolved and not has_disk_pause:
             raise HTTPException(409, f"no pending clarify for quest {quest_id}")
         payload: dict[str, Any] = {"ok": True,
                                    "in_process_resolved": in_process_resolved}

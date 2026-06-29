@@ -582,10 +582,17 @@ class Engine:
                                     clarify_answer_path.read_text(encoding="utf-8"),
                                 )
                             except (OSError, json.JSONDecodeError) as e:
+                                # A corrupt answer file would re-fail on every
+                                # resume and strand the quest — drop it so the
+                                # user can re-stage a fresh answer.
                                 self._log.warning(
-                                    "[run] couldn't read %s: %r — pausing instead",
-                                    clarify_answer_path, e,
+                                    "[run] couldn't read %s: %r — discarding it "
+                                    "and pausing instead", clarify_answer_path, e,
                                 )
+                                try:
+                                    clarify_answer_path.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
                                 answers = None
                             if isinstance(answers, dict) and answers:
                                 self._log.info(
