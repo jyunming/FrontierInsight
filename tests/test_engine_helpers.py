@@ -488,6 +488,36 @@ async def test_evidence_gate_broaden_is_bounded(
     assert "evidence_broaden_count" not in p2
 
 
+async def test_evidence_gate_fails_open_on_malformed_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signal-gathering is inside the fail-open guard with per-item type
+    checks: non-dict literature items, a non-dict analysis, and non-dict /
+    wrong-shaped cross_check entries (resumed or malformed checkpoint) must
+    NOT raise — the gate degrades to write and still tallies the good rows."""
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        return '{"verdict": "sufficient", "gaps": []}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    bad_state = {
+        "topic": "t",
+        "literature": ["not-a-dict", {"content": "real source"}, 42],
+        "analysis": "not-a-dict",          # wrong shape
+        "cross_check": [
+            "nope",                          # non-dict entry
+            {"hits": "not-a-list"},          # hits wrong shape
+            {"hits": [{"stance": "supporting"}, "x"]},  # one good supporting
+        ],
+    }
+    patch = await engine._node_evidence_gate(bad_state)
+    assert patch["evidence_assessment"]["route"] == "write"
+    # Only the one literature dict with non-empty content counts.
+    assert patch["evidence_assessment"]["n_sources"] == 1
+    assert patch["evidence_assessment"]["n_supporting"] == 1
+
+
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
     """Verify topology: linear ideate->...->review and conditional review->design|END."""
     from langgraph.graph import END, START

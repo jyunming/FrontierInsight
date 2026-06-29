@@ -3808,36 +3808,55 @@ class Engine:
         """
         if not self.config.engine.evidence_gate:
             return {}
-        lit = state.get("literature") or []
-        n_sources = sum(1 for d in lit if (d.get("content") or "").strip())
-        analysis = state.get("analysis") or {}
-        findings = analysis.get("key_findings") or []
-        cc = state.get("cross_check") or []
-        n_supporting = n_conflicting = 0
-        for rec in cc:
-            hits = rec.get("hits") or rec.get("results") or []
-            stances = [
-                str(h.get("stance") or h.get("classification") or "").lower()
-                for h in hits if isinstance(h, dict)
-            ] if isinstance(hits, list) else []
-            if any(s == "supporting" for s in stances):
-                n_supporting += 1
-            if any(s == "conflicting" for s in stances):
-                n_conflicting += 1
-        no_sim = bool(state.get("no_simulation_resolved"))
-        summary = {
-            "n_sources_with_text": n_sources,
-            "n_key_findings": len(findings),
-            "n_findings_with_supporting_lit": n_supporting,
-            "n_findings_with_conflicting_lit": n_conflicting,
-            "has_results": bool(state.get("result_json") or {}),
-            "mode": "no_simulation" if no_sim else "simulation",
-            "key_findings_preview": [str(f)[:200] for f in findings[:6]],
-        }
+        # EVERYTHING below is inside one fail-open guard, including the
+        # signal-gathering: a resumed / malformed checkpoint can hand us
+        # non-dict literature items, a non-dict analysis, or non-dict
+        # cross_check entries, and the gate must degrade to "write" rather
+        # than abort the whole quest on an AttributeError. Each access is
+        # also type-guarded so one bad entry doesn't poison the tally.
         parsed: dict[str, Any] = {}
+        n_sources = n_supporting = n_findings = 0
         try:
+            lit = state.get("literature")
+            lit = lit if isinstance(lit, list) else []
+            n_sources = sum(
+                1 for d in lit
+                if isinstance(d, dict) and str(d.get("content") or "").strip()
+            )
+            analysis = state.get("analysis")
+            analysis = analysis if isinstance(analysis, dict) else {}
+            findings = analysis.get("key_findings")
+            findings = findings if isinstance(findings, list) else []
+            n_findings = len(findings)
+            cc = state.get("cross_check")
+            cc = cc if isinstance(cc, list) else []
+            n_conflicting = 0
+            for rec in cc:
+                if not isinstance(rec, dict):
+                    continue
+                hits = rec.get("hits") or rec.get("results") or []
+                stances = [
+                    str(h.get("stance") or h.get("classification") or "").lower()
+                    for h in hits if isinstance(h, dict)
+                ] if isinstance(hits, list) else []
+                if any(s == "supporting" for s in stances):
+                    n_supporting += 1
+                if any(s == "conflicting" for s in stances):
+                    n_conflicting += 1
+            summary = {
+                "n_sources_with_text": n_sources,
+                "n_key_findings": n_findings,
+                "n_findings_with_supporting_lit": n_supporting,
+                "n_findings_with_conflicting_lit": n_conflicting,
+                "has_results": bool(state.get("result_json") or {}),
+                "mode": (
+                    "no_simulation"
+                    if state.get("no_simulation_resolved") else "simulation"
+                ),
+                "key_findings_preview": [str(f)[:200] for f in findings[:6]],
+            }
             prompt = self._prompts["evidence_gate"].substitute(
-                topic=state["topic"],
+                topic=str(state.get("topic") or ""),
                 clarify_block=_format_clarify(state),
                 evidence_summary=json.dumps(summary, indent=2),
             )
@@ -3866,7 +3885,7 @@ class Engine:
         self._log.info(
             "[evidence_gate] verdict=%s route=%s (sources=%d, findings=%d, "
             "supporting=%d, broadened=%d)",
-            verdict, assessment["route"], n_sources, len(findings),
+            verdict, assessment["route"], n_sources, n_findings,
             n_supporting, broadened,
         )
         patch: QuestState = {"evidence_assessment": assessment}
