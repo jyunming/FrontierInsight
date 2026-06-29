@@ -151,6 +151,35 @@ class _QuestRegistry:
 # ---- on-disk quest scan ---------------------------------------------------
 
 
+def _quest_pending(quest_root: Path) -> str | None:
+    """The pause a quest is waiting on (its kind), or ``None`` when it isn't
+    paused.
+
+    A quest pauses with a clean rc=0 exit that STILL writes a
+    ``frontier_insight_summary.json`` — so "a summary exists" is NOT "the quest
+    finished". These markers are the real signal, and the dashboard + the quest
+    page both read this one helper so they always agree. Reliable for new
+    quests (``NEXT_STEP.md`` / ``.fi/pause.json``, both deleted on completion)
+    and older ones (the on-disk review / clarify snapshots with no answer)."""
+    fi = quest_root / ".fi"
+    pause_json = fi / "pause.json"
+    if pause_json.is_file():
+        try:
+            return str(json.loads(pause_json.read_text(encoding="utf-8"))
+                       .get("kind") or "paused")
+        except (OSError, json.JSONDecodeError):
+            return "paused"
+    if (quest_root / "NEXT_STEP.md").is_file():
+        return "paused"
+    if ((fi / "human_review.json").is_file()
+            and not (fi / "human_review_answer.json").is_file()):
+        return "review"
+    if ((fi / "clarify_questions.json").is_file()
+            and not (fi / "clarify_answer.json").is_file()):
+        return "clarify"
+    return None
+
+
 def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
     """Return one record per quest directory under ``output_root``. A
     quest dir is any subdirectory containing a ``.fi/`` folder."""
@@ -167,16 +196,26 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         summary_path = d / "frontier_insight_summary.json"
         score: Any = None
         provider = ""
+        # Parse the summary once: provider comes from it, and whether it PARSES
+        # is what separates "complete" from a truncated/partial write.
+        summary_ok = False
         if summary_path.exists():
             try:
-                data = json.loads(summary_path.read_text(encoding="utf-8"))
-                provider = data.get("provider", "")
-                # Only "complete" once the summary actually PARSES — a
-                # present-but-truncated/unreadable summary is a partial
-                # write from an interrupted finalize, not a finished quest.
-                verdict = "complete"
+                provider = json.loads(
+                    summary_path.read_text(encoding="utf-8")
+                ).get("provider", "")
+                summary_ok = True
             except Exception:
-                verdict = "incomplete"
+                summary_ok = False
+        # A paused quest still wrote a summary on its clean pause-exit, so check
+        # "is it waiting on the user?" BEFORE calling a summary "complete".
+        pending = _quest_pending(d)
+        if pending is not None:
+            verdict = "needs_you"
+        elif summary_path.exists():
+            # Only "complete" once the summary actually parsed — a present-but-
+            # truncated/unreadable summary is a partial write, not a finish.
+            verdict = "complete" if summary_ok else "incomplete"
         elif _quest_looks_running(d, now):
             # No summary yet, but the engine wrote run.log recently → live.
             verdict = "(running)"
@@ -191,6 +230,7 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
             "quest_id": d.name,
             "quest_root": str(d),
             "verdict": verdict,
+            "pending": pending,
             "score": score,
             "provider": provider,
             "has_paper": paper_md.exists(),
@@ -1717,6 +1757,12 @@ def make_app(
                 )
             ),
             "pending_human_review": pending_human_review,
+            # The pause this quest is waiting on (kind), or null — the same
+            # signal the dashboard uses, so the page shows Resume + the right
+            # control even though a pause-exit wrote a summary.
+            "pending_action": _quest_pending(quest_root),
+            # Whether config.yaml is present (Update / Resume need it).
+            "has_config": (quest_root / "config.yaml").is_file(),
             "review": review,
             "review_panel": review_panel,
             # `quest_failed.md` summary when the engine wrote one

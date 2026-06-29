@@ -681,6 +681,11 @@ class Engine:
                 self.fi_dir / "pause.json",
                 self.fi_dir / "clarify_questions.json",
                 self.fi_dir / "clarify_answer.json",
+                # The human-review snapshot too — the node re-writes it on the
+                # resume pass, so a finished quest could otherwise look like it's
+                # still waiting for review on the dashboard / quest page.
+                self.fi_dir / "human_review.json",
+                self.fi_dir / "human_review_answer.json",
             ):
                 try:
                     p.unlink(missing_ok=True)
