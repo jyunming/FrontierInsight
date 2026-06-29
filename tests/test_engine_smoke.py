@@ -298,6 +298,59 @@ async def test_human_refine_loops_past_max_iterations(
 
 
 @pytest.mark.asyncio
+async def test_reopen_finished_quest_re_runs_to_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run(reopen=True)`` on a FINISHED quest (checkpoint at terminal,
+    next=()) re-enters the pipeline and lands back at the human-review gate —
+    the callback fires again on the re-opened pass, proving a done quest can be
+    continued for another review/refine."""
+    import asyncio
+
+    cfg = Config(
+        topic="smoke-test topic for re-open",
+        title="reopen-smoke",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            human_feedback_gate="after_review", auto_accept_on_pass=False,
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    first: list[dict] = []
+
+    async def accept_cb(snapshot: dict) -> dict:
+        first.append(snapshot)
+        return {"action": "accept"}
+
+    await asyncio.wait_for(
+        engine.run(human_feedback_callback=accept_cb), timeout=300,
+    )
+    assert len(first) == 1  # reviewed once → accept → terminal
+
+    # Re-open the finished quest: it must re-run and hit the gate again.
+    reopened: list[dict] = []
+
+    async def accept_cb2(snapshot: dict) -> dict:
+        reopened.append(snapshot)
+        return {"action": "accept"}
+
+    art = await asyncio.wait_for(
+        engine.run(reopen=True, human_feedback_callback=accept_cb2), timeout=300,
+    )
+    assert len(reopened) == 1, "re-open did not re-run to the human-review gate"
+    assert art.paper_md is not None and art.paper_md.exists()
+
+
+@pytest.mark.asyncio
 async def test_engine_runs_with_clarify_auto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

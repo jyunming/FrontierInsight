@@ -90,6 +90,13 @@ def test_resume_happy_path_spawns_subprocess(
     assert "q3" in argv
     assert "--config" in argv
 
+    # rerun=true uses --rerun (re-open a finished quest) instead of --resume.
+    res2 = client.post("/api/quests/q3/resume?rerun=true")
+    assert res2.status_code == 200, res2.text
+    argv2 = mock_subprocess[1]
+    assert "--rerun" in argv2 and "--resume" not in argv2
+    assert "q3" in argv2
+
 
 def test_resume_rejects_path_traversal(tmp_path: Path) -> None:
     client = _client(tmp_path)

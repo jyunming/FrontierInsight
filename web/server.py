@@ -913,11 +913,16 @@ def make_app(
         return HTMLResponse(injected)
 
     @app.post("/api/quests/{quest_id}/resume")
-    async def resume_quest(quest_id: str) -> JSONResponse:
+    async def resume_quest(quest_id: str, rerun: bool = False) -> JSONResponse:
         """Spawn ``python launch.py --config <quest_root>/config.yaml
         --resume <id>`` as a subprocess via the launcher. Different
         from ``--update``: no interview; just continue from the last
-        checkpoint with the existing YAML unchanged."""
+        checkpoint with the existing YAML unchanged.
+
+        ``rerun=true`` uses ``--rerun`` instead: for a FINISHED quest it
+        re-opens it (re-enters at design, applies saved refine feedback) and
+        runs back to the human-review gate, so a done quest can be pushed
+        further."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
@@ -936,9 +941,10 @@ def make_app(
                 "prior run before --resume can pick it up.",
             )
         from web.quest_launcher import QuestLauncherFull
+        resume_flag = "--rerun" if rerun else "--resume"
         try:
             launched = app.state.launcher.launch_command(
-                argv_tail=["--config", str(yaml_path), "--resume", quest_id],
+                argv_tail=["--config", str(yaml_path), resume_flag, quest_id],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
             )
         except QuestLauncherFull as e:

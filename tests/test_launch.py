@@ -65,6 +65,51 @@ def test_parse_args_resume_with_config_ok() -> None:
     assert args.resume == "q-123"
 
 
+def test_parse_args_rerun_with_config_ok() -> None:
+    args = launch.parse_args(["--config", "x.yaml", "--rerun", "q-123"])
+    assert args.rerun == "q-123"
+
+
+async def test_main_async_rerun_resume_conflict_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--resume and --rerun naming *different* quests is ambiguous (which id
+    actually runs?) and must fail fast before any side effects, not silently
+    resume one while flagging the other for re-open."""
+    # Guard: if the conflict check is removed, this would otherwise reach the
+    # Axon sidecar / real run — make those explode so the test can't pass by
+    # accidentally proceeding.
+    monkeypatch.setattr(
+        "core.axon_sidecar.ensure_axon_up",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("reached run")),
+    )
+    args = launch.parse_args(
+        ["--config", "x.yaml", "--resume", "q-aaa", "--rerun", "q-bbb"]
+    )
+    rc = await launch.main_async(args)
+    assert rc == 2
+
+
+async def test_main_async_rerun_resume_same_id_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing the same quest to both flags is unambiguous — no fail-fast."""
+    sentinel = RuntimeError("proceeded past conflict check")
+
+    def _boom(*a, **k):
+        raise sentinel
+
+    monkeypatch.setattr("core.axon_sidecar.ensure_axon_up", _boom)
+    args = launch.parse_args(
+        ["--config", "x.yaml", "--resume", "q-same", "--rerun", "q-same"]
+    )
+    # It should sail past the conflict check and only then hit our boom — i.e.
+    # the conflict guard did NOT short-circuit return 2.
+    with pytest.raises(RuntimeError) as ei:
+        await launch.main_async(args)
+    assert ei.value is sentinel
+
+
 def test_parse_args_summarize_mode() -> None:
     """--summarize is its own top-level mode; takes a folder Path."""
     args = launch.parse_args(["--summarize", "./papers"])
