@@ -29,7 +29,9 @@ machine-readable summary in `outputs/<quest_id>/`. The paper's sources are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON), and a `paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, a cited source, or are unsupported (unsupported claims
-force a revise). You see every node firing live in the chat panel.
+force a revise). With `engine.execute_replicates > 1` the results are reported
+with 95% confidence intervals, effect sizes, and a multiple-comparison guard
+instead of bare numbers. You see every node firing live in the chat panel.
 
 ## One-time setup
 

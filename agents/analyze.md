@@ -34,6 +34,8 @@ Interpret the results vs the hypothesis. Be honest about negative or null result
 
 If `result_json` is aggregate-only (no `by_<factor>` key), this stratification step is a no-op — just interpret the aggregate.
 
+**Report uncertainty, not bare numbers.** When the result block carries `aggregate_mean_std` (multi-seed replication), each metric has a 95% confidence interval (`ci_lower`/`ci_upper`) and a standard error (`se`). State a headline number WITH its interval — e.g. "RMSE 0.045 (95% CI 0.041–0.049, n=5)" — and do NOT call a difference real if the intervals overlap heavily. When `comparison_stats` is present it gives, between the strata: pairwise effect sizes (`cohens_d` + `magnitude`) and a multiple-comparison guard (`comparisons.n`, `comparisons.bonferroni_alpha`, `comparisons.many`). Quote the effect size when claiming one group beats another ("model-based beats rule-based, Cohen's d = 0.9, large"), and when `comparisons.many` is true, say so and do not over-claim a single stratum difference that wouldn't survive correction for the number of comparisons made. With a single seed (`n_replicates` absent / 1), say plainly there's no replication so no confidence interval can be reported — don't invent one.
+
 # Next-step routing
 After interpreting the results, decide one of:
 
