@@ -19,7 +19,7 @@ Weigh the assembled evidence against the research question **and the protocol's 
 
 - **Source policy** — the protocol declares what sources this question *requires* via its `source policy`. A `web_current` policy (markets, current events) is NOT satisfied by academic papers alone — it needs recent, dated web sources; an `academic` policy (e.g. a literature review) needs a real body of on-topic published work; a `user_data` policy needs the supplied/collected dataset. If the assembled sources don't match the declared source policy, that weighs toward `broaden`/`insufficient`.
 - **Expected evidence** — does what was assembled match the protocol's `expected evidence` for this `topic_type`?
-- **Sources** — are there real, on-topic sources, or are they thin / snippet-only / off-topic for the *specific* question (not just the broad subject)?
+- **Sources** — inspect the `sources` array in the summary (each carries a `title` + a content `snippet`). Are they real and **on-topic for the *specific* question** (not just the broad subject), or thin / snippet-only / clearly off-topic? A source whose title/snippet is unrelated to the research question does NOT count as evidence, however many were retrieved — call that out and weigh it toward `broaden`/`insufficient`.
 - **Results** — did the run produce real measurements/data (a simulation result, or user/collected data), or are the "results" effectively absent?
 - **Cross-check balance** — are the key findings actually SUPPORTED by independent literature, or mostly unsupported or conflicting?
 - **Fit** — does the evidence address the specific research question, or only the general topic?
