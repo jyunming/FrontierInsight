@@ -189,6 +189,10 @@ async function handleRequest(
         await runResume(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "generate") {
+        await runGenerate(prompt, stream, token);
+        return;
+    }
     if (cmd === "summarize") {
         await runSummarize(prompt, stream, token, userPickedModel);
         return;
@@ -278,6 +282,7 @@ function helpText(): string {
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly.",
+        "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
         "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
@@ -643,6 +648,112 @@ async function runUpdate(
     // safe). The user's shell determines the quoting style; both
     // PowerShell and bash accept double-quotes.
     term.sendText(`${pythonPath} launch.py --update "${questId}"`);
+}
+
+
+/**
+ * `@fi /generate [<quest_id>] [<kind>]` — produce ONE more output format
+ * (paper_pdf / slides / poster / speech) for an ALREADY-finished quest
+ * without re-running the research. Mirrors `python launch.py --emit` and
+ * the web Outputs panel. Quest + kind are quick-picked when omitted; the
+ * actual generation runs in an integrated terminal so the user sees output.
+ */
+async function runGenerate(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    if (token.isCancellationRequested) return;
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const pythonPath = cfg.get<string>("pythonPath") || "python";
+    let repoPath = cfg.get<string>("repoPath") || "";
+    if (!repoPath) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+            stream.markdown(
+                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
+            );
+            return;
+        }
+        repoPath = ws;
+    }
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting)
+        ? outputDirSetting
+        : path.join(repoPath, outputDirSetting);
+
+    const KINDS = ["paper_pdf", "slides", "poster", "speech"];
+    const tokens = promptArgs.trim().split(/\s+/).filter(Boolean);
+    let questId = (tokens[0] || "").replace(/^["']+|["']+$/g, "");
+    let kind = tokens.find((t) => KINDS.includes(t)) || "";
+    if (kind) questId = questId === kind ? "" : questId;
+
+    // Pick the quest if not supplied: only quests with a config.yaml AND a
+    // paper/paper.md (something to render from).
+    if (!questId) {
+        if (!(await fsExists(outputsDir))) {
+            stream.markdown(
+                `❌ No outputs directory at \`${outputsDir}\` — nothing to generate from.`,
+            );
+            return;
+        }
+        const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
+        const candidates: { questId: string; mtimeMs: number }[] = [];
+        await Promise.all(entries.map(async (entry) => {
+            if (!entry.isDirectory() || entry.name.startsWith("_")) return;
+            const yaml = path.join(outputsDir, entry.name, "config.yaml");
+            const paper = path.join(outputsDir, entry.name, "paper", "paper.md");
+            try {
+                if (!(await fsPromises.stat(yaml)).isFile()) return;
+                if (!(await fsPromises.stat(paper)).isFile()) return;
+                const st = await fsPromises.stat(paper);
+                candidates.push({ questId: entry.name, mtimeMs: st.mtimeMs });
+            } catch {
+                // No config / no paper — can't emit. Skip.
+            }
+        }));
+        if (candidates.length === 0) {
+            stream.markdown(
+                `❌ No finished quests with a \`config.yaml\` + \`paper/paper.md\` under \`${outputsDir}\`.`,
+            );
+            return;
+        }
+        candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+        const picked = await vscode.window.showQuickPick(
+            candidates.map((c) => ({
+                label: `$(file-pdf) ${c.questId}`,
+                description: new Date(c.mtimeMs).toLocaleString(),
+                questId: c.questId,
+            })),
+            { placeHolder: "Pick a finished quest to generate an output for", matchOnDescription: true },
+        );
+        if (!picked) return;
+        questId = picked.questId;
+    }
+    if (!kind) {
+        const pickedKind = await vscode.window.showQuickPick(
+            [
+                { label: "$(file-pdf) PDF", value: "paper_pdf" },
+                { label: "$(device-camera-video) Slides", value: "slides" },
+                { label: "$(layout) Poster", value: "poster" },
+                { label: "$(comment-discussion) Talk script", value: "speech" },
+            ],
+            { placeHolder: "Which output format to generate?" },
+        );
+        if (!pickedKind) return;
+        kind = pickedKind.value;
+    }
+
+    const yamlPath = path.join(outputsDir, questId, "config.yaml");
+    stream.markdown(
+        `📄 Generating \`${kind}\` for \`${questId}\` from its existing paper — no re-run. ` +
+        `Opening a terminal so you can watch it render.\n\n`,
+    );
+    const term = vscode.window.createTerminal({ name: `FI generate: ${kind}`, cwd: repoPath });
+    term.show();
+    term.sendText(
+        `${pythonPath} launch.py --config "${yamlPath}" --resume "${questId}" --emit ${kind}`,
+    );
 }
 
 

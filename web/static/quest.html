@@ -99,6 +99,13 @@
     <div id="files-section" class="col-span-1 md:col-span-3 bg-surface-mid cyber-border p-6 rounded-xl flex flex-col gap-4 overflow-hidden">
       <h3 class="font-label-sm text-label-sm text-outline uppercase">Workspace</h3>
       <div id="files-tree" class="font-code-md text-code-md text-on-surface flex flex-col gap-2"></div>
+      <!-- Outputs: which formats exist + Generate buttons for the rest.
+           Only shown once the quest has a paper to render from. -->
+      <div id="outputs-section" class="hidden flex flex-col gap-2 pt-4 border-t border-white/5">
+        <h4 class="font-label-sm text-label-sm text-outline uppercase">Outputs</h4>
+        <div id="outputs-list" class="flex flex-col gap-2 font-code-md text-code-md"></div>
+        <p id="outputs-hint" class="text-outline text-[10px]"></p>
+      </div>
     </div>
     <!-- Paper Preview (Col 4-12) -->
     <div id="paper-section" class="hidden col-span-1 md:col-span-9 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
@@ -343,6 +350,8 @@
     refreshFiles();
     refreshWantedPapers();
     refreshNextStep();
+    window.__fi_last_data = data;
+    renderOutputs(data);
     // A paused quest wrote a summary but isn't finished — don't treat it as
     // terminal (keep polling so the controls stay live).
     const terminal = !data.alive && data.summary && !data.pending_action
@@ -531,6 +540,68 @@
           </ul>
         </details>`).join('');
     } catch (_) {}
+  }
+
+  // Tracks formats the user just clicked Generate on, so the button shows a
+  // spinner until the produced file appears on the next poll.
+  const _generating = new Set();
+  const _OUTPUT_LABELS = { paper_pdf: 'PDF', slides: 'Slides', poster: 'Poster', speech: 'Talk script' };
+
+  function renderOutputs(data) {
+    const sec = document.getElementById('outputs-section');
+    const list = document.getElementById('outputs-list');
+    const hint = document.getElementById('outputs-hint');
+    const avail = data.available_artifacts || null;
+    const gen = data.generatable_kinds || ['paper_pdf', 'slides', 'poster', 'speech'];
+    // Only meaningful once there's a paper to render from.
+    const hasPaper = avail && avail.paper_md;
+    if (!avail || !hasPaper || !data.has_config) { sec.classList.add('hidden'); return; }
+    sec.classList.remove('hidden');
+    list.innerHTML = gen.map(kind => {
+      const have = avail[kind];
+      const label = _OUTPUT_LABELS[kind] || kind;
+      if (have) {
+        _generating.delete(kind);
+        const enc = encodeURIComponent(have);
+        return `<div class="flex items-center gap-2">
+          <span class="material-symbols-outlined text-[14px] text-secondary">check_circle</span>
+          <a href="/api/quests/${encodeURIComponent(questId)}/file?path=${enc}" target="_blank" rel="noopener" class="text-on-surface-variant hover:text-primary flex-1 truncate" title="Open ${escapeHtml(have)}">${escapeHtml(label)}</a>
+          <a href="/api/quests/${encodeURIComponent(questId)}/file?path=${enc}&download=1" download class="text-outline hover:text-primary" title="Download"><span class="material-symbols-outlined text-[14px]">download</span></a>
+        </div>`;
+      }
+      if (_generating.has(kind)) {
+        return `<div class="flex items-center gap-2 text-outline"><span class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span><span class="flex-1">${escapeHtml(label)}</span><span class="text-[10px]">generating…</span></div>`;
+      }
+      return `<div class="flex items-center gap-2">
+        <span class="material-symbols-outlined text-[14px] text-outline">radio_button_unchecked</span>
+        <span class="flex-1 text-on-surface-variant">${escapeHtml(label)}</span>
+        <button onclick="generateArtifact('${kind}')" class="cyber-border text-on-surface px-3 py-1 rounded-full text-[10px] uppercase hover:bg-surface-high transition-colors">Generate</button>
+      </div>`;
+    }).join('');
+    const configured = data.configured_kinds || [];
+    hint.textContent = configured.length
+      ? `Configured: ${configured.join(', ')}. Generate adds a format from the existing paper — no re-run.`
+      : 'Generate adds a format from the existing paper — no re-run.';
+  }
+
+  async function generateArtifact(kind) {
+    _generating.add(kind);
+    renderOutputs(window.__fi_last_data || {});
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/generate?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
+      if (!res.ok) {
+        _generating.delete(kind);
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate ${kind}: ${err.detail || err.error || res.status}`);
+        return;
+      }
+      // The subprocess runs in the background; keep polling so the file
+      // appears in the panel when it lands. Ensure polling is active.
+      if (!pollHandle) { pollHandle = setInterval(refresh, 4000); }
+    } catch (e) {
+      _generating.delete(kind);
+      alert(`Could not generate ${kind}: ${e}`);
+    }
   }
 
   function formatBytes(n) { if (n < 1024) return `${n} B`; if (n < 1024*1024) return `${(n/1024).toFixed(1)} KB`; return `${(n/1024/1024).toFixed(1)} MB`; }

@@ -50,6 +50,10 @@
             "description": "Resume a previously-crashed quest from its checkpoint. With no arg, shows a picker. With a quest_id, resumes that quest."
           },
           {
+            "name": "generate",
+            "description": "Generate one more output format (PDF / slides / poster / talk script) for an already-finished quest WITHOUT re-running the research. Pick the quest + format, or pass them: @fi /generate <quest_id> paper_pdf. Mirrors `launch.py --emit` and the web Outputs panel."
+          },
+          {
             "name": "summarize",
             "description": "Walk a folder of mixed content (papers / code / study notes / logs) and produce a structured markdown summary. Input files plus the summary are ingested into Axon. Example: @fi /summarize ./papers literature"
           },
