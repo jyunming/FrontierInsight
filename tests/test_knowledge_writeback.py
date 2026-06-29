@@ -70,6 +70,7 @@ def _fake_response(prompt: str) -> str:
     return "{}"
 
 
+@pytest.mark.slow  # builds a real venv (sandbox="venv") — not fast-tier hermetic
 @pytest.mark.asyncio
 async def test_quest_writeback_invokes_axon_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -164,6 +165,7 @@ def _fake_response_revise(prompt: str) -> str:
     return "{}"
 
 
+@pytest.mark.slow  # builds a real venv (sandbox="venv") — not fast-tier hermetic
 @pytest.mark.asyncio
 async def test_quest_writeback_skipped_when_verdict_revise_and_accept_gate_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -218,6 +220,7 @@ async def test_quest_writeback_skipped_when_verdict_revise_and_accept_gate_on(
     assert captured == []
 
 
+@pytest.mark.slow  # builds a real venv (sandbox="venv") — not fast-tier hermetic
 @pytest.mark.asyncio
 async def test_quest_writeback_runs_on_revise_when_accept_gate_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

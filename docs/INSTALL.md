@@ -250,8 +250,8 @@ cd vscode-frontier-insight
 npm install
 npm run package      # produces vscode-frontier-insight.vsix
 
-# Install:
-code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
+# Install (still inside vscode-frontier-insight/):
+code --install-extension vscode-frontier-insight.vsix
 ```
 
 Reload your VSCode window and `@fi` will appear in the Copilot Chat

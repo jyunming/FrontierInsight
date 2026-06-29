@@ -108,11 +108,11 @@ This is the safest and cleanest path. You already have the VSCode Copilot Chat e
 # Build the FI VSCode extension into a .vsix (one-time):
 cd vscode-frontier-insight
 npm install
-npm run package    # → vscode-frontier-insight/vscode-frontier-insight.vsix
+npm run package    # → vscode-frontier-insight.vsix (in this folder)
 
 # Install it. Either:
 #   GUI:  Extensions sidebar → ⋯ → "Install from VSIX..." → pick the file
-#   CLI:  code --install-extension vscode-frontier-insight/vscode-frontier-insight.vsix
+#   CLI:  code --install-extension vscode-frontier-insight.vsix
 ```
 
 In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, web research, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
