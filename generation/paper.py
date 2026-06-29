@@ -24,8 +24,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.citations import to_bibtex, to_csl_json
 from core.config import Config
-from core.engine import QuestArtifacts
+from core.engine import QuestArtifacts, build_references
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
 
@@ -437,6 +438,24 @@ class PaperGenerator:
             dst = out_dir / "paper.md"
             shutil.copy2(art.paper_md, dst)
             result["paper_md"] = dst
+
+        # Machine-readable citations: emit the paper's references as BibTeX +
+        # CSL-JSON so they drop straight into a reference manager. Reuses the
+        # same de-duped reference list the paper / poster / slides cite.
+        refs = build_references(
+            (art.raw_state or {}).get("literature") or [],
+            audience=self.config.output.audience,
+        )
+        if refs:
+            bib = out_dir / "references.bib"
+            csl = out_dir / "references.csl.json"
+            try:
+                bib.write_text(to_bibtex(refs), encoding="utf-8")
+                csl.write_text(to_csl_json(refs), encoding="utf-8")
+                result["references_bib"] = bib
+                result["references_csl_json"] = csl
+            except OSError as e:
+                _log.warning("references export failed: %r", e)
 
         if art.figures_dir is not None and art.figures_dir.exists():
             dst = out_dir / "figures"
