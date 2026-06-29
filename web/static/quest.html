@@ -517,7 +517,17 @@
         <details ${top === 'figures' || top === 'paper' ? 'open' : ''} class="text-on-surface">
           <summary class="cursor-pointer flex items-center gap-2 hover:text-primary"><span class="material-symbols-outlined text-[16px]">folder${top === 'figures' || top === 'paper' ? '_open' : ''}</span><span>${escapeHtml(top)}/</span><span class="text-outline ml-auto">(${groups[top].length})</span></summary>
           <ul class="ml-6 mt-1 flex flex-col gap-1">
-            ${groups[top].map(f => `<li><a href="/api/quests/${encodeURIComponent(questId)}/file?path=${encodeURIComponent(f.path)}" target="_blank" class="flex items-center gap-2 text-on-surface-variant hover:text-primary"><span class="material-symbols-outlined text-[14px]">insert_drive_file</span><span class="truncate">${escapeHtml(f.path.slice(top.length + 1) || f.path)}</span><span class="text-outline ml-auto text-[10px]">${formatBytes(f.size_bytes)}</span></a></li>`).join('')}
+            ${groups[top].map(f => {
+              const enc = encodeURIComponent(f.path);
+              const label = escapeHtml(f.path.slice(top.length + 1) || f.path);
+              const base = escapeHtml(f.path.split('/').pop());
+              const fileUrl = `/api/quests/${encodeURIComponent(questId)}/file?path=${enc}`;
+              return `<li class="flex items-center gap-2">
+                <a href="${fileUrl}" target="_blank" rel="noopener" title="Open ${base} in a new tab" class="flex items-center gap-2 text-on-surface-variant hover:text-primary min-w-0 flex-1"><span class="material-symbols-outlined text-[14px]">insert_drive_file</span><span class="truncate">${label}</span></a>
+                <span class="text-outline text-[10px] shrink-0">${formatBytes(f.size_bytes)}</span>
+                <a href="${fileUrl}&download=1" download="${base}" title="Download ${base}" class="text-outline hover:text-primary shrink-0 flex items-center"><span class="material-symbols-outlined text-[14px]">download</span></a>
+              </li>`;
+            }).join('')}
           </ul>
         </details>`).join('');
     } catch (_) {}

@@ -705,6 +705,34 @@ def test_get_quest_file_404_when_real_file_truly_missing(tmp_path: Path) -> None
     assert res.status_code == 404
 
 
+def test_get_quest_file_serves_real_filename(tmp_path: Path) -> None:
+    """The download must carry the file's real name, not the URL's last
+    segment. Without a Content-Disposition filename the browser saves the
+    response as ``file`` (the route segment) with no extension — the bug
+    the user hit. Default disposition is ``inline`` (preview in a tab);
+    ``?download=1`` forces ``attachment`` (save). Both keep the real name."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-dl", "paper/paper.md", "real body")
+
+    # Default: inline preview, real filename present.
+    res = client.get("/api/quests/q-dl/file", params={"path": "paper/paper.md"})
+    assert res.status_code == 200
+    cd = res.headers.get("content-disposition", "")
+    assert "inline" in cd
+    assert "paper.md" in cd  # NOT "file"
+
+    # ?download=1: attachment (save), still the real filename.
+    res2 = client.get(
+        "/api/quests/q-dl/file",
+        params={"path": "paper/paper.md", "download": "1"},
+    )
+    assert res2.status_code == 200
+    cd2 = res2.headers.get("content-disposition", "")
+    assert "attachment" in cd2
+    assert "paper.md" in cd2
+
+
 def test_wanted_papers_and_upload_endpoints(tmp_path: Path) -> None:
     """The papers panel endpoints: GET wanted-papers returns the manifest +
     dropped list; POST papers saves sanitised PDFs into inputs/papers/ and

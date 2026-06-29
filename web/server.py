@@ -2011,7 +2011,15 @@ def make_app(
         paper = _resolve_quest_root(app.state.output_root, quest_id) / "paper" / "paper.md"
         if not paper.exists():
             raise HTTPException(404, "paper.md not yet written")
-        return FileResponse(str(paper), media_type="text/markdown")
+        # inline + real filename: the in-page renderer reads the body via
+        # fetch() (disposition ignored there), but a direct hit / "save as"
+        # then names it paper.md instead of the URL's last segment "paper".
+        return FileResponse(
+            str(paper),
+            media_type="text/markdown",
+            filename="paper.md",
+            content_disposition_type="inline",
+        )
 
     @app.get("/api/quests/{quest_id}/files")
     async def list_quest_files(quest_id: str) -> JSONResponse:
@@ -2038,7 +2046,9 @@ def make_app(
         return JSONResponse({"quest_id": quest_id, "files": items})
 
     @app.get("/api/quests/{quest_id}/file")
-    async def get_quest_file(quest_id: str, path: str) -> FileResponse:
+    async def get_quest_file(
+        quest_id: str, path: str, download: bool = False
+    ) -> FileResponse:
         """Serve a single file from the quest_root by relative path.
         Path-traversal guarded: resolves and confirms the final
         path stays inside quest_root.
@@ -2050,6 +2060,15 @@ def make_app(
         path value as the literal ``paper.md?preventCache=...``.
         Strip everything after the first ``?``/``#`` so the file
         actually resolves instead of 404-ing.
+
+        The response always carries the real filename in
+        ``Content-Disposition`` (derived from the file, not the URL).
+        Without it the browser names a saved file after the URL's last
+        path segment — literally ``file`` — instead of e.g. ``paper.md``.
+        ``?download=1`` forces a save (``attachment``); the default
+        ``inline`` lets the browser preview renderable types (PDF,
+        images, text) in a tab while still knowing the true name if the
+        user then saves it.
         """
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         cleaned = path.split("?", 1)[0].split("#", 1)[0]
@@ -2060,7 +2079,11 @@ def make_app(
             raise HTTPException(400, "path escapes quest dir") from None
         if not target.is_file():
             raise HTTPException(404, "file not found")
-        return FileResponse(str(target))
+        return FileResponse(
+            str(target),
+            filename=target.name,
+            content_disposition_type="attachment" if download else "inline",
+        )
 
     @app.get("/api/quests/{quest_id}/download")
     async def download_quest_zip(quest_id: str) -> StreamingResponse:
@@ -2275,7 +2298,11 @@ def make_app(
         path = quest_root / "figures" / name
         if not path.exists() or not path.is_file():
             raise HTTPException(404, "figure not found")
-        return FileResponse(str(path))
+        # inline + real name so the figure previews in a tab and any
+        # "save as" keeps e.g. fig1.png rather than the URL segment "name".
+        return FileResponse(
+            str(path), filename=path.name, content_disposition_type="inline"
+        )
 
     @app.post("/api/quests/start")
     async def start_quest(request: Request) -> JSONResponse:
