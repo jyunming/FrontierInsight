@@ -49,6 +49,7 @@ from .config import (
 )
 from .execution import ExecutionResult, make_executor
 from .knowledge import Knowledge, RetrievedDoc
+from .protocol import derive_protocol
 from .provider import (
     LLMClient,
     PROXY_PROVIDERS,
@@ -144,6 +145,10 @@ class QuestState(TypedDict, total=False):
     # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
+    # The typed research contract (core.protocol.ResearchProtocol, stored
+    # as a dict) the quest is held to: topic_type, source_policy, baseline,
+    # success_metric, … Derived at the evidence_gate from clarify + config.
+    research_protocol: dict[str, Any]
     # Evidence-sufficiency assessment from the evidence_gate node:
     # ``{"verdict": "sufficient"|"broaden"|"insufficient", "rationale",
     # "gaps": [...], "n_sources", "n_supporting"}``. Read by the writer so
@@ -3808,6 +3813,13 @@ class Engine:
         """
         if not self.config.engine.evidence_gate:
             return {}
+        # The typed contract this quest is held to (topic type, source
+        # policy, baseline, success metric). derive_protocol is pure +
+        # total — it guards every state access and has defaults — so it
+        # won't raise on a malformed checkpoint; building it here means
+        # it's always recorded in state AND available to the gate prompt
+        # below so the sufficiency call is contract-aware.
+        protocol = derive_protocol(state, self.config)
         # EVERYTHING below is inside one fail-open guard, including the
         # signal-gathering: a resumed / malformed checkpoint can hand us
         # non-dict literature items, a non-dict analysis, or non-dict
@@ -3858,6 +3870,7 @@ class Engine:
             prompt = self._prompts["evidence_gate"].substitute(
                 topic=str(state.get("topic") or ""),
                 clarify_block=_format_clarify(state),
+                protocol_block=protocol.as_block(),
                 evidence_summary=json.dumps(summary, indent=2),
             )
             text = await self._chat(prompt, node="evidence_gate")
@@ -3883,12 +3896,16 @@ class Engine:
             "n_supporting": n_supporting,
         }
         self._log.info(
-            "[evidence_gate] verdict=%s route=%s (sources=%d, findings=%d, "
-            "supporting=%d, broadened=%d)",
-            verdict, assessment["route"], n_sources, n_findings,
+            "[evidence_gate] verdict=%s route=%s type=%s policy=%s "
+            "(sources=%d, findings=%d, supporting=%d, broadened=%d)",
+            verdict, assessment["route"], protocol.topic_type,
+            protocol.source_policy, n_sources, n_findings,
             n_supporting, broadened,
         )
-        patch: QuestState = {"evidence_assessment": assessment}
+        patch: QuestState = {
+            "evidence_assessment": assessment,
+            "research_protocol": protocol.model_dump(),
+        }
         if will_broaden:
             patch["evidence_broaden_count"] = broadened + 1
         return patch

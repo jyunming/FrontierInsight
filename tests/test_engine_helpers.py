@@ -516,6 +516,10 @@ async def test_evidence_gate_fails_open_on_malformed_state(
     # Only the one literature dict with non-empty content counts.
     assert patch["evidence_assessment"]["n_sources"] == 1
     assert patch["evidence_assessment"]["n_supporting"] == 1
+    # The typed protocol is always recorded (built defensively before the
+    # fail-open guard), even on malformed state.
+    assert "research_protocol" in patch
+    assert patch["research_protocol"]["topic_type"]
 
 
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:

@@ -6,14 +6,19 @@ $topic
 # Pre-flight clarifications (success metric, baseline, study shape, simulatability, …)
 $clarify_block
 
+# Research protocol (the typed contract this quest is held to)
+$protocol_block
+
 # Evidence assembled
 ```json
 $evidence_summary
 ```
 
 # Your task
-Weigh the assembled evidence against the research question and return a verdict. Consider:
+Weigh the assembled evidence against the research question **and the protocol's declared contract** and return a verdict. Consider:
 
+- **Source policy** — the protocol declares what sources this question *requires*. A `web_current` topic (markets, current events) is NOT satisfied by academic papers alone — it needs recent, dated web sources; a `literature_review` needs a real body of on-topic published work; `user_data` needs the user's dataset. If the assembled sources don't match the declared `source_policy`, that weighs toward `broaden`/`insufficient`.
+- **Expected evidence** — does what was assembled match the protocol's `expected evidence` for this `topic_type`?
 - **Sources** — are there real, on-topic sources, or are they thin / snippet-only / off-topic for the *specific* question (not just the broad subject)?
 - **Results** — did the run produce real measurements/data (a simulation result, or user/collected data), or are the "results" effectively absent?
 - **Cross-check balance** — are the key findings actually SUPPORTED by independent literature, or mostly unsupported or conflicting?
