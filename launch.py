@@ -2074,15 +2074,7 @@ async def _run_new(
     # ...) and ``input()`` either errors or mangles the bytes before
     # Python sees them. ``errors="replace"`` keeps a partial-decode
     # answer over a hard crash.
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-        sys.stdin.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-    except (AttributeError, OSError):
-        # Older Pythons / unusual stream wrappers — fall through;
-        # the print calls below will still error on a non-UTF8
-        # console, but at least we tried.
-        pass
+    _force_utf8_streams()
 
     print("=" * 72)
     print("Frontier Insight — set up a new research quest")
@@ -3017,7 +3009,31 @@ def _load_dotenv(path: str = ".env") -> None:
         return
 
 
+def _force_utf8_streams() -> None:
+    """Reconfigure stdout/stderr/stdin to UTF-8 so non-ASCII output (the
+    `--help` text has arrows/em-dashes; draft titles and `--list-drafts`
+    can be Traditional Chinese) doesn't crash on a Windows cp1252 console
+    with ``UnicodeEncodeError: 'charmap' codec can't encode character``.
+    No-op on POSIX (already UTF-8). Must run BEFORE argparse prints help
+    or any mode writes Unicode — i.e. first thing in ``main()``."""
+    for stream, kw in (
+        (sys.stdout, {"encoding": "utf-8"}),
+        (sys.stderr, {"encoding": "utf-8"}),
+        (sys.stdin, {"encoding": "utf-8", "errors": "replace"}),
+    ):
+        try:
+            stream.reconfigure(**kw)  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            # Older Pythons / unusual stream wrappers — best-effort.
+            pass
+
+
 def main() -> int:
+    # UTF-8 the console FIRST: argparse prints --help (arrows/em-dashes)
+    # and exits inside parse_args(), before any other code runs, so a
+    # cp1252 Windows console would crash on --help / --list-drafts unless
+    # the streams are reconfigured up here.
+    _force_utf8_streams()
     # Load .env before anything reads the environment (KnowledgeConfig's
     # brave_api_key / offline defaults resolve BRAVE_API_KEY / FI_* at
     # Config construction time).
