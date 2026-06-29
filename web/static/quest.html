@@ -312,7 +312,9 @@
       updateLink.classList.remove('opacity-40', 'pointer-events-none');
       updateLink.title = '';
     }
-    // Add-files panel: available for any resumable (has-config, not-live) quest.
+    // Add-files panel: available for any quest that isn't actively running and
+    // has a saved config (so a later resume/refine can pick the files up) —
+    // includes completed quests, not just paused ones.
     const addSec = document.getElementById('add-files-section');
     const showAdd = data.has_config && !data.alive;
     addSec.classList.toggle('hidden', !showAdd);
@@ -458,26 +460,33 @@
     } catch (e) { statusEl.textContent = 'Upload failed.'; }
   }
 
-  // Add papers/data to ANY quest: each file is offered to both targets and
-  // lands wherever its extension fits (papers → inputs/papers, data →
-  // inputs/data); picked up on the next resume/refine.
+  // Add papers/data to ANY quest. Each file routes to exactly ONE target by
+  // extension — datasets (.csv/.json/…) → inputs/data, everything else
+  // (.pdf/.md/.txt) → inputs/papers — so a file can't land in both folders.
   async function addFilesToQuest() {
     const input = document.getElementById('add-files-input');
     const statusEl = document.getElementById('add-files-status');
     if (!input.files || !input.files.length) { statusEl.textContent = 'Pick one or more files first.'; return; }
+    const dataExt = ['.csv', '.tsv', '.json', '.jsonl', '.parquet', '.xlsx', '.npy', '.npz'];
+    const groups = { papers: [], data: [] };
+    for (const f of input.files) {
+      const ext = (f.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+      (dataExt.includes(ext) ? groups.data : groups.papers).push(f);
+    }
     const total = input.files.length;
-    const staged = new Set();
+    let staged = 0;
     statusEl.textContent = 'Adding…';
     try {
       for (const target of ['papers', 'data']) {
+        if (!groups[target].length) continue;
         const fd = new FormData();
         fd.append('target', target);
-        for (const f of input.files) fd.append('files', f);
+        for (const f of groups[target]) fd.append('files', f);
         const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/upload`, { method: 'POST', body: fd });
-        if (res.ok) { const d = await res.json(); (d.saved || []).forEach(n => staged.add(n)); }
+        if (res.ok) { const d = await res.json(); staged += (d.saved || []).length; }
       }
-      const noFit = total - staged.size;
-      statusEl.textContent = `Added ${staged.size} file(s)` + (noFit > 0 ? ` (${noFit} unsupported type)` : '') + '. Resume (or Refine, at review) to use them.';
+      const noFit = total - staged;
+      statusEl.textContent = `Added ${staged} file(s)` + (noFit > 0 ? ` (${noFit} unsupported type)` : '') + '. Resume (or Refine, at review) to use them.';
       input.value = '';
       refreshFiles();
     } catch (e) { statusEl.textContent = 'Add failed.'; }

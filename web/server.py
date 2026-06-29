@@ -196,27 +196,26 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         summary_path = d / "frontier_insight_summary.json"
         score: Any = None
         provider = ""
+        # Parse the summary once: provider comes from it, and whether it PARSES
+        # is what separates "complete" from a truncated/partial write.
+        summary_ok = False
         if summary_path.exists():
             try:
                 provider = json.loads(
                     summary_path.read_text(encoding="utf-8")
                 ).get("provider", "")
+                summary_ok = True
             except Exception:
-                provider = ""
+                summary_ok = False
         # A paused quest still wrote a summary on its clean pause-exit, so check
         # "is it waiting on the user?" BEFORE calling a summary "complete".
         pending = _quest_pending(d)
         if pending is not None:
             verdict = "needs_you"
         elif summary_path.exists():
-            try:
-                json.loads(summary_path.read_text(encoding="utf-8"))
-                # Only "complete" once the summary actually PARSES — a
-                # present-but-truncated/unreadable summary is a partial
-                # write from an interrupted finalize, not a finished quest.
-                verdict = "complete"
-            except Exception:
-                verdict = "incomplete"
+            # Only "complete" once the summary actually parsed — a present-but-
+            # truncated/unreadable summary is a partial write, not a finish.
+            verdict = "complete" if summary_ok else "incomplete"
         elif _quest_looks_running(d, now):
             # No summary yet, but the engine wrote run.log recently → live.
             verdict = "(running)"
