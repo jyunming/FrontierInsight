@@ -3244,17 +3244,26 @@ class Engine:
         data_dir = self.quest_root / "data"
         if data_dir.is_dir():
             _skip_top = {"literature", "auto_collected"}
-            for p in sorted(data_dir.rglob("*"))[: limit * 2]:
+            # Collect matching files lazily and STOP after limit*2 — don't
+            # materialize + sort the whole data/ tree (could be large). Sort
+            # only the small collected set for deterministic prompt order,
+            # and filter BEFORE the cap so non-data files don't crowd it out.
+            collected: list[Path] = []
+            for p in data_dir.rglob("*"):
                 if not p.is_file() or p.name == "README.md":
                     continue
                 rel = p.relative_to(data_dir)
                 if rel.parts and rel.parts[0] in _skip_top:
                     continue
-                kind = _classify_extension(p.suffix)
-                if kind == "other":
+                if _classify_extension(p.suffix) == "other":
                     continue
-                content = _read_text(p, kind)
+                collected.append(p)
+                if len(collected) >= limit * 2:
+                    break
+            for p in sorted(collected):
+                content = _read_text(p, _classify_extension(p.suffix))
                 if content.strip():
+                    rel = p.relative_to(data_dir)
                     parts.append(f"[USER DATA] {rel.as_posix()}\n{content[:budget]}")
         return "\n\n".join(parts)
 

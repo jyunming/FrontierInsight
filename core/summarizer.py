@@ -127,12 +127,13 @@ _KIND_BY_EXT: dict[str, str] = {
     # Configs.
     ".yaml": "config", ".yml": "config", ".json": "config",
     ".toml": "config", ".ini": "config", ".cfg": "config",
-    # Logs / outputs.
+    # Logs / data outputs. Spreadsheets/parquet join csv/tsv under "log" (an
+    # existing kind _detect_folder_kind already counts) — they're parsed via
+    # pandas into a CSV-like text preview in _read_text (keyed on suffix), so
+    # the LLM sees the actual rows, not just a filename. Previously
+    # .xlsx/.parquet were "other" → no content at all.
     ".log": "log", ".jsonl": "log", ".csv": "log", ".tsv": "log",
-    # Tabular data the user can drop / --analyze. Parsed via pandas into a
-    # CSV-like text preview (see _read_text) so the LLM sees the actual
-    # rows, not just a filename. Previously classified "other" → no content.
-    ".xlsx": "data", ".xls": "data", ".parquet": "data",
+    ".xlsx": "log", ".xls": "log", ".parquet": "log",
 }
 
 _VALID_KINDS: frozenset[str] = frozenset(
@@ -226,10 +227,13 @@ def _read_tabular(path: Path) -> str:
     try:
         import pandas as pd
         if path.suffix.lower() == ".parquet":
-            df = pd.read_parquet(path)
+            # parquet is columnar — no cheap row cap on read; head() after.
+            df = pd.read_parquet(path).head(200)
         else:
-            df = pd.read_excel(path)
-        return df.head(200).to_csv(index=False)
+            # nrows caps parsing so we don't load a huge workbook for a
+            # 200-row preview.
+            df = pd.read_excel(path, nrows=200)
+        return df.to_csv(index=False)
     except Exception as e:  # noqa: BLE001 — optional dep / corrupt file
         _log.warning("could not parse tabular %s: %s", path, e)
         return ""
