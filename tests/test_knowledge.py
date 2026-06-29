@@ -434,6 +434,34 @@ def test_external_top_k_used_when_caller_explicitly_passes_it(monkeypatch) -> No
     assert captured["params"]["max_results"] == "20"
 
 
+def test_disabled_knowledge_does_not_web_search(monkeypatch) -> None:
+    """knowledge.enabled=False is the master switch — it must NOT reach web
+    search, even with web_search=True (audit #8). Previously want_web looked
+    only at web_search (default on), so disabling the layer still hit the net."""
+    from core.knowledge import Knowledge
+    import asyncio
+
+    called = {"web": 0}
+
+    def fake_web(*a, **k):  # noqa: ANN001
+        called["web"] += 1
+        return []
+
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+
+    # enabled=False + web_search=True → still no web.
+    k = Knowledge(KnowledgeConfig(enabled=False, web_search=True))
+    k.cfg = KnowledgeConfig(enabled=False, web_search=True)
+    asyncio.run(k.asearch("anything"))
+    assert called["web"] == 0, "enabled=False must not web-search"
+
+    # Control: enabled=True + web_search=True DOES web-search, even without
+    # an Axon corpus (web is independent of the Axon brain when enabled).
+    k.cfg = KnowledgeConfig(enabled=True, web_search=True, external_fallback=[])
+    asyncio.run(k.asearch("anything"))
+    assert called["web"] == 1, "enabled=True + web_search must web-search"
+
+
 def test_external_top_k_honours_caller_per_call_cap(monkeypatch) -> None:
     """When the caller passes ``top_k=3`` (e.g. ideate seeding, cross_check)
     WITHOUT an explicit ``external_top_k``, the external layer must
@@ -670,8 +698,10 @@ def test_local_papers_supplement_external_when_few(tmp_path: Path, monkeypatch) 
     # default (20) would let the fake router return up to 19 external
     # docs alongside the pinned paper; the test only cares about the
     # head-of-list invariant (local paper first, then external).
+    # enabled=True: this test exercises the external supplement path, which
+    # is network retrieval and now (audit #8) requires the layer enabled.
     cfg = KnowledgeConfig(
-        enabled=False, source_routing="manual",
+        enabled=True, source_routing="manual",
         external_fallback=["arxiv"], web_search=False, local_papers=[local],
         top_k=4, external_top_k=4,
     )
