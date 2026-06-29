@@ -705,6 +705,34 @@ def test_get_quest_file_404_when_real_file_truly_missing(tmp_path: Path) -> None
     assert res.status_code == 404
 
 
+def test_get_quest_file_serves_name_with_hash(tmp_path: Path) -> None:
+    """A real filename containing '#' is listed by /files and must open.
+    The cache-buster strip (split on '?'/'#') used to truncate
+    ``paper/a#b.md`` to ``paper/a`` → 404. Now the literal path is tried
+    first, so '#'/'?' filenames work; the strip only applies as a
+    fallback for a path that isn't a real file."""
+    client = _client(tmp_path)
+    output_root: Path = client.app.state.output_root  # type: ignore[attr-defined]
+    _make_quest_with_file(output_root, "q-hash", "paper/a#b.md", "hashed body")
+
+    res = client.get("/api/quests/q-hash/file", params={"path": "paper/a#b.md"})
+    assert res.status_code == 200, res.text
+    assert res.text == "hashed body"
+    # Starlette RFC-5987-encodes the '#': filename*=utf-8''a%23b.md
+    # (browsers decode it back to a#b.md). Either form is fine.
+    cd = res.headers.get("content-disposition", "")
+    assert "a%23b.md" in cd or "a#b.md" in cd
+
+    # Fallback still works: a clean path with a stray ?preventCache resolves.
+    _make_quest_with_file(output_root, "q-hash2", "paper/clean.md", "clean")
+    res2 = client.get(
+        "/api/quests/q-hash2/file",
+        params={"path": "paper/clean.md?preventCache=123"},
+    )
+    assert res2.status_code == 200
+    assert res2.text == "clean"
+
+
 def test_get_quest_file_serves_real_filename(tmp_path: Path) -> None:
     """The download must carry the file's real name, not the URL's last
     segment. Without a Content-Disposition filename the browser saves the

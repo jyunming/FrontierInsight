@@ -2071,8 +2071,17 @@ def make_app(
         user then saves it.
         """
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-        cleaned = path.split("?", 1)[0].split("#", 1)[0]
-        target = (quest_root / cleaned).resolve()
+        # Prefer the path EXACTLY as given so real filenames containing
+        # '?' or '#' (which /files happily lists) still open. Only fall
+        # back to the stripped form when the literal path isn't a real
+        # file — that's the misbehaving-client case (a stray
+        # ?preventCache=.../#anchor appended to a clean path). Stripping
+        # unconditionally truncated ``paper/a#b.md`` to ``paper/a`` → 404.
+        target = (quest_root / path).resolve()
+        if not target.is_file():
+            stripped = path.split("?", 1)[0].split("#", 1)[0]
+            if stripped != path:
+                target = (quest_root / stripped).resolve()
         try:
             target.relative_to(quest_root.resolve())
         except ValueError:
