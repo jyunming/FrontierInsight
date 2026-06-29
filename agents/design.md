@@ -16,6 +16,7 @@ $review_feedback
 $clarify_block
 
 # Your task
+$study_mode_directive
 Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under $timeout_s seconds on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`.
 
 **Adapt scope to topic_shape (read from the clarifications block above):**

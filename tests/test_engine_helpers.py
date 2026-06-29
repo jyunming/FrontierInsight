@@ -865,6 +865,60 @@ def test_write_prompt_authors_title_not_slug() -> None:
     assert "Do NOT use the raw slug" in write_md
 
 
+def test_design_prompt_supports_no_simulation_mode() -> None:
+    """In no_simulation mode the design node must NOT plan an executable
+    Python experiment (the no-sim path never runs it, and the writer then
+    narrates the engine's own 'the simulation was not run' mechanics).
+    design.md exposes the override slot; the engine fills it with a
+    non-empty directive that zeroes deps/figures."""
+    from pathlib import Path
+    from core.engine import _NO_SIM_DESIGN_DIRECTIVE
+    design_md = (Path(__file__).resolve().parent.parent
+                 / "agents" / "design.md").read_text(encoding="utf-8")
+    assert "$study_mode_directive" in design_md
+    assert "NO-SIMULATION" in _NO_SIM_DESIGN_DIRECTIVE
+    # It must override the executable-experiment default, not append to it.
+    assert "Ignore the" in _NO_SIM_DESIGN_DIRECTIVE
+    assert '"dependencies": []' in _NO_SIM_DESIGN_DIRECTIVE
+    assert '"figures_planned": []' in _NO_SIM_DESIGN_DIRECTIVE
+
+
+def test_write_prompt_forbids_narrating_the_engine() -> None:
+    """A paper must never describe the machinery that produced it. write.md
+    carries a hard rule banning pipeline/process/failure meta-commentary
+    ('the automated research pipeline failed to run the simulation'), plus
+    a slot for the no-simulation framing note."""
+    from pathlib import Path
+    from core.engine import _NO_SIM_WRITE_NOTE
+    write_md = (Path(__file__).resolve().parent.parent
+                / "agents" / "write.md").read_text(encoding="utf-8")
+    assert "$study_mode_note" in write_md
+    assert "Never narrate the engine" in write_md
+    # The specific phrases that leaked into the real paper must be named.
+    assert "automated research pipeline" in write_md
+    assert "was not executed" in write_md
+    assert _NO_SIM_WRITE_NOTE.strip()
+
+
+def test_no_sim_directive_renders_into_design_prompt() -> None:
+    """End-to-end at the template layer: the directive lands in the design
+    prompt when no_simulation is on and vanishes when off — the exact
+    branch the design node takes on state['no_simulation_resolved']."""
+    import string
+    from pathlib import Path
+    from core.engine import _NO_SIM_DESIGN_DIRECTIVE
+    tmpl = string.Template(
+        (Path(__file__).resolve().parent.parent
+         / "agents" / "design.md").read_text(encoding="utf-8")
+    )
+    kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
+              review_feedback="r", timeout_s="60", clarify_block="c")
+    on = tmpl.substitute(study_mode_directive=_NO_SIM_DESIGN_DIRECTIVE, **kw)
+    off = tmpl.substitute(study_mode_directive="", **kw)
+    assert "NO-SIMULATION" in on
+    assert "NO-SIMULATION" not in off
+
+
 # ---- _quest_logger lifecycle ---------------------------------------------
 
 
