@@ -78,6 +78,7 @@ with the evidence in the blocks above, simply omit the claim — do not
 explain *why* the evidence is missing in terms of the run.
 
 $study_mode_note
+$evidence_note
 ## Honesty constraints — read this section, do not skip
 
 If this study ran an experiment, it may have failed, produced

@@ -144,6 +144,14 @@ class QuestState(TypedDict, total=False):
     # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
+    # Evidence-sufficiency assessment from the evidence_gate node:
+    # ``{"verdict": "sufficient"|"broaden"|"insufficient", "rationale",
+    # "gaps": [...], "n_sources", "n_supporting"}``. Read by the writer so
+    # a thin-evidence paper frames its limits honestly.
+    evidence_assessment: dict[str, Any]
+    # How many times the evidence_gate has sent the quest back to broaden
+    # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
+    evidence_broaden_count: int
     paper_md: str
     # Claim grounding: which paper claims trace to evidence
     # (experiment / citation / unsupported), from the claim_check node.
@@ -854,6 +862,11 @@ class Engine:
         g.add_node("analyze", self._node_analyze)
         # analyze → cross_check (always) → write OR design
         g.add_node("cross_check", self._node_cross_check)
+        # evidence_gate sits on the cross_check → write happy path: it
+        # weighs the assembled evidence and either proceeds to write or
+        # sends the quest back for ONE bounded literature broaden. A
+        # logged passthrough when engine.evidence_gate is off.
+        g.add_node("evidence_gate", self._node_evidence_gate)
         g.add_node("write", self._node_write)
         g.add_node("claim_check", self._node_claim_check)
         g.add_node("review", self._node_review)
@@ -924,10 +937,19 @@ class Engine:
             "cross_check",
             self._route_after_cross_check,
             {
-                "write": "write",
+                # The happy-path "write" label now lands on evidence_gate,
+                # which makes the real write-vs-broaden call.
+                "write": "evidence_gate",
                 "redesign": "design",
                 "broaden_lit": "literature",
             },
+        )
+        # evidence_gate → write (sufficient / insufficient-but-write) OR
+        # back to literature for ONE bounded broaden pass.
+        g.add_conditional_edges(
+            "evidence_gate",
+            self._route_after_evidence_gate,
+            {"write": "write", "broaden_lit": "literature"},
         )
         # write → claim_check → review. claim_check grounds each paper claim to
         # evidence (a no-op passthrough when engine.claim_grounding is off).
@@ -1042,6 +1064,12 @@ class Engine:
         if next_step == "re_experiment":
             return "redesign"
         return "write"
+
+    def _route_after_evidence_gate(self, state: QuestState) -> str:
+        """The evidence_gate node already decided write vs broaden (it
+        owns the bounded-broaden bookkeeping); the router just reads it.
+        Fails open to ``write`` when the gate was a passthrough."""
+        return (state.get("evidence_assessment") or {}).get("route", "write")
 
     def _route_after_review(self, state: QuestState) -> str:
         # Ordering is load-bearing:
@@ -3768,12 +3796,129 @@ class Engine:
             return ""
         return _load_persona_prefix(venue, category="write")
 
+    async def _node_evidence_gate(self, state: QuestState) -> QuestState:
+        """Weigh the assembled evidence against the research question
+        BEFORE writing. Returns a verdict the writer (and router) act on.
+
+        Fails OPEN — when the flag is off, or anything goes wrong, the
+        node is a passthrough and routing defaults to ``write`` (the
+        downstream review + claim_check still guard quality). The only
+        action it can take that changes control flow is ONE bounded
+        ``broaden_lit`` re-entry (capped by ``evidence_gate_max_broaden``).
+        """
+        if not self.config.engine.evidence_gate:
+            return {}
+        # EVERYTHING below is inside one fail-open guard, including the
+        # signal-gathering: a resumed / malformed checkpoint can hand us
+        # non-dict literature items, a non-dict analysis, or non-dict
+        # cross_check entries, and the gate must degrade to "write" rather
+        # than abort the whole quest on an AttributeError. Each access is
+        # also type-guarded so one bad entry doesn't poison the tally.
+        parsed: dict[str, Any] = {}
+        n_sources = n_supporting = n_findings = 0
+        try:
+            lit = state.get("literature")
+            lit = lit if isinstance(lit, list) else []
+            n_sources = sum(
+                1 for d in lit
+                if isinstance(d, dict) and str(d.get("content") or "").strip()
+            )
+            analysis = state.get("analysis")
+            analysis = analysis if isinstance(analysis, dict) else {}
+            findings = analysis.get("key_findings")
+            findings = findings if isinstance(findings, list) else []
+            n_findings = len(findings)
+            cc = state.get("cross_check")
+            cc = cc if isinstance(cc, list) else []
+            n_conflicting = 0
+            for rec in cc:
+                if not isinstance(rec, dict):
+                    continue
+                hits = rec.get("hits") or rec.get("results") or []
+                stances = [
+                    str(h.get("stance") or h.get("classification") or "").lower()
+                    for h in hits if isinstance(h, dict)
+                ] if isinstance(hits, list) else []
+                if any(s == "supporting" for s in stances):
+                    n_supporting += 1
+                if any(s == "conflicting" for s in stances):
+                    n_conflicting += 1
+            summary = {
+                "n_sources_with_text": n_sources,
+                "n_key_findings": n_findings,
+                "n_findings_with_supporting_lit": n_supporting,
+                "n_findings_with_conflicting_lit": n_conflicting,
+                "has_results": bool(state.get("result_json") or {}),
+                "mode": (
+                    "no_simulation"
+                    if state.get("no_simulation_resolved") else "simulation"
+                ),
+                "key_findings_preview": [str(f)[:200] for f in findings[:6]],
+            }
+            prompt = self._prompts["evidence_gate"].substitute(
+                topic=str(state.get("topic") or ""),
+                clarify_block=_format_clarify(state),
+                evidence_summary=json.dumps(summary, indent=2),
+            )
+            text = await self._chat(prompt, node="evidence_gate")
+            parsed = _parse_json_lenient(text, node="evidence_gate") or {}
+        except Exception as e:  # noqa: BLE001 — gate must never abort the quest
+            self._log.warning(
+                "[evidence_gate] assessment failed (%r); failing open to write", e,
+            )
+        verdict = str(parsed.get("verdict") or "").strip().lower()
+        if verdict not in ("sufficient", "broaden", "insufficient"):
+            verdict = "sufficient"  # fail-open
+        broadened = int(state.get("evidence_broaden_count", 0) or 0)
+        will_broaden = (
+            verdict == "broaden"
+            and broadened < self.config.engine.evidence_gate_max_broaden
+        )
+        assessment = {
+            "verdict": verdict,
+            "route": "broaden_lit" if will_broaden else "write",
+            "rationale": str(parsed.get("rationale") or ""),
+            "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
+            "n_sources": n_sources,
+            "n_supporting": n_supporting,
+        }
+        self._log.info(
+            "[evidence_gate] verdict=%s route=%s (sources=%d, findings=%d, "
+            "supporting=%d, broadened=%d)",
+            verdict, assessment["route"], n_sources, n_findings,
+            n_supporting, broadened,
+        )
+        patch: QuestState = {"evidence_assessment": assessment}
+        if will_broaden:
+            patch["evidence_broaden_count"] = broadened + 1
+        return patch
+
     async def _node_write(self, state: QuestState) -> QuestState:
         persona_block = self._resolve_write_persona(state)
         self._log.info(
             "[write] authoring paper.md (persona=%s)",
             persona_block.split("\n", 1)[0][:80] if persona_block else "default",
         )
+        # When the evidence gate judged the evidence thin (insufficient,
+        # or "broaden" with the broaden budget exhausted), hand the writer
+        # an explicit note so the paper frames its limits honestly instead
+        # of over-claiming. Empty when the gate was satisfied / disabled.
+        _ev = state.get("evidence_assessment") or {}
+        evidence_note = ""
+        if _ev.get("verdict") in ("insufficient", "broaden"):
+            _gaps = "; ".join(_ev.get("gaps") or [])
+            evidence_note = (
+                "**Evidence note (pre-write evidence gate).** The assembled "
+                f"evidence was judged *{_ev.get('verdict')}* for this research "
+                "question"
+                + (f": {_ev.get('rationale')}" if _ev.get("rationale") else "")
+                + (f" Specific gaps: {_gaps}." if _gaps else "")
+                + " Honour this: report only what the sources/data actually "
+                "support, state the limitation plainly (an honest, scoped paper "
+                "is the goal), and do NOT manufacture confidence the evidence "
+                "doesn't carry. This is a scientific limitation of the study — "
+                "do not phrase it as a failure of any tool or pipeline.\n"
+            )
         prompt = self._prompts["write"].substitute(
             persona_block=persona_block,
             topic=state["topic"],
@@ -3797,6 +3942,7 @@ class Engine:
                 if state.get("no_simulation_resolved")
                 else ""
             ),
+            evidence_note=evidence_note,
         )
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
@@ -4996,6 +5142,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence
+        "evidence_gate",        # weigh evidence sufficiency before write
         "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
