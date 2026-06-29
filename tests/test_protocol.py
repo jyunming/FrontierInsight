@@ -4,7 +4,15 @@ from __future__ import annotations
 import pytest
 
 from core.config import Config, EngineConfig, OutputConfig, ProviderConfig
-from core.protocol import ResearchProtocol, derive_protocol
+from core.protocol import (
+    ROUTE_MATRIX,
+    ResearchProtocol,
+    TopicType,
+    derive_protocol,
+    route_for_topic_type,
+    source_policy_for,
+)
+from typing import get_args
 
 
 def _cfg(*, max_iterations=2, evidence_gate=True, execute_replicates=1) -> Config:
@@ -101,3 +109,52 @@ def test_as_block_includes_key_fields() -> None:
 def test_malformed_clarify_answers_do_not_crash() -> None:
     p = derive_protocol({"topic": "x", "clarify_answers": "not-a-dict"}, _cfg())
     assert isinstance(p, ResearchProtocol)
+
+
+# ---------------------------------------------------------------------------
+# ROUTE_MATRIX — topic_type → graph path + source policy
+# ---------------------------------------------------------------------------
+
+
+def test_route_matrix_covers_every_topic_type() -> None:
+    """The matrix must have an entry for every TopicType — a missing one
+    would silently fall back to the 'simulation' default at the fork."""
+    for t in get_args(TopicType):
+        assert t in ROUTE_MATRIX, f"ROUTE_MATRIX missing {t!r}"
+        assert ROUTE_MATRIX[t]["path"] in ("simulation", "no_simulation")
+
+
+@pytest.mark.parametrize("topic_type,path", [
+    ("simulation", "simulation"),
+    ("data_analysis", "no_simulation"),
+    ("literature_review", "no_simulation"),
+    ("case_study", "no_simulation"),
+    ("market_current", "no_simulation"),
+    ("engineering", "simulation"),
+    ("opinion", "no_simulation"),
+])
+def test_route_for_topic_type(topic_type, path) -> None:
+    assert route_for_topic_type(topic_type) == path
+
+
+def test_route_for_unknown_type_defaults_to_simulation() -> None:
+    # Unrecognised / empty types fall back to the historical default.
+    assert route_for_topic_type("not-a-real-type") == "simulation"
+    assert route_for_topic_type("") == "simulation"
+
+
+def test_source_policy_for_matches_matrix() -> None:
+    # source_policy_for is the single source of truth derive_protocol uses.
+    assert source_policy_for("market_current") == "web_current"
+    assert source_policy_for("data_analysis") == "user_data"
+    assert source_policy_for("literature_review") == "academic"
+    assert source_policy_for("bogus") == "mixed"  # unknown fallback
+
+
+def test_derive_protocol_source_policy_comes_from_matrix() -> None:
+    """The refactor must keep derive_protocol's source policy in lockstep
+    with ROUTE_MATRIX (the consolidation must not drift)."""
+    p = derive_protocol(
+        {"topic": "x", "clarify_answers": {"topic_shape": "experimental"},
+         "no_simulation_resolved": True}, _cfg())
+    assert p.source_policy == source_policy_for(p.topic_type)

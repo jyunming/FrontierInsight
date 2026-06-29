@@ -49,7 +49,7 @@ from .config import (
 )
 from .execution import ExecutionResult, make_executor
 from .knowledge import Knowledge, RetrievedDoc
-from .protocol import derive_protocol
+from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
     LLMClient,
     PROXY_PROVIDERS,
@@ -1024,10 +1024,48 @@ class Engine:
         design (variables, hypotheses, measurement plan) — it just
         skips the simulate-and-execute half and treats the user's
         real-world data as the experimental result instead.
+
+        Before returning, the topic-type ROUTE_MATRIX is consulted: the
+        resolved ``no_simulation`` flag stays authoritative, but a
+        topic-type-vs-route divergence is surfaced as a WARNING.
         """
-        if state.get("no_simulation_resolved"):
+        no_sim = bool(state.get("no_simulation_resolved"))
+        self._warn_route_matrix_mismatch(
+            state, "no_simulation" if no_sim else "simulation")
+        if no_sim:
             return "auto_collect_data"
         return "implement"
+
+    def _warn_route_matrix_mismatch(
+        self, state: QuestState, actual_path: str,
+    ) -> None:
+        """Consult the topic-type ``ROUTE_MATRIX`` at the design fork and
+        log a WARNING when the topic type's expected path disagrees with
+        the resolved route. The resolved ``no_simulation`` flag stays
+        authoritative — routing is NOT overridden here; this only makes
+        the divergence visible in run.log.
+
+        Distinct from ``_log_topic_shape_mismatch`` (which fires earlier,
+        at clarify time, and only for non-experimental shape + SIMULATE):
+        this is bidirectional and keyed on the richer
+        ``ResearchProtocol.topic_type``, so it also catches a future
+        ``engineering`` topic that resolved to NO_SIMULATION. Pure + no
+        LLM call; fail-open (never blocks routing on its own error)."""
+        try:
+            protocol = derive_protocol(dict(state), self.config)
+            expected = route_for_topic_type(protocol.topic_type)
+        except Exception:  # never let a diagnostic break routing
+            return
+        if expected == actual_path:
+            return
+        self._log.warning(
+            "[route] topic_type=%r expects the %s path but the quest "
+            "resolved to the %s path. Routing follows the resolved "
+            "no_simulation flag (config/clarify wins); set "
+            "``simulatability`` in clarify_overrides to align. Declared "
+            "source policy for this type: %s.",
+            protocol.topic_type, expected, actual_path, protocol.source_policy,
+        )
 
     def _route_after_execute_reflect(self, state: QuestState) -> str:
         """Route based on whether the reflect node patched the
