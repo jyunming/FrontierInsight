@@ -1004,15 +1004,19 @@ class Engine:
         return "done"
 
     def _route_after_human_feedback(self, state: QuestState) -> str:
-        """``refine`` bumps the iteration counter (done in the node)
-        and loops back to design with the user's feedback in state;
-        ``accept`` / ``reject`` (and the iteration-cap-exhausted case)
-        finalise. The cap is the same ``max_iterations`` the verdict
-        loop respects — a user who clicks "refine" forever can't
-        outrun the loop budget."""
+        """``refine`` loops back to design with the user's feedback in state;
+        ``accept`` / ``reject`` finalise.
+
+        A human ``refine`` is honoured **regardless of ``max_iterations``** — it
+        is a deliberate, interactive request, not the unattended review loop the
+        cap exists to bound. The user stays in control: the refine runs one
+        design→…→review pass and lands back at the human-review gate, where they
+        can refine again or accept. (Earlier this was gated on the iteration
+        budget, so a refine submitted past the cap was silently dropped — the
+        user clicked Refine and nothing happened.)"""
         hf = state.get("human_feedback") or {}
         action = hf.get("action", "accept")
-        if action == "refine" and state.get("iteration", 0) < self.config.engine.max_iterations:
+        if action == "refine":
             return "revise"
         return "done"
 

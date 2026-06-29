@@ -295,14 +295,22 @@
       logEl.textContent = data.log_tail.join('\n');
       startLogStream();
     }
-    // Resume shows for a SUPPLY pause (drop files → Resume) or a crashed /
-    // incomplete quest with a saved config — NOT for ANSWER pauses (clarify /
-    // review resume via their own submit) and never without config.yaml.
+    // Resume / Re-run shows for any non-running quest with a saved config that
+    // ISN'T at an ANSWER pause (clarify / review resume via their own submit
+    // panels). That covers supply pauses (drop files → Resume), crashed /
+    // incomplete quests, AND finished quests — so a setting changed via Update
+    // can be re-run. Never without config.yaml.
     const answerPause = data.pending_clarify || !!data.pending_human_review;
-    const supplyPause = !answerPause && !!data.pending_action;
-    const resumable = !data.alive && data.has_config
-      && (supplyPause || (!data.summary && !answerPause));
-    document.getElementById('resume-btn').classList.toggle('hidden', !resumable);
+    const resumable = !data.alive && data.has_config && !answerPause;
+    const resumeBtn = document.getElementById('resume-btn');
+    resumeBtn.classList.toggle('hidden', !resumable);
+    // Label it "Re-run" for a finished quest (apply updated settings), else
+    // "Resume" (continue a pause / crash).
+    const finished = data.summary && !data.pending_action;
+    resumeBtn.textContent = finished ? 'Re-run' : 'Resume';
+    resumeBtn.title = finished
+      ? 'Re-run with the latest settings (use after Update settings — a changed research field re-runs the affected stages).'
+      : 'Resume this quest from where it paused.';
     // Config-less quests can't Update or Resume — disable + explain.
     const updateLink = document.getElementById('update-link');
     if (!data.has_config) {
