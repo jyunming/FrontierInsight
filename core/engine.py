@@ -3506,13 +3506,32 @@ class Engine:
         # showed up as a filename, not its rows. Render the real content via
         # the same summarizer the no-sim data_load uses, budgeted.
         user_data_block = "(none)"
-        if all_ds:
-            from .summarizer import _render_content_blocks, _walk_folder
+        drop_dir = self.quest_root / "inputs" / "data"
+        if drop_dir.is_dir():
+            from .summarizer import (
+                _render_content_blocks,
+                _render_file_manifest,
+                _walk_folder,
+            )
             try:
-                entries = _walk_folder(self.quest_root / "inputs" / "data")
-                rendered = _render_content_blocks(entries, total_budget_chars=8000)
-                if rendered.strip():
-                    user_data_block = rendered
+                # Filter the FI-authored README.md (the "drop your data here"
+                # instructions) so it doesn't leak into the prompt as a
+                # "source" — same guard as _node_data_load — and re-number
+                # idents so the manifest stays sequential.
+                entries = [
+                    e for e in _walk_folder(drop_dir)
+                    if not (e.rel_path == "README.md"
+                            and (drop_dir / "README.md").is_file())
+                ]
+                for new_id, e in enumerate(entries, start=1):
+                    e.ident = new_id
+                if entries:
+                    # Manifest first so _render_content_blocks' "files
+                    # elided" note ("the manifest above") is truthful and
+                    # binary/unreadable files are still visible to the model.
+                    manifest = _render_file_manifest(entries)
+                    blocks = _render_content_blocks(entries, total_budget_chars=8000)
+                    user_data_block = f"{manifest}\n\n{blocks}".strip() or "(none)"
             except OSError as e:
                 self._log.debug("[analyze] could not read dropped data: %r", e)
         prompt = self._prompts["analyze"].substitute(
