@@ -202,6 +202,39 @@ class QuestState(TypedDict, total=False):
     auto_collected_count: int
 
 
+# Injected into the design/write prompts when a quest runs in
+# ``no_simulation`` mode. Without these, the design node plans an
+# "executable Python experiment" (the default prompt) that the no-sim
+# path never runs, and the writer then narrates the engine's own
+# mechanics — "the automated pipeline failed to run the simulation",
+# "the system executed a literature search instead" — as if that were a
+# scientific finding. The paper must read as a standalone analytical
+# study, never as a report on the tool that produced it.
+_NO_SIM_DESIGN_DIRECTIVE = (
+    "> **THIS IS A NO-SIMULATION STUDY.** The quest is configured "
+    "`no_simulation`: nothing will be executed and no code will run. "
+    "**Ignore the \"executable Python experiment\" / \"must produce a "
+    "figure\" instructions below** — they do not apply. Instead design an "
+    "**analytical or observational study** grounded in the literature (and "
+    "any sources the user supplies): a derivation, a structured comparison, "
+    "a synthesis, or an interpretation of existing evidence. `method` "
+    "describes how that existing evidence is analyzed, NOT a program to "
+    "run. Set `\"dependencies\": []` and `\"figures_planned\": []` (a figure "
+    "may appear only if it comes directly from a source the user supplied, "
+    "never from a script you expect to execute). There is no 'planned "
+    "experiment' that could later be 'not run' — frame the study as "
+    "complete in its own right.\n"
+)
+_NO_SIM_WRITE_NOTE = (
+    "**This is a no-simulation study — by design, no experiment or "
+    "simulation was run.** Write it as a deliberate literature / "
+    "observational analysis that stands on its own. Do NOT describe a "
+    "'planned experiment', a 'simulation', or their absence as a failure, "
+    "and do NOT treat the lack of computed measurements as a gap to "
+    "apologise for — the study was never meant to run code.\n"
+)
+
+
 class Engine:
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
@@ -1889,6 +1922,11 @@ class Engine:
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             clarify_block=_format_clarify(state),
+            study_mode_directive=(
+                _NO_SIM_DESIGN_DIRECTIVE
+                if state.get("no_simulation_resolved")
+                else ""
+            ),
         )
         text = await self._chat(prompt, node="design")
         design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
@@ -3751,6 +3789,11 @@ class Engine:
             figure_list=_figure_list_for_prompt(state),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
+            study_mode_note=(
+                _NO_SIM_WRITE_NOTE
+                if state.get("no_simulation_resolved")
+                else ""
+            ),
         )
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.

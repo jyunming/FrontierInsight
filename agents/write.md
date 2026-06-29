@@ -50,12 +50,43 @@ Include all available figures this way.
 
 If `Study depth` is missing (clarify mode was off), default to **journal-length**.
 
+## Never narrate the engine, pipeline, or run — read this first
+
+The paper is a standalone scientific document. The reader must never be
+able to tell it was produced by an automated system. **Under NO
+circumstances may the paper mention the machinery that generated it.**
+Forbidden — these must not appear anywhere in the prose, including
+Methods, Results, Discussion, Abstract, or Future Work:
+
+- "automated research pipeline / system / workflow / engine", "the
+  pipeline", "the system", "this tool", "the LLM", "the agent".
+- "execution failure", "the experiment was not executed / not run", "an
+  error in the pipeline", "the simulation was aborted", "the run failed",
+  "the script could not run", "the input was a list".
+- "a literature search was performed instead", "the system defaulted to",
+  "substituted literature analysis", "due to a failure in the automated
+  …".
+- "could not be rendered", "the figure was not produced by the run".
+
+If the available evidence is a synthesis of prior work rather than a new
+measurement, present that **as a deliberate methodological choice** ("This
+analysis synthesizes the published literature on …"), in normal
+scientific voice — not as the fallout of a broken run. A legitimate
+literature/observational study is a respectable paper; a confession about
+a tool's internals is not a paper at all. If you cannot support a claim
+with the evidence in the blocks above, simply omit the claim — do not
+explain *why* the evidence is missing in terms of the run.
+
+$study_mode_note
 ## Honesty constraints — read this section, do not skip
 
 The experiment may have failed, produced implausible numbers, or
 contradicted the hypothesis. The analysis block above will say so
-plainly. **When that happens, the paper MUST say so plainly too.** Do
-not paper over a broken experiment by:
+plainly. **When that happens, the paper MUST say so plainly too.** This
+means reporting a result as null, implausible, or inconclusive **in
+scientific terms** (the measurement, the expected range, the
+discrepancy) — never by narrating the engine that ran it (see the
+section above). Do not paper over a broken experiment by:
 
 1. **Reporting numbers that the analysis flagged as implausible** as if they were real findings. The analysis is upstream of the writer for a reason — its caveats are your source of truth.
 2. **Inventing additional measurements** that weren't actually computed in the methods. Every number you cite in Results MUST be in the analysis block.
