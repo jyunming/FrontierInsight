@@ -909,7 +909,17 @@ def test_all_artifact_prompts_forbid_engine_narration() -> None:
     import re
     from pathlib import Path
     agents = Path(__file__).resolve().parent.parent / "agents"
-    directive = re.compile(r"narrate the (pipeline|engine)", re.IGNORECASE)
+    # Match the underlying directive, not one exact phrasing: a
+    # do-not/never + narrate/describe/mention/reference, close to a
+    # pipeline/engine/system/tool/automation noun. This survives a
+    # legitimate reword ("never mention the system", "do not describe the
+    # engine") while still catching an accidental deletion of the rule.
+    directive = re.compile(
+        r"(?:do not|don't|never)[^.\n]{0,40}"
+        r"(?:narrat|describ|mention|referenc)[^.\n]{0,40}"
+        r"(?:pipeline|engine|system|tooling|tool|automation|machinery)",
+        re.IGNORECASE,
+    )
     for prompt in ("write.md", "poster.md", "slides.md", "speech.md"):
         text = (agents / prompt).read_text(encoding="utf-8")
         assert directive.search(text), (
