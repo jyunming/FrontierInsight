@@ -350,7 +350,8 @@ def test_new_quest_id_truncates_long_slug() -> None:
 
 
 def _route_config(
-    tmp_path: Path, *, review_loop: bool, max_iterations: int
+    tmp_path: Path, *, review_loop: bool, max_iterations: int,
+    evidence_gate: bool = True,
 ) -> Config:
     return Config(
         topic="route audit",
@@ -358,6 +359,7 @@ def _route_config(
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=max_iterations, review_loop=review_loop,
+            evidence_gate=evidence_gate,
             # These tests exercise the legacy non-gated revise/done
             # routing — gate "off" so the human-feedback short-circuit
             # doesn't intercept.
@@ -422,6 +424,68 @@ def test_conditional_edge_targets_match_route_return_values(tmp_path: Path) -> N
             seen.add(engine._route_after_review({"review": {"verdict": verdict}, "iteration": it}))
 
     assert seen == {"revise", "done"}
+
+
+# ---- evidence_gate -------------------------------------------------------
+
+
+def test_route_after_evidence_gate_reads_node_decision(tmp_path: Path) -> None:
+    """The router just echoes the route the node already computed, and
+    fails open to ``write`` when the gate was a passthrough."""
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+    assert engine._route_after_evidence_gate(
+        {"evidence_assessment": {"route": "broaden_lit"}}) == "broaden_lit"
+    assert engine._route_after_evidence_gate(
+        {"evidence_assessment": {"route": "write"}}) == "write"
+    assert engine._route_after_evidence_gate({}) == "write"
+
+
+async def test_evidence_gate_disabled_is_passthrough(tmp_path: Path) -> None:
+    """engine.evidence_gate=False ⇒ no LLM call, empty patch, route=write."""
+    engine = Engine(_route_config(
+        tmp_path, review_loop=True, max_iterations=2, evidence_gate=False))
+    patch = await engine._node_evidence_gate(
+        {"topic": "t", "literature": [], "analysis": {}})
+    assert patch == {}
+
+
+async def test_evidence_gate_fails_open_on_unparseable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-JSON / invalid-verdict response must NOT block the quest —
+    the gate defaults to a 'sufficient' verdict that routes to write."""
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        return "the evidence looks fine to me"  # not JSON
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    patch = await engine._node_evidence_gate(
+        {"topic": "t", "literature": [{"content": "x"}], "analysis": {}})
+    assert patch["evidence_assessment"]["verdict"] == "sufficient"
+    assert patch["evidence_assessment"]["route"] == "write"
+
+
+async def test_evidence_gate_broaden_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 'broaden' verdict re-enters literature at most
+    evidence_gate_max_broaden (default 1) times, then proceeds to write
+    even though the verdict is still 'broaden' — it can't spin."""
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["more data"]}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    # Budget available → broaden, bump the counter.
+    p1 = await engine._node_evidence_gate({"topic": "t", "evidence_broaden_count": 0})
+    assert p1["evidence_assessment"]["route"] == "broaden_lit"
+    assert p1["evidence_broaden_count"] == 1
+    # Budget exhausted → write despite the same verdict; counter not bumped.
+    p2 = await engine._node_evidence_gate({"topic": "t", "evidence_broaden_count": 1})
+    assert p2["evidence_assessment"]["route"] == "write"
+    assert "evidence_broaden_count" not in p2
 
 
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
@@ -498,12 +562,19 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     cross_branch = next(iter(g.branches["cross_check"].values()))
     # Three terminal labels: ``broaden_lit`` re-enters the literature
     # node (iterative literature loop), ``redesign`` re-enters design
-    # for ``re_experiment``, and ``write`` is the happy-path exit.
+    # for ``re_experiment``, and the happy-path "write" label now lands
+    # on the evidence_gate node (which makes the real write-vs-broaden call).
     assert cross_branch.ends == {
-        "write": "write",
+        "write": "evidence_gate",
         "redesign": "design",
         "broaden_lit": "literature",
     }
+    # evidence_gate routes to write (sufficient / insufficient-but-write)
+    # or back to literature for one bounded broaden pass.
+    assert "evidence_gate" in g.nodes
+    assert "evidence_gate" in g.branches
+    ev_branch = next(iter(g.branches["evidence_gate"].values()))
+    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
     # ``implement`` (for resume contract compatibility — the 609990

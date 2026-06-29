@@ -455,6 +455,19 @@ class EngineConfig(BaseModel):
     # `max_iterations`). Set False to make the claim_check node a no-op
     # passthrough (no LLM call, no ledger) — the graph edge stays.
     claim_grounding: bool = True
+    # Evidence-sufficiency gate (evidence_gate node, between cross_check
+    # and write). When True (default), one LLM pass weighs the assembled
+    # evidence — source count, cross-check supporting/conflicting balance,
+    # whether the run produced real measurements — against the research
+    # question and returns a verdict: ``sufficient`` (write), ``broaden``
+    # (re-enter the literature loop once more, budget permitting), or
+    # ``insufficient`` (write anyway, but the assessment is handed to the
+    # writer so the paper frames thin evidence honestly instead of
+    # over-claiming). Fails OPEN: any parse error, or the flag off, routes
+    # straight to write. The broaden loop is bounded by
+    # ``evidence_gate_max_broaden`` so it can't spin.
+    evidence_gate: bool = True
+    evidence_gate_max_broaden: int = Field(default=1, ge=0)
     # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just
     # the original topic) and classify hits as supporting / conflicting
