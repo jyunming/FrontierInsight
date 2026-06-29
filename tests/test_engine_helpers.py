@@ -502,6 +502,33 @@ async def test_analyze_local_first_skips_framing_nodes(tmp_path: Path) -> None:
     assert await engine._node_design({"topic": "analyse my data"}) == {}
 
 
+async def test_evidence_gate_shows_source_titles_to_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is asked to judge whether sources are on-topic, so it must
+    SEE them — not just a count. The source title + snippet must reach the
+    prompt (an off-topic 'Banana Bread' source for a 'SpaceX revenue' topic
+    can only be caught if the agent can read it)."""
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+    captured: dict[str, str] = {}
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return '{"verdict": "insufficient", "gaps": ["on-topic sources"]}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    state = {
+        "topic": "SpaceX revenue trend 2020-2024",
+        "literature": [
+            {"content": "Banana bread recipe with walnuts and cinnamon.",
+             "metadata": {"title": "Best Banana Bread"}},
+        ],
+    }
+    await engine._node_evidence_gate(state)
+    assert "Best Banana Bread" in captured["prompt"]
+    assert "Banana bread recipe" in captured["prompt"]
+
+
 async def test_evidence_gate_fails_open_on_malformed_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

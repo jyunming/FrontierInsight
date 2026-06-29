@@ -3853,6 +3853,27 @@ class Engine:
                 1 for d in lit
                 if isinstance(d, dict) and str(d.get("content") or "").strip()
             )
+            # The gate is asked to judge whether sources are real / on-topic /
+            # off-topic — so it must actually SEE them. Pass each source's
+            # title + a short snippet (not just the count), capped so the
+            # prompt stays bounded. Without this the agent was judging
+            # relevance blind (an off-topic "Banana Bread" source for a
+            # "SpaceX revenue" topic looked identical to an on-topic one).
+            source_previews: list[dict[str, str]] = []
+            for d in lit[:10]:
+                if not isinstance(d, dict):
+                    continue
+                md = d.get("metadata")
+                md = md if isinstance(md, dict) else {}
+                title = str(md.get("title") or "").strip()
+                # Slice BEFORE normalising whitespace so we don't .split()
+                # a 16k-char body just to keep 240 chars (Copilot, #199).
+                snippet = " ".join(str(d.get("content") or "")[:400].split())[:240]
+                if title or snippet:
+                    source_previews.append({
+                        "title": title[:160] or "(untitled)",
+                        "snippet": snippet,
+                    })
             analysis = state.get("analysis")
             analysis = analysis if isinstance(analysis, dict) else {}
             findings = analysis.get("key_findings")
@@ -3875,6 +3896,7 @@ class Engine:
                     n_conflicting += 1
             summary = {
                 "n_sources_with_text": n_sources,
+                "sources": source_previews,
                 "n_key_findings": n_findings,
                 "n_findings_with_supporting_lit": n_supporting,
                 "n_findings_with_conflicting_lit": n_conflicting,
