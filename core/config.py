@@ -556,6 +556,15 @@ class EngineConfig(BaseModel):
     # ``empirical_vs_theoretical`` answer — auto-detection from
     # clarify is the second entry point. YAML flag wins when set.
     no_simulation: bool = False
+    # Local-data-first mode for the ``--analyze`` workflow: the user has
+    # already supplied the data, so the framing/retrieval nodes (ideate,
+    # literature, design) are made PASSTHROUGHS — no ideation, no external
+    # retrieval, no experiment design — and the quest goes straight from
+    # clarify to loading + analysing the local data. Implies no_simulation.
+    # Off for normal quests. (Set by ``analyze_cli.build_analyze_config``;
+    # also disable retrieval at the knowledge layer — ``web_search: false``
+    # — so nothing reaches out to the web/academic sources.)
+    analyze_local_first: bool = False
     # When the engine enters no-simulation mode, an
     # ``auto_collect_data`` node runs BEFORE ``wait_for_data`` and
     # tries to pull relevant docs from the Knowledge layer (Axon).

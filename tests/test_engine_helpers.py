@@ -488,6 +488,20 @@ async def test_evidence_gate_broaden_is_bounded(
     assert "evidence_broaden_count" not in p2
 
 
+async def test_analyze_local_first_skips_framing_nodes(tmp_path: Path) -> None:
+    """--analyze (analyze_local_first) makes ideate / literature / design
+    PASSTHROUGHS — no LLM call, no retrieval — so the quest goes straight
+    from clarify to loading + analysing the user's local data. Each returns
+    an empty patch BEFORE touching the LLM / knowledge layer (which would
+    otherwise need a network)."""
+    cfg = _route_config(tmp_path, review_loop=False, max_iterations=1)
+    cfg.engine.analyze_local_first = True
+    engine = Engine(cfg)
+    assert await engine._node_ideate({"topic": "analyse my data"}) == {}
+    assert await engine._node_literature({"topic": "analyse my data"}) == {}
+    assert await engine._node_design({"topic": "analyse my data"}) == {}
+
+
 async def test_evidence_gate_shows_source_titles_to_the_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

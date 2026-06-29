@@ -109,6 +109,18 @@ def test_build_analyze_config_defaults_are_no_simulation(tmp_path: Path) -> None
     assert cfg.engine.cross_check_per_finding_k == 0
 
 
+def test_build_analyze_config_is_local_data_first(tmp_path: Path) -> None:
+    """--analyze must be genuinely local-data-first: the framing nodes are
+    skipped (analyze_local_first) AND no external retrieval happens — web
+    search OFF (it's independent of `enabled`, so `enabled=False` alone
+    didn't stop it) and no academic fallbacks."""
+    cfg = build_analyze_config(topic="SpaceX revenue trend", output_dir=tmp_path)
+    assert cfg.engine.analyze_local_first is True
+    assert cfg.knowledge.enabled is False
+    assert cfg.knowledge.web_search is False          # the bug: was defaulting True
+    assert cfg.knowledge.external_fallback == []
+
+
 def test_prepare_analyze_quest_end_to_end(tmp_path: Path) -> None:
     """The public entry point: mints quest_id, stages data, returns
     a working Config + count. No LLM call."""
