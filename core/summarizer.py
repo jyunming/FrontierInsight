@@ -129,6 +129,10 @@ _KIND_BY_EXT: dict[str, str] = {
     ".toml": "config", ".ini": "config", ".cfg": "config",
     # Logs / outputs.
     ".log": "log", ".jsonl": "log", ".csv": "log", ".tsv": "log",
+    # Tabular data the user can drop / --analyze. Parsed via pandas into a
+    # CSV-like text preview (see _read_text) so the LLM sees the actual
+    # rows, not just a filename. Previously classified "other" → no content.
+    ".xlsx": "data", ".xls": "data", ".parquet": "data",
 }
 
 _VALID_KINDS: frozenset[str] = frozenset(
@@ -213,12 +217,32 @@ def _detect_folder_kind(entries: list[FileEntry]) -> str:
     return "mixed"
 
 
+def _read_tabular(path: Path) -> str:
+    """xlsx / xls / parquet → a CSV-like text preview via pandas, so the
+    LLM sees the actual rows instead of a content-less filename. Best-
+    effort: a missing engine or an unreadable file degrades to empty
+    string (the file is still listed in the manifest). Capped at 200 rows
+    here; the caller slices further for the prompt budget."""
+    try:
+        import pandas as pd
+        if path.suffix.lower() == ".parquet":
+            df = pd.read_parquet(path)
+        else:
+            df = pd.read_excel(path)
+        return df.head(200).to_csv(index=False)
+    except Exception as e:  # noqa: BLE001 — optional dep / corrupt file
+        _log.warning("could not parse tabular %s: %s", path, e)
+        return ""
+
+
 def _read_text(path: Path, kind: str) -> str:
     """Best-effort full-text load. Reuses the knowledge layer's PDF /
     md / txt loader where applicable; falls back to plain UTF-8 read
     for code / config / log files. The caller slices this for the
     prompt preview AND for Axon ingestion at different caps."""
     suffix = path.suffix.lower()
+    if suffix in (".xlsx", ".xls", ".parquet"):
+        return _read_tabular(path)
     if suffix in (".pdf", ".md", ".txt", ".rst"):
         # The knowledge loader handles encoding + pypdf gracefully.
         doc = _load_local_paper(path)

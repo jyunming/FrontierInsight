@@ -3220,6 +3220,28 @@ class Engine:
                     parts.append(f"[FILE] {p.name}\n{p.read_text(encoding='utf-8')[:budget]}")
                 except OSError:
                     continue
+        # The user's OWN data files (e.g. a dropped data/ridership.csv, an
+        # --analyze-staged spreadsheet) were ignored — so web_plots reported
+        # "no collected content to plot" even when the numbers to chart were
+        # sitting right there. Read the ordinary data files too (via the
+        # summarizer, so csv/json AND xlsx/parquet all yield real content),
+        # skipping the literature / auto_collected subtrees covered above.
+        from .summarizer import _classify_extension, _read_text
+        data_dir = self.quest_root / "data"
+        if data_dir.is_dir():
+            _skip_top = {"literature", "auto_collected"}
+            for p in sorted(data_dir.rglob("*"))[: limit * 2]:
+                if not p.is_file() or p.name == "README.md":
+                    continue
+                rel = p.relative_to(data_dir)
+                if rel.parts and rel.parts[0] in _skip_top:
+                    continue
+                kind = _classify_extension(p.suffix)
+                if kind == "other":
+                    continue
+                content = _read_text(p, kind)
+                if content.strip():
+                    parts.append(f"[USER DATA] {rel.as_posix()}\n{content[:budget]}")
         return "\n\n".join(parts)
 
     async def _node_web_plots(self, state: QuestState) -> QuestState:

@@ -532,3 +532,29 @@ async def test_summarize_folder_caps_files_in_prompt_but_ingests_all(
     # Axon ingest still received the full set (12 input files + 1 summary
     # = 13 calls). The cap is prompt-only.
     assert knowledge.add_text.call_count == 13
+
+
+def test_read_text_parses_xlsx(tmp_path: Path) -> None:
+    """xlsx must yield real CSV-like content (it was classified 'other'
+    with zero preview before). Skips cleanly if openpyxl is unavailable."""
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("openpyxl")
+    from core.summarizer import _classify_extension, _read_text
+    p = tmp_path / "ridership.xlsx"
+    pd.DataFrame({"year": [2020, 2021], "riders": [100, 200]}).to_excel(
+        p, index=False)
+    kind = _classify_extension(".xlsx")
+    assert kind != "other", "xlsx must be classified so its content is read"
+    content = _read_text(p, kind)
+    assert "2020" in content and "200" in content
+
+
+def test_read_text_parses_parquet(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    from core.summarizer import _classify_extension, _read_text
+    p = tmp_path / "metrics.parquet"
+    pd.DataFrame({"node": ["a", "b"], "latency": [120, 80]}).to_parquet(
+        p, index=False)
+    content = _read_text(p, _classify_extension(".parquet"))
+    assert "120" in content and "80" in content

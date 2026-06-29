@@ -563,6 +563,21 @@ async def test_evidence_gate_fails_open_on_malformed_state(
     assert patch["research_protocol"]["topic_type"]
 
 
+def test_web_plots_gathers_user_data_files(tmp_path: Path) -> None:
+    """web_plots' _gather_collected_text must read the user's ordinary data
+    files (data/*.csv), not only literature + auto_collected — otherwise a
+    no-sim quest with a ridership.csv reported 'no collected content to plot'
+    while the numbers sat right there."""
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    d = engine.quest_root / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "ridership.csv").write_text(
+        "year,riders\n2020,100\n2021,200\n", encoding="utf-8")
+    text = engine._gather_collected_text({"topic": "ridership trend over time"})
+    assert "ridership.csv" in text
+    assert "100" in text and "200" in text
+
+
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
     """Verify topology: linear ideate->...->review and conditional review->design|END."""
     from langgraph.graph import END, START
