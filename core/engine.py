@@ -332,6 +332,12 @@ class Engine:
             config.pauses.timeout_s
         )
 
+    def __del__(self) -> None:
+        try:
+            _close_quest_logger(self.quest_id)
+        except Exception:
+            pass
+
     async def run(
         self,
         *,
