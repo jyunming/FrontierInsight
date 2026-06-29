@@ -115,6 +115,7 @@ The active Copilot model is captured automatically into `provider.model` so the 
 
 ### Other chat commands
 
+- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk script) for an **already-finished** quest **without re-running the research**. Pick the quest + format, or pass them (`@fi /generate <id> paper_pdf`). Opens an integrated terminal running `launch.py --emit`; the quest's existing `paper.md` + figures are reused, so a markdown-only quest can get a PDF later for the cost of one render. Mirrors the web quest page's **Outputs** panel.
 - `@fi /ingest <paths>` — load PDFs / Markdown / TXT into the Axon corpus as prior work. Opens an integrated terminal.
 - `@fi /install-tectonic` — install the tectonic LaTeX binary (~70 MB) into `tools/` so `paper.pdf` works without an admin install of MiKTeX. Opens an integrated terminal.
 - `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.

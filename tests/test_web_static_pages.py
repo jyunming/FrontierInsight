@@ -105,6 +105,51 @@ def test_resume_rejects_path_traversal(tmp_path: Path) -> None:
         assert res.status_code in (400, 404, 422)
 
 
+def test_generate_artifact_spawns_emit_subprocess(
+    tmp_path: Path, mock_subprocess: list[list[str]],
+) -> None:
+    """POST /generate?kind=paper_pdf spawns launch.py --emit on a finished
+    quest (config.yaml + checkpoint + paper.md present)."""
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    q = output_root / "qg"
+    (q / ".fi").mkdir(parents=True)
+    (q / ".fi" / "state.sqlite").write_bytes(b"")
+    (q / "config.yaml").write_text("topic: x", encoding="utf-8")
+    (q / "paper").mkdir()
+    (q / "paper" / "paper.md").write_text("# p", encoding="utf-8")
+
+    res = client.post("/api/quests/qg/generate?kind=paper_pdf")
+    assert res.status_code == 200, res.text
+    argv = mock_subprocess[0]
+    assert "--emit" in argv and "paper_pdf" in argv and "--resume" in argv
+
+    # Unknown kind rejected.
+    assert client.post("/api/quests/qg/generate?kind=video").status_code == 400
+    # No paper.md → can't render.
+    (q / "paper" / "paper.md").unlink()
+    assert client.post("/api/quests/qg/generate?kind=slides").status_code == 400
+
+
+def test_get_quest_reports_output_status(tmp_path: Path) -> None:
+    """GET /api/quests/{id} surfaces configured_kinds + available_artifacts so
+    the Outputs panel knows what to offer a Generate button for."""
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    q = output_root / "qs"
+    (q / ".fi").mkdir(parents=True)  # required for get_quest's full response
+    (q / "paper").mkdir(parents=True)
+    (q / "paper" / "paper.md").write_text("# p", encoding="utf-8")
+    (q / "config.yaml").write_text(
+        "output:\n  kinds: [paper_md, paper_pdf]\n", encoding="utf-8")
+    body = client.get("/api/quests/qs").json()
+    assert body["configured_kinds"] == ["paper_md", "paper_pdf"]
+    assert body["available_artifacts"]["paper_md"] == "paper/paper.md"
+    assert body["available_artifacts"]["paper_pdf"] is None  # not produced yet
+    assert "paper_pdf" in body["generatable_kinds"]
+    assert "paper_md" not in body["generatable_kinds"]  # source, not generatable
+
+
 # ---------------------------------------------------------------------------
 # Tectonic install
 # ---------------------------------------------------------------------------

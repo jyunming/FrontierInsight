@@ -657,6 +657,36 @@ def test_route_after_execute_reflect_retries_on_empty_result_json(
          "exec_reflect_iter": 99}) == "proceed"
 
 
+async def test_emit_artifacts_only_loads_checkpoint_without_rerun(
+    tmp_path: Path,
+) -> None:
+    """emit_artifacts_only reads a finished quest's checkpoint READ-ONLY and
+    bundles its on-disk artifacts (paper.md) with no node re-run — the basis
+    of the on-demand Generate-artifacts path."""
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    # No checkpoint yet → clear error.
+    with pytest.raises(FileNotFoundError):
+        await engine.emit_artifacts_only()
+
+    # Lay down a paper.md + a real checkpoint, then emit.
+    paper = engine.quest_root / "paper"
+    paper.mkdir(parents=True, exist_ok=True)
+    (paper / "paper.md").write_text("# A Paper\n\nBody.", encoding="utf-8")
+    engine.fi_dir.mkdir(parents=True, exist_ok=True)
+    run_cfg = {"configurable": {"thread_id": engine.quest_id}}
+    async with AsyncSqliteSaver.from_conn_string(
+        str(engine.fi_dir / "state.sqlite")
+    ) as saver:
+        graph = engine._build_graph().compile(checkpointer=saver)
+        await graph.aupdate_state(run_cfg, {"topic": "t"}, as_node="clarify")
+
+    art = await engine.emit_artifacts_only()
+    assert art.paper_md is not None and art.paper_md.name == "paper.md"
+    assert art.quest_id == engine.quest_id
+
+
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
     """Verify topology: linear ideate->...->review and conditional review->design|END."""
     from langgraph.graph import END, START

@@ -544,6 +544,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "feedback) and runs back to the human-review gate, so a done "
              "quest can be pushed further. Pass the quest_id.",
     )
+    p.add_argument(
+        "--emit",
+        type=str,
+        default=None,
+        choices=["paper_pdf", "slides", "poster", "speech"],
+        help="Generate ONE additional output format for an already-finished "
+             "quest WITHOUT re-running the research. Pass the format here and "
+             "the quest via --resume <quest_id> --config <yaml>; the engine "
+             "loads the checkpoint read-only and runs only that generator off "
+             "the existing paper.md + figures. E.g. a markdown-only quest can "
+             "produce a PDF: --resume <id> --config <yaml> --emit paper_pdf.",
+    )
     # One-shot human-review decision for a quest paused at the review gate.
     # Saves hand-editing .fi/human_review_answer.json: just resume with the
     # decision, e.g. `--resume <id> --accept`.
@@ -1196,6 +1208,41 @@ def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
 
+async def _emit_one(
+    cfg: Config, quest_id: str, kind: str, *, supervisor: ProxySupervisor,
+) -> int:
+    """Generate ONE extra output format for a finished quest without
+    re-running the research: load the checkpoint read-only, then run only
+    the requested generator off the existing paper.md + figures."""
+    engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
+    try:
+        art = await engine.emit_artifacts_only()
+    except FileNotFoundError as e:
+        print(f"[FI] cannot emit: {e}", file=sys.stderr)
+        return 1
+    if art.paper_md is None:
+        print(
+            f"[FI] cannot emit {kind}: this quest has no paper/paper.md to "
+            "render from", file=sys.stderr,
+        )
+        return 1
+    # Narrow output.kinds to JUST the requested format so _run_generators
+    # only fires that one generator (each gates on its kind being present).
+    cfg.output.kinds = [kind]  # type: ignore[list-item]
+    written = await _run_generators(cfg, art, supervisor=supervisor)
+    produced = {k: v for k, v in written.items() if k == kind or k.startswith(kind)}
+    if produced:
+        for name, path in produced.items():
+            print(f"[FI] emitted {name} -> {path}")
+        return 0
+    print(
+        f"[FI] nothing emitted for {kind} — the generator skipped (missing "
+        "toolchain? see <quest>/paper/{kind}_skipped.md if present)",
+        file=sys.stderr,
+    )
+    return 1
+
+
 async def _run_generators(
     cfg: Config,
     art: QuestArtifacts,
@@ -1570,6 +1617,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     print(f"[FI] {resume_err}", file=sys.stderr)
                     return 1
                 _apply_review_decision(args, cfg.output.output_dir)
+            if args.emit:
+                if not args.resume:
+                    print("[FI] --emit requires --resume <quest_id>",
+                          file=sys.stderr)
+                    return 2
+                return await _emit_one(
+                    cfg, args.resume, args.emit, supervisor=supervisor,
+                )
             await run_one(
                 cfg, supervisor=supervisor, profile=args.profile,
                 interactive=args.interactive,

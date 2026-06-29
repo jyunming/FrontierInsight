@@ -151,6 +151,47 @@ class _QuestRegistry:
 # ---- on-disk quest scan ---------------------------------------------------
 
 
+def _quest_output_status(quest_root: Path) -> dict[str, object]:
+    """Which output formats this quest is configured for (from its
+    config.yaml's ``output.kinds``) and which artifacts have actually been
+    produced on disk. Powers the quest page's Outputs panel: a format that's
+    not yet present but is generatable shows a "Generate" button.
+
+    ``available_artifacts`` maps each format → the produced filename (relative
+    to quest_root) or ``null`` if absent. ``generatable_kinds`` is the set the
+    /generate endpoint accepts (everything except paper_md, which is the
+    source). Best-effort — a missing/garbage config.yaml yields empty kinds."""
+    # Format → the file(s) that signal it exists (first match wins for label).
+    probes: dict[str, list[str]] = {
+        "paper_md": ["paper/paper.md"],
+        "paper_pdf": ["paper/paper.pdf"],
+        "slides": ["slides.pdf", "slides.html", "slides.pptx", "slides.md"],
+        "poster": ["poster.pdf", "poster.tex"],
+        "speech": ["talk.md"],
+    }
+    available: dict[str, str | None] = {}
+    for fmt, rels in probes.items():
+        hit = next((r for r in rels if (quest_root / r).is_file()), None)
+        available[fmt] = hit
+    configured: list[str] = []
+    cfg_path = quest_root / "config.yaml"
+    if cfg_path.is_file():
+        try:
+            import yaml as _yaml
+            data = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            kinds = ((data.get("output") or {}).get("kinds")) or []
+            if isinstance(kinds, list):
+                configured = [str(k) for k in kinds]
+        except Exception:  # noqa: BLE001 — best-effort; bad YAML → no kinds
+            configured = []
+    return {
+        "configured_kinds": configured,
+        "available_artifacts": available,
+        # paper_md is the source, not generatable on demand.
+        "generatable_kinds": ["paper_pdf", "slides", "poster", "speech"],
+    }
+
+
 def _quest_pending(quest_root: Path) -> str | None:
     """The pause a quest is waiting on (its kind), or ``None`` when it isn't
     paused.
@@ -958,6 +999,48 @@ def make_app(
             "quest_id": quest_id,
             "pid": launched.pid,
             "resumed": True,
+        })
+
+    @app.post("/api/quests/{quest_id}/generate")
+    async def generate_artifact(quest_id: str, kind: str) -> JSONResponse:
+        """Generate ONE additional output format (paper_pdf / slides / poster
+        / speech) for a finished quest WITHOUT re-running the research —
+        spawns ``launch.py --emit <kind> --resume <id> --config <yaml>``,
+        which loads the checkpoint read-only and runs only that generator off
+        the existing paper.md + figures."""
+        valid = {"paper_pdf", "slides", "poster", "speech"}
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        if kind not in valid:
+            raise HTTPException(
+                400, f"kind must be one of {sorted(valid)}; got {kind!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        yaml_path = quest_root / "config.yaml"
+        if not yaml_path.is_file():
+            raise HTTPException(
+                400, f"no config.yaml at {yaml_path}; cannot generate.")
+        if not (quest_root / ".fi" / "state.sqlite").is_file():
+            raise HTTPException(
+                400, "no checkpoint — the quest must have run first.")
+        if not (quest_root / "paper" / "paper.md").is_file():
+            raise HTTPException(
+                400, "this quest has no paper/paper.md to render from.")
+        from web.quest_launcher import QuestLauncherFull
+        try:
+            launched = app.state.launcher.launch_command(
+                argv_tail=["--config", str(yaml_path), "--resume", quest_id,
+                           "--emit", kind],
+                job_id=f"{quest_id}-emit-{kind}",
+            )
+        except QuestLauncherFull as e:
+            return JSONResponse(
+                {"error": "launcher at capacity", "detail": str(e),
+                 "retry_after_seconds": 30},
+                status_code=503, headers={"Retry-After": "30"},
+            )
+        return JSONResponse({
+            "quest_id": quest_id, "kind": kind,
+            "pid": launched.pid, "generating": True,
         })
 
     @app.get("/api/quests/{quest_id}/wanted-papers")
@@ -1769,6 +1852,10 @@ def make_app(
             "pending_action": _quest_pending(quest_root),
             # Whether config.yaml is present (Update / Resume need it).
             "has_config": (quest_root / "config.yaml").is_file(),
+            # Which output formats this quest is configured for, and which
+            # have actually been produced — powers the Outputs panel's
+            # "Generate" buttons (on-demand PDF/slides/poster/speech).
+            **_quest_output_status(quest_root),
             "review": review,
             "review_panel": review_panel,
             # `quest_failed.md` summary when the engine wrote one

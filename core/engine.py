@@ -844,6 +844,31 @@ class Engine:
             # fired. ``_close_quest_logger`` is idempotent.
             _close_quest_logger(self.quest_id)
 
+    async def emit_artifacts_only(self) -> "QuestArtifacts":
+        """Load a FINISHED quest's checkpoint READ-ONLY and bundle its
+        artifacts — WITHOUT re-running any node. Used by the on-demand
+        ``--emit``/Generate-artifacts path: the caller then runs only the
+        requested generator (PDF/slides/poster/speech) off the existing
+        ``paper.md`` + figures, so a quest that finished as markdown-only can
+        produce more formats without re-doing the research.
+
+        Mirrors the read-only snapshot pattern the quest-failed resolver
+        uses — open a fresh saver context purely to read the StateSnapshot.
+        Returns an artifacts bundle built from whatever the checkpoint holds;
+        raises ``FileNotFoundError`` if there is no checkpoint to read.
+        """
+        checkpoint_path = self.fi_dir / "state.sqlite"
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"no checkpoint at {checkpoint_path} — nothing to emit"
+            )
+        run_config = {"configurable": {"thread_id": self.quest_id}}
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+            graph = self._build_graph().compile(checkpointer=saver)
+            snap = await graph.aget_state(run_config)
+        state = dict((snap.values if snap else None) or {})
+        return self._collect_artifacts(state)
+
     # ---- graph topology --------------------------------------------------
 
     def _build_graph(self) -> StateGraph:
