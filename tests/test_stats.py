@@ -31,7 +31,7 @@ def test_confidence_interval_single_value_is_undefined() -> None:
 
 
 def test_cohens_d_known_value() -> None:
-    # Two groups one pooled-SD apart → |d| ≈ 1.
+    # Two groups three pooled-SDs apart → d = -3 (pooled SD 1, mean diff 3).
     a = [10.0, 11.0, 12.0]   # mean 11, var 1
     b = [13.0, 14.0, 15.0]   # mean 14, var 1 → pooled SD 1, diff 3
     d = stats.cohens_d(a, b)
@@ -50,6 +50,15 @@ def test_effect_magnitude_thresholds() -> None:
     assert stats.effect_magnitude(0.35) == "small"
     assert stats.effect_magnitude(0.6) == "medium"
     assert stats.effect_magnitude(1.2) == "large"
+
+
+def test_t95_anchoring_is_conservative() -> None:
+    # Exact anchors, the largest-anchor-≤-df rule between them, and — above the
+    # table — the largest anchor (1.980), staying conservative (never < true t).
+    assert stats._t95(5) == 2.571
+    assert stats._t95(45) == stats._t95(40) == 2.021   # 45 → df=40 anchor
+    assert stats._t95(500) == 1.980                    # above table → df=120 anchor
+    assert stats._t95(0) == stats._Z95                 # no df → bare normal
 
 
 def test_bonferroni_alpha() -> None:
