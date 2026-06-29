@@ -193,6 +193,45 @@ def test_pause_writes_disk_marker_before_interrupt(tmp_path: Path) -> None:
     assert (eng.fi_dir / "paused_at_before_build.flag").is_file()
 
 
+def test_wait_for_data_pause_fires_with_root_data_target(tmp_path: Path) -> None:
+    """The no-simulation data pause: with an empty data/ dir,
+    ``_node_wait_for_data`` fires the unified pause — data_required payload,
+    a 'data' descriptor whose upload target is root_data (→ data/), and the
+    NEXT_STEP.md + .fi/pause.json artifacts the web banner reads. This is the
+    real node code path (the live trigger is rare because the literature
+    corpus usually fills data/ first)."""
+    import asyncio
+    import json
+    import core.engine as engine_mod
+
+    eng = _mk_engine(tmp_path, "never")
+    captured: dict[str, Any] = {}
+    real_interrupt = engine_mod.interrupt
+
+    def fake_interrupt(value: Any) -> None:
+        captured["payload"] = value
+        raise _InterruptedSentinel(value)
+
+    engine_mod.interrupt = fake_interrupt
+    try:
+        try:
+            asyncio.run(eng._node_wait_for_data({"topic": "overlay metrology"}))  # type: ignore[arg-type]
+        except _InterruptedSentinel:
+            pass
+    finally:
+        engine_mod.interrupt = real_interrupt
+
+    payload = captured["payload"]
+    assert payload["data_required"] is True
+    assert payload["pause"]["kind"] == "data"
+    assert payload["pause"]["interaction"] == "supply"
+    assert payload["pause"]["upload_targets"] == ["root_data"]
+    # The artifacts the Web GUI surfaces for this pause.
+    assert (tmp_path / "NEXT_STEP.md").is_file()
+    desc = json.loads((tmp_path / ".fi" / "pause.json").read_text(encoding="utf-8"))
+    assert desc["kind"] == "data" and desc["upload_targets"] == ["root_data"]
+
+
 def test_clear_clarify_snapshot_removes_both_files(tmp_path: Path) -> None:
     """On consume, the run loop clears BOTH the clarify questions snapshot and
     the staged answer so the web's "questions present + no answer" pending
