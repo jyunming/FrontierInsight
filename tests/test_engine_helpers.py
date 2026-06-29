@@ -563,6 +563,37 @@ async def test_evidence_gate_fails_open_on_malformed_state(
     assert patch["research_protocol"]["topic_type"]
 
 
+async def test_auto_collect_relevance_guards_reused_literature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reused literature must pass the relevance guard — an off-topic source
+    must NOT count toward the no-sim gate (audit #2). Otherwise a 'banana
+    bread' hit for a 'SpaceX revenue' topic silently satisfies wait_for_data."""
+    cfg = _route_config(tmp_path, review_loop=False, max_iterations=1)
+    cfg.engine.auto_collect_data = True
+    cfg.knowledge.relevance_guard = True
+    engine = Engine(cfg)
+    state = {"topic": "SpaceX revenue trend", "literature": [
+        {"content": "SpaceX revenue grew to $X.",
+         "metadata": {"title": "SpaceX Revenue 2024", "url": "u1"}},
+        {"content": "Banana bread recipe.",
+         "metadata": {"title": "Best Banana Bread", "url": "u2"}},
+    ]}
+
+    async def fake_filter(topic, docs):  # noqa: ANN001 — keep only on-topic
+        return [d for d in docs
+                if "banana" not in (d.get("metadata") or {}).get("title", "").lower()]
+
+    async def zero(*_a, **_k):  # axon + adapters: no network
+        return 0
+
+    monkeypatch.setattr(engine, "_filter_relevant_docs", fake_filter)
+    monkeypatch.setattr(engine, "_axon_collect_step", zero)
+    monkeypatch.setattr(engine, "_run_dataset_adapters", zero)
+    patch = await engine._node_auto_collect_data(state)
+    assert patch["auto_collected_count"] == 1  # only the on-topic source counts
+
+
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
     """Verify topology: linear ideate->...->review and conditional review->design|END."""
     from langgraph.graph import END, START

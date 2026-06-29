@@ -2298,7 +2298,33 @@ class Engine:
         # auto_collected/. Avoids re-querying the web (wasteful, and the
         # keyless DuckDuckGo backend can rate-limit the Nth query) and
         # avoids double-feeding the same content into the analysis.
-        lit_written = self._literature_seed_step(state)
+        # Reuse already-downloaded literature — but DROP off-topic sources
+        # so an irrelevant hit (the classic "banana bread" result for a
+        # "SpaceX revenue" topic) can't silently satisfy the no-sim gate
+        # without the relevance check the Axon top-up path already applies.
+        lit_docs = [
+            d for d in (state.get("literature") or [])
+            if isinstance(d, dict)
+            and ((d.get("metadata") or {}).get("title")
+                 or (d.get("metadata") or {}).get("url"))
+            and (d.get("metadata") or {}).get("kind") not in _FI_INTERNAL_KINDS
+        ]
+        if lit_docs and self.config.knowledge.relevance_guard:
+            relevant = await self._filter_relevant_docs(query, lit_docs)
+            lit_written = len(relevant)
+            if lit_written < len(lit_docs):
+                self._log.info(
+                    "[auto_collect] relevance guard: %d/%d reused literature "
+                    "doc(s) on-topic — off-topic ones don't satisfy the "
+                    "no-sim gate", lit_written, len(lit_docs),
+                )
+            elif lit_written:
+                self._log.info(
+                    "[auto_collect] reusing %d already-downloaded literature "
+                    "doc(s) from data/literature/", lit_written,
+                )
+        else:
+            lit_written = self._literature_seed_step(state)
 
         # ---- Axon / web retrieval (top-up) -------------------------
         # Only fire a fresh knowledge-layer query when the literature
