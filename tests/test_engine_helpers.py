@@ -900,6 +900,35 @@ def test_write_prompt_forbids_narrating_the_engine() -> None:
     assert _NO_SIM_WRITE_NOTE.strip()
 
 
+def test_all_artifact_prompts_forbid_engine_narration() -> None:
+    """The no-engine-narration rule must hold for EVERY published artifact,
+    not just the paper — a poster/slide/talk gets its own LLM call from the
+    paper, so each can re-introduce 'the automated pipeline …' unless its
+    own prompt forbids it. Pin that all four artifact authors carry a
+    'do not narrate the pipeline/engine' directive."""
+    import re
+    from pathlib import Path
+    agents = Path(__file__).resolve().parent.parent / "agents"
+    # Match the underlying directive, not one exact phrasing: a
+    # do-not/never + narrate/describe/mention/reference, close to a
+    # pipeline/engine/system/tool/automation noun. This survives a
+    # legitimate reword ("never mention the system", "do not describe the
+    # engine") while still catching an accidental deletion of the rule.
+    directive = re.compile(
+        r"(?:do not|don't|never)[^.\n]{0,40}"
+        r"(?:narrat|describ|mention|referenc)[^.\n]{0,40}"
+        r"(?:pipeline|engine|system|tooling|tool|automation|machinery)",
+        re.IGNORECASE,
+    )
+    for prompt in ("write.md", "poster.md", "slides.md", "speech.md"):
+        text = (agents / prompt).read_text(encoding="utf-8")
+        assert directive.search(text), (
+            f"agents/{prompt} is missing a no-engine/pipeline-narration "
+            f"rule — an audience artifact must not describe the tool that "
+            f"produced it"
+        )
+
+
 def test_no_sim_directive_renders_into_design_prompt() -> None:
     """End-to-end at the template layer: the directive lands in the design
     prompt when no_simulation is on and vanishes when off — the exact
