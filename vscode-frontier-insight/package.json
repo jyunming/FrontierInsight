@@ -79,7 +79,7 @@
           },
           {
             "name": "update",
-            "description": "Mid-quest re-entry of the interview. Pass the quest_id (or pick from the list). Opens an integrated terminal that runs `python launch.py --update <id>`: pre-fills the editable fields with the quest's current values, computes a diff, soft-invalidates affected LangGraph stages, then resumes."
+            "description": "Mid-quest re-entry of the interview. Pass the quest_id (or pick from the list). Opens an integrated terminal that runs `python launch.py --update <id>`: pre-fills the editable fields with the quest's current values, computes a diff, soft-invalidates affected LangGraph stages, then resumes — re-opening a finished quest when needed so the invalidated stages actually re-run instead of re-emitting from the old paper."
           },
           {
             "name": "ingest",
