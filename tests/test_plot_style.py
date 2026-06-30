@@ -96,7 +96,8 @@ def test_write_boot_creates_sitecustomize(tmp_path) -> None:
 
 @pytest.fixture
 def _restore_rcparams():
-    import matplotlib
+    # matplotlib isn't in the fast-tier CI env; skip the tests that need it.
+    matplotlib = pytest.importorskip("matplotlib")
 
     snapshot = dict(matplotlib.rcParams)
     try:
@@ -123,6 +124,9 @@ def test_bootstrap_applies_in_subprocess(tmp_path) -> None:
     """Drop the bootstrap, put it on a child process's PYTHONPATH, and confirm
     a script that imports ONLY matplotlib (never core.plot_style) inherits the
     full house style — exactly how the execute node styles experiments."""
+    # The probe subprocess imports matplotlib; same interpreter, so if it's
+    # absent here (fast-tier CI) the child can't import it either — skip.
+    pytest.importorskip("matplotlib")
     boot_dir = write_boot(tmp_path, "briefing")
     env = {
         **os.environ,

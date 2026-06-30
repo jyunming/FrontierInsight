@@ -184,8 +184,13 @@ async def test_execute_runs_n_times_with_replicate_env_var(tmp_path: Path) -> No
     # 3 execute calls total (primary + 2 replicates). Warmup is skipped
     # because deps is empty.
     assert idx["n"] == 3
-    # Primary call has no env override (uses inherited env).
-    assert call_envs[0] is None
+    # Primary call (seed 0) now carries the house-plot-style env — the
+    # execute node injects a PYTHONPATH pointing at the sitecustomize
+    # bootstrap so every figure gets the FrontierInsight look — but it
+    # must NOT carry a replicate seed (that's seed 0's defining trait).
+    assert call_envs[0] is not None
+    assert "FI_REPLICATE_SEED" not in call_envs[0]
+    assert "PYTHONPATH" in call_envs[0]
     # Replicate calls carry FI_REPLICATE_SEED=<i> ALONGSIDE the parent
     # environment (PATH/PYTHONPATH/LANG etc) — the engine merges with
     # os.environ rather than replacing it so the venv python.exe can
