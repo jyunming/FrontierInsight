@@ -162,6 +162,15 @@ PAPER_FORMATS: tuple[Choice, ...] = (
            "Vendor-neutral tech trends / standards / architecture comparisons. Practitioner audience."),
 )
 
+# How paper.pdf is styled (output.paper_style). Keep in sync with PaperStyle
+# in core/config.py.
+PAPER_STYLES: tuple[Choice, ...] = (
+    Choice("latex", "LaTeX — Computer Modern article (default)",
+           "The classic typeset look via the venue LaTeX template. Best typography; needs a LaTeX engine (or the HTML fallback)."),
+    Choice("briefing", "Briefing — Frontier Insight brand look",
+           "Warm paper, deep-teal accents, serif display + brand mark — the same identity as the slides and poster. Rendered via pandoc + a browser (no LaTeX); single-column regardless of venue."),
+)
+
 
 PROSE_FORMATS: frozenset[str] = frozenset(
     {"essay", "report", "policy_brief", "whitepaper"}
@@ -403,6 +412,16 @@ QUESTIONS: tuple[Question, ...] = (
         default=["paper_md", "paper_pdf"],
         mid_quest_editable=True,
         tier=1,
+    ),
+    Question(
+        id="paper_style",
+        label="Paper style",
+        prompt="How should paper.pdf look? 'latex' is the classic Computer Modern article; 'briefing' is the Frontier Insight brand look (warm paper + teal, matching the slides/poster) rendered without LaTeX.",
+        kind="single",
+        choices=PAPER_STYLES,
+        default="latex",
+        mid_quest_editable=True,
+        tier=3,
     ),
     Question(
         id="study_depth",
@@ -1063,6 +1082,10 @@ class InterviewAnswers:
     # cross-quest memory from the References section; "internal"
     # keeps everything. Default external for safe one-shot quests.
     audience: str = "external"
+    # Visual style for paper.pdf: "latex" (Computer Modern article, default)
+    # or "briefing" (the FI Research-Briefing look via the HTML/Chromium
+    # backend). Emitted as ``output.paper_style``.
+    paper_style: str = "latex"
     # How many Axon (RAG) prior-work entries the literature node
     # retrieves into the writer's context block. 8 is the default;
     # the smart-default helper bumps it to 12 for comprehensive reviews.
@@ -1270,6 +1293,9 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     quoted = ", ".join(json.dumps(k) for k in answers.output_kinds)
     lines.append(f"{indent}kinds: [{quoted}]")
     lines.append(f"{indent}paper_format: {json.dumps(answers.paper_format)}")
+    # Only emit a non-default paper_style so existing YAML stays clean.
+    if getattr(answers, "paper_style", "latex") != "latex":
+        lines.append(f"{indent}paper_style: {json.dumps(answers.paper_style)}")
     if answers.audience != "external":
         lines.append(f"{indent}audience: {json.dumps(answers.audience)}")
     lines.append(f"{indent}output_dir: \"./outputs\"")

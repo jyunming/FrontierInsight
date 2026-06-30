@@ -412,6 +412,23 @@ def test_update_no_change_does_not_reopen(
     assert captured.get("reopen") is False, captured
 
 
+def test_paper_style_round_trips(tmp_path: Path) -> None:
+    """``output.paper_style`` emits to YAML and loads back on --update."""
+    quest_root = tmp_path / "q-style"
+    quest_root.mkdir()
+    yaml_text = answers_to_yaml(_sample(paper_style="briefing"), frontend="cli")
+    assert 'paper_style: "briefing"' in yaml_text, yaml_text
+    (quest_root / "config.yaml").write_text(yaml_text, encoding="utf-8")
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.paper_style == "briefing"
+
+
+def test_paper_style_default_latex_not_emitted(tmp_path: Path) -> None:
+    """The default 'latex' is omitted so existing YAML stays clean."""
+    yaml_text = answers_to_yaml(_sample(), frontend="cli")
+    assert "paper_style" not in yaml_text
+
+
 def test_no_simulation_in_hard_refuse() -> None:
     """no_simulation is not editable mid-quest. The HARD_REFUSE_FIELDS
     set is consulted by run_update_flow to skip it during the

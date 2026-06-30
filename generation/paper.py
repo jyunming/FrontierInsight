@@ -607,6 +607,39 @@ class PaperGenerator:
                 ),
             )
 
+        # Briefing style: render via the HTML/Chromium backend with the
+        # Research-Briefing theme, REGARDLESS of LaTeX availability — the
+        # user chose this look on purpose, so it wins over the LaTeX path.
+        # Falls back to LaTeX below (with a warning) only when pandoc + a
+        # browser aren't both present to produce it.
+        if self.config.output.paper_style == "briefing":
+            from generation._html_pdf import (
+                find_html_browser, render_paper_html_pdf, theme_css_path,
+            )
+            browser = find_html_browser()
+            if browser is not None:
+                _log.info(
+                    "paper.pdf: paper_style=briefing — rendering via HTML "
+                    "(pandoc + %s headless)", browser[0],
+                )
+                pdf, detail = render_paper_html_pdf(
+                    paper_md, out_dir / "paper.pdf",
+                    pandoc_path=pandoc_exe, browser=browser,
+                    css_path=theme_css_path("briefing"), log=_log,
+                )
+                if pdf is not None:
+                    return pdf, None
+                _log.warning(
+                    "paper.pdf: briefing render did not produce a PDF (%s); "
+                    "falling back to the LaTeX style", detail,
+                )
+            else:
+                _log.warning(
+                    "paper.pdf: paper_style=briefing needs a Chromium-family "
+                    "browser (Edge/Chrome/Chromium); none found — falling "
+                    "back to the LaTeX style",
+                )
+
         # CRITICAL: pandoc does its OWN PATH lookup for the
         # `--pdf-engine` binary. On corporate Windows boxes the
         # MiKTeX bin dir (`~/AppData/Local/Programs/MiKTeX/miktex/bin/x64/`)

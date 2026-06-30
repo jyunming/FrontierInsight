@@ -138,6 +138,34 @@
       "tier": 1
     },
     {
+      "id": "paper_style",
+      "label": "Paper style",
+      "prompt": "How should paper.pdf look? 'latex' is the classic Computer Modern article; 'briefing' is the Frontier Insight brand look (warm paper + teal, matching the slides/poster) rendered without LaTeX.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "latex",
+          "label": "LaTeX — Computer Modern article (default)",
+          "description": "The classic typeset look via the venue LaTeX template. Best typography; needs a LaTeX engine (or the HTML fallback)."
+        },
+        {
+          "value": "briefing",
+          "label": "Briefing — Frontier Insight brand look",
+          "description": "Warm paper, deep-teal accents, serif display + brand mark — the same identity as the slides and poster. Rendered via pandoc + a browser (no LaTeX); single-column regardless of venue."
+        }
+      ],
+      "placeholder": "",
+      "default": "latex",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "study_depth",
       "label": "Study depth",
       "prompt": "How mature should the resulting paper be? Drives word count + citation depth.",
@@ -1038,6 +1066,7 @@
     "max_iterations",
     "output_kinds",
     "paper_format",
+    "paper_style",
     "pause_for_user_input",
     "review_panel",
     "study_depth",

@@ -175,6 +175,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "budget",
         "knowledge_external_top_k",
         "max_iterations",
+        "paper_style",
     }
 
 

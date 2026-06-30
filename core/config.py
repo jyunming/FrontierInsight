@@ -62,6 +62,12 @@ NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
+# How paper.pdf is rendered. ``latex`` (default) = the venue LaTeX template
+# (Computer Modern article). ``briefing`` = the Frontier Insight
+# "Research Briefing" look (warm paper, teal accents, serif display)
+# rendered via the HTML/Chromium PDF backend — same brand identity as the
+# slides + poster. See OutputConfig.paper_style.
+PaperStyle = Literal["latex", "briefing"]
 
 
 def _expand(v: object) -> object:
@@ -881,6 +887,16 @@ class KnowledgeConfig(BaseModel):
 class OutputConfig(BaseModel):
     kinds: list[OutputKind] = Field(default_factory=lambda: ["paper_md", "paper_pdf"])
     paper_format: PaperFormat = "generic"
+    # Visual style of paper.pdf. ``latex`` (default) keeps the venue LaTeX
+    # template (Computer Modern article). ``briefing`` renders the Frontier
+    # Insight "Research Briefing" look (warm paper, deep-teal accents, serif
+    # display, brand mark) via the HTML/Chromium PDF backend — the same
+    # editorial identity as the slides + poster. ``briefing`` needs pandoc +
+    # a Chromium-family browser (Edge/Chrome/Chromium); when those are
+    # unavailable it falls back to the LaTeX path with a warning. It can't
+    # reproduce a venue's two-column class, so it always renders single
+    # column regardless of ``paper_format``.
+    paper_style: PaperStyle = "latex"
     output_dir: Path = Path("./outputs")
     # When True AND ``paper_pdf`` is in ``kinds``, treat a failed PDF
     # compile as a hard quest failure rather than a graceful skip.
