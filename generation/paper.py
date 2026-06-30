@@ -121,6 +121,23 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     "Φ": r"\ensuremath{\Phi}",
     "Ψ": r"\ensuremath{\Psi}",
     "Ω": r"\ensuremath{\Omega}",
+    # Invisible / zero-width format characters an LLM silently emits
+    # (copy-paste from rendered text, tokenizer artifacts). They render
+    # as nothing but pdflatex still hard-errors ("Unicode character …
+    # not set up for use with LaTeX") — a single U+200B broke a real
+    # poster compile, and the emoji strip + Greek map didn't catch it
+    # (zero-width chars live in General Punctuation, outside both). Strip
+    # the zero-width ones; normalize the exotic spaces to a plain space.
+    "​": "",   # zero-width space
+    "‌": "",   # zero-width non-joiner
+    "‍": "",   # zero-width joiner
+    "⁠": "",   # word joiner
+    "﻿": "",   # zero-width no-break space / BOM
+    "­": "",   # soft hyphen
+    " ": " ",  # no-break space
+    " ": " ",  # figure space
+    " ": " ",  # thin space
+    " ": " ",  # narrow no-break space
 }
 
 # Pre-compile a translator for str.translate — that path is faster
@@ -564,6 +581,41 @@ class PaperGenerator:
         """
         return _find_pdf_engine_impl(REPO_ROOT)
 
+    def _try_html_pdf_fallback(
+        self, paper_md: Path, out_dir: Path, pandoc_exe: str, *, why: str,
+    ) -> Path | None:
+        """Last-resort paper.pdf via pandoc → styled HTML → headless browser,
+        used when the LaTeX path can't deliver — EITHER no engine was found OR
+        a present engine errored on bad LLM-emitted LaTeX. Returns the PDF path
+        on success, else ``None``. Gated on ``output.html_pdf_fallback`` plus a
+        present Chromium-family browser. ``why`` is woven into the log so it's
+        clear in run.log which condition triggered the fallback."""
+        if not self.config.output.html_pdf_fallback:
+            return None
+        from generation._html_pdf import find_html_browser, render_paper_html_pdf
+
+        browser = find_html_browser()
+        if browser is None:
+            _log.info(
+                "paper.pdf: %s, and no Chromium-family browser for the HTML "
+                "fallback; skipping with diagnostic", why,
+            )
+            return None
+        _log.info(
+            "paper.pdf: %s — using HTML fallback (pandoc + %s headless)",
+            why, browser[0],
+        )
+        pdf, detail = render_paper_html_pdf(
+            paper_md, out_dir / "paper.pdf",
+            pandoc_path=pandoc_exe, browser=browser, log=_log,
+        )
+        if pdf is not None:
+            return pdf
+        _log.warning(
+            "paper.pdf: HTML fallback did not produce a PDF (%s)", detail,
+        )
+        return None
+
     def _compile_pdf(
         self, paper_md: Path, out_dir: Path,
     ) -> tuple[Path | None, _PdfSkipReason | None]:
@@ -655,31 +707,11 @@ class PaperGenerator:
             # browser prints it to paper.pdf — no LaTeX, no admin install,
             # only the pandoc resolved above + a browser. The look matches
             # the LaTeX `article` output (bundled Latin Modern Roman).
-            if self.config.output.html_pdf_fallback:
-                from generation._html_pdf import (
-                    find_html_browser, render_paper_html_pdf,
-                )
-                browser = find_html_browser()
-                if browser is not None:
-                    _log.info(
-                        "paper.pdf: no LaTeX engine — using HTML fallback "
-                        "(pandoc + %s headless)", browser[0],
-                    )
-                    pdf, detail = render_paper_html_pdf(
-                        paper_md, out_dir / "paper.pdf",
-                        pandoc_path=pandoc_exe, browser=browser, log=_log,
-                    )
-                    if pdf is not None:
-                        return pdf, None
-                    _log.warning(
-                        "paper.pdf: HTML fallback did not produce a PDF "
-                        "(%s); skipping with diagnostic", detail,
-                    )
-                else:
-                    _log.info(
-                        "paper.pdf: no LaTeX engine and no Chromium-family "
-                        "browser for the HTML fallback; skipping",
-                    )
+            pdf = self._try_html_pdf_fallback(
+                paper_md, out_dir, pandoc_exe, why="no LaTeX engine found",
+            )
+            if pdf is not None:
+                return pdf, None
             msg = (
                 "no LaTeX engine found (pdflatex or tectonic), and the "
                 "HTML/Chromium fallback was unavailable or disabled; "
@@ -882,6 +914,19 @@ class PaperGenerator:
                 f"paper.pdf skipped. stderr_tail={stderr_tail}"
             )
             _log.warning(msg)
+            # The LaTeX engine is present but ERRORED — almost always on
+            # something the LLM emitted that pandoc translated into broken
+            # LaTeX (a bare \command in text mode, an unsupported glyph).
+            # Rather than skip outright, try the browser path: it doesn't
+            # go through LaTeX, so the same paper.md usually renders fine.
+            # A produced PDF beats a diagnostic-only skip for the default
+            # experience; the warning above keeps the LaTeX error in run.log.
+            pdf = self._try_html_pdf_fallback(
+                paper_md, out_dir, pandoc_exe,
+                why=f"{engine_name} errored (rc={r.returncode})",
+            )
+            if pdf is not None:
+                return pdf, None
             return None, _PdfSkipReason(
                 code=f"{engine_name}_rc_{r.returncode}",
                 summary=(
