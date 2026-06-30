@@ -195,6 +195,64 @@ async def test_clarify_auto_fills_answers_from_defaults(
     assert answers["output_kinds"] == ["paper_md"]
 
 
+@pytest.mark.asyncio
+async def test_clarify_agent_simulatability_wins_over_heuristic_override(
+    tmp_path: Path,
+) -> None:
+    """audit #1: the interview pins ``simulatability`` from a FORMAT
+    heuristic into clarify_overrides. When the clarify agent actually runs
+    and judges the topic non-simulatable (a review), its judgment must win
+    back over the heuristic — otherwise a review-shaped topic gets
+    force-run as a toy experiment. (The hard ``engine.no_simulation: true``
+    YAML pin is a separate, absolute control.)"""
+    from unittest.mock import AsyncMock
+
+    cfg = _mk_cfg(tmp_path, "auto")
+    # Heuristic override says SIMULATE; the agent will disagree. Only one
+    # slot pinned, so the auto short-circuit does NOT fire and the agent
+    # runs (the path where the override used to clobber its judgment).
+    cfg.engine.clarify_overrides = {"simulatability": "yes"}
+    eng = Engine(cfg)
+    questions = {
+        "simulatability": {"question": "Can a simulation answer this?",
+                           "default": "no"},
+        "topic_shape": {"question": "Shape?", "default": "review"},
+    }
+    eng._client = type(
+        "Stub", (), {"chat": AsyncMock(return_value=json.dumps(questions))},
+    )()
+
+    patch = await eng._node_clarify(
+        {"topic": "A survey of EUV resist chemistries"})
+
+    # The agent's "no" wins back over the heuristic "yes".
+    assert patch["clarify_answers"]["simulatability"] == "no"
+    assert patch["clarify_answers"]["topic_shape"] == "review"
+    assert patch["no_simulation_resolved"] is True
+
+
+@pytest.mark.asyncio
+async def test_clarify_preference_override_still_wins(
+    tmp_path: Path,
+) -> None:
+    """The judgment-slot exception must NOT leak to ordinary preference
+    slots: a pinned ``study_depth`` still wins over the agent's guess."""
+    from unittest.mock import AsyncMock
+
+    cfg = _mk_cfg(tmp_path, "auto")
+    cfg.engine.clarify_overrides = {"study_depth": "comprehensive"}
+    eng = Engine(cfg)
+    questions = {
+        "study_depth": {"question": "Depth?", "default": "quick"},
+        "simulatability": {"question": "Sim?", "default": "yes"},
+    }
+    eng._client = type(
+        "Stub", (), {"chat": AsyncMock(return_value=json.dumps(questions))},
+    )()
+    patch = await eng._node_clarify({"topic": "x"})
+    assert patch["clarify_answers"]["study_depth"] == "comprehensive"
+
+
 _PROPOSAL_FOR_SEED = """\
 ## TL;DR
 A short summary of the planned quest.

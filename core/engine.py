@@ -1316,18 +1316,45 @@ class Engine:
             questions = _default_clarify_questions(state["topic"])
 
         if mode == "auto":
-            answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
-            agent_count = len(answers)  # pre-merge count for honest logging
+            agent_answers = {
+                k: v.get("default") for k, v in questions.items()
+                if isinstance(v, dict)
+            }
+            agent_count = len(agent_answers)  # pre-merge count for honest logging
+            answers = dict(agent_answers)
             # User-pinned overrides (from the interview / --update flow)
             # win over the agent's self-answers. Logged so run.log
             # tells the user exactly which slots they pre-pinned.
             if overrides:
                 pinned = sorted(overrides.keys() & answers.keys())
-                answers = {**answers, **overrides}
+                answers = {**agent_answers, **overrides}
+                # EXCEPT ``simulatability`` / ``topic_shape``: these are
+                # TOPIC JUDGMENTS the clarify agent is better placed to make
+                # than the interview's format heuristic. When the agent
+                # actually answered one and it conflicts with the pinned
+                # value, the agent's judgment wins back — otherwise a
+                # review-shaped topic the agent flagged as no-simulation
+                # gets force-run as an experiment by a stale
+                # ``simulatability: "yes"`` override (audit #1). The hard
+                # ``engine.no_simulation: true`` YAML pin still wins
+                # absolutely (see _resolve_no_simulation_from_clarify);
+                # there is intentionally no hard "force simulate" — the
+                # engine trusts the agent's "can a simulation answer this?"
+                # call over a format guess.
+                reclaimed: list[str] = []
+                for slot in ("simulatability", "topic_shape"):
+                    agent_val = agent_answers.get(slot)
+                    if (agent_val not in (None, "")
+                            and slot in overrides
+                            and overrides[slot] != agent_val):
+                        answers[slot] = agent_val
+                        reclaimed.append(slot)
                 self._log.info(
                     "[clarify] mode=auto; agent self-answered %d slots, "
-                    "user-pinned overrides applied to %d (%s)",
+                    "user-pinned overrides applied to %d (%s)%s",
                     agent_count, len(pinned), ",".join(pinned),
+                    (f"; agent judgment kept over heuristic for "
+                     f"{','.join(reclaimed)}") if reclaimed else "",
                 )
             else:
                 self._log.info("[clarify] mode=auto; agent self-answered %d slots", agent_count)
