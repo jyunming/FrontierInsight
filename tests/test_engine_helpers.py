@@ -6,6 +6,7 @@ by `test_engine_smoke.py` so they run in milliseconds.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -21,10 +22,13 @@ from core.config import (
 )
 from core.engine import (
     Engine,
+    _ANALYZE_RESULT_JSON_BUDGET_CHARS,
+    _compact_result_json_block,
     _extract_result_json,
     _new_quest_id,
     _parse_implement_response,
     _parse_json_lenient,
+    _shrink_json_value,
     _slugify,
     _strip_outer_fence,
 )
@@ -238,6 +242,66 @@ def test_extract_result_json_malformed_json_returns_none() -> None:
 def test_extract_result_json_ignores_marker_without_braces() -> None:
     # No braces on the line at all.
     assert _extract_result_json("RESULT_JSON: oops\n") is None
+
+
+# ---- _shrink_json_value / _compact_result_json_block ---------------------
+
+
+def test_shrink_json_value_keeps_short_lists_intact() -> None:
+    """A list at or under 2*list_keep is returned element-for-element."""
+    v = {"xs": [1, 2, 3, 4]}
+    assert _shrink_json_value(v, list_keep=4, str_keep=100) == v
+
+
+def test_shrink_json_value_elides_long_list_middle() -> None:
+    """A long list keeps head + tail with a count-of-elided marker between."""
+    out = _shrink_json_value(list(range(100)), list_keep=3, str_keep=100)
+    assert out[:3] == [0, 1, 2]
+    assert out[-3:] == [97, 98, 99]
+    assert out[3] == "... 94 more elements elided to fit prompt budget ..."
+    assert len(out) == 7  # 3 head + marker + 3 tail
+
+
+def test_shrink_json_value_truncates_long_strings() -> None:
+    out = _shrink_json_value("x" * 5000, list_keep=3, str_keep=100)
+    assert out.startswith("x" * 100)
+    assert out.endswith("chars elided)")
+    assert "4900 chars elided" in out
+
+
+def test_shrink_json_value_recurses_into_nested_structures() -> None:
+    """Nested dicts/lists are shrunk too, and dict keys survive."""
+    v = {"a": {"b": list(range(50))}}
+    out = _shrink_json_value(v, list_keep=2, str_keep=100)
+    assert set(out.keys()) == {"a"}
+    assert set(out["a"].keys()) == {"b"}
+    assert out["a"]["b"][:2] == [0, 1]
+    assert out["a"]["b"][-2:] == [48, 49]
+
+
+def test_compact_result_json_block_passthrough_under_budget() -> None:
+    """A small result_json is returned verbatim and reports its true size."""
+    data = {"contrast": 0.42, "nils": 1.7}
+    block, orig = _compact_result_json_block(data, budget_chars=10_000)
+    assert json.loads(block) == data
+    assert orig == len(block)
+
+
+def test_compact_result_json_block_shrinks_oversized_and_stays_valid_json() -> None:
+    """A pathological result_json (huge raw array, à la the 36 MB DUV quest)
+    is compacted under budget, stays parseable, keeps the scalar summary
+    stat, and reports the original (untrimmed) size for the caller's log."""
+    data = {"contrast": 0.42, "raw_image": list(range(500_000))}
+    block, orig = _compact_result_json_block(data, budget_chars=20_000)
+    assert len(block) <= 20_000
+    assert orig > 20_000          # original was far bigger
+    parsed = json.loads(block)    # still valid JSON
+    assert parsed["contrast"] == 0.42
+    assert any("elided" in str(x) for x in parsed["raw_image"])
+
+
+def test_compact_result_json_block_default_budget_is_200k() -> None:
+    assert _ANALYZE_RESULT_JSON_BUDGET_CHARS == 200_000
 
 
 # ---- _strip_outer_fence --------------------------------------------------
