@@ -179,8 +179,8 @@
       <span class="hidden sm:inline-flex bg-surface-container-high text-electric-lime font-mono text-label-caps px-2 py-1 rounded border border-border-subtle">BETA</span>
     </div>
     <div class="hidden md:flex items-center gap-8">
-      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#pipeline">Pipeline</a>
-      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#features">Features</a>
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#how">How it works</a>
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#features">Why trust it</a>
       <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#providers">Providers</a>
       <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="https://github.com/jyunming/FrontierInsight#readme">Docs</a>
     </div>
@@ -201,20 +201,20 @@
   <div class="hero-glow"></div>
   <span class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-on-surface-variant relative z-10">
     <span class="pulse-dot"></span>
-    OPEN SOURCE · LANGGRAPH · APACHE 2.0
+    OPEN SOURCE · SELF-HOSTED · APACHE 2.0
   </span>
   <h1 class="font-display text-display-xl-mobile md:text-display-xl glow-text max-w-5xl mb-6 relative z-10">
-    Research, <span class="text-gradient-cool">automated.</span>
+    One sentence in.<br/><span class="text-gradient-cool">A whole paper out.</span>
   </h1>
   <p class="font-body text-body-lg md:text-xl text-on-surface-variant max-w-2xl mb-8 md:mb-12 relative z-10">
-    From one sentence to a peer-reviewable paper. Frontier Insight plans the experiment, retrieves prior work, runs the code, writes the IMRAD draft, and survives adversarial review &mdash; producing a PDF, the figures, and the experiment.py that made them.
+    Frontier Insight is an AI research assistant that does the whole job. Describe what you want to find out; it reads the literature, runs a real experiment (or analyses data you give it), makes the charts, writes the paper, and checks its own work &mdash; then hands you the PDF, the figures, and the code that produced them.
   </p>
   <div class="flex flex-col sm:flex-row gap-4 mb-12 md:mb-20 relative z-10">
     <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
       Get started <span class="material-symbols-outlined">arrow_forward</span>
     </a>
-    <a class="bg-surface-charcoal border border-border-subtle text-on-surface hover:border-outline hover:text-white transition-all font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="#pipeline">
-      <span class="material-symbols-outlined">code</span> See the pipeline
+    <a class="bg-surface-charcoal border border-border-subtle text-on-surface hover:border-outline hover:text-white transition-all font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="#how">
+      <span class="material-symbols-outlined">play_circle</span> See how it works
     </a>
   </div>
 
@@ -249,102 +249,75 @@
   </div>
 </section>
 
-<!-- ───────────────── Interactive pipeline ───────────────── -->
-<section id="pipeline" class="px-6 md:px-10 mb-16 md:mb-28">
-  <div class="max-w-6xl mx-auto">
+<!-- ───────────────── How it works (plain) ───────────────── -->
+<section id="how" class="px-6 md:px-10 mb-16 md:mb-28">
+  <div class="max-w-5xl mx-auto">
     <div class="text-center mb-12">
-      <span class="font-mono text-label-caps text-cyan-accent">THE PIPELINE</span>
-      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">14 nodes. One paper.</h2>
+      <span class="font-mono text-label-caps text-cyan-accent">HOW IT WORKS</span>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Three steps. No babysitting.</h2>
       <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
-        Each node is a focused LLM call or a real Python subprocess. The graph checkpoints to SQLite, so a crash mid-quest doesn't lose work &mdash; <code class="font-mono text-cyan-accent">--resume</code> picks up where it died.
+        You don't drive it step by step. You describe the idea once &mdash; it runs the whole way to a finished paper on its own.
       </p>
     </div>
-    <div class="flex flex-wrap justify-center gap-2 md:gap-3">
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">clarify</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">ideate</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">literature</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">design</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">implement</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-electric-lime/40 text-electric-lime">execute&nbsp;<span class="opacity-60">▶</span></span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">analyze</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">execute_reflect</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">cross_check</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">write</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">review</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">auto_collect_data</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">wait_for_data</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">data_load</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-cyan-accent/40 text-cyan-accent">paper.pdf</span>
+    <div class="grid md:grid-cols-3 gap-5">
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 1</div>
+        <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">edit_note</span>
+        <h3 class="font-display font-bold text-lg mb-2">Describe your idea</h3>
+        <p class="text-on-surface-variant text-body-md">A sentence or two: what you want to find out, and what would count as success. That's the whole input &mdash; a short interview helps you fill it in.</p>
+      </div>
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 2</div>
+        <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">science</span>
+        <h3 class="font-display font-bold text-lg mb-2">It does the research</h3>
+        <p class="text-on-surface-variant text-body-md">Reads the literature, then runs a real experiment in Python &mdash; or analyses data you hand it &mdash; and makes the figures from real numbers, not guesses.</p>
+      </div>
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 3</div>
+        <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">description</span>
+        <h3 class="font-display font-bold text-lg mb-2">You get a paper</h3>
+        <p class="text-on-surface-variant text-body-md">A complete PDF &mdash; with figures, citations, and the code that made them &mdash; after it fact-checks every claim and reviews its own work.</p>
+      </div>
     </div>
+    <p class="text-center text-body-md text-on-surface-variant/70 mt-8">
+      No made-up results: it runs real code and cites real sources. <a href="#features" class="text-cyan-accent hover:underline">Here's why you can trust it ↓</a>
+    </p>
   </div>
 </section>
 
 <!-- ───────────────── Features ───────────────── -->
 <section id="features" class="px-6 md:px-10 space-y-16 md:space-y-24 mb-16 md:mb-28">
-
-  <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
-    <div class="space-y-5">
-      <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
-        <span class="material-symbols-outlined text-[14px]">terminal</span> SANDBOXED PYTHON
-      </span>
-      <h3 class="font-display text-headline-lg text-on-surface">Runs your experiment. Doesn't hallucinate it.</h3>
-      <p class="text-body-lg text-on-surface-variant">
-        The <code class="font-mono text-cyan-accent">execute</code> node spawns a sandboxed venv subprocess. Figures are rendered from real numbers, not Markdown image links to imaginary files. The bundled <code class="font-mono text-cyan-accent">code/experiment.py</code> reproduces them on any machine with the requirements.
-      </p>
-      <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Subprocess isolation with a per-quest venv.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Auto-dataset adapters for arXiv, OpenAlex, S2, Crossref.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Re-execute lets you tweak <code class="font-mono">experiment.py</code> and re-run.</li>
-      </ul>
-    </div>
-    <div class="card-border-gradient p-6 md:p-7 min-h-[360px] flex flex-col overflow-hidden">
-      <div class="font-mono text-code-sm flex flex-col h-full">
-        <div class="text-on-surface-variant mb-3"># execute node — figures land on disk</div>
-        <div class="text-cyan-accent mb-2">$ python -m core.engine execute</div>
-        <div class="text-on-surface-variant mb-1">[execute] spawn pid=<span class="text-primary">3174</span> · venv=<span class="text-primary">.venv-quest</span></div>
-        <div class="text-on-surface-variant mb-1">[execute] running … <span class="text-cyan-accent">39.2s</span></div>
-        <div class="text-electric-lime mb-3">[execute] ● done · exit_code=0</div>
-        <div class="bg-surface-container-high border border-border-subtle p-4 rounded mt-auto">
-          <div class="text-electric-lime mb-2">figures/ (4)</div>
-          <div class="text-on-surface-variant">├─ fig1_iv_curve.png<br/>├─ fig2_coulomb_diamond.png<br/>├─ fig3_temperature_sweep.png<br/>└─ fig4_residuals.png</div>
-        </div>
-      </div>
-    </div>
+  <div class="text-center mb-12 max-w-3xl mx-auto">
+    <span class="font-mono text-label-caps text-cyan-accent">WHY YOU CAN TRUST IT</span>
+    <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">No made-up results.</h2>
+    <p class="text-body-lg text-on-surface-variant">
+      What makes the paper worth reading: it runs real code and checks its own work &mdash; so the numbers, the figures, and the citations are real, not invented.
+    </p>
   </div>
-
   <div class="grid md:grid-cols-2 gap-10 items-center max-w-6xl mx-auto">
-    <div class="card-border-gradient order-2 md:order-1 p-6 md:p-7 min-h-[360px] flex flex-col">
+    <ul class="space-y-6 text-body-md text-on-surface-variant">
+      <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime mt-0.5">science</span> <span><b class="text-on-surface">Real experiments.</b> Figures come from numbers a sandboxed Python program actually computed &mdash; not pictures invented and dropped into the text. The code ships with the paper, so anyone can re-run it.</span></li>
+      <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime mt-0.5">menu_book</span> <span><b class="text-on-surface">Real sources.</b> It searches the open web and academic databases and cites what it actually used &mdash; no fabricated references.</span></li>
+      <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime mt-0.5">verified</span> <span><b class="text-on-surface">Checks its own work.</b> Before writing, it confirms the evidence supports the question; after, it traces every claim back to the experiment or a citation, then a panel of reviewers picks the draft apart until it passes.</span></li>
+    </ul>
+    <div class="card-border-gradient p-6 md:p-7 min-h-[300px] flex flex-col">
+      <div class="font-mono text-xs text-on-surface-variant mb-3"># it reviews its own draft</div>
       <div class="font-mono text-code-sm flex flex-col gap-3 h-full">
         <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
-          <div class="text-cyan-accent mb-1">@reviewer_1 (skeptic)</div>
-          <div class="text-on-surface-variant">"Sample size N=120 is borderline. Fisher's exact would be more honest than χ²."</div>
+          <div class="text-cyan-accent mb-1">@statistician</div>
+          <div class="text-on-surface-variant">"Sample size N=120 is borderline. Fisher's exact would be more honest than &chi;&sup2;."</div>
         </div>
         <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
-          <div class="text-primary mb-1">@reviewer_2 (domain expert)</div>
+          <div class="text-primary mb-1">@methodologist</div>
           <div class="text-on-surface-variant">"Figure 2 contradicts Eq. 4. Either the model is wrong or the units."</div>
         </div>
         <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
           <div class="text-electric-lime mb-1">@moderator</div>
-          <div class="text-on-surface-variant">verdict: <span class="text-electric-lime font-semibold">revise</span> · iteration 2 of 3</div>
+          <div class="text-on-surface-variant">verdict: <span class="text-electric-lime font-semibold">revise</span> &middot; iteration 2 of 3</div>
         </div>
       </div>
     </div>
-    <div class="order-1 md:order-2 space-y-5">
-      <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
-        <span class="material-symbols-outlined text-[14px]">forum</span> MULTI-PERSONA REVIEW
-      </span>
-      <h3 class="font-display text-headline-lg text-on-surface">Adversarial review, baked in.</h3>
-      <p class="text-body-lg text-on-surface-variant">
-        Three reviewer personas plus a separate critique pass that asks <i>"what did the first reviewer miss?"</i> Iterates until accept or N=3. Every verdict + score lands in the quest summary so you can grep across runs.
-      </p>
-      <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Configurable reviewer panel (skeptic / domain / methods).</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Score + verdict written to <code class="font-mono">frontier_insight_summary.json</code>.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Iterations diffable via <code class="font-mono">/compare</code>.</li>
-      </ul>
-    </div>
   </div>
-
 </section>
 
 <!-- ───────────────── Three surfaces ───────────────── -->
@@ -352,7 +325,7 @@
   <div class="max-w-6xl mx-auto">
     <div class="text-center mb-12">
       <span class="font-mono text-label-caps text-cyan-accent">RUN IT WHERE YOU ARE</span>
-      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Same pipeline. Three surfaces.</h2>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Same engine. Three surfaces.</h2>
     </div>
     <div class="grid md:grid-cols-3 gap-5">
       <div class="card-border-gradient p-6 md:p-7">
@@ -392,74 +365,12 @@ python launch.py --resume &lt;quest_id&gt;</code></pre>
 
 <!-- ───────────────── Provider pricing ───────────────── -->
 <section id="providers" class="px-6 md:px-10 mb-16 md:mb-28">
-  <div class="max-w-6xl mx-auto">
-    <div class="text-center mb-12">
-      <span class="font-mono text-label-caps text-cyan-accent">COST-AWARE BY DEFAULT</span>
-      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Pay per call, per token, or zero.</h2>
-      <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
-        Two billing models. The wrong pick can be a 5&ndash;10&times; cost difference on a long quest. Pricing is tracked per call in <code class="font-mono text-cyan-accent">.fi/cost.jsonl</code>.
-      </p>
-    </div>
-    <div class="rounded-2xl border border-border-subtle overflow-hidden bg-surface-container-lowest/60">
-      <div class="hidden md:grid grid-cols-12 gap-4 px-5 py-3 border-b border-border-subtle bg-surface-container/40 font-mono text-label-caps text-on-surface-variant">
-        <div class="col-span-4">PROVIDER</div>
-        <div class="col-span-3">UNIT BILLED</div>
-        <div class="col-span-5">BEST FOR</div>
-      </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
-        <div class="col-span-12 md:col-span-4">
-          <div class="font-display font-bold text-lg mb-1">GitHub Copilot</div>
-          <code class="font-mono text-xs text-on-surface-variant">vscode_extension · copilot_cli</code>
-        </div>
-        <div class="col-span-12 md:col-span-3">
-          <span class="font-display font-bold text-electric-lime">Premium request</span>
-          <div class="font-mono text-xs text-on-surface-variant mt-1">1 call = 1 unit</div>
-        </div>
-        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Bursty heavy quests. Flat-rate per-call wins when prompts are large.</div>
-      </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
-        <div class="col-span-12 md:col-span-4">
-          <div class="font-display font-bold text-lg mb-1">OpenAI / Codex</div>
-          <code class="font-mono text-xs text-on-surface-variant">openai · codex · codex_cli</code>
-        </div>
-        <div class="col-span-12 md:col-span-3">
-          <span class="font-display font-bold text-cyan-accent">Per-token</span>
-          <div class="font-mono text-xs text-on-surface-variant mt-1">prompt + completion</div>
-        </div>
-        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Long-running automations. Wins when prompts stay lean.</div>
-      </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
-        <div class="col-span-12 md:col-span-4">
-          <div class="font-display font-bold text-lg mb-1">Claude</div>
-          <code class="font-mono text-xs text-on-surface-variant">claude_cli</code>
-        </div>
-        <div class="col-span-12 md:col-span-3">
-          <span class="font-display font-bold text-cyan-accent">Per-token</span>
-        </div>
-        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Sonnet is the workhorse. Reserve Opus for <code class="font-mono">write</code> + <code class="font-mono">review</code> via <code class="font-mono">node_models</code>.</div>
-      </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 border-b border-border-subtle/60 items-start hover:bg-surface-container/30 transition-colors">
-        <div class="col-span-12 md:col-span-4">
-          <div class="font-display font-bold text-lg mb-1">Gemini</div>
-          <code class="font-mono text-xs text-on-surface-variant">gemini_cli</code>
-        </div>
-        <div class="col-span-12 md:col-span-3">
-          <span class="font-display font-bold text-cyan-accent">Per-token</span>
-        </div>
-        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">Cheapest cloud option for long-context tasks.</div>
-      </div>
-      <div class="grid grid-cols-12 gap-4 px-5 py-4 md:py-5 items-start hover:bg-surface-container/30 transition-colors">
-        <div class="col-span-12 md:col-span-4">
-          <div class="font-display font-bold text-lg mb-1">Ollama</div>
-          <code class="font-mono text-xs text-on-surface-variant">ollama</code>
-        </div>
-        <div class="col-span-12 md:col-span-3">
-          <span class="font-display font-bold text-electric-lime">Free</span>
-          <div class="font-mono text-xs text-on-surface-variant mt-1">local</div>
-        </div>
-        <div class="col-span-12 md:col-span-5 text-on-surface-variant text-body-md">High-volume cheap nodes; airgapped runs.</div>
-      </div>
-    </div>
+  <div class="text-center max-w-2xl mx-auto">
+    <span class="font-mono text-label-caps text-cyan-accent">BRING YOUR OWN AI</span>
+    <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Use the model you already have.</h2>
+    <p class="text-body-lg text-on-surface-variant">
+      Works with GitHub Copilot, OpenAI, Claude, or Gemini &mdash; or run it completely free and offline with local <a href="https://ollama.com" class="text-cyan-accent hover:underline">Ollama</a>. Pay per call, per token, or nothing; every call's cost is logged for you. <a href="https://github.com/jyunming/FrontierInsight/blob/main/docs/PROVIDERS.md" class="text-cyan-accent hover:underline">Choosing a provider &rarr;</a>
+    </p>
   </div>
 </section>
 
@@ -471,7 +382,7 @@ python launch.py --resume &lt;quest_id&gt;</code></pre>
     Stop writing literature reviews. <span class="text-gradient-cool">Run experiments.</span>
   </h2>
   <p class="text-body-lg text-on-surface-variant max-w-xl mx-auto mb-10">
-    Open source. Self-hosted. <code class="font-mono text-cyan-accent">pip install -r requirements.txt</code> and you're done.
+    Open source. Self-hosted. <code class="font-mono text-cyan-accent">pip install -r requirements.txt</code> and you're done &mdash; even <code class="font-mono text-cyan-accent">paper.pdf</code> renders on a locked-down box with no LaTeX (pandoc + any browser is enough).
   </p>
   <div class="flex flex-col sm:flex-row gap-4 justify-center">
     <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
@@ -513,8 +424,8 @@ python launch.py --resume &lt;quest_id&gt;</code></pre>
     </div>
     <div class="flex flex-col gap-3">
       <span class="font-mono text-label-caps text-on-surface mb-1">Product</span>
-      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#pipeline">Pipeline</a>
-      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#features">Features</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#how">How it works</a>
+      <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#features">Why trust it</a>
       <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="#providers">Providers</a>
       <a class="text-on-surface-variant hover:text-electric-lime transition-colors" href="https://github.com/jyunming/FrontierInsight#readme">Docs</a>
     </div>
