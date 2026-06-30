@@ -146,4 +146,4 @@ exclude = [
 # wheel and are reachable via the same relative paths the runtime
 # uses in the source tree.
 [tool.setuptools.package-data]
-"*" = ["*.md", "*.tex", "*.css", "*.html", "*.js"]
+"*" = ["*.md", "*.tex", "*.css", "*.html", "*.js", "*.otf"]

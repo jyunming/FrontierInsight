@@ -5169,7 +5169,27 @@ class Engine:
         if pandoc_exe is None:
             missing.append("pandoc")
         if engine_lookup is None:
-            missing.append("a LaTeX engine (pdflatex or tectonic)")
+            # No LaTeX engine — but the HTML/Chromium fallback can still
+            # produce paper.pdf (pandoc + a system browser). So a missing
+            # LaTeX engine is only a real problem when that fallback is
+            # disabled or no browser is reachable.
+            from generation._html_pdf import find_html_browser
+            fallback_browser = (
+                find_html_browser()
+                if (self.config.output.html_pdf_fallback and pandoc_exe)
+                else None
+            )
+            if fallback_browser is not None:
+                self._log.info(
+                    "[preflight] no LaTeX engine found, but the HTML/Chromium "
+                    "fallback is available (pandoc + %s headless) — paper.pdf "
+                    "will render via HTML.", fallback_browser[0],
+                )
+            else:
+                missing.append(
+                    "a LaTeX engine (pdflatex/tectonic) — or, for the HTML "
+                    "fallback, a Chromium-family browser (Edge/Chrome/Chromium)"
+                )
         if not missing:
             self._log.info(
                 "[preflight] paper.pdf prereqs OK: pandoc=%s pdf_engine=%s",

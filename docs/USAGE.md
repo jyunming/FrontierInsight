@@ -243,6 +243,7 @@ output:
   paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   require_pdf: false                # strict mode for paper_pdf — see below
+  html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
 
 # Reserved free-text steering slot — declared in ``core/config.py``
 # but NOT YET wired into any prompt template or ``Engine._chat`` path
@@ -280,6 +281,30 @@ Recommended for unattended / CI runs where a missing PDF means the
 output is unusable anyway. Leave at the default `false` for
 interactive use where you'd rather have `paper.md` + a diagnostic
 than no output at all.
+
+### `output.html_pdf_fallback` — LaTeX-free PDF rendering
+
+A 4th engine tier, **on by default**. When none of `pdflatex` /
+`tectonic` / `tools/tectonic` is reachable, FI renders `paper.pdf`
+*without* LaTeX: `pandoc` turns `paper.md` into a Computer-Modern-
+styled HTML page (the `templates/paper/_html/latexlike.css` theme,
+with Latin Modern Roman embedded so it matches the LaTeX `article`
+look), then a headless system **browser** (Edge / Chrome / Chromium)
+prints it to PDF. Figures and fonts are inlined, so the PDF is
+self-contained.
+
+This means a machine with **pandoc + a browser but no TeX
+distribution** — common on locked-down corporate laptops where you
+can't install MiKTeX — still produces a styled `paper.pdf`. The
+pre-flight knows about it too: with `require_pdf: true`, a present
+browser satisfies the prerequisite, so the quest isn't aborted just
+because no LaTeX engine is installed.
+
+Trade-off: the fallback can't reproduce a venue's two-column LaTeX
+class (NeurIPS/IEEE), so it always renders the single-column house
+style. Set `html_pdf_fallback: false` to force the strict LaTeX-only
+path — then a missing engine skips the PDF (or, with `require_pdf:
+true`, aborts) exactly as before.
 
 ### `execution.sandbox: docker` — what it actually does
 

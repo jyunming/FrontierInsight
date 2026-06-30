@@ -893,6 +893,16 @@ class OutputConfig(BaseModel):
     # so the user still gets paper.md + the
     # ``paper_pdf_skipped.md`` diagnostic.
     require_pdf: bool = False
+    # When no LaTeX engine (pdflatex/tectonic) is reachable, fall back to
+    # an HTML/Chromium renderer: pandoc turns paper.md into a Computer-
+    # Modern-styled HTML page (matching the LaTeX `article` look), then a
+    # headless system browser (Edge/Chrome/Chromium) prints it to
+    # paper.pdf. No LaTeX, no admin install — only pandoc (already needed)
+    # + a browser, both of which a locked-down machine almost always has.
+    # The fallback can't reproduce a venue's two-column LaTeX class, so it
+    # always renders the single-column house style; set False to force the
+    # strict LaTeX-only path (skip-with-diagnostic when no engine).
+    html_pdf_fallback: bool = True
     # Who will read this paper? Drives which Axon entries are eligible
     # to appear in the References section.
     #

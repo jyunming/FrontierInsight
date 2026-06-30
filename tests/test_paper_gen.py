@@ -469,8 +469,11 @@ def test_paper_pdf_not_in_kinds_skips_compile(
 def test_no_pdf_engine_skips_pdf_with_clear_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pandoc present but NEITHER pdflatex NOR tectonic available:
-    skip the PDF cleanly (no subprocess invocation, no traceback)."""
+    """Pandoc present but NEITHER pdflatex NOR tectonic available, and the
+    HTML fallback DISABLED (strict LaTeX-only): skip the PDF cleanly with no
+    subprocess invocation, no traceback. (With the fallback enabled — the
+    default — the HTML path is tried instead; that's covered in
+    tests/test_html_pdf.py.)"""
     def fake_which(name):  # type: ignore[no-untyped-def]
         return "/fake/pandoc.exe" if name == "pandoc" else None
     monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
@@ -486,11 +489,12 @@ def test_no_pdf_engine_skips_pdf_with_clear_message(
     monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
 
     cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    cfg.output.html_pdf_fallback = False  # strict LaTeX-only path
     art = _make_artifacts(tmp_path)
     result = PaperGenerator(cfg).generate(art, tmp_path / "out")
     assert "paper_pdf" not in result
-    # No engine = no pandoc spawn at all (vs. spawning and failing
-    # mid-run, which would waste time on a bigger paper).
+    # No engine + no fallback = no pandoc spawn at all (vs. spawning and
+    # failing mid-run, which would waste time on a bigger paper).
     assert fake_run_called["n"] == 0
 
 
