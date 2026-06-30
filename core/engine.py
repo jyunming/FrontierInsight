@@ -478,6 +478,12 @@ class Engine:
                     # run also fails, the exception handler writes a fresh one;
                     # a fresh START has no file, so this is a no-op there.
                     self._clear_stale_quest_failed_diagnostic()
+                    # Same fix for the pause-display markers: a refine/resume
+                    # that continues past a pause must not leave the prior
+                    # pause's "needs you" markers on disk, or the dashboard
+                    # shows "human review" / "user input" for the whole run.
+                    # (Answer files are kept — they're this run's input.)
+                    self._clear_stale_pause_markers()
 
                     # Run, handling interrupts as they fire. Two kinds:
                     #   (a) clarify-interactive — pause to collect answers
@@ -4867,6 +4873,36 @@ class Engine:
             except OSError as e:
                 self._log.warning(
                     "[run] could not remove stale %s: %r", stale, e,
+                )
+
+    def _clear_stale_pause_markers(self) -> None:
+        """Remove the on-disk 'needs you' DISPLAY markers at the START of a run.
+
+        A resume that continues past a pause (e.g. a refine that re-enters the
+        graph) otherwise leaves these on disk for the quest's whole run, so the
+        dashboard / quest page shows a stale "human review" / "user input" /
+        "needs you" badge while the quest is actively running and has moved well
+        past the pause. Same staleness class as the ``quest_failed.md`` one.
+
+        Crucially this does NOT clear the *answer* files
+        (``human_review_answer.json`` / ``clarify_answer.json``): those are the
+        INPUT this resume is about to consume (the human-feedback / clarify
+        nodes read them), and dropping them here would discard the user's
+        decision. It also leaves the ``paused_at_<stage>.flag`` idempotency
+        markers alone, since those are state ("already paused here"), not
+        display. Any node that genuinely re-pauses re-writes its own marker, so
+        a real pending pause re-appears within the same run."""
+        for p in (
+            self.quest_root / "NEXT_STEP.md",
+            self.fi_dir / "pause.json",
+            self.fi_dir / "human_review.json",
+            self.fi_dir / "clarify_questions.json",
+        ):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                self._log.warning(
+                    "[run] could not remove stale pause marker %s: %r", p, e,
                 )
 
     async def _write_quest_failed_diagnostic(
