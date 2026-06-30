@@ -179,7 +179,7 @@
       <span class="hidden sm:inline-flex bg-surface-container-high text-electric-lime font-mono text-label-caps px-2 py-1 rounded border border-border-subtle">BETA</span>
     </div>
     <div class="hidden md:flex items-center gap-8">
-      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#pipeline">Pipeline</a>
+      <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#how">How it works</a>
       <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#features">Features</a>
       <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="#providers">Providers</a>
       <a class="text-on-surface-variant hover:text-primary transition-colors font-medium text-body-md" href="https://github.com/jyunming/FrontierInsight#readme">Docs</a>
@@ -201,20 +201,20 @@
   <div class="hero-glow"></div>
   <span class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-on-surface-variant relative z-10">
     <span class="pulse-dot"></span>
-    OPEN SOURCE · LANGGRAPH · APACHE 2.0
+    OPEN SOURCE · SELF-HOSTED · APACHE 2.0
   </span>
   <h1 class="font-display text-display-xl-mobile md:text-display-xl glow-text max-w-5xl mb-6 relative z-10">
-    Research, <span class="text-gradient-cool">automated.</span>
+    One sentence in.<br/><span class="text-gradient-cool">A whole paper out.</span>
   </h1>
   <p class="font-body text-body-lg md:text-xl text-on-surface-variant max-w-2xl mb-8 md:mb-12 relative z-10">
-    From one sentence to a peer-reviewable paper. Frontier Insight retrieves the literature, designs and runs the experiment &mdash; or analyses the data you give it &mdash; grounds every claim, and survives adversarial review, handing back the PDF, the figures, and the experiment.py that made them.
+    Frontier Insight is an AI research assistant that does the whole job. Describe what you want to find out; it reads the literature, runs a real experiment (or analyses data you give it), makes the charts, writes the paper, and checks its own work &mdash; then hands you the PDF, the figures, and the code that produced them.
   </p>
   <div class="flex flex-col sm:flex-row gap-4 mb-12 md:mb-20 relative z-10">
     <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
       Get started <span class="material-symbols-outlined">arrow_forward</span>
     </a>
-    <a class="bg-surface-charcoal border border-border-subtle text-on-surface hover:border-outline hover:text-white transition-all font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="#pipeline">
-      <span class="material-symbols-outlined">code</span> See the pipeline
+    <a class="bg-surface-charcoal border border-border-subtle text-on-surface hover:border-outline hover:text-white transition-all font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="#how">
+      <span class="material-symbols-outlined">play_circle</span> See how it works
     </a>
   </div>
 
@@ -249,11 +249,47 @@
   </div>
 </section>
 
+<!-- ───────────────── How it works (plain) ───────────────── -->
+<section id="how" class="px-6 md:px-10 mb-16 md:mb-28">
+  <div class="max-w-5xl mx-auto">
+    <div class="text-center mb-12">
+      <span class="font-mono text-label-caps text-cyan-accent">HOW IT WORKS</span>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">Three steps. No babysitting.</h2>
+      <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
+        You don't drive it step by step. You describe the idea once &mdash; it runs the whole way to a finished paper on its own.
+      </p>
+    </div>
+    <div class="grid md:grid-cols-3 gap-5">
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 1</div>
+        <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">edit_note</span>
+        <h3 class="font-display font-bold text-lg mb-2">Describe your idea</h3>
+        <p class="text-on-surface-variant text-body-md">A sentence or two: what you want to find out, and what would count as success. That's the whole input &mdash; a short interview helps you fill it in.</p>
+      </div>
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 2</div>
+        <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">science</span>
+        <h3 class="font-display font-bold text-lg mb-2">It does the research</h3>
+        <p class="text-on-surface-variant text-body-md">Reads the literature, then runs a real experiment in Python &mdash; or analyses data you hand it &mdash; and makes the figures from real numbers, not guesses.</p>
+      </div>
+      <div class="card-border-gradient p-6 md:p-7">
+        <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 3</div>
+        <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">description</span>
+        <h3 class="font-display font-bold text-lg mb-2">You get a paper</h3>
+        <p class="text-on-surface-variant text-body-md">A complete PDF &mdash; with figures, citations, and the code that made them &mdash; after it fact-checks every claim and reviews its own work.</p>
+      </div>
+    </div>
+    <p class="text-center text-body-md text-on-surface-variant/70 mt-8">
+      No made-up results: it runs real code and cites real sources. Curious how? <a href="#pipeline" class="text-cyan-accent hover:underline">Peek under the hood ↓</a>
+    </p>
+  </div>
+</section>
+
 <!-- ───────────────── Interactive pipeline ───────────────── -->
 <section id="pipeline" class="px-6 md:px-10 mb-16 md:mb-28">
   <div class="max-w-6xl mx-auto">
     <div class="text-center mb-12">
-      <span class="font-mono text-label-caps text-cyan-accent">THE PIPELINE</span>
+      <span class="font-mono text-label-caps text-cyan-accent">UNDER THE HOOD</span>
       <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">20 nodes. One paper.</h2>
       <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
         Each node is a focused LLM call or a real Python subprocess. A topic that needs code runs an experiment; one that needs data takes the no-simulation path instead. Two gates keep it honest &mdash; <code class="font-mono text-cyan-accent">evidence_gate</code> weighs the evidence before any paper is written, <code class="font-mono text-cyan-accent">claim_check</code> grounds every claim. It all checkpoints to SQLite, so <code class="font-mono text-cyan-accent">--resume</code> picks up where a crash left off.
