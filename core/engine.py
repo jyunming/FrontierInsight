@@ -3098,12 +3098,20 @@ class Engine:
                     warmup.returncode, warmup.stderr[-200:],
                 )
 
-        # Run from quest_root so figures/ is the relative target.
-        result: ExecutionResult = await self.executor.execute(
-            [str(py), str(code_path)],
-            cwd=self.quest_root,
-            timeout_s=self.config.execution.timeout_s,
-            env=exec_env,
+        # Run from quest_root so figures/ is the relative target. Wrapped in a
+        # heartbeat: the experiment subprocess can run for many minutes (a
+        # parameter sweep) while the executor just blocks on communicate(),
+        # emitting nothing — and the dashboard infers a quest's status from
+        # run.log recency, so a long silent run reads as "pending"/idle. The
+        # heartbeat keeps that signal fresh.
+        result: ExecutionResult = await self._await_with_heartbeat(
+            self.executor.execute(
+                [str(py), str(code_path)],
+                cwd=self.quest_root,
+                timeout_s=self.config.execution.timeout_s,
+                env=exec_env,
+            ),
+            label="running experiment.py",
         )
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
@@ -4855,6 +4863,40 @@ class Engine:
             try:
                 (self.fi_dir / name).unlink()
             except OSError:
+                pass
+
+    async def _await_with_heartbeat(
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0,
+    ) -> Any:
+        """Await ``coro`` while emitting a periodic ``[execute] … still running,
+        Ns elapsed`` line to run.log. Long-running work that blocks silently —
+        chiefly the experiment subprocess (the executor just waits on
+        ``communicate()``) — otherwise produces no log output, and the
+        dashboard infers a quest's status from run.log recency, so a busy quest
+        reads as "pending"/idle the whole time. The heartbeat keeps that signal
+        fresh. Failure-isolated: the heartbeat task can't affect the awaited
+        result, and its cancellation is awaited so it never leaks."""
+        done = asyncio.Event()
+        start = time.monotonic()
+
+        async def _beat() -> None:
+            while not done.is_set():
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=interval_s)
+                except asyncio.TimeoutError:
+                    self._log.info(
+                        "[execute] %s — still running, %ds elapsed",
+                        label, int(time.monotonic() - start),
+                    )
+
+        beat = asyncio.ensure_future(_beat())
+        try:
+            return await coro
+        finally:
+            done.set()
+            try:
+                await beat
+            except asyncio.CancelledError:
                 pass
 
     def _clear_stale_quest_failed_diagnostic(self) -> None:
