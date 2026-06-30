@@ -6,6 +6,7 @@ $design_block
 # Constraints
 - Single Python file. Standard library + the `dependencies` from the design (numpy, scipy, matplotlib, pandas, sympy are all fine).
 - Save figures to `figures/` (relative to the script's working directory). Use `matplotlib.use("Agg")` so it works headless.
+- **Figure styling is automatic — don't fight it.** A FrontierInsight matplotlib house style (brand palette, despined axes, clean typography, a branded heatmap colormap, paper-matched background) is applied to every figure for you. Do NOT call `plt.style.use(...)`, touch `rcParams`/`rcdefaults()`, call `seaborn.set_*`, or hard-code colors/colormaps — just plot and the house look lands. Instead spend effort on making figures *read well*: label every axis with units, give each a short descriptive title, prefer a frameless legend or direct series labels over a boxed legend, annotate the single number that matters, and use small-multiples (`plt.subplots(...)`) for per-stratum comparisons rather than one overcrowded axis.
 - Write a one-line JSON summary of key numerical results to stdout as the **last line**, prefixed `RESULT_JSON: `. Example:
   `RESULT_JSON: {"rmse": 0.0034, "best_method": "RK4"}`
 - **Stratify when natural strata exist.** If the experiment generates results across a categorical factor (different methods, classes, datasets, seeds, difficulty levels, …), the `RESULT_JSON` MUST include BOTH aggregate metrics AND per-stratum breakdowns. The per-stratum data lives under a `by_<factor>` key whose value is a dict mapping each stratum to its metrics. Example:
