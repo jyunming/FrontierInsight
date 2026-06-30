@@ -3037,6 +3037,14 @@ class Engine:
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
 
+        # Clear figures from a PRIOR experiment version before this run. On a
+        # re_experiment / broaden / repair loop the implement node rewrites
+        # experiment.py, which may emit a DIFFERENT set of figure filenames —
+        # the old ones aren't overwritten, so without this they linger, get
+        # counted in figures=N, and pollute the paper/slides/poster with a mix
+        # of current and stale (possibly degenerate) plots.
+        self._clear_stale_figures()
+
         # House plot style: drop a guarded `sitecustomize.py` bootstrap and
         # put its dir on the experiment subprocess's PYTHONPATH. Python
         # auto-imports `sitecustomize` at startup — before the script imports
@@ -4874,6 +4882,31 @@ class Engine:
                 self._log.warning(
                     "[run] could not remove stale %s: %r", stale, e,
                 )
+
+    def _clear_stale_figures(self) -> int:
+        """Delete figure files from ``<quest_root>/figures/`` before a (re-)run
+        of the experiment, so a re-implemented script's new figure set can't be
+        mixed with the previous version's leftovers. Returns the count removed.
+        Only files with a figure suffix are touched (``results.csv`` and other
+        non-figure artifacts live here too on some quests and must survive).
+        Best-effort: unlink errors are swallowed, a no-op on a fresh quest."""
+        fig_dir = self.quest_root / "figures"
+        if not fig_dir.is_dir():
+            return 0
+        removed = 0
+        for f in fig_dir.iterdir():
+            if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES:
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        if removed:
+            self._log.info(
+                "[execute] cleared %d stale figure(s) from a prior experiment "
+                "version before re-executing", removed,
+            )
+        return removed
 
     def _clear_stale_pause_markers(self) -> None:
         """Remove the on-disk 'needs you' DISPLAY markers at the START of a run.

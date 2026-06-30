@@ -3358,3 +3358,41 @@ async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
     assert chat_calls == 0
     assert winner["title"] == "Solo"
     assert record["outcome"] == "inconclusive_fallback"
+
+
+# ---- _clear_stale_figures ------------------------------------------------
+
+
+def _min_engine_for_figs(tmp_path: Path) -> Engine:
+    cfg = Config(
+        topic="figs", title="figs",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(clarify_mode="off"),
+        execution=ExecutionConfig(sandbox="venv"),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    return Engine(cfg)
+
+
+def test_clear_stale_figures_removes_figures_keeps_other_files(tmp_path: Path) -> None:
+    """A re-execute clears the prior run's figures (any figure suffix) but
+    leaves non-figure artifacts like results.csv alone."""
+    eng = _min_engine_for_figs(tmp_path)
+    figs = eng.quest_root / "figures"
+    figs.mkdir(parents=True)
+    for name in ("a.png", "b.svg", "c.jpg", "d.pdf"):
+        (figs / name).write_bytes(b"stale")
+    (figs / "results.csv").write_text("keep me\n", encoding="utf-8")
+
+    removed = eng._clear_stale_figures()
+
+    assert removed == 4
+    assert sorted(p.name for p in figs.iterdir()) == ["results.csv"]
+    assert (figs / "results.csv").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_clear_stale_figures_noop_without_figures_dir(tmp_path: Path) -> None:
+    eng = _min_engine_for_figs(tmp_path)
+    assert not (eng.quest_root / "figures").exists()
+    assert eng._clear_stale_figures() == 0
