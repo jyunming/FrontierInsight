@@ -244,6 +244,7 @@ output:
   output_dir: ./outputs
   require_pdf: false                # strict mode for paper_pdf — see below
   html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
+  paper_style: latex                # paper.pdf look: latex (Computer Modern article, default) | briefing (FI brand look, HTML-rendered)
 
 # Reserved free-text steering slot — declared in ``core/config.py``
 # but NOT YET wired into any prompt template or ``Engine._chat`` path
@@ -305,6 +306,21 @@ class (NeurIPS/IEEE), so it always renders the single-column house
 style. Set `html_pdf_fallback: false` to force the strict LaTeX-only
 path — then a missing engine skips the PDF (or, with `require_pdf:
 true`, aborts) exactly as before.
+
+### `output.paper_style` — choose the paper.pdf look
+
+`latex` (default) renders `paper.pdf` with the venue LaTeX template —
+the classic Computer Modern article. `briefing` instead renders the
+Frontier Insight **"Research Briefing"** look: warm off-white paper, a
+deep-teal accent, a serif display face, and the brand mark — the same
+identity as the slides and poster. It's produced by the same
+HTML/Chromium backend as the fallback above (pandoc + a browser, no
+LaTeX), so it works on a machine without a TeX distribution, and falls
+back to the LaTeX path with a warning when pandoc + a browser aren't
+both present. Because it's HTML, it's single-column regardless of
+`paper_format`. Pick it in YAML (`output.paper_style: briefing`) or
+during the interview (`--new` / `@fi /new` / web — the *Paper style*
+question).
 
 ### `execution.sandbox: docker` — what it actually does
 

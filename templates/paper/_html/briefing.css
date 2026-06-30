@@ -1,0 +1,131 @@
+/* Frontier Insight — "Research Briefing" PAPER stylesheet (selectable).
+   The same editorial identity as the slide/poster theme, adapted to a
+   continuous A4 paper, rendered by the HTML/Chromium PDF backend (no LaTeX).
+   Selected via ``output.paper_style: briefing``; the default ``latex`` keeps
+   the Computer Modern article look. Uses OS-bundled fonts (Palatino →
+   Georgia fallback) so it renders without vendored font files; the brand
+   glyph is an inline base64 SVG. */
+:root {
+  --ink:      #16222b;
+  --paper:    #f8f7f3;
+  --muted:    #65727c;
+  --faint:    #8a949b;
+  --hair:     #e4e2da;
+  --accent:   #0e6e6b;
+  --accent-2: #0a4f4d;
+  --serif: "Palatino Linotype", "Book Antiqua", "Iowan Old Style", Georgia, Cambria, serif;
+  --sans:  "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono:  "Consolas", "SFMono-Regular", ui-monospace, "Liberation Mono", monospace;
+}
+@page { size: A4; margin: 17mm 17mm 23mm; }
+* { box-sizing: border-box; }
+html, body { background: var(--paper); }
+html { font-size: 10.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: var(--serif);
+  color: var(--ink);
+  line-height: 1.5;
+  margin: 0;
+  text-rendering: optimizeLegibility;
+  /* Page-1 masthead brand glyph, top-right. A NON-repeating background on
+     <body> paints once (at the top of the flow) rather than per-page, so it
+     avoids the position:fixed paged-media bug — the mark lands on page 1
+     only, opposite the mono eyebrow. */
+  background-color: var(--paper);
+  background-repeat: no-repeat;
+  background-position: top 1mm right 0;
+  background-size: 122px auto;
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MzAgMTIwIiBmaWxsPSJub25lIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMzIsLTkpIHNjYWxlKDAuMjcpIiBzdHJva2U9IiMwZTZlNmIiIHN0cm9rZS13aWR0aD0iNDAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTI1NiAxMDBWNDEyIiBzdHJva2Utd2lkdGg9IjQ4Ii8+PHBhdGggZD0iTTI1NiAxNjBMMzIwIDE2MEwzNTAgMTMwTDQwMCAxODAiLz48cGF0aCBkPSJNMjU2IDI2MEgzNjAiLz48cGF0aCBkPSJNMTQwIDE4MEMxODAgMjAwIDIyMCAyNDAgMjU2IDI2MCIgb3BhY2l0eT0iMC4zMiIgc3Ryb2tlLXdpZHRoPSIzMiIvPjxwYXRoIGQ9Ik0xNDAgMzQwQzE4MCAzMjAgMjIwIDI4MCAyNTYgMjYwIiBvcGFjaXR5PSIwLjMyIiBzdHJva2Utd2lkdGg9IjMyIi8+PGNpcmNsZSBjeD0iMjU2IiBjeT0iMjYwIiByPSIxNCIgZmlsbD0iIzBhNGY0ZCIgc3Ryb2tlPSJub25lIi8+PC9nPjx0ZXh0IHg9IjEwNCIgeT0iNjAiIGZpbGw9IiMwZTZlNmIiIGZvbnQtZmFtaWx5PSJDb25zb2xhcyxTRk1vbm8tUmVndWxhcixtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMzAiIGZvbnQtd2VpZ2h0PSI2MDAiIGxldHRlci1zcGFjaW5nPSIyLjUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5GUk9OVElFUiBJTlNJR0hUPC90ZXh0Pjwvc3ZnPg==");
+}
+/* Teal accent rail along the top of every page. */
+body::before {
+  content: ""; position: fixed; top: 0; left: 0; right: 0;
+  height: 4px; background: var(--accent);
+}
+/* (Per-page corner brand glyph intentionally omitted: Chromium's
+   position:fixed in paged media renders unreliably across page breaks.
+   The brand identity is carried by the teal top rail, the mono eyebrow,
+   the teal kicker rules, mono captions, and teal table headers.) */
+/* ---- Title block (pandoc #title-block-header) ----------------------- */
+#title-block-header {
+  position: relative; padding-top: 26pt; margin: 6pt 0 16pt 0;
+}
+/* mono eyebrow above the title */
+#title-block-header::before {
+  content: "RESEARCH BRIEFING";
+  position: absolute; top: 3pt; left: 0;
+  font-family: var(--mono); font-size: 8pt; font-weight: 600;
+  letter-spacing: 2.5px; color: var(--accent);
+}
+h1.title {
+  font-family: var(--serif);
+  font-size: 23pt; line-height: 1.14; font-weight: 700;
+  letter-spacing: -0.4px; color: var(--ink);
+  margin: 0; max-width: 30ch;
+}
+/* teal kicker rule under the title */
+h1.title::after {
+  content: ""; display: block;
+  width: 96px; height: 4px; background: var(--accent);
+  margin: 12pt 0 12pt 0;
+}
+/* author byline + tagline/date */
+#title-block-header .author {
+  font-family: var(--serif); font-size: 12pt; font-weight: 700;
+  color: var(--accent-2); margin: 0;
+}
+#title-block-header .date {
+  font-family: var(--mono); font-size: 8.4pt; letter-spacing: 0.4px;
+  color: var(--muted); margin: 3pt 0 0 0;
+}
+/* ---- Section headings ----------------------------------------------- */
+h2 {
+  font-family: var(--serif); font-size: 14pt; font-weight: 700;
+  color: var(--ink); letter-spacing: -0.2px;
+  margin: 17pt 0 7pt 0; padding-top: 9pt; position: relative;
+  break-after: avoid;
+}
+h2::before {
+  content: ""; position: absolute; top: 0; left: 0;
+  width: 50px; height: 3px; background: var(--accent);
+}
+h3 {
+  font-family: var(--sans); font-size: 8.6pt; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1.3px; color: var(--accent-2);
+  margin: 12pt 0 4pt 0; break-after: avoid;
+}
+/* ---- Body ----------------------------------------------------------- */
+p { margin: 0 0 7pt 0; text-align: justify; hyphens: auto; }
+strong { color: var(--accent-2); font-weight: 700; }
+em { color: var(--muted); }
+a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--hair); word-break: break-word; }
+ul, ol { margin: 5pt 0; padding-left: 18pt; }
+li { margin-bottom: 3pt; }
+li::marker { color: var(--accent); }
+blockquote {
+  font-style: italic; color: var(--ink); border: none;
+  border-left: 4px solid var(--accent); margin: 8pt 0; padding: 2pt 0 2pt 12pt;
+}
+/* ---- Figures -------------------------------------------------------- */
+img {
+  display: block; max-width: 82%; height: auto; margin: 12pt auto 4pt auto;
+  background: #fff; border: 1px solid var(--hair); border-radius: 3px;
+  box-shadow: 0 2px 14px rgba(22,34,43,0.07);
+}
+figure { margin: 12pt 0; text-align: center; break-inside: avoid; }
+figcaption, p > img + em, .caption {
+  display: block; font-family: var(--mono); font-size: 8pt; color: var(--faint);
+  text-align: center; letter-spacing: 0.2px; margin-bottom: 10pt;
+}
+/* ---- Tables --------------------------------------------------------- */
+table { border-collapse: collapse; margin: 10pt auto; font-size: 9.2pt; width: auto; }
+thead th {
+  font-family: var(--mono); font-size: 8pt; text-transform: uppercase;
+  letter-spacing: 0.6px; color: var(--accent-2); background: #eef1ee;
+  border-bottom: 2px solid var(--accent); text-align: left; padding: 4pt 11pt;
+}
+td { padding: 3pt 11pt; border-bottom: 1px solid var(--hair); }
+/* ---- References ----------------------------------------------------- */
+h2 + ol { font-size: 9pt; color: var(--muted); }
+h2 + ol li { margin-bottom: 4pt; text-align: left; }
+code, pre { font-family: var(--mono); font-size: 9pt; }

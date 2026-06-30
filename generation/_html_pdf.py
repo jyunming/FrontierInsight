@@ -29,6 +29,19 @@ from pathlib import Path
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "paper" / "_html"
 _CSS_PATH = _ASSETS_DIR / "latexlike.css"
 
+# Selectable HTML themes (output.paper_style). ``latexlike`` matches the
+# Computer Modern LaTeX article (the no-LaTeX fallback default); ``briefing``
+# is the Frontier Insight Research-Briefing brand look.
+_THEMES: dict[str, Path] = {
+    "latexlike": _ASSETS_DIR / "latexlike.css",
+    "briefing": _ASSETS_DIR / "briefing.css",
+}
+
+
+def theme_css_path(theme: str) -> Path:
+    """Resolve a theme name to its CSS file, defaulting to ``latexlike``."""
+    return _THEMES.get(theme, _CSS_PATH)
+
 # Chromium-family executables, by the names they're usually invokable as.
 _BROWSER_PATH_NAMES = (
     "msedge", "microsoft-edge", "microsoft-edge-stable",
@@ -100,20 +113,24 @@ def render_paper_html_pdf(
     *,
     pandoc_path: str,
     browser: tuple[str, str],
+    css_path: Path | None = None,
     log: logging.Logger | None = None,
     timeout_s: float = 180.0,
 ) -> tuple[Path | None, str]:
     """Render ``paper_md`` to ``out_pdf`` via pandoc → styled HTML → headless
     browser. Returns ``(out_pdf, "")`` on success or ``(None, reason)``.
 
-    Runs pandoc with ``cwd = out_pdf.parent`` so ``figures/…`` references
-    resolve against the copied ``figures/`` dir (same contract the LaTeX
-    path relies on); ``--embed-resources`` then inlines the images + the
-    Latin Modern fonts, so the printed PDF is fully self-contained."""
+    ``css_path`` selects the theme (``latexlike.css`` by default, or
+    ``briefing.css`` for the Research-Briefing look). Runs pandoc with
+    ``cwd = out_pdf.parent`` so ``figures/…`` references resolve against the
+    copied ``figures/`` dir (same contract the LaTeX path relies on);
+    ``--embed-resources`` then inlines the images + any embedded fonts, so
+    the printed PDF is fully self-contained."""
     log = log or logging.getLogger("frontier_insight.paper")
     browser_name, browser_path = browser
-    if not _CSS_PATH.is_file():
-        return None, f"HTML theme missing at {_CSS_PATH}"
+    css_path = css_path or _CSS_PATH
+    if not css_path.is_file():
+        return None, f"HTML theme missing at {css_path}"
 
     work = out_pdf.parent
     try:
@@ -123,8 +140,9 @@ def render_paper_html_pdf(
     title, body = _split_title(md_text)
 
     # Resolve the @FONT_DIR@ token to the assets dir's absolute file:/// URL
-    # so pandoc --embed-resources can find + inline the OTFs.
-    css_text = _CSS_PATH.read_text(encoding="utf-8").replace(
+    # so pandoc --embed-resources can find + inline any vendored OTFs (the
+    # latexlike theme uses this; briefing relies on OS-bundled fonts).
+    css_text = css_path.read_text(encoding="utf-8").replace(
         "@FONT_DIR@", _ASSETS_DIR.as_uri())
     css_resolved = work / "paper_html_theme.css"
     css_resolved.write_text(css_text, encoding="utf-8")

@@ -135,6 +135,47 @@ def test_compile_pdf_skips_when_fallback_disabled(
     assert skip is not None and skip.code == "no_latex_engine"
 
 
+def test_compile_pdf_briefing_style_uses_briefing_theme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``output.paper_style=briefing`` renders via the HTML backend with the
+    briefing theme — even when a LaTeX engine IS available (the chosen look
+    wins over the LaTeX path)."""
+    cfg = Config.model_validate({
+        "topic": "t", "title": "t",
+        "output": {"kinds": ["paper_md", "paper_pdf"],
+                   "output_dir": str(tmp_path / "outputs"),
+                   "paper_style": "briefing"},
+    })
+    gen = PaperGenerator(cfg)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    paper_md = tmp_path / "paper.md"
+    paper_md.write_text("# T\n\nbody\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        paper_mod.shutil, "which", lambda n: "pandoc" if n == "pandoc" else None)
+    # A LaTeX engine IS present — briefing must still win.
+    monkeypatch.setattr(gen, "_find_pdf_engine", lambda: ("pdflatex", "/fake/pdflatex"))
+    monkeypatch.setattr(
+        "generation._html_pdf.find_html_browser", lambda: ("msedge", "edge"))
+
+    captured: dict[str, object] = {}
+
+    def fake_render(pmd, out_pdf, **kw):  # noqa: ANN001
+        captured["css_path"] = kw.get("css_path")
+        out_pdf.write_bytes(b"%PDF-1.4 fake")
+        return out_pdf, ""
+
+    monkeypatch.setattr("generation._html_pdf.render_paper_html_pdf", fake_render)
+
+    pdf, skip = gen._compile_pdf(paper_md, out_dir)
+    assert skip is None
+    assert pdf == out_dir / "paper.pdf"
+    css = captured["css_path"]
+    assert css is not None and Path(css).name == "briefing.css", captured
+
+
 @pytest.mark.skipif(
     shutil.which("pandoc") is None or find_html_browser() is None,
     reason="needs pandoc + a Chromium-family browser for a real render",

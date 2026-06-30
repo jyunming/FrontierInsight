@@ -29,6 +29,7 @@ export interface InterviewAnswers {
     title: string;
     output_kinds: string[];
     paper_format: PaperFormat;
+    paper_style?: "latex" | "briefing";   // paper.pdf look; default "latex"
     clarify_mode: "off" | "auto" | "interactive";
     review_panel: string[];           // empty = single reviewer
     knowledge_enabled: boolean;
@@ -289,6 +290,10 @@ export function answersToYaml(answers: InterviewAnswers): string {
     const quotedKinds = answers.output_kinds.map((k) => `"${yamlEscape(k)}"`).join(", ");
     lines.push(`${indent}kinds: [${quotedKinds}]`);
     lines.push(`${indent}paper_format: "${yamlEscape(answers.paper_format)}"`);
+    // Only emit a non-default paper_style so configs stay clean.
+    if (answers.paper_style && answers.paper_style !== "latex") {
+        lines.push(`${indent}paper_style: "${yamlEscape(answers.paper_style)}"`);
+    }
     // Emit audience only when it differs from the safer default ("external").
     if (answers.audience && answers.audience !== "external") {
         lines.push(`${indent}audience: "${yamlEscape(answers.audience)}"`);
