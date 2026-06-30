@@ -168,6 +168,29 @@ _EXPECTED_EVIDENCE: dict[str, str] = {
 }
 
 
+# Markers that flag a markets / current-events question — one whose answer
+# turns on RECENT, dated web sources (filings, reports, news), not just
+# academic papers. Deliberately finance/geopolitics/current-events specific
+# (no bare "current"/"trend", which collide with physics: "current density",
+# "trend line"), so the deterministic upgrade below doesn't misfire on
+# scientific topics. The richer LLM-classified deriver will replace this.
+_MARKET_CURRENT_MARKERS = (
+    "market share", "stock price", "share price", "stock market", "revenue",
+    "valuation", "gdp", "inflation", "interest rate", "election", "sanction",
+    "earnings", "quarterly", "ipo", "recession", "geopolitic", "tariff",
+    "exchange rate", "commodity price", "market cap", "financial status",
+    "box office", "unemployment rate",
+)
+
+
+def _looks_market_current(topic: object) -> bool:
+    """True when the question text reads as a markets / current-events
+    topic — the one case whose ``source_policy`` must be ``web_current``.
+    Conservative substring match against :data:`_MARKET_CURRENT_MARKERS`."""
+    t = str(topic or "").lower()
+    return bool(t) and any(m in t for m in _MARKET_CURRENT_MARKERS)
+
+
 def _derive_topic_type(topic_shape: str, no_simulation: bool) -> TopicType:
     """Map the four clarify ``topic_shape`` values × the simulatability
     decision onto a TopicType. (market_current / engineering aren't in
@@ -193,6 +216,15 @@ def derive_protocol(state: dict[str, Any], config: Any) -> ResearchProtocol:
     no_simulation = bool(state.get("no_simulation_resolved"))
     topic_type = _derive_topic_type(
         str(answers.get("topic_shape") or ""), no_simulation)
+    # Deterministic upgrade: a markets / current-events question (detected
+    # from the topic text) needs recent web sources. The clarify
+    # ``topic_shape`` vocabulary can't express this, so without it the
+    # ``market_current`` branch of ROUTE_MATRIX (source_policy=web_current)
+    # was unreachable dead code. Only upgrade non-experimental shapes — a
+    # genuine simulation keeps its type.
+    if topic_type in ("data_analysis", "literature_review", "case_study",
+                      "unknown") and _looks_market_current(state.get("topic")):
+        topic_type = "market_current"
     expected_evidence = _EXPECTED_EVIDENCE.get(
         topic_type, _EXPECTED_EVIDENCE["unknown"])
     source_policy = source_policy_for(topic_type)

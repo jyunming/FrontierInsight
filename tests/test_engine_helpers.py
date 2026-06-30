@@ -529,6 +529,43 @@ async def test_evidence_gate_shows_source_titles_to_the_agent(
     assert "Banana bread recipe" in captured["prompt"]
 
 
+async def test_evidence_gate_counts_cross_check_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate must count support/conflict from cross_check's ACTUAL shape
+    — per-finding {supporting:[...], conflicting:[...], neutral:[...]}. The
+    old code read rec['hits'][].stance, which this structure never carries,
+    so both counters were always 0 and the gate judged blind (audit #2)."""
+    import json as _json
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+    captured: dict[str, str] = {}
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return '{"verdict": "sufficient"}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    state = {
+        "topic": "EUV stochastics",
+        "analysis": {"key_findings": ["f1", "f2", "f3"]},
+        "cross_check": [
+            {"finding": "f1", "supporting": [{"title": "A"}],
+             "conflicting": [], "neutral": []},
+            {"finding": "f2", "supporting": [{"title": "B"}],
+             "conflicting": [{"title": "C"}], "neutral": []},
+            {"finding": "f3", "supporting": [],
+             "conflicting": [], "neutral": [{"title": "D"}]},
+        ],
+    }
+    await engine._node_evidence_gate(state)
+    # Extract the embedded evidence_summary JSON from the prompt.
+    prompt = captured["prompt"]
+    assert '"n_findings_with_supporting_lit": 2' in prompt, prompt
+    assert '"n_findings_with_conflicting_lit": 1' in prompt, prompt
+    # And nothing must collapse to the old always-zero behaviour.
+    assert '"n_findings_with_supporting_lit": 0' not in prompt
+
+
 async def test_analyze_reads_dropped_data_contents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -158,3 +158,32 @@ def test_derive_protocol_source_policy_comes_from_matrix() -> None:
         {"topic": "x", "clarify_answers": {"topic_shape": "experimental"},
          "no_simulation_resolved": True}, _cfg())
     assert p.source_policy == source_policy_for(p.topic_type)
+
+
+@pytest.mark.parametrize("topic", [
+    "EV market share 2018-2024 by region",
+    "What is the financial status of SpaceX",
+    "US GDP and inflation outlook",
+])
+def test_market_current_topic_is_reachable(topic) -> None:
+    """A markets / current-events question must resolve to topic_type
+    market_current with source_policy web_current — otherwise that branch
+    of ROUTE_MATRIX is dead code and the quest is judged against academic
+    sources it shouldn't need (audit #5)."""
+    p = derive_protocol(
+        {"topic": topic, "no_simulation_resolved": True}, _cfg())
+    assert p.topic_type == "market_current"
+    assert p.source_policy == "web_current"
+
+
+@pytest.mark.parametrize("topic", [
+    "Current density distribution in an EUV resist film",   # physics, not markets
+    "Predicting EUV stochastic contact failures",
+    "Trend of Lyapunov exponents in the Lorenz system",
+])
+def test_scientific_topics_are_not_misread_as_market(topic) -> None:
+    """The market heuristic must not misfire on physics/maths topics that
+    happen to contain words like 'current' or 'trend'."""
+    p = derive_protocol(
+        {"topic": topic, "no_simulation_resolved": True}, _cfg())
+    assert p.topic_type != "market_current"

@@ -4065,14 +4065,26 @@ class Engine:
             for rec in cc:
                 if not isinstance(rec, dict):
                     continue
-                hits = rec.get("hits") or rec.get("results") or []
-                stances = [
-                    str(h.get("stance") or h.get("classification") or "").lower()
-                    for h in hits if isinstance(h, dict)
-                ] if isinstance(hits, list) else []
-                if any(s == "supporting" for s in stances):
+                # ``_node_cross_check`` writes per-finding records shaped
+                # ``{supporting: [...], conflicting: [...], neutral: [...]}``
+                # — read THOSE buckets. (The old code looked for
+                # ``hits``/``results`` with per-hit ``stance`` fields, which
+                # this structure never carries, so both counters were always
+                # 0 and the gate was blind to real support/conflict.) Keep a
+                # fallback for the legacy stance shape just in case.
+                supporting = rec.get("supporting")
+                conflicting = rec.get("conflicting")
+                if supporting is None and conflicting is None:
+                    hits = rec.get("hits") or rec.get("results") or []
+                    stances = [
+                        str(h.get("stance") or h.get("classification") or "").lower()
+                        for h in hits if isinstance(h, dict)
+                    ] if isinstance(hits, list) else []
+                    supporting = [s for s in stances if s == "supporting"]
+                    conflicting = [s for s in stances if s == "conflicting"]
+                if supporting:
                     n_supporting += 1
-                if any(s == "conflicting" for s in stances):
+                if conflicting:
                     n_conflicting += 1
             summary = {
                 "n_sources_with_text": n_sources,
