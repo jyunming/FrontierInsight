@@ -101,7 +101,29 @@ def test_tighten_skips_fenced_code_blocks() -> None:
     assert "Example: $ \\beta $ stays exactly as written." in out
 
 
-def _make_config(tmp_path: Path, kinds: list[str], paper_format: str = "generic") -> Config:
+# ---------------------------------------------------------------------------
+# _sanitize_unicode_for_latex — invisible / zero-width chars
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_strips_zero_width_and_invisible_chars() -> None:
+    """A single zero-width space (U+200B) the LLM slipped into a column
+    hard-failed a real pdflatex poster compile. The shared sanitizer (used by
+    both paper and poster) must strip the invisible chars and normalize the
+    exotic spaces — they live outside the Greek map and the emoji strip."""
+    raw = "boundary​ value here﻿­⁠ end x"
+    out = paper_mod._sanitize_unicode_for_latex(raw)
+    for cp in ("​", "‌", "‍", "⁠", "﻿", "­"):
+        assert cp not in out
+    # nbsp / thin space normalized to a plain ASCII space
+    assert " " not in out and " " not in out
+    assert out == "boundary value here end x"
+
+
+def _make_config(
+    tmp_path: Path, kinds: list[str], paper_format: str = "generic",
+    *, html_pdf_fallback: bool = True,
+) -> Config:
     return Config.model_validate(
         {
             "topic": "t",
@@ -110,6 +132,7 @@ def _make_config(tmp_path: Path, kinds: list[str], paper_format: str = "generic"
                 "kinds": kinds,
                 "paper_format": paper_format,
                 "output_dir": str(tmp_path / "outputs"),
+                "html_pdf_fallback": html_pdf_fallback,
             },
         }
     )
@@ -203,19 +226,65 @@ def test_pandoc_missing_only_paper_md(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_pandoc_rc_nonzero_no_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: "/fake/pandoc")
+    # Force the LaTeX path (engine present) so the rc=1 below is a *compile*
+    # error, not a "no engine" skip.
+    monkeypatch.setattr(
+        PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", "/fake/pdflatex"),
+    )
 
     def fake_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return SimpleNamespace(returncode=1, stdout="", stderr="LaTeX error: missing.sty")
 
     monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
 
-    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    # html_pdf_fallback OFF — isolate the LaTeX-error skip from the fallback
+    # (the fallback-on-error behaviour has its own test below).
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"], html_pdf_fallback=False)
     art = _make_artifacts(tmp_path)
     out_dir = tmp_path / "out"
 
     result = PaperGenerator(cfg).generate(art, out_dir)
     assert "paper_pdf" not in result
     assert "paper_md" in result
+
+
+def test_latex_compile_error_falls_back_to_html(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present LaTeX engine that ERRORS (not just an absent one) should fall
+    back to the HTML/Chromium path rather than skipping with no PDF — the
+    failure mode that left a real codex quest with paper.md but no paper.pdf."""
+    monkeypatch.setattr(paper_mod.shutil, "which", lambda _c: "/fake/pandoc")
+    monkeypatch.setattr(
+        PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", "/fake/pdflatex"),
+    )
+    # pdflatex errors on bad LLM-emitted LaTeX (a bare \command in text mode).
+    monkeypatch.setattr(
+        paper_mod.subprocess, "run",
+        lambda *_a, **_k: SimpleNamespace(
+            returncode=1, stdout="", stderr="! Missing $ inserted.",
+        ),
+    )
+    # HTML fallback: a browser is present and the renderer writes a PDF.
+    import generation._html_pdf as html_mod
+
+    monkeypatch.setattr(html_mod, "find_html_browser", lambda: ("edge", "/fake/edge"))
+
+    def fake_html_render(paper_md, out_pdf, **_kw):  # type: ignore[no-untyped-def]
+        out_pdf.write_bytes(b"%PDF-1.4 fallback")
+        return out_pdf, ""
+
+    monkeypatch.setattr(html_mod, "render_paper_html_pdf", fake_html_render)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])  # fallback on (default)
+    art = _make_artifacts(tmp_path)
+    out_dir = tmp_path / "out"
+
+    result = PaperGenerator(cfg).generate(art, out_dir)
+    assert "paper_pdf" in result
+    assert result["paper_pdf"].read_bytes().startswith(b"%PDF")
+    # Fallback succeeded → no skip diagnostic left behind.
+    assert not (out_dir / "paper" / "paper_pdf_skipped.md").exists()
 
 
 def test_pandoc_happy_path_emits_pdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
