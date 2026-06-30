@@ -9,7 +9,7 @@ Model API.**
 
 ## What this is
 
-The Frontier Insight Python engine drives an 11-node async research
+The Frontier Insight Python engine drives a 20-node async research
 DAG (`clarify → ideate → literature → design → implement → execute →
 execute_reflect → analyze → cross_check → write → review`, with three
 self-correction loops and an optional reviewer panel). This extension

@@ -173,7 +173,10 @@ export class Bridge {
         child.stderr.setEncoding("utf-8");
         let pending = "";
         let lastShown = "";
-        const NODE_PATTERN = /\[(clarify|ideate|literature|design|implement|execute|execute_reflect|analyze|cross_check|write|review)\]\s*(.*)$/;
+        // Must track every node tag emitted by core/engine.py:_build_graph,
+        // else the chat silently skips whole phases (evidence_gate, claim_check,
+        // the no-simulation data path, web-derived figures).
+        const NODE_PATTERN = /\[(clarify|ideate|literature|design|design_self_critique|implement_outline|implement|execute|execute_reflect|analyze|cross_check|evidence_gate|write|claim_check|review|human_feedback|auto_collect_data|wait_for_data|data_load|web_plots|web_figures)\]\s*(.*)$/;
         child.stderr.on("data", (chunk: string) => {
             pending += chunk;
             const lines = pending.split(/\r?\n/);

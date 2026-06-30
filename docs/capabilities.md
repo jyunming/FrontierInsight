@@ -4,7 +4,7 @@ What this doc is: a feature index for people evaluating FI or looking
 for a specific knob to twist. README is the elevator pitch; USAGE.md
 is the YAML schema; this file is the breadth catalogue.
 
-## The 14-node DAG
+## The 20-node DAG
 
 > Simplified happy path below — see ``core/engine.py:_build_graph``
 > for the authoritative edge set. Conditional branches that aren't
@@ -20,27 +20,39 @@ START → clarify → ideate → literature ←─────┐ (broaden_lit)
                                 │
             ┌───────────────────┴───────────────────┐
             ↓ (computational)                       ↓ (no_simulation)
-        implement ──→ execute ──┐         auto_collect_data
-                                │                   ↓
-                          execute_reflect ←─(retry) wait_for_data
-                                │                   ↓
-                                ↓ (proceed)     data_load
-                              analyze ←──────────────┘
+     implement_outline                       auto_collect_data
+            ↓                                        ↓
+        implement ──→ execute ──┐               wait_for_data
+                                │                    ↓
+                          execute_reflect ←─(retry)  data_load
+                                │                    ↓
+                                │                 web_plots
+                                │                    ↓
+                                ↓ (proceed)       web_figures
+                              analyze ←───────────────┘
                                 ↓
                           cross_check ──┐ (re_experiment → design)
                                 │       │ (broaden_lit → literature)
-                                ↓ (write)
+                                ↓
+                          evidence_gate ─┐ (broaden → literature)
+                                │ (write)
+                                ↓
                               write
                                 ↓
-                              review ──→ END (accept)
+                          claim_check
+                                ↓
+                              review ──→ human_feedback ──→ END (accept)
                                 │
                                 ↓ (revise → design)
 ```
 
 Feedback loops in this diagram: `execute_reflect → execute` (retry),
 `cross_check → design` or `cross_check → literature` (analyze re-
-route), `review → design` (revise). The human-feedback gate, when
-enabled, inserts a `human_feedback` node between review and END.
+route), `evidence_gate → literature` (broaden), `review → design`
+(revise). `evidence_gate` (between cross_check and write) weighs
+assembled evidence before any paper is written; `claim_check` (between
+write and review) grounds the paper's claims. The `human_feedback`
+gate, when enabled, sits between review and END.
 
 Feedback loops:
 
@@ -58,7 +70,7 @@ is the index.
 
 ### Engine + execution
 
-- **Async LangGraph engine** with 14 nodes and 4 feedback loops; see `core/engine.py:_build_graph` for the actual edges.
+- **Async LangGraph engine** with 20 nodes and 4 feedback loops; see `core/engine.py:_build_graph` for the actual edges.
 - **Per-quest venv with auto-cleanup** — agent-generated Python is installed and run in isolation in `<quest_root>/.venv/`. On successful quest finish the venv is frozen to `.fi/requirements.lock.txt` and then removed to reclaim disk (typically 150–250 MB per quest). The lock file makes the environment reproducible: `python -m venv .venv && .venv/bin/pip install -r .fi/requirements.lock.txt`. Failed or paused quests keep their `.venv/` so you can poke at it.
 - **Docker sandbox** — `execution.sandbox: docker` runs the experiment subprocess with network disabled, mounted at `/work`.
 - **Provider matrix** — direct HTTP, proxy, CLI exec, and VSCode-extension transports (see provider matrix below).
@@ -121,7 +133,7 @@ is the index.
 - **Consistent Frontier Insight design + branding** — the slide deck, poster, and paper share one editorial "Research Briefing" identity: a serif display face for titles, a system-sans body, a single deep-teal accent, and structure carried by hairline + teal rules rather than boxes. Each surface carries a subtle palette-native teal brand mark — a bottom-left corner lockup on the slides, a masthead lockup plus a Sources-band mark on the poster, and a footer mark on the paper — driven from a single glyph asset so the look is uniform across all three.
 - **Length-aware page fitting** — outputs that pack content onto a fixed page are auto-fitted so an over-long LLM result can't overflow. Slide figures are height-capped in CSS (`max-height`, preserving aspect) so a chart can never push its slide's text off the bottom. The **poster** auto-fits its `beamerposter` scale: it compiles, rasterises the page (PyMuPDF or `pdftoppm`), detects whether content is clipped at the bottom edge — beamerposter clips silently with no LaTeX warning — and recompiles at a smaller scale until the A1 page holds everything (falling back to a conservative fixed scale when no rasteriser is available). The **paper** breaks reference URLs at any character (`xurl` + pandoc's `autolink_bare_uris` + `\urlstyle{same}`) so a long wiki-style link wraps inside the text column instead of running into the right margin.
 - **Citations in every output** — the sources a quest actually consulted (web pages carry their URL) are rendered as References across all three surfaces, not just the paper: the writer builds the paper's numbered References section; the poster gets a full-width **Sources** band injected straight from the retrieved literature (so it survives even when the LLM only saw a truncated `paper.md`); the slide deck gets an appended **References** slide. Web URLs and paper DOIs are both first-class; FI-internal cross-quest entries are filtered out of external-facing outputs.
-- **Claim grounding** — `engine.claim_grounding` (default on) inserts a `claim_check` node between `write` and `review` that extracts the paper's substantive claims and grounds each as **experiment** (it restates a number/result this quest produced), **citation** (it rests on a specific cited `[N]` reference), or **unsupported**. A transparency ledger is written next to the paper — **`paper/claims.json`** (structured) + **`paper/CLAIMS.md`** (grounded-fraction + the unsupported list) — and any unsupported claims are surfaced to the reviewer, which **must-flags** them and forces a bounded revise pass (capped by `max_iterations`), exactly like the non-bypassable methodology flags. Set `engine.claim_grounding: false` to make the node a no-op passthrough (no LLM call, no ledger).
+- **Claim grounding** — `engine.claim_grounding` (default on) inserts a `claim_check` node between `write` and `review` that extracts the paper's substantive claims and grounds each as **experiment** (it restates a number/result this quest produced), **citation** (it rests on a specific cited `[N]` reference), or **unsupported**. A transparency ledger is written next to the paper — **`paper/claims.json`** (structured) + **`paper/CLAIMS.md`** (grounded-fraction + the unsupported list) — and any unsupported claims are surfaced to the reviewer with an instruction to must-flag them. When a reviewer does raise a must-flag, the revise pass is then **non-bypassable and deterministic** (forced even with `review_loop` off, capped by `max_iterations`) — but note the trigger runs *through* the reviewer reading the unsupported list, not a direct `claim_check → revise` edge, so enforcement is only as reliable as the panel (the methodologist persona owns it; a single-reviewer/empty panel weakens it). Set `engine.claim_grounding: false` to make the node a no-op passthrough (no LLM call, no ledger). Basis classification keys on cited reference indices, not full source-text re-verification.
 - **Evidence gate** — `engine.evidence_gate` (default on) inserts an `evidence_gate` node between `cross_check` and `write` that weighs the assembled evidence — source count, the cross-check supporting/conflicting balance, whether the run produced real measurements — against the research question **before** any paper is written, and returns a verdict: **sufficient** (write), **broaden** (re-enter the literature loop once more, bounded by `engine.evidence_gate_max_broaden`, default 1), or **insufficient** (write anyway, but the assessment is handed to the writer so the paper frames its thin evidence honestly rather than over-claiming). It **fails open** — any parse error, or the flag off, routes straight to write — and is deliberately calibrated to pass most well-run quests; it exists to stop a confident-looking paper from being authored on evidence that doesn't support the question, not to refuse answerable topics. Set `engine.evidence_gate: false` for a no-op passthrough.
 - **Research protocol** — a typed `core.protocol.ResearchProtocol` (research question, `topic_type`, `source_policy`, expected evidence, baseline, success metric, replication, stopping criteria, requires-user-input) consolidates the otherwise-scattered clarify slots into ONE validated contract, derived deterministically from the resolved clarify answers + engine config (no extra LLM call). It is handed to the `evidence_gate` so the sufficiency judgement is **contract-aware** — e.g. a topic whose `source_policy` is `web_current` (markets/current events) is judged insufficient if it has only academic sources, because that policy requires recent web sources. Recorded in `state['research_protocol']`. A declarative `core.protocol.ROUTE_MATRIX` is the single source of truth mapping each `topic_type` to the graph path it expects (`simulation` vs `no_simulation`) and the `source_policy` it implies; it is consulted at the design fork so `topic_type` is a first-class routing input. The resolved `no_simulation` flag stays authoritative (config/clarify wins the actual edge), but when the topic type's expected path disagrees with the resolved route the engine logs a `[route]` WARNING in run.log — bidirectional (it also catches a future build/engineering topic that resolved to no-simulation), complementing the earlier clarify-time `topic_shape`-vs-SIMULATE warning.
 - **Machine-readable citations** — the same de-duplicated reference list is also exported next to the paper as **`paper/references.bib`** (BibTeX) and **`paper/references.csl.json`** (CSL-JSON), so a finished quest drops straight into Zotero / Mendeley / a LaTeX or Pandoc workflow instead of leaving citations trapped in the markdown body. Entry types are chosen from the available fields (`@article` when it has a venue/journal, an `eprint`/`archivePrefix=arXiv` entry for a bare preprint, a `howpublished` web entry for a page), cite keys are stable + unique (`firstauthor+year+word`), and BibTeX special characters are escaped. Both files are listed in the quest's file tree in the Web GUI for direct download.

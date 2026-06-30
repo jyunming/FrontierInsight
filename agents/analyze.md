@@ -57,6 +57,9 @@ Respond with a single JSON object, no prose, no markdown fence:
   "claims_supported": [{"claim": "<text>", "evidence": "<text>"}, ...],
   "claims_unsupported": [{"claim": "<text>", "reason": "<text>"}, ...],
   "limitations": ["<bullet>", ...],
+  "primary_sources": [{"title": "<source/file>", "detail": "<what it provided>"}, ...],
   "next_step": "publish" | "re_experiment" | "broaden_lit",
   "next_step_reason": "<one sentence — why you picked this next step>"
 }
+
+**`primary_sources` — carry provenance forward.** If the upstream `result_json` (from `data_load` in no-simulation mode) carries a `primary_sources` list, or your inputs name specific files / datasets / web pages the findings rest on, copy that attribution into `primary_sources` verbatim. This is the only place file-level provenance survives into the paper — the writer cannot cite a source it never sees. Omit the key (or use `[]`) only when there genuinely are no discrete sources (e.g., a pure single-script simulation).

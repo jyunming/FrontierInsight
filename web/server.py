@@ -373,9 +373,13 @@ _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
 _KNOWN_NODES = frozenset({
     "clarify", "ideate", "literature", "design", "design_self_critique",
     "implement_outline", "implement", "execute", "execute_reflect",
-    "analyze", "cross_check", "write", "review", "human_feedback",
+    "analyze", "cross_check", "evidence_gate", "write", "claim_check",
+    "review", "human_feedback",
     # No-simulation routing: triggered when ``simulatability == "no"``.
+    # web_plots/web_figures derive figures from collected web + literature
+    # data on the no-simulation path.
     "auto_collect_data", "wait_for_data", "data_load",
+    "web_plots", "web_figures",
 })
 
 

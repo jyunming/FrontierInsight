@@ -1,7 +1,7 @@
 {
   "name": "vscode-frontier-insight",
   "displayName": "Frontier Insight",
-  "description": "Run autonomous research quests inside VSCode, powered by your Copilot subscription via the sanctioned vscode.lm Language Model API. Local Python engine drives an 11-node async LangGraph DAG; this extension hosts the LLM calls.",
+  "description": "Run autonomous research quests inside VSCode, powered by your Copilot subscription via the sanctioned vscode.lm Language Model API. Local Python engine drives a 20-node async LangGraph DAG; this extension hosts the LLM calls.",
   "icon": "images/icon.png",
   "version": "0.1.0",
   "publisher": "frontier-insight",

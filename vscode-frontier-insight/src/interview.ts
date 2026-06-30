@@ -295,7 +295,11 @@ export async function runInterview(
         output_kinds: outputChoice.value as string[],
         paper_format: paperFormat,
         clarify_mode: "auto",
-        review_panel: [],
+        // Match the Python smart default: a 3-persona panel. An empty list
+        // is single-reviewer and silently disables must-flag enforcement
+        // (the methodologist owns the non-bypassable rules) — VSCode users
+        // must not quietly get weaker rigor than CLI users.
+        review_panel: ["methodologist", "statistician", "devil_advocate"],
         knowledge_enabled: await probeAxonReachable(),
         no_simulation: PROSE_FORMATS.has(paperFormat),
         study_depth: studyDepth,

@@ -562,7 +562,11 @@
       title: slugifyTopic(tier1.topic),
       no_simulation: PROSE_FORMATS.has(tier1.paper_format),
       clarify_mode: 'auto',
-      review_panel: [],
+      // Match the Python smart default: a 3-persona panel. An empty list
+      // means single-reviewer and silently disables must-flag enforcement
+      // (the methodologist owns the non-bypassable rules), so web users
+      // must not quietly get weaker rigor than CLI users.
+      review_panel: ['methodologist', 'statistician', 'devil_advocate'],
       knowledge_enabled: await probeAxonReachable(),
       audience: 'external',
       knowledge_top_k: tier1.study_depth === 'comprehensive review' ? 12 : 8,
