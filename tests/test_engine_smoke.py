@@ -515,3 +515,37 @@ async def test_engine_runs_with_clarify_interactive_via_callback(
     answers = artifacts.raw_state.get("clarify_answers", {})
     assert answers["comparative_baseline"] == "user-chosen baseline"
     assert answers["success_metric"] == "user-chosen metric"
+
+
+@pytest.mark.asyncio
+async def test_await_with_heartbeat_returns_result_and_logs(smoke_config: Config) -> None:
+    """The heartbeat wrapper returns the awaited result unchanged AND emits at
+    least one '[execute] … still running' line to the engine logger while the
+    coroutine is in flight, so a long silent subprocess keeps the dashboard's
+    log-recency signal fresh."""
+    import asyncio
+    import logging as _logging
+
+    engine = Engine(smoke_config)
+    msgs: list[str] = []
+
+    class _Cap(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            msgs.append(record.getMessage())
+
+    handler = _Cap()
+    engine._log.addHandler(handler)
+    engine._log.setLevel(_logging.INFO)
+    try:
+        async def slow() -> str:
+            await asyncio.sleep(0.25)
+            return "RESULT"
+
+        result = await engine._await_with_heartbeat(
+            slow(), label="running experiment.py", interval_s=0.08,
+        )
+    finally:
+        engine._log.removeHandler(handler)
+
+    assert result == "RESULT"
+    assert any("still running" in m for m in msgs), msgs
