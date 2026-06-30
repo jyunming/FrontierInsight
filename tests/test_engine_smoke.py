@@ -225,6 +225,48 @@ async def test_run_clears_stale_quest_failed_at_start(
 
 
 @pytest.mark.asyncio
+async def test_run_clears_stale_pause_markers_but_keeps_answers(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume that continues past a pause must drop the 'needs you' DISPLAY
+    markers at run start (so the dashboard doesn't show a ghost human-review /
+    user-input pause for the whole run), but must KEEP the *answer* files —
+    those are the input the resume is about to consume. Asserted at the first
+    node call, before any node could re-write or consume them."""
+    engine = Engine(smoke_config)
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    engine.fi_dir.mkdir(parents=True, exist_ok=True)
+    display = [
+        engine.quest_root / "NEXT_STEP.md",
+        engine.fi_dir / "pause.json",
+        engine.fi_dir / "human_review.json",
+        engine.fi_dir / "clarify_questions.json",
+    ]
+    for p in display:
+        p.write_text("stale\n", encoding="utf-8")
+    answer = engine.fi_dir / "human_review_answer.json"
+    answer.write_text('{"action": "accept", "feedback": ""}', encoding="utf-8")
+
+    seen: dict[str, bool | None] = {"display_gone": None, "answer_kept": None}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        if seen["display_gone"] is None:
+            seen["display_gone"] = not any(p.exists() for p in display)
+            seen["answer_kept"] = answer.exists()
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    assert seen["display_gone"] is True, (
+        "stale pause DISPLAY markers should be cleared at run start"
+    )
+    assert seen["answer_kept"] is True, (
+        "answer files must survive the run-start clear — they're the input"
+    )
+
+
+@pytest.mark.asyncio
 async def test_human_feedback_callback_timeout_pause_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
