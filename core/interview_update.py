@@ -580,9 +580,21 @@ async def run_update_flow(
                     "before resuming."
                 )
 
-    # Resume the quest with the (possibly updated) YAML.
+    # Resume the quest with the (possibly updated) YAML. When this --update
+    # invalidated any stage, ask run_one to REOPEN: on a TERMINAL checkpoint
+    # (the quest already finished) plain resume is a no-op — there's nothing
+    # left to run, so the output generators re-emit from the OLD paper.md on
+    # disk and the --update silently has no effect (audit #3). reopen injects
+    # a refine pass (design → … → write → review) so the affected stages
+    # actually re-run and the paper is regenerated. On a still-running
+    # checkpoint reopen is a no-op (it only fires when next is empty), so the
+    # surgical soft-invalidate + resume above is unchanged.
+    reopen_on_terminal = bool(stages)
     print()
-    print(f"Resuming quest {quest_id}...")
+    if reopen_on_terminal:
+        print(f"Resuming quest {quest_id} (re-opening if already finished)...")
+    else:
+        print(f"Resuming quest {quest_id}...")
     cfg = Config.from_yaml(yaml_path)
     apply_vscode_bridge_override(cfg, vscode_bridge_port)
     try:
@@ -593,6 +605,7 @@ async def run_update_flow(
             interactive=interactive,
             resume_quest_id=quest_id,
             source_yaml_path=yaml_path.resolve(),
+            reopen=reopen_on_terminal,
         )
         return 0
     except Exception as e:

@@ -333,6 +333,85 @@ def test_run_update_flow_rejects_path_traversal(tmp_path: Path) -> None:
         assert rc == 1, f"hostile quest_id {hostile!r} returned rc={rc}"
 
 
+def test_update_reopens_when_stages_invalidated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit #3: an --update that invalidates stages must ask run_one to
+    REOPEN, so a TERMINAL (finished) quest re-runs the affected stages
+    instead of the output generators re-emitting from the stale paper.md.
+    (reopen is a no-op on still-running checkpoints, so it's always safe.)"""
+    import asyncio
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    quest_root = output_root / "q-upd"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(_sample(paper_format="generic"), frontend="cli"),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_one(*_args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    # Force a paper_format change (→ invalidates design/write); every other
+    # editable field returns its current value (no change).
+    def fake_prompt(q, _partial, _opts):
+        return "neurips" if q.id == "paper_format" else q.default
+
+    monkeypatch.setattr("launch._cli_prompt_for", fake_prompt)
+
+    rc = asyncio.run(run_update_flow(
+        quest_id="q-upd",
+        output_root=output_root,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=None,
+        run_one=fake_run_one,
+        apply_vscode_bridge_override=lambda _c, _p: None,
+    ))
+    assert rc == 0
+    assert captured.get("reopen") is True, captured
+
+
+def test_update_no_change_does_not_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No edits ⇒ no invalidated stages ⇒ plain resume (reopen=False), so a
+    no-op --update doesn't force an unnecessary refine pass."""
+    import asyncio
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    quest_root = output_root / "q-noop"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(_sample(), frontend="cli"), encoding="utf-8")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_one(*_args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("launch._cli_prompt_for", lambda q, _p, _o: q.default)
+
+    rc = asyncio.run(run_update_flow(
+        quest_id="q-noop",
+        output_root=output_root,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=None,
+        run_one=fake_run_one,
+        apply_vscode_bridge_override=lambda _c, _p: None,
+    ))
+    assert rc == 0
+    assert captured.get("reopen") is False, captured
+
+
 def test_no_simulation_in_hard_refuse() -> None:
     """no_simulation is not editable mid-quest. The HARD_REFUSE_FIELDS
     set is consulted by run_update_flow to skip it during the
