@@ -43,7 +43,7 @@ Concretely: **per-node model routing** lets you spend cheap on `clarify` and exp
 
 - **Python 3.11+** (Windows / macOS / Linux — no WSL needed).
 - An LLM provider: a Copilot subscription via VSCode, OpenAI / Anthropic / Gemini API key, or local Ollama. Pick one in the quickstart below.
-- *Optional:* `pandoc` + a LaTeX engine for `paper.pdf` output. If you can't install MiKTeX / TeX Live (no admin, corporate laptop), run `python launch.py --install-tectonic` after install — it drops a 70 MB self-contained LaTeX binary into `tools/` and FI picks it up automatically.
+- *Optional:* `pandoc` for `paper.pdf` output. For the best typesetting, add a LaTeX engine (MiKTeX / TeX Live, or `python launch.py --install-tectonic` for a no-admin 70 MB binary into `tools/`). **No LaTeX? No problem** — with pandoc + any Chromium browser (Edge/Chrome) already on the machine, FI falls back to an HTML renderer that produces a Computer-Modern-styled `paper.pdf` matching the LaTeX look, no install needed.
 - *Optional:* `pip install axon` for the knowledge layer (literature retrieval + cross-quest memory). When present, FI auto-launches the Axon API as a sidecar on `127.0.0.1:8000` so the embedding model + vector indexes stay warm across quests instead of cold-loading per quest (saves ~5-15 s per `/start`). Skip the auto-launch with `--no-axon-sidecar` or `FI_NO_AXON_SIDECAR=1`.
 - *Optional, network only:* the WorldBank + Wikipedia dataset adapters (`engine.dataset_adapters: [worldbank, wikipedia]`, opt-in) use stdlib `urllib` against `api.worldbank.org` and `en.wikipedia.org` — no extra `pip install` needed, but the runtime needs outbound HTTPS to those hosts when the adapters are enabled.
 

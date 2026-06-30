@@ -616,22 +616,57 @@ class PaperGenerator:
         # (no-admin LaTeX) when pdflatex isn't reachable.
         engine = self._find_pdf_engine()
         if engine is None:
+            # No LaTeX engine. Before giving up, try the HTML/Chromium
+            # fallback (unless disabled): pandoc renders paper.md into a
+            # Computer-Modern-styled HTML page, then a headless system
+            # browser prints it to paper.pdf — no LaTeX, no admin install,
+            # only the pandoc resolved above + a browser. The look matches
+            # the LaTeX `article` output (bundled Latin Modern Roman).
+            if self.config.output.html_pdf_fallback:
+                from generation._html_pdf import (
+                    find_html_browser, render_paper_html_pdf,
+                )
+                browser = find_html_browser()
+                if browser is not None:
+                    _log.info(
+                        "paper.pdf: no LaTeX engine — using HTML fallback "
+                        "(pandoc + %s headless)", browser[0],
+                    )
+                    pdf, detail = render_paper_html_pdf(
+                        paper_md, out_dir / "paper.pdf",
+                        pandoc_path=pandoc_exe, browser=browser, log=_log,
+                    )
+                    if pdf is not None:
+                        return pdf, None
+                    _log.warning(
+                        "paper.pdf: HTML fallback did not produce a PDF "
+                        "(%s); skipping with diagnostic", detail,
+                    )
+                else:
+                    _log.info(
+                        "paper.pdf: no LaTeX engine and no Chromium-family "
+                        "browser for the HTML fallback; skipping",
+                    )
             msg = (
-                "no LaTeX engine found (pdflatex or tectonic); paper.pdf "
-                "skipped. Run `python launch.py --install-tectonic` for "
-                "a no-admin LaTeX install."
+                "no LaTeX engine found (pdflatex or tectonic), and the "
+                "HTML/Chromium fallback was unavailable or disabled; "
+                "paper.pdf skipped."
             )
             _log.warning(msg)
             return None, _PdfSkipReason(
                 code="no_latex_engine",
                 summary=msg,
                 how_to_fix=(
-                    "Easiest no-admin path: run `python launch.py "
-                    "--install-tectonic` from the repo root. That drops a "
-                    "single self-bootstrapping LaTeX binary (~70 MB) into "
-                    "`tools/`; FI auto-detects it on the next quest. "
-                    "Standard alternative: install MiKTeX (Windows) or "
-                    "TeX Live (macOS/Linux) so `pdflatex` lands on PATH."
+                    "Three options. (1) HTML fallback (no admin, no LaTeX): "
+                    "ensure `pandoc` and a Chromium-family browser "
+                    "(Edge/Chrome/Chromium) are installed and "
+                    "`output.html_pdf_fallback` is true (the default). "
+                    "(2) No-admin LaTeX: run `python launch.py "
+                    "--install-tectonic` from the repo root — a single "
+                    "self-bootstrapping binary into `tools/`, auto-detected "
+                    "next quest. (3) Standard LaTeX: install MiKTeX "
+                    "(Windows) or TeX Live (macOS/Linux) so `pdflatex` "
+                    "lands on PATH."
                 ),
             )
         engine_name, engine_path = engine

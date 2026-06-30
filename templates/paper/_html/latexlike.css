@@ -1,0 +1,93 @@
+/* Frontier Insight — LaTeX-consistent paper stylesheet (HTML/Chromium
+   fallback). Produces output that matches the MiKTeX/tectonic `article`
+   look: Computer Modern (bundled Latin Modern Roman), centered/flush-left
+   title block, unnumbered centered Abstract, CSS-counter numbered sections,
+   justified body with first-line indents and no inter-paragraph spacing.
+
+   ``@FONT_DIR@`` is replaced at render time by generation/_html_pdf.py with
+   the absolute file:/// URL of this directory, so pandoc --embed-resources
+   inlines the OTFs and the PDF is fully self-contained. */
+
+@font-face {
+  font-family: "LM Roman"; font-style: normal; font-weight: normal;
+  src: url("@FONT_DIR@/lmroman10-regular.otf");
+}
+@font-face {
+  font-family: "LM Roman"; font-style: normal; font-weight: bold;
+  src: url("@FONT_DIR@/lmroman10-bold.otf");
+}
+@font-face {
+  font-family: "LM Roman"; font-style: italic; font-weight: normal;
+  src: url("@FONT_DIR@/lmroman10-italic.otf");
+}
+@font-face {
+  font-family: "LM Roman"; font-style: italic; font-weight: bold;
+  src: url("@FONT_DIR@/lmroman10-bolditalic.otf");
+}
+
+@page { size: A4; margin: 24mm 25mm; }
+* { box-sizing: border-box; }
+html { font-size: 10.8pt; }
+body {
+  font-family: "LM Roman", "Latin Modern Roman", "Computer Modern", Georgia, serif;
+  color: #000; background: #fff; line-height: 1.32; margin: 0;
+  counter-reset: sec fig;
+}
+
+/* ---- Title block (pandoc #title-block-header), flush-left ------------ */
+#title-block-header { text-align: left; margin: 4pt 0 20pt 0; }
+h1.title { font-weight: bold; font-size: 17pt; line-height: 1.18; margin: 0; }
+#title-block-header .author {
+  font-size: 11pt; font-weight: normal; margin: 13pt 0 0 0;
+}
+#title-block-header .date {
+  font-size: 10.4pt; font-style: italic; margin: 1pt 0 0 0;
+}
+
+/* ---- Sections: CSS-counter numbered, Abstract excepted -------------- */
+h2 {
+  font-family: "LM Roman", serif; font-weight: bold; font-size: 12.4pt;
+  margin: 13pt 0 4pt 0; line-height: 1.2; counter-increment: sec;
+  counter-reset: sub; break-after: avoid;
+}
+h2::before { content: counter(sec) "\2003"; font-weight: bold; }
+/* First h2 is the Abstract: unnumbered + centered (LaTeX \begin{abstract}). */
+h2:first-of-type {
+  text-align: center; counter-increment: none; counter-reset: sec;
+  font-size: 11pt; margin-bottom: 5pt;
+}
+h2:first-of-type::before { content: none; }
+
+h3 {
+  font-family: "LM Roman", serif; font-weight: bold; font-size: 11pt;
+  margin: 10pt 0 3pt 0; counter-increment: sub; break-after: avoid;
+}
+h3::before { content: counter(sec) "." counter(sub) "\2003"; font-weight: bold; }
+
+/* ---- Body: justified, first-line indent, no inter-paragraph space --- */
+p { margin: 0; text-align: justify; text-indent: 1.6em; hyphens: auto; }
+h1 + p, h2 + p, h3 + p, h2:first-of-type + p { text-indent: 0; }
+h2:first-of-type + p { margin: 0 14pt 8pt 14pt; }
+
+strong { font-weight: bold; }
+em { font-style: italic; }
+a { color: #000; text-decoration: none; }
+ul, ol { margin: 3pt 0; padding-left: 22pt; }
+li { margin: 1pt 0; text-align: justify; }
+
+/* ---- Figures: centered, numbered "Figure N:" ----------------------- */
+figure { margin: 11pt 0; text-align: center; break-inside: avoid; counter-increment: fig; }
+img { display: block; max-width: 78%; height: auto; margin: 6pt auto 3pt auto; }
+figcaption { font-size: 9.6pt; text-align: center; margin: 2pt auto 0 auto; max-width: 86%; }
+figcaption::before { content: "Figure " counter(fig) ": "; }
+
+/* ---- Tables -------------------------------------------------------- */
+table { border-collapse: collapse; margin: 9pt auto; font-size: 9.8pt; }
+th, td { padding: 2pt 9pt; }
+thead th { border-top: 1pt solid #000; border-bottom: 0.5pt solid #000; font-weight: bold; }
+tbody tr:last-child td { border-bottom: 1pt solid #000; }
+
+/* ---- References ----------------------------------------------------- */
+h2 + ol { font-size: 9.8pt; text-indent: 0; }
+ol li { text-indent: 0; }
+code, pre { font-family: "Consolas", monospace; font-size: 9.4pt; }

@@ -2013,8 +2013,8 @@ def test_preflight_pdf_raises_when_required(
 def test_preflight_pdf_raises_on_missing_latex_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When pandoc IS present but no LaTeX engine is reachable, the
-    pre-flight still triggers in strict mode."""
+    """pandoc present, no LaTeX engine, AND the HTML fallback disabled
+    (strict LaTeX-only): the pre-flight still triggers in strict mode."""
     from generation import paper as paper_mod
     from core import engine as engine_mod
 
@@ -2032,8 +2032,33 @@ def test_preflight_pdf_raises_on_missing_latex_only(
     engine = _make_engine_for_preflight(
         tmp_path, kinds=["paper_md", "paper_pdf"], require_pdf=True,
     )
+    engine.config.output.html_pdf_fallback = False  # strict LaTeX-only
     with pytest.raises(RuntimeError, match="LaTeX engine"):
         engine._preflight_paper_pdf()
+
+
+def test_preflight_pdf_ok_when_html_fallback_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pandoc present, no LaTeX engine, but the HTML/Chromium fallback is
+    available (browser present): the pre-flight passes even under
+    require_pdf=True — paper.pdf will render via the Chromium fallback, so
+    aborting the quest would be wrong."""
+    from generation import paper as paper_mod, _html_pdf
+    from core import engine as engine_mod
+
+    def fake_which(name):
+        return "/fake/pandoc" if name == "pandoc" else None
+    monkeypatch.setattr(paper_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(engine_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(paper_mod, "REPO_ROOT", tmp_path)  # no tools/tectonic
+    monkeypatch.setattr(_html_pdf, "find_html_browser", lambda: ("msedge", "edge"))
+
+    engine = _make_engine_for_preflight(
+        tmp_path, kinds=["paper_md", "paper_pdf"], require_pdf=True,
+    )
+    # Must NOT raise — the fallback covers the missing LaTeX engine.
+    engine._preflight_paper_pdf()
 
 
 @pytest.mark.asyncio
