@@ -1053,15 +1053,72 @@ def _apply_review_decision(args: argparse.Namespace, output_dir: Path) -> None:
     else:
         return
     fi_dir = output_dir / args.resume / ".fi"
+    answer_path = fi_dir / "human_review_answer.json"
+    pause_path = fi_dir / "pause.json"
+
+    # Guard a terminal CLI decision (accept/reject) against clobbering work
+    # the user is doing elsewhere. A `refine` always proceeds — it's the user
+    # ADDING work, and it's idempotent-ish (just more feedback). But a stray
+    # `--accept` fired while the user is mid-refine in the web UI silently
+    # overwrote their refine answer and auto-finalized the quest without the
+    # improved result ever being reviewed (observed once, painfully).
+    if decision["action"] in ("accept", "reject"):
+        # (a) Don't overwrite a DIFFERENT decision already staged (e.g. a
+        #     refine just submitted from the web UI). Refine wins; a late
+        #     accept/reject must not bulldoze it.
+        existing_action = None
+        if answer_path.is_file():
+            try:
+                existing_action = (
+                    json.loads(answer_path.read_text(encoding="utf-8")) or {}
+                ).get("action")
+            except (OSError, ValueError):
+                existing_action = None
+        if existing_action and existing_action != decision["action"]:
+            print(
+                f"[FI] refusing --{decision['action']}: a '{existing_action}' "
+                f"decision is already staged for this review (e.g. submitted in "
+                f"the web UI). Honour that one, or delete {answer_path} to "
+                f"override.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # (b) Only stage accept/reject when the quest is actually paused
+        #     AWAITING REVIEW. If it's running (or in a refine loop) there's no
+        #     review to answer, and the staged decision would be consumed at the
+        #     NEXT review pause — finalizing past whatever the quest is doing now.
+        if not _is_review_pause_active(pause_path):
+            print(
+                f"[FI] refusing --{decision['action']}: this quest is not paused "
+                f"awaiting review (it may be running or in a refine loop). Wait "
+                f"for it to reach the review pause, then retry. (`--refine` is "
+                f"always accepted.)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     try:
         fi_dir.mkdir(parents=True, exist_ok=True)
-        (fi_dir / "human_review_answer.json").write_text(
-            json.dumps(decision), encoding="utf-8",
-        )
+        answer_path.write_text(json.dumps(decision), encoding="utf-8")
         tail = f" — {decision['feedback']}" if decision["feedback"] else ""
         print(f"[FI] review decision: {decision['action']}{tail}")
     except OSError as e:
         print(f"[FI] could not write review decision: {e!r}", file=sys.stderr)
+
+
+def _is_review_pause_active(pause_path: Path) -> bool:
+    """True when ``.fi/pause.json`` marks a live review pause (``kind=review``).
+    The engine writes it on a review pause-exit and clears it at the start of
+    the next run (see ``Engine._clear_stale_pause_markers``), so its presence
+    with ``kind=review`` is a reliable "the quest is waiting for your review
+    decision right now" signal — distinct from a data/input pause."""
+    if not pause_path.is_file():
+        return False
+    try:
+        return (
+            json.loads(pause_path.read_text(encoding="utf-8")) or {}
+        ).get("kind") == "review"
+    except (OSError, ValueError):
+        return False
 
 
 def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:

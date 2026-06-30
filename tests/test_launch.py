@@ -3,6 +3,8 @@ and fleet counter accounting. No real LLM calls; no real quest run."""
 
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -628,9 +630,14 @@ def test_write_launch_record_skipped_when_captured(tmp_path, monkeypatch) -> Non
 
 def test_apply_review_decision_writes_accept(tmp_path) -> None:
     import json as _json
+    # --accept is now honoured only when the quest is paused awaiting review,
+    # so stage the review-pause marker the engine would have written.
+    fi = tmp_path / "q-1" / ".fi"
+    fi.mkdir(parents=True)
+    (fi / "pause.json").write_text(_json.dumps({"kind": "review"}), encoding="utf-8")
     args = launch.parse_args(["--config", "x.yaml", "--resume", "q-1", "--accept"])
     launch._apply_review_decision(args, tmp_path)
-    ans = _json.loads((tmp_path / "q-1" / ".fi" / "human_review_answer.json").read_text())
+    ans = _json.loads((fi / "human_review_answer.json").read_text())
     assert ans == {"action": "accept", "feedback": ""}
 
 
@@ -648,3 +655,70 @@ def test_apply_review_decision_noop_without_flags(tmp_path) -> None:
     args = launch.parse_args(["--config", "x.yaml", "--resume", "q-3"])
     launch._apply_review_decision(args, tmp_path)
     assert not (tmp_path / "q-3" / ".fi").exists()
+
+
+# ---- _apply_review_decision: guard accept/reject vs in-flight refine ----
+
+
+def _review_args(resume: str = "q1", **kw) -> argparse.Namespace:
+    base = {"accept": False, "reject": False, "refine": None}
+    base.update(kw)
+    return argparse.Namespace(resume=resume, **base)
+
+
+def _setup_review_quest(tmp_path: Path, *, pause_kind=None, existing_answer=None):
+    out = tmp_path / "outputs"
+    fi = out / "q1" / ".fi"
+    fi.mkdir(parents=True)
+    if pause_kind is not None:
+        (fi / "pause.json").write_text(json.dumps({"kind": pause_kind}), encoding="utf-8")
+    if existing_answer is not None:
+        (fi / "human_review_answer.json").write_text(
+            json.dumps({"action": existing_answer, "feedback": ""}), encoding="utf-8")
+    return out, fi
+
+
+def test_is_review_pause_active(tmp_path: Path) -> None:
+    p = tmp_path / "pause.json"
+    assert launch._is_review_pause_active(p) is False          # missing
+    p.write_text(json.dumps({"kind": "data"}), encoding="utf-8")
+    assert launch._is_review_pause_active(p) is False          # not a review pause
+    p.write_text(json.dumps({"kind": "review"}), encoding="utf-8")
+    assert launch._is_review_pause_active(p) is True
+
+
+def test_review_refine_always_proceeds_even_without_pause(tmp_path: Path) -> None:
+    """A refine is the user ADDING work — it's never blocked by the guard."""
+    out, fi = _setup_review_quest(tmp_path)  # no pause, no prior answer
+    launch._apply_review_decision(_review_args(refine="add more simulation"), out)
+    d = json.loads((fi / "human_review_answer.json").read_text(encoding="utf-8"))
+    assert d == {"action": "refine", "feedback": "add more simulation"}
+
+
+def test_review_accept_stages_when_paused_for_review(tmp_path: Path) -> None:
+    out, fi = _setup_review_quest(tmp_path, pause_kind="review")
+    launch._apply_review_decision(_review_args(accept=True), out)
+    assert json.loads(
+        (fi / "human_review_answer.json").read_text(encoding="utf-8"))["action"] == "accept"
+
+
+def test_review_accept_refused_when_not_paused_for_review(tmp_path: Path) -> None:
+    """No active review pause (quest running / in a refine loop) → refuse, so a
+    stray --accept can't auto-finalize past in-flight work."""
+    out, fi = _setup_review_quest(tmp_path)  # no pause.json
+    with pytest.raises(SystemExit) as e:
+        launch._apply_review_decision(_review_args(accept=True), out)
+    assert e.value.code == 2
+    assert not (fi / "human_review_answer.json").exists()
+
+
+def test_review_accept_refused_when_refine_already_staged(tmp_path: Path) -> None:
+    """A refine submitted elsewhere (e.g. web UI) must not be clobbered by a
+    late CLI --accept — the exact bug this guards against."""
+    out, fi = _setup_review_quest(tmp_path, pause_kind="review", existing_answer="refine")
+    with pytest.raises(SystemExit) as e:
+        launch._apply_review_decision(_review_args(accept=True), out)
+    assert e.value.code == 2
+    # the refine answer is preserved, NOT overwritten
+    assert json.loads(
+        (fi / "human_review_answer.json").read_text(encoding="utf-8"))["action"] == "refine"
