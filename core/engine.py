@@ -3669,7 +3669,7 @@ class Engine:
                 payload["comparison_stats"] = comparison_stats
             if all_ds:
                 payload["_user_supplied_datasets"] = all_ds
-            result_json_block = json.dumps(payload, indent=2)
+            result_json_block, _rj_orig = _compact_result_json_block(payload)
             self._log.info(
                 "[analyze] using replicate aggregate (n=%d, %d numeric keys, "
                 "%d comparison(s))", len(replicates), len(agg),
@@ -3679,7 +3679,15 @@ class Engine:
             result_json_block_data: dict[str, Any] = dict(state.get("result_json") or {})
             if all_ds:
                 result_json_block_data["_user_supplied_datasets"] = all_ds
-            result_json_block = json.dumps(result_json_block_data, indent=2)
+            result_json_block, _rj_orig = _compact_result_json_block(result_json_block_data)
+        if _rj_orig > len(result_json_block):
+            self._log.warning(
+                "[analyze] result_json was %d chars; compacted to %d to fit the "
+                "prompt budget — raw arrays in the experiment output were elided. "
+                "The interpretation rests on the summary stats; if detail is lost, "
+                "have the experiment emit summary statistics (not raw arrays) in "
+                "its RESULT_JSON.", _rj_orig, len(result_json_block),
+            )
         stdout_for_analyze = exec_result.get("stdout_tail", "")[:2000]
         if degenerate:
             stdout_for_analyze = (
@@ -6611,6 +6619,64 @@ def _extract_result_json(stdout: str) -> dict[str, Any] | None:
         return json.loads(matches[-1].group(1))
     except json.JSONDecodeError:
         return None
+
+
+# Char budget for the ``result_json`` block spliced into the analyze prompt.
+# The full result_json stays in state (it feeds results.csv at full fidelity);
+# only the *prompt copy* is bounded. A pathological experiment can dump raw
+# arrays/images into its RESULT_JSON — one low-k1 DUV quest emitted a 36 MB
+# result_json, which blew past codex_cli's 1,048,576-char turn limit and
+# hard-failed analyze. 200 KB is generous for genuine summary statistics
+# (real ones are a few KB) while staying well under any CLI input cap, so
+# the rest of the analyze prompt (design, framing, figure list) still fits.
+_ANALYZE_RESULT_JSON_BUDGET_CHARS = 200_000
+
+
+def _shrink_json_value(value: Any, *, list_keep: int, str_keep: int) -> Any:
+    """Recursively shrink the bulky parts of a JSON-able value so it serializes
+    smaller while staying VALID, representative JSON (not a mid-structure hard
+    cut). Long lists keep ``list_keep`` head + ``list_keep`` tail elements with
+    a count-of-elided marker between them; long strings are truncated with a
+    char-count suffix. Dict keys and scalar summary stats are preserved — those
+    are what analyze actually reasons over; raw arrays are the disposable bulk."""
+    if isinstance(value, dict):
+        return {k: _shrink_json_value(v, list_keep=list_keep, str_keep=str_keep)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        if len(value) <= list_keep * 2:
+            return [_shrink_json_value(v, list_keep=list_keep, str_keep=str_keep)
+                    for v in value]
+        head = [_shrink_json_value(v, list_keep=list_keep, str_keep=str_keep)
+                for v in value[:list_keep]]
+        tail = [_shrink_json_value(v, list_keep=list_keep, str_keep=str_keep)
+                for v in value[-list_keep:]]
+        elided = len(value) - 2 * list_keep
+        return head + [f"... {elided} more elements elided to fit prompt budget ..."] + tail
+    if isinstance(value, str) and len(value) > str_keep:
+        return value[:str_keep] + f"... ({len(value) - str_keep} chars elided)"
+    return value
+
+
+def _compact_result_json_block(
+    data: dict[str, Any], budget_chars: int = _ANALYZE_RESULT_JSON_BUDGET_CHARS,
+) -> tuple[str, int]:
+    """Serialize ``data`` to indented JSON bounded to ~``budget_chars``.
+
+    Returns ``(block, original_chars)`` — ``original_chars`` is the size of the
+    untrimmed dump (so the caller can log when compaction actually fired). If
+    the full dump already fits, it is returned unchanged. Otherwise the bulky
+    arrays/strings are progressively shrunk (tighter on each pass) until the
+    dump fits, with a final hard cap as a last resort so the return value can
+    never exceed the budget."""
+    full = json.dumps(data, indent=2, ensure_ascii=False)
+    if len(full) <= budget_chars:
+        return full, len(full)
+    for list_keep, str_keep in ((20, 2000), (8, 800), (4, 400), (2, 200), (1, 100)):
+        shrunk = _shrink_json_value(data, list_keep=list_keep, str_keep=str_keep)
+        out = json.dumps(shrunk, indent=2, ensure_ascii=False)
+        if len(out) <= budget_chars:
+            return out, len(full)
+    return out[:budget_chars], len(full)
 
 
 def _is_degenerate_result(rj: dict[str, Any]) -> bool:
