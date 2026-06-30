@@ -207,7 +207,7 @@
     Research, <span class="text-gradient-cool">automated.</span>
   </h1>
   <p class="font-body text-body-lg md:text-xl text-on-surface-variant max-w-2xl mb-8 md:mb-12 relative z-10">
-    From one sentence to a peer-reviewable paper. Frontier Insight plans the experiment, retrieves prior work, runs the code, writes the IMRAD draft, and survives adversarial review &mdash; producing a PDF, the figures, and the experiment.py that made them.
+    From one sentence to a peer-reviewable paper. Frontier Insight retrieves the literature, designs and runs the experiment &mdash; or analyses the data you give it &mdash; grounds every claim, and survives adversarial review, handing back the PDF, the figures, and the experiment.py that made them.
   </p>
   <div class="flex flex-col sm:flex-row gap-4 mb-12 md:mb-20 relative z-10">
     <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
@@ -254,9 +254,9 @@
   <div class="max-w-6xl mx-auto">
     <div class="text-center mb-12">
       <span class="font-mono text-label-caps text-cyan-accent">THE PIPELINE</span>
-      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">14 nodes. One paper.</h2>
+      <h2 class="font-display text-headline-lg mt-3 mb-4 text-fade">20 nodes. One paper.</h2>
       <p class="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
-        Each node is a focused LLM call or a real Python subprocess. The graph checkpoints to SQLite, so a crash mid-quest doesn't lose work &mdash; <code class="font-mono text-cyan-accent">--resume</code> picks up where it died.
+        Each node is a focused LLM call or a real Python subprocess. A topic that needs code runs an experiment; one that needs data takes the no-simulation path instead. Two gates keep it honest &mdash; <code class="font-mono text-cyan-accent">evidence_gate</code> weighs the evidence before any paper is written, <code class="font-mono text-cyan-accent">claim_check</code> grounds every claim. It all checkpoints to SQLite, so <code class="font-mono text-cyan-accent">--resume</code> picks up where a crash left off.
       </p>
     </div>
     <div class="flex flex-wrap justify-center gap-2 md:gap-3">
@@ -264,18 +264,27 @@
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">ideate</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">literature</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">design</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">implement_outline</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">implement</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-electric-lime/40 text-electric-lime">execute&nbsp;<span class="opacity-60">▶</span></span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">analyze</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">execute_reflect</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">analyze</span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">cross_check</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-cyan-accent/40 text-cyan-accent">evidence_gate&nbsp;<span class="opacity-60">✓</span></span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">write</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-cyan-accent/40 text-cyan-accent">claim_check&nbsp;<span class="opacity-60">✓</span></span>
       <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">review</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">auto_collect_data</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">wait_for_data</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">data_load</span>
-      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-cyan-accent/40 text-cyan-accent">paper.pdf</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant">human_feedback</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant/70">auto_collect_data</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant/70">wait_for_data</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant/70">data_load</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant/70">web_plots</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-border-subtle text-on-surface-variant/70">web_figures</span>
+      <span class="node-chip font-mono text-code-sm px-4 py-2 rounded-lg bg-surface-container border border-primary/50 text-primary">paper.pdf</span>
     </div>
+    <p class="text-center font-mono text-xs text-on-surface-variant/60 mt-5">
+      <span class="text-cyan-accent">✓</span> rigor gates &nbsp;·&nbsp; <span class="text-electric-lime">▶</span> real subprocess &nbsp;·&nbsp; dimmed = the no-simulation data path
+    </p>
   </div>
 </section>
 
@@ -292,9 +301,9 @@
         The <code class="font-mono text-cyan-accent">execute</code> node spawns a sandboxed venv subprocess. Figures are rendered from real numbers, not Markdown image links to imaginary files. The bundled <code class="font-mono text-cyan-accent">code/experiment.py</code> reproduces them on any machine with the requirements.
       </p>
       <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Subprocess isolation with a per-quest venv.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Auto-dataset adapters for arXiv, OpenAlex, S2, Crossref.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Re-execute lets you tweak <code class="font-mono">experiment.py</code> and re-run.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Subprocess isolation with a per-quest venv (or Docker).</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Open-web + academic retrieval (Brave/DuckDuckGo, arXiv, OpenAlex, Crossref) &mdash; real citations, not invented ones.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Or skip code entirely: the no-simulation path analyses data you drop in or it auto-collects.</li>
       </ul>
     </div>
     <div class="card-border-gradient p-6 md:p-7 min-h-[360px] flex flex-col overflow-hidden">
@@ -316,11 +325,11 @@
     <div class="card-border-gradient order-2 md:order-1 p-6 md:p-7 min-h-[360px] flex flex-col">
       <div class="font-mono text-code-sm flex flex-col gap-3 h-full">
         <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
-          <div class="text-cyan-accent mb-1">@reviewer_1 (skeptic)</div>
+          <div class="text-cyan-accent mb-1">@statistician</div>
           <div class="text-on-surface-variant">"Sample size N=120 is borderline. Fisher's exact would be more honest than χ²."</div>
         </div>
         <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
-          <div class="text-primary mb-1">@reviewer_2 (domain expert)</div>
+          <div class="text-primary mb-1">@methodologist</div>
           <div class="text-on-surface-variant">"Figure 2 contradicts Eq. 4. Either the model is wrong or the units."</div>
         </div>
         <div class="border border-border-subtle rounded-lg p-3 bg-surface-container">
@@ -331,16 +340,16 @@
     </div>
     <div class="order-1 md:order-2 space-y-5">
       <span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container border border-border-subtle font-mono text-label-caps text-cyan-accent">
-        <span class="material-symbols-outlined text-[14px]">forum</span> MULTI-PERSONA REVIEW
+        <span class="material-symbols-outlined text-[14px]">forum</span> RIGOR, BAKED IN
       </span>
       <h3 class="font-display text-headline-lg text-on-surface">Adversarial review, baked in.</h3>
       <p class="text-body-lg text-on-surface-variant">
-        Three reviewer personas plus a separate critique pass that asks <i>"what did the first reviewer miss?"</i> Iterates until accept or N=3. Every verdict + score lands in the quest summary so you can grep across runs.
+        Before a word is written, the <code class="font-mono text-cyan-accent">evidence_gate</code> checks the assembled evidence actually supports the question. After, <code class="font-mono text-cyan-accent">claim_check</code> grounds every claim to the experiment or a citation, then a panel of reviewer personas iterates until accept or N=3 &mdash; the methodologist hard-flags fatal patterns.
       </p>
       <ul class="space-y-3 text-body-md text-on-surface-variant mt-6">
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Configurable reviewer panel (skeptic / domain / methods).</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Reviewer panel: methodologist / statistician / devil's advocate.</li>
+        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Claim-grounding ledger &mdash; each claim traces to the experiment, a citation, or is flagged unsupported.</li>
         <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Score + verdict written to <code class="font-mono">frontier_insight_summary.json</code>.</li>
-        <li class="flex items-start gap-3"><span class="material-symbols-outlined text-electric-lime">check_circle</span> Iterations diffable via <code class="font-mono">/compare</code>.</li>
       </ul>
     </div>
   </div>
@@ -471,7 +480,7 @@ python launch.py --resume &lt;quest_id&gt;</code></pre>
     Stop writing literature reviews. <span class="text-gradient-cool">Run experiments.</span>
   </h2>
   <p class="text-body-lg text-on-surface-variant max-w-xl mx-auto mb-10">
-    Open source. Self-hosted. <code class="font-mono text-cyan-accent">pip install -r requirements.txt</code> and you're done.
+    Open source. Self-hosted. <code class="font-mono text-cyan-accent">pip install -r requirements.txt</code> and you're done &mdash; even <code class="font-mono text-cyan-accent">paper.pdf</code> renders on a locked-down box with no LaTeX (pandoc + any browser is enough).
   </p>
   <div class="flex flex-col sm:flex-row gap-4 justify-center">
     <a class="btn-gradient text-white font-semibold text-body-lg px-8 py-4 rounded-xl flex items-center justify-center gap-2" href="https://github.com/jyunming/FrontierInsight">
