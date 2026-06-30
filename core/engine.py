@@ -468,6 +468,17 @@ class Engine:
                     else:
                         payload = initial
 
+                    # Clear any stale ``quest_failed.md`` NOW, at the start of
+                    # this run — not only on the pause/completion paths below.
+                    # A resume that's still in-flight otherwise keeps the prior
+                    # run's failure diagnostic on disk for its whole (often
+                    # many-minute) duration, so the dashboard / quest page shows
+                    # the quest as "failed" even though it's actively running
+                    # and has already moved past the node that broke. If THIS
+                    # run also fails, the exception handler writes a fresh one;
+                    # a fresh START has no file, so this is a no-op there.
+                    self._clear_stale_quest_failed_diagnostic()
+
                     # Run, handling interrupts as they fire. Two kinds:
                     #   (a) clarify-interactive — pause to collect answers
                     #       via clarify_callback, then resume the graph.

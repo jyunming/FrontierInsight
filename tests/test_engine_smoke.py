@@ -193,6 +193,38 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_run_clears_stale_quest_failed_at_start(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior run's ``quest_failed.md`` must be cleared at the START of a
+    run — not only on the completion/pause paths. Otherwise an in-flight
+    resume keeps the old diagnostic on disk for its whole duration and the
+    dashboard shows the quest as 'failed' even while it's actively running
+    past the node that broke. The first LLM-using node asserts the file is
+    already gone, proving the clear happened before any node executed."""
+    engine = Engine(smoke_config)
+    # Plant a stale diagnostic as if a prior run of this quest had failed.
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    stale = engine.quest_root / "quest_failed.md"
+    stale.write_text("# prior failure breadcrumb\n", encoding="utf-8")
+
+    seen: dict[str, bool | None] = {"present_on_first_call": None}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        if seen["present_on_first_call"] is None:
+            seen["present_on_first_call"] = stale.exists()
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    assert seen["present_on_first_call"] is False, (
+        "quest_failed.md should be cleared at run start, before the first node"
+    )
+    assert not stale.exists()
+
+
+@pytest.mark.asyncio
 async def test_human_feedback_callback_timeout_pause_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
