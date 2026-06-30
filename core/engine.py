@@ -3020,6 +3020,27 @@ class Engine:
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
 
+        # House plot style: drop a guarded `sitecustomize.py` bootstrap and
+        # put its dir on the experiment subprocess's PYTHONPATH. Python
+        # auto-imports `sitecustomize` at startup — before the script imports
+        # matplotlib — so every figure gets the FrontierInsight look (brand
+        # palette, despined axes, branded teal heatmap, paper-matched
+        # backdrop) with zero edits to the LLM-authored code. Failure-isolated:
+        # if anything goes wrong we run with the plain inherited env.
+        exec_env: dict[str, str] | None = None
+        try:
+            from .plot_style import write_boot
+
+            boot_dir = write_boot(self.fi_dir, self.config.output.paper_style)
+            exec_env = {
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p
+                ),
+            }
+        except Exception as exc:  # styling must never break execution
+            self._log.warning("[execute] plot-style bootstrap skipped: %s", exc)
+
         # Venv warmup: invoke the freshly-installed Python and import the
         # declared deps before the real experiment. This consumes the
         # rc=2 fast-fail race specific to the first invocation of a
@@ -3065,6 +3086,7 @@ class Engine:
             [str(py), str(code_path)],
             cwd=self.quest_root,
             timeout_s=self.config.execution.timeout_s,
+            env=exec_env,
         )
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
@@ -3090,6 +3112,7 @@ class Engine:
                 [str(py), str(code_path)],
                 cwd=self.quest_root,
                 timeout_s=self.config.execution.timeout_s,
+                env=exec_env,
             )
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
@@ -3133,7 +3156,7 @@ class Engine:
                 # python.exe would fail at the DLL-load step. Build
                 # a merged env so the child sees the inherited values
                 # plus our replicate seed.
-                rep_env = {**os.environ, "FI_REPLICATE_SEED": str(seed)}
+                rep_env = {**(exec_env or os.environ), "FI_REPLICATE_SEED": str(seed)}
                 rep_result = await self.executor.execute(
                     [str(py), str(code_path)],
                     cwd=self.quest_root,
