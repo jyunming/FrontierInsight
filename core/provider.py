@@ -148,6 +148,14 @@ class _CliSpec:
     # (set by e.g. `~/.codex/config.toml` for codex, or the most-recent
     # `/model` selection for claude).
     model_flag: str | None = None
+    # Hard ceiling (characters) on the prompt this CLI will accept on a
+    # single turn. ``None`` = no known limit. When set and a prompt exceeds
+    # it, ``_run_cli`` trims the MIDDLE of the prompt (keeping the task head
+    # + the output-format tail) so the call still goes through instead of the
+    # CLI rejecting it with a hard "input_too_large" error. codex_cli caps a
+    # turn at 1,048,576 chars; we sit under it to leave room for codex's own
+    # system prompt + tool schema wrapped around our instructions.
+    max_input_chars: int | None = None
 
 
 _CLI_SPECS: dict[str, _CliSpec] = {
@@ -184,6 +192,11 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="stdin",
         output_via="last_message_file",
         model_flag="-m",        # provider.model = "gpt-5.5"; default reads ~/.codex/config.toml
+        # codex `turn/start` rejects input over 1,048,576 chars with
+        # ``input_too_large``. Sit ~150K under to leave room for codex's
+        # own system prompt + tools schema. Hit by analyze/write on quests
+        # whose literature + result_json grow large (e.g. after a broaden).
+        max_input_chars=900_000,
     ),
     "copilot_cli": _CliSpec(
         # GitHub Copilot CLI (`copilot --prompt`). WARNING — this is an
@@ -662,6 +675,29 @@ def _looks_like_rate_limit_message(text: str) -> str | None:
     return _short_marker_check(_CLI_RATE_LIMIT_MARKERS)(text)
 
 
+def _truncate_prompt_to_fit(prompt: str, max_chars: int) -> str:
+    """Trim ``prompt`` to at most ``max_chars`` by cutting the MIDDLE, so the
+    task framing (head) and the output-format instructions (tail) — both of
+    which FI puts at the ends of every node prompt — survive. The bulky
+    context (literature excerpts, large result_json) lives in the middle and
+    is what gets dropped. Lossy, but it lets a capped CLI finish instead of
+    hard-failing with ``input_too_large``."""
+    if len(prompt) <= max_chars:
+        return prompt
+    dropped = len(prompt) - max_chars
+    marker = (
+        f"\n\n[... {dropped} characters of context were trimmed here to fit "
+        f"this provider's input limit; the task above and the output-format "
+        f"instructions below are intact ...]\n\n"
+    )
+    budget = max_chars - len(marker)
+    if budget <= 0:  # absurdly small cap — just hard-cut the head
+        return prompt[:max_chars]
+    head = int(budget * 0.78)   # keep more of the head (task + early data)
+    tail = budget - head        # keep the output-format instructions
+    return prompt[:head] + marker + prompt[-tail:]
+
+
 async def _run_cli(
     spec: _CliSpec,
     prompt: str,
@@ -736,6 +772,21 @@ async def _run_cli(
         tmp.close()
         tmp_out_path = Path(tmp.name)
         argv.extend(["--output-last-message", str(tmp_out_path)])
+
+    # Cap the prompt for CLIs with a hard per-turn input limit (codex_cli),
+    # trimming the middle context so the call goes through instead of the
+    # CLI rejecting it with ``input_too_large`` and failing the node.
+    if spec.max_input_chars is not None and len(prompt) > spec.max_input_chars:
+        orig_len = len(prompt)
+        prompt = _truncate_prompt_to_fit(prompt, spec.max_input_chars)
+        _log.warning(
+            "[provider] %s%s prompt was %d chars, over the %d-char input cap; "
+            "trimmed middle context to fit. The model may miss some "
+            "literature/result detail — consider a leaner knowledge footprint "
+            "(top_k / literature_excerpt_chars) or evidence_gate_max_broaden: 0.",
+            spec.argv[0], f" [{node}]" if node else "", orig_len,
+            spec.max_input_chars,
+        )
 
     if spec.pass_prompt_via == "arg":
         argv.append(prompt)

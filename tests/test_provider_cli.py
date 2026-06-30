@@ -22,6 +22,7 @@ from core.provider import (
     _CLI_PROVIDERS,
     _CLI_SPECS,
     _messages_to_text,
+    _truncate_prompt_to_fit,
     resolve_endpoint,
     resolve_endpoint_async,
 )
@@ -53,6 +54,36 @@ def test_cli_specs_have_required_fields() -> None:
         assert spec.argv, f"{name}: empty argv"
         assert spec.pass_prompt_via in ("stdin", "arg"), name
         assert spec.output_via in ("stdout", "last_message_file", "stream_json"), name
+
+
+def test_codex_cli_has_input_cap_others_none() -> None:
+    """codex_cli rejects >1 MB turns, so it carries a max_input_chars cap;
+    the others have no known per-turn limit."""
+    assert _CLI_SPECS["codex_cli"].max_input_chars == 900_000
+    assert _CLI_SPECS["codex_cli"].max_input_chars < 1_048_576  # under codex's hard limit
+    for name in ("claude_cli", "gemini_cli", "copilot_cli"):
+        assert _CLI_SPECS[name].max_input_chars is None, name
+
+
+def test_truncate_prompt_to_fit_keeps_head_and_tail() -> None:
+    """A prompt over the cap is trimmed to fit, dropping the MIDDLE while
+    preserving the head (task) and tail (output-format instructions)."""
+    head = "TASK: do the thing.\n"
+    tail = "\nOUTPUT FORMAT: return JSON only."
+    middle = "X" * 5000
+    prompt = head + middle + tail
+    out = _truncate_prompt_to_fit(prompt, 1200)
+    assert len(out) <= 1200
+    assert out.startswith("TASK: do the thing.")
+    assert out.endswith("OUTPUT FORMAT: return JSON only.")
+    assert "trimmed here to fit" in out
+    # The bulky middle is mostly gone.
+    assert out.count("X") < 5000
+
+
+def test_truncate_prompt_to_fit_passes_through_under_cap() -> None:
+    prompt = "short prompt"
+    assert _truncate_prompt_to_fit(prompt, 1000) == prompt
 
 
 def test_resolve_endpoint_claude_cli_sets_transport_to_cli() -> None:
