@@ -56,12 +56,18 @@ def test_cli_specs_have_required_fields() -> None:
         assert spec.output_via in ("stdout", "last_message_file", "stream_json"), name
 
 
-def test_codex_cli_has_input_cap_others_none() -> None:
-    """codex_cli rejects >1 MB turns, so it carries a max_input_chars cap;
-    the others have no known per-turn limit."""
+def test_cli_input_caps() -> None:
+    """codex_cli rejects >1 MB turns; copilot_cli passes the prompt as a CLI
+    arg and hits the Windows cmd.exe ~8191-char command-line limit — both
+    carry a max_input_chars cap. The stdin-based CLIs have no such limit."""
     assert _CLI_SPECS["codex_cli"].max_input_chars == 900_000
     assert _CLI_SPECS["codex_cli"].max_input_chars < 1_048_576  # under codex's hard limit
-    for name in ("claude_cli", "gemini_cli", "copilot_cli"):
+    # copilot: capped under the ~8191 Windows command-line limit.
+    assert _CLI_SPECS["copilot_cli"].max_input_chars == 7000
+    assert _CLI_SPECS["copilot_cli"].max_input_chars < 8191
+    assert _CLI_SPECS["copilot_cli"].pass_prompt_via == "arg"  # why it needs the cap
+    # stdin-based CLIs: no arg-length limit.
+    for name in ("claude_cli", "gemini_cli"):
         assert _CLI_SPECS[name].max_input_chars is None, name
 
 

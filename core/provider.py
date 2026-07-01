@@ -218,6 +218,16 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="arg",
         output_via="stdout",
         model_flag="--model",   # provider.model = "gpt-5.2"
+        # Prompt is passed as a command-line ARG, so on Windows the whole
+        # command line is subject to the cmd.exe limit (~8191 chars) — copilot
+        # ships as `copilot.BAT` and a long design/write prompt (with
+        # accumulated feedback_history) fails with `rc=1: The command line is
+        # too long`. Cap under that so the shared prompt-trimmer (see
+        # `_truncate_prompt_to_fit`) kicks in first. NOTE: 7 KB is small for a
+        # rich node prompt, so copilot_cli trims heavily on long-context nodes
+        # — a stdin/temp-file transport (like codex/gemini) is the real fix;
+        # prefer codex_cli / openai for long prompts on Windows.
+        max_input_chars=7000,
     ),
     "gemini_cli": _CliSpec(
         # `@google/gemini-cli` non-interactive. `--yolo` auto-approves
