@@ -713,3 +713,53 @@ async def test_cli_nonzero_exit_retries_then_raises() -> None:
         assert spawner.await_count == 4
     finally:
         await client.aclose()
+
+
+# ---- heartbeat on the non-streaming communicate() path -------------------
+
+
+@pytest.mark.asyncio
+async def test_communicate_path_emits_heartbeats(monkeypatch: pytest.MonkeyPatch) -> None:
+    """codex_cli/copilot_cli/gemini_cli use the bare communicate() path and
+    emit no stream events, so without a beat they're silent in run.log and the
+    dashboard reads them as 'pending'. The path now ticks heartbeat_cb while
+    the child runs."""
+    import core.provider as provider
+
+    monkeypatch.setattr(provider, "_COMMUNICATE_HEARTBEAT_INTERVAL_S", 0.03)
+    beats: list[dict] = []
+    proc = MagicMock()
+    proc.returncode = 0
+
+    async def slow_comm(*_a, **_k):
+        await asyncio.sleep(0.2)
+        return (b"the model output text here", b"")
+
+    proc.communicate = slow_comm
+    spec = _CLI_SPECS["copilot_cli"]  # output_via="stdout", no extractor
+
+    result = await provider._collect_via_communicate(
+        proc, ["copilot"], spec, None, None, timeout_s=5.0,
+        heartbeat_cb=lambda p: beats.append(p), node="implement",
+    )
+
+    assert result == "the model output text here"
+    assert len(beats) >= 2, beats            # ~6 beats at 0.03 s over 0.2 s
+    assert beats[0]["kind"] == "cli_progress"
+    assert beats[0]["node"] == "implement"
+
+
+@pytest.mark.asyncio
+async def test_communicate_path_without_heartbeat_cb_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No heartbeat_cb → no beat task spun up; the output still comes back."""
+    import core.provider as provider
+
+    proc = MagicMock()
+    proc.returncode = 0
+    proc.communicate = AsyncMock(return_value=(b"plain output", b""))
+    result = await provider._collect_via_communicate(
+        proc, ["copilot"], _CLI_SPECS["copilot_cli"], None, None, timeout_s=5.0,
+    )
+    assert result == "plain output"

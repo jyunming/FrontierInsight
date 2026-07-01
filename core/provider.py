@@ -850,10 +850,18 @@ async def _run_cli(
         # tests that mock ``proc.communicate()`` keep working.
         return await _collect_via_communicate(
             proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
+            heartbeat_cb=heartbeat_cb, node=node,
         )
     finally:
         if tmp_out_path is not None:
             tmp_out_path.unlink(missing_ok=True)
+
+
+# Cadence of the run.log heartbeat for the non-streaming CLIs (codex/copilot/
+# gemini). Kept well under the Engine's 30 s heartbeat throttle so a fresh
+# "still waiting" line reliably lands every ~30 s. Module-level so tests can
+# shrink it.
+_COMMUNICATE_HEARTBEAT_INTERVAL_S = 10.0
 
 
 async def _collect_via_communicate(
@@ -863,6 +871,9 @@ async def _collect_via_communicate(
     stdin_bytes: bytes | None,
     tmp_out_path: Path | None,
     timeout_s: float,
+    *,
+    heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
+    node: str = "",
 ) -> str:
     """Legacy ``communicate()`` path. Two sub-cases:
 
@@ -877,41 +888,81 @@ async def _collect_via_communicate(
     inactivity-timer path lives in ``_collect_via_streaming`` and is
     used for ``output_via="stream_json"`` (claude_cli) — that one
     distinguishes "model is thinking" from "process is hung" by
-    resetting on every stream event."""
+    resetting on every stream event.
+
+    These CLIs emit no stream events, so without help they'd be totally
+    silent in run.log for the whole call — and the dashboard, which infers
+    a quest's status from log recency, shows them as "pending"/idle. A
+    background heartbeat ticks ``heartbeat_cb`` every ~10 s with zero
+    progress counters (there's genuinely no token-level signal here), which
+    the Engine renders as ``[node] still waiting on LLM — no events yet,
+    elapsed=Ns`` at its usual 30 s throttle. Purely cosmetic — it can't
+    affect the result and is torn down in the finally."""
+    _beat_stop = asyncio.Event()
+    _beat_task: asyncio.Task[None] | None = None
+    if heartbeat_cb is not None:
+        _beat_start = time.monotonic()
+
+        async def _beat() -> None:
+            while not _beat_stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        _beat_stop.wait(), timeout=_COMMUNICATE_HEARTBEAT_INTERVAL_S,
+                    )
+                except asyncio.TimeoutError:
+                    el = time.monotonic() - _beat_start
+                    try:
+                        heartbeat_cb({
+                            "kind": "cli_progress", "node": node,
+                            "elapsed_s": el, "idle_s": el,
+                            "text_chars": 0, "thinking_tokens": 0,
+                        })
+                    except Exception:
+                        pass
+
+        _beat_task = asyncio.ensure_future(_beat())
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(stdin_bytes), timeout=timeout_s,
-        )
-    except asyncio.TimeoutError:
-        elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
-        kill_clean = await _kill_and_reap(proc, spec.argv[0])
-        raise _CliTransientError(
-            f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
-            + ("" if kill_clean else " (post-kill wait timed out)")
-        )
-    if proc.returncode != 0:
-        raise _CliTransientError(
-            f"{argv[0]} exited rc={proc.returncode}: "
-            f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
-        )
-    if spec.output_via == "last_message_file":
-        assert tmp_out_path is not None
-        content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
-    else:
-        content = (stdout_b or b"").decode("utf-8", errors="replace")
-    if spec.output_extractor is not None:
-        content = spec.output_extractor(content)
-    final = content.strip()
-    gate_hit = _check_output_gates(final)
-    if gate_hit is not None:
-        gate_name, marker = gate_hit
-        raise _CliTransientError(
-            f"{spec.argv[0]} tripped output gate {gate_name!r} (matched: "
-            f"{marker!r}). This would have been written to disk as the "
-            f"artifact; treating as transient so tenacity retries (which "
-            f"may also escalate the model)."
-        )
-    return final
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(stdin_bytes), timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
+            kill_clean = await _kill_and_reap(proc, spec.argv[0])
+            raise _CliTransientError(
+                f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
+                + ("" if kill_clean else " (post-kill wait timed out)")
+            )
+        if proc.returncode != 0:
+            raise _CliTransientError(
+                f"{argv[0]} exited rc={proc.returncode}: "
+                f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
+            )
+        if spec.output_via == "last_message_file":
+            assert tmp_out_path is not None
+            content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
+        else:
+            content = (stdout_b or b"").decode("utf-8", errors="replace")
+        if spec.output_extractor is not None:
+            content = spec.output_extractor(content)
+        final = content.strip()
+        gate_hit = _check_output_gates(final)
+        if gate_hit is not None:
+            gate_name, marker = gate_hit
+            raise _CliTransientError(
+                f"{spec.argv[0]} tripped output gate {gate_name!r} (matched: "
+                f"{marker!r}). This would have been written to disk as the "
+                f"artifact; treating as transient so tenacity retries (which "
+                f"may also escalate the model)."
+            )
+        return final
+    finally:
+        _beat_stop.set()
+        if _beat_task is not None:
+            try:
+                await _beat_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def _collect_via_streaming(
