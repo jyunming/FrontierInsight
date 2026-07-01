@@ -713,3 +713,46 @@ async def test_cli_nonzero_exit_retries_then_raises() -> None:
         assert spawner.await_count == 4
     finally:
         await client.aclose()
+
+
+# ---- claude_cli wedge: distinct type + fail-fast after 2 attempts --------
+
+
+def test_cli_wedge_error_is_transient_subclass() -> None:
+    from core.provider import _CliTransientError, _CliWedgeError
+    # Subclass so the normal retry predicate still catches it, but code can
+    # target the wedge specifically.
+    assert issubclass(_CliWedgeError, _CliTransientError)
+
+
+def test_stop_on_repeated_wedge() -> None:
+    import types
+    from core.provider import (
+        _CliTransientError, _CliWedgeError, _stop_on_repeated_wedge,
+    )
+
+    def rs(exc, n):
+        return types.SimpleNamespace(
+            attempt_number=n,
+            outcome=types.SimpleNamespace(exception=lambda: exc),
+        )
+
+    # A wedge on attempt 1 keeps going (give it one retry).
+    assert _stop_on_repeated_wedge(rs(_CliWedgeError("x"), 1)) is False
+    # A 2nd wedge bails — don't burn attempts 3 & 4 on a hang.
+    assert _stop_on_repeated_wedge(rs(_CliWedgeError("x"), 2)) is True
+    # A normal transient still gets the full budget (not wedge-capped).
+    assert _stop_on_repeated_wedge(rs(_CliTransientError("x"), 2)) is False
+    # No exception captured → don't stop on this predicate.
+    assert _stop_on_repeated_wedge(rs(None, 3)) is False
+
+
+def test_wedge_error_message_carries_switch_provider_guidance() -> None:
+    from core.provider import _CliWedgeError
+    msg = str(_CliWedgeError(
+        "claude stdout closed but child didn't exit within 60s (no output "
+        "collected) — an extended-thinking CLI hang, not a transient blip. "
+        "Retrying wedges the same way; the fix is a different provider for "
+        "this node (e.g. resume with `--config <codex_or_openai>.yaml`)."
+    ))
+    assert "different provider" in msg and "--config" in msg
