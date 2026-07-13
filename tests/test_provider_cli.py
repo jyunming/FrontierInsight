@@ -764,6 +764,38 @@ def test_wedge_error_message_carries_switch_provider_guidance() -> None:
     assert "different provider" in msg and "--config" in msg
 
 
+@pytest.mark.asyncio
+async def test_cli_retry_loop_stops_after_second_wedge() -> None:
+    """Integration: drive a repeated ``_CliWedgeError`` through the ACTUAL
+    ``AsyncRetrying`` loop (not just ``_stop_on_repeated_wedge`` in isolation)
+    to prove the ``stop_after_attempt(4) | _stop_on_repeated_wedge``
+    composition is wired correctly. A wedge must bail after 2 attempts — not
+    burn the full 4-attempt budget on an unrecoverable hang — and reraise with
+    its switch-provider guidance."""
+    from core.provider import _CliWedgeError
+
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    client = LLMClient(ep)
+    try:
+        runner = AsyncMock(side_effect=_CliWedgeError(
+            "stdout closed but child won't exit — the fix is a different "
+            "provider for this node (e.g. resume with `--config <codex>.yaml`)."
+        ))
+        with patch("core.provider._run_cli", new=runner):
+            # Instant backoff so the single inter-attempt wait doesn't sleep.
+            with patch(
+                "core.provider.wait_random_exponential",
+                return_value=lambda *a, **kw: 0,
+            ):
+                with pytest.raises(_CliWedgeError, match="different provider"):
+                    await client.chat([{"role": "user", "content": "x"}])
+        # stop_after_attempt(4) alone would call 4×; the wedge predicate caps
+        # it at 2. This is the wiring the unit test on the predicate can't see.
+        assert runner.await_count == 2
+    finally:
+        await client.aclose()
+
+
 # ---- heartbeat on the non-streaming communicate() path -------------------
 
 
