@@ -2061,6 +2061,32 @@ class Engine:
         review_feedback = ""
         if iteration > 0:
             review_feedback = json.dumps(state.get("review", {}), indent=2)
+        # When this redesign was triggered by analyze's ``re_experiment``
+        # reroute (the previous experiment produced non-physical or unsupported
+        # results), the review block above is empty — the review node only runs
+        # AFTER the paper is written, never before a pre-write re_experiment
+        # loop. Without the analyze/cross_check diagnosis the redesign is blind
+        # to WHY the last experiment was rejected and tends to regenerate the
+        # same flaw. Fold the analysis summary + key findings in so the design
+        # LLM can diagnose and correct the root cause rather than repeat it.
+        analysis = state.get("analysis") or {}
+        if iteration > 0 and analysis.get("next_step") == "re_experiment":
+            findings_txt = json.dumps(analysis.get("key_findings") or [], indent=2)
+            diag = (
+                "--- PRIOR EXPERIMENT REJECTED BY ANALYSIS "
+                "(diagnose and fix the root cause; do NOT reproduce it) ---\n"
+                "The previous experiment ran but its results were judged "
+                "non-physical or unsupported. Before redesigning, work out why "
+                "the results were wrong — common causes are unit or scale "
+                "inconsistencies, comparing two quantities defined on different "
+                "scales, degenerate or biased estimators, and parameters that "
+                "make an effect vanish — then change the experimental plan so "
+                "the numbers become physically sensible and internally "
+                "consistent.\n"
+                f"Analysis summary: {analysis.get('summary', '')}\n"
+                f"Key findings from the rejected run:\n{findings_txt}"
+            )
+            review_feedback = f"{review_feedback}\n\n{diag}".strip()
         # Human-feedback refinement (when the gate is configured AND the
         # user picked "refine"). Folded into the same review_feedback
         # block the design prompt already reads — explicitly attributed
@@ -6752,18 +6778,58 @@ def _parse_implement_response(text: str) -> tuple[str, list[str]]:
 
 
 _RESULT_LINE_RE = re.compile(r"RESULT_JSON:\s*(\{.*\})\s*$", re.MULTILINE)
+_RESULT_MARKER_RE = re.compile(r"RESULT_JSON:\s*")
 
 
 def _extract_result_json(stdout: str) -> dict[str, Any] | None:
     if not stdout:
         return None
+    # Fast path: single-line ``RESULT_JSON: {...}`` (the format the prompt asks
+    # for). Take the LAST such marker so a replicate run's final line wins.
     matches = list(_RESULT_LINE_RE.finditer(stdout))
-    if not matches:
+    if matches:
+        try:
+            return json.loads(matches[-1].group(1))
+        except json.JSONDecodeError:
+            pass
+    # Fallback: the marker is present but the JSON spans MULTIPLE lines — the
+    # common case where the script used ``json.dumps(..., indent=2)``. The
+    # single-line regex above (MULTILINE, no DOTALL) can't span newlines, so
+    # brace-balance the first complete JSON object after the last marker. This
+    # keeps a perfectly good experiment from being scored ``result_json=False``
+    # purely over pretty-printing.
+    marker_hits = list(_RESULT_MARKER_RE.finditer(stdout))
+    if not marker_hits:
         return None
-    try:
-        return json.loads(matches[-1].group(1))
-    except json.JSONDecodeError:
+    tail = stdout[marker_hits[-1].end():]
+    start = tail.find("{")
+    if start == -1:
         return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(tail)):
+        c = tail[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(tail[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
 
 
 # Char budget for the ``result_json`` block spliced into the analyze prompt.

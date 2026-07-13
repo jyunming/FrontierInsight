@@ -75,6 +75,27 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     "⁷": r"\ensuremath{^{7}}",          # ⁷
     "⁸": r"\ensuremath{^{8}}",          # ⁸
     "⁹": r"\ensuremath{^{9}}",          # ⁹
+    # Superscript signs/parens/n — complete the superscript set so units
+    # like ``cm⁻³`` and ``s⁻¹`` compile (U+207A–U+207F).
+    "⁻": r"\ensuremath{^{-}}",          # ⁻ superscript minus (U+207B)
+    "⁺": r"\ensuremath{^{+}}",          # ⁺ superscript plus (U+207A)
+    "⁼": r"\ensuremath{^{=}}",          # ⁼ superscript equals (U+207C)
+    "⁽": r"\ensuremath{^{(}}",          # ⁽ superscript left paren (U+207D)
+    "⁾": r"\ensuremath{^{)}}",          # ⁾ superscript right paren (U+207E)
+    "ⁿ": r"\ensuremath{^{n}}",          # ⁿ superscript n (U+207F)
+    # Subscripts — chemical/physics notation like ``H₂O`` or ``N₋`` (U+2080–U+208E).
+    "₀": r"\ensuremath{_{0}}",          # ₀
+    "₁": r"\ensuremath{_{1}}",          # ₁
+    "₂": r"\ensuremath{_{2}}",          # ₂
+    "₃": r"\ensuremath{_{3}}",          # ₃
+    "₄": r"\ensuremath{_{4}}",          # ₄
+    "₅": r"\ensuremath{_{5}}",          # ₅
+    "₆": r"\ensuremath{_{6}}",          # ₆
+    "₇": r"\ensuremath{_{7}}",          # ₇
+    "₈": r"\ensuremath{_{8}}",          # ₈
+    "₉": r"\ensuremath{_{9}}",          # ₉
+    "₊": r"\ensuremath{_{+}}",          # ₊ subscript plus (U+208A)
+    "₋": r"\ensuremath{_{-}}",          # ₋ subscript minus (U+208B)
     # Degrees + typography
     "°": r"\ensuremath{^{\circ}}",      # °
     "—": "---",                          # — em dash

@@ -244,6 +244,47 @@ def test_extract_result_json_ignores_marker_without_braces() -> None:
     assert _extract_result_json("RESULT_JSON: oops\n") is None
 
 
+def test_extract_result_json_multiline_pretty_printed() -> None:
+    # The common ``json.dumps(..., indent=2)`` case: the marker is present but
+    # the object spans several lines, so the single-line regex can't match it.
+    # The brace-balancing fallback must recover it rather than score it False.
+    stdout = (
+        "epoch 3 done\n"
+        "RESULT_JSON: {\n"
+        '  "score": 0.87,\n'
+        '  "nested": {"k": [1, 2, 3]},\n'
+        '  "final": true\n'
+        "}\n"
+    )
+    assert _extract_result_json(stdout) == {
+        "score": 0.87,
+        "nested": {"k": [1, 2, 3]},
+        "final": True,
+    }
+
+
+def test_extract_result_json_multiline_last_marker_wins() -> None:
+    # A pretty-printed replicate followed by another — the LAST marker's object
+    # must win, matching the single-line "last wins" semantics.
+    stdout = (
+        "RESULT_JSON: {\n"
+        '  "score": 0.1\n'
+        "}\n"
+        "second replicate\n"
+        "RESULT_JSON: {\n"
+        '  "score": 0.9\n'
+        "}\n"
+    )
+    assert _extract_result_json(stdout) == {"score": 0.9}
+
+
+def test_extract_result_json_multiline_brace_in_string() -> None:
+    # A ``}`` inside a JSON string value must not prematurely close the object
+    # for the brace-balancing fallback.
+    stdout = 'RESULT_JSON: {\n  "note": "close } brace",\n  "ok": true\n}\n'
+    assert _extract_result_json(stdout) == {"note": "close } brace", "ok": True}
+
+
 # ---- _shrink_json_value / _compact_result_json_block ---------------------
 
 

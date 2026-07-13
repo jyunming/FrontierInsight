@@ -1274,6 +1274,20 @@ def test_sanitize_unicode_covers_greek_letters_and_superscripts() -> None:
     assert r"\ensuremath{^{4}}" in out
 
 
+def test_sanitize_unicode_covers_sub_and_superscript_signs() -> None:
+    """Units like ``cm⁻³`` and ``s⁻¹`` and formulae like ``H₂O`` are written
+    bare by LLMs; the superscript minus and full subscript digit set must all
+    rewrite so pdflatex does not error on the raw glyphs."""
+    src = "n = 1e18 cm⁻³, rate 3 s⁻¹, H₂O, N₋ centre, x⁽ⁿ⁾, charge Q₊"
+    out = paper_mod._sanitize_unicode_for_latex(src)
+    for ch in ("⁻", "³", "¹", "₂", "₋", "⁽", "ⁿ", "⁾", "₊"):
+        assert ch not in out, f"{ch!r} still present after sanitize"
+    assert r"\ensuremath{^{-}}" in out    # superscript minus (cm⁻³)
+    assert r"\ensuremath{_{2}}" in out    # subscript 2 (H₂O)
+    assert r"\ensuremath{_{-}}" in out    # subscript minus (N₋)
+    assert r"\ensuremath{^{n}}" in out    # superscript n
+
+
 def test_sanitize_unicode_outside_code_helper_preserves_code_blocks() -> None:
     """The ``_outside_code_blocks`` helper exists as a documented
     option for callers that legitimately need prose-only rewriting.
