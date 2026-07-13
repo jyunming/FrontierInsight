@@ -721,6 +721,81 @@ async def test_cli_nonzero_exit_retries_then_raises() -> None:
         await client.aclose()
 
 
+# ---- claude_cli wedge: distinct type + fail-fast after 2 attempts --------
+
+
+def test_cli_wedge_error_is_transient_subclass() -> None:
+    from core.provider import _CliTransientError, _CliWedgeError
+    # Subclass so the normal retry predicate still catches it, but code can
+    # target the wedge specifically.
+    assert issubclass(_CliWedgeError, _CliTransientError)
+
+
+def test_stop_on_repeated_wedge() -> None:
+    import types
+    from core.provider import (
+        _CliTransientError, _CliWedgeError, _stop_on_repeated_wedge,
+    )
+
+    def rs(exc, n):
+        return types.SimpleNamespace(
+            attempt_number=n,
+            outcome=types.SimpleNamespace(exception=lambda: exc),
+        )
+
+    # A wedge on attempt 1 keeps going (give it one retry).
+    assert _stop_on_repeated_wedge(rs(_CliWedgeError("x"), 1)) is False
+    # A 2nd wedge bails — don't burn attempts 3 & 4 on a hang.
+    assert _stop_on_repeated_wedge(rs(_CliWedgeError("x"), 2)) is True
+    # A normal transient still gets the full budget (not wedge-capped).
+    assert _stop_on_repeated_wedge(rs(_CliTransientError("x"), 2)) is False
+    # No exception captured → don't stop on this predicate.
+    assert _stop_on_repeated_wedge(rs(None, 3)) is False
+
+
+def test_wedge_error_message_carries_switch_provider_guidance() -> None:
+    from core.provider import _CliWedgeError
+    msg = str(_CliWedgeError(
+        "claude stdout closed but child didn't exit within 60s (no output "
+        "collected) — an extended-thinking CLI hang, not a transient blip. "
+        "Retrying wedges the same way; the fix is a different provider for "
+        "this node (e.g. resume with `--config <codex_or_openai>.yaml`)."
+    ))
+    assert "different provider" in msg and "--config" in msg
+
+
+@pytest.mark.asyncio
+async def test_cli_retry_loop_stops_after_second_wedge() -> None:
+    """Integration: drive a repeated ``_CliWedgeError`` through the ACTUAL
+    ``AsyncRetrying`` loop (not just ``_stop_on_repeated_wedge`` in isolation)
+    to prove the ``stop_after_attempt(4) | _stop_on_repeated_wedge``
+    composition is wired correctly. A wedge must bail after 2 attempts — not
+    burn the full 4-attempt budget on an unrecoverable hang — and reraise with
+    its switch-provider guidance."""
+    from core.provider import _CliWedgeError
+
+    ep = resolve_endpoint(ProviderConfig(name="claude_cli"))
+    client = LLMClient(ep)
+    try:
+        runner = AsyncMock(side_effect=_CliWedgeError(
+            "stdout closed but child won't exit — the fix is a different "
+            "provider for this node (e.g. resume with `--config <codex>.yaml`)."
+        ))
+        with patch("core.provider._run_cli", new=runner):
+            # Instant backoff so the single inter-attempt wait doesn't sleep.
+            with patch(
+                "core.provider.wait_random_exponential",
+                return_value=lambda *a, **kw: 0,
+            ):
+                with pytest.raises(_CliWedgeError, match="different provider"):
+                    await client.chat([{"role": "user", "content": "x"}])
+        # stop_after_attempt(4) alone would call 4×; the wedge predicate caps
+        # it at 2. This is the wiring the unit test on the predicate can't see.
+        assert runner.await_count == 2
+    finally:
+        await client.aclose()
+
+
 # ---- heartbeat on the non-streaming communicate() path -------------------
 
 

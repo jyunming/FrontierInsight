@@ -545,6 +545,27 @@ class _CliTransientError(RuntimeError):
     so the retry predicate can target it precisely."""
 
 
+class _CliWedgeError(_CliTransientError):
+    """The specific failure where a CLI streams (often minutes of
+    extended-thinking) then closes stdout WITHOUT producing an answer and
+    won't exit even to SIGKILL — an unrecoverable hang, not a transient blip.
+    Retrying it just wedges again the same way (observed 4×/4 on a heavy
+    claude_cli code-gen prompt). A subclass so the retry loop can cap it
+    faster than a normal transient and the message can carry switch-provider
+    guidance."""
+
+
+def _stop_on_repeated_wedge(retry_state: "Any") -> bool:
+    """Tenacity stop: bail after the 2nd wedge instead of burning the full
+    4-attempt budget on an unrecoverable hang. A wedge means the CLI streamed
+    then died without an answer and won't reap — retrying reproduces it, so
+    the remaining ~2 attempts (each a multi-minute call) are pure waste. The
+    `_CliWedgeError` then reraises with switch-provider guidance."""
+    outcome = getattr(retry_state, "outcome", None)
+    exc = outcome.exception() if outcome is not None else None
+    return isinstance(exc, _CliWedgeError) and retry_state.attempt_number >= 2
+
+
 # Output gates. CLI vendors sometimes deliver upstream-state messages
 # as plain ``text_delta`` events instead of structured error envelopes
 # — the message then gets aggregated into the response and the engine
@@ -1176,10 +1197,12 @@ async def _collect_via_streaming(
                 stderr_b = await asyncio.wait_for(proc.stderr.read(), timeout=2.0)
             except asyncio.TimeoutError:
                 pass
-        raise _CliTransientError(
+        raise _CliWedgeError(
             f"{spec.argv[0]} stdout closed but child didn't exit within "
-            f"{post_eof_reap_timeout_s:g}s "
-            f"(no output collected). stderr tail: "
+            f"{post_eof_reap_timeout_s:g}s (no output collected) — an "
+            f"extended-thinking CLI hang, not a transient blip. Retrying wedges "
+            f"the same way; the fix is a different provider for this node (e.g. "
+            f"resume with `--config <codex_or_openai>.yaml`). stderr tail: "
             f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
         )
     if rc != 0:
@@ -2011,7 +2034,10 @@ class LLMClient:
                 pass  # never block retries on logging errors
 
         async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(4),
+            # Normal transients get 4 attempts; a repeated WEDGE bails after 2
+            # (an unrecoverable hang — retrying just wedges again, ~2 wasted
+            # multi-minute calls) and reraises with switch-provider guidance.
+            stop=stop_after_attempt(4) | _stop_on_repeated_wedge,
             # Jittered backoff so concurrent --fleet quests don't all
             # retry the same upstream at the same instant — see
             # the HTTP path's note. wait_random_exponential picks a
