@@ -454,7 +454,10 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         title=body["title"],
         output_kinds=list(body["output_kinds"]),
         paper_format=body["paper_format"],
-        no_simulation=body["no_simulation"],
+        # survey_mode implies no_simulation (no experiment, no dataset) — OR
+        # them at the boundary so the InterviewAnswers object can never be
+        # internally inconsistent, e.g. survey_mode=true + no_simulation=false.
+        no_simulation=body["no_simulation"] or survey_mode,
         survey_mode=survey_mode,
         study_depth=body["study_depth"],
         comparative_baseline=body["comparative_baseline"],

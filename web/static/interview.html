@@ -572,7 +572,10 @@
   async function deriveTier2(tier1) {
     return {
       title: slugifyTopic(tier1.topic),
-      no_simulation: PROSE_FORMATS.has(tier1.paper_format),
+      // survey_mode implies no_simulation, so a "history of …" topic forces
+      // observational even under a scientific paper_format — keeps the review
+      // screen + payload consistent with the runtime invariant.
+      no_simulation: PROSE_FORMATS.has(tier1.paper_format) || looksLikeSurvey(tier1.topic),
       survey_mode: looksLikeSurvey(tier1.topic),
       clarify_mode: 'auto',
       // Match the Python smart default: a 3-persona panel. An empty list

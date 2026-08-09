@@ -313,7 +313,10 @@ export async function runInterview(
         // must not quietly get weaker rigor than CLI users.
         review_panel: ["methodologist", "statistician", "devil_advocate"],
         knowledge_enabled: await probeAxonReachable(),
-        no_simulation: PROSE_FORMATS.has(paperFormat),
+        // survey_mode implies no_simulation, so a history topic forces
+        // observational even under a scientific paper_format (invariant parity
+        // with the runtime + the other frontends).
+        no_simulation: PROSE_FORMATS.has(paperFormat) || looksLikeSurvey(topic),
         // Auto-suggest survey mode (a descriptive history / overview synthesis
         // with no experiment and no dataset) for history/overview topics —
         // mirrors core/interview.py:smart_default_survey_mode. Editable below.

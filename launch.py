@@ -2279,13 +2279,16 @@ async def _run_new(
         return 1
 
     # ---- Build final answers ----
+    _survey_mode = bool(derived.get("survey_mode", partial.get("survey_mode", False)))
     answers = InterviewAnswers(
         topic=str(partial["topic"]),
         title=str(derived["title"]),
         output_kinds=list(partial["output_kinds"]),  # type: ignore[arg-type]
         paper_format=str(partial["paper_format"]),
-        no_simulation=bool(derived["no_simulation"]),
-        survey_mode=bool(derived.get("survey_mode", partial.get("survey_mode", False))),
+        # survey_mode implies no_simulation (no experiment, no dataset) — OR
+        # them so the answers object is never internally inconsistent.
+        no_simulation=bool(derived["no_simulation"]) or _survey_mode,
+        survey_mode=_survey_mode,
         study_depth=str(partial["study_depth"]),
         comparative_baseline=str(advanced.get("comparative_baseline") or ""),
         success_metric=str(advanced.get("success_metric") or ""),
