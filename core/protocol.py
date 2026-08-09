@@ -75,7 +75,7 @@ ROUTE_MATRIX: dict[str, dict[str, str]] = {
     "simulation":        {"path": "simulation",    "source_policy": "academic"},
     "data_analysis":     {"path": "no_simulation", "source_policy": "user_data"},
     "literature_review": {"path": "no_simulation", "source_policy": "academic"},
-    "survey":            {"path": "no_simulation", "source_policy": "academic"},
+    "survey":            {"path": "no_simulation", "source_policy": "mixed"},
     "case_study":        {"path": "no_simulation", "source_policy": "mixed"},
     "market_current":    {"path": "no_simulation", "source_policy": "web_current"},
     "engineering":       {"path": "simulation",    "source_policy": "academic"},
@@ -157,8 +157,9 @@ _EXPECTED_EVIDENCE: dict[str, str] = {
     "literature_review":
         "a representative, on-topic body of published sources to synthesise",
     "survey":
-        "a representative, on-topic body of published sources to synthesise "
-        "into a descriptive history / overview — no experiment or dataset",
+        "on-topic sources to synthesise into a descriptive history / overview "
+        "— credible web / encyclopedic / museum / archival / trade sources AND "
+        "any relevant published work both count; no experiment or dataset",
     "case_study":
         "concrete evidence about the one system in question + comparable "
         "prior cases",
