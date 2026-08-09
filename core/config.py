@@ -753,6 +753,21 @@ class KnowledgeConfig(BaseModel):
     # than letting analyze+write produce an honest-but-useless "pipeline
     # failure" paper on garbage. Off → legacy behaviour (proceed anyway).
     relevance_guard: bool = True
+    # Deterministic relevance floor applied to freshly-retrieved literature in
+    # the literature node — a cheap complement to the LLM ``relevance_guard``,
+    # which runs ONLY on the auto_collect path (so survey / simulation quests,
+    # which skip auto_collect, otherwise carry off-topic sources into
+    # analyze/write). Each retrieved doc is scored by embedding cosine (the
+    # all-MiniLM model shared with passage ranking) against the TOPIC; docs
+    # below ``relevance_min_score`` are dropped. Fail-open: no filtering when
+    # embeddings are unavailable (FI_OFFLINE / no model). 0.0 disables. The
+    # 0.20 default sits in the empirically-measured gap between on-topic
+    # (~0.4+) and off-topic (<0.1) docs for a humanities/history topic.
+    relevance_min_score: float = Field(default=0.20, ge=0.0, le=1.0)
+    # Never-starve retention: always keep at least this many top-scoring docs
+    # even when all fall below ``relevance_min_score``, so a wholly-borderline
+    # corpus is not emptied (the evidence_gate can then broaden instead).
+    relevance_min_keep: int = Field(default=3, ge=0)
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2

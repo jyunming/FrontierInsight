@@ -384,6 +384,96 @@ def test_node_literature_downloads_corpus_for_every_quest(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Literature relevance floor (deterministic embedding filter)
+# ---------------------------------------------------------------------------
+
+
+def _lit_docs(*titles: str) -> list:
+    return [{"content": t, "metadata": {"title": t}} for t in titles]
+
+
+def test_relevance_floor_drops_off_topic(monkeypatch, tmp_path: Path) -> None:
+    """Docs scoring below relevance_min_score are dropped; on-topic kept."""
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.2
+    eng.config.knowledge.relevance_min_keep = 1
+    docs = _lit_docs("History of Sculpture", "Change-Point Detection Math")
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.6, 0.05])
+    kept = eng._filter_docs_by_relevance("sculpture history", docs)
+    assert [d["metadata"]["title"] for d in kept] == ["History of Sculpture"]
+
+
+def test_relevance_floor_retention_never_starves(monkeypatch, tmp_path: Path) -> None:
+    """When every doc is below the floor, retain the top min_keep by score
+    (never empty the corpus)."""
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.5
+    eng.config.knowledge.relevance_min_keep = 2
+    docs = _lit_docs("a", "b", "c")
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.10, 0.30, 0.05])
+    kept = {d["metadata"]["title"] for d in eng._filter_docs_by_relevance("t", docs)}
+    assert kept == {"a", "b"}  # top-2 by score, though both below 0.5
+
+
+def test_relevance_floor_fail_open_without_embeddings(monkeypatch, tmp_path: Path) -> None:
+    """No embeddings available (FI_OFFLINE / no model) → never filter blind."""
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.2
+    docs = _lit_docs("a", "b")
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
+    assert eng._filter_docs_by_relevance("t", docs) == docs
+
+
+def test_relevance_floor_disabled_at_zero(monkeypatch, tmp_path: Path) -> None:
+    """relevance_min_score=0 is a passthrough that never even embeds."""
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.0
+    called = []
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: called.append(1) or [0.0])
+    docs = _lit_docs("a", "b")
+    assert eng._filter_docs_by_relevance("t", docs) == docs
+    assert not called  # short-circuited before embedding
+
+
+def test_node_literature_applies_relevance_floor(monkeypatch, tmp_path: Path) -> None:
+    """End-to-end: the literature node drops off-topic retrieved docs so only
+    on-topic sources land in data/literature/ and in state."""
+    from core.knowledge import RetrievedDoc
+    import core.passages as pmod
+    eng = _engine(tmp_path)  # the floor is mode-independent (runs in _node_literature)
+    eng.config.knowledge.relevance_min_score = 0.2
+    eng.config.knowledge.relevance_min_keep = 1
+    docs = [
+        RetrievedDoc(content="movie character figurines history",
+                     metadata={"title": "Sculpture in Pop Culture",
+                               "url": "https://ex.com/sculpt", "kind": "web_page"}),
+        RetrievedDoc(content="kernel change-point detection",
+                     metadata={"title": "Change-Point Algorithm",
+                               "url": "https://arxiv.org/abs/x", "kind": "web_page"}),
+    ]
+
+    async def fake_asearch(*a, **k):
+        return docs
+    eng.knowledge.asearch = fake_asearch  # type: ignore[method-assign]
+    # On-topic doc scores high, off-topic low.
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.55, 0.04])
+
+    out = asyncio.run(eng._node_literature({
+        "topic": "the evolution of sculpture in pop culture",
+        "chosen_idea": {"title": "pop-culture sculpture"},
+    }))
+    titles = [d["metadata"].get("title") for d in out["literature"]]
+    assert titles == ["Sculpture in Pop Culture"]  # off-topic dropped
+    files = list((eng.quest_root / "data" / "literature").glob("lit_*.md"))
+    assert len(files) == 1
+    assert "Change-Point" not in files[0].read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # References land in poster + slides (end-to-end through the generators)
 # ---------------------------------------------------------------------------
 
