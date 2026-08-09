@@ -4447,23 +4447,11 @@ class Engine:
         # When the evidence gate judged the evidence thin (insufficient,
         # or "broaden" with the broaden budget exhausted), hand the writer
         # an explicit note so the paper frames its limits honestly instead
-        # of over-claiming. Empty when the gate was satisfied / disabled.
-        _ev = state.get("evidence_assessment") or {}
-        evidence_note = ""
-        if _ev.get("verdict") in ("insufficient", "broaden"):
-            _gaps = "; ".join(_ev.get("gaps") or [])
-            evidence_note = (
-                "**Evidence note (pre-write evidence gate).** The assembled "
-                f"evidence was judged *{_ev.get('verdict')}* for this research "
-                "question"
-                + (f": {_ev.get('rationale')}" if _ev.get("rationale") else "")
-                + (f" Specific gaps: {_gaps}." if _gaps else "")
-                + " Honour this: report only what the sources/data actually "
-                "support, state the limitation plainly (an honest, scoped paper "
-                "is the goal), and do NOT manufacture confidence the evidence "
-                "doesn't carry. This is a scientific limitation of the study — "
-                "do not phrase it as a failure of any tool or pipeline.\n"
-            )
+        # of over-claiming. Suppressed for survey topics (see the helper).
+        evidence_note = _format_evidence_note(
+            state.get("evidence_assessment"),
+            is_survey=bool(state.get("survey_mode_resolved")),
+        )
         prompt = self._prompts["write"].substitute(
             persona_block=persona_block,
             topic=state["topic"],
@@ -6608,6 +6596,38 @@ def _aggregate_panel_reviews(
         "suggestions": suggestions, "blocking": blocking,
         "must_flag_hits": mfh_out,
     }
+
+
+def _format_evidence_note(
+    evidence_assessment: dict[str, Any] | None, *, is_survey: bool,
+) -> str:
+    """The pre-write 'evidence note' handed to the writer when the evidence gate
+    judged the assembled evidence thin (``insufficient`` / ``broaden``), so the
+    paper frames its limits honestly. Returns ``""`` when the gate was satisfied
+    / disabled.
+
+    Suppressed entirely for **survey** topics: a survey is a descriptive
+    literature synthesis, not an evidence-gated experiment, so the gate's
+    experiment-oriented criteria (results, cross-check support) don't apply and
+    this note would just make the essay apologise for experiment-grade evidence
+    it never needed. The ``_SURVEY_WRITE_NOTE`` already enforces honest,
+    source-only framing for surveys. (The broaden *routing* still ran, so a
+    survey that broadened simply gathered more sources.)"""
+    ev = evidence_assessment or {}
+    if is_survey or ev.get("verdict") not in ("insufficient", "broaden"):
+        return ""
+    gaps = "; ".join(ev.get("gaps") or [])
+    return (
+        "**Evidence note (pre-write evidence gate).** The assembled "
+        f"evidence was judged *{ev.get('verdict')}* for this research question"
+        + (f": {ev.get('rationale')}" if ev.get("rationale") else "")
+        + (f" Specific gaps: {gaps}." if gaps else "")
+        + " Honour this: report only what the sources/data actually support, "
+        "state the limitation plainly (an honest, scoped paper is the goal), "
+        "and do NOT manufacture confidence the evidence doesn't carry. This is "
+        "a scientific limitation of the study — do not phrase it as a failure "
+        "of any tool or pipeline.\n"
+    )
 
 
 def _format_claim_grounding(state: QuestState) -> str:

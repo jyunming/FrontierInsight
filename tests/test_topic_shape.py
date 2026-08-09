@@ -429,6 +429,22 @@ def test_evidence_gate_prompt_is_survey_aware() -> None:
     assert "cross-check" in text and "no experiment" in text
 
 
+def test_evidence_note_suppressed_for_survey() -> None:
+    """A survey is a synthesis, not an evidence-gated experiment — the gate's
+    'evidence insufficient / broaden' over-hedge note must NOT be injected into
+    a survey's write prompt (deterministic, regardless of the gate's verdict)."""
+    from core.engine import _format_evidence_note
+    broaden = {"verdict": "broaden", "rationale": "thin sources", "gaps": ["x"]}
+    # Non-survey: the note IS produced (existing behaviour).
+    note = _format_evidence_note(broaden, is_survey=False)
+    assert "Evidence note" in note and "broaden" in note
+    # Survey: suppressed entirely.
+    assert _format_evidence_note(broaden, is_survey=True) == ""
+    # Sufficient / disabled / None → always empty.
+    assert _format_evidence_note({"verdict": "sufficient"}, is_survey=False) == ""
+    assert _format_evidence_note(None, is_survey=False) == ""
+
+
 def test_source_router_prompt_has_field_discipline() -> None:
     """The source router must be told not to pick arXiv/PubMed for humanities."""
     text = (Path(__file__).resolve().parent.parent / "core" / "knowledge.py").read_text(encoding="utf-8")
