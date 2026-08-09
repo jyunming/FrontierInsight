@@ -376,4 +376,59 @@ def test_protocol_survey_topic_type_maps_to_no_simulation() -> None:
     )
     assert _derive_topic_type("survey", True) == "survey"
     assert route_for_topic_type("survey") == "no_simulation"
-    assert source_policy_for("survey") == "academic"
+    # survey is a humanities history/overview — a MIXED source policy (web +
+    # academic both legitimate), so the evidence gate accepts a web-sourced
+    # corpus instead of broadening against it for lacking peer-reviewed papers.
+    assert source_policy_for("survey") == "mixed"
+
+
+def test_survey_protocol_accepts_web_sources() -> None:
+    """derive_protocol for a survey state carries source_policy=mixed and an
+    expected-evidence string that legitimises web / reference sources, so the
+    evidence gate won't penalise a humanities corpus for lacking academic work."""
+    from core.config import (
+        Config, EngineConfig, ExecutionConfig, KnowledgeConfig,
+        OutputConfig, ProviderConfig,
+    )
+    from core.protocol import derive_protocol
+    cfg = Config(
+        topic="the evolution of sculpture in pop culture", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, survey_mode=True),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=Path("./o")),
+    )
+    state = {
+        "topic": cfg.topic, "no_simulation_resolved": True,
+        "survey_mode_resolved": True,
+        "clarify_answers": {"topic_shape": "survey"},
+    }
+    proto = derive_protocol(state, cfg)
+    assert proto.topic_type == "survey"
+    assert proto.source_policy == "mixed"
+    assert "web" in proto.expected_evidence.lower()
+
+
+def test_evidence_gate_prompt_documents_mixed_policy() -> None:
+    """The evidence-gate prompt must define the `mixed` source policy, else the
+    survey→mixed change silently relies on the LLM inferring it."""
+    text = (PROMPTS_DIR / "evidence_gate.md").read_text(encoding="utf-8")
+    assert "`mixed`" in text
+    assert "survey" in text.lower()
+
+
+def test_evidence_gate_prompt_is_survey_aware() -> None:
+    """Surveys have no experiment / dataset / cross-check by design, so the gate
+    must be told not to weigh Results / Cross-check against a survey (else it
+    broadens on absent results that were never meant to exist)."""
+    text = (PROMPTS_DIR / "evidence_gate.md").read_text(encoding="utf-8").lower()
+    assert "topic_type: survey" in text
+    # It must tell the gate not to penalise a survey for missing results/cross-check.
+    assert "cross-check" in text and "no experiment" in text
+
+
+def test_source_router_prompt_has_field_discipline() -> None:
+    """The source router must be told not to pick arXiv/PubMed for humanities."""
+    text = (Path(__file__).resolve().parent.parent / "core" / "knowledge.py").read_text(encoding="utf-8")
+    assert "arXiv is physics" in text and "PubMed is biomedical" in text
