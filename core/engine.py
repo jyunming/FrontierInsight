@@ -2017,6 +2017,13 @@ class Engine:
             chosen_idea=chosen,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
         )
+        # Relevance floor: drop off-topic sources the retriever returned before
+        # they reach the corpus. This is the ONLY relevance filter on the
+        # literature path — the LLM guard runs only under auto_collect, which
+        # survey / simulation quests skip — so without this a humanities topic
+        # carries e.g. change-point-math papers into analyze/write. Scored vs
+        # the raw topic; fail-open + never-starve (see _filter_docs_by_relevance).
+        docs = self._filter_docs_by_relevance(state.get("topic", "") or query, docs)
         # Keep the FULL fetched text (no truncation): it lands uncapped on
         # disk under data/literature/ for audit, and the prompt builders
         # relevance-select the passages each node needs (see
@@ -2809,6 +2816,61 @@ class Engine:
             self._log.info(
                 "[auto_collect] relevance guard kept %d/%d docs (%d off-topic dropped)",
                 len(kept), len(docs), dropped,
+            )
+        return kept
+
+    def _filter_docs_by_relevance(self, topic: str, docs: list) -> list:
+        """Deterministic relevance floor for the literature node: score each
+        retrieved doc by embedding cosine against the TOPIC and drop the
+        off-topic tail. Unlike the LLM ``_filter_relevant_docs`` guard — which
+        runs only on the auto_collect path — this runs on EVERY quest's fresh
+        literature, so survey / simulation quests (which skip auto_collect)
+        don't carry off-topic sources (e.g. change-point-math papers retrieved
+        for a sculpture-history topic) into analyze/write.
+
+        No LLM call — reuses the all-MiniLM cosine helper from ``passages``.
+        Fail-open and never-starve: returns docs unchanged when embeddings are
+        unavailable (FI_OFFLINE / no model / error), when ``relevance_min_score``
+        is 0, or when docs is empty; and always retains at least
+        ``relevance_min_keep`` top-scoring docs so a wholly-borderline corpus is
+        not emptied (the evidence_gate can then broaden). Scores against the raw
+        TOPIC (not the retrieval query, whose folded-in hypothesis keywords are
+        exactly what drags off-topic hits in)."""
+        min_score = self.config.knowledge.relevance_min_score
+        min_keep = self.config.knowledge.relevance_min_keep
+        if not docs or min_score <= 0.0:
+            return docs
+        from core.passages import _embed_scores  # shared MiniLM; FI_OFFLINE-safe
+
+        blobs: list[str] = []
+        for d in docs:
+            # Dict- and RetrievedDoc-aware, mirroring _filter_relevant_docs.
+            if isinstance(d, dict):
+                meta = d.get("metadata") or {}
+                content = d.get("content") or ""
+            else:
+                meta = getattr(d, "metadata", {}) or {}
+                content = getattr(d, "content", "") or ""
+            title = (
+                (meta.get("title") or meta.get("source") or "")
+                if isinstance(meta, dict) else ""
+            )
+            excerpt = str(content)[:300].replace("\n", " ")
+            blobs.append(f"{title} {excerpt}".strip())
+        scores = _embed_scores(blobs, str(topic or "")[:600])
+        if scores is None:  # embeddings unavailable — never filter blind
+            return docs
+        order = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)
+        keep_idx = {i for i in range(len(docs)) if scores[i] >= min_score}
+        keep_idx.update(order[:max(0, min_keep)])  # never-starve retention
+        kept = [d for i, d in enumerate(docs) if i in keep_idx]
+        dropped = len(docs) - len(kept)
+        if dropped:
+            min_kept = min((scores[i] for i in keep_idx), default=0.0)
+            self._log.info(
+                "[literature] relevance floor kept %d/%d docs (%d off-topic "
+                "dropped, min kept cosine=%.2f, threshold=%.2f)",
+                len(kept), len(docs), dropped, min_kept, min_score,
             )
         return kept
 

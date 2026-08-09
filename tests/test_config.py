@@ -31,6 +31,12 @@ def test_negative_numeric_config_fields_fail_fast() -> None:
         ExecutionConfig(timeout_s=0)
     with pytest.raises(ValidationError):
         KnowledgeConfig(full_text_fetch_timeout_s=-1)
+    with pytest.raises(ValidationError):
+        KnowledgeConfig(relevance_min_score=1.5)   # le=1.0 → >1 rejected
+    with pytest.raises(ValidationError):
+        KnowledgeConfig(relevance_min_score=-0.1)   # ge=0.0 → <0 rejected
+    with pytest.raises(ValidationError):
+        KnowledgeConfig(relevance_min_keep=-1)      # ge=0 → <0 rejected
     # Sanity: the defaults still construct.
     assert EngineConfig().max_iterations == 2
 
@@ -185,6 +191,11 @@ def test_axon_config_none_default() -> None:
     # New independent cap on external (web) search results.
     assert kc.external_top_k == 20
     assert kc.write_back_quests is True
+    # Literature relevance floor: on by default at the empirically-measured
+    # 0.20 cosine gap, retaining at least 3 top docs so a borderline corpus
+    # is never emptied.
+    assert kc.relevance_min_score == 0.20
+    assert kc.relevance_min_keep == 3
 
 
 def test_output_config_defaults_roundtrip() -> None:

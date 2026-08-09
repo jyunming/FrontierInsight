@@ -222,6 +222,8 @@ knowledge:
     llm:       { provider: ollama, model: qwen2.5-coder:32b }
   top_k: 8                          # Axon RAG cap — dense hits are precise, 8 strong matches beat 20 medium ones for the writer prompt. The interview's "Axon hits per quest" question.
   external_top_k: 20                # External (arXiv / OpenAlex / Crossref / S2 / ...) cap when Axon misses. Bigger than top_k because web search is coarser; bump to 30 for survey-shaped quests.
+  relevance_min_score: 0.20         # Literature relevance FLOOR: drop retrieved docs whose embedding cosine vs the TOPIC is below this, before they reach analyze/write. Runs in the literature node for EVERY quest (unlike relevance_guard, which only runs on the auto_collect path), so survey/simulation quests don't carry off-topic sources (e.g. change-point-math papers for a sculpture-history topic). 0.0 disables. Fail-open when embeddings are unavailable (FI_OFFLINE).
+  relevance_min_keep: 3             # Never-starve retention: keep at least this many top-scoring docs even if all fall below the floor (the evidence_gate can then broaden).
   write_back_quests: true
   write_back_only_on_accept: true
 
