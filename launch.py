@@ -2285,6 +2285,7 @@ async def _run_new(
         output_kinds=list(partial["output_kinds"]),  # type: ignore[arg-type]
         paper_format=str(partial["paper_format"]),
         no_simulation=bool(derived["no_simulation"]),
+        survey_mode=bool(derived.get("survey_mode", partial.get("survey_mode", False))),
         study_depth=str(partial["study_depth"]),
         comparative_baseline=str(advanced.get("comparative_baseline") or ""),
         success_metric=str(advanced.get("success_metric") or ""),

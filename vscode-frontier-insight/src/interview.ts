@@ -37,6 +37,18 @@ function isOnPath(binary: string): boolean {
 // Prose paper formats — their tier-2 no_simulation default is `true`.
 const PROSE_FORMATS = new Set(["essay", "report", "policy_brief", "whitepaper"]);
 
+// Topic markers that auto-suggest survey mode (a descriptive history /
+// overview synthesis, no experiment, no dataset). Mirrors
+// core/interview.py:_SURVEY_TOPIC_MARKERS.
+const SURVEY_TOPIC_MARKERS = [
+    "history of", "evolution of", "overview of", "development of",
+    "retrospective", "the story of", "a survey of", "over time",
+];
+function looksLikeSurvey(topic: string): boolean {
+    const t = (topic || "").toLowerCase();
+    return SURVEY_TOPIC_MARKERS.some((m) => t.includes(m));
+}
+
 /**
  * Run the interview. Returns the answers, or `undefined` if the user
  * cancelled at any step (Esc on a modal, or empty topic).
@@ -302,6 +314,10 @@ export async function runInterview(
         review_panel: ["methodologist", "statistician", "devil_advocate"],
         knowledge_enabled: await probeAxonReachable(),
         no_simulation: PROSE_FORMATS.has(paperFormat),
+        // Auto-suggest survey mode (a descriptive history / overview synthesis
+        // with no experiment and no dataset) for history/overview topics —
+        // mirrors core/interview.py:smart_default_survey_mode. Editable below.
+        survey_mode: looksLikeSurvey(topic),
         study_depth: studyDepth,
         comparative_baseline: "",
         success_metric: "",
@@ -387,7 +403,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push("| Field | Value |");
     lines.push("|---|---|");
     lines.push(`| Title (auto-slug) | \`${a.title}\` |`);
-    lines.push(`| Research approach | ${a.no_simulation ? "observational" : "computational"} |`);
+    lines.push(`| Research approach | ${a.survey_mode === true ? "literature synthesis (survey — no experiment/data)" : a.no_simulation ? "observational" : "computational"} |`);
     lines.push(`| Clarify mode | \`${a.clarify_mode}\` |`);
     lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
@@ -478,12 +494,18 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
         case "no_simulation": {
             const v = await vscode.window.showQuickPick(
                 [
-                    { label: "$(zap) Computational (Python script produces data)", value: false },
-                    { label: "$(eye) Observational (needs real-world data)", value: true },
+                    { label: "$(zap) Computational (Python script produces data)", value: "computational" },
+                    { label: "$(eye) Observational (needs real-world data)", value: "observational" },
+                    { label: "$(book) Literature synthesis / survey (no experiment, no data)", value: "survey" },
                 ],
                 { title: "Research approach", ignoreFocusOut: true },
             );
-            if (v) a.no_simulation = v.value;
+            if (v) {
+                a.survey_mode = v.value === "survey";
+                // Survey and observational both skip the experiment; survey
+                // additionally skips the dataset. Computational runs it.
+                a.no_simulation = v.value !== "computational";
+            }
             return;
         }
         case "clarify_mode": {

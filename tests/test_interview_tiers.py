@@ -93,6 +93,7 @@ def test_tier2_covers_the_derived_fields() -> None:
     assert set(ids) == {
         "title",
         "no_simulation",
+        "survey_mode",
         "clarify_mode",
         "review_panel",
         "pause_for_user_input",

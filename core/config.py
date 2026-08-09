@@ -562,6 +562,19 @@ class EngineConfig(BaseModel):
     # ``empirical_vs_theoretical`` answer — auto-detection from
     # clarify is the second entry point. YAML flag wins when set.
     no_simulation: bool = False
+    # Survey mode — a descriptive literature / history synthesis with NO
+    # experiment AND NO dataset (e.g. "the evolution/history of X", an
+    # overview or retrospective). A stronger form of ``no_simulation``: the
+    # engine skips BOTH the experiment (implement/execute) AND the
+    # data-collection path (auto_collect_data/wait_for_data/data_load/
+    # web_plots), routing ``design → web_figures → analyze`` so the paper
+    # synthesises the cited literature directly (illustrative license-clean
+    # images are still embedded). Setting this implies ``no_simulation``.
+    # When unset (default False), the clarify node may STILL turn it on when
+    # the clarify agent classifies ``topic_shape == 'survey'`` — auto-detection
+    # from clarify is the second entry point. YAML flag wins when set.
+    # See ``Engine._resolve_survey_from_clarify``.
+    survey_mode: bool = False
     # Local-data-first mode for the ``--analyze`` workflow: the user has
     # already supplied the data, so the framing/retrieval nodes (ideate,
     # literature, design) are made PASSTHROUGHS — no ideation, no external

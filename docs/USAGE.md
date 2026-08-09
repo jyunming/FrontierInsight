@@ -202,6 +202,7 @@ engine:
     - devil_advocate
     # available: methodologist, statistician, devil_advocate, reproducibility
   no_simulation: false              # see "Topics that need real data" section below
+  survey_mode: false                # literature/history synthesis: NO experiment AND NO dataset (implies no_simulation). See "Survey mode" below
   auto_collect_data: true           # try Axon for evidence before pausing for user data (no_simulation mode)
   auto_collect_top_k: 5             # Axon top_k for auto_collect_data
   dataset_adapters: []              # structured-data + web-fetch adapters. Available: "worldbank", "wikipedia"
@@ -424,7 +425,31 @@ precedence — first match wins, decision is logged to `run.log` as
    (`source=clarify_empirical_legacy`).
 4. Otherwise: simulate (`source=default`).
 
-The engine then runs `clarify → ideate → literature → design →
+### Survey mode (a history / overview — no experiment AND no dataset)
+
+Some topics are neither a simulation nor a data-analysis: *"the
+evolution of X"*, *"a history of Y"*, *"an overview of Z"*. These want
+a **descriptive synthesis of the published literature** — there is
+nothing to measure and no dataset to collect. That is **survey mode**,
+a stronger form of no-simulation. Turn it on any of three ways:
+
+* `engine.survey_mode: true` in YAML — explicit override (also forces
+  `no_simulation: true`).
+* Pick **"Literature synthesis (no experiment)"** as the research
+  approach in the interview (CLI / web / VSCode).
+* Automatically — the clarify step classifies the topic shape as
+  `survey` (triggers: "history of", "evolution of", "overview of", …).
+
+In survey mode the graph skips BOTH the experiment (`implement` /
+`execute`) AND the whole data path (`auto_collect_data` →
+`wait_for_data` → `data_load` → `web_plots`), routing `design →
+web_figures → analyze → write`. `web_figures` still embeds
+license-clean illustrative images; `analyze` synthesises the reviewed
+sources directly; the paper is a narrative history with a References
+section and no fabricated metrics.
+
+For the no-simulation (data-analysis) path — where there IS a dataset
+to analyse — the engine runs `clarify → ideate → literature → design →
 auto_collect_data → wait_for_data → data_load → analyze → ...`. The
 two no-simulation-specific stops:
 

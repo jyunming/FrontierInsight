@@ -925,6 +925,9 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert design_branch.ends == {
         "implement": "implement_outline",
         "auto_collect_data": "auto_collect_data",
+        # survey mode: no experiment AND no dataset — straight to
+        # web_figures (illustrative images) → analyze.
+        "synthesize": "web_figures",
     }
 
 

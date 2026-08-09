@@ -30,8 +30,20 @@ $user_data_block
 ## Figures produced
 $figure_list
 
+## Reviewed literature (published sources)
+$literature_block
+
 # Your task
 Interpret the results vs the hypothesis. Be honest about negative or null results — do not embellish.
+
+**No experiment / no dataset (survey or no-simulation studies).** If there are no execution
+results and no `result_json` (empty or absent), this study synthesises the **reviewed literature
+above** — there is nothing else to interpret and that is by design, not a failure. Read the
+sources and produce `key_findings` that are substantive claims ABOUT THE TOPIC drawn from and
+attributed to those sources (organised by era / theme / technique for a history or survey),
+NOT observations about the pipeline, the retrieval, or the absence of an experiment. Put the
+sources you drew on into `primary_sources`, and set `next_step` to `"publish"`. Do NOT invent
+numbers, metrics, accuracies, or datasets that the sources do not actually report.
 
 **If `result_json` contains a `by_<factor>` key** (or any nested dict whose top-level keys look like categorical strata — class names, method names, dataset slices), surface BOTH aggregate findings AND per-stratum findings. A real OPC paper distinguishes "model-based wins on dense lines" from "model-based wins on isolated lines"; collapsing those into a single aggregate mean obscures the most useful result. List stratum-level findings under `key_findings` with a clear prefix like `[by_clip_class:isolated_lines]` so the writer can render them as a per-stratum table. If the strata all behave the same way, ONE bullet stating that is fine ("the effect is uniform across all 5 clip classes"); the rule is "don't hide a non-uniform effect behind an aggregate."
 

@@ -200,6 +200,16 @@ class QuestState(TypedDict, total=False):
     # in YAML OR the clarify answer for `empirical_vs_theoretical` is
     # "empirical". See `_resolve_no_simulation_from_clarify`.
     no_simulation_resolved: bool
+    # survey mode — a descriptive literature / history synthesis with NO
+    # experiment AND NO dataset. A stronger form of no_simulation: the
+    # engine skips the experiment (implement/execute) AND the data path
+    # (auto_collect_data/wait_for_data/data_load/web_plots), routing
+    # design → web_figures → analyze so the paper synthesises the
+    # literature directly. Resolved at clarify: True if `engine.survey_mode:
+    # true` in YAML OR the clarify agent classified `topic_shape == 'survey'`
+    # (a history/overview/"evolution of X" topic). Survey implies
+    # no_simulation_resolved. See `_resolve_survey_from_clarify`.
+    survey_mode_resolved: bool
     # Populated by the wait_for_data node's interrupt-resume payload.
     # List of absolute paths the user dropped into `<quest_root>/data/`.
     # The data_load node walks them, classifies, and synthesizes a
@@ -248,6 +258,39 @@ _NO_SIM_WRITE_NOTE = (
     "— this study was never meant to run an executable experiment. (Any "
     "figures present were charted from numbers the sources report; cite "
     "them normally.)\n"
+)
+# Injected into the design/write prompts when a quest runs in ``survey``
+# mode — a descriptive literature / history synthesis with no experiment
+# AND no dataset. Stronger than the no-sim directives above: there is not
+# even a dataset to analyse, so ``method`` is a plan for how the existing
+# published sources are organised and synthesised (by era, theme, technique,
+# school …), never a measurement.
+_SURVEY_DESIGN_DIRECTIVE = (
+    "> **THIS IS A SURVEY / HISTORICAL SYNTHESIS.** The quest is configured "
+    "`survey_mode`: there is NO experiment AND NO dataset — the paper is a "
+    "descriptive synthesis of the published literature (a history, overview, "
+    "or evolution of the topic). **Ignore the \"executable Python "
+    "experiment\" / \"must produce a figure\" instructions below.** Do NOT "
+    "invent a measurable hypothesis, a clustering/ML method, variables to "
+    "measure, or a dataset to collect. Instead produce a SYNTHESIS OUTLINE: "
+    "use `hypothesis` for the framing thesis or through-line, `method` for "
+    "how the sources are organised and synthesised (e.g. chronological eras, "
+    "techniques, movements, sub-questions to cover), and leave `variables` "
+    "empty or as thematic axes. Set `\"dependencies\": []` and "
+    "`\"figures_planned\": []` — any figures are license-clean illustrative "
+    "images gathered separately, not experiment output. Frame the study as "
+    "a complete descriptive synthesis in its own right.\n"
+)
+_SURVEY_WRITE_NOTE = (
+    "**This is a survey / historical synthesis — by design there is no "
+    "experiment and no dataset.** Write a descriptive, well-structured "
+    "narrative (organised by era / theme / technique as fits the topic) "
+    "grounded ONLY in the cited literature. Do NOT report results, metrics, "
+    "accuracies, clustering, or any computed numbers; do NOT describe a "
+    "'planned experiment', a 'dataset', or their absence as a gap or "
+    "failure — this study was never meant to run one. Any figures present "
+    "are license-clean illustrative images; caption and attribute them "
+    "normally.\n"
 )
 
 
@@ -958,6 +1001,10 @@ class Engine:
                 # legacy single-shot prompt.
                 "implement": "implement_outline",
                 "auto_collect_data": "auto_collect_data",
+                # survey mode: no experiment AND no dataset — jump straight
+                # to web_figures (illustrative images) → analyze, skipping
+                # the whole data-collection chain.
+                "synthesize": "web_figures",
             },
         )
         g.add_edge("implement_outline", "implement")
@@ -1046,6 +1093,16 @@ class Engine:
         resolved ``no_simulation`` flag stays authoritative, but a
         topic-type-vs-route divergence is surfaced as a WARNING.
         """
+        # Survey mode is the strongest form of no-simulation: no experiment
+        # AND no dataset. Skip the data-collection chain entirely
+        # (auto_collect_data → wait_for_data → data_load → web_plots) and go
+        # straight to web_figures → analyze, so the paper synthesises the
+        # literature directly. web_figures still runs (it is guarded on
+        # no_simulation_resolved, which survey implies) and sources its
+        # license-clean illustrative images from the topic + literature.
+        if bool(state.get("survey_mode_resolved")):
+            self._warn_route_matrix_mismatch(state, "no_simulation")
+            return "synthesize"
         no_sim = bool(state.get("no_simulation_resolved"))
         self._warn_route_matrix_mismatch(
             state, "no_simulation" if no_sim else "simulation")
@@ -1243,7 +1300,7 @@ class Engine:
             # no_simulation — there's no clarify answer to inspect.
             return {
                 "clarify_done": True,
-                "no_simulation_resolved": self.config.engine.no_simulation,
+                **self._resolve_modes({}),
             }
 
         # Proposal short-circuit: when this quest was started from a
@@ -1278,7 +1335,7 @@ class Engine:
                     "clarify_questions": {},
                     "clarify_answers": answers,
                     "clarify_done": True,
-                    "no_simulation_resolved": self._resolve_no_simulation_from_clarify(answers),
+                    **self._resolve_modes(answers),
                 }
 
         # When the interview / --update has pinned EVERY known clarify
@@ -1313,13 +1370,14 @@ class Engine:
                 "[clarify] mode=auto; all %d slots pinned via "
                 "clarify_overrides (skipped LLM call)", len(known_slots),
             )
-            no_sim = self._resolve_no_simulation_from_clarify(overrides)
-            self._log_topic_shape_mismatch(overrides, no_simulation_resolved=no_sim)
+            modes = self._resolve_modes(overrides)
+            self._log_topic_shape_mismatch(
+                overrides, no_simulation_resolved=modes["no_simulation_resolved"])
             return {
                 "clarify_questions": {},
                 "clarify_answers": overrides,
                 "clarify_done": True,
-                "no_simulation_resolved": no_sim,
+                **modes,
             }
 
         prompt = self._prompts["clarify"].substitute(topic=state["topic"])
@@ -1375,13 +1433,14 @@ class Engine:
                 )
             else:
                 self._log.info("[clarify] mode=auto; agent self-answered %d slots", agent_count)
-            no_sim = self._resolve_no_simulation_from_clarify(answers)
-            self._log_topic_shape_mismatch(answers, no_simulation_resolved=no_sim)
+            modes = self._resolve_modes(answers)
+            self._log_topic_shape_mismatch(
+                answers, no_simulation_resolved=modes["no_simulation_resolved"])
             return {
                 "clarify_questions": questions,
                 "clarify_answers": answers,
                 "clarify_done": True,
-                "no_simulation_resolved": no_sim,
+                **modes,
             }
 
         # Interactive: pre-fill any user-pinned answers as the
@@ -1421,13 +1480,14 @@ class Engine:
         else:
             # Resumed with a non-dict (or None) — fall through to defaults.
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
-        no_sim = self._resolve_no_simulation_from_clarify(answers)
-        self._log_topic_shape_mismatch(answers, no_simulation_resolved=no_sim)
+        modes = self._resolve_modes(answers)
+        self._log_topic_shape_mismatch(
+            answers, no_simulation_resolved=modes["no_simulation_resolved"])
         return {
             "clarify_questions": questions,
             "clarify_answers": answers,
             "clarify_done": True,
-            "no_simulation_resolved": no_sim,
+            **modes,
         }
 
     def _maybe_seed_clarify_from_proposal(
@@ -1615,6 +1675,46 @@ class Engine:
             "(source=default, no signal from YAML or clarify)",
         )
         return False
+
+    def _resolve_survey_from_clarify(self, answers: dict[str, Any]) -> bool:
+        """Decide whether ``survey`` mode is on: a descriptive literature /
+        history synthesis with NO experiment AND NO dataset. True when
+        ``engine.survey_mode: true`` is pinned in YAML OR the clarify agent
+        classified ``topic_shape == 'survey'`` (a history / overview /
+        "evolution of X" humanities topic). Survey is a stronger form of
+        no_simulation — the caller (:meth:`_resolve_modes`) forces
+        ``no_simulation_resolved`` True whenever this is True, so the graph
+        skips both the experiment and the data-collection path."""
+        if self.config.engine.survey_mode:
+            self._log.info(
+                "[clarify] survey resolved: SURVEY "
+                "(source=yaml, reason='engine.survey_mode: true')",
+            )
+            return True
+        answers = answers or {}
+        shape = str(answers.get("topic_shape") or "").strip().lower()
+        if shape == "survey":
+            self._log.info(
+                "[clarify] survey resolved: SURVEY "
+                "(source=clarify_topic_shape, reason='topic_shape=survey')",
+            )
+            return True
+        return False
+
+    def _resolve_modes(self, answers: dict[str, Any]) -> dict[str, bool]:
+        """Resolve the two run-mode flags together and return them as a
+        state patch. ``survey_mode_resolved`` implies ``no_simulation_resolved``
+        (a survey has no experiment), so callers can spread this into their
+        clarify return dict and get a consistent pair. Passing ``{}`` (no
+        clarify answers, e.g. ``clarify=off``) still honours the YAML
+        ``engine.no_simulation`` / ``engine.survey_mode`` flags via the
+        underlying resolvers."""
+        survey = self._resolve_survey_from_clarify(answers)
+        no_sim = self._resolve_no_simulation_from_clarify(answers) or survey
+        return {
+            "no_simulation_resolved": no_sim,
+            "survey_mode_resolved": survey,
+        }
 
     async def _node_ideate(self, state: QuestState) -> QuestState:
         if self.config.engine.analyze_local_first:
@@ -2120,7 +2220,9 @@ class Engine:
             timeout_s=str(self.config.execution.timeout_s),
             clarify_block=_format_clarify(state),
             study_mode_directive=(
-                _NO_SIM_DESIGN_DIRECTIVE
+                _SURVEY_DESIGN_DIRECTIVE
+                if state.get("survey_mode_resolved")
+                else _NO_SIM_DESIGN_DIRECTIVE
                 if state.get("no_simulation_resolved")
                 else ""
             ),
@@ -3643,7 +3745,13 @@ class Engine:
         ``figure_credits`` for the writer + references. Best-effort: any miss
         leaves the quest unchanged."""
         k = self.config.knowledge
-        if not k.fetch_web_figures or k.web_figures_max <= 0:
+        # Survey mode is a text-only path (no experiment, no data plots), so
+        # illustrative images ARE the paper's only visuals — force web_figures
+        # on for survey even when ``knowledge.fetch_web_figures`` is off (its
+        # default), still honouring ``web_figures_max``. Other modes keep the
+        # explicit opt-in.
+        survey = bool(state.get("survey_mode_resolved"))
+        if (not k.fetch_web_figures and not survey) or k.web_figures_max <= 0:
             return {}
         if not state.get("no_simulation_resolved"):
             return {}
@@ -3825,6 +3933,11 @@ class Engine:
             result_json=result_json_block,
             user_data_block=user_data_block,
             figure_list=_figure_list_for_prompt(state),
+            # The literature is analyze's ONLY evidence in survey / no-sim
+            # mode (no experiment, and — in survey mode — no dataset either),
+            # so it must reach the analyze prompt to be synthesised. Harmless
+            # extra grounding in the simulation path.
+            literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
         )
         # Multi-model ensemble path: when the YAML carries
         # provider.node_ensemble["analyze"], fan out N parallel calls
@@ -4304,7 +4417,9 @@ class Engine:
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
             study_mode_note=(
-                _NO_SIM_WRITE_NOTE
+                _SURVEY_WRITE_NOTE
+                if state.get("survey_mode_resolved")
+                else _NO_SIM_WRITE_NOTE
                 if state.get("no_simulation_resolved")
                 else ""
             ),
@@ -6075,7 +6190,7 @@ def _default_clarify_questions(topic: str) -> dict[str, Any]:
             "default": "generic",
         },
         "topic_shape": {
-            "question": "What's the intellectual shape of this topic? (experimental / review / case_study / opinion)",
+            "question": "What's the intellectual shape of this topic? (experimental / survey / review / case_study / opinion)",
             "default": "experimental",
         },
     }

@@ -102,7 +102,7 @@ The extension walks you through 12 quick questions via VSCode-native input modal
 2. **Title** — short identifier (auto-suggested from the topic).
 3. **Outputs** — paper only / paper + PDF / paper + slides / everything.
 4. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
-5. **Research approach** — computational (a Python script can produce the data) vs. observational (real-world data needed). Maps to `engine.no_simulation` — and matches the clarify agent's `simulatability` slot, so picking it here skips the auto-detect path.
+5. **Research approach** — computational (a Python script can produce the data), observational (real-world data needed), or **literature synthesis / survey** (a history / overview with no experiment and no dataset). Maps to `engine.no_simulation` (+ `engine.survey_mode` for survey) — and matches the clarify agent's `simulatability` / `topic_shape` judgment, so picking it here skips the auto-detect path. Survey mode is also auto-suggested for "history of X" / "evolution of X" topics.
 6. **Study depth** — brief preprint / journal-length / comprehensive review. Drives paper word count and citation depth. Smart-defaulted off the chosen paper format.
 7. **Comparative baseline** — what existing method / dataset to compare against (free text).
 8. **Success metric** — what number changing in what direction = headline result (free text).
@@ -209,6 +209,15 @@ companies / markets / current events. The `/new` interview's
 and the generated YAML sets `engine.no_simulation: true`. The
 engine then skips `implement → execute` entirely and routes through
 `auto_collect_data → wait_for_data → data_load → web_plots → analyze`.
+
+For a purely descriptive **history / overview** (no experiment *and*
+no dataset — e.g. *"the evolution of X"*), pick *"literature synthesis
+/ survey"* instead. The YAML sets `engine.survey_mode: true` and the
+engine routes `design → web_figures → analyze → write`, skipping the
+whole data path — the paper is a narrative synthesis of the cited
+sources with license-clean illustrative images and no fabricated
+metrics. Survey mode is auto-suggested for "history/evolution/overview
+of X" topics and can also be turned on by the clarify step.
 
 The `/new` interview also has a **Web research** question (on by
 default, independent of the Axon knowledge layer): when on, the

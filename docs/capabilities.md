@@ -20,7 +20,8 @@ START → clarify → ideate → literature ←─────┐ (broaden_lit)
                                 │
             ┌───────────────────┴───────────────────┐
             ↓ (computational)                       ↓ (no_simulation)
-     implement_outline                       auto_collect_data
+     implement_outline                       auto_collect_data   ‡ survey: design ──→ web_figures (skips
+            ↓                                        ↓              auto_collect_data … web_plots) ──→ analyze
             ↓                                        ↓
         implement ──→ execute ──┐               wait_for_data
                                 │                    ↓
@@ -54,6 +55,18 @@ assembled evidence before any paper is written; `claim_check` (between
 write and review) grounds the paper's claims. The `human_feedback`
 gate, when enabled, sits between review and END.
 
+The design fork has a **third branch, `survey`** (‡ in the diagram), for a
+descriptive history / overview synthesised purely from the literature — no
+experiment and no dataset. It is a stronger form of no-simulation: after
+`design` it routes straight to `web_figures` (license-clean illustrative
+images) → `analyze`, skipping the experiment (`implement`/`execute`) **and**
+the whole data-collection chain (`auto_collect_data` → `wait_for_data` →
+`data_load` → `web_plots`). `analyze` synthesises the reviewed sources
+directly. Survey mode turns on from `engine.survey_mode: true`, from the
+"Literature synthesis" research approach in the interview, or automatically
+when the clarify step classifies the topic shape as `survey` (a "history of
+X" / "evolution of X" / overview topic).
+
 Feedback loops:
 
 | Loop | Trigger | Bound by |
@@ -75,7 +88,7 @@ is the index.
 - **Docker sandbox** — `execution.sandbox: docker` runs the experiment subprocess with network disabled, mounted at `/work`.
 - **Provider matrix** — direct HTTP, proxy, CLI exec, and VSCode-extension transports (see provider matrix below).
 - **Per-node model routing** via `provider.node_models` (e.g., a cheap model for `clarify`, a strong one for `write`).
-- **Pre-flight `clarify` node** — slot survey before `ideate`; off / auto / interactive modes. The slot set includes ``topic_shape`` (``experimental`` / ``review`` / ``case_study`` / ``opinion``) so the engine recognises when a topic naturally wants a literature synthesis instead of a code experiment. **Agent judgment beats the format heuristic.** Most `clarify_overrides` pinned by the interview are user *preferences* (study depth, venue, output kinds, baseline, metric, budget) and rightly win over the agent's self-answers — but ``simulatability`` and ``topic_shape`` are topic *judgments*. When the agent runs in `auto` mode and its judgment conflicts with the interview's pinned value (which is often just a paper-format heuristic), the **agent's value wins back** for those two slots, so a review-shaped topic the agent flags as no-simulation isn't force-run as a toy experiment by a stale `simulatability: "yes"` override. The hard `engine.no_simulation: true` YAML pin is separate and still absolute; there is intentionally no hard "force simulate" — the engine trusts the agent's "can a simulation actually answer this?" call. When the shape is non-experimental but simulatability still resolves to SIMULATE (the agent itself judged it simulatable), the engine logs a WARNING in run.log and the design stage falls back to a narrow illustrative experiment with weight shifted to literature synthesis (rather than a full comparative benchmark).
+- **Pre-flight `clarify` node** — slot survey before `ideate`; off / auto / interactive modes. The slot set includes ``topic_shape`` (``experimental`` / ``survey`` / ``review`` / ``case_study`` / ``opinion``) so the engine recognises when a topic naturally wants a literature synthesis instead of a code experiment — ``survey`` (a "history of X" / "evolution of X" / overview topic) takes the no-experiment, no-dataset survey path. **Agent judgment beats the format heuristic.** Most `clarify_overrides` pinned by the interview are user *preferences* (study depth, venue, output kinds, baseline, metric, budget) and rightly win over the agent's self-answers — but ``simulatability`` and ``topic_shape`` are topic *judgments*. When the agent runs in `auto` mode and its judgment conflicts with the interview's pinned value (which is often just a paper-format heuristic), the **agent's value wins back** for those two slots, so a review-shaped topic the agent flags as no-simulation isn't force-run as a toy experiment by a stale `simulatability: "yes"` override. The hard `engine.no_simulation: true` YAML pin is separate and still absolute; there is intentionally no hard "force simulate" — the engine trusts the agent's "can a simulation actually answer this?" call. When the shape is non-experimental but simulatability still resolves to SIMULATE (the agent itself judged it simulatable), the engine logs a WARNING in run.log and the design stage falls back to a narrow illustrative experiment with weight shifted to literature synthesis (rather than a full comparative benchmark).
 - **Execute-repair loop** — agent reads traceback, patches code, retries (`engine.exec_reflect_max_iterations`).
 - **Stale-figure purge on re-execute** — every `execute` clears `figures/` before running the experiment. On a `re_experiment` / `broaden` / repair loop the `implement` node rewrites `experiment.py`, which may emit a *different* set of figure filenames; without the purge the previous version's plots linger (they're not overwritten), get counted in `figures=N`, and pollute the paper/slides/poster with a mix of current and stale figures. Only figure-suffixed files are removed — `results.csv` and other artifacts survive.
 - **Degenerate-run guard** — `engine.degenerate_run_guard` (default on) treats a script that exits 0 but emits an all-zero RESULT_JSON as a soft failure: the execute-repair loop gets a chance to fix the underlying bug (wrong grid/sampling, a threshold/edge finder returning a zero sentinel, bad normalization) before a paper is written. If the result is still degenerate after repair, analyze flags it and frames an honest failure note instead of reporting silent zeros as findings.
@@ -240,7 +253,7 @@ See [USAGE.md](USAGE.md) for the full annotated YAML schema. Quick
 landmarks:
 
 - `provider.*` — provider name, model, per-node model routing, ensemble.
-- `engine.*` — max_iterations, review_panel, ensemble, no_simulation, and the rest of the research-loop knobs.
+- `engine.*` — max_iterations, review_panel, ensemble, no_simulation, survey_mode (literature/history synthesis: no experiment and no dataset), and the rest of the research-loop knobs.
 - `pauses.*` — the unified human-in-the-loop section: clarify, papers, supply, review, auto_accept_on_pass, timeout_s (legacy `engine.*` / `knowledge.*` pause flags still map in).
 - `execution.*` — venv vs docker, timeout, python version.
 - `knowledge.*` — Axon config, top_k (RAG) + external_top_k (web), local_papers, full-text fetch.
