@@ -152,3 +152,27 @@ def test_claim_check_unparseable_llm_is_safe(tmp_path: Path) -> None:
     out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
     g = out["claim_grounding"]
     assert g["total"] == 0 and g["unsupported"] == []
+
+
+def test_claim_check_provider_failure_is_non_fatal(tmp_path: Path) -> None:
+    """A transient provider outage during the grounding call (e.g. a Copilot
+    bridge stall) must NOT abort the quest. claim_check runs after the paper is
+    already written; it degrades to "grounding not run" (empty result, no
+    ledger) so review + output generation still proceed on resume-free."""
+    eng = _engine(tmp_path)
+
+    async def boom_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
+        raise RuntimeError(
+            "Copilot backend was unavailable across 6 retry attempts "
+            "(bridge stalled: no part for 180 s)"
+        )
+    eng._chat = boom_chat  # type: ignore[assignment,method-assign]
+
+    state = {"topic": "t", "paper_md": _paper(tmp_path), "literature": []}
+    # Does not raise — the node swallows the provider failure.
+    out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    assert out == {}
+    # No grounding ran → reviewer renders "(claim grounding not run)".
+    assert _format_claim_grounding(out) == "(claim grounding not run)"
+    # No ledger is written when grounding never produced a result.
+    assert not (tmp_path / "paper" / "claims.json").exists()

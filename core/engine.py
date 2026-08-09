@@ -4359,7 +4359,22 @@ class Engine:
             references=refs_block,
             paper=paper_text,
         )
-        text = await self._chat(prompt, node="claim_check")
+        # claim_check is a best-effort quality gate that runs AFTER the paper
+        # is already written: the reviewer renders "(claim grounding not run)"
+        # when grounding is absent, and the ledger write below is likewise
+        # never quest-fatal. A transient provider failure here (e.g. a Copilot
+        # bridge stall) must therefore NOT abort the quest and forfeit the
+        # already-produced paper + every downstream output (pdf/slides/poster/
+        # speech). Degrade to "not run" on any LLM failure, matching how the
+        # sibling cross_check node guards its provider calls.
+        try:
+            text = await self._chat(prompt, node="claim_check")
+        except Exception as e:
+            self._log.warning(
+                "[claim_check] grounding call failed (%s); skipping claim "
+                "grounding and continuing to review", e,
+            )
+            return {}
         parsed = _parse_json_lenient(text) or {}
         raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
         n_refs = len(refs)
