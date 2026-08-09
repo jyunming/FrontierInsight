@@ -24,7 +24,7 @@ Weigh the assembled evidence against the research question **and the protocol's 
 - **Cross-check balance** — are the key findings actually SUPPORTED by independent literature, or mostly unsupported or conflicting?
 - **Fit** — does the evidence address the specific research question, or only the general topic?
 
-**Survey / history topics** (`topic_type: survey` in the protocol above) are a descriptive literature synthesis: by design there is **NO experiment, NO dataset, and NO cross-check** — so a `survey` MUST NOT be weighed on the "Results" or "Cross-check balance" criteria (their absence is expected, not a gap). Judge a survey **only** on whether the assembled sources are on-topic and adequate to write a credible descriptive history/overview, and default to `sufficient` when they are. Reserve `broaden` for a survey whose sources are genuinely thin or off-topic (e.g. almost no on-topic material was retrieved).
+**Survey / history topics** (`topic type: survey` in the protocol above) are a descriptive literature synthesis: by design there is **no experiment and no dataset**, and its cross-check is empty/disabled — so a `survey` MUST NOT be weighed on the "Results" or "Cross-check balance" criteria (their absence or emptiness is expected, not a gap). Judge a survey **only** on whether the assembled sources are on-topic and adequate to write a credible descriptive history/overview, and default to `sufficient` when they are. Reserve `broaden` for a survey whose sources are genuinely thin or off-topic (e.g. almost no on-topic material was retrieved).
 
 Return ONE verdict:
 

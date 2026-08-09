@@ -423,7 +423,8 @@ def test_evidence_gate_prompt_is_survey_aware() -> None:
     must be told not to weigh Results / Cross-check against a survey (else it
     broadens on absent results that were never meant to exist)."""
     text = (PROMPTS_DIR / "evidence_gate.md").read_text(encoding="utf-8").lower()
-    assert "topic_type: survey" in text
+    # Match the label ResearchProtocol.as_block() actually renders ("topic type").
+    assert "topic type: survey" in text
     # It must tell the gate not to penalise a survey for missing results/cross-check.
     assert "cross-check" in text and "no experiment" in text
 
@@ -431,4 +432,7 @@ def test_evidence_gate_prompt_is_survey_aware() -> None:
 def test_source_router_prompt_has_field_discipline() -> None:
     """The source router must be told not to pick arXiv/PubMed for humanities."""
     text = (Path(__file__).resolve().parent.parent / "core" / "knowledge.py").read_text(encoding="utf-8")
-    assert "arXiv is physics" in text and "PubMed is biomedical" in text
+    # Phrases contiguous within a single source-string literal (the prompt is
+    # split across adjacent literals, so cross-literal substrings won't match).
+    assert "arXiv is a STEM preprint" in text
+    assert "do NOT pick them for humanities" in text
