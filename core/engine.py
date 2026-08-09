@@ -2023,7 +2023,8 @@ class Engine:
         # survey / simulation quests skip — so without this a humanities topic
         # carries e.g. change-point-math papers into analyze/write. Scored vs
         # the raw topic; fail-open + never-starve (see _filter_docs_by_relevance).
-        docs = self._filter_docs_by_relevance(state.get("topic", "") or query, docs)
+        docs = self._filter_docs_by_relevance(
+            (state.get("topic") or "").strip() or query, docs)
         # Keep the FULL fetched text (no truncation): it lands uncapped on
         # disk under data/literature/ for audit, and the prompt builders
         # relevance-select the passages each node needs (see
@@ -2866,11 +2867,14 @@ class Engine:
         kept = [d for i, d in enumerate(docs) if i in keep_idx]
         dropped = len(docs) - len(kept)
         if dropped:
-            min_kept = min((scores[i] for i in keep_idx), default=0.0)
+            # ``lowest_kept`` can be below the threshold when the never-starve
+            # retention (min_keep) held back a doc — label the values + surface
+            # min_keep so that isn't misread as the floor being violated.
+            lowest_kept = min((scores[i] for i in keep_idx), default=0.0)
             self._log.info(
-                "[literature] relevance floor kept %d/%d docs (%d off-topic "
-                "dropped, min kept cosine=%.2f, threshold=%.2f)",
-                len(kept), len(docs), dropped, min_kept, min_score,
+                "[literature] relevance floor kept %d/%d docs (%d dropped; "
+                "threshold=%.2f, min_keep=%d, lowest kept cosine=%.2f)",
+                len(kept), len(docs), dropped, min_score, min_keep, lowest_kept,
             )
         return kept
 
