@@ -132,6 +132,23 @@ def test_submit_new_writes_yaml(tmp_path: Path) -> None:
     assert "Web test topic" in yaml_path.read_text(encoding="utf-8")
 
 
+def test_submit_survey_mode_couples_no_simulation(tmp_path: Path) -> None:
+    """survey_mode implies no_simulation. A payload with survey_mode=true but
+    no_simulation=false must still emit engine.survey_mode: true AND
+    no_simulation: true — the invariant is enforced at the API boundary, not
+    left inconsistent for downstream logic to trip on."""
+    client = _client(tmp_path)
+    body = _ok_answers_payload()
+    body["survey_mode"] = True
+    body["no_simulation"] = False  # deliberately inconsistent
+    res = client.post("/api/interview/submit", json=body)
+    assert res.status_code == 200, res.text
+    yaml_text = Path(res.json()["yaml_path"]).read_text(encoding="utf-8")
+    assert "survey_mode: true" in yaml_text
+    assert "no_simulation: true" in yaml_text
+    assert 'simulatability: "no"' in yaml_text
+
+
 def test_submit_missing_required_field_400(tmp_path: Path) -> None:
     client = _client(tmp_path)
     bad = _ok_answers_payload()

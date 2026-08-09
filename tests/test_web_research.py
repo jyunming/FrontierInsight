@@ -539,6 +539,33 @@ def test_web_figures_node_off_by_default(tmp_path: Path) -> None:
     assert asyncio.run(eng._node_web_figures(state)) == {}
 
 
+def test_web_figures_forced_on_in_survey_mode(monkeypatch, tmp_path: Path) -> None:
+    """Survey mode is text-only (no experiment, no data plots), so illustrative
+    images are the paper's only visuals — web_figures runs even though
+    ``knowledge.fetch_web_figures`` is off by default."""
+    import core.figure_sources as fsmod
+    from core.figure_sources import WebFigure
+
+    eng = _engine(tmp_path, web_derived_plots=True)
+    assert eng.config.knowledge.fetch_web_figures is False  # default off
+    figdir = eng.quest_root / "figures"
+    figdir.mkdir(parents=True, exist_ok=True)
+    a = figdir / "webfig_arxiv_x.png"; a.write_bytes(b"\x89PNG\r\n")
+    cands = [WebFigure(a, "A diagram", "https://arxiv.org/abs/x",
+                       "CC BY 4.0", "arXiv:x", "oa_paper")]
+    monkeypatch.setattr(fsmod, "collect_topic_figures", lambda *a, **k: cands)
+    monkeypatch.setattr("core.engine._stamp_figure_credit", lambda *a, **k: None)
+
+    async def fake_chat(prompt, *, node=None):
+        return "[0]"
+    eng._chat = fake_chat
+    # survey implies no_simulation; both set as the engine would at resolve time.
+    state = {"no_simulation_resolved": True, "survey_mode_resolved": True,
+             "topic": "history of sculpture", "literature": [], "figures": []}
+    out = asyncio.run(eng._node_web_figures(state))
+    assert out["figures"] == ["webfig_arxiv_x.png"]
+
+
 def test_figure_list_for_prompt_annotates_credits() -> None:
     from core.engine import _figure_list_for_prompt
     state = {

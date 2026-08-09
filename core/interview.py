@@ -224,6 +224,14 @@ NO_SIMULATION_CHOICES: tuple[Choice, ...] = (
 )
 
 
+SURVEY_MODE_CHOICES: tuple[Choice, ...] = (
+    Choice(False, "No — run an experiment or analyse data (default)",
+           "Normal pipeline: the engine designs an experiment (or, for observational topics, analyses collected data)."),
+    Choice(True, "Yes — a literature / history synthesis, no experiment or data",
+           "Skip BOTH the experiment AND the dataset. The paper is a descriptive history / overview synthesised from the cited sources, with license-clean illustrative images. For 'history of X' / 'evolution of X' / overview topics. Implies observational."),
+)
+
+
 WEB_RESEARCH_CHOICES: tuple[Choice, ...] = (
     Choice(True, "On (recommended)",
            "Search the public web (Brave / DuckDuckGo) for current sources and download them into the quest's data/literature/ folder — for BOTH simulation and observational quests. Adds real-world reports / news on top of academic retrieval."),
@@ -484,6 +492,17 @@ QUESTIONS: tuple[Question, ...] = (
         tier=2,
     ),
     Question(
+        id="survey_mode",
+        label="Literature synthesis (survey) mode",
+        prompt="Is this a pure literature / history synthesis (a history, overview, or evolution of a subject) with NO experiment and NO dataset? If yes, the engine skips both and writes a descriptive synthesis. Auto-suggested for history/overview topics.",
+        kind="single",
+        choices=SURVEY_MODE_CHOICES,
+        default=False,
+        # Like no_simulation, flipping this mid-quest reroutes the graph.
+        mid_quest_editable=False,
+        tier=2,
+    ),
+    Question(
         id="clarify_mode",
         label="Pre-flight clarification mode",
         prompt="Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
@@ -720,6 +739,22 @@ def smart_default_no_simulation(partial: dict[str, Any]) -> bool:
     return fmt in PROSE_FORMATS
 
 
+_SURVEY_TOPIC_MARKERS = (
+    "history of", "evolution of", "overview of", "development of",
+    "retrospective", "the story of", "a survey of", "over time",
+)
+
+
+def smart_default_survey_mode(partial: dict[str, Any]) -> bool:
+    """Auto-suggest survey mode (a descriptive history / overview synthesis
+    with no experiment and no dataset) when the topic string reads as a
+    history / overview / "evolution of X" question. The clarify agent makes
+    the same call at runtime; this pre-selects it in the interview so the
+    user only has to confirm."""
+    topic = (partial.get("topic") or "").lower()
+    return any(m in topic for m in _SURVEY_TOPIC_MARKERS)
+
+
 def smart_default_study_depth(partial: dict[str, Any]) -> str:
     """policy_brief is by definition 2-4 pages → 'brief preprint'.
     The other formats keep the journal-length default unless the
@@ -806,6 +841,7 @@ def smart_default_knowledge_external_top_k(partial: dict[str, Any]) -> int:
 SMART_DEFAULTS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "title": smart_default_title,
     "no_simulation": smart_default_no_simulation,
+    "survey_mode": smart_default_survey_mode,
     "study_depth": smart_default_study_depth,
     "clarify_mode": smart_default_clarify_mode,
     "review_panel": smart_default_review_panel,
@@ -1099,6 +1135,11 @@ class InterviewAnswers:
     # data/literature/ for every quest — sim and observational alike.
     # Maps to ``knowledge.web_search`` + ``web_fetch_pages``. Independent
     # of ``knowledge_enabled`` (the Axon corpus toggle).
+    # Survey mode — a descriptive literature / history synthesis with NO
+    # experiment AND NO dataset (the third "research approach"). Emitted as
+    # ``engine.survey_mode``; implies ``no_simulation`` at runtime. Mirrors
+    # ``interview-core.ts:InterviewAnswers.survey_mode``.
+    survey_mode: bool = False
     web_research: bool = True
     # When True, pause on a paywalled/abstract-only relevant paper and write
     # needs/WANTED_PAPERS.md so the user can drop the PDF into inputs/papers/
@@ -1215,7 +1256,15 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     lines.append(f"{indent}framework: \"langgraph\"")
     lines.append(f"{indent}max_iterations: {answers.max_iterations}")
     lines.append(f"{indent}review_loop: true")
-    lines.append(f"{indent}no_simulation: {'true' if answers.no_simulation else 'false'}")
+    # Survey mode implies no-simulation (no experiment AND no dataset), so
+    # the emitted no_simulation flag is the OR of the two — keeps the YAML
+    # internally consistent even though the engine also forces this at
+    # resolve time.
+    survey_mode = bool(getattr(answers, "survey_mode", False))
+    no_simulation = bool(answers.no_simulation) or survey_mode
+    lines.append(f"{indent}no_simulation: {'true' if no_simulation else 'false'}")
+    if survey_mode:
+        lines.append(f"{indent}survey_mode: true")
 
     # Cost-discipline trio — preserved for VSCode parity. CLI and
     # serve users get the engine defaults.
@@ -1238,7 +1287,7 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         "study_depth": answers.study_depth,
         "paper_venue": answers.paper_format,
         "output_kinds": answers.output_kinds,
-        "simulatability": "no" if answers.no_simulation else "yes",
+        "simulatability": "no" if no_simulation else "yes",
         "comparative_baseline": answers.comparative_baseline,
         "success_metric": answers.success_metric,
         "budget": answers.budget,

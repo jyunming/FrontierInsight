@@ -41,6 +41,7 @@ TopicType = Literal[
     "simulation",         # run code, measure something
     "data_analysis",      # analyse supplied / collected data, no simulation
     "literature_review",  # synthesise existing published work
+    "survey",             # descriptive / historical synthesis, no experiment AND no dataset
     "case_study",         # characterise one system
     "market_current",     # markets / current events — needs recent sources
     "engineering",        # build/spec a system
@@ -74,6 +75,7 @@ ROUTE_MATRIX: dict[str, dict[str, str]] = {
     "simulation":        {"path": "simulation",    "source_policy": "academic"},
     "data_analysis":     {"path": "no_simulation", "source_policy": "user_data"},
     "literature_review": {"path": "no_simulation", "source_policy": "academic"},
+    "survey":            {"path": "no_simulation", "source_policy": "academic"},
     "case_study":        {"path": "no_simulation", "source_policy": "mixed"},
     "market_current":    {"path": "no_simulation", "source_policy": "web_current"},
     "engineering":       {"path": "simulation",    "source_policy": "academic"},
@@ -154,6 +156,9 @@ _EXPECTED_EVIDENCE: dict[str, str] = {
         "the user's / collected dataset, analysed; supporting literature",
     "literature_review":
         "a representative, on-topic body of published sources to synthesise",
+    "survey":
+        "a representative, on-topic body of published sources to synthesise "
+        "into a descriptive history / overview — no experiment or dataset",
     "case_study":
         "concrete evidence about the one system in question + comparable "
         "prior cases",
@@ -196,6 +201,8 @@ def _derive_topic_type(topic_shape: str, no_simulation: bool) -> TopicType:
     decision onto a TopicType. (market_current / engineering aren't in
     topic_shape yet — the LLM-classified follow-up will reach them.)"""
     shape = (topic_shape or "").strip().lower()
+    if shape == "survey":
+        return "survey"
     if shape == "review":
         return "literature_review"
     if shape == "case_study":
@@ -222,8 +229,8 @@ def derive_protocol(state: dict[str, Any], config: Any) -> ResearchProtocol:
     # ``market_current`` branch of ROUTE_MATRIX (source_policy=web_current)
     # was unreachable dead code. Only upgrade non-experimental shapes — a
     # genuine simulation keeps its type.
-    if topic_type in ("data_analysis", "literature_review", "case_study",
-                      "unknown") and _looks_market_current(state.get("topic")):
+    if topic_type in ("data_analysis", "literature_review", "survey",
+                      "case_study", "unknown") and _looks_market_current(state.get("topic")):
         topic_type = "market_current"
     expected_evidence = _EXPECTED_EVIDENCE.get(
         topic_type, _EXPECTED_EVIDENCE["unknown"])

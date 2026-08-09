@@ -64,7 +64,7 @@ Full setup, cost trade-offs, and the billing model per provider are in **[docs/r
 
 - **Whole loop, not just the LLM call** — ideate → literature → code → run → analyze → write → review, end to end, without you driving each step. It even fixes its own code when the experiment crashes.
 - **Built-in rigor** — an **evidence gate** weighs the assembled evidence before any paper is written; **claim grounding** traces every substantive claim to the experiment or a cited source; an optional **reviewer panel** (methodologist / statistician / devil's advocate) hard-flags fatal patterns.
-- **Two research modes** — run a real Python experiment in a sandboxed venv, *or* a **no-simulation** path that analyses data you supply (or that FI auto-collects from the web + dataset adapters) — for market, policy, or archival topics with no code to run.
+- **Three research modes** — run a real Python experiment in a sandboxed venv; a **no-simulation** path that analyses data you supply (or that FI auto-collects from the web + dataset adapters) for market, policy, or archival topics; *or* a **survey** path — a descriptive history / overview synthesised purely from the literature, with no experiment and no dataset, for "history of X" / "evolution of X" topics.
 - **Knows the literature** — academic **and** open-web research, with real citations exported as BibTeX / CSL-JSON, and figures derived from web-collected data.
 - **Three interfaces, one engine** — CLI, web UI, and VSCode chat all drive the same pipeline; every feature works in all three.
 - **Runs on locked-down machines** — no-admin LaTeX (`--install-tectonic`), *or* a **LaTeX-free HTML/Chromium PDF fallback** that needs only pandoc + a browser and matches the LaTeX look.

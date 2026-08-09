@@ -140,7 +140,11 @@ async def test_clarify_off_skips_node(tmp_path: Path, monkeypatch) -> None:
     # visible at the state level (not just inferred from YAML/clarify
     # downstream). With clarify_mode='off' and ``engine.no_simulation``
     # unset, the resolved flag is False.
-    assert patch == {"clarify_done": True, "no_simulation_resolved": False}
+    assert patch == {
+        "clarify_done": True,
+        "no_simulation_resolved": False,
+        "survey_mode_resolved": False,
+    }
     assert chat_calls == []  # LLM was never invoked
 
 

@@ -308,6 +308,31 @@ def test_yaml_emits_prose_format_with_no_simulation() -> None:
     assert cfg.engine.clarify_overrides["simulatability"] == "no"
 
 
+def test_yaml_emits_survey_mode_and_couples_no_simulation() -> None:
+    """survey_mode=True emits ``engine.survey_mode: true`` AND forces
+    ``no_simulation: true`` + ``simulatability: no`` even when the user left
+    no_simulation False — survey has no experiment and no dataset."""
+    answers = _sample_answers(
+        paper_format="report", no_simulation=False, survey_mode=True,
+    )
+    yaml_text = answers_to_yaml(answers, frontend="cli")
+    assert "survey_mode: true" in yaml_text
+    data = yaml.safe_load(yaml_text)
+    cfg = Config.model_validate(data)
+    assert cfg.engine.survey_mode is True
+    assert cfg.engine.no_simulation is True  # coupled
+    assert cfg.engine.clarify_overrides["simulatability"] == "no"
+
+
+def test_yaml_omits_survey_mode_when_off() -> None:
+    """The common (non-survey) case emits no survey_mode line and keeps the
+    default False on the validated Config."""
+    yaml_text = answers_to_yaml(_sample_answers(), frontend="cli")
+    assert "survey_mode" not in yaml_text
+    cfg = Config.model_validate(yaml.safe_load(yaml_text))
+    assert cfg.engine.survey_mode is False
+
+
 def test_yaml_omits_provider_model_when_unset() -> None:
     """VSCode passes provider_model=None when the active Copilot model
     hasn't been captured yet. The emitter must NOT write

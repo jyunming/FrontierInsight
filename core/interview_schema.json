@@ -312,6 +312,34 @@
       "tier": 2
     },
     {
+      "id": "survey_mode",
+      "label": "Literature synthesis (survey) mode",
+      "prompt": "Is this a pure literature / history synthesis (a history, overview, or evolution of a subject) with NO experiment and NO dataset? If yes, the engine skips both and writes a descriptive synthesis. Auto-suggested for history/overview topics.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "No — run an experiment or analyse data (default)",
+          "description": "Normal pipeline: the engine designs an experiment (or, for observational topics, analyses collected data)."
+        },
+        {
+          "value": true,
+          "label": "Yes — a literature / history synthesis, no experiment or data",
+          "description": "Skip BOTH the experiment AND the dataset. The paper is a descriptive history / overview synthesised from the cited sources, with license-clean illustrative images. For 'history of X' / 'evolution of X' / overview topics. Implies observational."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 2
+    },
+    {
       "id": "clarify_mode",
       "label": "Pre-flight clarification mode",
       "prompt": "Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",

@@ -542,6 +542,18 @@
   // them in the review screen before launch.
   const PROSE_FORMATS = new Set(['essay', 'report', 'policy_brief', 'whitepaper']);
 
+  // Topic markers that auto-suggest survey mode (a descriptive history /
+  // overview synthesis, no experiment, no dataset). Mirrors
+  // core/interview.py:_SURVEY_TOPIC_MARKERS.
+  const SURVEY_TOPIC_MARKERS = [
+    'history of', 'evolution of', 'overview of', 'development of',
+    'retrospective', 'the story of', 'a survey of', 'over time',
+  ];
+  function looksLikeSurvey(topic) {
+    const t = String(topic || '').toLowerCase();
+    return SURVEY_TOPIC_MARKERS.some((m) => t.includes(m));
+  }
+
   function slugifyTopic(t) {
     return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'quest';
   }
@@ -560,7 +572,11 @@
   async function deriveTier2(tier1) {
     return {
       title: slugifyTopic(tier1.topic),
-      no_simulation: PROSE_FORMATS.has(tier1.paper_format),
+      // survey_mode implies no_simulation, so a "history of …" topic forces
+      // observational even under a scientific paper_format — keeps the review
+      // screen + payload consistent with the runtime invariant.
+      no_simulation: PROSE_FORMATS.has(tier1.paper_format) || looksLikeSurvey(tier1.topic),
+      survey_mode: looksLikeSurvey(tier1.topic),
       clarify_mode: 'auto',
       // Match the Python smart default: a 3-persona panel. An empty list
       // means single-reviewer and silently disables must-flag enforcement

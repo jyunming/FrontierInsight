@@ -34,6 +34,11 @@ export interface InterviewAnswers {
     review_panel: string[];           // empty = single reviewer
     knowledge_enabled: boolean;
     no_simulation: boolean;
+    // Survey mode — a descriptive literature / history synthesis with NO
+    // experiment AND NO dataset (the third "research approach"). Emitted as
+    // engine.survey_mode; implies no_simulation at runtime. Off by default.
+    // Must stay in sync with core/interview.py:InterviewAnswers.survey_mode.
+    survey_mode?: boolean;
     // Study depth + three topic-tuned clarify slots. The interview
     // collects them so the engine's clarify node short-circuits in
     // auto mode (pinned values win over LLM-generated defaults).
@@ -209,7 +214,15 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}framework: "langgraph"`);
     lines.push(`${indent}max_iterations: ${answers.max_iterations}`);
     lines.push(`${indent}review_loop: true`);
-    lines.push(`${indent}no_simulation: ${answers.no_simulation ? "true" : "false"}`);
+    // Survey mode implies no-simulation (no experiment AND no dataset), so
+    // the emitted no_simulation flag is the OR of the two — mirrors
+    // core/interview.py:answers_to_yaml.
+    const surveyMode = answers.survey_mode === true;
+    const noSimulation = answers.no_simulation || surveyMode;
+    lines.push(`${indent}no_simulation: ${noSimulation ? "true" : "false"}`);
+    if (surveyMode) {
+        lines.push(`${indent}survey_mode: true`);
+    }
     // ---- COST DISCIPLINE — these defaults are LOW so a basic quest is
     // ~6 LLM calls instead of ~26. Each line below switches off an
     // expensive feature that the Python defaults turn ON. A user who
@@ -234,7 +247,7 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}${indent}paper_venue: "${yamlEscape(answers.paper_format)}"`);
     const kindsCsv = answers.output_kinds.map((k) => `"${yamlEscape(k)}"`).join(", ");
     lines.push(`${indent}${indent}output_kinds: [${kindsCsv}]`);
-    lines.push(`${indent}${indent}simulatability: "${answers.no_simulation ? "no" : "yes"}"`);
+    lines.push(`${indent}${indent}simulatability: "${noSimulation ? "no" : "yes"}"`);
     lines.push(`${indent}${indent}comparative_baseline: "${yamlEscape(answers.comparative_baseline)}"`);
     lines.push(`${indent}${indent}success_metric: "${yamlEscape(answers.success_metric)}"`);
     lines.push(`${indent}${indent}budget: "${yamlEscape(answers.budget)}"`);

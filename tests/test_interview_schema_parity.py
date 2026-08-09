@@ -83,12 +83,13 @@ def test_ts_interview_answers_has_all_python_managed_fields() -> None:
     required_fields = (
         "topic", "title", "output_kinds", "paper_format",
         "clarify_mode", "review_panel", "knowledge_enabled",
-        "no_simulation", "study_depth", "comparative_baseline",
+        "no_simulation", "survey_mode", "study_depth", "comparative_baseline",
         "success_metric", "budget", "provider_model",
         "max_iterations",
     )
     for field in required_fields:
-        assert re.search(rf"\b{field}\s*:", body), (
+        # ``\??`` tolerates optional TS fields (e.g. ``survey_mode?: boolean``).
+        assert re.search(rf"\b{field}\??\s*:", body), (
             f"TS InterviewAnswers is missing field {field!r}. "
             f"All Python interview answers must round-trip to YAML "
             f"identically — the parity test is here so adding a "

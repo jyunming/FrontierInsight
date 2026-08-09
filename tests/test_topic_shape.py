@@ -290,3 +290,90 @@ def test_design_prompt_reads_topic_shape_signal() -> None:
         "design prompt missing the narrow-illustrative scope guidance "
         "for review-shaped topics"
     )
+
+
+# --- survey mode (no experiment AND no dataset) -----------------------------
+
+
+def _mk_engine_survey(tmp_path: Path, *, survey_mode: bool = False) -> Engine:
+    cfg = Config(
+        topic="the evolution of sculpture in pop culture",
+        title="sculpt-history",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False, clarify_mode="auto",
+            survey_mode=survey_mode,
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    return Engine(cfg)
+
+
+def test_survey_via_topic_shape_resolves_and_implies_no_sim(tmp_path: Path) -> None:
+    """The clarify agent classifying ``topic_shape == 'survey'`` turns on
+    survey mode, and survey ALWAYS implies no-simulation (no experiment,
+    no dataset)."""
+    eng = _mk_engine_survey(tmp_path)
+    assert eng._resolve_survey_from_clarify({"topic_shape": "survey"}) is True
+    modes = eng._resolve_modes({"topic_shape": "survey"})
+    assert modes == {
+        "survey_mode_resolved": True, "no_simulation_resolved": True,
+    }
+
+
+def test_survey_via_yaml_flag_resolves(tmp_path: Path) -> None:
+    """``engine.survey_mode: true`` pins survey mode regardless of clarify."""
+    eng = _mk_engine_survey(tmp_path, survey_mode=True)
+    assert eng._resolve_survey_from_clarify({}) is True
+    assert eng._resolve_modes({}) == {
+        "survey_mode_resolved": True, "no_simulation_resolved": True,
+    }
+
+
+def test_non_survey_shapes_are_not_survey(tmp_path: Path) -> None:
+    """experimental / review are NOT survey. review still resolves to the
+    data (no-sim) path only when simulatability says so — never survey."""
+    eng = _mk_engine_survey(tmp_path)
+    assert eng._resolve_modes({"topic_shape": "experimental"}) == {
+        "survey_mode_resolved": False, "no_simulation_resolved": False,
+    }
+    # review + simulatability:no → no-sim data path, but NOT survey.
+    assert eng._resolve_modes(
+        {"topic_shape": "review", "simulatability": "no"}
+    ) == {"survey_mode_resolved": False, "no_simulation_resolved": True}
+
+
+def test_route_after_design_survey_goes_to_synthesize(tmp_path: Path) -> None:
+    """Survey mode routes design → web_figures (illustrative images) → analyze,
+    skipping BOTH the experiment and the data-collection chain."""
+    eng = _mk_engine_survey(tmp_path)
+    assert eng._route_after_design({"survey_mode_resolved": True}) == "synthesize"
+    # A plain no-sim (non-survey) quest still takes the data path.
+    assert eng._route_after_design(
+        {"no_simulation_resolved": True}
+    ) == "auto_collect_data"
+    assert eng._route_after_design({}) == "implement"
+
+
+def test_default_clarify_questions_include_survey(tmp_path: Path) -> None:
+    q = _default_clarify_questions("history of X")
+    assert "survey" in q["topic_shape"]["question"].lower()
+
+
+def test_clarify_prompt_carries_survey_vocabulary() -> None:
+    text = (PROMPTS_DIR / "clarify.md").read_text(encoding="utf-8")
+    assert "survey" in text.lower(), "clarify prompt missing survey shape"
+    # The design prompt must tell the survey path to NOT design an experiment.
+    design = (PROMPTS_DIR / "design.md").read_text(encoding="utf-8")
+    assert "survey" in design.lower()
+
+
+def test_protocol_survey_topic_type_maps_to_no_simulation() -> None:
+    from core.protocol import (
+        _derive_topic_type, route_for_topic_type, source_policy_for,
+    )
+    assert _derive_topic_type("survey", True) == "survey"
+    assert route_for_topic_type("survey") == "no_simulation"
+    assert source_policy_for("survey") == "academic"
