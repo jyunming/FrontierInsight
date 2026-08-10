@@ -657,3 +657,54 @@ def test_direct_defaults_have_required_keys():
         assert "base_url" in d, name
         assert "model" in d, name
         assert "api_key_env" in d, name
+
+
+# --- retry-classification predicates (PR-2) --------------------------------
+# HTTP: retry only 5xx/429, never deterministic 4xx. CLI: retry transients
+# except long-duration session/usage/credit limits and auth failures.
+
+import httpx  # noqa: E402
+from core.provider import (  # noqa: E402
+    _retry_http_error, _retry_cli_error, _CliTransientError,
+)
+
+
+def _http_status_error(code: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "http://x/v1/chat/completions")
+    resp = httpx.Response(code, request=req)
+    return httpx.HTTPStatusError(f"{code}", request=req, response=resp)
+
+
+def test_retry_http_error_retries_5xx_and_429_only() -> None:
+    assert _retry_http_error(_http_status_error(500)) is True
+    assert _retry_http_error(_http_status_error(503)) is True
+    assert _retry_http_error(_http_status_error(429)) is True
+    # Deterministic 4xx must NOT retry (bad key / quota / oversized body).
+    for code in (400, 401, 403, 404, 422):
+        assert _retry_http_error(_http_status_error(code)) is False, code
+    # Genuine transport transients still retry.
+    assert _retry_http_error(httpx.ConnectError("boom")) is True
+    assert _retry_http_error(httpx.ReadTimeout("slow")) is True
+    # Unrelated errors don't retry.
+    assert _retry_http_error(ValueError("nope")) is False
+
+
+def test_retry_cli_error_aborts_fast_on_fatal_markers() -> None:
+    # Ordinary transients retry.
+    assert _retry_cli_error(OSError("spawn failed")) is True
+    assert _retry_cli_error(_CliTransientError("codex exited rc=1: connection reset")) is True
+    # A momentary rate-limit (short reset) is still worth a retry.
+    assert _retry_cli_error(_CliTransientError("rate limit exceeded · resets in 30s")) is True
+    # Long-duration limits / auth failures abort immediately (no doomed retries).
+    fatal = [
+        "You've hit your session limit · resets 2:30am (Europe/Brussels)",
+        "claude usage limit reached",
+        "out of credits - upgrade your plan",
+        "copilot.EXE exited rc=1: Your GitHub token may be invalid, expired",
+        "ensure it has the 'Copilot Requests' permission",
+        "run '/login' to re-authenticate",
+    ]
+    for msg in fatal:
+        assert _retry_cli_error(_CliTransientError(msg)) is False, msg
+    # Unrelated errors don't retry.
+    assert _retry_cli_error(ValueError("nope")) is False

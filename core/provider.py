@@ -594,6 +594,55 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "claude usage limit reached",
 )
 
+# Long-duration / non-recoverable CLI failures: an hours-away session or usage
+# limit, exhausted credits, or a dead / mis-scoped auth token. These CANNOT
+# clear within the ~4-attempt retry window, so retrying just burns 3-4
+# multi-minute calls before crashing anyway (the failure mode that truncated an
+# earlier run here). Matched case-insensitively against the CLI error message
+# (which carries the CLI's stderr). Deliberately separate from the momentary
+# "rate limit exceeded · resets <soon>" case, which IS worth a retry.
+_CLI_FATAL_MARKERS: tuple[str, ...] = (
+    "session limit",
+    "usage limit reached",
+    "out of credits",
+    "token may be invalid",
+    "copilot requests",          # gh token lacking the Copilot scope
+    "run '/login'",
+    "re-authenticate",
+)
+
+
+def _retry_http_error(exc: BaseException) -> bool:
+    """HTTP retry predicate: retry genuine transients only. A 4xx (bad/expired
+    key, content policy, malformed or oversized body) is deterministic —
+    retrying wastes the backoff budget and crashes anyway — so only 5xx and 429
+    are retried alongside transport / read-timeout errors. (The prior
+    ``retry_if_exception_type(HTTPStatusError)`` retried every 4xx despite the
+    inline comment claiming it didn't.)"""
+    if isinstance(exc, (httpx.TransportError, httpx.ReadTimeout)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        resp = getattr(exc, "response", None)
+        sc = getattr(resp, "status_code", None)
+        if isinstance(sc, int):
+            return sc >= 500 or sc == 429
+        # A real HTTP error always carries an int status; a malformed/absent
+        # one is surfaced rather than looped.
+        return False
+    return False
+
+
+def _retry_cli_error(exc: BaseException) -> bool:
+    """CLI retry predicate: retry OSErrors and transient CLI failures, EXCEPT a
+    long-duration session/usage/credit limit or an auth failure (see
+    ``_CLI_FATAL_MARKERS``) — those can't clear within the retry window, so
+    abort fast with the original message rather than burning the budget."""
+    if isinstance(exc, OSError):
+        return True
+    if isinstance(exc, _CliTransientError):
+        return not any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+    return False
+
 # Placeholder / "I gave up" patterns that some CLIs emit instead of a
 # real response. Distinct from refusal — these signal the LLM lost the
 # plot mid-call rather than declining to help.
@@ -1777,16 +1826,15 @@ class LLMClient:
             # the upstream. Random-exponential spreads them out over
             # a window so the upstream sees a gentler ramp.
             wait=wait_random_exponential(multiplier=1, max=20),
-            retry=retry_if_exception_type(
-                (httpx.HTTPStatusError, httpx.TransportError, httpx.ReadTimeout)
-            ),
+            retry=retry_if_exception(_retry_http_error),
             reraise=True,
         ):
             with attempt:
                 r = await self._http.post(url, json=body, headers=headers)
-                if r.status_code >= 500:
-                    r.raise_for_status()
-                # 4xx surfaces immediately — no retry on auth/quota errors.
+                # Raise for any error status; the retry predicate
+                # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                # (bad key, quota, content policy, oversized body) surface
+                # immediately instead of burning the backoff budget.
                 r.raise_for_status()
         data = r.json()
         # Capture token usage when the upstream returned
@@ -2044,7 +2092,7 @@ class LLMClient:
             # uniform random value from [0, multiplier * 2^attempt],
             # capped at ``max``, which spreads retries over a window.
             wait=wait_random_exponential(multiplier=1, max=20),
-            retry=retry_if_exception_type((OSError, _CliTransientError)),
+            retry=retry_if_exception(_retry_cli_error),
             reraise=True,
             before_sleep=_retry_log,
         ):
