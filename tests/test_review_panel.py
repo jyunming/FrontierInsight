@@ -526,3 +526,74 @@ def test_methodologist_persona_closer_requires_low_score_with_must_flag() -> Non
         "shortcut fires (otherwise the design loop is silently "
         "outvoted in panel mode)."
     )
+
+
+# --- Crash-safety: review runs AFTER the paper is written -----------------
+# A transient provider failure in review must NOT abort the quest and forfeit
+# the finished paper + its outputs (pdf/slides/poster/speech run only after
+# run() returns). Same fail-open class as the claim_check fix.
+
+
+def _paper_on_disk(eng: Engine) -> Path:
+    p = eng.quest_root / "paper" / "paper.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# title\n\nbody.\n", encoding="utf-8")
+    return p
+
+
+@pytest.mark.asyncio
+async def test_review_single_reviewer_provider_failure_is_non_fatal(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, panel=[]))
+    paper = _paper_on_disk(eng)
+
+    async def boom(prompt, *, node: str = ""):  # noqa: ANN001
+        raise RuntimeError("Copilot backend unavailable / bridge stalled")
+    eng._chat = boom  # type: ignore[assignment,method-assign]
+
+    # Does NOT raise — degrades to accept so the finished paper still renders.
+    patch = await eng._node_review(
+        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    assert patch["review"]["verdict"] == "accept"
+    assert "iteration" not in patch  # accept + no must-flags → no revise loop
+
+
+@pytest.mark.asyncio
+async def test_review_panel_one_panelist_failure_degrades_not_aborts(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, panel=["methodologist", "statistician", "devil_advocate"]))
+    paper = _paper_on_disk(eng)
+
+    async def flaky(prompt, *, node: str = ""):  # noqa: ANN001
+        if node == "review_panel.statistician":
+            raise RuntimeError("provider timeout for this persona")
+        if node == "review_moderator":
+            return "{}"
+        return json.dumps({"verdict": "accept", "score": 4, "strengths": [],
+                           "weaknesses": [], "suggestions": [], "blocking": ""})
+    eng._chat = flaky  # type: ignore[assignment,method-assign]
+
+    patch = await eng._node_review(
+        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    panel = patch["review_panel"]
+    assert len(panel) == 3  # the failed persona is recorded (degraded), not dropped
+    assert {r["persona"] for r in panel} == {"methodologist", "statistician", "devil_advocate"}
+    by = {r["persona"]: r for r in panel}
+    assert by["statistician"]["verdict"] == "accept"  # neutral degrade
+    assert patch["review"]["verdict"] == "accept"     # 3 accepts → accept, no crash
+
+
+@pytest.mark.asyncio
+async def test_review_panel_all_panelists_failure_is_non_fatal(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, panel=["methodologist", "statistician"]))
+    paper = _paper_on_disk(eng)
+
+    async def boom(prompt, *, node: str = ""):  # noqa: ANN001
+        if node == "review_moderator":
+            return "{}"
+        raise RuntimeError("all providers down")
+    eng._chat = boom  # type: ignore[assignment,method-assign]
+
+    # Every panelist's provider call fails — still no crash, accept as-is.
+    patch = await eng._node_review(
+        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    assert patch["review"]["verdict"] == "accept"
+    assert len(patch["review_panel"]) == 2

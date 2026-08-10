@@ -4655,8 +4655,20 @@ class Engine:
 
         panel_names = list(self.config.engine.review_panel or [])
         if not panel_names:
-            # Legacy single-reviewer path — unchanged behavior.
-            text = await self._chat(base_prompt, node="review")
+            # Legacy single-reviewer path. Review runs AFTER the paper is
+            # written, and the output generators (pdf/slides/poster/speech) run
+            # only after run() returns — so a transient provider failure here
+            # must NOT abort the quest and forfeit the finished paper + its
+            # outputs. Fail open to "accept" (the same degrade the parse-miss
+            # path below already uses, and the pattern applied to claim_check).
+            try:
+                text = await self._chat(base_prompt, node="review")
+            except Exception as e:
+                self._log.warning(
+                    "[review] review call failed (%s); accepting the paper "
+                    "as-is so its outputs still render", e,
+                )
+                text = ""
             review = _parse_json_lenient(text) or {
                 "verdict": "accept", "score": 3, "suggestions": [],
             }
@@ -4699,7 +4711,14 @@ class Engine:
                         "suggestions": [], "blocking": "",
                         "error": str(e)}
             prompt = f"{prefix}\n\n{base_prompt}"
-            text = await self._chat(prompt, node=f"review_panel.{name}")
+            try:
+                text = await self._chat(prompt, node=f"review_panel.{name}")
+            except Exception as e:
+                self._log.warning(
+                    "[review] panelist %s failed (%s); recording a neutral "
+                    "accept for this persona", name, e,
+                )
+                text = ""
             parsed = _parse_json_lenient(text) or {}
             mfh = parsed.get("must_flag_hits") or []
             if not isinstance(mfh, list):
@@ -4715,10 +4734,32 @@ class Engine:
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
             }
 
-        panel_results = await asyncio.gather(
+        # return_exceptions=True is defense in depth: run_persona already
+        # degrades a failed persona to a neutral accept, but a panelist must
+        # never be able to abort the whole (post-write) review and forfeit the
+        # paper's outputs. Drop any unexpected raise, propagate genuine
+        # cancellation, and if EVERY panelist somehow failed, accept as-is.
+        panel_results_raw = await asyncio.gather(
             *(run_persona(n) for n in panel_names),
-            return_exceptions=False,
+            return_exceptions=True,
         )
+        panel_results: list[dict[str, Any]] = []
+        for r in panel_results_raw:
+            if isinstance(r, asyncio.CancelledError):
+                raise r
+            if isinstance(r, BaseException):
+                self._log.warning("[review] a panelist raised unexpectedly: %r", r)
+            elif isinstance(r, dict):
+                panel_results.append(r)
+        if not panel_results:
+            self._log.warning(
+                "[review] all panelists failed; accepting the paper as-is",
+            )
+            panel_results = [{
+                "persona": panel_names[0], "verdict": "accept", "score": 3,
+                "strengths": [], "weaknesses": [], "suggestions": [],
+                "blocking": "", "must_flag_hits": [],
+            }]
         agg = _aggregate_panel_reviews(list(panel_results))
 
         # Moderator call — best effort for the rationale + suggestion
