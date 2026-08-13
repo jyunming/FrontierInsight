@@ -317,7 +317,24 @@ class ProxySupervisor:
     """
 
     _handles: dict[str, _ProxyHandle] = field(default_factory=dict)
+    # Fast lock: guards ONLY the _handles / _key_locks bookkeeping dicts. It is
+    # NEVER held across a blocking spawn or terminate.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Per-canonical-key locks: serialize spawn/teardown for the SAME provider
+    # (so a proxy is never double-spawned) while letting DIFFERENT providers
+    # spawn concurrently. Previously a single global lock was held across the
+    # up-to-60s ``_spawn`` warmup, so in a --fleet one provider's proxy startup
+    # blocked EVERY other provider's acquire — serializing all proxy warmups.
+    _key_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+
+    async def _key_lock(self, key: str) -> asyncio.Lock:
+        """Get-or-create the per-key lock under the fast bookkeeping lock."""
+        async with self._lock:
+            lk = self._key_locks.get(key)
+            if lk is None:
+                lk = asyncio.Lock()
+                self._key_locks[key] = lk
+            return lk
 
     async def acquire(self, provider_name: str) -> _ProxyHandle:
         if provider_name not in _PROXY_PROVIDERS:
@@ -325,48 +342,60 @@ class ProxySupervisor:
         # Canonicalize aliases (e.g. github_copilot_vscode → github_copilot_cli)
         # so two aliases that spawn the same proxy share a single handle.
         key = _canonical_proxy_name(provider_name)
-        async with self._lock:
-            handle = self._handles.get(key)
+        key_lock = await self._key_lock(key)
+        # Per-key lock: a slow spawn for THIS provider must not block acquires
+        # of OTHER providers, but two acquires of the same provider must not
+        # both spawn.
+        async with key_lock:
+            async with self._lock:
+                handle = self._handles.get(key)
             if handle is None:
                 # `_spawn` ends with a blocking poll of `/v1/models` (up to
-                # 60s). Run it in a worker thread so concurrent quests doing
-                # other work don't stall the event loop while one of them
-                # waits for the proxy to come up.
+                # 60s). Run it in a worker thread AND outside the global lock,
+                # so only same-key acquires wait for it.
                 handle = await asyncio.to_thread(self._spawn, key)
-                self._handles[key] = handle
-            handle.refcount += 1
+                async with self._lock:
+                    self._handles[key] = handle
+            async with self._lock:
+                handle.refcount += 1
             return handle
 
     async def release(self, provider_name: str) -> None:
         key = _canonical_proxy_name(provider_name)
-        async with self._lock:
-            handle = self._handles.get(key)
-            if handle is None:
-                return
-            handle.refcount -= 1
-            if handle.refcount <= 0:
-                handle.proc.terminate()
-                try:
-                    handle.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    handle.proc.kill()
-                # Use the canonical key so the entry the terminated
-                # handle is actually stored under gets removed.
-                # Without this, releasing via a non-canonical alias
-                # leaves a dead handle in _handles and the next
-                # acquire returns it without respawning.
-                self._handles.pop(key, None)
+        key_lock = await self._key_lock(key)
+        async with key_lock:
+            async with self._lock:
+                handle = self._handles.get(key)
+                if handle is None:
+                    return
+                handle.refcount -= 1
+                teardown = handle.refcount <= 0
+                if teardown:
+                    # Remove under the global lock BEFORE the (blocking)
+                    # terminate, using the canonical key so releasing via a
+                    # non-canonical alias can't strand a dead handle. A same-key
+                    # acquire waits on this key lock and respawns cleanly.
+                    self._handles.pop(key, None)
+            if teardown:
+                await asyncio.to_thread(self._terminate, handle)
 
     async def shutdown(self) -> None:
         async with self._lock:
-            for h in list(self._handles.values()):
-                h.proc.terminate()
-            for h in list(self._handles.values()):
-                try:
-                    h.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    h.proc.kill()
+            handles = list(self._handles.values())
             self._handles.clear()
+        # Terminate off the event loop so the up-to-5s waits never stall it.
+        for h in handles:
+            await asyncio.to_thread(self._terminate, h)
+
+    @staticmethod
+    def _terminate(handle: _ProxyHandle) -> None:
+        """Blocking best-effort teardown of one proxy process. Run via
+        ``asyncio.to_thread`` so the up-to-5s wait never stalls the loop."""
+        handle.proc.terminate()
+        try:
+            handle.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            handle.proc.kill()
 
     def _spawn(self, provider_name: str) -> _ProxyHandle:
         port = _free_port()

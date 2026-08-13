@@ -24,9 +24,16 @@ env/
 outputs/
 *.log
 
-# Pytest scratch (per pytest.ini basetemp).
-.pytest_tmp/
+# Pytest scratch (per pytest.ini basetemp). The glob also covers the
+# suffixed basetemps individual test runs use (.pytest_tmp_config,
+# .pytest_tmp_fast, …) so per-run scratch dirs never show up as untracked.
+.pytest_tmp*
 .pytest_cache/
+# Coverage artifacts (pytest-cov / --cov-fail-under in CI).
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 .testmondata*
 tstex_modules/
 tools/

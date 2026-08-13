@@ -669,6 +669,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
+    if args.fleet and args.profile:
+        p.error(
+            "--profile cannot be combined with --fleet: viztracer would trace "
+            "N concurrent quests into overlapping spans in one process, "
+            "producing an unreadable/garbled trace. Profile a single quest "
+            "(--config <one.yaml> --profile) instead."
+        )
     if args.ingest and args.output is not None:
         p.error("--output is irrelevant in --ingest mode.")
     if args.resume and not args.config:

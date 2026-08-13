@@ -56,6 +56,20 @@ def test_parse_args_profile_and_memory_cap() -> None:
     assert args.memory_cap_mb == 2048
 
 
+def test_parse_args_profile_and_fleet_rejected() -> None:
+    """--profile + --fleet is nonsense: viztracer would trace N concurrent
+    quests into overlapping spans in one process. Must be rejected."""
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--fleet", "a.yaml", "b.yaml", "--profile"])
+
+
+def test_parse_args_profile_with_single_config_ok() -> None:
+    """--profile with a single --config quest stays valid (the guard is
+    specific to --fleet)."""
+    args = launch.parse_args(["--config", "one.yaml", "--profile"])
+    assert args.profile is True and args.fleet is None
+
+
 def test_parse_args_resume_requires_config() -> None:
     """--resume without --config is rejected (fleet/serve/ingest can't resume)."""
     with pytest.raises(SystemExit):
