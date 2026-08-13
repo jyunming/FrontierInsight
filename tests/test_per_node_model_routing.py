@@ -106,7 +106,7 @@ async def test_http_chat_uses_per_call_model_override() -> None:
     ep = resolve_endpoint(ProviderConfig(name="openai", model="default-model"))
     captured: dict = {}
 
-    async def fake_post(url, json=None, headers=None):  # noqa: ANN001
+    async def fake_post(url, json=None, headers=None, timeout=None):  # noqa: ANN001
         captured["url"] = url
         captured["body"] = json
         resp = MagicMock()
@@ -135,7 +135,7 @@ async def test_http_chat_falls_back_to_endpoint_model_when_no_override() -> None
     ep = resolve_endpoint(ProviderConfig(name="openai", model="default-model"))
     captured: dict = {}
 
-    async def fake_post(url, json=None, headers=None):  # noqa: ANN001
+    async def fake_post(url, json=None, headers=None, timeout=None):  # noqa: ANN001
         captured["body"] = json
         resp = MagicMock()
         resp.status_code = 200
