@@ -99,6 +99,15 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+    # Ordered provider names to fall back to when the primary provider
+    # terminally fails a chat call (after its own in-provider retries) —
+    # e.g. ``["codex_cli", "gemini_cli"]``. Empty (default) keeps the
+    # unchanged single-provider behaviour. Each fallback is resolved
+    # lazily on first use (its proxy, if any, spins up only when the
+    # primary is actually failing) and gets its own circuit breaker:
+    # after repeated failures — or one auth/quota error — it is skipped
+    # for the rest of the run. See ``core.provider.FallbackLLMClient``.
+    fallback: list[ProviderName] = Field(default_factory=list)
     # Wall-clock budget (seconds) for a single chat call on transports
     # that lack a built-in per-request deadline. Applies to:
     #

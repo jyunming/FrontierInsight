@@ -2177,3 +2177,157 @@ class LLMClient:
                     node=node,
                 )
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
+
+
+# ---------------------------------------------------------------------------
+# Provider fallback chain + per-provider circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def _is_fatal_provider_error(exc: BaseException) -> bool:
+    """A provider failure that won't clear within the run — auth/quota/credit
+    exhaustion — so the breaker should open immediately rather than after the
+    usual failure threshold. Transient blips (5xx, timeouts) trip only after
+    repeated failures."""
+    if isinstance(exc, _CliTransientError):
+        return any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+    if isinstance(exc, httpx.HTTPStatusError):
+        sc = getattr(getattr(exc, "response", None), "status_code", None)
+        return isinstance(sc, int) and sc in (401, 403, 402)
+    return False
+
+
+@dataclass
+class _FallbackSlot:
+    """One rung of the fallback chain: a provider plus its breaker state."""
+
+    label: str
+    # ``None`` for the primary (already constructed); an async factory for
+    # lazily-built fallbacks (their proxy, if any, spins up only on first use).
+    factory: "Callable[[], Any] | None"
+    client: "LLMClient | None" = None
+    failures: int = 0
+    tripped: bool = False  # circuit open — skipped for the rest of the run
+
+    def record_failure(self, threshold: int, *, fatal: bool) -> None:
+        self.failures += 1
+        if fatal or self.failures >= threshold:
+            self.tripped = True
+
+
+class FallbackLLMClient:
+    """Try an ordered chain of providers so a single provider's outage (rate
+    limit, auth failure, proxy crash) doesn't forfeit the whole quest.
+
+    ``chat`` calls the primary; if it terminally fails (after the primary's own
+    in-provider tenacity retries), the call moves to the next provider, and so
+    on. Each provider has a **circuit breaker**: after ``breaker_threshold``
+    failures — or a single auth/quota error — its circuit opens and it is
+    skipped for the rest of the run, so subsequent calls jump straight to a
+    live provider instead of re-burning the dead one's retry budget on every
+    call. Fallbacks are built lazily (nothing is resolved or spawned until the
+    primary actually fails), and the provider names of any fallbacks that were
+    materialised are recorded in :attr:`built_fallback_providers` so the caller
+    can release their proxies on shutdown.
+
+    Presents the read surface the Engine uses on a plain ``LLMClient``
+    (``chat`` / ``last_model`` / ``last_usage`` / ``aclose``); ``last_model``
+    and ``last_usage`` reflect whichever provider served the most recent call.
+    """
+
+    def __init__(
+        self,
+        primary: "LLMClient",
+        factories: "list[tuple[str, Callable[[], Any]]]" = (),
+        *,
+        breaker_threshold: int = 2,
+        log: "logging.Logger | None" = None,
+    ) -> None:
+        self._log = log or logging.getLogger("fi.provider.fallback")
+        primary_label = getattr(
+            getattr(primary, "endpoint", None), "provider_name", None,
+        ) or "primary"
+        self._slots: list[_FallbackSlot] = [
+            _FallbackSlot(label=primary_label, factory=None, client=primary)
+        ]
+        for name, factory in factories:
+            self._slots.append(_FallbackSlot(label=name, factory=factory))
+        self._threshold = max(1, int(breaker_threshold))
+        # Read by the Engine cost logger immediately after each chat().
+        self.last_usage: Any = None
+        self.last_model: str | None = None
+        # Fallback providers actually materialised (for proxy release on close).
+        self.built_fallback_providers: list[str] = []
+
+    async def _client_for(self, slot: _FallbackSlot) -> "LLMClient":
+        if slot.client is None:
+            assert slot.factory is not None
+            slot.client = await slot.factory()
+            self.built_fallback_providers.append(slot.label)
+            self._log.info("[fallback] initialised provider %s", slot.label)
+        return slot.client
+
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        errors: list[tuple[str, BaseException]] = []
+        for idx, slot in enumerate(self._slots):
+            if slot.tripped:
+                continue
+            try:
+                client = await self._client_for(slot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # building/resolving the fallback failed
+                slot.record_failure(self._threshold, fatal=True)
+                self._log.warning(
+                    "[fallback] could not initialise %s: %r", slot.label, e,
+                )
+                errors.append((slot.label, e))
+                continue
+            try:
+                text = await client.chat(messages, **kwargs)
+            except asyncio.CancelledError:
+                # Cancellation is not a provider failure — never fall back on it.
+                raise
+            except Exception as e:
+                fatal = _is_fatal_provider_error(e)
+                slot.record_failure(self._threshold, fatal=fatal)
+                more = idx < len(self._slots) - 1
+                self._log.warning(
+                    "[fallback] provider %s failed (%s)%s; %s",
+                    slot.label, type(e).__name__,
+                    " [circuit opened]" if slot.tripped else "",
+                    "trying next provider" if more else "no more providers",
+                )
+                errors.append((slot.label, e))
+                continue
+            # Success — snapshot the serving provider's cost fields.
+            slot.failures = 0
+            self.last_usage = getattr(client, "last_usage", None)
+            self.last_model = getattr(client, "last_model", None)
+            if idx > 0:
+                self._log.info(
+                    "[fallback] request served by %s (primary unavailable)",
+                    slot.label,
+                )
+            return text
+        # Every provider failed on this call, or all circuits are already open.
+        if errors:
+            _, last_err = errors[-1]
+            try:
+                chain = ", ".join(lbl for lbl, _ in errors)
+                last_err.add_note(f"[FI] all providers exhausted: {chain}")
+            except Exception:  # pragma: no cover — needs Py<3.11
+                pass
+            raise last_err
+        raise RuntimeError(
+            "no LLM providers available: every circuit is open "
+            f"({', '.join(s.label for s in self._slots)})"
+        )
+
+    async def aclose(self) -> None:
+        for slot in self._slots:
+            if slot.client is not None:
+                try:
+                    await slot.client.aclose()
+                except Exception:  # pragma: no cover — best-effort cleanup
+                    pass
