@@ -1218,7 +1218,12 @@ async def run_one(
         human_feedback_callback=hf_callback, reopen=reopen,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
-    written = await _run_generators(cfg, art, supervisor=supervisor)
+    # On a resume, only (re)generate outputs that are actually missing — don't
+    # re-invoke the LLM for slides/poster/speech that already rendered.
+    written = await _run_generators(
+        cfg, art, supervisor=supervisor,
+        skip_existing=resume_quest_id is not None,
+    )
     summary = {
         "quest_id": art.quest_id,
         "quest_root": str(art.quest_root),
@@ -1300,54 +1305,121 @@ async def _emit_one(
     return 1
 
 
+def _kind_final_output(art: QuestArtifacts, kind: str) -> list[Path]:
+    """The FINAL rendered deliverable(s) for a configured output kind. A kind
+    counts as already produced if any of these exists on disk. Intermediates
+    (slides.md, poster.tex, paper_pdf_source.md) are deliberately excluded —
+    only the shippable artifact gates the skip."""
+    root = art.quest_root
+    return {
+        "paper_pdf": [root / "paper.pdf"],
+        "slides": [root / "slides.pdf", root / "slides.html"],
+        "poster": [root / "poster.pdf"],
+        "speech": [root / "talk.md"],
+    }.get(kind, [])
+
+
+def _existing_output(art: QuestArtifacts, kind: str) -> Path | None:
+    for p in _kind_final_output(art, kind):
+        if p.is_file():
+            return p
+    return None
+
+
 async def _run_generators(
     cfg: Config,
     art: QuestArtifacts,
     *,
     supervisor: ProxySupervisor,
+    skip_existing: bool = False,
 ) -> dict[str, Path]:
-    """Run each generator in turn; one failure does not abort the rest."""
+    """Run each generator in turn; one failure does not abort the rest.
+
+    ``skip_existing`` (set on a --resume) makes the pass idempotent AND
+    completing: a kind whose final deliverable already exists on disk is
+    carried through untouched — so resume regenerates only the MISSING outputs
+    instead of re-invoking the LLM for slides/poster/speech and clobbering good
+    decks. Fresh runs (skip_existing=False) regenerate unconditionally, and
+    ``--emit`` stays a force-regenerate path."""
     written: dict[str, Path] = {}
     _apply_paper_venue_override(cfg, art)
+
+    def _already(kind: str) -> Path | None:
+        if not skip_existing:
+            return None
+        existing = _existing_output(art, kind)
+        if existing is not None:
+            print(f"[FI] {kind}: {existing.name} already present — skipping regeneration")
+        return existing
+
     # 1) Paper (sync — pandoc shell-out is fine without async).
-    try:
-        written.update(PaperGenerator(cfg).generate(art, art.quest_root))
-    except Exception as e:  # pragma: no cover — defensive
-        print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
-        # Strict mode escape hatch: ``output.require_pdf=True`` is the
-        # user's signal that a missing PDF is a hard failure for this
-        # quest, not a soft-degrade. The default catch-all above
-        # exists so a flaky pandoc / LaTeX engine doesn't lose the
-        # slides+poster+speech outputs — that policy stays for the
-        # default ``require_pdf=False`` case. When the user opted into
-        # strict mode, re-raise so the quest exits non-zero and the
-        # caller sees the failure instead of a "completed quest with
-        # missing PDF".
-        if cfg.output.require_pdf:
-            raise
+    existing = _already("paper_pdf")
+    if existing is not None:
+        written["paper_pdf"] = existing
+    else:
+        try:
+            written.update(PaperGenerator(cfg).generate(art, art.quest_root))
+        except Exception as e:  # pragma: no cover — defensive
+            print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
+            # Strict mode escape hatch: ``output.require_pdf=True`` is the
+            # user's signal that a missing PDF is a hard failure for this
+            # quest, not a soft-degrade. The default catch-all above
+            # exists so a flaky pandoc / LaTeX engine doesn't lose the
+            # slides+poster+speech outputs — that policy stays for the
+            # default ``require_pdf=False`` case. When the user opted into
+            # strict mode, re-raise so the quest exits non-zero and the
+            # caller sees the failure instead of a "completed quest with
+            # missing PDF".
+            if cfg.output.require_pdf:
+                raise
     # 2) Slides (LLM + Marp).
-    try:
-        written.update(
-            await SlideGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-        )
-    except Exception as e:
-        print(f"[FI] slide generator failed: {e!r}", file=sys.stderr)
+    existing = _already("slides")
+    if existing is not None:
+        written["slides"] = existing
+    else:
+        try:
+            written.update(
+                await SlideGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+            )
+        except Exception as e:
+            print(f"[FI] slide generator failed: {e!r}", file=sys.stderr)
     # 3) Poster (LLM + pdflatex).
-    try:
-        written.update(
-            await PosterGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-        )
-    except Exception as e:
-        print(f"[FI] poster generator failed: {e!r}", file=sys.stderr)
+    existing = _already("poster")
+    if existing is not None:
+        written["poster"] = existing
+    else:
+        try:
+            written.update(
+                await PosterGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+            )
+        except Exception as e:
+            print(f"[FI] poster generator failed: {e!r}", file=sys.stderr)
     # 4) Speech (one LLM call).
-    try:
-        written.update(
-            await SpeechGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-        )
-    except Exception as e:
-        print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
+    existing = _already("speech")
+    if existing is not None:
+        written["speech"] = existing
+    else:
+        try:
+            written.update(
+                await SpeechGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+            )
+        except Exception as e:
+            print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")
+    # On a resume, surface any configured output still missing after the pass
+    # so an incomplete quest doesn't silently report success.
+    if skip_existing:
+        still_missing = [
+            k for k in cfg.output.kinds
+            if _kind_final_output(art, k) and _existing_output(art, k) is None
+        ]
+        if still_missing:
+            print(
+                f"[FI] resume: still missing after generation: "
+                f"{', '.join(still_missing)} (toolchain issue? see "
+                f"<quest>/*_skipped.md)", file=sys.stderr,
+            )
     return written
 
 
