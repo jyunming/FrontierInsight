@@ -68,6 +68,7 @@ Full setup, cost trade-offs, and the billing model per provider are in **[docs/r
 - **Knows the literature** — academic **and** open-web research, with real citations exported as BibTeX / CSL-JSON, and figures derived from web-collected data.
 - **Three interfaces, one engine** — CLI, web UI, and VSCode chat all drive the same pipeline; every feature works in all three.
 - **Runs on locked-down machines** — no-admin LaTeX (`--install-tectonic`), *or* a **LaTeX-free HTML/Chromium PDF fallback** that needs only pandoc + a browser and matches the LaTeX look.
+- **Survives flaky providers** — a single provider outage no longer forfeits a finished quest: an optional **provider fallback chain** with per-provider **circuit breakers**, retry classification that skips doomed 4xx / quota errors, fail-open review gates, VSCode-bridge reconnect, and fleet backpressure (`FI_MAX_CONCURRENT_LLM_CALLS`) keep long runs and fleets moving. Gates run at temperature 0 so routing is reproducible, and a `--resume` completes only the outputs still missing.
 - **Cross-quest memory** — `/digest`, `/portfolio`, `/critique`, `/proposal` accumulate over weeks via the optional Axon knowledge layer, so FI remembers what you tried last month.
 
 ---
