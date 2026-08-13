@@ -62,6 +62,34 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
 _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
 
+# Default sampling temperature for generative nodes (ideate, write, analyze…).
+_DEFAULT_CHAT_TEMPERATURE = 0.2
+# Judgment / gate / classifier nodes: their job is to reach a *verdict* or a
+# routing decision (sufficient vs broaden, accept vs revise, supported vs not),
+# where run-to-run flakiness means the same corpus can flip the route and
+# trigger wasted broaden loops or spurious revise cycles (audit: "gates are
+# non-deterministic"). These run at temperature 0 so the decision is
+# reproducible wherever the transport honours it (HTTP + vscode_bridge; CLI
+# transports that don't expose temperature are unaffected — no regression).
+# The ``review_panel.`` prefix covers every per-persona panel call.
+_DETERMINISTIC_GATE_NODES = frozenset({
+    "evidence_gate",
+    "review",
+    "claim_check",
+    "cross_check",
+    "relevance_guard",
+})
+
+
+def _temperature_for_node(node: str | None) -> float:
+    """Temperature for a node's chat call: 0 for gate/verdict/classifier nodes
+    (deterministic routing), the generative default otherwise."""
+    if not node:
+        return _DEFAULT_CHAT_TEMPERATURE
+    if node in _DETERMINISTIC_GATE_NODES or node.startswith("review_panel."):
+        return 0.0
+    return _DEFAULT_CHAT_TEMPERATURE
+
 
 @dataclass
 class QuestArtifacts:
@@ -4956,15 +4984,27 @@ class Engine:
 
     # ---- helpers ---------------------------------------------------------
 
-    async def _chat(self, prompt: str, *, node: str | None = None) -> str:
+    async def _chat(
+        self, prompt: str, *, node: str | None = None,
+        temperature: float | None = None,
+    ) -> str:
         """Single-user-message chat. ``node`` is the engine node name
         (e.g. ``"ideate"``, ``"review"``); when present and the YAML
         config sets ``provider.node_models[node]``, that model is sent
-        on this call only. Otherwise the endpoint default applies."""
+        on this call only. Otherwise the endpoint default applies.
+
+        ``temperature`` defaults to per-node routing: gate/verdict/classifier
+        nodes (evidence_gate, review, review_panel.*, claim_check, cross_check,
+        relevance_guard) run at 0 for reproducible decisions; generative nodes
+        use the 0.2 default. Pass an explicit value to override."""
         assert self._client is not None
+        temp = (
+            temperature if temperature is not None
+            else _temperature_for_node(node)
+        )
         messages = [{"role": "user", "content": prompt}]
         response = await self._client.chat(
-            messages, temperature=0.2, model=self._model_for_node(node),
+            messages, temperature=temp, model=self._model_for_node(node),
             node=node or "",
         )
         self._log_chat_cost(node=node or "")
