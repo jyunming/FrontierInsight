@@ -285,7 +285,11 @@ class VSCodeBridgeClient:
             _log.info("emit_event(%s) failed: %s", event, e)
 
     async def _send(self, obj: dict[str, Any]) -> None:
-        assert self._writer is not None
+        if self._writer is None:
+            # The connection dropped (read-loop nulled it). Raise a transient
+            # BridgeError so the retry layer reconnects, rather than an
+            # AssertionError that would abort the quest.
+            raise BridgeError("bridge not connected")
         line = (json.dumps(obj) + "\n").encode("utf-8")
         async with self._lock:
             try:
@@ -315,11 +319,25 @@ class VSCodeBridgeClient:
         except Exception as e:
             _log.warning("bridge read loop error: %s", e)
         finally:
-            # Reader stopped — drop any in-flight requests.
+            # Reader stopped → the connection is dead. Drop any in-flight
+            # requests AND null the transport so the next chat()/connect()
+            # RECONNECTS instead of writing to a corpse. Without this, a single
+            # mid-quest socket drop wedges the rest of a long --serve/--tools
+            # session: connect() early-returns on the stale (non-None) writer,
+            # so every retry re-sends to the dead socket and fails identically.
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(BridgeError("bridge connection dropped"))
             self._pending.clear()
+            self._chunks.clear()
+            w = self._writer
+            self._reader = None
+            self._writer = None
+            if w is not None:
+                try:
+                    w.close()
+                except Exception:
+                    pass
 
     def _dispatch(self, msg: dict[str, Any]) -> None:
         mtype = msg.get("type")

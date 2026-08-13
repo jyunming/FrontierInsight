@@ -268,6 +268,37 @@ async def test_bridge_connection_drop_mid_request_surfaces_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bridge_reconnects_after_a_dropped_connection() -> None:
+    """A mid-session socket drop must not wedge the client for the rest of the
+    run: after the peer closes the connection the read loop nulls the stale
+    transport, and the NEXT chat() reconnects rather than writing to a corpse
+    (the regression that hung long --serve/--tools sessions)."""
+    server = _MockBridgeServer()
+
+    def handler(msg: dict[str, Any], w) -> list[dict[str, Any]]:
+        return [{"type": "lm_done", "id": msg["id"], "content": "ok"}]
+
+    port = await server.start(handler)
+    client = VSCodeBridgeClient(port=port)
+    try:
+        await client.connect()
+        assert await client.chat([{"role": "user", "content": "1"}]) == "ok"
+        # Peer drops the connection mid-session.
+        server.force_drop_all()
+        # Let the read loop observe EOF and null the transport.
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if client._writer is None:
+                break
+        assert client._writer is None, "read loop must null the dead transport"
+        # The next call reconnects and succeeds instead of failing on a corpse.
+        assert await client.chat([{"role": "user", "content": "2"}]) == "ok"
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_bridge_connect_to_dead_port_raises_immediately() -> None:
     """Trying to talk to a port nobody's listening on should raise
     quickly with a clear BridgeError — not hang."""
