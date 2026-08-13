@@ -65,13 +65,32 @@ def test_paper_format_choices_match_ts_literal() -> None:
     )
 
 
+# Python InterviewAnswers fields that legitimately have NO TS counterpart.
+# Keep this list SHORT and justified — anything not here is required to appear
+# in the TS interface (see the auto-derived parity test below).
+_TS_EXEMPT_ANSWER_FIELDS = frozenset({
+    # CLI / serve only — VSCode pins the provider to ``vscode_extension``
+    # silently and routes human-in-the-loop pauses through the bridge, so
+    # neither field is part of the TS answer surface.
+    "provider",
+    "pause_for_user_input",
+})
+
+
 def test_ts_interview_answers_has_all_python_managed_fields() -> None:
-    """Every field on the Python InterviewAnswers dataclass that
-    affects YAML output (study_depth, comparative_baseline,
-    success_metric, budget, provider_model) must appear as a field
-    in the TS InterviewAnswers interface."""
+    """EVERY field on the Python ``InterviewAnswers`` dataclass (minus an
+    explicit, justified exempt set) must appear in the TS ``InterviewAnswers``
+    interface, so a Python answer can't silently fail to round-trip through the
+    VSCode half.
+
+    The field list is AUTO-DERIVED from ``InterviewAnswers.__dataclass_fields__``
+    rather than hardcoded — a hardcoded list is itself a drift source (add a
+    Python field, forget to list it here, and the parity check has a blind
+    spot). Adding a Python answer field now automatically requires a matching
+    TS field or an explicit entry in ``_TS_EXEMPT_ANSWER_FIELDS``."""
+    from core.interview import InterviewAnswers
+
     ts_text = INTERVIEW_CORE_TS.read_text(encoding="utf-8")
-    # Pull out the InterviewAnswers interface body.
     m = re.search(
         r"export interface InterviewAnswers\s*\{([^}]+)\}",
         ts_text,
@@ -80,21 +99,28 @@ def test_ts_interview_answers_has_all_python_managed_fields() -> None:
     assert m, "InterviewAnswers interface not found in interview-core.ts"
     body = m.group(1)
 
-    required_fields = (
-        "topic", "title", "output_kinds", "paper_format",
-        "clarify_mode", "review_panel", "knowledge_enabled",
-        "no_simulation", "survey_mode", "study_depth", "comparative_baseline",
-        "success_metric", "budget", "provider_model",
-        "max_iterations",
+    required = sorted(
+        set(InterviewAnswers.__dataclass_fields__) - _TS_EXEMPT_ANSWER_FIELDS
     )
-    for field in required_fields:
+    # Guard against the exempt set drifting out of sync with the dataclass.
+    stale_exempt = _TS_EXEMPT_ANSWER_FIELDS - set(InterviewAnswers.__dataclass_fields__)
+    assert not stale_exempt, (
+        f"_TS_EXEMPT_ANSWER_FIELDS lists fields no longer on InterviewAnswers: "
+        f"{sorted(stale_exempt)} — remove them."
+    )
+
+    missing = [
+        field for field in required
         # ``\??`` tolerates optional TS fields (e.g. ``survey_mode?: boolean``).
-        assert re.search(rf"\b{field}\??\s*:", body), (
-            f"TS InterviewAnswers is missing field {field!r}. "
-            f"All Python interview answers must round-trip to YAML "
-            f"identically — the parity test is here so adding a "
-            f"new field to Python can't silently break the TS half."
-        )
+        if not re.search(rf"\b{field}\??\s*:", body)
+    ]
+    assert not missing, (
+        f"TS InterviewAnswers is missing Python answer field(s): {missing}. "
+        f"All Python interview answers must round-trip to YAML identically. "
+        f"Add the field to vscode-frontier-insight/src/interview-core.ts, or "
+        f"— if it is genuinely CLI/serve-only — add it to "
+        f"_TS_EXEMPT_ANSWER_FIELDS with a justification."
+    )
 
 
 def test_ts_interview_prompts_for_new_questions() -> None:
