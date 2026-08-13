@@ -1397,11 +1397,22 @@ def _rss_mb() -> float | None:
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
 
 
-async def _await_under_cap(cap_mb: int, *, poll_s: float = 2.0) -> None:
-    """Block until process RSS is under the cap. No-op if psutil missing."""
+async def _await_under_cap(
+    cap_mb: int, *, poll_s: float = 2.0, max_wait_s: float = 120.0,
+) -> None:
+    """Block until process RSS is under the cap, up to ``max_wait_s`` then
+    proceed with a warning. No-op if psutil is missing. The deadline is what
+    prevents a fleet-wide deadlock: without it, if RSS never drops below the
+    cap (e.g. the baseline already exceeds it) the first admitted quest waits
+    forever holding a semaphore slot and stalls the whole fleet."""
+    deadline = time.monotonic() + max_wait_s
     while True:
         rss = _rss_mb()
         if rss is None or rss < cap_mb:
+            return
+        if time.monotonic() >= deadline:
+            print(f"[FI fleet] memory {rss:.0f}MB still >= cap {cap_mb}MB after "
+                  f"{max_wait_s:.0f}s; proceeding anyway")
             return
         print(f"[FI fleet] memory {rss:.0f}MB >= cap {cap_mb}MB; waiting...")
         await asyncio.sleep(poll_s)
@@ -1428,6 +1439,22 @@ async def run_fleet(
     state = {"done": 0, "failed": 0, "running": 0}
     started_at = time.monotonic()
 
+    # Guard against an unsatisfiable memory cap: if the baseline RSS already
+    # exceeds it, waiting would deadlock the whole fleet (nothing runs to free
+    # memory). Disable the cap with a warning instead. Also warn if a cap was
+    # requested but psutil isn't installed (the cap would silently no-op).
+    if memory_cap_mb is not None:
+        base = _rss_mb()
+        if base is None:
+            print("[FI fleet] --memory-cap-mb set but psutil is not installed; "
+                  "the cap cannot be enforced and is ignored.", file=sys.stderr)
+            memory_cap_mb = None
+        elif base >= memory_cap_mb:
+            print(f"[FI fleet] baseline RSS {base:.0f}MB already >= "
+                  f"--memory-cap-mb {memory_cap_mb}MB; disabling the cap to avoid "
+                  "a fleet deadlock.", file=sys.stderr)
+            memory_cap_mb = None
+
     def _status_line(quest_id: str, event: str) -> None:
         elapsed = int(time.monotonic() - started_at)
         rss = _rss_mb()
@@ -1446,17 +1473,19 @@ async def run_fleet(
             if memory_cap_mb is not None:
                 await _await_under_cap(memory_cap_mb)
             state["running"] += 1
-            # Construct the Engine ONCE and reuse it in run_one so the
-            # status-line quest_id matches the quest that actually runs.
-            # Previously a second Engine (with a fresh quest_id) was
-            # built inside run_one, leaving a stranded sibling quest_dir
-            # on disk and breaking per-quest accounting.
-            engine = Engine(
-                cfg, supervisor=supervisor,
-                auto_accept_on_pass=auto_accept_on_pass,
-            )
-            _status_line(engine.quest_id, "start")
+            engine = None
             try:
+                # Construct the Engine INSIDE the guard so a construction error
+                # (invalid provider, malformed config, bad output_dir) is
+                # isolated to THIS quest and returned as a failure — not
+                # propagated out of the gather to abort the whole fleet and
+                # orphan the sibling quests. Reused in run_one so the
+                # status-line quest_id matches the quest that actually runs.
+                engine = Engine(
+                    cfg, supervisor=supervisor,
+                    auto_accept_on_pass=auto_accept_on_pass,
+                )
+                _status_line(engine.quest_id, "start")
                 summary = await run_one(
                     cfg, supervisor=supervisor, profile=profile, engine=engine,
                     source_yaml_path=yaml_path,
@@ -1468,11 +1497,20 @@ async def run_fleet(
             except Exception as e:
                 state["running"] -= 1
                 state["failed"] += 1
-                _status_line(engine.quest_id, "FAIL ")
+                qid = engine.quest_id if engine is not None else "(engine construction failed)"
+                _status_line(qid, "FAIL ")
                 return e
 
-    results = await asyncio.gather(*(gated(p, c) for p, c in norm))
-    failed = [r for r in results if isinstance(r, Exception)]
+    # return_exceptions=True as defense in depth: gated already catches its own
+    # errors and returns them, but an unforeseen raise must not abort the fleet
+    # and orphan the sibling quests still running. Propagate genuine cancellation.
+    results = await asyncio.gather(
+        *(gated(p, c) for p, c in norm), return_exceptions=True,
+    )
+    for r in results:
+        if isinstance(r, asyncio.CancelledError):
+            raise r
+    failed = [r for r in results if isinstance(r, BaseException)]
     for r in failed:
         print(f"[FI fleet] FAILURE: {r!r}", file=sys.stderr)
     return 1 if failed else 0

@@ -124,3 +124,68 @@ async def test_two_engines_run_concurrently(
     # Distinct on-disk artifacts.
     assert art_a.quest_root != art_b.quest_root
     assert art_a.paper_md != art_b.paper_md
+
+
+# --- run_fleet runner unit tests (isolation + memory-cap deadlock, PR-3) ---
+
+
+@pytest.mark.asyncio
+async def test_run_fleet_isolates_construction_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quest whose Engine construction fails must NOT abort the fleet — the
+    sibling quests still complete, and run_fleet returns a non-zero exit."""
+    import launch as fi_launch
+
+    good = _make_cfg(tmp_path, "good")
+    bad = _make_cfg(tmp_path, "bad")
+    ran: list[Config] = []
+
+    class _FakeEngine:
+        def __init__(self, cfg, **kw):  # noqa: ANN001
+            if cfg is bad:
+                raise ValueError("invalid provider config")
+            self.quest_id = "good-quest"
+
+    async def fake_run_one(cfg, **kw):  # noqa: ANN001
+        ran.append(cfg)
+        return {"quest_id": "good-quest"}
+
+    monkeypatch.setattr(fi_launch, "Engine", _FakeEngine)
+    monkeypatch.setattr(fi_launch, "run_one", fake_run_one)
+
+    rc = await fi_launch.run_fleet(
+        [good, bad], supervisor=fi_launch.ProxySupervisor(),
+        max_concurrent=2, memory_cap_mb=None, profile=False,
+    )
+    assert good in ran          # the good quest ran — not orphaned
+    assert rc == 1              # the bad quest is counted as a failure
+
+
+@pytest.mark.asyncio
+async def test_run_fleet_disables_unsatisfiable_memory_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """A memory cap below the baseline RSS would deadlock the fleet (nothing
+    runs to free memory). It must be disabled with a warning, not hung on."""
+    import launch as fi_launch
+
+    good = _make_cfg(tmp_path, "g")
+
+    class _FakeEngine:
+        def __init__(self, cfg, **kw):  # noqa: ANN001
+            self.quest_id = "g"
+
+    async def fake_run_one(cfg, **kw):  # noqa: ANN001
+        return {"quest_id": "g"}
+
+    monkeypatch.setattr(fi_launch, "Engine", _FakeEngine)
+    monkeypatch.setattr(fi_launch, "run_one", fake_run_one)
+    monkeypatch.setattr(fi_launch, "_rss_mb", lambda: 2000.0)  # baseline > cap
+
+    rc = await fi_launch.run_fleet(
+        [good], supervisor=fi_launch.ProxySupervisor(),
+        max_concurrent=1, memory_cap_mb=100, profile=False,
+    )
+    assert rc == 0  # completed (did not deadlock)
+    assert "disabling the cap" in capsys.readouterr().err
