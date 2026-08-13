@@ -24,6 +24,14 @@ on:
       - "docs/**"
       - "outputs/**"
 
+# Cancel a PR's in-flight CI when a new commit is pushed to the same PR — no
+# point spending minutes on a superseded diff. Main-branch runs are NOT
+# cancelled (each push to main is a distinct gating run we want to complete),
+# because the group keys on the ref and cancel-in-progress is gated to PRs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ---- Python pytest (fast tier) -----------------------------------
   fast:
@@ -65,8 +73,21 @@ jobs:
       #   - tests/test_self_correction_e2e.py
       #   - tests/test_web_e2e.py
       #   - any test tagged @pytest.mark.slow
+      # Coverage floor guards against a change that silently deletes tested
+      # behaviour. Fast-tier line coverage of core+generation+launch measured
+      # at 74%; the gate is set to 65% — comfortably below, so normal OS /
+      # skipif variance doesn't flake CI, while a real coverage collapse
+      # (a whole module going untested) still fails the build. Ratchet up as
+      # coverage improves.
       - name: Run pytest (fast tier)
-        run: pytest -q -m "not slow" --ignore=tests/test_engine_smoke.py --ignore=tests/test_self_correction_e2e.py --ignore=tests/test_web_e2e.py
+        run: >-
+          pytest -q -m "not slow"
+          --ignore=tests/test_engine_smoke.py
+          --ignore=tests/test_self_correction_e2e.py
+          --ignore=tests/test_web_e2e.py
+          --cov=core --cov=generation --cov=launch
+          --cov-report=term-missing:skip-covered
+          --cov-fail-under=65
 
   # ---- Python pytest (slow tier) -----------------------------------
   slow:

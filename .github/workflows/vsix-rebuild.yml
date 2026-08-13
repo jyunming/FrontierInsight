@@ -28,6 +28,15 @@ on:
 permissions:
   contents: write
 
+# Serialize rebuild+commit+push so two overlapping pushes to main don't race
+# two auto-commits of the same binary (which would collide on push / need a
+# retry). Queue rather than cancel — a cancelled run mid-push could leave the
+# tracked .vsix out of sync with its source; letting each finish keeps the
+# binary in lockstep, and the last one to run reflects the latest source.
+concurrency:
+  group: vsix-rebuild-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   rebuild-vsix:
     # Skip on the auto-commit this workflow itself makes — the marker
@@ -66,5 +75,9 @@ jobs:
           else
             git add vscode-frontier-insight/vscode-frontier-insight.vsix
             git commit -m "chore(vsix): auto-rebuild after extension source change [skip vsix]"
+            # main may have advanced (a concurrent non-vsix push) between our
+            # checkout and here; rebase our single binary commit on top before
+            # pushing so the push fast-forwards instead of failing.
+            git pull --rebase --autostash origin main
             git push
           fi
