@@ -45,6 +45,7 @@ same proxy provider shares one proxy process.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -642,6 +643,61 @@ def _retry_cli_error(exc: BaseException) -> bool:
     if isinstance(exc, _CliTransientError):
         return not any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
     return False
+
+
+# --- Process-wide LLM-call backpressure -------------------------------------
+#
+# A single quest fans out to a handful of concurrent LLM calls (a review panel,
+# an ensemble). A ``--fleet`` run multiplies that by the number of live quests,
+# so an unbounded process can burst into dozens/hundreds of simultaneous
+# provider calls and trip provider rate limits (audit: "no global backpressure").
+# This semaphore caps concurrent in-flight ``chat`` dispatches across EVERY
+# LLMClient in the process. It is created lazily inside the running event loop
+# (an ``asyncio.Semaphore`` binds to the loop it is first awaited on), sized from
+# ``FI_MAX_CONCURRENT_LLM_CALLS``. Default 0 == unlimited (a no-op nullcontext,
+# zero behaviour change) so single quests are never throttled unless an operator
+# opts in; set e.g. ``FI_MAX_CONCURRENT_LLM_CALLS=8`` for a large fleet.
+#
+# Deadlock note: the slot is held only around a single ``_chat_impl`` dispatch,
+# which never re-enters ``chat``. Fallback/retry loops acquire a fresh slot per
+# attempt (release between), so a saturated cap queues — it cannot deadlock.
+_LLM_CALL_SEM: "asyncio.Semaphore | None" = None
+_LLM_CALL_SEM_LIMIT: int = -1  # -1 == "not yet resolved from the environment"
+_LLM_CALL_SEM_LOOP: "asyncio.AbstractEventLoop | None" = None
+
+
+def _llm_call_limit() -> int:
+    """Resolve the concurrency cap from the environment (0/negative == off)."""
+    try:
+        return int(os.environ.get("FI_MAX_CONCURRENT_LLM_CALLS", "0") or "0")
+    except ValueError:
+        return 0
+
+
+def _llm_call_slot():
+    """Return an async context manager gating one LLM dispatch on the
+    process-wide cap. ``nullcontext`` (no-op) when the cap is disabled.
+
+    A single shared semaphore enforces the cap across all concurrent callers on
+    one event loop; it is recreated when the limit changes (env tweaked) or the
+    running loop changes (an ``asyncio.Semaphore`` is bound to the loop it was
+    created on — reusing one across loops raises, which pytest-asyncio would
+    hit since each test gets a fresh loop)."""
+    global _LLM_CALL_SEM, _LLM_CALL_SEM_LIMIT, _LLM_CALL_SEM_LOOP
+    limit = _llm_call_limit()
+    if limit <= 0:
+        return contextlib.nullcontext()
+    loop = asyncio.get_running_loop()
+    if (
+        _LLM_CALL_SEM is None
+        or _LLM_CALL_SEM_LIMIT != limit
+        or _LLM_CALL_SEM_LOOP is not loop
+    ):
+        _LLM_CALL_SEM = asyncio.Semaphore(limit)
+        _LLM_CALL_SEM_LIMIT = limit
+        _LLM_CALL_SEM_LOOP = loop
+    return _LLM_CALL_SEM
+
 
 # Placeholder / "I gave up" patterns that some CLIs emit instead of a
 # real response. Distinct from refusal — these signal the LLM lost the
@@ -1697,14 +1753,20 @@ class LLMClient:
         httpx / CLI stderr stack.
         """
         try:
-            return await self._chat_impl(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                extra=extra,
-                model=model,
-                node=node,
-            )
+            # Gate the dispatch on the process-wide concurrency cap
+            # (``FI_MAX_CONCURRENT_LLM_CALLS``; no-op when unset) so a fleet of
+            # quests can't burst past provider rate limits. The slot is held
+            # only for this one dispatch and released on return, so retries /
+            # fallbacks re-queue rather than deadlock.
+            async with _llm_call_slot():
+                return await self._chat_impl(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra=extra,
+                    model=model,
+                    node=node,
+                )
         except Exception as e:
             # ``except Exception`` excludes ``asyncio.CancelledError``
             # (a BaseException subclass since Python 3.8) — see the

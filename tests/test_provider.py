@@ -708,3 +708,70 @@ def test_retry_cli_error_aborts_fast_on_fatal_markers() -> None:
         assert _retry_cli_error(_CliTransientError(msg)) is False, msg
     # Unrelated errors don't retry.
     assert _retry_cli_error(ValueError("nope")) is False
+
+
+# ---------------------------------------------------------------------------
+# Global LLM-call semaphore — process-wide backpressure (PR-6)
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_call_semaphore_caps_concurrent_dispatches(monkeypatch):
+    """With FI_MAX_CONCURRENT_LLM_CALLS=2, at most two chat() dispatches may be
+    in flight at once across a shared LLMClient — the rest queue. Guards the
+    fleet against bursting past provider rate limits."""
+    monkeypatch.setenv("FI_MAX_CONCURRENT_LLM_CALLS", "2")
+
+    ep = ResolvedEndpoint(base_url="https://x/v1", model="m", api_key="k")
+    client = LLMClient(ep, http=MagicMock())
+
+    live = 0
+    peak = 0
+
+    async def fake_impl(messages, **kw):  # noqa: ANN001, ANN003
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            # Yield control a few times so all callers pile up if unbounded.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return "ok"
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(client, "_chat_impl", fake_impl)
+
+    results = await asyncio.gather(
+        *(client.chat([{"role": "user", "content": str(i)}]) for i in range(8))
+    )
+    assert results == ["ok"] * 8
+    assert peak <= 2, f"cap breached: {peak} concurrent dispatches"
+
+
+async def test_llm_call_semaphore_disabled_by_default(monkeypatch):
+    """With the cap unset (default 0), the slot is a no-op — no throttling and
+    all dispatches may run concurrently (no behaviour change for single quests)."""
+    monkeypatch.delenv("FI_MAX_CONCURRENT_LLM_CALLS", raising=False)
+
+    ep = ResolvedEndpoint(base_url="https://x/v1", model="m", api_key="k")
+    client = LLMClient(ep, http=MagicMock())
+
+    live = 0
+    peak = 0
+
+    async def fake_impl(messages, **kw):  # noqa: ANN001, ANN003
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return "ok"
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(client, "_chat_impl", fake_impl)
+    await asyncio.gather(
+        *(client.chat([{"role": "user", "content": str(i)}]) for i in range(6))
+    )
+    assert peak == 6, "default (unset) cap must not throttle"
