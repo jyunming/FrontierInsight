@@ -82,3 +82,34 @@ async def test_prompt_trim_no_op_when_under_cap():
     await client.chat([{"role": "user", "content": small}], node="ideate")
     sent = fake_http.post.call_args.kwargs["json"]["messages"][0]["content"]
     assert sent == small
+
+
+async def test_prompt_trim_bounds_total_when_cap_below_marker():
+    """A cap smaller than the trim marker must NOT be exceeded — the marker is
+    dropped and the content is hard-clamped to the budget (Copilot edge case)."""
+    ep = ResolvedEndpoint(base_url="https://x/v1", model="m", api_key="k")
+    fake_http = _http_returning("ok")
+    client = LLMClient(ep, http=fake_http, max_prompt_chars=10)
+
+    await client.chat([{"role": "user", "content": "x" * 5000}], node="write")
+    sent = fake_http.post.call_args.kwargs["json"]["messages"]
+    total = sum(len(m["content"]) for m in sent)
+    assert total <= 10, f"cap breached: {total} > 10"
+
+
+async def test_prompt_trim_bounds_total_with_multiple_large_messages():
+    """When the NON-largest messages already exceed the cap, trimming one
+    message can't help — every message is clamped so the total still fits
+    (Copilot edge case)."""
+    ep = ResolvedEndpoint(base_url="https://x/v1", model="m", api_key="k")
+    fake_http = _http_returning("ok")
+    client = LLMClient(ep, http=fake_http, max_prompt_chars=1000)
+
+    msgs = [
+        {"role": "system", "content": "s" * 40_000},
+        {"role": "user", "content": "u" * 40_000},
+    ]
+    await client.chat(msgs, node="analyze")
+    sent = fake_http.post.call_args.kwargs["json"]["messages"]
+    total = sum(len(m["content"]) for m in sent)
+    assert total <= 1000, f"cap breached: {total} > 1000"

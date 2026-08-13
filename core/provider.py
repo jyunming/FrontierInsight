@@ -1847,44 +1847,60 @@ class LLMClient:
         self, messages: list[dict[str, str]], *, node: str = "",
     ) -> list[dict[str, str]]:
         """Last-resort guard against a runaway prompt. When ``max_prompt_chars``
-        is set and the total message size exceeds it, truncate the single
-        largest message in the MIDDLE (keeping head + tail, where the task
-        framing and the trailing instruction usually live) so the prompt fits.
-        No-op when the guard is disabled (0) or the prompt already fits — so
-        normal calls pay only one ``sum`` and are otherwise untouched. Returns a
-        new list; never mutates the caller's messages."""
+        is set and the total message size exceeds it, shrink the prompt so the
+        TOTAL is guaranteed to land at or under the cap. No-op when the guard is
+        disabled (0) or the prompt already fits — so normal calls pay only one
+        ``sum`` and are otherwise untouched. Returns a new list; never mutates
+        the caller's messages.
+
+        Common case (one dominant message — a giant RESULT_JSON / literature
+        dump): the largest message is trimmed in the MIDDLE, keeping head + tail
+        (where the task framing and the trailing instruction live). The kept
+        length is derived from the largest message's *budget* (cap minus the
+        other messages), so the result total is exactly the cap — never over,
+        even when the cap is smaller than the trim marker (then the marker is
+        dropped and the content is hard-clamped to the budget).
+
+        Pathological case (the OTHER messages alone already exceed the cap):
+        trimming one message can't help, so every message is hard-clamped to its
+        proportional share of the cap. Loses the head+tail nicety, but still
+        guarantees the bound."""
         cap = self._max_prompt_chars
         if cap <= 0:
             return messages
-        total = sum(len(str(m.get("content", ""))) for m in messages)
+        lengths = [len(str(m.get("content", ""))) for m in messages]
+        total = sum(lengths)
         if total <= cap:
             return messages
         trimmed = [dict(m) for m in messages]
-        idx = max(
-            range(len(trimmed)),
-            key=lambda i: len(str(trimmed[i].get("content", ""))),
-        )
-        content = str(trimmed[idx].get("content", ""))
-        overflow = total - cap
-        marker = (
-            f"\n\n... [FI: {overflow} chars trimmed to fit the "
-            f"{cap}-char prompt cap] ...\n\n"
-        )
-        keep = len(content) - overflow - len(marker)
-        if keep <= 0:
-            # The largest message alone can't absorb the overflow — hard-cap it.
-            new_content = content[: max(0, cap - len(marker))] + marker
+        idx = max(range(len(trimmed)), key=lambda i: lengths[i])
+        others = total - lengths[idx]
+        budget = cap - others  # chars the largest message may keep
+        marker = f"\n\n... [FI: prompt trimmed to fit the {cap}-char cap] ...\n\n"
+        if budget > 0:
+            content = str(trimmed[idx].get("content", ""))
+            if budget > len(marker) + 2:
+                keep = budget - len(marker)
+                head = keep // 2
+                tail = keep - head
+                new_content = content[:head] + marker + (
+                    content[-tail:] if tail else ""
+                )
+            else:
+                # Budget too tight to fit the marker — hard-clamp to the budget.
+                new_content = content[:budget]
+            trimmed[idx]["content"] = new_content
         else:
-            head = keep // 2
-            tail = keep - head
-            new_content = content[:head] + marker + (
-                content[-tail:] if tail else ""
-            )
-        trimmed[idx]["content"] = new_content
+            # Even excluding the largest message the prompt is over the cap;
+            # clamp every message to its proportional share (floors sum <= cap).
+            for i, m in enumerate(trimmed):
+                share = (cap * lengths[i]) // total if total else 0
+                m["content"] = str(m.get("content", ""))[:share]
         _log.warning(
-            "[prompt-trim] node=%s prompt %d chars > cap %d — trimmed message "
-            "%d to %d chars (dropped ~%d)",
-            node or "?", total, cap, idx, len(new_content), overflow,
+            "[prompt-trim] node=%s prompt %d chars > cap %d — trimmed to fit "
+            "(%d chars now)",
+            node or "?", total, cap,
+            sum(len(str(m.get("content", ""))) for m in trimmed),
         )
         return trimmed
 
