@@ -1665,12 +1665,25 @@ class LLMClient:
         cli_timeout_s: float = 300.0,
         cli_inactivity_timeout_s: float | None = 180.0,
         node_cli_timeout_s: dict[str, float] | None = None,
+        node_http_timeout_s: dict[str, float] | None = None,
         node_model_fallbacks: dict[str, str] | None = None,
+        max_prompt_chars: int = 0,
         heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(timeout=timeout_s)
+        # Base HTTP read-timeout (seconds) and per-node overrides for the
+        # OpenAI-compatible transport. Reasoning-heavy nodes (implement/write)
+        # routinely outrun a flat 120 s on slow/local models; the per-node map
+        # gives them headroom while cheap nodes keep the tight base that
+        # catches a hung server fast. Lookup misses fall back to the base.
+        self._http_timeout_s = timeout_s
+        self._node_http_timeout_s = node_http_timeout_s or {}
+        # Last-resort prompt-size guard (total characters across messages).
+        # 0 disables. Prevents a runaway prompt from blowing the context
+        # window into a hard 400 / stall. See ``_trim_messages``.
+        self._max_prompt_chars = max(0, int(max_prompt_chars))
         # CLI providers (claude_cli/codex_cli/copilot_cli/gemini_cli)
         # use this wall-clock cap per chat call; a stuck child gets
         # killed and tenacity retries. Defaults to 5 minutes — longer
@@ -1801,6 +1814,51 @@ class LLMClient:
             parts.append(f"node={node}")
         return "[FI] " + ", ".join(parts)
 
+    def _trim_messages(
+        self, messages: list[dict[str, str]], *, node: str = "",
+    ) -> list[dict[str, str]]:
+        """Last-resort guard against a runaway prompt. When ``max_prompt_chars``
+        is set and the total message size exceeds it, truncate the single
+        largest message in the MIDDLE (keeping head + tail, where the task
+        framing and the trailing instruction usually live) so the prompt fits.
+        No-op when the guard is disabled (0) or the prompt already fits — so
+        normal calls pay only one ``sum`` and are otherwise untouched. Returns a
+        new list; never mutates the caller's messages."""
+        cap = self._max_prompt_chars
+        if cap <= 0:
+            return messages
+        total = sum(len(str(m.get("content", ""))) for m in messages)
+        if total <= cap:
+            return messages
+        trimmed = [dict(m) for m in messages]
+        idx = max(
+            range(len(trimmed)),
+            key=lambda i: len(str(trimmed[i].get("content", ""))),
+        )
+        content = str(trimmed[idx].get("content", ""))
+        overflow = total - cap
+        marker = (
+            f"\n\n... [FI: {overflow} chars trimmed to fit the "
+            f"{cap}-char prompt cap] ...\n\n"
+        )
+        keep = len(content) - overflow - len(marker)
+        if keep <= 0:
+            # The largest message alone can't absorb the overflow — hard-cap it.
+            new_content = content[: max(0, cap - len(marker))] + marker
+        else:
+            head = keep // 2
+            tail = keep - head
+            new_content = content[:head] + marker + (
+                content[-tail:] if tail else ""
+            )
+        trimmed[idx]["content"] = new_content
+        _log.warning(
+            "[prompt-trim] node=%s prompt %d chars > cap %d — trimmed message "
+            "%d to %d chars (dropped ~%d)",
+            node or "?", total, cap, idx, len(new_content), overflow,
+        )
+        return trimmed
+
     async def _chat_impl(
         self,
         messages: list[dict[str, str]],
@@ -1822,6 +1880,9 @@ class LLMClient:
         # of empty bars for CLI / bridge transports.
         self.last_usage = None
         self.last_model = (model or self.endpoint.model)
+        # Last-resort prompt-size guard (all transports) — a runaway prompt
+        # otherwise blows the context window into a hard 400 / stall.
+        messages = self._trim_messages(messages, node=node)
         if self.endpoint.transport == "cli":
             text = await self._chat_cli(
                 messages, model_override=model, node=node,
@@ -1892,7 +1953,15 @@ class LLMClient:
             reraise=True,
         ):
             with attempt:
-                r = await self._http.post(url, json=body, headers=headers)
+                # Per-node HTTP read-timeout: heavy nodes (implement/write) get
+                # headroom, cheap nodes keep the tight base that catches a hung
+                # server fast. Miss → base client timeout.
+                http_timeout = self._node_http_timeout_s.get(
+                    node, self._http_timeout_s,
+                )
+                r = await self._http.post(
+                    url, json=body, headers=headers, timeout=http_timeout,
+                )
                 # Raise for any error status; the retry predicate
                 # (_retry_http_error) retries only 5xx / 429, letting a 4xx
                 # (bad key, quota, content policy, oversized body) surface

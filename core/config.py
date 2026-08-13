@@ -134,6 +134,31 @@ class ProviderConfig(BaseModel):
     # streams don't false-positive, while still catching real hangs in
     # roughly 3 minutes.
     cli_inactivity_timeout_s: float | None = 180.0
+    # HTTP read-timeout budget (seconds) for the OpenAI-compatible transport
+    # (openai/codex/gemini/ollama/vllm + proxy providers). ``http_timeout_s``
+    # is the base; ``node_http_timeout_s`` overrides it per engine node.
+    # Reasoning-heavy nodes routinely outrun a flat 120 s on slow/local
+    # models, so give them explicit headroom while cheap nodes keep the tight
+    # base that catches a hung server fast. Lookup misses fall back to the
+    # base. HTTP only — CLI transports use ``node_cli_timeout_s``.
+    http_timeout_s: float = Field(default=120.0, gt=0)
+    node_http_timeout_s: dict[str, float] = Field(
+        default_factory=lambda: {
+            "implement_outline": 300.0,
+            "implement": 900.0,
+            "write": 600.0,
+            "execute_reflect": 600.0,
+            "design_self_critique": 600.0,
+            "analyze": 300.0,
+        }
+    )
+    # Last-resort prompt-size guard (total characters across all messages).
+    # 0 (default) disables it — no behaviour change. When >0, a prompt that
+    # exceeds this is truncated in the MIDDLE of its largest message (head +
+    # tail kept) with a loud warning before dispatch, so a runaway prompt
+    # (e.g. a giant RESULT_JSON or literature dump) can't blow the context
+    # window into a hard 400 / stall. See ``LLMClient._trim_messages``.
+    max_prompt_chars: int = Field(default=0, ge=0)
     # Per-node ``cli_timeout_s`` override map. Reasoning-heavy nodes
     # (``implement``, ``execute_reflect``) routinely outrun the 300 s
     # default on complex topics under Sonnet 4.6 extended thinking;

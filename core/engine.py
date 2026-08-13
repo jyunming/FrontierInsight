@@ -465,14 +465,17 @@ class Engine:
             )
             self._client = LLMClient(
                 endpoint,
+                timeout_s=self.config.provider.http_timeout_s,
                 cli_timeout_s=self.config.provider.cli_timeout_s,
                 cli_inactivity_timeout_s=(
                     self.config.provider.cli_inactivity_timeout_s
                 ),
                 node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+                node_http_timeout_s=self.config.provider.node_http_timeout_s,
                 node_model_fallbacks=(
                     self.config.provider.node_model_fallbacks
                 ),
+                max_prompt_chars=self.config.provider.max_prompt_chars,
                 heartbeat_cb=self._llm_heartbeat,
             )
             # Wrap in a fallback chain so a single provider's outage doesn't
@@ -5034,12 +5037,15 @@ class Engine:
             )
             return LLMClient(
                 ep,
+                timeout_s=self.config.provider.http_timeout_s,
                 cli_timeout_s=self.config.provider.cli_timeout_s,
                 cli_inactivity_timeout_s=(
                     self.config.provider.cli_inactivity_timeout_s
                 ),
                 node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+                node_http_timeout_s=self.config.provider.node_http_timeout_s,
                 node_model_fallbacks={},
+                max_prompt_chars=self.config.provider.max_prompt_chars,
                 heartbeat_cb=self._llm_heartbeat,
             )
         return _factory
