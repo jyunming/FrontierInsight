@@ -2321,12 +2321,30 @@ class _FallbackSlot:
     factory: "Callable[[], Any] | None"
     client: "LLMClient | None" = None
     failures: int = 0
-    tripped: bool = False  # circuit open — skipped for the rest of the run
+    tripped: bool = False  # circuit open
+    tripped_at: float | None = None  # monotonic time the circuit opened
 
-    def record_failure(self, threshold: int, *, fatal: bool) -> None:
+    def record_failure(self, threshold: int, *, fatal: bool, now: float) -> None:
         self.failures += 1
         if fatal or self.failures >= threshold:
             self.tripped = True
+            self.tripped_at = now  # (re)start the cooldown clock
+
+    def record_success(self) -> None:
+        # A closed circuit (or a successful half-open probe) resets everything.
+        self.failures = 0
+        self.tripped = False
+        self.tripped_at = None
+
+    def is_available(self, now: float, cooldown_s: float) -> bool:
+        """Usable if the circuit is closed, or open-but-cooled-down (half-open:
+        allow ONE probe). ``cooldown_s <= 0`` keeps the legacy behaviour —
+        a tripped circuit stays open for the rest of the run."""
+        if not self.tripped:
+            return True
+        if cooldown_s <= 0 or self.tripped_at is None:
+            return False
+        return (now - self.tripped_at) >= cooldown_s
 
 
 class FallbackLLMClient:
@@ -2355,6 +2373,7 @@ class FallbackLLMClient:
         factories: "list[tuple[str, Callable[[], Any]]]" = (),
         *,
         breaker_threshold: int = 2,
+        breaker_cooldown_s: float = 90.0,
         log: "logging.Logger | None" = None,
     ) -> None:
         self._log = log or logging.getLogger("fi.provider.fallback")
@@ -2367,6 +2386,10 @@ class FallbackLLMClient:
         for name, factory in factories:
             self._slots.append(_FallbackSlot(label=name, factory=factory))
         self._threshold = max(1, int(breaker_threshold))
+        # Half-open recovery: a tripped provider is re-probed once after this
+        # many seconds (above the tenacity budget) so a transient outage doesn't
+        # permanently drop it for the whole quest. 0 disables (open for the run).
+        self._cooldown_s = float(breaker_cooldown_s)
         # Read by the Engine cost logger immediately after each chat().
         self.last_usage: Any = None
         self.last_model: str | None = None
@@ -2383,15 +2406,24 @@ class FallbackLLMClient:
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         errors: list[tuple[str, BaseException]] = []
+        now = time.monotonic()
         for idx, slot in enumerate(self._slots):
-            if slot.tripped:
+            if not slot.is_available(now, self._cooldown_s):
                 continue
+            probing = slot.tripped  # a cooled-down open circuit -> half-open probe
+            if probing:
+                self._log.info(
+                    "[fallback] half-open probe of %s after %.0fs cooldown",
+                    slot.label, now - (slot.tripped_at or now),
+                )
             try:
                 client = await self._client_for(slot)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # building/resolving the fallback failed
-                slot.record_failure(self._threshold, fatal=True)
+                # Timestamp the trip at failure time, not chat() entry — a slow
+                # call that then fails must not backdate the cooldown clock.
+                slot.record_failure(self._threshold, fatal=True, now=time.monotonic())
                 self._log.warning(
                     "[fallback] could not initialise %s: %r", slot.label, e,
                 )
@@ -2404,7 +2436,7 @@ class FallbackLLMClient:
                 raise
             except Exception as e:
                 fatal = _is_fatal_provider_error(e)
-                slot.record_failure(self._threshold, fatal=fatal)
+                slot.record_failure(self._threshold, fatal=fatal, now=time.monotonic())
                 more = idx < len(self._slots) - 1
                 self._log.warning(
                     "[fallback] provider %s failed (%s)%s; %s",
@@ -2414,8 +2446,11 @@ class FallbackLLMClient:
                 )
                 errors.append((slot.label, e))
                 continue
-            # Success — snapshot the serving provider's cost fields.
-            slot.failures = 0
+            # Success — snapshot the serving provider's cost fields, and close
+            # the circuit (a successful half-open probe re-admits the provider).
+            if probing:
+                self._log.info("[fallback] provider %s recovered — circuit closed", slot.label)
+            slot.record_success()
             self.last_usage = getattr(client, "last_usage", None)
             self.last_model = getattr(client, "last_model", None)
             if idx > 0:

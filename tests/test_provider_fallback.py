@@ -166,3 +166,65 @@ def test_is_fatal_provider_error_classification():
     assert _is_fatal_provider_error(
         httpx.HTTPStatusError("busy", request=resp5.request, response=resp5)
     ) is False
+
+
+# --- A3: circuit-breaker half-open recovery -----------------------------------
+
+
+class _RecoveringClient:
+    """Fails its first ``fail_n`` calls, then succeeds — models a transient
+    outage that clears."""
+
+    def __init__(self, fail_n: int) -> None:
+        self.calls = 0
+        self._fail_n = fail_n
+        self.last_model = "primary-model"
+        self.last_usage = None
+        self.closed = False
+
+    async def chat(self, messages, **kw):  # noqa: ANN001, ANN003
+        self.calls += 1
+        if self.calls <= self._fail_n:
+            raise _CliTransientError("transient blip")
+        return "primary-recovered"
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_breaker_stays_open_when_cooldown_disabled():
+    """cooldown=0 keeps the legacy behaviour: a tripped provider is skipped for
+    the rest of the run, never re-probed."""
+    primary = _RecoveringClient(fail_n=99)
+    fb = _FakeClient("fallback")
+    client = FallbackLLMClient(
+        primary, [("fallback", _factory_for(fb, [0]))],
+        breaker_threshold=2, breaker_cooldown_s=0,
+    )
+    for i in range(4):
+        assert await client.chat([{"role": "user", "content": str(i)}]) == "fallback-ok"
+    assert primary.calls == 2, "tripped primary must not be re-probed with cooldown off"
+
+
+async def test_breaker_half_open_recovers_after_cooldown():
+    """After the cooldown elapses, one probe is let through; on success the
+    circuit closes and the recovered provider is used again."""
+    primary = _RecoveringClient(fail_n=2)
+    fb = _FakeClient("fallback")
+    client = FallbackLLMClient(
+        primary, [("fallback", _factory_for(fb, [0]))],
+        breaker_threshold=2, breaker_cooldown_s=0.01,
+    )
+    # Two failures trip the primary; the fallback serves both.
+    assert await client.chat([{"role": "user", "content": "1"}]) == "fallback-ok"
+    assert await client.chat([{"role": "user", "content": "2"}]) == "fallback-ok"
+    assert primary.calls == 2
+
+    await asyncio.sleep(0.03)  # let the cooldown elapse
+
+    # A half-open probe now hits the recovered primary and closes the circuit.
+    assert await client.chat([{"role": "user", "content": "3"}]) == "primary-recovered"
+    assert primary.calls == 3
+    # Circuit closed: the next call goes straight to the primary again.
+    assert await client.chat([{"role": "user", "content": "4"}]) == "primary-recovered"
+    assert primary.calls == 4

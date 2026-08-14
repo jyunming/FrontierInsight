@@ -65,8 +65,8 @@ async def test_resume_skips_existing_and_completes_missing(tmp_path: Path, monke
         quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md",
     )
     # Paper + slides already rendered; poster + speech are missing.
-    (tmp_path / "paper.pdf").write_text("pdf", encoding="utf-8")
-    (tmp_path / "slides.pdf").write_text("pdf", encoding="utf-8")
+    (tmp_path / "paper.pdf").write_bytes(b"%PDF-1.5\n...\n%%EOF\n")
+    (tmp_path / "slides.pdf").write_bytes(b"%PDF-1.5\n...\n%%EOF\n")
 
     written = await fi_launch._run_generators(
         _cfg(), art, supervisor=MagicMock(), skip_existing=True,
@@ -100,10 +100,35 @@ async def test_fresh_run_regenerates_everything(tmp_path: Path, monkeypatch):
 def test_existing_output_detects_final_deliverables(tmp_path: Path):
     art = QuestArtifacts(quest_id="q", quest_root=tmp_path)
     assert fi_launch._existing_output(art, "paper_pdf") is None
-    (tmp_path / "paper.pdf").write_text("x", encoding="utf-8")
+    (tmp_path / "paper.pdf").write_bytes(b"%PDF-1.5\n...\n%%EOF\n")
     assert fi_launch._existing_output(art, "paper_pdf") == tmp_path / "paper.pdf"
     # slides accepts either the pdf or the html render.
     (tmp_path / "slides.html").write_text("x", encoding="utf-8")
     assert fi_launch._existing_output(art, "slides") == tmp_path / "slides.html"
     # An intermediate (slides.md) does NOT count as the final deliverable.
     assert fi_launch._existing_output(art, "poster") is None
+
+
+# --- A2: don't trust partial/corrupt artifacts from an interrupted run --------
+
+
+def test_existing_output_rejects_truncated_or_empty_pdf(tmp_path: Path):
+    """A 0-byte or non-%PDF file (killed mid-compile) must NOT count as
+    produced — resume regenerates it instead of shipping a broken PDF."""
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"")  # 0-byte
+    assert fi_launch._existing_output(art, "paper_pdf") is None
+    pdf.write_bytes(b"%!PS truncated not a pdf")  # wrong magic
+    assert fi_launch._existing_output(art, "paper_pdf") is None
+    pdf.write_bytes(b"%PDF-1.7\n... body ...\n%%EOF\n")  # valid
+    assert fi_launch._existing_output(art, "paper_pdf") == pdf
+
+
+def test_existing_output_text_deliverable_needs_nonempty(tmp_path: Path):
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path)
+    talk = tmp_path / "talk.md"
+    talk.write_text("", encoding="utf-8")  # empty
+    assert fi_launch._existing_output(art, "speech") is None
+    talk.write_text("# Talk\n\nHello.\n", encoding="utf-8")
+    assert fi_launch._existing_output(art, "speech") == talk
