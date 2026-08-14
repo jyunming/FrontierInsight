@@ -1061,6 +1061,50 @@ class Config(BaseModel):
         return data
 
     @classmethod
+    def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:
+        """Raise ``ValueError`` listing any YAML keys FI doesn't recognize.
+
+        Pydantic's default ``extra='ignore'`` silently drops an unknown key, so
+        a typo (``node_http_timeoutt_s``, ``reviewer_panel``) validates cleanly
+        and the setting quietly reverts to its default — disabling a knob the
+        user believes they enabled. This checks the top level and the six known
+        sub-sections one level deep. It deliberately does NOT recurse into
+        free-form dict fields (``node_models``, ``node_cli_timeout_s``,
+        ``node_http_timeout_s``, ``node_ensemble``, ``clarify_overrides``,
+        ``extra``, …) whose keys are arbitrary."""
+        unknown: list[str] = []
+        for k in data:
+            if k not in cls.model_fields:
+                unknown.append(k)
+        # Legacy pause flags live under engine/knowledge but map into `pauses:`
+        # via ``_merge_legacy_pauses`` — they are valid, not typos.
+        legacy: dict[str, set[str]] = {}
+        for section, old_key, _new in _LEGACY_PAUSE_FLAGS:
+            legacy.setdefault(section, set()).add(old_key)
+        section_models = {
+            "provider": ProviderConfig, "engine": EngineConfig,
+            "execution": ExecutionConfig, "knowledge": KnowledgeConfig,
+            "pauses": PausesConfig, "output": OutputConfig,
+        }
+        for section, model in section_models.items():
+            sub = data.get(section)
+            if not isinstance(sub, dict):
+                continue
+            allowed = set(model.model_fields) | legacy.get(section, set())
+            for k in sub:
+                if k not in allowed:
+                    unknown.append(f"{section}.{k}")
+        if unknown:
+            raise ValueError(
+                "unrecognized config key(s): " + ", ".join(sorted(unknown))
+                + " — check for typos. FrontierInsight ignores unknown keys "
+                "silently, so a misspelled setting would quietly revert to its "
+                "default instead of taking effect."
+            )
+
+    @classmethod
     def from_yaml(cls, path: Path) -> "Config":
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            cls._audit_unknown_keys(data)
         return cls.model_validate(data)

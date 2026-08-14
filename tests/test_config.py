@@ -307,3 +307,48 @@ def test_pauses_namespace_legacy_mapping_and_norway() -> None:
         "pauses": {"clarify": "ask"},
     })
     assert conflict.pauses.clarify == "ask"
+
+
+# --- unknown-key audit: typo'd YAML keys must fail fast (not silently drop) ---
+
+
+def _write(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "quest.yaml"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_from_yaml_rejects_unknown_top_level_key(tmp_path: Path) -> None:
+    p = _write(tmp_path, "topic: t\nproivder:\n  name: openai\n")  # typo: proivder
+    with pytest.raises(ValueError, match="unrecognized config key"):
+        Config.from_yaml(p)
+
+
+def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
+    # Typos of real reliability knobs — the exact silent-revert footgun.
+    p = _write(
+        tmp_path,
+        "topic: t\nprovider:\n  node_http_timeoutt_s: {implement: 900}\n"
+        "engine:\n  reviewer_panel: []\n",
+    )
+    with pytest.raises(ValueError) as ei:
+        Config.from_yaml(p)
+    msg = str(ei.value)
+    assert "provider.node_http_timeoutt_s" in msg
+    assert "engine.reviewer_panel" in msg
+
+
+def test_from_yaml_accepts_valid_and_legacy_keys(tmp_path: Path) -> None:
+    # Real fields + a legacy pause flag (engine.clarify_mode → pauses.clarify)
+    # + a free-form dict field (node_http_timeout_s values are node names).
+    p = _write(
+        tmp_path,
+        "topic: t\ntitle: x\n"
+        "provider:\n  name: openai\n  node_http_timeout_s:\n    implement: 900\n"
+        "engine:\n  max_iterations: 2\n  clarify_mode: \"off\"\n"
+        "knowledge:\n  enabled: false\n  pause_for_user_papers: true\n"
+        "output:\n  kinds: [paper_pdf]\n",
+    )
+    cfg = Config.from_yaml(p)  # must not raise
+    assert cfg.provider.node_http_timeout_s["implement"] == 900
+    assert cfg.pauses.papers is True  # legacy flag mapped through
