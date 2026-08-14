@@ -657,3 +657,121 @@ def test_direct_defaults_have_required_keys():
         assert "base_url" in d, name
         assert "model" in d, name
         assert "api_key_env" in d, name
+
+
+# --- retry-classification predicates (PR-2) --------------------------------
+# HTTP: retry only 5xx/429, never deterministic 4xx. CLI: retry transients
+# except long-duration session/usage/credit limits and auth failures.
+
+import httpx  # noqa: E402
+from core.provider import (  # noqa: E402
+    _retry_http_error, _retry_cli_error, _CliTransientError,
+)
+
+
+def _http_status_error(code: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "http://x/v1/chat/completions")
+    resp = httpx.Response(code, request=req)
+    return httpx.HTTPStatusError(f"{code}", request=req, response=resp)
+
+
+def test_retry_http_error_retries_5xx_and_429_only() -> None:
+    assert _retry_http_error(_http_status_error(500)) is True
+    assert _retry_http_error(_http_status_error(503)) is True
+    assert _retry_http_error(_http_status_error(429)) is True
+    # Deterministic 4xx must NOT retry (bad key / quota / oversized body).
+    for code in (400, 401, 403, 404, 422):
+        assert _retry_http_error(_http_status_error(code)) is False, code
+    # Genuine transport transients still retry.
+    assert _retry_http_error(httpx.ConnectError("boom")) is True
+    assert _retry_http_error(httpx.ReadTimeout("slow")) is True
+    # Unrelated errors don't retry.
+    assert _retry_http_error(ValueError("nope")) is False
+
+
+def test_retry_cli_error_aborts_fast_on_fatal_markers() -> None:
+    # Ordinary transients retry.
+    assert _retry_cli_error(OSError("spawn failed")) is True
+    assert _retry_cli_error(_CliTransientError("codex exited rc=1: connection reset")) is True
+    # A momentary rate-limit (short reset) is still worth a retry.
+    assert _retry_cli_error(_CliTransientError("rate limit exceeded · resets in 30s")) is True
+    # Long-duration limits / auth failures abort immediately (no doomed retries).
+    fatal = [
+        "You've hit your session limit · resets 2:30am (Europe/Brussels)",
+        "claude usage limit reached",
+        "out of credits - upgrade your plan",
+        "copilot.EXE exited rc=1: Your GitHub token may be invalid, expired",
+        "ensure it has the 'Copilot Requests' permission",
+        "run '/login' to re-authenticate",
+    ]
+    for msg in fatal:
+        assert _retry_cli_error(_CliTransientError(msg)) is False, msg
+    # Unrelated errors don't retry.
+    assert _retry_cli_error(ValueError("nope")) is False
+
+
+# ---------------------------------------------------------------------------
+# Global LLM-call semaphore — process-wide backpressure (PR-6)
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_call_semaphore_caps_concurrent_dispatches(monkeypatch):
+    """With FI_MAX_CONCURRENT_LLM_CALLS=2, at most two chat() dispatches may be
+    in flight at once across a shared LLMClient — the rest queue. Guards the
+    fleet against bursting past provider rate limits."""
+    monkeypatch.setenv("FI_MAX_CONCURRENT_LLM_CALLS", "2")
+
+    ep = ResolvedEndpoint(base_url="https://x/v1", model="m", api_key="k")
+    client = LLMClient(ep, http=MagicMock())
+
+    live = 0
+    peak = 0
+
+    async def fake_impl(messages, **kw):  # noqa: ANN001, ANN003
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            # Yield control a few times so all callers pile up if unbounded.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return "ok"
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(client, "_chat_impl", fake_impl)
+
+    results = await asyncio.gather(
+        *(client.chat([{"role": "user", "content": str(i)}]) for i in range(8))
+    )
+    assert results == ["ok"] * 8
+    assert peak <= 2, f"cap breached: {peak} concurrent dispatches"
+
+
+async def test_llm_call_semaphore_disabled_by_default(monkeypatch):
+    """With the cap unset (default 0), the slot is a no-op — no throttling and
+    all dispatches may run concurrently (no behaviour change for single quests)."""
+    monkeypatch.delenv("FI_MAX_CONCURRENT_LLM_CALLS", raising=False)
+
+    ep = ResolvedEndpoint(base_url="https://x/v1", model="m", api_key="k")
+    client = LLMClient(ep, http=MagicMock())
+
+    live = 0
+    peak = 0
+
+    async def fake_impl(messages, **kw):  # noqa: ANN001, ANN003
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return "ok"
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(client, "_chat_impl", fake_impl)
+    await asyncio.gather(
+        *(client.chat([{"role": "user", "content": str(i)}]) for i in range(6))
+    )
+    assert peak == 6, "default (unset) cap must not throttle"

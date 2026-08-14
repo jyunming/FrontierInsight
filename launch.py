@@ -669,6 +669,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.fleet and args.output is not None:
         p.error("--output cannot be combined with --fleet (per-quest output_dir comes from each YAML).")
+    if args.fleet and args.profile:
+        p.error(
+            "--profile cannot be combined with --fleet: viztracer would trace "
+            "N concurrent quests into overlapping spans in one process, "
+            "producing an unreadable/garbled trace. Profile a single quest "
+            "(--config <one.yaml> --profile) instead."
+        )
     if args.ingest and args.output is not None:
         p.error("--output is irrelevant in --ingest mode.")
     if args.resume and not args.config:
@@ -1218,7 +1225,12 @@ async def run_one(
         human_feedback_callback=hf_callback, reopen=reopen,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
-    written = await _run_generators(cfg, art, supervisor=supervisor)
+    # On a resume, only (re)generate outputs that are actually missing — don't
+    # re-invoke the LLM for slides/poster/speech that already rendered.
+    written = await _run_generators(
+        cfg, art, supervisor=supervisor,
+        skip_existing=resume_quest_id is not None,
+    )
     summary = {
         "quest_id": art.quest_id,
         "quest_root": str(art.quest_root),
@@ -1300,54 +1312,121 @@ async def _emit_one(
     return 1
 
 
+def _kind_final_output(art: QuestArtifacts, kind: str) -> list[Path]:
+    """The FINAL rendered deliverable(s) for a configured output kind. A kind
+    counts as already produced if any of these exists on disk. Intermediates
+    (slides.md, poster.tex, paper_pdf_source.md) are deliberately excluded —
+    only the shippable artifact gates the skip."""
+    root = art.quest_root
+    return {
+        "paper_pdf": [root / "paper.pdf"],
+        "slides": [root / "slides.pdf", root / "slides.html"],
+        "poster": [root / "poster.pdf"],
+        "speech": [root / "talk.md"],
+    }.get(kind, [])
+
+
+def _existing_output(art: QuestArtifacts, kind: str) -> Path | None:
+    for p in _kind_final_output(art, kind):
+        if p.is_file():
+            return p
+    return None
+
+
 async def _run_generators(
     cfg: Config,
     art: QuestArtifacts,
     *,
     supervisor: ProxySupervisor,
+    skip_existing: bool = False,
 ) -> dict[str, Path]:
-    """Run each generator in turn; one failure does not abort the rest."""
+    """Run each generator in turn; one failure does not abort the rest.
+
+    ``skip_existing`` (set on a --resume) makes the pass idempotent AND
+    completing: a kind whose final deliverable already exists on disk is
+    carried through untouched — so resume regenerates only the MISSING outputs
+    instead of re-invoking the LLM for slides/poster/speech and clobbering good
+    decks. Fresh runs (skip_existing=False) regenerate unconditionally, and
+    ``--emit`` stays a force-regenerate path."""
     written: dict[str, Path] = {}
     _apply_paper_venue_override(cfg, art)
+
+    def _already(kind: str) -> Path | None:
+        if not skip_existing:
+            return None
+        existing = _existing_output(art, kind)
+        if existing is not None:
+            print(f"[FI] {kind}: {existing.name} already present — skipping regeneration")
+        return existing
+
     # 1) Paper (sync — pandoc shell-out is fine without async).
-    try:
-        written.update(PaperGenerator(cfg).generate(art, art.quest_root))
-    except Exception as e:  # pragma: no cover — defensive
-        print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
-        # Strict mode escape hatch: ``output.require_pdf=True`` is the
-        # user's signal that a missing PDF is a hard failure for this
-        # quest, not a soft-degrade. The default catch-all above
-        # exists so a flaky pandoc / LaTeX engine doesn't lose the
-        # slides+poster+speech outputs — that policy stays for the
-        # default ``require_pdf=False`` case. When the user opted into
-        # strict mode, re-raise so the quest exits non-zero and the
-        # caller sees the failure instead of a "completed quest with
-        # missing PDF".
-        if cfg.output.require_pdf:
-            raise
+    existing = _already("paper_pdf")
+    if existing is not None:
+        written["paper_pdf"] = existing
+    else:
+        try:
+            written.update(PaperGenerator(cfg).generate(art, art.quest_root))
+        except Exception as e:  # pragma: no cover — defensive
+            print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
+            # Strict mode escape hatch: ``output.require_pdf=True`` is the
+            # user's signal that a missing PDF is a hard failure for this
+            # quest, not a soft-degrade. The default catch-all above
+            # exists so a flaky pandoc / LaTeX engine doesn't lose the
+            # slides+poster+speech outputs — that policy stays for the
+            # default ``require_pdf=False`` case. When the user opted into
+            # strict mode, re-raise so the quest exits non-zero and the
+            # caller sees the failure instead of a "completed quest with
+            # missing PDF".
+            if cfg.output.require_pdf:
+                raise
     # 2) Slides (LLM + Marp).
-    try:
-        written.update(
-            await SlideGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-        )
-    except Exception as e:
-        print(f"[FI] slide generator failed: {e!r}", file=sys.stderr)
+    existing = _already("slides")
+    if existing is not None:
+        written["slides"] = existing
+    else:
+        try:
+            written.update(
+                await SlideGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+            )
+        except Exception as e:
+            print(f"[FI] slide generator failed: {e!r}", file=sys.stderr)
     # 3) Poster (LLM + pdflatex).
-    try:
-        written.update(
-            await PosterGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-        )
-    except Exception as e:
-        print(f"[FI] poster generator failed: {e!r}", file=sys.stderr)
+    existing = _already("poster")
+    if existing is not None:
+        written["poster"] = existing
+    else:
+        try:
+            written.update(
+                await PosterGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+            )
+        except Exception as e:
+            print(f"[FI] poster generator failed: {e!r}", file=sys.stderr)
     # 4) Speech (one LLM call).
-    try:
-        written.update(
-            await SpeechGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
-        )
-    except Exception as e:
-        print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
+    existing = _already("speech")
+    if existing is not None:
+        written["speech"] = existing
+    else:
+        try:
+            written.update(
+                await SpeechGenerator(cfg).generate(art, art.quest_root, supervisor=supervisor)
+            )
+        except Exception as e:
+            print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")
+    # On a resume, surface any configured output still missing after the pass
+    # so an incomplete quest doesn't silently report success.
+    if skip_existing:
+        still_missing = [
+            k for k in cfg.output.kinds
+            if _kind_final_output(art, k) and _existing_output(art, k) is None
+        ]
+        if still_missing:
+            print(
+                f"[FI] resume: still missing after generation: "
+                f"{', '.join(still_missing)} (toolchain issue? see "
+                f"<quest>/*_skipped.md)", file=sys.stderr,
+            )
     return written
 
 
@@ -1397,11 +1476,22 @@ def _rss_mb() -> float | None:
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
 
 
-async def _await_under_cap(cap_mb: int, *, poll_s: float = 2.0) -> None:
-    """Block until process RSS is under the cap. No-op if psutil missing."""
+async def _await_under_cap(
+    cap_mb: int, *, poll_s: float = 2.0, max_wait_s: float = 120.0,
+) -> None:
+    """Block until process RSS is under the cap, up to ``max_wait_s`` then
+    proceed with a warning. No-op if psutil is missing. The deadline is what
+    prevents a fleet-wide deadlock: without it, if RSS never drops below the
+    cap (e.g. the baseline already exceeds it) the first admitted quest waits
+    forever holding a semaphore slot and stalls the whole fleet."""
+    deadline = time.monotonic() + max_wait_s
     while True:
         rss = _rss_mb()
         if rss is None or rss < cap_mb:
+            return
+        if time.monotonic() >= deadline:
+            print(f"[FI fleet] memory {rss:.0f}MB still >= cap {cap_mb}MB after "
+                  f"{max_wait_s:.0f}s; proceeding anyway")
             return
         print(f"[FI fleet] memory {rss:.0f}MB >= cap {cap_mb}MB; waiting...")
         await asyncio.sleep(poll_s)
@@ -1428,6 +1518,22 @@ async def run_fleet(
     state = {"done": 0, "failed": 0, "running": 0}
     started_at = time.monotonic()
 
+    # Guard against an unsatisfiable memory cap: if the baseline RSS already
+    # exceeds it, waiting would deadlock the whole fleet (nothing runs to free
+    # memory). Disable the cap with a warning instead. Also warn if a cap was
+    # requested but psutil isn't installed (the cap would silently no-op).
+    if memory_cap_mb is not None:
+        base = _rss_mb()
+        if base is None:
+            print("[FI fleet] --memory-cap-mb set but psutil is not installed; "
+                  "the cap cannot be enforced and is ignored.", file=sys.stderr)
+            memory_cap_mb = None
+        elif base >= memory_cap_mb:
+            print(f"[FI fleet] baseline RSS {base:.0f}MB already >= "
+                  f"--memory-cap-mb {memory_cap_mb}MB; disabling the cap to avoid "
+                  "a fleet deadlock.", file=sys.stderr)
+            memory_cap_mb = None
+
     def _status_line(quest_id: str, event: str) -> None:
         elapsed = int(time.monotonic() - started_at)
         rss = _rss_mb()
@@ -1446,17 +1552,19 @@ async def run_fleet(
             if memory_cap_mb is not None:
                 await _await_under_cap(memory_cap_mb)
             state["running"] += 1
-            # Construct the Engine ONCE and reuse it in run_one so the
-            # status-line quest_id matches the quest that actually runs.
-            # Previously a second Engine (with a fresh quest_id) was
-            # built inside run_one, leaving a stranded sibling quest_dir
-            # on disk and breaking per-quest accounting.
-            engine = Engine(
-                cfg, supervisor=supervisor,
-                auto_accept_on_pass=auto_accept_on_pass,
-            )
-            _status_line(engine.quest_id, "start")
+            engine = None
             try:
+                # Construct the Engine INSIDE the guard so a construction error
+                # (invalid provider, malformed config, bad output_dir) is
+                # isolated to THIS quest and returned as a failure — not
+                # propagated out of the gather to abort the whole fleet and
+                # orphan the sibling quests. Reused in run_one so the
+                # status-line quest_id matches the quest that actually runs.
+                engine = Engine(
+                    cfg, supervisor=supervisor,
+                    auto_accept_on_pass=auto_accept_on_pass,
+                )
+                _status_line(engine.quest_id, "start")
                 summary = await run_one(
                     cfg, supervisor=supervisor, profile=profile, engine=engine,
                     source_yaml_path=yaml_path,
@@ -1468,11 +1576,20 @@ async def run_fleet(
             except Exception as e:
                 state["running"] -= 1
                 state["failed"] += 1
-                _status_line(engine.quest_id, "FAIL ")
+                qid = engine.quest_id if engine is not None else "(engine construction failed)"
+                _status_line(qid, "FAIL ")
                 return e
 
-    results = await asyncio.gather(*(gated(p, c) for p, c in norm))
-    failed = [r for r in results if isinstance(r, Exception)]
+    # return_exceptions=True as defense in depth: gated already catches its own
+    # errors and returns them, but an unforeseen raise must not abort the fleet
+    # and orphan the sibling quests still running. Propagate genuine cancellation.
+    results = await asyncio.gather(
+        *(gated(p, c) for p, c in norm), return_exceptions=True,
+    )
+    for r in results:
+        if isinstance(r, asyncio.CancelledError):
+            raise r
+    failed = [r for r in results if isinstance(r, BaseException)]
     for r in failed:
         print(f"[FI fleet] FAILURE: {r!r}", file=sys.stderr)
     return 1 if failed else 0

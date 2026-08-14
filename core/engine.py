@@ -51,6 +51,7 @@ from .execution import ExecutionResult, make_executor
 from .knowledge import Knowledge, RetrievedDoc
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
+    FallbackLLMClient,
     LLMClient,
     PROXY_PROVIDERS,
     ProxySupervisor,
@@ -60,6 +61,34 @@ from .provider import (
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
 _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
+
+# Default sampling temperature for generative nodes (ideate, write, analyze…).
+_DEFAULT_CHAT_TEMPERATURE = 0.2
+# Judgment / gate / classifier nodes: their job is to reach a *verdict* or a
+# routing decision (sufficient vs broaden, accept vs revise, supported vs not),
+# where run-to-run flakiness means the same corpus can flip the route and
+# trigger wasted broaden loops or spurious revise cycles (audit: "gates are
+# non-deterministic"). These run at temperature 0 so the decision is
+# reproducible wherever the transport honours it (HTTP + vscode_bridge; CLI
+# transports that don't expose temperature are unaffected — no regression).
+# The ``review_panel.`` prefix covers every per-persona panel call.
+_DETERMINISTIC_GATE_NODES = frozenset({
+    "evidence_gate",
+    "review",
+    "claim_check",
+    "cross_check",
+    "relevance_guard",
+})
+
+
+def _temperature_for_node(node: str | None) -> float:
+    """Temperature for a node's chat call: 0 for gate/verdict/classifier nodes
+    (deterministic routing), the generative default otherwise."""
+    if not node:
+        return _DEFAULT_CHAT_TEMPERATURE
+    if node in _DETERMINISTIC_GATE_NODES or node.startswith("review_panel."):
+        return 0.0
+    return _DEFAULT_CHAT_TEMPERATURE
 
 
 @dataclass
@@ -436,16 +465,34 @@ class Engine:
             )
             self._client = LLMClient(
                 endpoint,
+                timeout_s=self.config.provider.http_timeout_s,
                 cli_timeout_s=self.config.provider.cli_timeout_s,
                 cli_inactivity_timeout_s=(
                     self.config.provider.cli_inactivity_timeout_s
                 ),
                 node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+                node_http_timeout_s=self.config.provider.node_http_timeout_s,
                 node_model_fallbacks=(
                     self.config.provider.node_model_fallbacks
                 ),
+                max_prompt_chars=self.config.provider.max_prompt_chars,
                 heartbeat_cb=self._llm_heartbeat,
             )
+            # Wrap in a fallback chain so a single provider's outage doesn't
+            # forfeit the quest. No-op (unwrapped) when no fallback configured.
+            if self.config.provider.fallback:
+                specs = [
+                    (name, self._make_fallback_factory(name))
+                    for name in self.config.provider.fallback
+                ]
+                self._client = FallbackLLMClient(
+                    self._client, specs, log=self._log,
+                )
+                self._log.info(
+                    "provider fallback chain: %s -> %s",
+                    self.config.provider.name,
+                    " -> ".join(self.config.provider.fallback),
+                )
 
             checkpoint_path = self.fi_dir / "state.sqlite"
             try:
@@ -791,6 +838,16 @@ class Engine:
                     and self._client is not None
                 ):
                     await self.supervisor.release(self.config.provider.name)
+                # Release proxies for any fallback providers that a
+                # FallbackLLMClient actually materialised this run.
+                for fb_name in getattr(
+                    self._client, "built_fallback_providers", (),
+                ):
+                    if (
+                        fb_name in PROXY_PROVIDERS
+                        and fb_name != self.config.provider.name
+                    ):
+                        await self.supervisor.release(fb_name)
 
             if data_paused:
                 # Generic pause-exit. The flag is shared across four
@@ -4655,8 +4712,20 @@ class Engine:
 
         panel_names = list(self.config.engine.review_panel or [])
         if not panel_names:
-            # Legacy single-reviewer path — unchanged behavior.
-            text = await self._chat(base_prompt, node="review")
+            # Legacy single-reviewer path. Review runs AFTER the paper is
+            # written, and the output generators (pdf/slides/poster/speech) run
+            # only after run() returns — so a transient provider failure here
+            # must NOT abort the quest and forfeit the finished paper + its
+            # outputs. Fail open to "accept" (the same degrade the parse-miss
+            # path below already uses, and the pattern applied to claim_check).
+            try:
+                text = await self._chat(base_prompt, node="review")
+            except Exception as e:
+                self._log.warning(
+                    "[review] review call failed (%s); accepting the paper "
+                    "as-is so its outputs still render", e,
+                )
+                text = ""
             review = _parse_json_lenient(text) or {
                 "verdict": "accept", "score": 3, "suggestions": [],
             }
@@ -4699,7 +4768,14 @@ class Engine:
                         "suggestions": [], "blocking": "",
                         "error": str(e)}
             prompt = f"{prefix}\n\n{base_prompt}"
-            text = await self._chat(prompt, node=f"review_panel.{name}")
+            try:
+                text = await self._chat(prompt, node=f"review_panel.{name}")
+            except Exception as e:
+                self._log.warning(
+                    "[review] panelist %s failed (%s); recording a neutral "
+                    "accept for this persona", name, e,
+                )
+                text = ""
             parsed = _parse_json_lenient(text) or {}
             mfh = parsed.get("must_flag_hits") or []
             if not isinstance(mfh, list):
@@ -4715,10 +4791,32 @@ class Engine:
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
             }
 
-        panel_results = await asyncio.gather(
+        # return_exceptions=True is defense in depth: run_persona already
+        # degrades a failed persona to a neutral accept, but a panelist must
+        # never be able to abort the whole (post-write) review and forfeit the
+        # paper's outputs. Drop any unexpected raise, propagate genuine
+        # cancellation, and if EVERY panelist somehow failed, accept as-is.
+        panel_results_raw = await asyncio.gather(
             *(run_persona(n) for n in panel_names),
-            return_exceptions=False,
+            return_exceptions=True,
         )
+        panel_results: list[dict[str, Any]] = []
+        for r in panel_results_raw:
+            if isinstance(r, asyncio.CancelledError):
+                raise r
+            if isinstance(r, BaseException):
+                self._log.warning("[review] a panelist raised unexpectedly: %r", r)
+            elif isinstance(r, dict):
+                panel_results.append(r)
+        if not panel_results:
+            self._log.warning(
+                "[review] all panelists failed; accepting the paper as-is",
+            )
+            panel_results = [{
+                "persona": panel_names[0], "verdict": "accept", "score": 3,
+                "strengths": [], "weaknesses": [], "suggestions": [],
+                "blocking": "", "must_flag_hits": [],
+            }]
         agg = _aggregate_panel_reviews(list(panel_results))
 
         # Moderator call — best effort for the rationale + suggestion
@@ -4889,19 +4987,68 @@ class Engine:
 
     # ---- helpers ---------------------------------------------------------
 
-    async def _chat(self, prompt: str, *, node: str | None = None) -> str:
+    async def _chat(
+        self, prompt: str, *, node: str | None = None,
+        temperature: float | None = None,
+    ) -> str:
         """Single-user-message chat. ``node`` is the engine node name
         (e.g. ``"ideate"``, ``"review"``); when present and the YAML
         config sets ``provider.node_models[node]``, that model is sent
-        on this call only. Otherwise the endpoint default applies."""
+        on this call only. Otherwise the endpoint default applies.
+
+        ``temperature`` defaults to per-node routing: gate/verdict/classifier
+        nodes (evidence_gate, review, review_panel.*, claim_check, cross_check,
+        relevance_guard) run at 0 for reproducible decisions; generative nodes
+        use the 0.2 default. Pass an explicit value to override."""
         assert self._client is not None
+        temp = (
+            temperature if temperature is not None
+            else _temperature_for_node(node)
+        )
         messages = [{"role": "user", "content": prompt}]
         response = await self._client.chat(
-            messages, temperature=0.2, model=self._model_for_node(node),
+            messages, temperature=temp, model=self._model_for_node(node),
             node=node or "",
         )
         self._log_chat_cost(node=node or "")
         return response
+
+    def _make_fallback_factory(self, name: str):
+        """Build an async factory that lazily resolves+constructs an
+        ``LLMClient`` for fallback provider ``name`` (used by
+        :class:`FallbackLLMClient`). Nothing is resolved and no proxy spawned
+        until the primary provider actually fails and the chain reaches this
+        rung. The derived config keeps the primary's timeouts (pure seconds,
+        provider-agnostic) but resets model/base_url/api_key and drops
+        node_model_fallbacks — those name provider-specific models that would
+        be wrong for a different provider."""
+        async def _factory() -> LLMClient:
+            derived = self.config.provider.model_copy(update={
+                "name": name,
+                "model": None,
+                "base_url": None,
+                "api_key_env": None,
+                "node_model_fallbacks": {},
+                "fallback": [],
+            })
+            ep = await resolve_endpoint_async(derived, self.supervisor)
+            self._log.info(
+                "[fallback] resolved %s -> %s (%s)", name, ep.base_url, ep.model,
+            )
+            return LLMClient(
+                ep,
+                timeout_s=self.config.provider.http_timeout_s,
+                cli_timeout_s=self.config.provider.cli_timeout_s,
+                cli_inactivity_timeout_s=(
+                    self.config.provider.cli_inactivity_timeout_s
+                ),
+                node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+                node_http_timeout_s=self.config.provider.node_http_timeout_s,
+                node_model_fallbacks={},
+                max_prompt_chars=self.config.provider.max_prompt_chars,
+                heartbeat_cb=self._llm_heartbeat,
+            )
+        return _factory
 
     def _llm_heartbeat(self, payload: dict[str, Any]) -> None:
         """Receive a periodic progress beat from ``LLMClient`` during

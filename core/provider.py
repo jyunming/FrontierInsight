@@ -45,6 +45,7 @@ same proxy provider shares one proxy process.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -316,7 +317,24 @@ class ProxySupervisor:
     """
 
     _handles: dict[str, _ProxyHandle] = field(default_factory=dict)
+    # Fast lock: guards ONLY the _handles / _key_locks bookkeeping dicts. It is
+    # NEVER held across a blocking spawn or terminate.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Per-canonical-key locks: serialize spawn/teardown for the SAME provider
+    # (so a proxy is never double-spawned) while letting DIFFERENT providers
+    # spawn concurrently. Previously a single global lock was held across the
+    # up-to-60s ``_spawn`` warmup, so in a --fleet one provider's proxy startup
+    # blocked EVERY other provider's acquire — serializing all proxy warmups.
+    _key_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+
+    async def _key_lock(self, key: str) -> asyncio.Lock:
+        """Get-or-create the per-key lock under the fast bookkeeping lock."""
+        async with self._lock:
+            lk = self._key_locks.get(key)
+            if lk is None:
+                lk = asyncio.Lock()
+                self._key_locks[key] = lk
+            return lk
 
     async def acquire(self, provider_name: str) -> _ProxyHandle:
         if provider_name not in _PROXY_PROVIDERS:
@@ -324,48 +342,60 @@ class ProxySupervisor:
         # Canonicalize aliases (e.g. github_copilot_vscode → github_copilot_cli)
         # so two aliases that spawn the same proxy share a single handle.
         key = _canonical_proxy_name(provider_name)
-        async with self._lock:
-            handle = self._handles.get(key)
+        key_lock = await self._key_lock(key)
+        # Per-key lock: a slow spawn for THIS provider must not block acquires
+        # of OTHER providers, but two acquires of the same provider must not
+        # both spawn.
+        async with key_lock:
+            async with self._lock:
+                handle = self._handles.get(key)
             if handle is None:
                 # `_spawn` ends with a blocking poll of `/v1/models` (up to
-                # 60s). Run it in a worker thread so concurrent quests doing
-                # other work don't stall the event loop while one of them
-                # waits for the proxy to come up.
+                # 60s). Run it in a worker thread AND outside the global lock,
+                # so only same-key acquires wait for it.
                 handle = await asyncio.to_thread(self._spawn, key)
-                self._handles[key] = handle
-            handle.refcount += 1
+                async with self._lock:
+                    self._handles[key] = handle
+            async with self._lock:
+                handle.refcount += 1
             return handle
 
     async def release(self, provider_name: str) -> None:
         key = _canonical_proxy_name(provider_name)
-        async with self._lock:
-            handle = self._handles.get(key)
-            if handle is None:
-                return
-            handle.refcount -= 1
-            if handle.refcount <= 0:
-                handle.proc.terminate()
-                try:
-                    handle.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    handle.proc.kill()
-                # Use the canonical key so the entry the terminated
-                # handle is actually stored under gets removed.
-                # Without this, releasing via a non-canonical alias
-                # leaves a dead handle in _handles and the next
-                # acquire returns it without respawning.
-                self._handles.pop(key, None)
+        key_lock = await self._key_lock(key)
+        async with key_lock:
+            async with self._lock:
+                handle = self._handles.get(key)
+                if handle is None:
+                    return
+                handle.refcount -= 1
+                teardown = handle.refcount <= 0
+                if teardown:
+                    # Remove under the global lock BEFORE the (blocking)
+                    # terminate, using the canonical key so releasing via a
+                    # non-canonical alias can't strand a dead handle. A same-key
+                    # acquire waits on this key lock and respawns cleanly.
+                    self._handles.pop(key, None)
+            if teardown:
+                await asyncio.to_thread(self._terminate, handle)
 
     async def shutdown(self) -> None:
         async with self._lock:
-            for h in list(self._handles.values()):
-                h.proc.terminate()
-            for h in list(self._handles.values()):
-                try:
-                    h.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    h.proc.kill()
+            handles = list(self._handles.values())
             self._handles.clear()
+        # Terminate off the event loop so the up-to-5s waits never stall it.
+        for h in handles:
+            await asyncio.to_thread(self._terminate, h)
+
+    @staticmethod
+    def _terminate(handle: _ProxyHandle) -> None:
+        """Blocking best-effort teardown of one proxy process. Run via
+        ``asyncio.to_thread`` so the up-to-5s wait never stalls the loop."""
+        handle.proc.terminate()
+        try:
+            handle.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            handle.proc.kill()
 
     def _spawn(self, provider_name: str) -> _ProxyHandle:
         port = _free_port()
@@ -593,6 +623,110 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "out of credits - upgrade your plan",
     "claude usage limit reached",
 )
+
+# Long-duration / non-recoverable CLI failures: an hours-away session or usage
+# limit, exhausted credits, or a dead / mis-scoped auth token. These CANNOT
+# clear within the ~4-attempt retry window, so retrying just burns 3-4
+# multi-minute calls before crashing anyway (the failure mode that truncated an
+# earlier run here). Matched case-insensitively against the CLI error message
+# (which carries the CLI's stderr). Deliberately separate from the momentary
+# "rate limit exceeded · resets <soon>" case, which IS worth a retry.
+_CLI_FATAL_MARKERS: tuple[str, ...] = (
+    "session limit",
+    "usage limit reached",
+    "out of credits",
+    "token may be invalid",
+    "copilot requests",          # gh token lacking the Copilot scope
+    "run '/login'",
+    "re-authenticate",
+)
+
+
+def _retry_http_error(exc: BaseException) -> bool:
+    """HTTP retry predicate: retry genuine transients only. A 4xx (bad/expired
+    key, content policy, malformed or oversized body) is deterministic —
+    retrying wastes the backoff budget and crashes anyway — so only 5xx and 429
+    are retried alongside transport / read-timeout errors. (The prior
+    ``retry_if_exception_type(HTTPStatusError)`` retried every 4xx despite the
+    inline comment claiming it didn't.)"""
+    if isinstance(exc, (httpx.TransportError, httpx.ReadTimeout)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        resp = getattr(exc, "response", None)
+        sc = getattr(resp, "status_code", None)
+        if isinstance(sc, int):
+            return sc >= 500 or sc == 429
+        # A real HTTP error always carries an int status; a malformed/absent
+        # one is surfaced rather than looped.
+        return False
+    return False
+
+
+def _retry_cli_error(exc: BaseException) -> bool:
+    """CLI retry predicate: retry OSErrors and transient CLI failures, EXCEPT a
+    long-duration session/usage/credit limit or an auth failure (see
+    ``_CLI_FATAL_MARKERS``) — those can't clear within the retry window, so
+    abort fast with the original message rather than burning the budget."""
+    if isinstance(exc, OSError):
+        return True
+    if isinstance(exc, _CliTransientError):
+        return not any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+    return False
+
+
+# --- Process-wide LLM-call backpressure -------------------------------------
+#
+# A single quest fans out to a handful of concurrent LLM calls (a review panel,
+# an ensemble). A ``--fleet`` run multiplies that by the number of live quests,
+# so an unbounded process can burst into dozens/hundreds of simultaneous
+# provider calls and trip provider rate limits (audit: "no global backpressure").
+# This semaphore caps concurrent in-flight ``chat`` dispatches across EVERY
+# LLMClient in the process. It is created lazily inside the running event loop
+# (an ``asyncio.Semaphore`` binds to the loop it is first awaited on), sized from
+# ``FI_MAX_CONCURRENT_LLM_CALLS``. Default 0 == unlimited (a no-op nullcontext,
+# zero behaviour change) so single quests are never throttled unless an operator
+# opts in; set e.g. ``FI_MAX_CONCURRENT_LLM_CALLS=8`` for a large fleet.
+#
+# Deadlock note: the slot is held only around a single ``_chat_impl`` dispatch,
+# which never re-enters ``chat``. Fallback/retry loops acquire a fresh slot per
+# attempt (release between), so a saturated cap queues — it cannot deadlock.
+_LLM_CALL_SEM: "asyncio.Semaphore | None" = None
+_LLM_CALL_SEM_LIMIT: int = -1  # -1 == "not yet resolved from the environment"
+_LLM_CALL_SEM_LOOP: "asyncio.AbstractEventLoop | None" = None
+
+
+def _llm_call_limit() -> int:
+    """Resolve the concurrency cap from the environment (0/negative == off)."""
+    try:
+        return int(os.environ.get("FI_MAX_CONCURRENT_LLM_CALLS", "0") or "0")
+    except ValueError:
+        return 0
+
+
+def _llm_call_slot():
+    """Return an async context manager gating one LLM dispatch on the
+    process-wide cap. ``nullcontext`` (no-op) when the cap is disabled.
+
+    A single shared semaphore enforces the cap across all concurrent callers on
+    one event loop; it is recreated when the limit changes (env tweaked) or the
+    running loop changes (an ``asyncio.Semaphore`` is bound to the loop it was
+    created on — reusing one across loops raises, which pytest-asyncio would
+    hit since each test gets a fresh loop)."""
+    global _LLM_CALL_SEM, _LLM_CALL_SEM_LIMIT, _LLM_CALL_SEM_LOOP
+    limit = _llm_call_limit()
+    if limit <= 0:
+        return contextlib.nullcontext()
+    loop = asyncio.get_running_loop()
+    if (
+        _LLM_CALL_SEM is None
+        or _LLM_CALL_SEM_LIMIT != limit
+        or _LLM_CALL_SEM_LOOP is not loop
+    ):
+        _LLM_CALL_SEM = asyncio.Semaphore(limit)
+        _LLM_CALL_SEM_LIMIT = limit
+        _LLM_CALL_SEM_LOOP = loop
+    return _LLM_CALL_SEM
+
 
 # Placeholder / "I gave up" patterns that some CLIs emit instead of a
 # real response. Distinct from refusal — these signal the LLM lost the
@@ -1560,12 +1694,25 @@ class LLMClient:
         cli_timeout_s: float = 300.0,
         cli_inactivity_timeout_s: float | None = 180.0,
         node_cli_timeout_s: dict[str, float] | None = None,
+        node_http_timeout_s: dict[str, float] | None = None,
         node_model_fallbacks: dict[str, str] | None = None,
+        max_prompt_chars: int = 0,
         heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(timeout=timeout_s)
+        # Base HTTP read-timeout (seconds) and per-node overrides for the
+        # OpenAI-compatible transport. Reasoning-heavy nodes (implement/write)
+        # routinely outrun a flat 120 s on slow/local models; the per-node map
+        # gives them headroom while cheap nodes keep the tight base that
+        # catches a hung server fast. Lookup misses fall back to the base.
+        self._http_timeout_s = timeout_s
+        self._node_http_timeout_s = node_http_timeout_s or {}
+        # Last-resort prompt-size guard (total characters across messages).
+        # 0 disables. Prevents a runaway prompt from blowing the context
+        # window into a hard 400 / stall. See ``_trim_messages``.
+        self._max_prompt_chars = max(0, int(max_prompt_chars))
         # CLI providers (claude_cli/codex_cli/copilot_cli/gemini_cli)
         # use this wall-clock cap per chat call; a stuck child gets
         # killed and tenacity retries. Defaults to 5 minutes — longer
@@ -1648,14 +1795,20 @@ class LLMClient:
         httpx / CLI stderr stack.
         """
         try:
-            return await self._chat_impl(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                extra=extra,
-                model=model,
-                node=node,
-            )
+            # Gate the dispatch on the process-wide concurrency cap
+            # (``FI_MAX_CONCURRENT_LLM_CALLS``; no-op when unset) so a fleet of
+            # quests can't burst past provider rate limits. The slot is held
+            # only for this one dispatch and released on return, so retries /
+            # fallbacks re-queue rather than deadlock.
+            async with _llm_call_slot():
+                return await self._chat_impl(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra=extra,
+                    model=model,
+                    node=node,
+                )
         except Exception as e:
             # ``except Exception`` excludes ``asyncio.CancelledError``
             # (a BaseException subclass since Python 3.8) — see the
@@ -1690,6 +1843,67 @@ class LLMClient:
             parts.append(f"node={node}")
         return "[FI] " + ", ".join(parts)
 
+    def _trim_messages(
+        self, messages: list[dict[str, str]], *, node: str = "",
+    ) -> list[dict[str, str]]:
+        """Last-resort guard against a runaway prompt. When ``max_prompt_chars``
+        is set and the total message size exceeds it, shrink the prompt so the
+        TOTAL is guaranteed to land at or under the cap. No-op when the guard is
+        disabled (0) or the prompt already fits — so normal calls pay only one
+        ``sum`` and are otherwise untouched. Returns a new list; never mutates
+        the caller's messages.
+
+        Common case (one dominant message — a giant RESULT_JSON / literature
+        dump): the largest message is trimmed in the MIDDLE, keeping head + tail
+        (where the task framing and the trailing instruction live). The kept
+        length is derived from the largest message's *budget* (cap minus the
+        other messages), so the result total is exactly the cap — never over,
+        even when the cap is smaller than the trim marker (then the marker is
+        dropped and the content is hard-clamped to the budget).
+
+        Pathological case (the OTHER messages alone already exceed the cap):
+        trimming one message can't help, so every message is hard-clamped to its
+        proportional share of the cap. Loses the head+tail nicety, but still
+        guarantees the bound."""
+        cap = self._max_prompt_chars
+        if cap <= 0:
+            return messages
+        lengths = [len(str(m.get("content", ""))) for m in messages]
+        total = sum(lengths)
+        if total <= cap:
+            return messages
+        trimmed = [dict(m) for m in messages]
+        idx = max(range(len(trimmed)), key=lambda i: lengths[i])
+        others = total - lengths[idx]
+        budget = cap - others  # chars the largest message may keep
+        marker = f"\n\n... [FI: prompt trimmed to fit the {cap}-char cap] ...\n\n"
+        if budget > 0:
+            content = str(trimmed[idx].get("content", ""))
+            if budget > len(marker) + 2:
+                keep = budget - len(marker)
+                head = keep // 2
+                tail = keep - head
+                new_content = content[:head] + marker + (
+                    content[-tail:] if tail else ""
+                )
+            else:
+                # Budget too tight to fit the marker — hard-clamp to the budget.
+                new_content = content[:budget]
+            trimmed[idx]["content"] = new_content
+        else:
+            # Even excluding the largest message the prompt is over the cap;
+            # clamp every message to its proportional share (floors sum <= cap).
+            for i, m in enumerate(trimmed):
+                share = (cap * lengths[i]) // total if total else 0
+                m["content"] = str(m.get("content", ""))[:share]
+        _log.warning(
+            "[prompt-trim] node=%s prompt %d chars > cap %d — trimmed to fit "
+            "(%d chars now)",
+            node or "?", total, cap,
+            sum(len(str(m.get("content", ""))) for m in trimmed),
+        )
+        return trimmed
+
     async def _chat_impl(
         self,
         messages: list[dict[str, str]],
@@ -1711,6 +1925,9 @@ class LLMClient:
         # of empty bars for CLI / bridge transports.
         self.last_usage = None
         self.last_model = (model or self.endpoint.model)
+        # Last-resort prompt-size guard (all transports) — a runaway prompt
+        # otherwise blows the context window into a hard 400 / stall.
+        messages = self._trim_messages(messages, node=node)
         if self.endpoint.transport == "cli":
             text = await self._chat_cli(
                 messages, model_override=model, node=node,
@@ -1777,16 +1994,23 @@ class LLMClient:
             # the upstream. Random-exponential spreads them out over
             # a window so the upstream sees a gentler ramp.
             wait=wait_random_exponential(multiplier=1, max=20),
-            retry=retry_if_exception_type(
-                (httpx.HTTPStatusError, httpx.TransportError, httpx.ReadTimeout)
-            ),
+            retry=retry_if_exception(_retry_http_error),
             reraise=True,
         ):
             with attempt:
-                r = await self._http.post(url, json=body, headers=headers)
-                if r.status_code >= 500:
-                    r.raise_for_status()
-                # 4xx surfaces immediately — no retry on auth/quota errors.
+                # Per-node HTTP read-timeout: heavy nodes (implement/write) get
+                # headroom, cheap nodes keep the tight base that catches a hung
+                # server fast. Miss → base client timeout.
+                http_timeout = self._node_http_timeout_s.get(
+                    node, self._http_timeout_s,
+                )
+                r = await self._http.post(
+                    url, json=body, headers=headers, timeout=http_timeout,
+                )
+                # Raise for any error status; the retry predicate
+                # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                # (bad key, quota, content policy, oversized body) surface
+                # immediately instead of burning the backoff budget.
                 r.raise_for_status()
         data = r.json()
         # Capture token usage when the upstream returned
@@ -2044,7 +2268,7 @@ class LLMClient:
             # uniform random value from [0, multiplier * 2^attempt],
             # capped at ``max``, which spreads retries over a window.
             wait=wait_random_exponential(multiplier=1, max=20),
-            retry=retry_if_exception_type((OSError, _CliTransientError)),
+            retry=retry_if_exception(_retry_cli_error),
             reraise=True,
             before_sleep=_retry_log,
         ):
@@ -2067,3 +2291,157 @@ class LLMClient:
                     node=node,
                 )
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
+
+
+# ---------------------------------------------------------------------------
+# Provider fallback chain + per-provider circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def _is_fatal_provider_error(exc: BaseException) -> bool:
+    """A provider failure that won't clear within the run — auth/quota/credit
+    exhaustion — so the breaker should open immediately rather than after the
+    usual failure threshold. Transient blips (5xx, timeouts) trip only after
+    repeated failures."""
+    if isinstance(exc, _CliTransientError):
+        return any(m in str(exc).lower() for m in _CLI_FATAL_MARKERS)
+    if isinstance(exc, httpx.HTTPStatusError):
+        sc = getattr(getattr(exc, "response", None), "status_code", None)
+        return isinstance(sc, int) and sc in (401, 403, 402)
+    return False
+
+
+@dataclass
+class _FallbackSlot:
+    """One rung of the fallback chain: a provider plus its breaker state."""
+
+    label: str
+    # ``None`` for the primary (already constructed); an async factory for
+    # lazily-built fallbacks (their proxy, if any, spins up only on first use).
+    factory: "Callable[[], Any] | None"
+    client: "LLMClient | None" = None
+    failures: int = 0
+    tripped: bool = False  # circuit open — skipped for the rest of the run
+
+    def record_failure(self, threshold: int, *, fatal: bool) -> None:
+        self.failures += 1
+        if fatal or self.failures >= threshold:
+            self.tripped = True
+
+
+class FallbackLLMClient:
+    """Try an ordered chain of providers so a single provider's outage (rate
+    limit, auth failure, proxy crash) doesn't forfeit the whole quest.
+
+    ``chat`` calls the primary; if it terminally fails (after the primary's own
+    in-provider tenacity retries), the call moves to the next provider, and so
+    on. Each provider has a **circuit breaker**: after ``breaker_threshold``
+    failures — or a single auth/quota error — its circuit opens and it is
+    skipped for the rest of the run, so subsequent calls jump straight to a
+    live provider instead of re-burning the dead one's retry budget on every
+    call. Fallbacks are built lazily (nothing is resolved or spawned until the
+    primary actually fails), and the provider names of any fallbacks that were
+    materialised are recorded in :attr:`built_fallback_providers` so the caller
+    can release their proxies on shutdown.
+
+    Presents the read surface the Engine uses on a plain ``LLMClient``
+    (``chat`` / ``last_model`` / ``last_usage`` / ``aclose``); ``last_model``
+    and ``last_usage`` reflect whichever provider served the most recent call.
+    """
+
+    def __init__(
+        self,
+        primary: "LLMClient",
+        factories: "list[tuple[str, Callable[[], Any]]]" = (),
+        *,
+        breaker_threshold: int = 2,
+        log: "logging.Logger | None" = None,
+    ) -> None:
+        self._log = log or logging.getLogger("fi.provider.fallback")
+        primary_label = getattr(
+            getattr(primary, "endpoint", None), "provider_name", None,
+        ) or "primary"
+        self._slots: list[_FallbackSlot] = [
+            _FallbackSlot(label=primary_label, factory=None, client=primary)
+        ]
+        for name, factory in factories:
+            self._slots.append(_FallbackSlot(label=name, factory=factory))
+        self._threshold = max(1, int(breaker_threshold))
+        # Read by the Engine cost logger immediately after each chat().
+        self.last_usage: Any = None
+        self.last_model: str | None = None
+        # Fallback providers actually materialised (for proxy release on close).
+        self.built_fallback_providers: list[str] = []
+
+    async def _client_for(self, slot: _FallbackSlot) -> "LLMClient":
+        if slot.client is None:
+            assert slot.factory is not None
+            slot.client = await slot.factory()
+            self.built_fallback_providers.append(slot.label)
+            self._log.info("[fallback] initialised provider %s", slot.label)
+        return slot.client
+
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        errors: list[tuple[str, BaseException]] = []
+        for idx, slot in enumerate(self._slots):
+            if slot.tripped:
+                continue
+            try:
+                client = await self._client_for(slot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # building/resolving the fallback failed
+                slot.record_failure(self._threshold, fatal=True)
+                self._log.warning(
+                    "[fallback] could not initialise %s: %r", slot.label, e,
+                )
+                errors.append((slot.label, e))
+                continue
+            try:
+                text = await client.chat(messages, **kwargs)
+            except asyncio.CancelledError:
+                # Cancellation is not a provider failure — never fall back on it.
+                raise
+            except Exception as e:
+                fatal = _is_fatal_provider_error(e)
+                slot.record_failure(self._threshold, fatal=fatal)
+                more = idx < len(self._slots) - 1
+                self._log.warning(
+                    "[fallback] provider %s failed (%s)%s; %s",
+                    slot.label, type(e).__name__,
+                    " [circuit opened]" if slot.tripped else "",
+                    "trying next provider" if more else "no more providers",
+                )
+                errors.append((slot.label, e))
+                continue
+            # Success — snapshot the serving provider's cost fields.
+            slot.failures = 0
+            self.last_usage = getattr(client, "last_usage", None)
+            self.last_model = getattr(client, "last_model", None)
+            if idx > 0:
+                self._log.info(
+                    "[fallback] request served by %s (primary unavailable)",
+                    slot.label,
+                )
+            return text
+        # Every provider failed on this call, or all circuits are already open.
+        if errors:
+            _, last_err = errors[-1]
+            try:
+                chain = ", ".join(lbl for lbl, _ in errors)
+                last_err.add_note(f"[FI] all providers exhausted: {chain}")
+            except Exception:  # pragma: no cover — needs Py<3.11
+                pass
+            raise last_err
+        raise RuntimeError(
+            "no LLM providers available: every circuit is open "
+            f"({', '.join(s.label for s in self._slots)})"
+        )
+
+    async def aclose(self) -> None:
+        for slot in self._slots:
+            if slot.client is not None:
+                try:
+                    await slot.client.aclose()
+                except Exception:  # pragma: no cover — best-effort cleanup
+                    pass

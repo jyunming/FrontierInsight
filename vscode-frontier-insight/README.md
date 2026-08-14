@@ -199,6 +199,21 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+A resume regenerates only the outputs actually missing on disk — a `paper.pdf` /
+slides / poster / talk that already rendered is left untouched — so re-running to
+finish an interrupted quest never re-invokes the LLM for work that's already done.
+
+### Long-session reliability
+
+The bridge and engine are built to survive flaky Copilot sessions across a long
+`@fi /start` or `--serve` run. A dropped bridge socket **reconnects on the next
+call** instead of wedging the session; an HTTP/2 stall surfaces as a retryable
+`bridge stalled` error; and the review / evidence gates **fail open** so a
+transient model blip can't discard a finished paper. Gate decisions run at
+temperature 0, so the same corpus routes the same way every time. If you run
+YAML quests on CLI providers, `provider.fallback: [codex_cli, gemini_cli]` adds a
+cross-provider failover chain with per-provider circuit breakers.
+
 ## Topics that need real data (no simulation)
 
 Some research questions can't honestly be answered by a Python
