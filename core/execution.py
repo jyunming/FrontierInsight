@@ -71,6 +71,19 @@ class VenvExecutor:
     async def setup(self, quest_root: Path) -> None:
         quest_root.mkdir(parents=True, exist_ok=True)
         venv_dir = quest_root / ".venv"
+        # Proactive Windows MAX_PATH warning: once native extensions
+        # (PIL/matplotlib .pyd files, ~55 chars under site-packages) are
+        # installed, a venv path already near 260 chars overflows and their DLL
+        # load fails — silently killing figure generation. Warn early so the
+        # user can enable LongPathsEnabled or shorten output.output_dir.
+        if sys.platform.startswith("win") and len(str(venv_dir)) > 200:
+            _log.warning(
+                "[setup] venv path is %d chars (%s) — on Windows this risks "
+                "exceeding the 260-char MAX_PATH once native extensions are "
+                "installed, which fails figure generation. Enable Windows "
+                "long-path support (LongPathsEnabled) or set a shorter "
+                "output.output_dir.", len(str(venv_dir)), venv_dir,
+            )
         py = self.python_path(quest_root)
         # A venv is safe to REUSE only if it was fully built. CPython writes
         # pyvenv.cfg BEFORE copying the interpreter and running ensurepip, so a
@@ -137,13 +150,19 @@ class VenvExecutor:
             proc.kill()
             stdout, stderr = await proc.communicate()
             timed_out = True
-        return ExecutionResult(
+        result = ExecutionResult(
             returncode=proc.returncode if proc.returncode is not None else -1,
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
             duration_s=time.monotonic() - start,
             timed_out=timed_out,
         )
+        # Reactive diagnostic: a native-extension DLL load failure on Windows is
+        # almost always the venv path crossing MAX_PATH. Surface an actionable
+        # hint even on the otherwise-silent web_plots path (rc!=0 -> {} there).
+        if result.returncode not in (0, None) and _looks_like_dll_load_failure(result.stderr):
+            _log.warning("[execute] %s", _DLL_LOAD_HINT)
+        return result
 
     async def cleanup_after_success(self, quest_root: Path) -> Path | None:
         """Freeze the venv's pip state to ``.fi/requirements.lock.txt``
@@ -244,6 +263,25 @@ class VenvExecutor:
                 e,
             )
             return None
+
+
+_DLL_LOAD_HINT = (
+    "a native extension failed to load (DLL load failed). On Windows this is "
+    "usually the per-quest venv path exceeding the 260-char MAX_PATH limit, "
+    "which breaks PIL/matplotlib and silently kills figure generation. Enable "
+    "Windows long-path support (LongPathsEnabled) or set a shorter "
+    "output.output_dir (e.g. C:\\fi) and re-run."
+)
+
+
+def _looks_like_dll_load_failure(stderr: str) -> bool:
+    """True when stderr carries the native-extension load-failure signature.
+    Specific enough not to false-positive on ordinary experiment errors."""
+    low = stderr.lower()
+    return (
+        "dll load failed" in low
+        or "the filename or extension is too long" in low
+    )
 
 
 def _build_venv(venv_dir: Path, *, with_pip: bool, clear: bool = False) -> None:

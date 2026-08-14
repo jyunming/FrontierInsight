@@ -166,3 +166,50 @@ async def test_setup_rebuilds_when_pip_probe_fails(tmp_path: Path, monkeypatch):
     await exe.setup(tmp_path)
     assert built, "a venv failing the pip probe must be rebuilt"
     assert built[0].get("clear") is True
+
+
+# --- A4: Windows MAX_PATH venv diagnostics ------------------------------------
+
+
+def test_looks_like_dll_load_failure_signature():
+    from core.execution import _looks_like_dll_load_failure
+    assert _looks_like_dll_load_failure(
+        'ImportError: DLL load failed while importing _imaging: '
+        'The filename or extension is too long.'
+    )
+    assert _looks_like_dll_load_failure("The filename or extension is too long")
+    # Ordinary experiment errors must NOT trip it.
+    assert not _looks_like_dll_load_failure("ValueError: shapes not aligned")
+    assert not _looks_like_dll_load_failure("")
+
+
+@pytest.mark.asyncio
+async def test_execute_logs_dll_hint_on_native_load_failure(tmp_path: Path, caplog):
+    """A failed run whose stderr shows a DLL-load failure logs the actionable
+    MAX_PATH hint (so even the silent web_plots path surfaces the cause)."""
+    import logging
+    exe = VenvExecutor()
+    py = sys.executable
+    code = (
+        "import sys; sys.stderr.write('ImportError: DLL load failed while "
+        "importing _imaging: The filename or extension is too long.'); "
+        "sys.exit(1)"
+    )
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.execution"):
+        res = await exe.execute([py, "-c", code], cwd=tmp_path, timeout_s=30)
+    assert res.returncode == 1
+    assert any("MAX_PATH" in r.message or "long-path" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_execute_no_hint_on_ordinary_failure(tmp_path: Path, caplog):
+    import logging
+    exe = VenvExecutor()
+    py = sys.executable
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.execution"):
+        res = await exe.execute(
+            [py, "-c", "import sys; sys.stderr.write('ValueError: nope'); sys.exit(1)"],
+            cwd=tmp_path, timeout_s=30,
+        )
+    assert res.returncode == 1
+    assert not any("MAX_PATH" in r.message for r in caplog.records)
