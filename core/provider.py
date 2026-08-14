@@ -2421,7 +2421,9 @@ class FallbackLLMClient:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # building/resolving the fallback failed
-                slot.record_failure(self._threshold, fatal=True, now=now)
+                # Timestamp the trip at failure time, not chat() entry — a slow
+                # call that then fails must not backdate the cooldown clock.
+                slot.record_failure(self._threshold, fatal=True, now=time.monotonic())
                 self._log.warning(
                     "[fallback] could not initialise %s: %r", slot.label, e,
                 )
@@ -2434,7 +2436,7 @@ class FallbackLLMClient:
                 raise
             except Exception as e:
                 fatal = _is_fatal_provider_error(e)
-                slot.record_failure(self._threshold, fatal=fatal, now=now)
+                slot.record_failure(self._threshold, fatal=fatal, now=time.monotonic())
                 more = idx < len(self._slots) - 1
                 self._log.warning(
                     "[fallback] provider %s failed (%s)%s; %s",

@@ -1097,9 +1097,9 @@ class Config(BaseModel):
         if unknown:
             raise ValueError(
                 "unrecognized config key(s): " + ", ".join(sorted(unknown))
-                + " — check for typos. FrontierInsight ignores unknown keys "
-                "silently, so a misspelled setting would quietly revert to its "
-                "default instead of taking effect."
+                + " — check for typos. Unknown keys are rejected here because "
+                "they would otherwise be dropped and the setting silently revert "
+                "to its default instead of taking effect."
             )
 
     @classmethod

@@ -183,6 +183,10 @@ def test_looks_like_dll_load_failure_signature():
     assert not _looks_like_dll_load_failure("")
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("win"),
+    reason="the MAX_PATH DLL hint is Windows-specific and gated to win32",
+)
 @pytest.mark.asyncio
 async def test_execute_logs_dll_hint_on_native_load_failure(tmp_path: Path, caplog):
     """A failed run whose stderr shows a DLL-load failure logs the actionable

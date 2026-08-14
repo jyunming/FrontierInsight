@@ -160,7 +160,12 @@ class VenvExecutor:
         # Reactive diagnostic: a native-extension DLL load failure on Windows is
         # almost always the venv path crossing MAX_PATH. Surface an actionable
         # hint even on the otherwise-silent web_plots path (rc!=0 -> {} there).
-        if result.returncode not in (0, None) and _looks_like_dll_load_failure(result.stderr):
+        # Gated to Windows — the MAX_PATH hint is Windows-specific advice.
+        if (
+            sys.platform.startswith("win")
+            and result.returncode not in (0, None)
+            and _looks_like_dll_load_failure(result.stderr)
+        ):
             _log.warning("[execute] %s", _DLL_LOAD_HINT)
         return result
 
