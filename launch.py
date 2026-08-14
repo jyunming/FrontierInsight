@@ -1326,10 +1326,38 @@ def _kind_final_output(art: QuestArtifacts, kind: str) -> list[Path]:
     }.get(kind, [])
 
 
+def _valid_pdf(p: Path) -> bool:
+    """A PDF counts as produced only if it is non-empty AND starts with the
+    ``%PDF`` magic. A run killed mid-compile leaves a 0-byte or truncated
+    ``paper.pdf`` on the final path (the generators write there directly); a
+    size-only check misses a header-flushed-but-truncated file, so verify both."""
+    try:
+        if p.stat().st_size <= 0:
+            return False
+        with p.open("rb") as fh:
+            return fh.read(5).startswith(b"%PDF")
+    except OSError:
+        return False
+
+
 def _existing_output(art: QuestArtifacts, kind: str) -> Path | None:
+    """The already-produced deliverable for a kind, or None. Guards against a
+    partial artifact from an interrupted run: a PDF must be valid (non-empty +
+    ``%PDF`` header); a text deliverable (slides.html / talk.md) must be
+    non-empty. Otherwise resume treats the corrupt file as complete and ships
+    it (audit finding)."""
     for p in _kind_final_output(art, kind):
-        if p.is_file():
-            return p
+        if not p.is_file():
+            continue
+        if p.name.lower().endswith(".pdf"):
+            if _valid_pdf(p):
+                return p
+            continue
+        try:
+            if p.stat().st_size > 0:
+                return p
+        except OSError:
+            pass
     return None
 
 

@@ -71,11 +71,29 @@ class VenvExecutor:
     async def setup(self, quest_root: Path) -> None:
         quest_root.mkdir(parents=True, exist_ok=True)
         venv_dir = quest_root / ".venv"
-        if (venv_dir / "pyvenv.cfg").exists():
-            return
+        py = self.python_path(quest_root)
+        # A venv is safe to REUSE only if it was fully built. CPython writes
+        # pyvenv.cfg BEFORE copying the interpreter and running ensurepip, so a
+        # run killed mid-build leaves pyvenv.cfg with no interpreter — reusing
+        # it makes every later execute()/install() spawn a missing python
+        # (FileNotFoundError) on every --resume, an unrecoverable loop until the
+        # user manually deletes .venv/. Gate the skip on the interpreter
+        # actually existing (mirrors cleanup_after_success) AND a cheap pip
+        # probe (catches a partial ensurepip); rebuild a broken dir from clean.
+        if (venv_dir / "pyvenv.cfg").exists() and py.is_file():
+            probe = await self.execute(
+                [str(py), "-c", "import pip"], cwd=quest_root, timeout_s=30,
+            )
+            if probe.returncode == 0:
+                return
+            _log.warning(
+                "setup: reusable venv at %s failed the pip probe (rc=%s) — "
+                "rebuilding from clean", venv_dir, probe.returncode,
+            )
         # `venv.EnvBuilder` is sync; offload so we don't block the loop.
+        # clear=True wipes any partial/broken dir before recreating.
         await asyncio.to_thread(
-            _build_venv, venv_dir, with_pip=True
+            _build_venv, venv_dir, with_pip=True, clear=True
         )
 
     def python_path(self, quest_root: Path) -> Path:
@@ -228,8 +246,10 @@ class VenvExecutor:
             return None
 
 
-def _build_venv(venv_dir: Path, *, with_pip: bool) -> None:
-    builder = venv.EnvBuilder(with_pip=with_pip, clear=False, upgrade_deps=False)
+def _build_venv(venv_dir: Path, *, with_pip: bool, clear: bool = False) -> None:
+    # ``clear=True`` wipes a partial/broken venv dir (e.g. left by a run killed
+    # mid-build) before recreating it, so a rebuild starts from clean.
+    builder = venv.EnvBuilder(with_pip=with_pip, clear=clear, upgrade_deps=False)
     builder.create(str(venv_dir))
 
 
