@@ -98,7 +98,10 @@ def test_axon_status_handles_socket_timeout(
 
     status = axon_sidecar.axon_status()
     assert status["running"] is False
-    assert status["error"] == "timeout"
+    # ``error`` aggregates every candidate we tried, so the message
+    # names both the endpoint and the reason rather than the bare
+    # reason alone — that's what makes a wrong-port setup diagnosable.
+    assert "timeout" in (status["error"] or "")
 
 
 def test_ensure_axon_up_short_circuits_when_already_running(

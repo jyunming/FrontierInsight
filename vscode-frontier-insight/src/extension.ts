@@ -17,13 +17,36 @@
  */
 import * as vscode from "vscode";
 import * as fsPromises from "fs/promises";
-import * as http from "http";
-import * as net from "net";
 import * as path from "path";
 import { spawn } from "child_process";
 import { Bridge } from "./bridge";
 import { PersistentBridge } from "./persistent-bridge";
 import { runInterview, writeInterviewYaml } from "./interview";
+import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
+
+
+/**
+ * The `frontierInsight.axonUrl` override, or undefined when unset.
+ * An explicit setting is the one candidate that beats discovery — it is
+ * how a user points the extension at a remote or oddly-placed sidecar.
+ */
+/**
+ * How long the activation probe keeps watching for a sidecar before it
+ * says anything. Axon loads an embedding model and opens vector indexes
+ * before its server accepts requests, and a user may well start it
+ * minutes after opening the editor — so the default is generous. The
+ * wait is silent: a sidecar that shows up at any point during it
+ * produces no notification at all.
+ */
+const DEFAULT_AXON_WAIT_SEC = 600;
+
+
+function axonUrlSetting(): string | undefined {
+    const raw = vscode.workspace
+        .getConfiguration("frontierInsight")
+        .get<string>("axonUrl");
+    return raw && raw.trim() ? raw.trim() : undefined;
+}
 
 
 /** Async existence check — avoids the sync fs.existsSync call that
@@ -131,15 +154,19 @@ export function activate(context: vscode.ExtensionContext): void {
     // process running in their workspace — but we surface a one-time
     // notification if it's down so the first /start of the session
     // doesn't pay the cold-init cost silently.
-    void probeAxonOnActivate(context);
+    // Created before the Axon probe so the probe's diagnostics land
+    // somewhere the user can actually open, rather than in the extension
+    // host's Developer Tools console.
+    const outputChannel = vscode.window.createOutputChannel("Frontier Insight");
+    context.subscriptions.push(outputChannel);
+
+    void probeAxonOnActivate(context, outputChannel);
 
     // Start the session-long IPC bridge so a `python launch.py --serve`
     // (or any --tool subprocess) can route LLM calls through
     // ``vscode.lm.*`` without the user wiring a port. The bridge
     // listens on a per-user OS-managed socket / named pipe; see
     // ./bridge-path.ts for the address.
-    const outputChannel = vscode.window.createOutputChannel("Frontier Insight");
-    context.subscriptions.push(outputChannel);
     persistentBridge = new PersistentBridge(outputChannel);
     persistentBridge.listen().catch((err) => {
         outputChannel.appendLine(`[fi] persistent bridge failed to start: ${err}`);
@@ -289,7 +316,7 @@ function helpText(): string {
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
         "- `@fi /drafts` — list proposal drafts you've made (most-recent first) with a one-click `/start` command for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.",
-        "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api` on `127.0.0.1:8000`) is reachable. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
+        "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable. Its port is discovered automatically; override it with the `frontierInsight.axonUrl` setting. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
         "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",
         "All LLM calls go through your Copilot subscription via the",
@@ -1655,70 +1682,128 @@ async function runCritique(
  * spaces, punctuation, newlines pasted from chat.
  */
 /**
- * Probe the Axon sidecar (``python -m axon.api`` on ``127.0.0.1:8000``)
- * once when the extension activates. If it's not reachable, show an
- * info notification with a one-click "Open instructions" action. We
- * deliberately do NOT auto-launch the sidecar from the extension —
- * users running FI from VSCode are expected to keep an Axon process
- * around themselves (or just live with the cold-init cost on the
- * first quest). The check is informational only.
+ * Look for the Axon sidecar (``python -m axon.api``) when the extension
+ * activates. If nothing is reachable, show an info notification with a
+ * one-click "Start in terminal" action. We deliberately do NOT
+ * auto-launch the sidecar from the extension — users running FI from
+ * VSCode are expected to keep an Axon process around themselves (or
+ * just live with the cold-init cost on the first quest). The check is
+ * informational only.
  *
  * Mirrors `core.axon_sidecar.axon_status` (CLI/web auto-launch path).
  * Three-interface parity for Axon health visibility.
  */
 async function probeAxonOnActivate(
     context: vscode.ExtensionContext,
+    output: vscode.OutputChannel,
 ): Promise<void> {
-    const host = process.env.AXON_HOST || "127.0.0.1";
-    const port = process.env.AXON_PORT || "8000";
+    const waitSec = vscode.workspace
+        .getConfiguration("frontierInsight")
+        .get<number>("axonStartupWaitSec", DEFAULT_AXON_WAIT_SEC);
+    // 0 disables the notice outright — the escape hatch behind the
+    // "Don't show again" button below.
+    if (!waitSec || waitSec <= 0) return;
 
-    // Activation runs on `onStartupFinished`, which often fires
-    // BEFORE the user's Axon sidecar finishes its cold-init (the
-    // sentence-transformers model load is the slow step — typically
-    // 5-15 s on a fresh launch). A one-shot probe right at activate
-    // racing the sidecar produces false-negative "Axon not detected"
-    // notifications. Poll until either Axon answers or a wall-clock
-    // deadline elapses, so a slow sidecar isn't mistaken for an
-    // absent one.
+    // Activation runs on `onStartupFinished`, which fires long before a
+    // sidecar started around the same time is serving: Axon has to load
+    // the embedding model and open its vector indexes, and it only
+    // writes its lock file once the server is actually up. Giving up
+    // after half a minute produces a "not detected" notification for a
+    // sidecar that is simply still booting — the user then dismisses a
+    // warning that was wrong by the time they read it.
     //
-    // Per-probe timeout is 1s (vs. 5s default) so each failed attempt
-    // returns fast and the deadline is honored. Worst-case-per-attempt
-    // is now ~2s (HTTP timeout + sibling TCP timeout) instead of ~10s,
-    // and the loop checks the elapsed deadline before sleeping or
-    // probing again — so the ~30s budget is real wall-clock, not just
-    // attempt count.
-    const DEADLINE_MS = 30000;
+    // So we wait, and we wait quietly. Two phases: a responsive one that
+    // catches the common case fast, then a patient one that keeps
+    // watching in the background for the rest of the budget. If Axon
+    // shows up at any point we return silently and no notification is
+    // ever shown. Only a sidecar that never appears produces one.
+    //
+    // Each sweep re-runs discovery rather than reusing the first
+    // sweep's answer: the lock file appears partway through Axon's own
+    // boot, so a later sweep can find an endpoint the first one had no
+    // way to know about.
+    //
+    // The polling itself is nearly free — nothing listening on loopback
+    // means an instant ECONNREFUSED, not a timeout — so the long tail
+    // costs a rounding error of CPU.
+    const DEADLINE_MS = waitSec * 1000;
     const PER_PROBE_TIMEOUT_MS = 1000;
-    const INTERVAL_MS = 2000;
+    const FAST_PHASE_MS = 60000;
+    const FAST_INTERVAL_MS = 2000;
+    const SLOW_INTERVAL_MS = 15000;
+
+    // Stop polling if the window closes mid-wait; the budget can now
+    // outlive a short session.
+    let cancelled = false;
+    context.subscriptions.push({ dispose: () => { cancelled = true; } });
+
     const startedAt = Date.now();
-    let status: AxonHealthResult = { live: false, ready: false };
+    let found: AxonDiscovery | undefined;
     let attempts = 0;
-    while (Date.now() - startedAt < DEADLINE_MS) {
+    while (!cancelled && Date.now() - startedAt < DEADLINE_MS) {
         attempts++;
-        status = await probeAxonHealth(host, port, PER_PROBE_TIMEOUT_MS);
-        if (status.live) return;
+        // Re-read the override every sweep. The wait can run for
+        // minutes, and someone whose Axon isn't being found is exactly
+        // the person likely to set `axonUrl` during it — snapshotting
+        // it once would ignore them until the next reload.
+        found = await discoverAxon({
+            overrideUrl: axonUrlSetting(),
+            timeoutMs: PER_PROBE_TIMEOUT_MS,
+        });
+        if (found.live) {
+            if (attempts > 1) {
+                const waited = ((Date.now() - startedAt) / 1000).toFixed(0);
+                output.appendLine(
+                    `[fi] Axon came up at ${found.baseUrl} after ${waited}s ` +
+                    `(found via ${found.source}).`,
+                );
+            }
+            return;
+        }
         const elapsed = Date.now() - startedAt;
         const remaining = DEADLINE_MS - elapsed;
         if (remaining <= 0) break;
-        await new Promise(r => setTimeout(r, Math.min(INTERVAL_MS, remaining)));
+        const interval = elapsed < FAST_PHASE_MS ? FAST_INTERVAL_MS : SLOW_INTERVAL_MS;
+        await new Promise(r => setTimeout(r, Math.min(interval, remaining)));
     }
+    if (cancelled) return;
 
-    // Deadline reached — sidecar genuinely isn't reachable.
+    // Deadline reached — no candidate answered. Write the per-endpoint
+    // detail to the output channel (a panel the user can open) rather
+    // than console.warn, which only surfaces in the extension host's
+    // Developer Tools.
     const totalElapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.warn(
-        `[fi] axon probe failed at http://${host}:${port}/health/live ` +
-        `after ${attempts} attempts over ${totalElapsedSec}s: ${status.error}`,
+    output.appendLine(
+        `[fi] no Axon sidecar found after ${attempts} discovery sweeps over ${totalElapsedSec}s.`,
     );
-    const detail = status.error ? ` (probe error: ${status.error})` : "";
+    for (const line of found?.attempts ?? []) {
+        output.appendLine(`[fi]   tried ${line}`);
+    }
+    const waitedMin = Math.round(waitSec / 60);
+    const waited = waitedMin >= 1 ? `${waitedMin} min` : `${waitSec}s`;
+    const tried = found?.attempts.length
+        ? ` Tried ${found.attempts.length} endpoint(s) — details in the "Frontier Insight" output panel.`
+        : "";
     const action = await vscode.window.showInformationMessage(
-        `Frontier Insight: Axon sidecar not detected at ${host}:${port}${detail}. ` +
-        `If Axon IS running, it may be on a different host/port — set the ` +
-        `AXON_HOST / AXON_PORT environment variables before launching VS Code.`,
+        `Frontier Insight: no Axon sidecar detected after waiting ${waited}.${tried} ` +
+        `If Axon IS running somewhere else, point the extension at it with the ` +
+        `\`frontierInsight.axonUrl\` setting.`,
         "Start in terminal",
+        "Show output",
         "Show /axon-status",
+        "Don't show again",
         "Dismiss",
     );
-    if (action === "Start in terminal") {
+    if (action === "Don't show again") {
+        // Persist the opt-out as a setting rather than hidden state, so
+        // it's visible in the Settings UI and reversible without a
+        // reinstall.
+        await vscode.workspace
+            .getConfiguration("frontierInsight")
+            .update("axonStartupWaitSec", 0, vscode.ConfigurationTarget.Global);
+    } else if (action === "Show output") {
+        output.show(true);
+    } else if (action === "Start in terminal") {
         const term = vscode.window.createTerminal({ name: "Axon" });
         term.show();
         term.sendText("python -m axon.api");
@@ -1732,146 +1817,38 @@ async function probeAxonOnActivate(
 }
 
 /**
- * Single-source probe of the Axon sidecar's two health endpoints.
- * Returns `{live, ready, error?}`. ``error`` is exposed so callers
- * can show the user WHY the probe failed instead of "we couldn't
- * tell."
+ * Chat-command handler for `@fi /axon-status`. Runs the same discovery
+ * sweep as the Python ``axon_status()`` helper — every candidate
+ * endpoint, first live one wins — and prints a short markdown verdict.
  *
- * Uses Node's built-in ``http.request`` rather than the global
- * ``fetch`` (undici). VSCode users repeatedly hit
- * ``TypeError: fetch failed`` against a localhost Axon that curl
- * could talk to fine — the opaque undici error hides the real cause
- * (corporate proxy env vars, EDR injection, stale agent connection
- * pool, IPv6 misroute). ``http.request`` has no global agent
- * keepalive pool, surfaces ECONNREFUSED / ETIMEDOUT / etc. directly,
- * and accepts ``family: 4`` to force IPv4 so a misconfigured ``::1``
- * resolution can't quietly break the probe.
- *
- * Each HTTP check is paired with a raw TCP connect against the same
- * host:port. If TCP succeeds but HTTP fails, the bug is above the
- * socket layer (proxy / EDR / HTTP-protocol mismatch) — surface
- * that in the error string so the user knows where to look.
- *
- * 5 s timeout per probe.
- */
-interface AxonHealthResult {
-    live: boolean;
-    ready: boolean;
-    error?: string;
-}
-
-function tcpConnectCheck(host: string, port: number, timeoutMs: number): Promise<{ ok: boolean; error?: string }> {
-    return new Promise(resolve => {
-        const sock = net.connect({ host, port, family: 4 });
-        const timer = setTimeout(() => {
-            sock.destroy();
-            resolve({ ok: false, error: `TCP timeout after ${timeoutMs}ms` });
-        }, timeoutMs);
-        sock.once("connect", () => {
-            clearTimeout(timer);
-            sock.end();
-            resolve({ ok: true });
-        });
-        sock.once("error", err => {
-            clearTimeout(timer);
-            const code = (err as NodeJS.ErrnoException).code;
-            resolve({ ok: false, error: code ? `TCP ${code}` : `TCP error: ${err.message}` });
-        });
-    });
-}
-
-function httpProbe(host: string, port: number, urlPath: string, timeoutMs: number): Promise<{ ok: boolean; error?: string; status?: number }> {
-    return new Promise(resolve => {
-        const req = http.request(
-            {
-                host, port, path: urlPath, method: "GET",
-                family: 4,
-                // Use a one-shot agent so we don't share undici's
-                // poisoned global keepalive pool from any earlier
-                // failure window.
-                agent: new http.Agent({ keepAlive: false }),
-                timeout: timeoutMs,
-            },
-            res => {
-                // Drain so the socket can close.
-                res.resume();
-                const ok = (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300;
-                resolve({ ok, status: res.statusCode, error: ok ? undefined : `HTTP ${res.statusCode}` });
-            },
-        );
-        req.on("timeout", () => {
-            req.destroy();
-            resolve({ ok: false, error: `HTTP timeout after ${timeoutMs}ms` });
-        });
-        req.on("error", err => {
-            const code = (err as NodeJS.ErrnoException).code;
-            resolve({ ok: false, error: code ? `HTTP ${code}` : `HTTP error: ${err.message}` });
-        });
-        req.end();
-    });
-}
-
-async function probeAxonHealth(
-    host: string, port: string, timeoutMs: number = 5000,
-): Promise<AxonHealthResult> {
-    const portN = Number(port);
-    const TIMEOUT = timeoutMs;
-
-    const probe = async (urlPath: string): Promise<{ ok: boolean; error?: string }> => {
-        const httpRes = await httpProbe(host, portN, urlPath, TIMEOUT);
-        if (httpRes.ok) return { ok: true };
-
-        // HTTP failed. Do a sibling TCP probe so the user can tell
-        // socket-level failure (axon not listening) apart from
-        // above-socket failure (proxy / EDR / HTTP mismatch).
-        const tcpRes = await tcpConnectCheck(host, portN, TIMEOUT);
-        if (tcpRes.ok) {
-            return {
-                ok: false,
-                error: `${httpRes.error} (TCP connect succeeded — HTTP request blocked; check HTTP_PROXY / antivirus / EDR)`,
-            };
-        }
-        return { ok: false, error: `${httpRes.error}; ${tcpRes.error}` };
-    };
-
-    const live = await probe("/health/live");
-    if (!live.ok) {
-        return { live: false, ready: false, error: live.error };
-    }
-    const ready = await probe("/health/ready");
-    return { live: true, ready: ready.ok };
-}
-
-/**
- * Chat-command handler for `@fi /axon-status`. Fetches the same
- * ``/health/live`` + ``/health/ready`` endpoints as the Python
- * ``axon_status()`` helper and prints a short markdown verdict.
+ * On failure it lists the endpoints it tried. A wrong-port setup is the
+ * overwhelmingly common cause of "not running", and the user can only
+ * fix what they can see.
  */
 async function runAxonStatus(stream: vscode.ChatResponseStream): Promise<void> {
-    const host = process.env.AXON_HOST || "127.0.0.1";
-    const port = process.env.AXON_PORT || "8000";
-    const base = `http://${host}:${port}`;
-    const status = await probeAxonHealth(host, port);
-    if (!status.live) {
+    const found = await discoverAxon({ overrideUrl: axonUrlSetting() });
+    if (!found.live) {
+        const tried = found.attempts.length
+            ? "Tried:\n\n" + found.attempts.map(a => `- \`${a}\``).join("\n") + "\n\n"
+            : "";
         stream.markdown(
-            `**Axon sidecar:** \`${base}\` — _not running_\n\n` +
-            (status.error ? `_Probe error:_ \`${status.error}\`\n\n` : "") +
-            `If Axon IS running, the probe may be hitting the wrong host/port. ` +
-            `Set \`AXON_HOST\` and \`AXON_PORT\` env vars before launching VS Code, ` +
-            `or start it on the default host:port:\n\n` +
+            `**Axon sidecar:** _not running_\n\n` + tried +
+            `Start one, or point the extension at an existing one with the ` +
+            `\`frontierInsight.axonUrl\` setting:\n\n` +
             `\`\`\`\npython -m axon.api\n\`\`\`\n`,
         );
         return;
     }
-    if (!status.ready) {
+    const via = `_found via ${found.source}_`;
+    if (!found.ready) {
         stream.markdown(
-            `**Axon sidecar:** \`${base}\` — _running, brain still initializing_\n\n` +
+            `**Axon sidecar:** \`${found.baseUrl}\` — _running, brain still initializing_ (${via})\n\n` +
             `Give it a few seconds; the embedding model + vector index load on first request.\n`,
         );
         return;
     }
     stream.markdown(
-        `**Axon sidecar:** \`${base}\` — _up + ready_\n\n` +
+        `**Axon sidecar:** \`${found.baseUrl}\` — _up + ready_ (${via})\n\n` +
         `The next \`@fi /start\` will reuse this warm process.\n`,
     );
 }

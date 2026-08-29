@@ -613,11 +613,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip the Axon sidecar health check + auto-launch. By default, "
              "every FI launch ensures a long-lived ``python -m axon.api`` "
-             "process is running on AXON_HOST:AXON_PORT (default "
-             "127.0.0.1:8000) so the embedding model + vector indexes "
-             "stay hot across quests. Pass this in CI / tests where the "
-             "sidecar isn't wanted, or when running an Axon API server "
-             "manually with non-default flags.",
+             "process is running so the embedding model + vector indexes "
+             "stay hot across quests. Its address is discovered (the "
+             "running server's lock file, then Axon's config.yaml, then "
+             "the defaults), so a sidecar you started by hand on a "
+             "non-default port is found rather than duplicated; pin it "
+             "with AXON_API_BASE. Pass this in CI / tests where the "
+             "sidecar isn't wanted.",
     )
     args = p.parse_args(argv)
     # Env-var fallback for the bridge port. The VSCode extension can
