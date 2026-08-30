@@ -710,10 +710,14 @@ def make_app(
 
     @app.get("/api/axon/status")
     async def axon_status_endpoint() -> JSONResponse:
-        """Health-probe the Axon sidecar (``python -m axon.api`` on
-        ``127.0.0.1:8000`` by default). The /settings page polls
-        this so the user can see the sidecar is hot before kicking
-        off a quest. Cheap — one HTTP HEAD-equivalent probe."""
+        """Health-probe the Axon sidecar (``python -m axon.api``).
+
+        Its address is discovered rather than assumed — see
+        ``core.axon_endpoint``. The response carries a ``source`` naming
+        which candidate answered, and on failure ``error`` lists every
+        endpoint tried. The /settings page polls this so the user can
+        see the sidecar is hot before kicking off a quest. Cheap — one
+        health request per candidate, and the first live one wins."""
         from core.axon_sidecar import axon_status as _probe
         return JSONResponse(dict(_probe()))
 

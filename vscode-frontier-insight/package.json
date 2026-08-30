@@ -95,7 +95,7 @@
           },
           {
             "name": "axon-status",
-            "description": "Check whether the Axon sidecar (`python -m axon.api`) is reachable on 127.0.0.1:8000. The sidecar keeps the embedding model + vector index hot across quests; CLI/web launches auto-start it, but VSCode users run their own."
+            "description": "Check whether the Axon sidecar (`python -m axon.api`) is reachable. Its address is discovered automatically — the running server's lock file, Axon's config.yaml, then the defaults. The sidecar keeps the embedding model + vector index hot across quests; CLI/web launches auto-start it, but VSCode users run their own."
           },
           {
             "name": "help",
@@ -121,6 +121,17 @@
           "type": "string",
           "default": "outputs",
           "description": "Where finished quests are written (relative to repoPath or absolute)."
+        },
+        "frontierInsight.axonStartupWaitSec": {
+          "type": "number",
+          "default": 600,
+          "minimum": 0,
+          "description": "How long (seconds) to keep watching for the Axon sidecar after the editor starts, before reporting that none was found. Axon loads its embedding model and vector indexes before serving, and you may start it well after opening VS Code, so the wait is generous and silent — a sidecar that appears at any point during it produces no notification. Set to 0 to never show the notice."
+        },
+        "frontierInsight.axonUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL of the Axon API sidecar, e.g. http://127.0.0.1:8420. Leave empty to discover it automatically (the running server's lock file, then Axon's config.yaml, then the defaults). Set this only when Axon runs somewhere discovery can't see, such as another machine or a container. Plain HTTP only — an https:// URL is not probed over TLS. Setting this pins the extension to that one instance rather than adding a first guess, because two Axon instances hold different corpora."
         }
       }
     }

@@ -114,6 +114,30 @@ def test_vscode_extension_manifest_exposes_chat_participant() -> None:
     assert "onChatParticipant:frontier-insight.fi" in activation
 
 
+def test_vscode_extension_manifest_exposes_axon_settings() -> None:
+    """Both Axon knobs must be declared, or they're invisible in the
+    Settings UI and the "Don't show again" button writes to a setting
+    VSCode doesn't know about — which silently fails to persist."""
+    import json
+    pkg = json.loads((EXT_DIR / "package.json").read_text(encoding="utf-8"))
+    props = pkg["contributes"]["configuration"]["properties"]
+
+    assert "frontierInsight.axonUrl" in props
+    assert props["frontierInsight.axonUrl"]["default"] == "", (
+        "an empty default is what selects automatic discovery"
+    )
+
+    wait = props.get("frontierInsight.axonStartupWaitSec")
+    assert wait is not None, "activation wait is not configurable"
+    assert wait["type"] == "number"
+    # Axon loads an embedding model and opens vector indexes before it
+    # serves, and users start it well after opening the editor. A short
+    # default is what produced "not detected" notices for a sidecar that
+    # was merely still booting.
+    assert wait["default"] >= 300, f"wait default too short: {wait['default']}s"
+    assert wait["minimum"] == 0, "0 must be accepted — it's the opt-out"
+
+
 def test_vscode_extension_manifest_has_package_script() -> None:
     """The `npm run package` script must exist + invoke vsce. Without
     it, users hit "where's my .vsix?" after `npm run compile` (which

@@ -79,6 +79,8 @@ instead of bare numbers. You see every node firing live in the chat panel.
 | `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine. Use a venv path if you don't want FI cluttering your global packages. |
 | `frontierInsight.repoPath` | `""` | Absolute path to FrontierInsight repo. Defaults to the open workspace root. |
 | `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to repoPath). |
+| `frontierInsight.axonStartupWaitSec` | `600` | How long to keep watching for the Axon sidecar after the editor starts, before saying none was found. Axon loads its embedding model and indexes before it serves, and you may start it well after opening VS Code — so the wait is long and silent. A sidecar that appears at any point during it produces no notification at all. `0` never shows the notice. |
+| `frontierInsight.axonUrl` | `""` | Base URL of the Axon sidecar, e.g. `http://127.0.0.1:8420`. Empty means discover it automatically. Set it only when Axon runs somewhere discovery can't see — another machine, a container. Plain HTTP only. It pins the extension to that one instance rather than acting as a first guess, since two Axon instances hold different corpora. |
 
 ## Usage
 
@@ -119,7 +121,11 @@ The active Copilot model is captured automatically into `provider.model` so the 
 - `@fi /ingest <paths>` — load PDFs / Markdown / TXT into the Axon corpus as prior work. Opens an integrated terminal.
 - `@fi /install-tectonic` — install the tectonic LaTeX binary (~70 MB) into `tools/` so `paper.pdf` works without an admin install of MiKTeX. Opens an integrated terminal.
 - `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.
-- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api` on `127.0.0.1:8000`) is reachable. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking).
+- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable, and report which endpoint answered. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking).
+
+  You don't have to tell the extension which port Axon is on. It finds the running server through the lock file Axon writes for its store, falling back to Axon's `config.yaml` and then the built-in defaults, and it lists everything it tried when nothing answers. Use `frontierInsight.axonUrl` only for an Axon that discovery can't see, such as one on another machine.
+
+  On activation the extension keeps watching for the sidecar for `frontierInsight.axonStartupWaitSec` (10 minutes by default) before it says anything, because Axon needs time to load its model and open its indexes — and you may start it long after opening the editor. The wait is silent, so starting Axon at any point during it means you never see a notice.
 
 **Air-gapped machines:** the knowledge layer downloads ~184 MB of embedding + reranker models from Hugging Face on first use. To run with no network, on a connected machine run `python launch.py --export-models <dir>`, copy `<dir>` to the offline machine, and set `FI_MODELS_DIR=<dir>` + `FI_OFFLINE=1` (or `knowledge.models_dir` / `knowledge.offline` in YAML). See `docs/INSTALL.md`.
 

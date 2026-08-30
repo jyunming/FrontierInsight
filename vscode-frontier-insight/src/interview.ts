@@ -19,6 +19,7 @@ import {
     truncate,
     slugify,
 } from "./interview-core";
+import { discoverAxon } from "./axon-endpoint";
 
 // Re-export so callers don't have to know about the split.
 export { InterviewAnswers, answersToYaml, writeInterviewYaml };
@@ -373,31 +374,33 @@ export async function runInterview(
 }
 
 /**
- * Probe the Axon API sidecar on 127.0.0.1:8000 — if reachable, the
- * knowledge layer defaults to enabled. Otherwise off. Matches
+ * Find the Axon API sidecar — if one is reachable, the knowledge layer
+ * defaults to enabled. Otherwise off. Matches
  * core/interview.py:smart_default_knowledge_enabled.
+ *
+ * Goes through the shared discovery sweep rather than a fixed port:
+ * this default used to land on "disabled" for anyone whose Axon wasn't
+ * on the old 8000, which is now everyone running a current Axon.
  */
 async function probeAxonReachable(): Promise<boolean> {
-    const host = process.env.AXON_HOST || "127.0.0.1";
-    const port = process.env.AXON_PORT || "8000";
-    try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 5000);
-        const res = await fetch(`http://${host}:${port}/health/live`, { signal: ctrl.signal });
-        clearTimeout(timer);
-        return res.ok;
-    } catch (e) {
-        // Mirror the diagnostic probe in extension.ts so reviewers can
-        // see WHY this fell back to disabled when the user expected
-        // Axon to be detected. The original silent catch made
+    const overrideUrl = vscode.workspace
+        .getConfiguration("frontierInsight")
+        .get<string>("axonUrl");
+    // Shorter than the default per-probe budget: this runs inline in the
+    // interview, and several dead candidates at 5 s each would stall the
+    // question the user is waiting on.
+    const found = await discoverAxon({
+        overrideUrl: overrideUrl?.trim() || undefined,
+        timeoutMs: 1500,
+    });
+    if (!found.live) {
+        // Say WHY this fell back to disabled. A silent catch made
         // "axon is up but the interview defaulted to disabled" reports
         // impossible to debug.
-        console.warn(
-            `[fi] axon probe failed at http://${host}:${port}/health/live: `,
-            e instanceof Error ? `${e.name}: ${e.message}` : String(e),
-        );
+        console.warn(`[fi] axon not found. Tried: ${found.attempts.join("; ")}`);
         return false;
     }
+    return true;
 }
 
 function reviewBlockMarkdown(a: InterviewAnswers): string {
