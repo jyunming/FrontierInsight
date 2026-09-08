@@ -30,7 +30,7 @@ What this does, per skill:
 
 Usage:
     python scripts/import_scientist_skills.py
-    python scripts/import_scientist_skills.py --cache-dir D:\\skill-sources
+    python scripts/import_scientist_skills.py --cache-dir /path/to/cache
     python scripts/import_scientist_skills.py --skip pymc,rdkit
     python scripts/import_scientist_skills.py --pip-install
 

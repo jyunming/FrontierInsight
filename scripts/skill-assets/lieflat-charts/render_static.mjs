@@ -32,7 +32,15 @@ import { pathToFileURL } from "node:url";
 async function loadChromium() {
   let globalRoot;
   try {
-    globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+    // `execFileSync("npm", ...)` fails with ENOENT on Windows -- npm is a
+    // `.cmd` shim there, not a real executable, and execFileSync won't
+    // resolve or run one without a shell (passing "npm.cmd" instead still
+    // fails, with EINVAL: a .cmd needs cmd.exe to interpret it, it isn't
+    // directly spawnable either). `shell: true` with a single command
+    // string (not a file+args array, which triggers a Node deprecation
+    // warning about unescaped args) is the portable fix -- safe here since
+    // the command is a fixed literal, nothing from user input reaches it.
+    globalRoot = execFileSync("npm root -g", { encoding: "utf8", shell: true }).trim();
   } catch (e) {
     throw new Error(
       "could not resolve the global npm root -- is npm on PATH? " +
