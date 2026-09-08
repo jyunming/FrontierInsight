@@ -74,6 +74,8 @@ instead of bare numbers. You see every node firing live in the chat panel.
 
 ## Settings
 
+- `frontierInsight.approveAs` — name pre-filled in the skill-approval box. A prefill only: the box still has to be typed into and confirmed, because the gate exists so a person decides rather than a setting deciding for them.
+
 | Setting | Default | What it does |
 |---|---|---|
 | `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine. Use a venv path if you don't want FI cluttering your global packages. |
@@ -122,6 +124,21 @@ The active Copilot model is captured automatically into `provider.model` so the 
 - `@fi /install-tectonic` — install the tectonic LaTeX binary (~70 MB) into `tools/` so `paper.pdf` works without an admin install of MiKTeX. Opens an integrated terminal.
 - `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.
 - `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable, and report which endpoint answered. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking).
+
+### Skills
+
+A **skill** is what FI has learned about driving one piece of software — when to use it, how to call it, and an executable check that proves it still works. FI ships none; a skill is what it picks up working with you, on this machine.
+
+Two gates stand before any skill reaches a quest, and both are visible here:
+
+- `@fi /skills` — the library, with each entry's status, domain tags and any scan findings. Self-tests are **not** run (each can take up to 120s, which would leave the panel silent); the output says so and names the command that does verify.
+- `@fi /scan-skill <name>` — static review before you approve: instruction-injection phrasing, invisible characters, network access, `eval`, environment reads. Nothing is imported or executed — the files are parsed. It never reports a skill as "safe", only how many findings came out of how many rules.
+- `@fi /approve-skill <name>` — the human gate. Shows the review first, then asks who is approving. The name is prefilled from `frontierInsight.approveAs` but never submitted for you: typing it *is* the gate. A high-severity finding takes an extra confirmation. Approval binds to the skill's exact content, so editing it lapses the approval.
+- `@fi /revoke-skill <name>` — withdraw approval, returning the skill to proposed.
+- `@fi /import-skill [path]` — adapt a skill written for another agent ([Agent Skills](https://agentskills.io/) layout). With no path it opens a picker, then asks for optional domain tags — an untagged skill is general and always offered to a quest, while a tagged one joins only when the topic looks related.
+- `@fi /teach-skill <name> <module>` — draft a skill from a library you already have installed, reading its real signatures by introspection rather than generating them.
+
+All of these run the same `launch.py` the CLI does and render the result; none of the gate's logic is reimplemented in the extension, so the three interfaces cannot drift apart.
 
   You don't have to tell the extension which port Axon is on. It finds the running server through the lock file Axon writes for its store, falling back to Axon's `config.yaml` and then the built-in defaults, and it lists everything it tried when nothing answers. Use `frontierInsight.axonUrl` only for an Axon that discovery can't see, such as one on another machine.
 
