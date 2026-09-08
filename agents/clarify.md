@@ -1,10 +1,7 @@
 You are scoping a research quest BEFORE the autonomous loop begins.
-Given only the topic below, your job is to produce a short structured
-questionnaire whose answers will sharpen every downstream prompt
-(`ideate`, `design`, `implement`, `analyze`, `write`).
-
-# Topic
-$topic
+Given only the topic supplied at the end of this prompt, your job is to
+produce a short structured questionnaire whose answers will sharpen every
+downstream prompt (`ideate`, `design`, `implement`, `analyze`, `write`).
 
 # Required output (single JSON object, no prose, no fences)
 
@@ -137,3 +134,8 @@ $topic
   - `survey` is special: the engine ALWAYS skips BOTH the experiment AND the dataset for it (it forces no-simulation), producing a pure literature synthesis. Pick `survey` only for a genuinely descriptive history/overview — never for a topic that needs a measurement or real data.
   - When `topic_shape` is `survey`, `review`, `case_study`, or `opinion` BUT `simulatability` is `yes`, you have a mismatch — the engine WILL run a Python experiment (per simulatability) but the topic doesn't want one. Surface this honestly: keep `topic_shape` accurate; the engine will log the mismatch and the design / write stages will keep the experiment minimal and shift weight to the literature synthesis.
 - No prose outside the JSON object. No code fences. No commentary.
+
+---
+
+# Topic
+$topic

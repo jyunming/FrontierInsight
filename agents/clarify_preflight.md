@@ -1,11 +1,5 @@
 You are scoping a research quest at INTERVIEW time, BEFORE the engine has started. The user is sitting at the interview prompt waiting for your reply. Your only job is to propose topic-tuned defaults for three slots so the interview can pre-fill them.
 
-# Topic
-$topic
-
-# Paper format the user picked
-$paper_format
-
 # Required output
 
 Respond with a single JSON object, no prose, no fences:
@@ -30,3 +24,14 @@ Respond with a single JSON object, no prose, no fences:
   * Qualitative essay / policy brief → "library research only — no compute"
 - No markdown, no fenced code blocks, no commentary. JSON object only.
 - If you genuinely cannot infer a specific value for one slot, fall back to a generic placeholder like "(none specified — agent will pick)". Do NOT invent numeric values you have no basis for.
+
+---
+
+# Inputs
+
+## Topic
+$topic
+
+## Paper format the user picked
+$paper_format
+

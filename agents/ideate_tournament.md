@@ -3,26 +3,6 @@ brainstormed for the same topic. Pick which is more promising as the
 basis for a research quest that will run end-to-end (literature →
 design → experiment → analysis → paper).
 
-# Topic
-
-$topic
-
-# Clarify answers
-
-$clarify_block
-
-# Idea A
-
-```json
-$idea_a
-```
-
-# Idea B
-
-```json
-$idea_b
-```
-
 # Output (single JSON object, no prose outside it)
 
 ```
@@ -64,3 +44,28 @@ $idea_b
   or on a soft criterion. The aggregator uses margin to break
   tournament-level ties; narrow wins still count as one vote.
 - No prose outside the JSON object. No code fences. No commentary.
+
+---
+
+# Inputs
+
+## Topic
+
+$topic
+
+## Clarify answers
+
+$clarify_block
+
+## Idea A
+
+```json
+$idea_a
+```
+
+## Idea B
+
+```json
+$idea_b
+```
+

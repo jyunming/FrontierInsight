@@ -1,11 +1,5 @@
 You are the **Slides** stage of an automated research pipeline.
 
-# Source paper (markdown)
-$paper_md
-
-# Figures available (reference each by filename)
-$figure_list
-
 # Your task
 Compress the paper into a Marp slide deck of **8–12 slides**. Embed each figure exactly once. Keep total spoken duration about 10 minutes.
 
@@ -64,3 +58,14 @@ If a figure's aspect ratio is unknown, default to `![w:720](figures/<name>)` on 
 
 # Output format
 Respond with the Marp markdown only — no JSON, no surrounding fence, no preamble. Begin with the Marp front-matter block (`---\nmarp: true\n...\n---`).
+
+---
+
+# Inputs
+
+## Source paper (markdown)
+$paper_md
+
+## Figures available (reference each by filename)
+$figure_list
+
