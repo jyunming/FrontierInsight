@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -138,15 +140,42 @@ def run_selftest(skill: Skill, *, timeout_s: int = SELFTEST_TIMEOUT_S) -> tuple[
         [str(skill.path), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
 
+    # Run against a COPY of the skill, never the skill itself.
+    #
+    # A self-test that plots writes its PNG beside the script, and the
+    # skill's content hash covers everything in the folder -- so the test
+    # that proves a skill works was silently revoking its own approval.
+    # Observed across three quests in one hour: scikit-learn reported
+    # "content changed since approval" with a different hash every time
+    # (91c8cd1d, 8e3b8fbf, 3a885971), because matplotlib output is not
+    # byte-identical between runs. The ledger was right; it was being
+    # asked about a directory the gate itself kept editing.
+    #
+    # Merely running elsewhere is not enough: three skills read their own
+    # data files relative to cwd, and a bare temp directory quarantined
+    # all three. Copying keeps cwd meaning what the test expects while the
+    # writes land somewhere we throw away.
     try:
-        proc = subprocess.run(
-            [sys.executable, str(script)],
-            cwd=str(skill.path),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        with tempfile.TemporaryDirectory(prefix="fi-selftest-") as tmp:
+            work = Path(tmp) / skill.path.name
+            shutil.copytree(
+                skill.path, work,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(work), os.environ.get("PYTHONPATH", "")]
+            ).strip(os.pathsep)
+            # An absolute path to the real skill, for a test that wants its
+            # installed location rather than this scratch copy.
+            env["SKILL_DIR"] = str(skill.path)
+            proc = subprocess.run(
+                [sys.executable, str(work / SELFTEST_PY)],
+                cwd=str(work),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
     except subprocess.TimeoutExpired:
         return False, f"selftest timed out after {timeout_s}s"
     except OSError as e:

@@ -354,31 +354,56 @@ def test_renaming_a_script_lapses_approval_even_with_identical_bytes(
     assert evaluate(s, ledger=ledger).status is Status.PROPOSED
 
 
+SELFTEST_THAT_WRITES_BESIDE_ITSELF = chr(10).join([
+    # Importing a sibling module makes CPython write __pycache__ next to it.
+    "import helper, pathlib, sys",
+    # A plotting self-test dropping a PNG in its cwd is the real-world case.
+    "pathlib.Path('artifact.png').write_bytes(b'not-really-a-png')",
+    "sys.exit(0)",
+])
+
+
 def test_running_the_selftest_does_not_lapse_approval(
     tmp_path: Path, ledger: Path
 ) -> None:
-    """A hash over everything would sweep in the ``__pycache__`` that running
-    the self-test creates in the skill's own directory — so checking a skill
-    would revoke it, and it could never stay trusted through two evaluations.
+    """Checking a skill must not modify the skill.
 
-    Written because inverting the hash to an exclusion list is exactly the
-    change that introduces this, and it would show up as an intermittent
-    "content changed since approval" that looks like tampering.
+    The hash covers the whole folder, so anything evaluation leaves behind
+    revokes the approval it was checking -- an intermittent "content
+    changed since approval" that reads like tampering. Two things used to
+    land there: __pycache__ from importing a module beside selftest.py,
+    and, in the wild, the PNG a plotting self-test writes to its cwd.
+
+    So the gate runs against a copy, and the assertion is the strong form:
+    evaluation leaves the directory byte-identical. Reverting to cwd=skill
+    fails this on the listing, not just on the hash.
     """
     s = make_skill(
         tmp_path,
-        selftest="import helper, sys; sys.exit(0)",
-        scripts={"noop.py": "x = 1\n"},
+        selftest=SELFTEST_THAT_WRITES_BESIDE_ITSELF,
+        scripts={"noop.py": "x = 1"},
     )
-    # An importable module beside selftest.py, so the child really does write
-    # bytecode into the skill directory rather than skipping the import.
-    (s.path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    # Importable beside selftest.py, so the child really writes bytecode.
+    (s.path / "helper.py").write_text("VALUE = 1", encoding="utf-8")
 
-    approval.approve("demo", s.content_hash(), approved_by="jyunming", path=ledger)
+    before_hash = s.content_hash()
+    before_files = sorted(p.relative_to(s.path).as_posix()
+                          for p in s.path.rglob("*"))
+
+    approval.approve("demo", before_hash, approved_by="jyunming", path=ledger)
 
     first = evaluate(s, ledger=ledger)
     assert first.status is Status.TRUSTED, first.selftest_output
-    assert (s.path / "__pycache__").is_dir(), "the trap did not spring; test is inert"
+
+    after_files = sorted(p.relative_to(s.path).as_posix()
+                         for p in s.path.rglob("*"))
+    assert after_files == before_files, (
+        "evaluation left files in the skill directory: "
+        f"{sorted(set(after_files) - set(before_files))}"
+    )
+    assert s.content_hash() == before_hash, (
+        "the skill's content hash moved because the gate wrote to it"
+    )
 
     second = evaluate(s, ledger=ledger)
     assert second.status is Status.TRUSTED, second.reason
