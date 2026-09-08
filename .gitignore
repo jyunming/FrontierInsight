@@ -42,3 +42,12 @@ tools/
 # Local secrets (Brave / CORE API keys, etc.) — never commit
 .env
 .env.*
+
+# Agent tooling state (session-local sqlite)
+.concord/
+
+# Generated PDF scratch: proof renders and the MiKTeX-vs-tectonic
+# comparison set, both rebuilt on demand from paper.md
+_proof_pdfs/
+_miktex_pdfs/
+poster.pdf
