@@ -46,7 +46,109 @@ def _stub_shutil_which():
 
 
 def test_cli_provider_set_matches_known_providers() -> None:
-    assert _CLI_PROVIDERS == {"codex_cli", "claude_cli", "copilot_cli", "gemini_cli"}
+    assert _CLI_PROVIDERS == {
+        "codex_cli", "claude_cli", "copilot_cli", "gemini_cli", "antigravity_cli",
+    }
+
+
+def test_antigravity_takes_its_prompt_off_argv() -> None:
+    """The reason this provider is worth having at all.
+
+    ``agy`` refuses a plain prompt on stdin — ``-p ""`` returns *empty
+    prompt* — so the obvious wiring is argv, which is what ``copilot_cli``
+    does and why ``copilot_cli`` is capped at 7 KB and documented as a poor
+    fit: on Windows the whole command line has to fit in ~8 KB, and a design
+    or write prompt does not. Routing through the stream-json stdin path
+    removes the ceiling, so a regression back to ``arg`` would silently
+    start truncating every long node.
+    """
+    spec = _CLI_SPECS["antigravity_cli"]
+    assert spec.pass_prompt_via == "stdin"
+    assert spec.stdin_encoder is not None, "stdin needs the NDJSON envelope"
+    assert spec.max_input_chars is None, "the stdin path has no argv ceiling"
+
+
+def test_antigravity_stdin_envelope_shape() -> None:
+    """The CLI rejects anything else: a bare string fails to unmarshal, and
+    an envelope without ``event`` is refused outright."""
+    import json as _json
+
+    from core.provider import _CLI_SPECS as _S
+
+    encoded = _S["antigravity_cli"].stdin_encoder("hello")
+    msg = _json.loads(encoded)
+    assert msg["event"] == "user"
+    assert msg["message"] == {"role": "user", "content": "hello"}
+
+
+def test_antigravity_usage_is_measured_not_estimated() -> None:
+    """Real counts, and the reason it matters: on a one-word prompt the
+    char-count estimator said 7 tokens where the CLI reported ~10,900. The
+    difference is the system prompt and tool schema it wraps around ours,
+    which the estimator cannot see — so any budget drawn from the estimate
+    is wrong by three orders of magnitude, not by a margin."""
+    from core.provider import _extract_antigravity_usage
+
+    raw = (
+        '{"event":"init","init":{"tools":["a","b"]}}\n'
+        '{"event":"result","result":{"status":"SUCCESS","response":"ok",'
+        '"usage":{"input_tokens":10920,"output_tokens":178,'
+        '"thinking_tokens":175,"cache_read_tokens":8113,"total_tokens":11098}}}\n'
+    )
+    u = _extract_antigravity_usage(raw)
+    assert u == {
+        "prompt_tokens": 10920,
+        "completion_tokens": 178,
+        "total_tokens": 11098,
+        "cached_input_tokens": 8113,
+        "thinking_tokens": 175,
+        "estimated": False,
+    }
+
+
+def test_antigravity_cached_tokens_are_not_added_to_the_input() -> None:
+    """``cache_read_tokens`` is part of the input, not extra. Summing them
+    would double-count the cheapest tokens in every call and inflate a cost
+    estimate exactly where caching was supposed to reduce it."""
+    from core.provider import _extract_antigravity_usage
+
+    raw = (
+        '{"event":"result","result":{"status":"SUCCESS","response":"x",'
+        '"usage":{"input_tokens":100,"output_tokens":10,'
+        '"cache_read_tokens":90,"total_tokens":110}}}\n'
+    )
+    u = _extract_antigravity_usage(raw)
+    assert u["prompt_tokens"] == 100
+    assert u["cached_input_tokens"] == 90
+    assert u["total_tokens"] == 110
+
+
+def test_antigravity_failure_envelope_raises_rather_than_returning_empty() -> None:
+    """The CLI reports failures *inside* a zero-exit envelope. Returning the
+    empty ``response`` field would hand the pipeline an empty completion and
+    it would be written to disk as the artifact."""
+    import pytest as _pytest
+
+    from core.provider import _extract_antigravity_response
+
+    raw = (
+        '{"event":"result","result":{"status":"ERROR","response":"",'
+        '"error":"empty prompt"}}\n'
+    )
+    with _pytest.raises(RuntimeError, match="empty prompt"):
+        _extract_antigravity_response(raw)
+
+
+def test_antigravity_response_skips_the_init_event() -> None:
+    """The init event carries the whole tool catalogue and arrives first;
+    taking the first JSON line would return that instead of the answer."""
+    from core.provider import _extract_antigravity_response
+
+    raw = (
+        '{"event":"init","init":{"tools":["browser_click_element"]}}\n'
+        '{"event":"result","result":{"status":"SUCCESS","response":"ANSWER\\n"}}\n'
+    )
+    assert _extract_antigravity_response(raw).strip() == "ANSWER"
 
 
 def test_cli_specs_have_required_fields() -> None:
@@ -312,8 +414,10 @@ async def test_codex_cli_passes_prompt_via_stdin_and_reads_last_message_file(
     # — prompt is NOT in argv (security: avoid leaking via local process listings).
     args = spawn.call_args[0]
     assert args[0] == "/usr/bin/codex" and args[1] == "exec"
-    assert args[2] == "--output-last-message"
-    assert args[3] == seen_paths[0]
+    # Position-independent: --json was added ahead of these, and the point is
+    # that the flag carries the tempfile, not where in argv it sits.
+    assert "--output-last-message" in args
+    assert args[args.index("--output-last-message") + 1] == seen_paths[0]
     assert all(a != "What is 3*3?" for a in args), "prompt must NOT be in argv"
     # Prompt was passed on stdin.
     proc.communicate.assert_awaited_once()
@@ -327,8 +431,15 @@ async def test_codex_cli_passes_prompt_via_stdin_and_reads_last_message_file(
 async def test_codex_cli_sends_stdout_to_devnull_when_using_last_message_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """stdout for codex_cli is just the agent log — we should not pipe it
-    into memory. Verify the spawn was called with stdout=DEVNULL."""
+    """stdout is dropped only for a last_message_file CLI that reports no
+    usage.
+
+    Dropping it saves memory on long prompts, and for a CLI whose answer
+    arrives in a file the log is genuinely throwaway. codex is the exception:
+    its real token counts arrive on that same stdout as a `turn.completed`
+    event, and dropping it is what kept FI on a char-count estimate that was
+    wrong by three orders of magnitude. So codex now keeps stdout, and this
+    test covers the branch that still drops it."""
     import asyncio as _asyncio
 
     real_NamedTemporaryFile = __import__("tempfile").NamedTemporaryFile
@@ -355,7 +466,16 @@ async def test_codex_cli_sends_stdout_to_devnull_when_using_last_message_file(
         await client.aclose()
 
     kwargs = spawn.call_args[1]
-    assert kwargs["stdout"] == _asyncio.subprocess.DEVNULL
+    # codex_cli declares a usage_extractor, so it keeps stdout. Assert the
+    # rule rather than the provider, so the branch stays covered either way.
+    from core.provider import _CLI_SPECS as _S
+    spec = _S["codex_cli"]
+    expected = (
+        _asyncio.subprocess.DEVNULL
+        if spec.usage_extractor is None
+        else _asyncio.subprocess.PIPE
+    )
+    assert kwargs["stdout"] == expected
 
 
 @pytest.mark.asyncio
@@ -844,3 +964,81 @@ async def test_communicate_path_without_heartbeat_cb_still_works(
         proc, ["copilot"], _CLI_SPECS["copilot_cli"], None, None, timeout_s=5.0,
     )
     assert result == "plain output"
+
+
+def test_antigravity_raises_its_own_print_timeout() -> None:
+    """agy's print mode defaults to a 5-minute cap and, when it fires, exits
+    rc=1 with an EMPTY stderr — no message, nothing to diagnose from.
+
+    FI's own inactivity watchdog is longer, so without this flag FI waits on
+    a child that has already quit and the quest dies with a bare transient
+    error. Observed killing an `execute_reflect` turn at 311s.
+
+    The flag must stay well above FI's ceilings so FI's timeouts remain the
+    ones that decide, and a genuinely slow node fails with a diagnosis.
+    """
+    argv = _CLI_SPECS["antigravity_cli"].argv
+    assert "--print-timeout" in argv, (
+        "without this, agy silently kills long turns at 5 minutes"
+    )
+    value = argv[argv.index("--print-timeout") + 1]
+    assert value.endswith("m") and int(value[:-1]) >= 15, value
+
+
+def test_codex_reports_measured_usage() -> None:
+    """codex emits `turn.completed` on stdout under --json while the answer
+    goes to the --output-last-message file, so the two are read from
+    different places.
+
+    The gap is not a rounding difference: on a one-word prompt the estimator
+    said 7 tokens and codex reported 20,953 — the rest being the system
+    prompt and tool schema codex wraps around every call. Any budget built on
+    the estimate is wrong by orders of magnitude.
+    """
+    from core.provider import _extract_codex_usage
+
+    raw = (
+        '{"type":"thread.started"}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":20953,'
+        '"cached_input_tokens":11520,"cache_write_input_tokens":0,'
+        '"output_tokens":7,"reasoning_output_tokens":3}}\n'
+    )
+    u = _extract_codex_usage(raw)
+    assert u["prompt_tokens"] == 20953
+    assert u["completion_tokens"] == 7
+    assert u["reasoning_tokens"] == 3
+    assert u["estimated"] is False
+
+
+def test_codex_cached_tokens_are_a_subset_not_an_addition() -> None:
+    """Summing them would double-count the cheapest tokens in the call."""
+    from core.provider import _extract_codex_usage
+
+    u = _extract_codex_usage(
+        '{"type":"turn.completed","usage":{"input_tokens":100,'
+        '"cached_input_tokens":90,"output_tokens":10}}\n'
+    )
+    assert u["prompt_tokens"] == 100 and u["cached_input_tokens"] == 90
+    assert u["total_tokens"] == 110
+
+
+def test_codex_asks_for_the_json_event_stream() -> None:
+    """Without --json there is no usage event at all — plain stdout prints a
+    bare 'tokens used N' total with no input/output split and no cache
+    figures."""
+    assert "--json" in _CLI_SPECS["codex_cli"].argv
+
+
+def test_a_usage_reporting_cli_keeps_its_stdout() -> None:
+    """codex's answer arrives in a file, so stdout used to be dropped to save
+    memory on long prompts — which threw away the only place the real token
+    counts exist. A spec that declares a usage_extractor must keep it."""
+    import inspect
+
+    from core import provider as prov
+
+    src = inspect.getsource(prov)
+    assert 'spec.output_via == "last_message_file" and spec.usage_extractor is None' in src, (
+        "stdout is dropped for last_message_file CLIs; the usage_extractor "
+        "exemption is what lets codex report real numbers"
+    )

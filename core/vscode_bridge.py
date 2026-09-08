@@ -94,6 +94,7 @@ class VSCodeBridgeClient:
         # response text; clarify requests resolve to the answers dict.
         # We mix kinds in one map keyed by id because each id is unique
         # across the lifetime of the client.
+        self.last_usage: dict | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         # Streaming-chunk buffers per request, in case the extension
         # streams in chunks before sending the final lm_done.
@@ -363,6 +364,28 @@ class VSCodeBridgeClient:
                 # Fall back to chunk reassembly when the extension
                 # streamed and didn't repeat the final content.
                 content = "".join(self._chunks.get(req_id, []))
+            # Token counts, when the extension supplied them. It computes
+            # these with the model's own tokenizer via ``countTokens``,
+            # which is the only measurement the vscode.lm API allows —
+            # the response object carries no usage field and nothing in
+            # the namespace exposes quota or premium-request consumption.
+            #
+            # ``usage_scope`` therefore says ``sent_only``: these count the
+            # text we sent and received, not the system prompt and tool
+            # schema Copilot wraps around the call. On the CLI providers
+            # that wrapper turned out to be most of the input, so recording
+            # the scope keeps a vscode row from being read as comparable to
+            # a codex or claude row that includes it.
+            pt = msg.get("prompt_tokens")
+            ct = msg.get("completion_tokens")
+            if isinstance(pt, int) and isinstance(ct, int) and msg.get("measured"):
+                self.last_usage = {
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "total_tokens": pt + ct,
+                    "estimated": False,
+                    "usage_scope": str(msg.get("usage_scope") or "sent_only"),
+                }
             fut.set_result(content)
         elif mtype == "lm_error":
             req_id = int(msg.get("id", 0))
