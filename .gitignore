@@ -51,3 +51,6 @@ tools/
 _proof_pdfs/
 _miktex_pdfs/
 poster.pdf
+
+# Scratch clones of external skill sources, made by scripts/import_scientist_skills.py
+.skill-sources/

@@ -204,6 +204,26 @@ The sections below cover each pause in more detail.
 
 ## Common things you might want next
 
+### Bootstrap a starter set of scientist skills
+
+FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of thirteen scientist-workflow skills (Bayesian inference, astronomy, cheminformatics, bioinformatics, materials science, geospatial analysis, metabolic modeling, quantum simulation, ontology-term resolution, molecular dynamics, and template-driven chart/report generation) from their real upstream repositories and imports them — reproducing, on a fresh machine, the same sourcing step done once by hand.
+
+```bash
+python scripts/import_scientist_skills.py
+```
+
+Clones the source repos into `.skill-sources/` (gitignored — a cache, not something this repo ships), imports each skill, runs the static scan, and prints a summary. It does **not** install the underlying Python packages (pymc, astropy, rdkit, ...) or approve anything — those stay explicit, separate steps, because approval binds to a person's judgment and a script doesn't get to make that call for you:
+
+```bash
+python -m pip install pymc arviz astropy rdkit biopython pymatgen scikit-bio geopandas cobra qutip   # or pass --pip-install to the script
+python launch.py --scan-skill <name>       # read what the scanner found, for each
+python launch.py --approve-skill <name> --approve-as <you>
+```
+
+`--skip name1,name2` narrows the run to a subset; `--cache-dir PATH` points the source clones somewhere other than the default. Safe to re-run — an already-imported skill is left alone (re-importing over one would lapse its approval, so the importer refuses by default).
+
+For the general skill workflow — importing a single skill, teaching one from a package you already have installed, the promotion gate, the static scanner — see the skills paragraph in the [README](../README.md); `python launch.py --help` lists every `--*-skill` flag.
+
 ### Resume a crashed quest
 
 If a Copilot HTTP/2 outage or any other transient failure crashes a quest mid-run, FI checkpoints every node to `outputs/<quest_id>/.fi/state.sqlite`. The engine also drops a copy of the source YAML at `outputs/<quest_id>/config.yaml` at startup, so resume is a one-step lookup — no slug match, no picker rummaging.
