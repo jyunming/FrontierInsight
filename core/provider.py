@@ -168,6 +168,49 @@ class _CliSpec:
     # see and which dominates the total. Returning None means "this CLI does
     # not report usage", and the estimator stays in charge.
     usage_extractor: Callable[[str], dict[str, Any] | None] | None = None
+    # Environment variables to clear for this CLI's subprocess, and the one
+    # variable whose presence means the user chose the env path deliberately
+    # and we must not touch anything.
+    #
+    # Copilot resolves credentials COPILOT_GITHUB_TOKEN > GH_TOKEN >
+    # GITHUB_TOKEN > its own stored login, so any ambient GITHUB_TOKEN
+    # silently outranks `copilot /login`. That variable is normally present
+    # for git and gh, where a repo-scoped fine-grained PAT is the usual
+    # thing to have -- and such a PAT has no "Copilot Requests" permission,
+    # so the call comes back 401 with a message about the token being
+    # invalid or expired. The login it displaced was working the whole time.
+    #
+    # Diagnosed the hard way: identical calls succeeded from a shell and
+    # failed from the quest process, through four rounds of ruling out auth,
+    # model, prompt size, prompt content, concurrency, cwd and binary path.
+    # Only a shim recording the child's environment showed the token.
+    env_unset: tuple[str, ...] = ()
+    env_unset_override: str | None = None
+
+
+def _child_env(spec: _CliSpec) -> dict[str, str] | None:
+    """The environment for a CLI subprocess, or None to inherit unchanged.
+
+    Only ``spec.env_unset`` is removed, and only when the spec's override
+    variable is absent -- setting that variable is how a user says "I mean
+    to authenticate through the environment", and then nothing is touched.
+    """
+    if not spec.env_unset:
+        return None
+    if spec.env_unset_override and os.environ.get(spec.env_unset_override):
+        return None
+    present = [k for k in spec.env_unset if k in os.environ]
+    if not present:
+        return None
+    env = dict(os.environ)
+    for key in present:
+        env.pop(key, None)
+    _log.info(
+        "cleared %s for the %s subprocess so its own stored login is used; "
+        "set %s to authenticate through the environment instead",
+        ", ".join(present), spec.argv[0], spec.env_unset_override,
+    )
+    return env
 
 
 def _encode_antigravity_stdin(prompt: str) -> str:
@@ -427,6 +470,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="arg",
         output_via="stdout",
         model_flag="--model",   # provider.model = "gpt-5.2"
+        # See _CliSpec.env_unset: an ambient GITHUB_TOKEN outranks the
+        # copilot login and 401s if it lacks "Copilot Requests".
+        env_unset=("GITHUB_TOKEN", "GH_TOKEN"),
+        env_unset_override="COPILOT_GITHUB_TOKEN",
         # Prompt is passed as a command-line ARG, so on Windows the whole
         # command line is subject to the cmd.exe limit (~8191 chars) — copilot
         # ships as `copilot.BAT` and a long design/write prompt (with
@@ -1237,6 +1284,7 @@ async def _run_cli(
                 ),
                 stdout=stdout_target,
                 stderr=asyncio.subprocess.PIPE,
+                env=_child_env(spec),
             )
         except FileNotFoundError as e:
             raise RuntimeError(
