@@ -49,6 +49,11 @@ docker>=7.1
 # psutil enables `--memory-cap-mb` throttling in fleet mode.
 # viztracer enables `--profile` per-quest tracing.
 psutil>=5.9
+
+# Cross-process lock around a skill's provenance.json. Two quests
+# recording a use of the same skill serialise on it, so neither
+# loses the other's record.
+filelock>=3.13
 # viztracer>=0.16   # uncomment when you want a real profile run
 
 # Optional PDF support for `knowledge.local_papers` (manually-fed

@@ -87,7 +87,7 @@ def record_use(
 
     try:
         from filelock import FileLock, Timeout
-    except ImportError:  # pragma: no cover - filelock ships with the deps
+    except ImportError:  # pragma: no cover - declared in pyproject deps
         _log.warning("filelock unavailable; skipping usage record")
         return False
 
