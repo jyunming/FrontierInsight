@@ -106,6 +106,17 @@ class QuestState(TypedDict, total=False):
     topic: str
     title: str
     iteration: int
+    # Skills chosen for this quest by ``select_skills`` — the names that
+    # actually reach the design and implement prompts. Distinct from
+    # ``config.engine.skills``, which only bounds the candidate set.
+    selected_skills: list[str]
+    # The selection record: chosen names, per-skill reasons, how many
+    # candidates there were, and any names the model invented. Kept so
+    # "why did this quest not use ambit?" is answerable after the fact.
+    skill_selection: dict[str, Any]
+    # Range assertions contributed by the selected skills, merged with the
+    # design's own by ``_assertion_violations``.
+    _skill_assertions: list[dict[str, Any]]
     # Clarify-node state. Both dicts share the same 5 keys
     # (`comparative_baseline`, `empirical_vs_theoretical`,
     # `success_metric`, `budget`, `output_kinds`); `clarify_questions`
@@ -898,6 +909,7 @@ class Engine:
                 except OSError:
                     pass
             self._write_back_knowledge(artifacts, final_state)
+            self._record_skill_usage(final_state)
             self._write_cost_summary()
             # Clean up any stale ``quest_failed.md`` from a PRIOR
             # failed run of this quest — the current run succeeded,
@@ -998,6 +1010,7 @@ class Engine:
         g.add_node("clarify", self._node_clarify)
         g.add_node("ideate", self._node_ideate)
         g.add_node("literature", self._node_literature)
+        g.add_node("select_skills", self._node_select_skills)
         g.add_node("design", self._node_design)
         # design → implement_outline → implement → execute (two-stage
         # implement). The outline node produces a scaffold + function
@@ -1040,7 +1053,11 @@ class Engine:
         g.add_edge(START, "clarify")
         g.add_edge("clarify", "ideate")
         g.add_edge("ideate", "literature")
-        g.add_edge("literature", "design")
+        # Selection sits between literature and design so it sees the
+        # chosen direction and the retrieved sources — the direction is
+        # what actually names the instrument a quest needs.
+        g.add_edge("literature", "select_skills")
+        g.add_edge("select_skills", "design")
         # design → implement (normal sim path) OR auto_collect_data
         # (no-simulation, agent attempts auto-collect via Axon first
         # then wait_for_data handles the pause-if-still-empty case).
@@ -1225,6 +1242,12 @@ class Engine:
                 self.config.engine.degenerate_run_guard
                 and _is_degenerate_result(state.get("result_json") or {})
             ):
+                return "retry"
+            # A run can exit 0 with perfectly plausible numbers and still be
+            # physically wrong (unit error, factor of two, sign flip). The
+            # design declared what its outputs may legally be; enforce it
+            # here, before a paper gets written from them.
+            if _assertion_violations(state):
                 return "retry"
             return "proceed"
         return "retry"
@@ -2284,6 +2307,7 @@ class Engine:
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             clarify_block=_format_clarify(state),
+            skills_block=self._skills_block(state) or "(no skills selected for this quest)",
             study_mode_directive=(
                 _SURVEY_DESIGN_DIRECTIVE
                 if state.get("survey_mode_resolved")
@@ -2359,6 +2383,19 @@ class Engine:
         )
 
         out: dict[str, Any] = {"design": design}
+        # Range assertions contributed by the trusted skills this quest may
+        # call. Stashed in state because ``_assertion_violations`` is a
+        # module-level function with no access to the engine, and the
+        # execute-repair loop needs them before any node with `self` runs
+        # again. A skill declares its own valid domain once; the design does
+        # not have to restate it.
+        skill_assertions = self._skill_assertions(state)
+        if skill_assertions:
+            out["_skill_assertions"] = skill_assertions
+            self._log.info(
+                "[skills] %d range assertion(s) contributed by skills",
+                len(skill_assertions),
+            )
         if isinstance(objections, list):
             # Surfaced into state so it can be inspected post-quest (run.log
             # already carries the count; the full list lives here for any
@@ -3176,6 +3213,7 @@ class Engine:
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
+                skills_block=self._skills_block(state) or "(no skills selected for this quest)",
             )
         except KeyError:
             # Prompt not loaded (e.g. running a build that doesn't ship
@@ -3226,6 +3264,7 @@ class Engine:
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
+                skills_block=self._skills_block(state) or "(no skills selected for this quest)",
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
@@ -3247,6 +3286,7 @@ class Engine:
             prompt = self._prompts["implement"].substitute(
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
+                skills_block=self._skills_block(state) or "(no skills selected for this quest)",
             )
         text = await self._chat(prompt, node="implement")
         code, deps = _parse_implement_response(text)
@@ -3507,9 +3547,13 @@ class Engine:
             and self.config.engine.degenerate_run_guard
             and _is_degenerate_result(state.get("result_json") or {})
         )
+        implausible = _assertion_violations(state)
 
         # Clean success (and not a degenerate all-zero run) → no-op.
-        if rc == 0 and has_result_json and not degenerate:
+        if rc == 0 and has_result_json and not degenerate and implausible:
+            for v in implausible:
+                self._log.warning("[execute_reflect] implausible: %s", v.describe())
+        if rc == 0 and has_result_json and not degenerate and not implausible:
             self._log.info("[execute_reflect] script succeeded; skipping repair")
             return {}
 
@@ -4643,6 +4687,312 @@ class Engine:
         self._write_claims_ledger(grounding)
         return {"claim_grounding": grounding}
 
+    async def _node_select_skills(self, state: QuestState) -> QuestState:
+        """Pick which skills this quest carries.
+
+        Replaces blanket injection. Every trusted skill used to be pushed into
+        four prompts regardless of topic, which cost ~465 tokens per skill per
+        node — so the library growing, which is the whole point, made itself
+        the largest single token cost.
+
+        Here one small call reads a catalogue (name, kind, a description and a
+        scope limit each) and narrows it, once, against ~93,000 for the
+        blanket version.
+
+        The catalogue itself is layered before the call. With no domain filter
+        — FI works in any field — every importable skill would otherwise be a
+        candidate for every quest, which is the same accumulation problem one
+        level up: ~28,000 tokens for a hundred-odd skills, growing with the
+        library. So untagged skills (the general ones — statistics, units,
+        figures) are always candidates, and domain-tagged ones are admitted
+        only when the topic looks related. See ``core.skills.layers``.
+
+        Never fatal: a quest must not fail because an additive step could not
+        answer. Every failure path ends in "no skills", which is the behaviour
+        that existed before skills.
+        """
+        from core.skills import loadable_skills
+        from core.skills.layers import render_layer_report, select_layers
+        from core.skills.selection import (
+            build_catalogue, near_misses, parse_selection,
+        )
+
+        cfg = self.config.engine
+        exclude = list(getattr(cfg, "skills_exclude", []) or [])
+        requested = list(getattr(cfg, "skills", []) or [])
+
+        try:
+            # An empty `skills` means "every trusted skill is a candidate" —
+            # the user should not have to remember what they have taught it.
+            names = requested or [s.name for s in _discover_skill_names()]
+            usable, rejected = loadable_skills(names)
+        except Exception as e:  # noqa: BLE001 - the registry must never stall a quest
+            self._log.warning("[skills] registry unavailable (%s); none used", e)
+            return {"selected_skills": [], "skill_selection": {"error": str(e)}}
+
+        survey = bool(
+            state.get("survey_mode_resolved") or state.get("no_simulation_resolved")
+        )
+        # Layer before cataloguing: the topic decides which domain-tagged
+        # skills are even worth describing to the selector.
+        layered, layer_report = select_layers(usable, str(state.get("topic") or ""))
+        self._log.info(
+            "[skills] %s",
+            render_layer_report(layer_report).replace("\n", " | "),
+        )
+        catalogue = build_catalogue(layered, exclude=exclude, survey_mode=survey)
+
+        # Tell the user about skills that would have been candidates but are
+        # not approved — otherwise one can sit unapproved forever while every
+        # quest quietly does without it.
+        for st in near_misses(rejected, [], catalogue):
+            self._log.warning(
+                "[skills] note: %r is not usable (%s) — %s",
+                st.skill.name, st.status.value, st.reason,
+            )
+
+        if not catalogue:
+            self._log.info(
+                "[skills] no candidate skills%s", " (survey mode)" if survey else "",
+            )
+            return {"selected_skills": [], "skill_selection": {"candidates": 0}}
+
+        prompt = self._prompts["select_skills"].substitute(
+            topic=state["topic"],
+            clarify_block=_format_clarify(state),
+            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            catalogue_block=catalogue.render(),
+        )
+
+        # Two attempts: the call is small, and a transient failure costing the
+        # quest its skills is a poor trade for one retry.
+        text = ""
+        for attempt in (1, 2):
+            try:
+                text = await self._chat(prompt, node="select_skills")
+                break
+            except Exception as e:  # noqa: BLE001
+                self._log.warning(
+                    "[skills] selection call failed (attempt %d/2): %s", attempt, e,
+                )
+        else:
+            self._log.warning("[skills] selection unavailable; none used")
+            return {"selected_skills": [], "skill_selection": {"error": "call failed"}}
+
+        sel = parse_selection(text, catalogue)
+        for name in sel.unknown:
+            self._log.warning(
+                "[skills] selection named %r, which is not a candidate — ignored",
+                name,
+            )
+        if sel.chosen:
+            self._log.info(
+                "[skills] selected %d of %d candidate(s): %s",
+                len(sel.chosen), len(catalogue.entries), ", ".join(sel.chosen),
+            )
+            for name in sel.chosen:
+                why = sel.reasons.get(name)
+                if why:
+                    self._log.info("[skills]   %s — %s", name, why)
+        else:
+            self._log.info(
+                "[skills] none of %d candidate(s) selected; generating instead",
+                len(catalogue.entries),
+            )
+
+        record = sel.to_dict() | {
+            "candidates": len(catalogue.entries),
+            "layers": layer_report,
+        }
+        return {"selected_skills": sel.chosen, "skill_selection": record}
+
+    def _skills_block(self, state: QuestState | None = None) -> str:
+        """Instructions for the skills this quest actually selected.
+
+        This is the step that makes the registry worth having: a skill FI
+        knows about but never tells ``design`` / ``implement`` about changes
+        nothing.
+
+        Renders **only what ``select_skills`` chose**, not everything trusted.
+        Rendering the whole library cost ~465 tokens per skill per node across
+        four nodes, so a growing library — the entire point of the subsystem —
+        became its own largest cost.
+
+        Only TRUSTED skills can be selected in the first place; anything else
+        never reaches this point, and the quest falls back to generating the
+        code itself, which is the behaviour that existed before skills.
+        """
+        names = list((state or {}).get("selected_skills") or [])
+        if not names:
+            return ""
+        # The selection's reasons travel with it: design sees why each skill
+        # was picked and may decline one it judges inapplicable.
+        reasons = dict(
+            ((state or {}).get("skill_selection") or {}).get("reasons") or {}
+        )
+
+        try:
+            from core.skills import loadable_skills
+        except Exception as e:  # noqa: BLE001 - a broken registry must not stall a quest
+            self._log.warning("[skills] registry unavailable (%s); generating instead", e)
+            return ""
+
+        try:
+            usable, rejected = loadable_skills(names)
+        except Exception as e:  # noqa: BLE001
+            self._log.warning("[skills] resolution failed (%s); generating instead", e)
+            return ""
+
+        for rej in rejected:
+            # Selection only ever names trusted skills, so reaching here means
+            # a skill broke between selection and use — its tool moved, or its
+            # package upgraded. Skip it and say so; a skill is additive, never
+            # a precondition.
+            self._log.warning(
+                "[skills] %s selected but no longer usable (%s) — %s",
+                rej.skill.name, rej.status.value, rej.reason,
+            )
+        if not usable:
+            return ""
+
+        # The preamble has to match what the skills actually are. "Call into
+        # them instead of re-deriving the physics" is right for an importable
+        # library and meaningless for a command-line tool, which has no
+        # physics and cannot be imported — telling a model to import pandoc
+        # teaches it to write code that cannot work.
+        from core.skills import Kind
+
+        kinds = {st.skill.kind for st in usable}
+        lead = ["The following skills are available and trusted. Prefer them "
+                "over working the same thing out yourself."]
+        if Kind.LIBRARY in kinds:
+            lead.append(
+                "For a **library** skill, import it and call its functions "
+                "rather than re-deriving what it computes — it is tested code, "
+                "and re-deriving it is where wrong physics enters."
+            )
+        if Kind.TOOL in kinds:
+            lead.append(
+                "For a **tool** skill, drive the tool the way its instructions "
+                "record — the invocations, flags and output-checking below are "
+                "known to work. Do not guess flags, and do not reimplement what "
+                "the tool already does."
+            )
+        lead.append(
+            "Each skill below records why it was selected. If you judge one "
+            "inapplicable after seeing the full design, you may leave it "
+            "unused — say why in `method`."
+        )
+        parts = [" ".join(lead)]
+        for st in usable:
+            skill = st.skill
+            self._log.info(
+                "[skills] loaded %s (%s, %s)",
+                skill.name, skill.kind.value, skill.maturity.value,
+            )
+            parts.append(f"\n## Skill: {skill.name} ({skill.kind.value})\n")
+            why = reasons.get(skill.name)
+            if why:
+                parts.append(f"*Selected because:* {why}\n")
+            parts.append(skill.instructions().strip())
+            surface = skill.api_surface().strip()
+            if surface:
+                parts.append(f"\n### {skill.name} — API surface\n")
+                parts.append(surface)
+
+            # Bundled files are named, never inlined. A references directory
+            # can be larger than the whole quest, and inlining it would undo
+            # the selection step this block exists to serve. Naming them is
+            # enough: the generated code runs in the skill's directory and
+            # can open what it needs.
+            bundled = skill.bundled_scripts()
+            refs = skill.reference_files()
+            if bundled or refs:
+                parts.append(f"\n### {skill.name} — bundled files\n")
+                parts.append(
+                    f"These ship with the skill, at paths relative to "
+                    f"`{skill.path}`. Read or run them as needed; their "
+                    f"contents are deliberately not reproduced here."
+                )
+                for rel in bundled:
+                    parts.append(f"- `{rel}` (executable)")
+                for rel in refs:
+                    parts.append(f"- `{rel}` (reference)")
+        return "\n".join(parts).strip()
+
+    def _skill_assertions(self, state: QuestState | None = None) -> list[dict[str, Any]]:
+        """Range assertions contributed by the trusted skills.
+
+        A skill knows its own valid domain, so a design that calls one need
+        not restate it. These are merged with the design's own
+        ``result_assertions`` by ``_assertion_violations``.
+        """
+        names = list((state or {}).get("selected_skills") or [])
+        if not names:
+            return []
+        try:
+            from core.skills import loadable_skills
+
+            usable, _ = loadable_skills(names)
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[dict[str, Any]] = []
+        for st in usable:
+            out.extend(st.skill.assertions())
+        return out
+
+    def _numeric_oracle_hits(
+        self, paper_md: str, state: QuestState,
+    ) -> list[str]:
+        """Deterministic number check; returns must-flag strings.
+
+        Runs on the FULL paper text, not the 16 000-character slice the
+        review prompt gets — a wrong number in a late results table is
+        exactly the kind this is here to catch.
+
+        Writes ``paper/numeric_audit.json`` either way, so a clean run
+        leaves evidence that the check ran rather than silence that could
+        equally mean it was skipped. Best-effort throughout: an oracle
+        failure must never be quest-fatal, because it would block a paper
+        over a bug in the checker rather than a bug in the paper.
+        """
+        try:
+            from core import numeric_oracle
+
+            report = numeric_oracle.check(paper_md, state.get("result_json") or {})
+        except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
+            self._log.warning("[numeric_oracle] check failed (%s); skipping", e)
+            return []
+
+        try:
+            paper_dir = self.quest_root / "paper"
+            paper_dir.mkdir(parents=True, exist_ok=True)
+            (paper_dir / "numeric_audit.json").write_text(
+                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[numeric_oracle] could not write audit: %s", e)
+
+        if report.skipped:
+            self._log.info("[numeric_oracle] skipped — %s", report.skip_reason)
+            return []
+        if report.ok:
+            self._log.info(
+                "[numeric_oracle] %d paper numbers vs %d results: all consistent",
+                report.paper_numbers, report.result_numbers,
+            )
+            return []
+
+        for f in report.findings:
+            self._log.warning("[numeric_oracle] %s", f.describe())
+        # One hit per contradicted number, each naming the value and the
+        # result path, so the rewrite has something specific to act on
+        # instead of "a number is wrong somewhere".
+        return [
+            f"unverified_number: {f.describe()}" for f in report.findings
+        ]
+
     def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
         """Persist the claim-grounding result as a transparency ledger:
         ``paper/claims.json`` (structured) + ``paper/CLAIMS.md`` (readable).
@@ -4733,6 +5083,15 @@ class Engine:
             if not isinstance(mfh, list):
                 mfh = []
             review["must_flag_hits"] = [str(h).strip() for h in mfh if str(h).strip()]
+            # Arithmetic, not judgement: compare the paper's numbers against
+            # the ones the run actually produced. Every other gate here ends
+            # in a model reading text, so a mis-transcription (2.14 computed,
+            # 2.41 written) survives all of them. Appended to must_flag_hits
+            # so it rides the existing non-bypassable revise path and
+            # consumes the iteration budget like any other hit.
+            for hit in self._numeric_oracle_hits(paper_md, state):
+                if hit not in review["must_flag_hits"]:
+                    review["must_flag_hits"].append(hit)
             update: QuestState = {"review": review}
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
@@ -5761,6 +6120,39 @@ class Engine:
             raw_state=dict(state),
         )
 
+    def _record_skill_usage(self, state: QuestState) -> None:
+        """Write this quest into the provenance of the skills it used.
+
+        Gated on an accepted review, matching ``write_back_only_on_accept``
+        next door: a paper that cleared the numeric oracle, the plausibility
+        gate and review is the strongest evidence available that the skill
+        contributed something sound. A rejected quest teaches nothing about
+        the skill — only about that attempt.
+
+        Best-effort throughout. The quest has already succeeded by the time
+        this runs, so a bookkeeping failure must never turn that into an
+        error.
+        """
+        names = list(state.get("selected_skills") or [])
+        if not names:
+            return
+        verdict = str((state.get("review") or {}).get("verdict", "")).lower()
+        if verdict != "accept":
+            self._log.info(
+                "[skills] usage not recorded (verdict=%s) — a rejected quest "
+                "says nothing about the skill", verdict or "unknown",
+            )
+            return
+        try:
+            from core.skills.usage import record_quest
+
+            written = record_quest(names, self.quest_id, "accept")
+        except Exception as e:  # noqa: BLE001 - bookkeeping is never fatal
+            self._log.warning("[skills] usage not recorded: %s", e)
+            return
+        if written:
+            self._log.info("[skills] recorded use in: %s", ", ".join(written))
+
     def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState) -> None:
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
             return
@@ -5943,6 +6335,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "design", "design_self_critique",   # second-pass methodology audit
         "implement",                        # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
+        "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
         "execute_reflect", "analyze",
         "cross_check",
@@ -7251,6 +7644,50 @@ def _compact_result_json_block(
         if len(out) <= budget_chars:
             return out, len(full)
     return out[:budget_chars], len(full)
+
+
+def _discover_skill_names() -> list:
+    """Every skill on this machine, for the "candidates = all trusted" default.
+
+    Returns Skill objects; the caller re-resolves them through
+    ``loadable_skills`` so the promotion gate runs exactly once, in one place.
+    Never raises — a broken skills directory must not stall a quest.
+    """
+    try:
+        from core.skills import discover
+
+        return discover()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _assertion_violations(state: "QuestState") -> list:
+    """Range/unit assertions the run broke, as declared by its own design.
+
+    Returns [] when the design declared nothing — silence means "nothing was
+    claimed", never "everything checked out". Never raises: a defect in the
+    checker must not stall a quest, so any failure degrades to "no violations"
+    and lets the run proceed.
+
+    Separate from ``_is_degenerate_result`` on purpose. That one catches a run
+    that produced nothing; this one catches a run that produced the wrong
+    thing convincingly.
+    """
+    try:
+        from core import plausibility
+
+        design = dict(state.get("design") or {})
+        # A skill knows its own valid domain, so a design that calls one
+        # need not restate its bounds. Design assertions come first: a
+        # design that deliberately narrows a skill's range keeps its say.
+        extra = state.get("_skill_assertions") or []
+        if extra:
+            design["result_assertions"] = list(
+                design.get("result_assertions") or []
+            ) + list(extra)
+        return plausibility.check_design(state.get("result_json") or {}, design)
+    except Exception:  # noqa: BLE001 - a checker bug must not block a quest
+        return []
 
 
 def _is_degenerate_result(rj: dict[str, Any]) -> bool:

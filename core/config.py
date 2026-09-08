@@ -25,6 +25,8 @@ ProviderName = Literal[
     "github_copilot_cli",
     "github_copilot_vscode",
     "codex_cli",      # local Codex CLI (uses ChatGPT Plus/Pro OAuth via `codex login`)
+    "antigravity_cli",  # local Google Antigravity CLI (`agy`), prompt via its
+                        # stream-json stdin so long nodes are not argv-capped
     "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude login`)
     "copilot_cli",    # local GitHub Copilot CLI (uses `gh auth login` Copilot Pro/Business)
     "gemini_cli",     # local @google/gemini-cli (uses `gemini` OAuth / Google AI Studio key)
@@ -659,6 +661,28 @@ class EngineConfig(BaseModel):
     # paper at a glance). Each adapter is best-effort — errors fall
     # through silently to the safety net (``wait_for_data`` pause).
     dataset_adapters: list[str] = Field(default_factory=list)
+    # Simulation skills the quest may call instead of re-deriving the
+    # physics. Each name is resolved against ``<FI_SKILLS_DIR>/<name>/`` and the
+    # ``fi.skills`` entry-point group; a name that resolves to a skill
+    # which is not TRUSTED is logged and skipped, and the quest falls back
+    # to guided generation. Empty (default) means "generate everything".
+    #
+    # A skill is trusted only when the self-test it carries passes AND a
+    # person has approved that exact content — so an unattended ``--fleet``
+    # run can never adopt capability nobody signed off on. Approve with
+    # ``core.skills.approval.approve``; editing a skill lapses its approval.
+    #
+    # FI ships no skills: a skill that arrives with the install is a
+    # curated library again, and curation does not compound. Skills live
+    # in ``FI_SKILLS_DIR`` (default ``~/.frontier-insight/skills``), so a
+    # fresh clone starts with none.
+    skills: list[str] = Field(default_factory=list)
+    # Skills to keep out of this quest, by name. Separate from ``skills``
+    # because excluding one thing should not require listing everything else
+    # — which gets impractical as the library grows, and would silently
+    # exclude anything added later. Also the A/B handle: run one topic with a
+    # skill and once without.
+    skills_exclude: list[str] = Field(default_factory=list)
     # Per-adapter top_k. The Axon top_k stays at ``auto_collect_top_k``
     # above; this separate knob is for the dataset adapters because
     # they tend to hit external APIs and a smaller default is the

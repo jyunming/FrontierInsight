@@ -23,3 +23,29 @@ def _no_embed_model_download(monkeypatch):
     import core.passages as _passages
     monkeypatch.setattr(_passages, "_EMBED_TRIED", True, raising=False)
     monkeypatch.setattr(_passages, "_EMBED_MODEL", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_library(tmp_path_factory, monkeypatch):
+    """No test may read the developer's real skill library.
+
+    Skills live outside the repo, in ``FI_SKILLS_DIR`` (default
+    ``~/.frontier-insight/skills``), because they are per-machine state
+    rather than repository content. Nothing pointed the tests away from it,
+    so every engine test discovered whatever happened to be installed —
+    invisible while that was one skill, and decisive once it was 34: engine
+    smoke tests began exercising real discovery, running each skill's
+    self-test, and making a live selection call. Three of them failed on
+    behaviour that had nothing to do with what they were testing, and the
+    full sweep went from ~20 minutes to 1h55.
+
+    A test that needs skills sets ``FI_SKILLS_DIR`` itself; the default is
+    an empty directory so results depend on the repository, not the machine.
+    """
+    empty = tmp_path_factory.mktemp("fi_skills_empty")
+    monkeypatch.setenv("FI_SKILLS_DIR", str(empty))
+    # The approval ledger lives outside the repo too, and an approval
+    # recorded by a test must never reach the real one.
+    monkeypatch.setenv(
+        "FI_SKILLS_APPROVALS", str(empty.parent / "approvals.json"),
+    )

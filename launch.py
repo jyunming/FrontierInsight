@@ -184,6 +184,148 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "knowledge.offline: true (or FI_OFFLINE=1). Requires network.",
     )
     mode.add_argument(
+        "--skills",
+        action="store_true",
+        help="List simulation skills and their promotion status. A skill is "
+             "usable only when its own selftest passes AND you have approved "
+             "that exact content; anything else is listed with the reason.",
+    )
+    mode.add_argument(
+        "--why-skills",
+        metavar="TOPIC",
+        default="",
+        help="Show which skills would be selected for a topic, and why, "
+             "without running a quest. Uses the same catalogue and the same "
+             "call the pipeline would, so it answers 'would this topic reach "
+             "my ambit skill?' for the cost of one small request.",
+    )
+    mode.add_argument(
+        "--import-skill",
+        metavar="PATH",
+        default="",
+        help="Import a SKILL.md written for another agent (Claude Code and "
+             "the tools that copied its shape) into FI's envelope. Point at "
+             "the skill directory or the SKILL.md itself. The prose and front "
+             "matter carry over; the executable check does not, so an imported "
+             "skill lands untested and needs one before it can be used. "
+             "Optional --name to rename it here.",
+    )
+    mode.add_argument(
+        "--list-foreign-skills",
+        action="store_true",
+        help="List skills belonging to other agents that could be imported. "
+             "Read-only: they are never added to FI's own discovery.",
+    )
+    p.add_argument(
+        "--name",
+        dest="skill_name",
+        metavar="NAME",
+        default="",
+        help="Name to give an imported skill. Defaults to its front-matter "
+             "name, else its directory name.",
+    )
+    p.add_argument(
+        "--kind",
+        dest="skill_kind",
+        choices=["library", "tool"],
+        default="library",
+        help="What --teach-skill is wrapping. `library` introspects an "
+             "importable Python package; `tool` scaffolds a check for an "
+             "external binary or service, where the self-test proves the tool "
+             "is present and answers rather than that a number is right.",
+    )
+    mode.add_argument(
+        "--teach-skill",
+        metavar="NAME",
+        default="",
+        help="Scaffold a new skill from an installed Python package. Reads the "
+             "package's real signatures by introspection (never guessed) and "
+             "leaves marked TODOs for the judgement only you can supply: when "
+             "the skill applies, when it does not, and what its outputs may "
+             "legally be. Pair with --from.",
+    )
+    p.add_argument(
+        "--from",
+        dest="teach_from",
+        metavar="MODULE",
+        default="",
+        help="Importable module the skill wraps, e.g. `ambit`. Required with "
+             "--teach-skill.",
+    )
+    mode.add_argument(
+        "--approve-skill",
+        metavar="NAME",
+        default="",
+        help="Approve a skill for use, after reviewing it. Approval binds to "
+             "the skill's current content, so a later edit lapses it and "
+             "requires approving again. Pair with --approve-as.",
+    )
+    mode.add_argument(
+        "--revoke-skill",
+        metavar="NAME",
+        default="",
+        help="Withdraw approval for a skill, returning it to proposed.",
+    )
+    mode.add_argument(
+        "--scan-skill",
+        metavar="NAME",
+        default="",
+        help="Statically review a skill's contents before approving it: "
+             "instruction-injection patterns and hidden characters in its "
+             "prose, network access, exec and environment reads in its code. "
+             "Nothing is imported or run. Findings never block a skill — they "
+             "are heuristics, shown so a person reviews the right lines.",
+    )
+    # Not modes: these qualify --skills / --scan-skill.
+    p.add_argument(
+        "--json",
+        dest="json_out",
+        action="store_true",
+        help="Emit machine-readable JSON instead of a table. Exactly one "
+             "JSON document goes to stdout and nothing else, so the web API "
+             "and the VSCode chat panel can parse it — they render this same "
+             "data rather than reimplementing the gate.",
+    )
+    p.add_argument(
+        "--no-run-selftests",
+        action="store_true",
+        help="List skills without executing their self-tests. Faster, and "
+             "honestly weaker: statuses become 'as last known' rather than "
+             "verified, which the output says. A self-test may take up to "
+             "120s, so a large library is minutes of work.",
+    )
+    # Not a mode: it qualifies --approve-skill rather than standing alone.
+    p.add_argument(
+        "--despite-findings",
+        action="store_true",
+        help="Approve a skill even though the static scan reported a "
+             "high-severity finding. Required in that case, because the "
+             "findings are heuristics a person must weigh rather than a "
+             "verdict the tool can reach — approving past a flagged network "
+             "call or exec is often correct, but it should be a decision. "
+             "The ledger records that it was used.",
+    )
+    # Not a mode: it qualifies --import-skill rather than standing alone.
+    p.add_argument(
+        "--domains",
+        metavar="A,B",
+        default="",
+        help="Comma-separated domain tags for an imported skill, e.g. "
+             "`genomics,biomedical`. Tagged skills join the catalogue only "
+             "when a quest's topic looks related; an UNTAGGED skill is "
+             "treated as general and is always a candidate. Tags route the "
+             "catalogue and grant nothing.",
+    )
+    # Not a mode: it qualifies --approve-skill rather than standing alone.
+    p.add_argument(
+        "--approve-as",
+        metavar="WHO",
+        default="",
+        help="Who is approving (recorded in the ledger). Required with "
+             "--approve-skill: the gate exists so a person decides, so there "
+             "is no anonymous approver.",
+    )
+    mode.add_argument(
         "--list-drafts",
         action="store_true",
         help="List proposal drafts (YAML companions) that ``--proposal`` "
@@ -433,6 +575,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "\"Find common failure modes in these logs\"). The "
              "engine's analyze + write nodes read this verbatim as "
              "the quest topic.",
+    )
+    p.add_argument(
+        "--skills-provider",
+        type=str,
+        default="claude_cli",
+        help="Provider for --why-skills. Same convention as the other "
+             "standalone commands: a headless CLI provider by default, "
+             "vscode_extension when launched from chat.",
+    )
+    p.add_argument(
+        "--skills-model",
+        type=str,
+        default="",
+        help="Model override for --why-skills.",
     )
     p.add_argument(
         "--analyze-provider",
@@ -1692,6 +1848,38 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.list_drafts:
             return _list_drafts(args.output_root)
+
+        if args.skills:
+            return _list_skills(args.json_out, not args.no_run_selftests)
+
+        if args.teach_skill:
+            return _teach_skill(
+                args.teach_skill, args.teach_from, args.skill_kind,
+            )
+
+        if args.why_skills:
+            return await _why_skills(
+                args.why_skills, args.skills_provider, args.skills_model,
+            )
+
+        if args.import_skill:
+            return _import_skill(
+                args.import_skill, args.skill_name, args.domains,
+            )
+
+        if args.list_foreign_skills:
+            return _list_foreign_skills()
+
+        if args.approve_skill:
+            return _approve_skill(
+                args.approve_skill, args.approve_as, args.despite_findings,
+            )
+
+        if args.revoke_skill:
+            return _revoke_skill(args.revoke_skill)
+
+        if args.scan_skill:
+            return _scan_skill(args.scan_skill, args.json_out)
 
         if args.new:
             return await _run_new(
@@ -3199,6 +3387,409 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
         return 1
     print(f"[FI ingest] ingested {len(loaded)} file(s) into Axon: {loaded}")
     return 0
+
+
+async def _why_skills(topic: str, provider_name: str, model: str) -> int:
+    """Preview the selection for a topic without running a quest.
+
+    Uses the same catalogue and the same prompt the pipeline uses, so what it
+    shows is what would happen — a preview built from a different code path
+    would be a guess dressed up as an answer.
+    """
+    import json as _json
+
+    from core.engine import _load_prompts
+    from core.provider import LLMClient, ProxySupervisor, resolve_endpoint_async
+    from core.skills import loadable_skills, discover
+    from core.skills.selection import (
+        build_catalogue, near_misses, parse_selection, render_selection_report,
+    )
+
+    from core.config import ProviderConfig
+
+    provider = ProviderConfig(name=provider_name, model=model or None)
+    names = [s.name for s in discover()]
+    usable, rejected = loadable_skills(names)
+    catalogue = build_catalogue(usable)
+
+    if not catalogue:
+        print("No candidate skills. Nothing would be selected.")
+        for st in rejected:
+            print(f"  {st.skill.name} ({st.status.value}): {st.reason}")
+        return 0
+
+    print(f"Topic: {topic}\n")
+    print(f"Catalogue ({len(catalogue.entries)} candidates):")
+    print(catalogue.render())
+    print()
+
+    prompt = _load_prompts()["select_skills"].substitute(
+        topic=topic,
+        clarify_block="(not run — this is a preview)",
+        chosen_idea="{}",
+        catalogue_block=catalogue.render(),
+    )
+    sup = ProxySupervisor()
+    try:
+        endpoint = await resolve_endpoint_async(provider, sup)
+        client = LLMClient(endpoint)
+        # Temperature 0, matching the pipeline: a preview that used a
+        # different temperature would not be previewing the same decision.
+        text = await client.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.0, node="select_skills",
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"Selection call failed: {e}")
+        return 1
+    finally:
+        await sup.shutdown()
+
+    sel = parse_selection(text, catalogue)
+    print(render_selection_report(sel=sel, catalogue=catalogue,
+                                  near=near_misses(rejected, sel.chosen, catalogue)))
+    return 0
+
+
+def _import_skill(source: str, name: str, domains: str = "") -> int:
+    """Adapt another agent's skill into FI's envelope."""
+    from pathlib import Path as _P
+
+    from core.skills import importer
+    from core.skills.registry import skills_root
+
+    try:
+        got = importer.import_skill(
+            _P(source), skills_root(), name=name,
+            domains=[d for d in (domains or "").split(",") if d.strip()],
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(str(e))
+        return 1
+    except FileExistsError as e:
+        print(str(e))
+        return 1
+
+    print(f"Imported {got.name} -> {got.path}")
+    print(f"  from      {got.source}")
+    if got.description:
+        print(f"  described {got.description}")
+    print(f"  carried   {', '.join(got.carried)}")
+    print()
+
+    # Shown here as well as at approval, because this is the cheapest moment
+    # to walk away: nobody has yet written a selftest for it.
+    from core.skills import Skill as _Skill
+    from core.skills import scan as _scan
+
+    findings = _scan.scan(_Skill(name=got.name, path=got.path))
+    worst = _scan.worst(findings)
+    if worst == _scan.HIGH:
+        print(_scan.render([f for f in findings if f.severity == _scan.HIGH]))
+        print()
+        print(f"Full report: python launch.py --scan-skill {got.name}")
+        print()
+    else:
+        print(f"Static review: {_scan.summarise(findings)}.")
+        print(f"See all of it with: python launch.py --scan-skill {got.name}")
+        print()
+    if not got.promotable:
+        # Generated rather than left empty, so an import is usable without 39
+        # tests being written by hand first. The trade is explicit: this
+        # proves the bundled tooling runs, not that it behaves as described,
+        # and the generated file says so in its own text.
+        from core.skills.scaffold import generate_selftest
+
+        try:
+            generate_selftest(got.path, got.name)
+            print("Generated a self-test: it probes that every bundled script")
+            print("is present and answers `--help`. That catches a broken or")
+            print("moved install — it does NOT check the tool behaves the way")
+            print("SKILL.md describes, which is what a self-test is really")
+            print("for. The file says so, and --skills flags it, until you")
+            print("replace it with real checks.")
+        except OSError as e:
+            print(f"Could not generate a self-test ({e}); the skill stays "
+                  "UNTESTED and cannot be used until one exists.")
+        print()
+    print(f"Then: python launch.py --skills")
+    print(f"      python launch.py --approve-skill {got.name} --approve-as <you>")
+    return 0
+
+
+def _list_foreign_skills() -> int:
+    """Show other agents' skills that could be adapted."""
+    from core.skills import importer
+
+    found = importer.discover_foreign()
+    if not found:
+        print("No skills found belonging to other agents.")
+        print("Looked in ~/.claude/skills and <project>/.claude/skills.")
+        return 0
+
+    print(f"{'NAME':<26}{'DESCRIPTION':<46}SOURCE")
+    print("-" * 100)
+    for name, path, desc in found:
+        print(f"{name:<26}{(desc or '—')[:44]:<46}{path}")
+    print()
+    print("These are NOT part of FI's discovery — a checklist telling an agent")
+    print("to run a slash command has no place in an experiment-design prompt.")
+    print("Adapt one with: python launch.py --import-skill <source>")
+    return 0
+
+
+def _teach_skill(name: str, module_name: str, kind: str = "library") -> int:
+    """Scaffold a skill from an installed package, then tell the user what
+    is still theirs to write."""
+    from core.skills.registry import skills_root
+    from core.skills import scaffold
+
+    if not module_name.strip():
+        what = "module" if kind == "library" else "command"
+        print(f"--teach-skill requires --from <{what}>, e.g.:\n"
+              "  python launch.py --teach-skill ambit --from ambit\n"
+              "  python launch.py --teach-skill tectonic --from tectonic --kind tool")
+        return 2
+
+    if kind == "tool":
+        drafted = scaffold.draft_tool(name, module_name.strip(), skills_root())
+        print(f"Drafted {drafted.path}")
+        print(f"  selftest.py      probes `{module_name}` is present and answers")
+        print(f"  SKILL.md         {drafted.todos} TODOs — yours to write")
+        print()
+        print("A tool skill's self-test cannot check a number; it checks the")
+        print("tool is there and behaves as the instructions assume — which is")
+        print("what stops a quest wasting a run on a binary that moved or")
+        print("changed under you.")
+        print()
+        print(f"Then: python launch.py --skills")
+        print(f"      python launch.py --approve-skill {name} --approve-as <you>")
+        return 0
+
+    try:
+        drafted = scaffold.draft(name, module_name.strip(), skills_root())
+    except ModuleNotFoundError:
+        print(f"Cannot import {module_name!r}. Install it in this environment "
+              "first — the scaffold reads real signatures rather than guessing.")
+        return 1
+    except FileExistsError as e:
+        print(str(e))
+        return 1
+
+    print(f"Drafted {drafted.path}")
+    print(f"  api_surface.md   {drafted.entries} entry points from "
+          f"{len(drafted.modules)} module(s), read by introspection")
+    print(f"  SKILL.md         {drafted.todos} TODOs — yours to write")
+    print(f"  selftest.py      imports {module_name}; add real assertions")
+    print(f"  provenance.json  result_assertions is empty")
+    print()
+    print("The scaffold cannot write the parts that matter: when the skill")
+    print("applies, when it does NOT, and what its outputs may legally be.")
+    print("A skill used outside its domain produces confident wrong physics,")
+    print("so the 'When NOT to use' section is the load-bearing one.")
+    print()
+    print(f"Then: python launch.py --skills")
+    print(f"      python launch.py --approve-skill {name} --approve-as <you>")
+    return 0
+
+
+def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
+    """Print every discoverable skill and why it is or is not usable.
+
+    Running each skill's selftest is the point of the listing — a status
+    that did not actually execute the check would be a guess. ``run_tests``
+    exists because that is up to 120s *per skill*: fine for one, and minutes
+    of silence in a chat panel for a large library, so the UI surfaces can
+    offer a fast listing that says plainly it did not run the checks.
+
+    ``as_json`` emits exactly one JSON document on stdout and nothing else.
+    Both other interfaces parse it, so a stray human ``print`` here becomes a
+    parse error there.
+    """
+    import json as _json
+
+    from core.skills import discover, evaluate
+
+    skills = discover()
+    if as_json:
+        print(_json.dumps({
+            "skills": [
+                evaluate(s, run_test=run_tests).to_dict() for s in skills
+            ],
+            "selftests_run": run_tests,
+        }, indent=1))
+        return 0
+    if not skills:
+        print("No skills found. Add one under skills/<name>/ or install a "
+              "package advertising the 'fi.skills' entry point.")
+        return 0
+
+    # Width from the actual names: published skills carry long ones
+    # ("uncertainty-and-units" is 21), and a fixed 20 ran the name into the
+    # status column.
+    w = max(20, max((len(s.name) for s in skills), default=20) + 2)
+    print(f"{'SKILL':<{w}}{'STATUS':<13}{'MATURITY':<10}WHY")
+    print("-" * (w + 72))
+    for skill in skills:
+        st = evaluate(skill, run_test=run_tests)
+        mark = "*" if st.loadable else " "
+        print(f"{mark}{skill.name:<{w - 1}}{st.status.value:<13}"
+              f"{skill.maturity.value:<10}{st.reason}")
+        if st.status.value == "quarantined" and st.selftest_output:
+            for line in st.selftest_output.splitlines()[-4:]:
+                print(f"      | {line}")
+        # Worst-severity count only. The full report belongs at the moment of
+        # approval, where someone is actually deciding; here it would push the
+        # table apart for skills nobody is about to approve.
+        highs = [f for f in st.findings if f.startswith("[high")]
+        if highs:
+            print(f"      ! {len(highs)} high-severity scan finding(s) — "
+                  f"see --scan-skill {skill.name}")
+        # A generated self-test proves the tooling runs, not that it behaves.
+        # Trusted means something weaker for such a skill, and the listing has
+        # to say so or the two look identical.
+        from core.skills.scaffold import selftest_is_generated
+        if selftest_is_generated(skill.path):
+            print("      ~ self-test is auto-generated "
+                  "(proves the tooling runs, not that it behaves)")
+    print()
+    print("* = usable in a quest. Enable with `engine.skills: [name]` in your "
+          "YAML.\nApprove with: python launch.py --approve-skill <name> "
+          "--approve-as <you>\nReview one first: python launch.py "
+          "--scan-skill <name>")
+    return 0
+
+
+def _scan_skill(name: str, as_json: bool = False) -> int:
+    """Show the static review of a skill's contents.
+
+    Separate from ``--skills`` because this is the report a person reads
+    while deciding, and it is long by design: the value is in the specific
+    lines, not in a count.
+    """
+    import json as _json
+
+    from core.skills import discover, scan
+
+    skill = next((s for s in discover() if s.name == name), None)
+    if skill is None:
+        if as_json:
+            print(_json.dumps({"error": f"no skill named {name}"}))
+        else:
+            print(f"No skill named {name!r}. Run --skills to see what is "
+                  "available.")
+        return 1
+
+    if as_json:
+        found = scan.scan(skill)
+        print(_json.dumps({
+            "name": skill.name,
+            "path": str(skill.path),
+            "files_reviewed": len(skill.hashable_files()),
+            "rule_count": scan.RULE_COUNT,
+            "worst": scan.worst(found),
+            "summary": scan.summarise(found),
+            "findings": [
+                {"rule": f.rule, "severity": f.severity, "path": f.path,
+                 "line": f.line, "detail": f.detail}
+                for f in found
+            ],
+        }, indent=1))
+        return 0
+
+    print(f"Static review of {skill.name} ({skill.path})")
+    print(f"Files reviewed: {len(skill.hashable_files())}")
+    print("Nothing here was imported or executed — the files were parsed.")
+    print()
+    print(scan.render(scan.scan(skill)))
+    return 0
+
+
+def _approve_skill(name: str, approved_by: str, despite: bool = False) -> int:
+    """Record approval of a skill's current content.
+
+    Refuses when the selftest does not pass: approving something that
+    provably does not work is the one case where a person's sign-off
+    should not be the last word.
+    """
+    from core.skills import approval, discover, evaluate
+    from core.skills.base import Status
+
+    who = (approved_by or "").strip()
+    if not who:
+        print("--approve-skill requires --approve-as <who>: the gate exists "
+              "so a person decides, so approvals are attributed.")
+        return 2
+
+    skill = next((s for s in discover() if s.name == name), None)
+    if skill is None:
+        print(f"No skill named {name!r}. Run --skills to see what is available.")
+        return 1
+
+    state = evaluate(skill)
+    if state.status is Status.QUARANTINED:
+        print(f"{name} fails its own selftest — not approving.")
+        if state.selftest_output:
+            print(state.selftest_output)
+        return 1
+    if state.status is Status.UNTESTED:
+        print(f"{name} carries no selftest.py, so it can never be promoted. "
+              "A skill that cannot demonstrate it still works is not usable.")
+        return 1
+
+    # Shown, and on high severity the approval stops here. The findings are
+    # still heuristics — a skill that legitimately drives a network tool flags
+    # NET001 — so this is not a verdict and never quarantines. What the flag
+    # buys is that "I read them" becomes an act rather than an assumption.
+    highs = [f for f in state.findings if f.startswith("[high")]
+    if highs:
+        print(f"{len(highs)} high-severity finding(s) in {name}:")
+        print()
+        for f in highs:
+            print(f)
+        print()
+        if not despite:
+            print("Not approved. These are heuristics, not verdicts — a real "
+                  "tool may legitimately need what they flag, and approving "
+                  "anyway is a normal outcome.")
+            print(f"Read the full report:  python launch.py --scan-skill {name}")
+            print(f"Then approve with:     python launch.py --approve-skill "
+                  f"{name} --approve-as {who} --despite-findings")
+            return 1
+        print("Approving despite these findings, as asked. Recorded in the "
+              "ledger so the decision is attributable later.")
+        print()
+
+    from core.skills.scaffold import selftest_is_generated
+    generated = selftest_is_generated(skill.path)
+    if generated:
+        print(f"Note: {name}'s self-test is auto-generated. It proves the "
+              "bundled tooling is present and runnable — not that the skill "
+              "behaves the way its instructions describe.")
+        print("Approving is still reasonable; just know what the green tick "
+              "covers. Replacing the test with real checks clears this note.")
+        print()
+
+    h = skill.content_hash()
+    note = "approved via launch.py"
+    if highs:
+        note += f" DESPITE {len(highs)} high-severity scan finding(s)"
+    if generated:
+        note += " [generated selftest]"
+    approval.approve(name, h, approved_by=who, note=note)
+    print(f"Approved {name} (content {h}) as {who}.")
+    print("Editing the skill lapses this approval and requires approving again.")
+    return 0
+
+
+def _revoke_skill(name: str) -> int:
+    from core.skills import approval
+
+    if approval.revoke(name):
+        print(f"Revoked approval for {name}; it returns to 'proposed'.")
+        return 0
+    print(f"No approval on record for {name!r}.")
+    return 1
 
 
 def _list_drafts(output_root: Path) -> int:
