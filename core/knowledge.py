@@ -59,12 +59,14 @@ The router parallelizes calls via `asyncio.to_thread` + `asyncio.gather`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as _htmlmod
 import json
 import logging
 import os
 import re
 import threading
+from itertools import zip_longest
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -2150,6 +2152,46 @@ def _doc_dedup_key(d: RetrievedDoc) -> str:
     return f"title:{normalized}" if normalized else f"id:{id(d)}"
 
 
+
+def _rank_by_relevance(docs: list[RetrievedDoc], query: str) -> list[RetrievedDoc]:
+    """Order pooled candidates by how well they answer the query.
+
+    Reuses the hybrid scorer that already ranks passages — all-MiniLM cosine
+    blended with lexical overlap, degrading to lexical alone when the model
+    is absent or ``FI_OFFLINE`` is set. No new dependency, and the same
+    notion of relevance the rest of the pipeline uses.
+
+    Scoring is over title plus the opening of the body: a title alone is too
+    short to separate near-duplicates, and a full paper's tail drags the
+    similarity down without adding signal about what it is.
+
+    On a tie — or when scoring cannot run at all — the original order stands,
+    which puts academic records ahead of web ones. That matters for the case
+    where both layers return the SAME paper: whichever arrives first wins the
+    dedup key, and the record with a DOI and a venue is the one worth
+    keeping over a paywall landing page.
+    """
+    if len(docs) < 2:
+        return list(docs)
+    texts = [
+        (str(d.metadata.get("title") or "") + "\n" + (d.content or "")[:1500])
+        for d in docs
+    ]
+    try:
+        from core.passages import _hybrid_scores
+
+        scores = _hybrid_scores(texts, query)
+    except Exception as e:  # noqa: BLE001 - ranking is an optimisation
+        _log.info("relevance ranking unavailable (%s); keeping source order", e)
+        return list(docs)
+    if not scores or len(scores) != len(docs):
+        return list(docs)
+    # Stable sort, so equal scores preserve the academic-before-web order.
+    return [d for _, d in sorted(
+        zip(scores, docs), key=lambda pair: pair[0], reverse=True,
+    )]
+
+
 async def _route_external(
     query: str, top_k: int, sources: list[str], *, timeout_s: float = 10.0,
 ) -> list[RetrievedDoc]:
@@ -2231,16 +2273,54 @@ def _slugify_topic(topic: str) -> str:
 
 
 def _paper_short_id(meta: dict[str, Any]) -> str:
-    """Strongest available cross-quest paper identifier."""
+    """Strongest available cross-quest paper identifier.
+
+    A normalized title is **not** a safe key on its own. "Optical proximity
+    effect and correction" is a phrase several papers legitimately share, and
+    normalization discards what little separation remained — case, punctuation
+    and subtitle separators all collapse. Six substantively different
+    documents were found sharing one such id in a live corpus; because the id
+    is the vector store's primary key, five of them were simply not indexed.
+
+    So when no external identifier exists, the title is qualified by a short
+    hash over whatever actually distinguishes the document — its abstract or
+    body first, then its URL, then year and authors. The hash is over content
+    rather than a counter so it stays stable across re-ingest, which is the
+    property that makes re-ingesting an update instead of a duplicate.
+    """
     if meta.get("doi"):
         return f"doi:{str(meta['doi']).lower()}"
     if meta.get("arxiv_id"):
         return f"arxiv:{meta['arxiv_id']}"
     if meta.get("pmid"):
         return f"pmid:{meta['pmid']}"
+
     title = (meta.get("title") or "").lower().strip()
     norm = re.sub(r"\s+", "-", re.sub(r"[^\w\s]", "", title))[:60]
-    return f"title:{norm}" if norm else "unknown"
+
+    # Distinguishing material, strongest first. Abstract and body identify a
+    # document; url identifies where it came from; year+authors is the weakest
+    # because a preprint and its published version still share both.
+    material = ""
+    for key in ("abstract", "content", "text", "url"):
+        v = meta.get(key)
+        if v and str(v).strip():
+            material = str(v).strip()
+            break
+    if not material:
+        bits = [str(meta.get(k) or "").strip() for k in ("year", "authors", "venue")]
+        material = "|".join(b for b in bits if b)
+
+    if not norm and not material:
+        return "unknown"
+    if not material:
+        # Nothing but a title exists, so two such documents genuinely cannot
+        # be told apart from metadata — colliding is then the honest outcome
+        # (they will dedupe) rather than a silent loss of five in six.
+        return f"title:{norm}"
+
+    digest = hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:10]
+    return f"title:{norm}:{digest}" if norm else f"doc:{digest}"
 
 
 def _paper_header_line(meta: dict[str, Any]) -> str:
@@ -2617,9 +2697,30 @@ class Knowledge:
                 api_key=self.cfg.brave_api_key,
                 timeout_s=self.cfg.full_text_fetch_timeout_s,
             ))
-        run_academic = (
-            self.cfg.enabled and (not axon_docs) and bool(academic_sources)
-        )
+        # Academic search runs whenever it is configured — it is NOT gated on
+        # Axon coming back empty.
+        #
+        # It used to be, to preserve a cost profile: "the corpus already has
+        # this, so skip the network". The failure that produced is worth
+        # stating, because it is quiet and it compounds. Axon accumulates from
+        # previous quests, so after the first one it is never empty again, and
+        # the academic adapters stop running permanently. What is left is Axon
+        # plus web search — and web search returns *pages*, not papers.
+        #
+        # Measured on a real EUV lithography quest: all seven retrieved
+        # sources came from web search, every reference was `@misc` with
+        # `howpublished = {Web page, ...}`, and the one that mattered was
+        # ResearchGate's "Request PDF" paywall landing page. The same paper is
+        # returned by OpenAlex complete with venue (Proceedings of SPIE), DOI
+        # (10.1117/12.536411), authors and year. Crossref returned six of six
+        # SPIE papers for the same query. The bibliography was not thin
+        # because the literature is hard to find; it was thin because nothing
+        # looked.
+        #
+        # It also self-reinforces: the corpus fills with the web pages the
+        # previous quest settled for, which is then the corpus that suppresses
+        # the next quest's academic search.
+        run_academic = self.cfg.enabled and bool(academic_sources)
         if run_academic:
             tasks.append(_route_external(query, external_k, academic_sources))
 
@@ -2656,21 +2757,99 @@ class Knowledge:
                 max_kb=self.cfg.full_text_max_kb,
             )
 
-        # Merge pinned → Axon → web → academic, de-duplicated. Web ahead of
-        # academic so that on a non-academic topic (Axon empty) the real
-        # web hits lead and any irrelevant scholarly nearest-neighbours
-        # trail (the relevance guard prunes those downstream).
+        # Merge pinned → Axon → academic → web, de-duplicated.
+        #
+        # Academic ahead of web on purpose. Both layers routinely return the
+        # *same* paper, and whichever arrives first wins the dedup key — so
+        # the order decides whether a citation ends up as a journal article
+        # with a DOI and a venue, or as `@misc{..., howpublished = {Web page}}`
+        # pointing at a paywall landing page. Web search reaches the same
+        # SPIE paper through ResearchGate's "Request PDF"; OpenAlex reaches it
+        # with its DOI, venue and authors intact. The second is a citation.
+        #
+        # Web hits still lead among themselves and still carry the page text
+        # the writer quotes from, so nothing is lost for a topic with no
+        # scholarly literature — the relevance guard prunes irrelevant
+        # scholarly nearest-neighbours downstream either way.
         seen: set[str] = set()
         merged: list[RetrievedDoc] = []
         cap = max(k, external_k)
-        for doc in (*pinned, *axon_docs, *web_docs, *academic_docs):
+
+        # Only PINNED docs are privileged — those are papers the user handed
+        # us directly, and there are few of them.
+        #
+        # Corpus hits are NOT privileged, and that is a correction. They used
+        # to be added unconditionally ahead of everything else, on the
+        # reasoning that they are "already-vetted material". They are not
+        # vetted; they are whatever a previous quest wrote back. Measured on
+        # this corpus: a query where the academic layer returned twelve real
+        # papers — including the SPIE reference with DOI 10.1117/12.536411 —
+        # produced a final set of eight `web-reingest` docs and four web
+        # pages, and not one of the twelve. The corpus had taken eight of the
+        # twelve slots before ranking was consulted at all.
+        #
+        # That is the compounding loop closing: earlier quests could only
+        # reach web pages, those pages were written back, and the written-back
+        # pages now displace the papers. Ranking corpus hits alongside
+        # everything else breaks it — a corpus entry still wins when it is
+        # genuinely the best answer, which is the only reason to prefer it.
+        for doc in pinned:
             key = _doc_dedup_key(doc)
             if key in seen:
                 continue
             seen.add(key)
             merged.append(doc)
-            if len(merged) >= cap:
-                break
+
+        # Then academic and web together, ranked by relevance to the query.
+        #
+        # Not concatenated and not interleaved. Concatenating starves
+        # whichever list comes second — measured: academic first with a cap
+        # of 12 returned twelve academic results and the web layer never
+        # reached the list at all, taking full-text coverage from 1/12 to
+        # 0/11. Interleaving fixes the starvation but decides by position
+        # rather than by quality, so an off-topic academic hit displaces an
+        # on-topic page purely for being in the other list.
+        #
+        # Ranking the pooled candidates lets the best sources win regardless
+        # of which layer produced them, and keeps both layers represented
+        # whenever both are actually relevant — which is the outcome the two
+        # layers exist for: academic supplies a citation's DOI, venue and
+        # authors, web supplies prose the writer can quote.
+        # Academic gets a reserved share of the slots; the rest is ranked.
+        #
+        # Ranking everything in one pool sounds right and is not, because the
+        # two layers are not comparable inputs to a similarity score. A web
+        # result's snippet is the search engine echoing the query back — it
+        # is selected to look like the query. An abstract is not. Measured on
+        # this corpus: web scored 0.836 mean against academic's 0.517, and
+        # truncating both to a common length did not close it at any cap
+        # tried (0, 200, 300, 500, 1500 chars) — web led at every one. The
+        # metric is rigged, so competing on it is not "the best sources win",
+        # it is "snippets win".
+        #
+        # A floor is the honest mechanism: papers are wanted for their
+        # citations, pages for their quotable text, and the two are needed
+        # for different reasons rather than being better and worse versions
+        # of one thing. Within each share, relevance still decides.
+        remaining = cap - len(merged)
+        academic_floor = min(len(academic_docs), max(1, remaining // 2))
+
+        def _take(docs: list[RetrievedDoc], limit: int) -> None:
+            for doc in _rank_by_relevance(docs, query):
+                if limit <= 0 or len(merged) >= cap:
+                    return
+                key = _doc_dedup_key(doc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(doc)
+                limit -= 1
+
+        _take(academic_docs, academic_floor)
+        # Then everything else — including any academic docs beyond the floor
+        # — ranked together for whatever slots are left.
+        _take([d for d in (*academic_docs, *web_docs, *axon_docs)
+               if _doc_dedup_key(d) not in seen], cap - len(merged))
         return merged
 
     def search(self, query: str, *, top_k: int | None = None) -> list[RetrievedDoc]:
@@ -2820,8 +2999,17 @@ class Knowledge:
         secondary_parts: list[str] = []
         for key in secondary_keys:
             v = md.get(key)
-            if v:
-                secondary_parts.append(str(v))
+            if not v:
+                continue
+            s = str(v)
+            # Skip a discriminator that merely restates one already present.
+            # ``tag`` is minted as ``fi-paper:<paper_id>``, so including both
+            # wrote the title into the id twice — 164-235 character ids that
+            # carried no more information than the first copy.
+            if any(s == p or s.endswith(f":{p}") or p.endswith(f":{s}")
+                   for p in secondary_parts):
+                continue
+            secondary_parts.append(s)
         if primary and secondary_parts:
             return f"{kind}:{primary}:{':'.join(secondary_parts)}"
         if primary:
