@@ -804,14 +804,25 @@ export class Bridge {
                 vendor: "copilot", family,
             });
         }
+        // Then any vendor. The hint came from the FI model picker, which
+        // now lists every model VSCode exposes — an Ollama server, a BYOK
+        // `llama-server`, Copilot. A hint the user picked from that list
+        // has to resolve, or the picker is offering models that cannot be
+        // used.
+        if (!matched.length) {
+            matched = await vscode.lm.selectChatModels({ id: hint });
+        }
+        if (!matched.length) {
+            matched = await vscode.lm.selectChatModels({ family });
+        }
         if (matched.length > 0) {
             return matched[0];
         }
         // Hint didn't match anything in the user's subscription.
         // Fall back to their chat-picker selection rather than
-        // silently grabbing whatever Copilot exposes.
+        // silently grabbing whatever any vendor exposes.
         this.opts.progress.markdown(
-            `\n⚠️ no Copilot model matches hint \`${hint}\` — using your Chat-picker selection instead\n\n`,
+            `\n⚠️ no model matches hint \`${hint}\` — using your Chat-picker selection instead\n\n`,
         );
         if (this.opts.defaultModel) {
             return this.opts.defaultModel;

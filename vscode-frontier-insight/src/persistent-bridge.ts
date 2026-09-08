@@ -242,22 +242,34 @@ export class PersistentBridge {
     }
 
     /**
-     * Answer a ``{type:"list_models", id}`` probe with the live
-     * Copilot model catalog. Used by Python's
-     * ``core.provider_models_discover.discover_vscode_extension`` so
-     * the picker shows what the user's Copilot session actually
-     * federates today (gpt-5, claude-opus-4-7, etc. plus whatever
-     * else Copilot has added since), not a static trio.
+     * Answer a ``{type:"list_models", id}`` probe with every chat model
+     * VSCode exposes to this extension. Used by Python's
+     * ``core.provider_models_discover.discover_vscode_extension`` so the
+     * picker shows what the user's editor actually has today, not a
+     * static trio.
+     *
+     * This deliberately passes no selector. `selectChatModels()` returns
+     * all models when called without one, and models reach VSCode from
+     * any extension that registers a
+     * `LanguageModelChatProvider` under its own vendor string — an
+     * Ollama server behind `vendor: "ollama-models"`, a `llama-server`
+     * behind the built-in OpenAI-compatible BYOK provider, and Copilot.
+     * Pinning `vendor: "copilot"` here made every one of those invisible
+     * to FI no matter how the user had configured it, which is not a
+     * cost-discipline measure — it is a blind spot. Choosing what to
+     * spend is the picker's job, and it can only offer what this returns.
      *
      * Each model contributes ``{value, label, vendor, family, version}``;
-     * the Python side renders ``value`` as the picker option and
-     * ``family`` / ``version`` go into the tooltip.
+     * the Python side renders ``value`` as the picker option and puts
+     * ``vendor`` / ``family`` / ``version`` in the tooltip, so a
+     * non-Copilot model is labelled as one rather than looking like a
+     * Copilot entry.
      */
     private async handleListModels(
         socket: net.Socket, req: { id: number },
     ): Promise<void> {
         try {
-            const models = await vscode.lm.selectChatModels({ vendor: "copilot" });
+            const models = await vscode.lm.selectChatModels();
             const payload = models.map((m) => ({
                 value: m.id,
                 label: m.id,
@@ -293,28 +305,43 @@ export class PersistentBridge {
             // working when the YAML pre-dates the picker.
             let models: vscode.LanguageModelChat[] = [];
             if (req.model_hint) {
-                // Constrain to vendor=copilot on both legs — this bridge
-                // exists to route FI's Copilot session, and the diagnostic
-                // dump below also pins vendor=copilot, so matching against
-                // any other vendor would produce inconsistent behavior
-                // (and could silently pull a non-Copilot model into a
-                // quest the user expects to bill against Copilot).
+                // Copilot first, by id then family, so a hint that names a
+                // Copilot model resolves exactly as it always has.
                 models = await vscode.lm.selectChatModels({ vendor: "copilot", id: req.model_hint });
                 if (!models.length) {
                     models = await vscode.lm.selectChatModels({ vendor: "copilot", family: req.model_hint });
                 }
+                // Only then widen to other vendors. A hint is a name the
+                // user chose from what the picker listed, so honouring it
+                // cannot route a quest somewhere they did not ask for —
+                // whereas refusing it means a model FI just offered them
+                // is one they cannot actually select.
+                if (!models.length) {
+                    models = await vscode.lm.selectChatModels({ id: req.model_hint });
+                }
+                if (!models.length) {
+                    models = await vscode.lm.selectChatModels({ family: req.model_hint });
+                }
             } else {
+                // No hint: Copilot, as before. Nothing has been chosen, so
+                // this is the one path where widening really could spend
+                // against a provider the user did not intend. It widens
+                // only when there is no Copilot at all, where the
+                // alternative is not a cheaper call but a failed quest.
                 models = await vscode.lm.selectChatModels({ vendor: "copilot" });
+                if (!models.length) {
+                    models = await vscode.lm.selectChatModels();
+                }
             }
             if (!models.length) {
                 // Self-diagnosing error: dump every available id|family
                 // pair so the next user who hits this knows exactly
                 // what they could have picked, without having to
                 // re-instrument the extension.
-                const all = await vscode.lm.selectChatModels({ vendor: "copilot" });
+                const all = await vscode.lm.selectChatModels();
                 const summary = all.length
-                    ? all.map((m) => `${m.id}|family=${m.family}`).join(", ")
-                    : "(no Copilot models exposed to this extension)";
+                    ? all.map((m) => `${m.vendor}/${m.id}|family=${m.family}`).join(", ")
+                    : "(no chat models exposed to this extension)";
                 this.send(socket, {
                     type: "lm_error", id: req.id,
                     error: `no model matches hint=${JSON.stringify(req.model_hint)}; available=[${summary}]`,
