@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Skills — Frontier Insight</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="/static/theme.js"></script>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>tailwind.config = window._fiConfig;</script>
+<link rel="stylesheet" href="/static/style.css"/>
+<script defer src="/static/header.js"></script>
+</head>
+<body class="bg-background text-on-surface min-h-screen flex flex-col font-body-md overflow-x-hidden">
+
+<div id="fi-header-root"></div>
+
+<main class="flex-grow flex flex-col items-center w-full px-margin-mobile md:px-margin-desktop py-12 max-w-max-width mx-auto bg-cyber-gradient">
+
+  <section class="w-full max-w-5xl mb-8 pt-8">
+    <div class="flex items-center gap-3 text-secondary mb-4 font-label-sm text-label-sm uppercase tracking-widest">
+      <span class="material-symbols-outlined text-[16px]">neurology</span>
+      <span>Skills</span>
+    </div>
+    <h1 class="font-headline-xl text-headline-lg-mobile md:text-headline-xl text-on-surface mb-6 leading-tight">Skill library</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant max-w-3xl">
+      What FI has learned about driving one piece of software. Two gates stand
+      before any of it reaches a quest: the self-test the skill carries must
+      pass, and a person must have approved <em>that exact content</em>.
+    </p>
+  </section>
+
+  <section class="w-full max-w-5xl mb-6">
+    <div class="flex items-center gap-4 flex-wrap">
+      <button onclick="load(false)" class="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md">Refresh</button>
+      <button onclick="load(true)" class="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md">Run self-tests</button>
+      <span id="verified-note" class="text-body-sm text-on-surface-variant"></span>
+    </div>
+  </section>
+
+  <section id="list" class="w-full max-w-5xl space-y-4 mb-16"></section>
+</main>
+
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const STATUS_STYLE = {
+  trusted:     "bg-green-500/15 text-green-300",
+  proposed:    "bg-amber-500/15 text-amber-300",
+  quarantined: "bg-red-500/15 text-red-300",
+  untested:    "bg-slate-500/15 text-slate-300",
+};
+
+async function load(runSelftests) {
+  const el = document.getElementById("list");
+  el.innerHTML = '<p class="text-on-surface-variant">Loading…</p>';
+  document.getElementById("verified-note").textContent =
+    runSelftests ? "Running each self-test — this can take a while." : "";
+  let data;
+  try {
+    const r = await fetch("/api/skills?run_selftests=" + (runSelftests ? "true" : "false"));
+    if (!r.ok) throw new Error(await r.text());
+    data = await r.json();
+  } catch (e) {
+    el.innerHTML = '<p class="text-red-300">Could not read the skill library: ' + esc(e.message) + '</p>';
+    return;
+  }
+
+  // "Not verified" has to be visible. A listing that skipped the checks but
+  // looked like one that ran them would be worse than no listing.
+  document.getElementById("verified-note").textContent = data.selftests_run
+    ? "Self-tests were run — these statuses are verified."
+    : "Self-tests were not run; statuses are as last recorded.";
+
+  const rows = data.skills || [];
+  if (!rows.length) {
+    el.innerHTML = `<div class="p-6 rounded-xl bg-surface-container">
+      <p class="font-title-md text-on-surface mb-2">No skills installed</p>
+      <p class="text-on-surface-variant text-body-md">FI ships none — a skill is what it picks up working with you, on this machine.
+      Add one with <code>python launch.py --import-skill &lt;path&gt;</code> or
+      <code>--teach-skill &lt;name&gt; --from &lt;module&gt;</code>.</p></div>`;
+    return;
+  }
+  el.innerHTML = rows.map(card).join("");
+}
+
+function card(s) {
+  const highs = (s.findings || []).filter(f => f.startsWith("[high"));
+  const badge = STATUS_STYLE[s.status] || STATUS_STYLE.untested;
+  return `
+  <div class="p-5 rounded-xl bg-surface-container border border-outline-variant/40">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <div class="flex items-center gap-3 flex-wrap">
+          <span class="font-title-md text-on-surface">${esc(s.name)}</span>
+          <span class="px-2 py-0.5 rounded-full text-label-sm ${badge}">${esc(s.status)}</span>
+          <span class="text-label-sm text-on-surface-variant">${esc(s.kind)} · ${esc(s.maturity)}</span>
+          ${(s.domains || []).map(d => `<span class="px-2 py-0.5 rounded-full bg-surface-container-high text-label-sm text-on-surface-variant">${esc(d)}</span>`).join("")}
+          ${!(s.domains || []).length ? '<span class="px-2 py-0.5 rounded-full bg-surface-container-high text-label-sm text-on-surface-variant">general</span>' : ""}
+        </div>
+        <p class="text-body-sm text-on-surface-variant mt-2">${esc(s.reason)}</p>
+        ${s.selftest_generated ? `<p class="text-body-sm text-amber-300/90 mt-2">
+          Self-test is auto-generated — it proves the bundled tooling runs, not that it behaves as described.</p>` : ""}
+        ${highs.length ? `<p class="text-body-sm text-red-300 mt-2">${highs.length} high-severity scan finding(s).</p>` : ""}
+      </div>
+      <div class="flex gap-2 flex-wrap">
+        <button onclick="showScan('${esc(s.name)}')" class="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-label-md">Review</button>
+        ${s.status === "trusted"
+          ? `<button onclick="revoke('${esc(s.name)}')" class="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-label-md">Revoke</button>`
+          : `<button onclick="approve('${esc(s.name)}', false)" class="px-3 py-1.5 rounded-lg bg-primary/20 hover:bg-primary/30 text-label-md">Approve…</button>`}
+      </div>
+    </div>
+    <div id="scan-${esc(s.name)}" class="mt-4 hidden"></div>
+  </div>`;
+}
+
+async function showScan(name) {
+  const box = document.getElementById("scan-" + name);
+  if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  box.innerHTML = '<p class="text-on-surface-variant text-body-sm">Reviewing…</p>';
+  const r = await fetch(`/api/skills/${encodeURIComponent(name)}/scan`);
+  const d = await r.json();
+  if (!d.findings || !d.findings.length) {
+    box.innerHTML = `<div class="p-4 rounded-lg bg-surface-container-high text-body-sm text-on-surface-variant">
+      <strong>No findings</strong> from ${d.rule_count} rules across ${d.files_reviewed} file(s).
+      Nothing was imported or executed — the files were parsed.
+      That is not a clean bill of health: these rules are heuristics, and a payload none of them
+      describes would not appear here. Read the SKILL.md yourself before approving.</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="p-4 rounded-lg bg-surface-container-high space-y-3">
+    <p class="text-body-sm text-on-surface"><strong>${esc(d.summary)}</strong> · ${d.files_reviewed} file(s) parsed, never executed.</p>
+    ${d.findings.map(f => `
+      <div class="text-body-sm">
+        <span class="font-mono ${f.severity === "high" ? "text-red-300" : f.severity === "medium" ? "text-amber-300" : "text-sky-300"}">${esc(f.severity)}</span>
+        <span class="font-mono text-on-surface">${esc(f.rule)}</span>
+        <span class="text-on-surface-variant">${esc(f.path)}:${f.line}</span>
+        <div class="text-on-surface-variant pl-4">${esc(f.detail)}</div>
+      </div>`).join("")}
+    <p class="text-body-sm text-on-surface-variant italic">These are heuristics, not verdicts. A skill that legitimately drives a network tool will flag NET001; the point is that you saw it.</p>
+  </div>`;
+}
+
+async function approve(name, despite) {
+  // Asked every time, never remembered. A browser session is not a person,
+  // and the gate's rule is that a person decides and is named.
+  const who = prompt(
+    despite
+      ? `Approving "${name}" despite high-severity findings.\nEnter your name to record that you decided:`
+      : `Approve "${name}".\nEnter your name — approval is recorded against it and binds to this exact content:`);
+  if (!who || !who.trim()) return;
+
+  const r = await fetch(`/api/skills/${encodeURIComponent(name)}/approve`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({approved_by: who.trim(), despite_findings: !!despite}),
+  });
+  const d = await r.json().catch(() => ({}));
+
+  if (r.status === 409 && d.needs_confirmation) {
+    const lines = d.high_findings.map(f => `• ${f.rule} ${f.path}:${f.line}\n  ${f.detail}`).join("\n\n");
+    if (confirm(`${d.message}\n\n${lines}\n\nApprove anyway?`)) {
+      await approve(name, true);
+    }
+    return;
+  }
+  if (!r.ok) { alert(d.detail || d.message || "Approval failed."); return; }
+  load(false);
+}
+
+async function revoke(name) {
+  if (!confirm(`Withdraw approval for "${name}"? It returns to proposed and no quest will load it.`)) return;
+  await fetch(`/api/skills/${encodeURIComponent(name)}/revoke`, {method: "POST"});
+  load(false);
+}
+
+load(false);
+</script>
+</body>
+</html>

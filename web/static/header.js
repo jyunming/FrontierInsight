@@ -65,6 +65,7 @@
               </div>
               <a class="text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" href="/jobs">Jobs</a>
               <a class="text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" href="/compare">Compare</a>
+              <a class="text-on-surface-variant font-medium hover:text-primary transition-colors duration-200" href="/skills">Skills</a>
             </div>
           </div>
           <div class="flex items-center gap-4">

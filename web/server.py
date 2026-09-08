@@ -634,6 +634,12 @@ def make_app(
     from web.tools_routes import register_tools_routes
     register_tools_routes(app, output_root)
 
+    # Skills: the third surface of the promotion gate. Reads the same
+    # serialiser the CLI's --json and the VSCode panel read, so the gate is
+    # decided in exactly one place.
+    from web.skills_routes import register_skills_routes
+    register_skills_routes(app)
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         index_html = static_dir / "index.html"
