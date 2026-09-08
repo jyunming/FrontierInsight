@@ -117,6 +117,25 @@ def test_recording_use_does_not_lapse_approval(skill: Skill, tmp_path: Path) -> 
     assert len(history(skill)) == 1
 
 
+def test_the_lock_file_is_not_written_into_the_skill(skill: Skill) -> None:
+    """The lock must live outside the skill, on every platform.
+
+    ``filelock`` removes its lock file on release on Windows but leaves it
+    behind on POSIX, so a lock beside ``provenance.json`` only lapsed
+    approval on Linux — green on the developer's machine, red in CI. Assert
+    on the location rather than on the leftover, so the property holds
+    wherever the test runs.
+    """
+    provenance = skill.path / PROVENANCE_JSON
+    lock = usage._lock_path(provenance)
+    assert skill.path not in lock.parents
+
+    before = skill.content_hash()
+    assert usage.record_use(skill.path, "q1", "accept") is True
+    assert sorted(p.name for p in skill.path.rglob("*.lock")) == []
+    assert skill.content_hash() == before
+
+
 # ---------------------------------------------------------------------------
 # Concurrency — real processes, because a lock cannot be tested in one
 # ---------------------------------------------------------------------------

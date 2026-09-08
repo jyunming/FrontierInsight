@@ -22,8 +22,11 @@ turning that success into an error.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +40,30 @@ _log = logging.getLogger("fi.skills.usage")
 #: held longer than this something is wrong, and skipping the record beats
 #: stalling the caller.
 LOCK_TIMEOUT_S = 10
+
+
+def _lock_path(provenance: Path) -> Path:
+    """Where the lock for one ``provenance.json`` lives — outside the skill.
+
+    The obvious place is ``provenance.json.lock`` beside the file, and that
+    is what this used to do. It cost the invariant this module exists to
+    keep. ``filelock`` deletes the lock file on release on Windows but
+    leaves it behind on POSIX, so on Linux the first recorded use dropped a
+    new file into the skill directory, the content hash covered it, and the
+    skill's approval lapsed — a quest un-trusting the skill it had just
+    used successfully, on one platform only.
+
+    Excluding ``*.lock`` from the hash would have fixed the symptom and
+    re-opened the hole the hash was widened to close: anything a skill
+    ships under a name the hash skips is unsigned content. So the lock goes
+    somewhere the hash never looks instead. The name is derived from the
+    resolved path, so two processes reaching the same skill by different
+    routes still serialise on the same lock.
+    """
+    key = hashlib.sha256(
+        str(provenance.resolve()).casefold().encode("utf-8")
+    ).hexdigest()[:32]
+    return Path(tempfile.gettempdir()) / "fi-skill-locks" / f"{key}.lock"
 
 
 @dataclass(frozen=True)
@@ -57,12 +84,41 @@ def _read(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+#: Windows can refuse a rename while a handle on the destination is still
+#: closing — a scanner's, or the previous writer's. Under ``--fleet`` those
+#: renames land back to back, so a few short retries turn a lost record into
+#: a slightly later one.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_BACKOFF_S = 0.05
+
+
 def _write_atomic(path: Path, data: dict[str, Any]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    tmp.replace(path)
+    """Write through a sibling file, then rename it over the target.
+
+    The sibling is named per process. A fixed ``.tmp`` is every writer's
+    file and not just this one's, and a crashed writer's leftover is worse
+    than untidy: anything left behind inside the skill counts towards its
+    content hash, so a stray temp file lapses the skill's approval exactly
+    the way a stray lock file did. Hence the ``finally``.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                tmp.replace(path)
+                return
+            except OSError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_BACKOFF_S)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - only if the directory vanished
+            pass
 
 
 def record_use(
@@ -91,7 +147,13 @@ def record_use(
         _log.warning("filelock unavailable; skipping usage record")
         return False
 
-    lock = FileLock(str(provenance) + ".lock", timeout=timeout_s)
+    lock_file = _lock_path(provenance)
+    try:
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _log.warning("could not create the lock directory %s: %s", lock_file.parent, e)
+        return False
+    lock = FileLock(str(lock_file), timeout=timeout_s)
     try:
         with lock:
             data = _read(provenance)
