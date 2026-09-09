@@ -243,7 +243,7 @@ is the index.
 | `claude_cli` | CLI exec | `claude login` (Claude Pro/Max OAuth) | ✅ Sanctioned |
 | `codex_cli` | CLI exec | `codex login` (ChatGPT Plus/Pro OAuth) | ✅ Sanctioned |
 | `copilot_cli` | CLI exec | `gh auth login` (Copilot subscription) | ⚠️ Agentic — replies conversationally; use `vscode_extension` for Copilot instead. |
-| `gemini_cli` | CLI exec | `gemini` OAuth / Google AI Studio key | ✅ Sanctioned |
+| `gemini_cli` | CLI exec | `gemini` OAuth / Google AI Studio key | ⚠️ Google has been migrating individual-account sign-in to Antigravity — verified live (`Code Assist for individuals... migrate to the Antigravity suite`, rc=1 before reaching FI). Try `antigravity_cli` or the direct `gemini` (API-key) provider instead. |
 | **`vscode_extension`** | **VSCode bridge** | **whatever the model is signed in as — Copilot Chat, or another extension's provider** | **✅ Sanctioned via `vscode.lm`** |
 | `claude_code` | HTTP via proxy | `claude login` + spawned wrapper | ⚠️ Third-party wrapper |
 | `github_copilot_cli` | HTTP via proxy | `gh auth login` + spawned `copilot-api` | ⚠️ Against ToS spirit (use `copilot_cli` instead) |

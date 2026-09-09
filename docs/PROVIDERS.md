@@ -10,7 +10,7 @@ you want to authenticate and which models you want to reach.
 | Your situation | Use this | Why |
 |---|---|---|
 | You have GitHub Copilot and use VSCode | **`vscode_extension`** | Sanctioned `vscode.lm.*` API; picks up every model your Copilot Chat picker exposes (Copilot GPT family, Claude / Gemini when your subscription includes them); no extra API keys; calls show up in your Copilot usage dashboard. |
-| You want headless runs (overnight fleets, CI) | **`claude_cli`** / **`codex_cli`** / **`gemini_cli`** | Reuses the CLI's own OAuth (`claude login`, `codex login`, `gemini`). One-time sign-in, then zero ongoing config. |
+| You want headless runs (overnight fleets, CI) | **`claude_cli`** / **`codex_cli`** | Reuses the CLI's own OAuth (`claude login`, `codex login`). One-time sign-in, then zero ongoing config. `gemini_cli` is no longer a reliable third option here — see the provider matrix note below. |
 | You have API keys and want full control | **`openai`** / **`gemini`** | Standard HTTP-direct via the OpenAI-compatible interface. |
 | You're running everything locally | **`ollama`** / **`vllm`** | Self-hosted; zero API spend. |
 
@@ -52,7 +52,7 @@ config YAML, and runs the quest. Every LLM call streams through the
 | `vllm` | HTTP direct (local) | none | Local vLLM-served models | ✅ Self-hosted |
 | `claude_cli` | CLI exec | `claude login` (Pro/Max OAuth) | Claude family via Anthropic's CLI | ✅ Sanctioned |
 | `codex_cli` | CLI exec | `codex login` (ChatGPT Plus/Pro OAuth) | OpenAI Codex CLI's model selection | ✅ Sanctioned |
-| `gemini_cli` | CLI exec | `gemini` OAuth / Google AI key | Gemini via `@google/gemini-cli` | ✅ Sanctioned |
+| `gemini_cli` | CLI exec | `gemini` OAuth / Google AI key | Gemini via `@google/gemini-cli` | ⚠️ Google has been migrating individual-account OAuth sign-in to Antigravity; verified live this session — a previously-working individual account now gets `Code Assist for individuals... migrate to the Antigravity suite` and the CLI exits rc=1 before ever reaching FI. A Workspace/enterprise account or an `AI_STUDIO`/`GEMINI_API_KEY` login may still work; use `antigravity_cli` or the direct `gemini` (API-key) provider instead if yours doesn't. |
 | `copilot_cli` | CLI exec | `gh auth login` (Copilot sub) | n/a — see warning | ⚠️ Agentic. Replies conversationally to FI's structured prompts; not usable as an FI backend. Loud warning at engine init. |
 | `claude_code` | HTTP via proxy | `claude login` + spawned wrapper | Anthropic via `claude-code-openai-wrapper` | ⚠️ Third-party wrapper |
 | `github_copilot_cli` | HTTP via proxy | `gh auth login` + spawned `copilot-api` | Copilot models via reverse-engineered proxy | ⚠️ Against ToS spirit (use `vscode_extension` instead) |

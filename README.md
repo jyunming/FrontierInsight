@@ -52,7 +52,7 @@ That runs a tiny example (three numerical integrators on a damped oscillator, ~3
 | GitHub Copilot | the VSCode extension (`@fi`) — sanctioned `vscode.lm` API | `vscode_extension` |
 | Any model your VSCode already has | the same extension — it lists every model VSCode exposes, not only Copilot's (an Ollama server, a BYOK endpoint) | `vscode_extension` |
 | An API key | OpenAI / Gemini over HTTP | `openai` / `gemini` |
-| A signed-in CLI | `claude login` / `codex login` / `gemini` | `claude_cli` / `codex_cli` / `gemini_cli` |
+| A signed-in CLI | `claude login` / `codex login` | `claude_cli` / `codex_cli` |
 | Nothing / offline | local Ollama (free) | `ollama` |
 
 Full setup, cost trade-offs, and the billing model per provider are in **[docs/recipes.md](docs/recipes.md)** and **[docs/PROVIDERS.md](docs/PROVIDERS.md)**.
@@ -101,4 +101,4 @@ Full setup, cost trade-offs, and the billing model per provider are in **[docs/r
 
 Apache 2.0 — see [`LICENSE`](LICENSE). Contributions welcome via PR.
 
-**Copilot, honestly:** only `vscode_extension` is sanctioned — it uses VSCode's official `vscode.lm.*` Language Model API. The standalone Copilot CLI is agentic (it won't run as an FI backend), and any reverse-engineered Copilot proxy is against the acceptable-use policy in spirit; FI warns when you select those. For headless runs use `claude_cli` / `codex_cli` / `gemini_cli` or a direct API key. Details in [`docs/recipes.md`](docs/recipes.md).
+**Copilot, honestly:** only `vscode_extension` is sanctioned — it uses VSCode's official `vscode.lm.*` Language Model API. The standalone Copilot CLI is agentic (it won't run as an FI backend), and any reverse-engineered Copilot proxy is against the acceptable-use policy in spirit; FI warns when you select those. For headless runs use `claude_cli` / `codex_cli` or a direct API key. Details in [`docs/recipes.md`](docs/recipes.md).
