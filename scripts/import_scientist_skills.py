@@ -127,9 +127,18 @@ SKILLS: dict[str, tuple[str, str, list[str], bool]] = {
     "lasio": ("geoscience", "lasio", ["lasio"], False),
     "welly": ("geoscience", "welly", ["welly"], False),
     "gempy": ("geoscience", "gempy", ["gempy"], False),
-    "simpeg": ("geoscience", "simpeg", ["simpeg"], False),
+    # simpeg's bundled scripts import discretize directly (mesh generation),
+    # not just simpeg's own re-exports -- pip-installing simpeg alone leaves
+    # `from discretize import TensorMesh` unresolved.
+    "simpeg": ("geoscience", "simpeg", ["simpeg", "discretize"], False),
     "harmonica": ("geoscience", "harmonica", ["harmonica"], False),
-    "landlab": ("geoscience", "landlab", ["landlab"], False),
+    # Pinned: landlab 2.11.0's own code uses Python 3.12+ generic-function
+    # syntax (`def f[T](...)`) despite the package claiming
+    # `requires_python: >=3.11` on PyPI -- a real upstream metadata bug,
+    # verified live (2.11.0 fails a bare `import landlab` with SyntaxError
+    # under 3.11; 2.10.1 imports cleanly). Re-check this pin once landlab
+    # either fixes the classifier or 3.11 support is genuinely dropped.
+    "landlab": ("geoscience", "landlab", ["landlab==2.10.1"], False),
     "pastas": ("geoscience", "pastas", ["pastas"], False),
     "segyio": ("geoscience", "segyio", ["segyio"], False),
     "xarray": ("geoscience", "xarray", ["xarray"], False),

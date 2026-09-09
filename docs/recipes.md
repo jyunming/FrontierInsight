@@ -206,23 +206,63 @@ The sections below cover each pause in more detail.
 
 ### Bootstrap a starter set of scientist skills
 
-FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of thirteen scientist-workflow skills (Bayesian inference, astronomy, cheminformatics, bioinformatics, materials science, geospatial analysis, metabolic modeling, quantum simulation, ontology-term resolution, molecular dynamics, and template-driven chart/report generation) from their real upstream repositories and imports them — reproducing, on a fresh machine, the same sourcing step done once by hand.
+FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of 69 scientist-workflow skills from 11 real upstream repositories — geoscience (obspy, landlab, lasio, simpeg, ...), bioinformatics and genomics, structural and control engineering, neuroscience, numerical methods and simulation, reliability engineering, Bayesian statistics, cheminformatics and materials science, causal inference, and template-driven chart/report generation — and imports them, reproducing on a fresh machine the same sourcing step done once by hand.
 
 ```bash
 python scripts/import_scientist_skills.py
 ```
 
-Clones the source repos into `.skill-sources/` (gitignored — a cache, not something this repo ships), imports each skill, runs the static scan, and prints a summary. It does **not** install the underlying Python packages (pymc, astropy, rdkit, ...) or approve anything — those stay explicit, separate steps, because approval binds to a person's judgment and a script doesn't get to make that call for you:
+Clones the source repos into `.skill-sources/` (gitignored — a cache, not something this repo ships), imports each skill, runs the static scan, and prints a summary. It does **not** approve anything — that stays an explicit, separate step, because approval binds to a person's judgment and a script doesn't get to make that call for you. It also does **not** install the underlying Python packages by default (pymc, astropy, rdkit, obspy, ...) — pass `--pip-install` to have it do that too:
 
 ```bash
-python -m pip install pymc arviz astropy rdkit biopython pymatgen scikit-bio geopandas cobra qutip   # or pass --pip-install to the script
+python scripts/import_scientist_skills.py --pip-install
 python launch.py --scan-skill <name>       # read what the scanner found, for each
 python launch.py --approve-skill <name> --approve-as <you>
 ```
 
 `--skip name1,name2` narrows the run to a subset; `--cache-dir PATH` points the source clones somewhere other than the default. Safe to re-run — an already-imported skill is left alone (re-importing over one would lapse its approval, so the importer refuses by default).
 
+A handful of the 69 need their selftest re-run once more before approving, or a closer look at what the static scanner flagged — none of that is scripted, deliberately (see the promotion gate above). The Skill Field Guide covers what was found reviewing this exact batch, if you want a worked example rather than starting cold.
+
 For the general skill workflow — importing a single skill, teaching one from a package you already have installed, the promotion gate, the static scanner — see the skills paragraph in the [README](../README.md); `python launch.py --help` lists every `--*-skill` flag.
+
+### Move an already-approved skill library to another machine
+
+There's no `--export-skill` — a skill is already a plain directory in the
+Agent Skills envelope (`SKILL.md`, `scripts/`, `references/`,
+`provenance.json`), so exporting one is copying it. What doesn't travel
+automatically is the approval record: it's deliberately kept **outside**
+each skill's own folder (`~/.frontier-insight/skill_approvals.json`, or
+`FI_SKILLS_APPROVALS`) so a skill can never ship its own approval —
+otherwise a packaged skill would be self-certifying. Bring both, to the
+same relative layout, and the second machine needs nothing re-approved
+(approval binds to a content hash, so this only works if the files are
+byte-identical — a straight copy, not a re-import):
+
+```bash
+# on the source machine
+tar -czf skills-bundle.tar.gz -C ~ .frontier-insight/skills .frontier-insight/skill_approvals.json
+
+# on the target machine
+tar -xzf skills-bundle.tar.gz -C ~
+```
+
+The underlying Python packages (obspy, pymc, ...) are a separate step —
+either `pip install` them directly on the target if it has network, or
+build a wheelhouse (`pip download <names> -d wheelhouse/`) on a machine
+that does and copy that over for an offline `pip install --no-index
+--find-links=wheelhouse/ <names>` — matching the target's OS and Python
+version if it differs from where you built the wheelhouse.
+
+Two machines that are both reachable from the same location — a shared
+drive, a synced folder, a VPN path — can skip copying altogether: point
+`FI_SKILLS_DIR` (and `FI_SKILLS_APPROVALS`) at that shared path from
+both, and a skill approved on one is immediately visible on the other.
+
+A skill packaged as an installable Python package with a
+`fi.skills` entry point is discovered the same way — see the module
+docstring in `core/skills/registry.py` — which is the better fit for
+distributing a skill to people rather than to your own second machine.
 
 ### Resume a crashed quest
 
