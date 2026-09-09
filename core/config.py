@@ -238,6 +238,13 @@ class ProviderConfig(BaseModel):
     # cross_check) and a strong one for the demanding ones (write,
     # review). On `copilot_cli` and its proxy siblings, all three
     # models share one OAuth and one premium-request budget.
+    #
+    # `poster` / `slides` / `speech` are also valid keys: those three
+    # generators pour an already-written paper into a fixed template
+    # (columns, slide outline, narration) rather than doing open-ended
+    # reasoning, so a cheaper model than the quest's primary is usually
+    # just as good there. Unset, they use the primary model like any
+    # other node — no behavior change until you opt in.
     node_models: dict[str, str] | None = None
 
     # Multi-model ensemble per node. Maps an engine node name (one of

@@ -98,6 +98,7 @@ from core.provider import (
     LLMClient,
     ProxySupervisor,
     PROXY_PROVIDERS,
+    model_for_node,
     resolve_endpoint_async,
 )
 from generation._pdf_engine import find_pdf_engine
@@ -279,7 +280,12 @@ class PosterGenerator:
         endpoint = await resolve_endpoint_async(self.config.provider, sup)
         client = LLMClient(endpoint)
         try:
-            text = await client.chat([{"role": "user", "content": prompt}], temperature=0.2)
+            text = await client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                model=model_for_node(self.config.provider.node_models, "poster"),
+                node="poster",
+            )
         finally:
             await client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:

@@ -199,6 +199,33 @@ async def test_slides_writes_md_with_fence_stripped(
 
 
 @pytest.mark.asyncio
+async def test_slides_honors_node_models_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``provider.node_models["slides"]`` must reach the chat call — slide
+    generation previously built its own LLMClient and never passed `model=`."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    cfg.provider.node_models = {"slides": "gpt-4o-mini"}
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    seen: dict = {}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        seen.update(kw)
+        return _FENCED_MARP
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+
+    await SlideGenerator(cfg).generate(art, out_dir)
+
+    assert seen["model"] == "gpt-4o-mini"
+    assert seen["node"] == "slides"
+
+
+@pytest.mark.asyncio
 async def test_slides_skipped_when_kind_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -291,6 +318,32 @@ async def test_speech_writes_talk_md(
     assert "(no slide deck available)" in captured["prompt"]
     assert "$paper_md" not in captured["prompt"]
     assert "$slides_outline" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_speech_honors_node_models_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``provider.node_models["speech"]`` must reach the chat call — speech
+    generation previously built its own LLMClient and never passed `model=`."""
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["speech"])
+    cfg.provider.node_models = {"speech": "gpt-4o-mini"}
+    out_dir = art.quest_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    seen: dict = {}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        seen.update(kw)
+        return _PLAIN_TALK
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+
+    await SpeechGenerator(cfg).generate(art, out_dir)
+
+    assert seen["model"] == "gpt-4o-mini"
+    assert seen["node"] == "speech"
 
 
 @pytest.mark.asyncio

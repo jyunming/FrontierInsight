@@ -128,6 +128,25 @@ def _canonical_proxy_name(provider_name: str) -> str:
     return _PROXY_ALIASES.get(provider_name, provider_name)
 
 
+def model_for_node(node_models: dict[str, str] | None, node: str) -> str | None:
+    """Resolve ``provider.node_models[node]`` — exact match wins, then a
+    dot-prefix match (``"review_panel"`` catches ``"review_panel.foo"``
+    when no persona-specific entry exists). ``None`` on any miss, which
+    is always a safe no-op: ``LLMClient.chat(model=None)`` falls through
+    to the endpoint's already-valid default, so callers never need to
+    know whether a given node key maps to anything, or guess a model
+    name that might not exist on whichever provider is actually active."""
+    if not node_models:
+        return None
+    if node in node_models:
+        return node_models[node]
+    if "." in node:
+        base = node.split(".", 1)[0]
+        if base in node_models:
+            return node_models[base]
+    return None
+
+
 @dataclass(frozen=True)
 class _CliSpec:
     """How to invoke a local CLI as a chat endpoint."""

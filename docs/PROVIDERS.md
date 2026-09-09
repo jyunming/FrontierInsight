@@ -83,6 +83,34 @@ the closest match in your Copilot subscription. If the hint matches
 nothing your subscription exposes, that one call errors with a clear
 "no Copilot model available for hint" message — VSCode handles the gate.
 
+`poster` / `slides` / `speech` are valid `node_models` keys too. Those
+three generators pour an already-written paper into a fixed template
+rather than doing open-ended reasoning, so a cheaper model than the
+quest's primary is usually just as good there:
+
+```yaml
+provider:
+  name: claude_cli
+  model: claude-sonnet-4-6       # global default
+  node_models:
+    poster: claude-haiku-4-5
+    slides: claude-haiku-4-5
+    speech: claude-haiku-4-5
+```
+
+Unset, all three use the primary model like any other node — no
+behavior change until you opt in. There is no automatic "pick a cheap
+model for me": the string you set here is passed straight to whichever
+provider is already active, exactly like every other `node_models`
+entry, so the model name still has to be one that provider's current
+catalogue actually has. Model catalogues drift — verified live while
+building this: `antigravity_cli` rejected `gemini-2.5-flash` outright
+("model gemini-2.5-flash is not recognized... Available models: Gemini
+3.8 Flash / 3.7 Flash / 3.6 Flash / ..."; the working id was
+`gemini-3.6-flash-low`, from `agy models`). Check your provider's own
+model-list command before setting a cheap-tier override, rather than
+copying a model name from elsewhere.
+
 ## Cost expectations
 
 Rough premium-request burn per quest (each is one LLM call against

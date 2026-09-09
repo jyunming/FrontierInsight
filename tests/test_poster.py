@@ -135,6 +135,33 @@ async def test_poster_writes_tex_with_substituted_columns(
 
 
 @pytest.mark.asyncio
+async def test_poster_honors_node_models_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``provider.node_models["poster"]`` must reach the chat call — this is
+    the per-node cheap-model routing poster generation previously bypassed
+    entirely (it built its own LLMClient and never passed `model=`)."""
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    cfg.provider.node_models = {"poster": "gpt-4o-mini"}
+    art = _make_artifacts(tmp_path)
+
+    seen: dict = {}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        seen.update(kw)
+        return json.dumps({"title": "T", "left": "L", "right": "R"})
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+
+    await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    assert seen["model"] == "gpt-4o-mini"
+    assert seen["node"] == "poster"
+
+
+@pytest.mark.asyncio
 async def test_poster_handles_inline_latex_math_in_llm_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -25,6 +25,7 @@ from core.provider import (
     LLMClient,
     ProxySupervisor,
     PROXY_PROVIDERS,
+    model_for_node,
     resolve_endpoint_async,
 )
 from generation._skip_md import render_skip_md
@@ -151,7 +152,12 @@ class SpeechGenerator:
         endpoint = await resolve_endpoint_async(self.config.provider, sup)
         client = LLMClient(endpoint)
         try:
-            text = await client.chat([{"role": "user", "content": prompt}], temperature=0.3)
+            text = await client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.3,
+                model=model_for_node(self.config.provider.node_models, "speech"),
+                node="speech",
+            )
         finally:
             await client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:
