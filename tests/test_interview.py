@@ -666,6 +666,67 @@ def test_answers_to_yaml_omits_node_ensemble_for_default_off() -> None:
     assert "node_ensemble" not in answers_to_yaml(answers)
 
 
+def test_parse_node_models_answer_splits_on_first_colon_per_pair() -> None:
+    """Comma-separated node:model pairs, split on the FIRST colon so a
+    model name that itself contains a colon (ollama:gemma3:4b) survives
+    intact rather than being truncated at the wrong point."""
+    from core.interview import parse_node_models_answer
+
+    assert parse_node_models_answer("poster:gpt-4o-mini, slides:gpt-4o-mini") == {
+        "poster": "gpt-4o-mini",
+        "slides": "gpt-4o-mini",
+    }
+    assert parse_node_models_answer("local:ollama:gemma3:4b") == {
+        "local": "ollama:gemma3:4b",
+    }
+
+
+def test_parse_node_models_answer_skips_malformed_pairs_instead_of_raising() -> None:
+    """A typo in free text a person typed must degrade to 'no override for
+    that one pair', not crash config generation."""
+    from core.interview import parse_node_models_answer
+
+    assert parse_node_models_answer("") == {}
+    assert parse_node_models_answer("   ") == {}
+    assert parse_node_models_answer("no-colon-here") == {}
+    assert parse_node_models_answer("poster:gpt-4o-mini, , node:, :model") == {
+        "poster": "gpt-4o-mini",
+    }
+
+
+def test_answers_to_yaml_emits_node_models_when_set() -> None:
+    """A non-empty node_models answer materializes a provider.node_models
+    block that round-trips through the ProviderConfig validator."""
+    from core.config import Config
+    answers = InterviewAnswers(
+        topic="t", title="t", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="b", success_metric="m", budget="b",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="openai", node_models="poster:gpt-4o-mini, review:gpt-5",
+    )
+    yaml_text = answers_to_yaml(answers)
+    assert "node_models:" in yaml_text
+    assert 'poster: "gpt-4o-mini"' in yaml_text
+    assert 'review: "gpt-5"' in yaml_text
+    parsed = yaml.safe_load(yaml_text)
+    cfg = Config.model_validate(parsed)
+    assert cfg.provider.node_models == {"poster": "gpt-4o-mini", "review": "gpt-5"}
+
+
+def test_answers_to_yaml_omits_node_models_for_default_empty() -> None:
+    """Default answer = "" → no node_models block. Existing quests that
+    never touched this slot continue to emit identical YAML."""
+    answers = InterviewAnswers(
+        topic="t", title="t", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="b", success_metric="m", budget="b",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="openai",
+    )
+    assert "node_models" not in answers_to_yaml(answers)
+
+
 def test_max_iterations_question_is_tier_3_default_2() -> None:
     """User-reported: 'i cannot define iterations in interview questions'.
     The hard cap on the design-revise loop now appears as a Tier-3

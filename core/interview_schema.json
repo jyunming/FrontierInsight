@@ -707,6 +707,23 @@
       ],
       "allow_other": false,
       "tier": 3
+    },
+    {
+      "id": "node_models",
+      "label": "Per-node model overrides",
+      "prompt": "Route specific nodes to a different model than the primary one — a cheaper model for low-value nodes (clarify, cross_check, poster, slides, speech), a stronger one for write/review. Comma-separated node:model pairs; leave blank to use the primary model everywhere. The model name must be one your provider's current catalogue actually has — this is passed straight through, not validated.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "poster:gpt-4o-mini, slides:gpt-4o-mini",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
     }
   ],
   "paper_formats": [
@@ -1092,6 +1109,7 @@
     "knowledge_external_top_k",
     "knowledge_top_k",
     "max_iterations",
+    "node_models",
     "output_kinds",
     "paper_format",
     "paper_style",

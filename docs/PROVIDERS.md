@@ -61,7 +61,13 @@ config YAML, and runs the quest. Every LLM call streams through the
 ## Per-node model routing
 
 Different nodes of the research DAG can use different models. Cheap
-model for clarify/cross_check, strong model for write/review:
+model for clarify/cross_check, strong model for write/review. Set it
+by hand-editing the YAML below, or from the interview's "Show advanced"
+screen (`python launch.py --new`, `@fi /new`, or the web `/interview`
+page) — the "Per-node model overrides" field takes the same
+comma-separated `node:model` pairs (`poster:gpt-4o-mini,
+slides:gpt-4o-mini`) and writes this exact block for you. Either way
+gets you the same YAML:
 
 ```yaml
 provider:

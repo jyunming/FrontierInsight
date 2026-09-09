@@ -85,6 +85,11 @@ export interface InterviewAnswers {
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
     ensemble_profile?: "off" | "cross_check_only" | "ideate_and_check" | "full";
+    // Comma-separated "node:model" pairs (e.g. "poster:gpt-4o-mini,
+    // slides:gpt-4o-mini"), parsed by `parseNodeModelsAnswer` into
+    // provider.node_models at YAML emit time. Empty (default) emits
+    // nothing. Must stay in sync with core/interview.py:InterviewAnswers.
+    node_models?: string;
 }
 
 
@@ -107,6 +112,32 @@ export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
     "ollama": ["llama3.3:70b", "qwen2.5:32b", "qwen2.5:7b"],
     "vscode_extension": ["gpt-5", "claude-opus-4-7", "gemini-2.5-pro"],
 };
+
+
+/**
+ * Parse the node_models interview answer into a {node: model} map, ready
+ * to emit as provider.node_models. Mirrors
+ * core/interview.py:parse_node_models_answer exactly (comma-separated
+ * pairs, split on the FIRST colon per pair so a model name containing
+ * its own colon — e.g. "ollama:gemma3:4b" — survives; a malformed pair
+ * is skipped rather than thrown, since this is free text a person typed).
+ */
+export function parseNodeModelsAnswer(raw: string | undefined): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const rawPair of (raw ?? "").split(",")) {
+        const pair = rawPair.trim();
+        const colonIdx = pair.indexOf(":");
+        if (!pair || colonIdx === -1) {
+            continue;
+        }
+        const node = pair.slice(0, colonIdx).trim();
+        const model = pair.slice(colonIdx + 1).trim();
+        if (node && model) {
+            out[node] = model;
+        }
+    }
+    return out;
+}
 
 
 /**
@@ -206,6 +237,14 @@ export function answersToYaml(answers: InterviewAnswers): string {
             if (cfg.moderator) {
                 lines.push(`${indent}${indent}${indent}moderator: "${yamlEscape(cfg.moderator)}"`);
             }
+        }
+    }
+    // Per-node model overrides. Only emit when the user typed something.
+    const nodeModels = parseNodeModelsAnswer(answers.node_models);
+    if (Object.keys(nodeModels).length > 0) {
+        lines.push(`${indent}node_models:`);
+        for (const [node, model] of Object.entries(nodeModels)) {
+            lines.push(`${indent}${indent}${node}: "${yamlEscape(model)}"`);
         }
     }
     lines.push("");
