@@ -115,7 +115,7 @@ The extension walks you through 12 quick questions via VSCode-native input modal
 11. **Reviewer panel** — single reviewer / 3-persona / 4-persona panel.
 12. **Knowledge layer** — disabled (default) / Axon (if you have it set up).
 
-The active Copilot model is captured automatically into `provider.model` so the quest stays on a consistent LLM even if you change Copilot model later. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. `@fi /update <quest_id>` re-opens the interview pre-filled with the editable subset for a mid-quest tweak; the same 12-question schema is used for both new-quest setup and mid-quest update.
+The active Copilot model is captured automatically into `provider.model` so the quest stays on a consistent LLM even if you change Copilot model later. The model list is not limited to Copilot: it is every chat model VSCode exposes to the extension, so a local Ollama server or a BYOK endpoint registered by another extension appears alongside Copilot's, tagged with its vendor. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. `@fi /update <quest_id>` re-opens the interview pre-filled with the editable subset for a mid-quest tweak; the same 12-question schema is used for both new-quest setup and mid-quest update.
 
 ### Other chat commands
 

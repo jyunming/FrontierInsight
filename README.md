@@ -50,6 +50,7 @@ That runs a tiny example (three numerical integrators on a damped oscillator, ~3
 | You have… | Use | Set `provider.name` |
 |---|---|---|
 | GitHub Copilot | the VSCode extension (`@fi`) — sanctioned `vscode.lm` API | `vscode_extension` |
+| Any model your VSCode already has | the same extension — it lists every model VSCode exposes, not only Copilot's (an Ollama server, a BYOK endpoint) | `vscode_extension` |
 | An API key | OpenAI / Gemini over HTTP | `openai` / `gemini` |
 | A signed-in CLI | `claude login` / `codex login` / `gemini` | `claude_cli` / `codex_cli` / `gemini_cli` |
 | Nothing / offline | local Ollama (free) | `ollama` |

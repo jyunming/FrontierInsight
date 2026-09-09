@@ -209,6 +209,61 @@ def test_discover_vscode_extension_round_trips_list_models(
     assert b'"type": "list_models"' in sent[0] or b'"type":"list_models"' in sent[0]
 
 
+def test_discover_vscode_extension_keeps_non_copilot_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model from another vendor reaches the picker, labelled as one.
+
+    VSCode hands an extension every model registered through a
+    ``LanguageModelChatProvider``, whatever vendor string its owner
+    chose — an Ollama server arrives under ``ollama-models``. The
+    bridge used to ask only for ``vendor: "copilot"``, so those were
+    invisible however the user had configured them. Nothing on this
+    side may narrow them back out, and the vendor has to survive into
+    the description or a local model is indistinguishable from a
+    Copilot one in the dropdown.
+    """
+    async def _yes(*_args, **_kwargs):
+        return True
+    monkeypatch.setattr("web._bridge_probe.is_socket_listening", _yes)
+
+    async def runner():
+        reader = asyncio.StreamReader()
+
+        class _FakeWriter:
+            def write(self, _data: bytes) -> None:
+                reply = (json.dumps({
+                    "type": "models", "id": 1,
+                    "models": [
+                        {"value": "gpt-5", "label": "gpt-5",
+                         "vendor": "copilot", "family": "gpt-5",
+                         "version": "2025"},
+                        {"value": "llama3.1:latest",
+                         "label": "llama3.1:latest",
+                         "vendor": "ollama-models", "family": "llama",
+                         "version": "3.1"},
+                    ],
+                }) + "\n").encode("utf-8")
+                reader.feed_data(reply)
+            async def drain(self) -> None: return None
+            def close(self) -> None: return None
+            async def wait_closed(self) -> None: return None
+
+        async def fake_open(_path: str):
+            return reader, _FakeWriter()
+
+        monkeypatch.setattr(
+            "core.vscode_bridge._open_ipc_connection", fake_open,
+        )
+        return await discover_vscode_extension(socket_path="/tmp/fake.sock")
+
+    models = asyncio.run(runner())
+    assert models is not None
+    assert {m["value"] for m in models} == {"gpt-5", "llama3.1:latest"}
+    by = {m["value"]: m for m in models}
+    assert "ollama-models" in by["llama3.1:latest"]["description"]
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
