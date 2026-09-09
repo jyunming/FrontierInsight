@@ -436,6 +436,28 @@ def draft_tool(name: str, command: str, dest_root: Path, *, overwrite: bool = Fa
 #: and start describing a hand-written test as generated.
 GENERATED_MARKER = "FI-GENERATED-SELFTEST"
 
+#: Per-script ``--help`` probe timeout, embedded as a literal in every
+#: generated selftest.py (it has no FI imports, so it can't read this
+#: constant at runtime -- see ``_selftest_source``). Exported so
+#: ``core.skills.registry.run_selftest`` can size ITS OWN outer timeout
+#: to the number of scripts a skill bundles: a flat outer ceiling that
+#: doesn't scale with script count will kill a multi-script selftest
+#: before every script gets its full per-script allowance, which orphans
+#: whichever probe subprocess was still running when that happens
+#: (observed live: a 5-script skill where several scripts don't gate on
+#: `--help` reliably exceeded a flat 120s outer timeout, each time
+#: leaving that script's subprocess running with nothing left to kill it).
+#:
+#: 20s, not the original 60s: a legitimate `--help`/argparse response,
+#: even with heavy scientific imports (numpy/scipy/matplotlib cold-start),
+#: takes low single-digit seconds in practice -- 60s was already far more
+#: headroom than any observed legitimate case needed. Shrinking it keeps
+#: the worst case (a skill bundling several scripts that all ignore
+#: --help) inside a sane total instead of needing an ever-larger outer
+#: ceiling as the most script-heavy skill in the library grows (already
+#: 10 scripts for one skill at the time of this change).
+PER_SCRIPT_PROBE_TIMEOUT_S = 20
+
 
 def _selftest_source(name: str, scripts: list[str]) -> str:
     """Body of a generated self-test, built from structured facts only.
@@ -477,6 +499,7 @@ and delete the marker line above when you do.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -488,6 +511,28 @@ SCRIPTS = [
 ]
 
 
+def _ancestor_dirs(root: Path, leaf: Path) -> list[Path]:
+    """``leaf`` and every directory above it up to (and including) ``root``.
+
+    Python puts only the invoked script's own directory on ``sys.path``, so
+    a nested script that imports a SIBLING package a level or two up (a bare
+    ``from helpers import x`` when ``helpers/`` sits next to ``scripts/``,
+    not next to the script itself) fails with ``ModuleNotFoundError`` even
+    though the install is fine. Putting every directory between the script
+    and the skill root on ``PYTHONPATH`` covers that layout without parsing
+    each script's imports to find the one real culprit.
+    """
+    dirs = [leaf]
+    d = leaf
+    while d != root:
+        parent = d.parent
+        if parent == d:
+            break
+        d = parent
+        dirs.append(d)
+    return dirs
+
+
 def main() -> int:
     failures = []
     unprobed = []
@@ -496,13 +541,27 @@ def main() -> int:
         if not path.is_file():
             failures.append(f"missing: {{rel}}")
             continue
+        env = os.environ.copy()
+        extra_path = os.pathsep.join(str(d) for d in _ancestor_dirs(HERE, path.parent))
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = extra_path + (os.pathsep + existing if existing else "")
         try:
             proc = subprocess.run(
                 [sys.executable, str(path), "--help"],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout={PER_SCRIPT_PROBE_TIMEOUT_S}, env=env,
             )
-        except (OSError, subprocess.TimeoutExpired) as e:
+        except OSError as e:
             failures.append(f"{{rel}}: could not run ({{e}})")
+            continue
+        except subprocess.TimeoutExpired:
+            # A script that runs a full minute without an import error has
+            # already imported everything it needs -- a genuinely missing
+            # dependency fails within milliseconds, not after 60s. This is
+            # evidence FOR "installed and runnable" (most likely an example
+            # script that runs its demo unconditionally instead of gating on
+            # --help), not evidence of a broken install, so it goes in the
+            # same lenient bucket as a positional-arg script below.
+            unprobed.append(rel)
             continue
         if proc.returncode != 0:
             blob = (proc.stderr or "") + (proc.stdout or "")
@@ -511,9 +570,15 @@ def main() -> int:
             # or are helper modules never meant to run alone, and they exit
             # non-zero on --help without anything being wrong. What this test
             # exists to catch is a broken or missing install, and that shows
-            # up as an import error.
-            if ("ModuleNotFoundError" in blob or "ImportError" in blob
-                    or "SyntaxError" in blob):
+            # up as an import error. "no known parent package" is excluded
+            # even though Python raises it as an ImportError: it fires for
+            # any package submodule invoked directly (one using `from . import
+            # x`) regardless of whether the package itself is installed
+            # correctly, so it signals "this file is an internal submodule,
+            # not a standalone entry point" rather than a broken install.
+            if (("ModuleNotFoundError" in blob or "ImportError" in blob
+                    or "SyntaxError" in blob)
+                    and "no known parent package" not in blob):
                 tail = blob.strip().splitlines()[-3:]
                 failures.append(f"{{rel}}: cannot load " + " / ".join(tail))
             else:
@@ -529,8 +594,9 @@ def main() -> int:
 
     print(f"ok: {{len(SCRIPTS)}} script(s) present and loadable")
     if unprobed:
-        print(f"note: {{len(unprobed)}} did not answer --help (positional args or "
-              f"helper modules); they loaded, which is what this checks:")
+        print(f"note: {{len(unprobed)}} did not answer --help (positional args, "
+              f"package-internal submodules, or long-running demos); they "
+              f"loaded, which is what this checks:")
         for rel in unprobed:
             print(f"  - {{rel}}"){extra}
     return 0
