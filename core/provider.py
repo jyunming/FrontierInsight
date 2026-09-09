@@ -743,6 +743,16 @@ class ProxySupervisor:
                 f"Set FI_CLAUDE_CODE_WRAPPER_DIR to a clone of "
                 f"RichardAtCT/claude-code-openai-wrapper with `poetry install` run."
             )
+        # On Windows, subprocess.Popen does NOT honor PATHEXT, so an
+        # unqualified name like "npx" raises FileNotFoundError even when
+        # npx.CMD is sitting in a PATH directory (same gap as the CLI-exec
+        # transports below — shutil.which does honor PATHEXT). "poetry" hits
+        # the same resolution path; only substitute when a match is found so
+        # a genuinely-missing binary still surfaces the RuntimeError below
+        # with its real name rather than "None".
+        resolved_cmd0 = shutil.which(cmd[0])
+        if resolved_cmd0:
+            cmd = [resolved_cmd0, *cmd[1:]]
         try:
             # stdout/stderr -> DEVNULL: the proxies are long-lived and
             # write enough log volume to fill an OS pipe buffer if we
