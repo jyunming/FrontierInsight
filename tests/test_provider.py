@@ -166,45 +166,78 @@ async def test_proxy_release_unknown_provider_is_noop():
 
 
 async def test_proxy_spawn_uses_correct_cli_for_claude_code(tmp_path, monkeypatch):
-    """`claude_code` spawns via poetry inside FI_CLAUDE_CODE_WRAPPER_DIR."""
+    """`claude_code` spawns via poetry inside FI_CLAUDE_CODE_WRAPPER_DIR.
+
+    ``shutil.which`` is patched to a fixed fake path rather than left to
+    resolve against this machine's real PATH: `_spawn` now runs argv[0]
+    through `shutil.which` first (Windows PATHEXT fix, resolves "poetry"
+    to "poetry.CMD" etc.), so asserting the bare literal "poetry" would
+    only pass by coincidence on a machine that happens to NOT have poetry
+    installed -- exactly backwards from what this test should guarantee."""
     fake_proc = MagicMock()
     fake_proc.wait = MagicMock(return_value=0)
     monkeypatch.setenv("FI_CLAUDE_CODE_WRAPPER_DIR", str(tmp_path))
 
     sup = ProxySupervisor()
     with patch("core.provider.subprocess.Popen", return_value=fake_proc) as popen, \
+         patch("core.provider.shutil.which", return_value=r"C:\fake\poetry.CMD"), \
          patch("core.provider._wait_for_openai_endpoint"), \
          patch("core.provider._free_port", return_value=55555):
         await sup.acquire("claude_code")
 
     args, kwargs = popen.call_args
     cmd = args[0]
-    assert cmd[:4] == ["poetry", "run", "python", "main.py"]
+    assert cmd[:4] == [r"C:\fake\poetry.CMD", "run", "python", "main.py"]
     assert cmd[4] == "55555"
     assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["env"]["PORT"] == "55555"
 
 
 async def test_proxy_spawn_uses_correct_cli_for_copilot():
-    """`github_copilot_*` spawns via npx with the rate-limit/wait flags."""
+    """`github_copilot_*` spawns via npx with the rate-limit/wait flags.
+
+    ``shutil.which`` is patched to a fixed fake path for the same reason
+    as the claude_code test above -- resolving against this machine's
+    real PATH would make the assertion machine-dependent (this dev box
+    has npx on PATH; CI may not)."""
     fake_proc = MagicMock()
     fake_proc.wait = MagicMock(return_value=0)
 
     sup = ProxySupervisor()
     with patch("core.provider.subprocess.Popen", return_value=fake_proc) as popen, \
+         patch("core.provider.shutil.which", return_value=r"C:\fake\npx.CMD"), \
          patch("core.provider._wait_for_openai_endpoint"), \
          patch("core.provider._free_port", return_value=55556):
         await sup.acquire("github_copilot_vscode")
 
     args, kwargs = popen.call_args
     cmd = args[0]
-    assert cmd[0] == "npx"
+    assert cmd[0] == r"C:\fake\npx.CMD"
     assert "copilot-api@latest" in cmd
     assert "start" in cmd
     assert "--port" in cmd and "55556" in cmd
     assert "--rate-limit" in cmd and "60" in cmd
     assert "--wait" in cmd
     assert kwargs["cwd"] is None
+
+
+async def test_proxy_spawn_falls_back_to_bare_name_when_which_finds_nothing():
+    """When ``shutil.which`` can't resolve the binary at all, `_spawn`
+    must still pass the original bare name through to Popen -- letting
+    the OS attempt its own resolution (and, on failure, the existing
+    FileNotFoundError handler report the real, recognizable name)."""
+    fake_proc = MagicMock()
+    fake_proc.wait = MagicMock(return_value=0)
+
+    sup = ProxySupervisor()
+    with patch("core.provider.subprocess.Popen", return_value=fake_proc) as popen, \
+         patch("core.provider.shutil.which", return_value=None), \
+         patch("core.provider._wait_for_openai_endpoint"), \
+         patch("core.provider._free_port", return_value=55557):
+        await sup.acquire("github_copilot_cli")
+
+    args, _ = popen.call_args
+    assert args[0][0] == "npx"
 
 
 async def test_proxy_alias_canonicalization_shares_handle_and_cleans_up():
