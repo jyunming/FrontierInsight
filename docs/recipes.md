@@ -41,10 +41,9 @@ If you want to run quests overnight or in CI, use one of the chat-style CLI prov
 # Pick whichever you already have signed in:
 claude login                                # → provider.name: claude_cli
 codex login                                 # → provider.name: codex_cli
-gemini   # one-time interactive sign-in     # → provider.name: gemini_cli
 ```
 
-Then change `provider.name` in your YAML accordingly.
+Then change `provider.name` in your YAML accordingly. (`gemini_cli` is also wired in but currently unreliable for individual Google accounts — Google has been redirecting its OAuth sign-in to Antigravity, verified live: the CLI now exits `rc=1` with `Code Assist for individuals... migrate to the Antigravity suite` before it ever reaches FI. If your account still works, it's still a valid `provider.name`; `antigravity_cli` or the direct `gemini` API-key provider are the current alternatives.)
 
 **Note:** the `copilot_cli` provider is also wired in the codebase but **does not work** as an FI backend — GitHub's standalone Copilot CLI is an *agentic* tool that interprets node prompts as user coding tasks and replies conversationally instead of running stateless LLM inference. FI emits a loud warning at engine init when you select it. For headless Copilot, there isn't currently a clean path; use `vscode_extension` (Option A) when you can, or switch to one of the other CLIs / Option C above.
 
@@ -72,7 +71,6 @@ bursty your usage is:
 | `vscode_extension` / `copilot_cli` (GitHub Copilot) | **Premium request** — 1 call = 1 unit regardless of token count | Bursty single quests with heavy prompts. A 50-call quest is 50 units whether each call was 200 tokens or 200K. The flat-rate dominates when prompts are large. |
 | `openai` / `codex` / `codex_cli` (OpenAI / ChatGPT) | **Per-token** — prompt + completion priced separately | Long-running automations where you can keep prompts skinny. `gpt-4o-mini` is cheap enough that low-value nodes (clarify, cross_check) shouldn't burn budget. |
 | `claude_cli` (Claude Code CLI) | **Per-token** | Same as above. Sonnet is the workhorse; reserve Opus for `write` + `review` via `provider.node_models`. |
-| `gemini_cli` | **Per-token** | Cheapest cloud option for long-context tasks. |
 | `ollama` (local) | **Free** | High-volume nodes where you don't need top-tier model quality, or airgapped runs. |
 
 The web UI's `/quest/<id>` page shows per-quest cost for the
