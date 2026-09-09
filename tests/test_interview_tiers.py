@@ -166,8 +166,10 @@ def test_tier3_covers_the_advanced_fields() -> None:
     Three are topic-tuned (preflight LLM call suggests a value);
     ``knowledge_external_top_k`` is the web-search cap (Axon RAG cap
     ``knowledge_top_k`` lives in Tier-2); ``max_iterations`` is the
-    design-revise loop hard cap. ``ensemble_profile`` was promoted out
-    of tier-3 to tier-1 so the cost multiplier sits with provider/model."""
+    design-revise loop hard cap; ``node_models`` is the per-node model
+    override (comma-separated node:model pairs, empty by default).
+    ``ensemble_profile`` was promoted out of tier-3 to tier-1 so the
+    cost multiplier sits with provider/model."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "supply_papers",
@@ -177,6 +179,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "knowledge_external_top_k",
         "max_iterations",
         "paper_style",
+        "node_models",
     }
 
 

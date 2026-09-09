@@ -405,6 +405,11 @@ provider:
     review_panel.devil_advocate: gpt-5
     review_panel.methodologist:  gpt-5
     review_moderator:            gpt-4o-mini    # cheap synthesis
+    # poster / slides / speech pour the finished paper into a fixed
+    # template rather than reasoning from scratch — cheap is fine here too:
+    poster: gpt-4o-mini
+    slides: gpt-4o-mini
+    speech: gpt-4o-mini
 ```
 
 ### Report results with confidence intervals, not bare numbers

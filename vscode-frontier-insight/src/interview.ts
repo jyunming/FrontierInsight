@@ -326,6 +326,7 @@ export async function runInterview(
         comparative_baseline: "",
         success_metric: "",
         budget: "",
+        node_models: "",
         provider_model: "",
         max_iterations: 2,
         audience: "external",
@@ -424,7 +425,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     // than the static defaults). External cap default = 20.
     const ext = a.knowledge_external_top_k;
     const hasOverride = (
-        a.comparative_baseline || a.success_metric || a.budget
+        a.comparative_baseline || a.success_metric || a.budget || a.node_models
         || (ext !== undefined && ext !== 20)
     );
     if (hasOverride) {
@@ -432,6 +433,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         if (a.comparative_baseline) lines.push(`  • baseline: ${a.comparative_baseline}`);
         if (a.success_metric) lines.push(`  • metric: ${a.success_metric}`);
         if (a.budget) lines.push(`  • budget: ${a.budget}`);
+        if (a.node_models) lines.push(`  • per-node models: ${a.node_models}`);
         if (ext !== undefined && ext !== 20) lines.push(`  • external_top_k (web): ${ext}`);
     }
     lines.push("");
@@ -599,13 +601,14 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
     }
 }
 
-/** Inline editor for the four tier-3 advanced fields. */
+/** Inline editor for the tier-3 advanced fields. */
 async function editTier3Field(a: InterviewAnswers): Promise<void> {
     const which = await vscode.window.showQuickPick(
         [
             { label: "Comparative baseline", value: "comparative_baseline" },
             { label: "Success metric", value: "success_metric" },
             { label: "Time / compute budget", value: "budget" },
+            { label: "Per-node model overrides", value: "node_models" },
             { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
@@ -635,6 +638,13 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
     const v = await vscode.window.showInputBox({
         title: which.label,
         value: (aBag[which.value] as string) || "",
+        // node_models' format isn't self-explanatory the way "success
+        // metric" is — give it a concrete example. Every other field
+        // here (comparative_baseline, success_metric, budget) is plain
+        // free text with no format to hint.
+        placeHolder: which.value === "node_models"
+            ? "poster:gpt-4o-mini, slides:gpt-4o-mini"
+            : undefined,
         ignoreFocusOut: true,
     });
     if (v === undefined) return;

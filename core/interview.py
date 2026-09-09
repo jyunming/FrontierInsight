@@ -658,6 +658,16 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=True,
         tier=3,
     ),
+    Question(
+        id="node_models",
+        label="Per-node model overrides",
+        prompt="Route specific nodes to a different model than the primary one — a cheaper model for low-value nodes (clarify, cross_check, poster, slides, speech), a stronger one for write/review. Comma-separated node:model pairs; leave blank to use the primary model everywhere. The model name must be one your provider's current catalogue actually has — this is passed straight through, not validated.",
+        kind="text",
+        default="",
+        placeholder="poster:gpt-4o-mini, slides:gpt-4o-mini",
+        mid_quest_editable=True,
+        tier=3,
+    ),
 )
 
 
@@ -1150,6 +1160,35 @@ class InterviewAnswers:
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
     # multipliers; ``ensemble_model_trio`` for the per-provider models.
     ensemble_profile: str = "off"
+    # Comma-separated "node:model" pairs, parsed by ``answers_to_yaml``
+    # into the ``provider.node_models`` block. Empty (default) emits
+    # nothing — no behavior change until the user opts in. See
+    # ``parse_node_models_answer``.
+    node_models: str = ""
+
+
+def parse_node_models_answer(raw: str) -> dict[str, str]:
+    """Parse the ``node_models`` interview answer into a ``{node: model}``
+    dict, ready to emit as ``provider.node_models``.
+
+    Format: comma-separated ``node:model`` pairs (``poster:gpt-4o-mini,
+    slides:gpt-4o-mini``). Split on the FIRST colon per pair, since a model
+    name can itself contain a colon (``ollama:gemma3:4b``). Blank input,
+    a pair with no colon, or a pair with an empty node or model half is
+    silently skipped rather than raising — an interview answer is free
+    text a person typed, and a typo here should degrade to "no override
+    for that one node", not crash config generation.
+    """
+    out: dict[str, str] = {}
+    for pair in (raw or "").split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        node, _, model = pair.partition(":")
+        node, model = node.strip(), model.strip()
+        if node and model:
+            out[node] = model
+    return out
 
 
 def expand_ensemble_profile(
@@ -1250,6 +1289,14 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
             lines.append(f"{indent}{indent}{indent}merge: {json.dumps(cfg['merge'])}")
             if "moderator" in cfg:
                 lines.append(f"{indent}{indent}{indent}moderator: {json.dumps(cfg['moderator'])}")
+    # Per-node model overrides. Only emit when the user typed something;
+    # blank (default) leaves every node on the primary model, matching
+    # today's behavior for a quest that doesn't set this.
+    node_models = parse_node_models_answer(answers.node_models)
+    if node_models:
+        lines.append(f"{indent}node_models:")
+        for node, model in node_models.items():
+            lines.append(f"{indent}{indent}{node}: {json.dumps(model)}")
     lines.append("")
 
     lines.append("engine:")

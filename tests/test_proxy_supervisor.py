@@ -129,3 +129,52 @@ async def test_alias_shares_canonical_handle():
     assert a is b
     assert a.refcount == 2
     assert len(spawns) == 1
+
+
+def test_spawn_resolves_npx_through_pathext(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``subprocess.Popen(["npx", ...])`` does not honor PATHEXT on Windows
+    -- it raises FileNotFoundError even when npx.CMD is on PATH, reproduced
+    directly against a real PATH on a dev box with Node installed. ``_spawn``
+    must resolve argv[0] via shutil.which first, the same fix already applied
+    to the CLI-exec transports (claude_cli/codex_cli/...) for the identical
+    gap."""
+    import core.provider as provider_mod
+
+    captured_cmd: list[str] = []
+
+    def fake_which(name: str) -> str | None:
+        return r"C:\Program Files\nodejs\npx.CMD" if name == "npx" else name
+
+    def fake_popen(cmd, **kw):  # noqa: ANN001
+        captured_cmd.extend(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(provider_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(provider_mod, "_wait_for_openai_endpoint", lambda port, timeout_s=60: None)
+
+    sup = ProxySupervisor()
+    sup._spawn("github_copilot_cli")
+
+    assert captured_cmd[0] == r"C:\Program Files\nodejs\npx.CMD"
+    assert captured_cmd[1:3] == ["copilot-api@latest", "start"]
+
+
+def test_spawn_leaves_unresolvable_binary_name_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When shutil.which can't find the binary at all, `_spawn` must still
+    pass the original bare name through to Popen -- so the existing
+    FileNotFoundError handler reports the real, recognizable name
+    ("npx" / "poetry") in its RuntimeError instead of a resolved-to-None
+    placeholder."""
+    import core.provider as provider_mod
+
+    monkeypatch.setattr(provider_mod.shutil, "which", lambda name: None)
+
+    def fake_popen(cmd, **kw):  # noqa: ANN001
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(provider_mod.subprocess, "Popen", fake_popen)
+
+    sup = ProxySupervisor()
+    with pytest.raises(RuntimeError, match="'npx' not found on PATH"):
+        sup._spawn("github_copilot_cli")

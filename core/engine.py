@@ -55,6 +55,7 @@ from .provider import (
     LLMClient,
     PROXY_PROVIDERS,
     ProxySupervisor,
+    model_for_node,
     resolve_endpoint_async,
 )
 
@@ -5978,25 +5979,14 @@ class Engine:
             self._log.debug("[cost] failed to write cost.jsonl: %r", e)
 
     def _model_for_node(self, node: str | None) -> str | None:
-        """Resolve the effective model for a node — empty string when
-        the lookup misses so the transport falls through to the
-        endpoint default. Accepts hierarchical keys like
-        ``"review_panel.methodologist"`` (review-panel personas)."""
+        """Resolve the effective model for a node via the shared
+        ``core.provider.model_for_node`` lookup — None when the lookup
+        misses so the transport falls through to the endpoint default.
+        Accepts hierarchical keys like ``"review_panel.methodologist"``
+        (review-panel personas)."""
         if not node:
             return None
-        node_models = self.config.provider.node_models or {}
-        if not node_models:
-            return None
-        # Exact match wins; then prefix match (e.g., "review_panel"
-        # catches "review_panel.methodologist" when no persona-specific
-        # entry exists).
-        if node in node_models:
-            return node_models[node]
-        if "." in node:
-            base = node.split(".", 1)[0]
-            if base in node_models:
-                return node_models[base]
-        return None
+        return model_for_node(self.config.provider.node_models, node)
 
     def _preflight_paper_pdf(self) -> None:
         """Verify the host can produce ``paper.pdf`` BEFORE the quest
