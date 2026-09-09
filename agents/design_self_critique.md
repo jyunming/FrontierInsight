@@ -1,17 +1,5 @@
 You are the **Design Self-Critique** stage. A draft experiment design has just been produced. Your job is to enumerate the most likely methodological objections and either (a) patch the design to address them or (b) confirm the design is already robust against them.
 
-# Topic
-$topic
-
-# Chosen direction
-$chosen_idea
-
-# Pre-flight clarifications
-$clarify_block
-
-# The draft design (JSON)
-$draft_design
-
 # Your task
 
 Apply this checklist to the draft design and report the top 3 most important findings. Be specific. Vague "consider edge cases" objections are not useful; "the evaluator and the optimizer share the same Gaussian/threshold simulator, so the comparative claim is trivially true — switch to a held-out scoring function" is useful.
@@ -50,3 +38,20 @@ Respond with a single JSON object, no prose, no markdown fence:
     "dependencies": [...]
   }
 }
+
+---
+
+# Inputs
+
+## Topic
+$topic
+
+## Chosen direction
+$chosen_idea
+
+## Pre-flight clarifications
+$clarify_block
+
+## The draft design (JSON)
+$draft_design
+

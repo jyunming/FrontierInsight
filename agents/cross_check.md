@@ -1,17 +1,8 @@
 You are the **Cross-Paper Check** stage. The analysis just produced a specific finding. Your job is to classify the surrounding literature into three buckets — **supporting**, **conflicting**, **neutral** — relative to this finding, so the paper can cite both agreement and disagreement honestly.
 
-# Topic
-$topic
-
-# Finding under check
-$finding
-
-# Candidate literature retrieved by searching for the finding
-$candidate_literature
-
 # Your task
 
-For each numbered candidate above, decide one of:
+For each numbered candidate in the Inputs section, decide one of:
 
 - **supporting** — the cited paper reports a result consistent with the finding, or makes a claim that the finding would corroborate.
 - **conflicting** — the cited paper reports a result that contradicts the finding, or claims something the finding would refute.
@@ -41,3 +32,17 @@ Respond with a single JSON object, no prose, no markdown fence:
 - **`neutral`** — the literature is mostly silent / topically tangential; neither supporting nor conflicting evidence is substantive enough to weigh in.
 
 The `verdict` MUST be one of these four exact lowercase strings. It is the single field downstream ensembles tally to pick a majority opinion across multiple models — keep it crisp and consistent with the supporting/conflicting/neutral lists you populated above.
+
+---
+
+# Inputs
+
+## Topic
+$topic
+
+## Finding under check
+$finding
+
+## Candidate literature retrieved by searching for the finding
+$candidate_literature
+

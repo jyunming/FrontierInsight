@@ -2,26 +2,6 @@ You are reading the **collected evidence** for a research quest running in **no-
 
 You are NOT running a simulation. You are NOT inventing data. You are summarizing what is actually in the collected files — do not assert the user personally produced data that came from a retrieved source, and don't claim a measurement the files don't contain.
 
-## Quest topic
-
-${topic}
-
-## Design (what the prior LLM call planned)
-
-```json
-${design_block}
-```
-
-The design above tells you what variables the user was supposed to measure. Use it to organize the result_json — when the design specifies a metric like "trust_in_institutions" or "average_decision_latency_ms", produce a key with that exact name. If the user's data doesn't cover a planned variable, note that under a `missing_measurements` array — DO NOT invent values.
-
-## File manifest (deterministic — do not edit IDs)
-
-${file_manifest}
-
-## File contents
-
-${content_blocks}
-
 # Instructions
 
 Produce a single JSON object with these top-level keys (omit any key you have no evidence for; never invent values to fill a slot):
@@ -33,7 +13,7 @@ Produce a single JSON object with these top-level keys (omit any key you have no
   "key_findings": [
     {
       "finding": "Concrete claim grounded in the dropped data.",
-      "evidence": "Quote or specific reference to the file IDs above that support this claim.",
+      "evidence": "Quote or specific reference to the file IDs in the Inputs section that support this claim.",
       "confidence": "high | medium | low"
     }
     // 2-6 findings; each MUST cite at least one file from the manifest by ID.
@@ -68,7 +48,32 @@ Produce a single JSON object with these top-level keys (omit any key you have no
 ## Style constraints
 
 - Markdown / prose responses are NOT acceptable — the result_json field must be a single JSON object.
-- Cite file IDs from the manifest above (e.g. `[3]`, `[7]`) when grounding any claim.
+- Cite file IDs from the manifest in the Inputs section (e.g. `[3]`, `[7]`) when grounding any claim.
 - If the user's data is sparse or ambiguous, say so explicitly under `limitations`. The downstream analyze + write nodes will be more useful with an honest "limited evidence" finding than a confidently-wrong invented one.
 - Do NOT add a top-level `result_json` wrapper — the engine reads the parsed object directly. The very first character of your response should be `{`.
 - If the dropped files genuinely don't answer the research question (e.g., the user dropped a single unrelated PDF), produce a result_json with empty `key_findings` and `measurements`, a clear `summary` saying so, and 1-2 `limitations` explaining what additional data would be needed.
+
+---
+
+# Inputs
+
+### Quest topic
+
+${topic}
+
+### Design (what the prior LLM call planned)
+
+```json
+${design_block}
+```
+
+The design above tells you what variables the user was supposed to measure. Use it to organize the result_json — when the design specifies a metric like "trust_in_institutions" or "average_decision_latency_ms", produce a key with that exact name. If the user's data doesn't cover a planned variable, note that under a `missing_measurements` array — DO NOT invent values.
+
+### File manifest (deterministic — do not edit IDs)
+
+${file_manifest}
+
+### File contents
+
+${content_blocks}
+

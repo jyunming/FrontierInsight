@@ -383,12 +383,21 @@ def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
     docs = k.search("Bernstein-Vazirani depolarizing", top_k=3)
 
     assert len(docs) == 2
-    assert docs[0].metadata["source"] == "arxiv"
+    assert all(d.metadata["source"] == "arxiv" for d in docs)
+    # Order is decided by relevance to the query now, not by the order the
+    # adapter returned, so assert the SET rather than a position.
     # arXiv URLs include a version suffix (vN); the parser keeps it.
-    assert docs[0].metadata["arxiv_id"].startswith("2401.00001")
-    assert docs[0].metadata["pdf_url"].endswith(".pdf")
-    assert "X. Yu" in docs[0].metadata["authors"]
-    assert "BV under noise" in docs[0].content
+    assert {d.metadata["arxiv_id"].split("v")[0] for d in docs} == {
+        "2401.00001", "2401.00002",
+    }
+    # Field-parsing assertions target the entry by id rather than by
+    # position — relevance ranking decides the order now, and this test is
+    # about the adapter parsing the Atom feed correctly.
+    first = next(d for d in docs
+                 if d.metadata["arxiv_id"].startswith("2401.00001"))
+    assert first.metadata["pdf_url"].endswith(".pdf")
+    assert "X. Yu" in first.metadata["authors"]
+    assert "BV under noise" in first.content
     assert captured["params"]["max_results"] == "3"
     assert "all:" in captured["params"]["search_query"]
 
@@ -1115,7 +1124,11 @@ def test_asearch_runs_web_in_parallel_and_merges_with_axon(monkeypatch) -> None:
     import asyncio
     docs = asyncio.run(k.asearch("anything", top_k=8, external_top_k=10))
     srcs = [d.metadata.get("src") or d.metadata.get("source") for d in docs]
-    assert srcs == ["axon", "web_search", "web_search"]
+    # Axon is no longer pinned to the front: corpus hits are ranked with the
+    # other layers rather than privileged ahead of them. Privileging them let
+    # previously-written-back web pages take eight of twelve slots and
+    # displace real papers, so the assertion is now about presence, not order.
+    assert sorted(srcs) == ["axon", "web_search", "web_search"]
 
 
 def test_asearch_web_fills_when_axon_empty_and_no_academic(monkeypatch) -> None:
@@ -2076,3 +2089,291 @@ def test_fetch_full_text_landing_page_failure_fallback(monkeypatch) -> None:
     # The returned text should match our open-access cascade mocked body
     assert res == expected_body
 
+
+
+# ---------------------------------------------------------------------------
+# Academic search is not gated on the corpus being empty
+#
+# It used to be, and the failure was quiet and compounding: Axon accumulates
+# from previous quests, so after the first one it is never empty again and the
+# academic adapters stop running permanently. What remains is Axon plus web
+# search — and web search returns pages, not papers.
+#
+# Measured on a real EUV lithography quest: all seven sources came from web
+# search, every reference was `@misc` with `howpublished = {Web page}`, and
+# the key one was ResearchGate's "Request PDF" paywall page. OpenAlex returns
+# the same paper with venue "Proceedings of SPIE" and DOI 10.1117/12.536411;
+# Crossref returned six of six SPIE papers for the same query.
+# ---------------------------------------------------------------------------
+
+
+def _stub_layers(monkeypatch, *, axon: list, academic: list, web: list):
+    """Pin all three retrieval layers so a test can assert which ones ran."""
+    from core.knowledge import RetrievedDoc as RD
+
+    ran = {"academic": False, "web": False}
+
+    async def fake_router(query, top_k, sources, **kw):
+        ran["academic"] = True
+        return [RD(content=t, metadata={"source": "academic", "title": t,
+                                        "doi": f"10.1117/{i}"})
+                for i, t in enumerate(academic)]
+
+    def fake_web(query, top_k, **kw):
+        ran["web"] = True
+        return [RD(content=t, metadata={"source": "web_search", "title": t,
+                                        "url": f"https://rg.net/{i}"})
+                for i, t in enumerate(web)]
+
+    monkeypatch.setattr("core.knowledge._route_external", fake_router)
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+    return ran
+
+
+def test_academic_search_runs_even_when_the_corpus_answers(monkeypatch) -> None:
+    """The regression this guards.
+
+    A non-empty Axon must not suppress the academic adapters — otherwise the
+    corpus silently becomes the only scholarly source a quest ever sees, and
+    it fills with whatever the previous quest settled for.
+    """
+    import asyncio
+
+    from core.knowledge import Knowledge, RetrievedDoc as RD
+
+    ran = _stub_layers(monkeypatch, axon=["corpus hit"],
+                       academic=["A real paper"], web=["A web page"])
+    cfg = KnowledgeConfig(
+        enabled=True, source_routing="manual", external_fallback=["crossref"],
+        web_search=True, top_k=6, external_top_k=6,
+    )
+    k = Knowledge(cfg)
+    # A corpus that answers — the exact condition that used to skip academic.
+    monkeypatch.setattr(
+        k, "_search_axon",
+        lambda q, top_k=0: [RD(content="corpus hit",
+                               metadata={"source": "axon", "title": "corpus hit"})],
+    )
+    asyncio.run(k.asearch("EUV line edge roughness shot noise"))
+    assert ran["academic"], (
+        "academic adapters were skipped because the corpus returned "
+        "something — that is how a bibliography ends up made of web pages"
+    )
+
+
+def test_an_academic_hit_beats_a_web_hit_for_the_same_paper(monkeypatch) -> None:
+    """Both layers routinely return the SAME paper, and the first one to
+    arrive wins the dedup key. That order decides whether the citation has a
+    DOI and a venue or is `@misc{..., howpublished = {Web page}}` pointing at
+    a paywall landing page."""
+    import asyncio
+
+    from core.knowledge import Knowledge
+
+    title = "Shot noise, LER, and quantum efficiency of EUV photoresists"
+    _stub_layers(monkeypatch, axon=[], academic=[title], web=[title])
+    cfg = KnowledgeConfig(
+        enabled=True, source_routing="manual", external_fallback=["openalex"],
+        web_search=True, top_k=6, external_top_k=6,
+    )
+    k = Knowledge(cfg)
+    monkeypatch.setattr(k, "_search_axon", lambda q, top_k=0: [])
+
+    docs = asyncio.run(k.asearch(title))
+    kept = [d for d in docs if d.metadata.get("title") == title]
+    assert kept, "the paper vanished entirely"
+    assert kept[0].metadata["source"] == "academic", (
+        "the web page won over the academic record for the same paper — the "
+        "citation loses its DOI and venue"
+    )
+
+
+def test_web_search_still_runs_alongside_academic(monkeypatch) -> None:
+    """Academic-first must not turn web search off; a topic with no scholarly
+    literature still needs it, and the writer quotes page text."""
+    import asyncio
+
+    from core.knowledge import Knowledge
+
+    ran = _stub_layers(monkeypatch, axon=[], academic=["paper"], web=["page"])
+    cfg = KnowledgeConfig(
+        enabled=True, source_routing="manual", external_fallback=["crossref"],
+        web_search=True, top_k=6, external_top_k=6,
+    )
+    k = Knowledge(cfg)
+    monkeypatch.setattr(k, "_search_axon", lambda q, top_k=0: [])
+    asyncio.run(k.asearch("anything"))
+    assert ran["web"] and ran["academic"]
+
+
+def test_knowledge_disabled_still_reaches_nothing(monkeypatch) -> None:
+    """The master switch keeps its meaning: enabled=False means no network at
+    all, academic included."""
+    import asyncio
+
+    from core.knowledge import Knowledge
+
+    ran = _stub_layers(monkeypatch, axon=[], academic=["p"], web=["w"])
+    k = Knowledge(KnowledgeConfig(
+        enabled=False, source_routing="manual", external_fallback=["crossref"],
+        web_search=True,
+    ))
+    asyncio.run(k.asearch("anything"))
+    assert not ran["academic"] and not ran["web"]
+
+
+
+def test_relevance_decides_every_slot_the_floor_does_not_claim(monkeypatch) -> None:
+    """Beyond the reserved academic share, a page wins on relevance alone.
+
+    Concatenating starved whichever layer came second — academic first with
+    a cap of 12 returned twelve academic results and the web layer never
+    reached the list, taking full-text coverage from 1/12 to 0/11.
+    Interleaving fixed the starvation but decided by position, so an
+    off-topic academic hit still displaced an on-topic page.
+
+    Neither is what the merge does now. Academic holds a floor, because the
+    similarity metric is rigged in the page's favour — a web snippet is the
+    search engine echoing the query back, an abstract is not — so pooling
+    everything into one ranking does not mean "the best source wins", it
+    means "snippets win". Every slot the floor does not claim is ranked.
+
+    This pins the ranked part. Three Crossref hits here are real shapes: the
+    query is about EUV photoresist LER, and "Al-2.63 Line Edge Roughness
+    (Ler)" is an IUPAC aluminium-alloy standard that matched on the phrase
+    alone. One holds the floor; the other two must lose their slots to the
+    page that actually answers the query.
+    """
+    import asyncio
+
+    from core.knowledge import Knowledge, RetrievedDoc as RD
+
+    async def fake_router(query, top_k, sources, **kw):
+        return [
+            RD(content="IUPAC standards table for aluminium alloys",
+               metadata={"source": "academic", "doi": "10.1515/x",
+                         "title": "Al-2.63 Line Edge Roughness (Ler)"}),
+            RD(content="tolerances for rolled aluminium sheet stock",
+               metadata={"source": "academic", "doi": "10.1515/y",
+                         "title": "Al-3.10 Sheet Thickness Tolerance"}),
+            RD(content="designation system for wrought aluminium alloys",
+               metadata={"source": "academic", "doi": "10.1515/z",
+                         "title": "Al-1.02 Alloy Designation"}),
+        ]
+
+    def fake_web(query, top_k, **kw):
+        return [RD(content="photon shot noise sets the LER floor in EUV "
+                           "photoresists at 13.5 nm exposure",
+                   metadata={"source": "web_search", "url": "https://x/1",
+                             "title": "Shot noise, LER and quantum efficiency "
+                                      "of EUV photoresists"})]
+
+    monkeypatch.setattr("core.knowledge._route_external", fake_router)
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+
+    cfg = KnowledgeConfig(
+        enabled=True, source_routing="manual", external_fallback=["crossref"],
+        web_search=True, top_k=3, external_top_k=3,
+    )
+    k = Knowledge(cfg)
+    monkeypatch.setattr(k, "_search_axon", lambda q, top_k=0: [])
+
+    docs = asyncio.run(k.asearch(
+        "photon shot noise limits on line edge roughness in EUV photoresists"
+    ))
+    assert docs, "everything was dropped"
+    titles = [d.metadata["title"].lower() for d in docs]
+    assert any("shot noise" in t for t in titles), (
+        "the on-topic page never reached the list — two off-topic academic "
+        "hits took the ranked slots, so selection is following the source "
+        "layer rather than the query"
+    )
+    # The floor is one slot, so the page must be ahead of the surplus
+    # academic hits rather than merely present.
+    assert "shot noise" in titles[1], (
+        f"the page placed at {titles.index(next(t for t in titles if 'shot noise' in t))} "
+        f"behind more than the floor: {titles}"
+    )
+
+
+def test_a_relevant_web_page_outranks_a_weaker_academic_hit(monkeypatch) -> None:
+    """What pure relevance ranking guarantees, stated honestly.
+
+    It does NOT promise both layers appear — if every academic result scores
+    above every page, academic takes all the slots, and that is the ranking
+    working as asked. What it promises is that a page answering the query
+    better than an academic record is not discarded for being a page. That is
+    the property concatenation broke.
+    """
+    import asyncio
+
+    from core.knowledge import Knowledge, RetrievedDoc as RD
+
+    async def fake_router(query, top_k, sources, **kw):
+        return [
+            RD(content="aluminium alloy designation standards table",
+               metadata={"source": "academic", "doi": f"10.1515/{i}",
+                         "title": f"Al-2.63 Line Edge Roughness (Ler) {i}"})
+            for i in range(3)
+        ]
+
+    def fake_web(query, top_k, **kw):
+        return [RD(content="photon shot noise sets the line edge roughness "
+                           "floor in EUV photoresists at 13.5 nm",
+                   metadata={"source": "web_search", "url": "https://x/1",
+                             "title": "Shot noise and LER in EUV photoresists"})]
+
+    monkeypatch.setattr("core.knowledge._route_external", fake_router)
+    monkeypatch.setattr("core.knowledge._web_search", fake_web)
+
+    cfg = KnowledgeConfig(
+        enabled=True, source_routing="manual", external_fallback=["crossref"],
+        web_search=True, top_k=2, external_top_k=2,
+    )
+    k = Knowledge(cfg)
+    monkeypatch.setattr(k, "_search_axon", lambda q, top_k=0: [])
+
+    docs = asyncio.run(k.asearch(
+        "photon shot noise line edge roughness EUV photoresists"
+    ))
+    assert any(d.metadata.get("source") == "web_search" for d in docs), (
+        "the on-topic page lost to off-topic academic records — relevance "
+        "is not deciding"
+    )
+
+
+def test_ranking_falls_back_to_source_order_when_it_cannot_run(monkeypatch) -> None:
+    """Relevance ranking is an optimisation, never a gate. If it fails the
+    original order stands — which keeps academic ahead of web, so a paper
+    returned by both still gets its DOI-bearing record."""
+    import asyncio
+
+    from core.knowledge import Knowledge
+
+    def boom(chunks, query):
+        raise RuntimeError("no scorer")
+
+    import core.passages as passages
+    monkeypatch.setattr(passages, "_hybrid_scores", boom)
+
+    title = "Shot noise, LER, and quantum efficiency of EUV photoresists"
+    _stub_layers(monkeypatch, axon=[], academic=[title], web=[title])
+    cfg = KnowledgeConfig(
+        enabled=True, source_routing="manual", external_fallback=["openalex"],
+        web_search=True, top_k=8, external_top_k=8,
+    )
+    k = Knowledge(cfg)
+    monkeypatch.setattr(k, "_search_axon", lambda q, top_k=0: [])
+
+    kept = [d for d in asyncio.run(k.asearch(title))
+            if d.metadata.get("title") == title]
+    assert kept and kept[0].metadata["source"] == "academic"
+
+
+def test_a_single_candidate_needs_no_ranking(monkeypatch) -> None:
+    """Guard the cheap path — and that it does not drop the one result."""
+    from core.knowledge import _rank_by_relevance, RetrievedDoc as RD
+
+    one = [RD(content="x", metadata={"title": "only"})]
+    assert _rank_by_relevance(one, "anything") == one
+    assert _rank_by_relevance([], "anything") == []

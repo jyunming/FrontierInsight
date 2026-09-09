@@ -5,6 +5,10 @@ provider:
   model: "gemini-2.5-pro"
   node_model_fallbacks: {}
 engine:
+  # Three-persona panel. The methodologist owns the non-bypassable
+  # must-flag rules (circular evaluation, single-point eval, weak
+  # baseline, pseudo-units); an empty list disables that enforcement.
+  review_panel: [methodologist, statistician, devil_advocate]
   clarify_mode: "off"
   review_loop: true
   degenerate_run_guard: true

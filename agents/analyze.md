@@ -1,44 +1,15 @@
 You are the **Analysis** stage of an automated research pipeline.
 
-# Pre-flight clarifications
-$clarify_block
-
-# Design
-$design_block
-
-# Execution results
-- Returncode: $returncode
-- Wall time: $duration_s seconds
-- Timed out: $timed_out
-
-## stdout (tail)
-```
-$stdout_tail
-```
-
-## stderr (tail)
-```
-$stderr_tail
-```
-
-## Result JSON line (last line of stdout, if present)
-$result_json
-
-## User-supplied data (dropped by the user — analyse the ACTUAL values below)
-$user_data_block
-
-## Figures produced
-$figure_list
-
-## Reviewed literature (published sources)
-$literature_block
+Your inputs — clarifications, design, execution results, any user-supplied
+data, the figures produced, and the reviewed literature — are in the **Inputs**
+section at the end of this prompt.
 
 # Your task
 Interpret the results vs the hypothesis. Be honest about negative or null results — do not embellish.
 
 **No experiment / no dataset (survey or no-simulation studies).** If there are no execution
 results and no `result_json` (empty or absent), this study synthesises the **reviewed literature
-above** — there is nothing else to interpret and that is by design, not a failure. Read the
+in the Inputs section** — there is nothing else to interpret and that is by design, not a failure. Read the
 sources and produce `key_findings` that are substantive claims ABOUT THE TOPIC drawn from and
 attributed to those sources (organised by era / theme / technique for a history or survey),
 NOT observations about the pipeline, the retrieval, or the absence of an experiment. Put the
@@ -75,3 +46,39 @@ Respond with a single JSON object, no prose, no markdown fence:
 }
 
 **`primary_sources` — carry provenance forward.** If the upstream `result_json` (from `data_load` in no-simulation mode) carries a `primary_sources` list, or your inputs name specific files / datasets / web pages the findings rest on, copy that attribution into `primary_sources` verbatim. This is the only place file-level provenance survives into the paper — the writer cannot cite a source it never sees. Omit the key (or use `[]`) only when there genuinely are no discrete sources (e.g., a pure single-script simulation).
+
+---
+
+# Inputs
+## Pre-flight clarifications
+$clarify_block
+
+## Design
+$design_block
+
+## Execution results
+- Returncode: $returncode
+- Wall time: $duration_s seconds
+- Timed out: $timed_out
+
+### stdout (tail)
+```
+$stdout_tail
+```
+
+### stderr (tail)
+```
+$stderr_tail
+```
+
+### Result JSON line (last line of stdout, if present)
+$result_json
+
+### User-supplied data (dropped by the user — analyse the ACTUAL values below)
+$user_data_block
+
+### Figures produced
+$figure_list
+
+### Reviewed literature (published sources)
+$literature_block

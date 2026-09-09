@@ -89,8 +89,30 @@ _EMBED_TRIED = False
 
 def _embed_model():
     """Lazily load + cache the sentence-transformer model, or None when it's
-    unavailable. Returns None under ``FI_OFFLINE`` so air-gapped / CI installs
-    never attempt a model download and stay on lexical ranking."""
+    unavailable.
+
+    ``FI_OFFLINE`` does NOT skip the model — it used to, which was a real
+    regression relative to ``core.knowledge``'s own offline path: that one
+    (``_apply_offline_env``) sets ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE``
+    and still loads the embedding + reranker weights from the local HF
+    cache with zero network calls, so literature ranking keeps its semantic
+    half even air-gapped. Skill-relevance ranking (``core.skills.layers``)
+    reuses this same function, so bailing to lexical-only here was throwing
+    away semantic matching for BOTH callers whenever the one env var anyone
+    sets for "offline" is ``FI_OFFLINE`` — which is the common case, since
+    that is the name documented everywhere else in this codebase.
+
+    Those two HF vars are set here too (not just left to ``core.knowledge``)
+    because this module has no dependency on ``core.knowledge`` and must not
+    gain one — a quest with ``knowledge.enabled: false`` never builds a
+    ``KnowledgeConfig``, so ``_apply_offline_env`` never runs, and skill
+    selection (which is independent of the knowledge layer) would otherwise
+    be the one caller left exposed to a network-dependent load attempt on
+    an air-gapped box. Setting them is idempotent and safe to repeat: once
+    ``HF_HUB_OFFLINE`` is "1" from either path, setting it to "1" again is a
+    no-op, so there is no fleet-lock / divergent-config class of problem to
+    replicate here the way ``core.knowledge`` has to.
+    """
     global _EMBED_MODEL, _EMBED_TRIED
     if _EMBED_TRIED:
         return _EMBED_MODEL
@@ -98,9 +120,13 @@ def _embed_model():
     # Parse FI_OFFLINE the same way the rest of the codebase does, so
     # FI_OFFLINE=0 / false does NOT disable embeddings.
     if os.environ.get("FI_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
-        _log.info("passages: FI_OFFLINE set — using lexical ranking")
-        _EMBED_MODEL = None
-        return _EMBED_MODEL
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        _log.info(
+            "passages: FI_OFFLINE set — loading all-MiniLM-L6-v2 from the "
+            "local HF cache only (HF_HUB_OFFLINE=1); falls back to lexical "
+            "ranking if it isn't cached"
+        )
     try:
         from sentence_transformers import SentenceTransformer
         _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")

@@ -1,0 +1,124 @@
+# A/B (antigravity, no knowledge layer): does `uncertainty-and-units` improve quality?
+#
+# Second attempt. The first pair used codex_cli with knowledge enabled; arm B
+# could never start because Axon's vector store became unreadable
+# (github.com/jyunming/Axon#165). Both arms here have knowledge OFF so they
+# remain matched — the cost is that neither does literature retrieval or
+# cross-check, so this measures the skill's effect on experiment and write-up
+# only.
+#
+# The ONLY difference between the pair is `skills_exclude`. Verify with:
+#   diff dev/ab-skill-test/agy-with-skill.yaml dev/ab-skill-test/agy-without-skill.yaml
+# A/B: does the `uncertainty-and-units` skill improve result quality?
+#
+# Derived from interview_euv_ler_shot_noise.yaml. The topic is copied
+# byte-for-byte; the ONLY differences between this pair are the title and
+# the `skills_exclude` line. Anything else would make the comparison
+# meaningless. Verify with:
+#
+#   diff dev/ab-skill-test/with-skill.yaml dev/ab-skill-test/without-skill.yaml
+#
+# Requires `uncertainty-and-units` to be TRUSTED — a person must approve it
+# first; an unapproved skill is simply absent and both arms would be identical.
+topic: |
+  TOPIC. The theoretical lower bound on Line-Edge Roughness (LER) imposed by
+  Poisson photon shot noise in metal-oxide EUV photoresists (MORs), and how
+  much of the experimentally observed LER at production dose is explained by
+  photon statistics alone.
+
+  CONTEXT. High-NA EUV lithography at 13.5 nm (~92 eV photons) is limited less
+  by optics than by stochastics: at exposure doses of 10-60 mJ/cm^2 the number
+  of photons absorbed in the resist volume that defines a short segment of a
+  sub-16 nm half-pitch line edge is finite and Poisson-distributed. This sets
+  an irreducible floor on Line-Edge Roughness, sigma_LER >= k / sqrt(N_abs),
+  where N_abs is the number of absorbed photons per edge segment. Metal-oxide
+  resists (MORs; HfO2- / SnOx-based platforms such as Inpria-class tin-oxo
+  formulations) absorb EUV more strongly than chemically amplified resists
+  (CARs), so at a given dose they absorb more photons per unit volume and
+  narrow — but do not close — the shot-noise gap.
+
+  SCOPE (THEORY-FORWARD, NO FAB EQUIPMENT NEEDED).
+    1. Build a minimal 1-D Monte Carlo: a line edge of length L binned into
+       segments of length Delta. For each segment sample absorbed photons from
+       Poisson(lambda), lambda a function of dose D, absorbance alpha, segment
+       volume, and 92 eV photon energy. Apply a dose-threshold clearing rule
+       (segment clears iff local absorbed dose exceeds D_th). Measure the edge
+       position per segment and compute sigma_LER.
+    2. Sweep dose D in {10,20,30,40,50,60} mJ/cm^2 for an MOR-class absorbance
+       alpha_MOR and a CAR-class absorbance alpha_CAR; report sigma_LER for
+       each (D, material).
+    3. Fit sigma_LER(D) to the predicted D^{-1/2} scaling, extract the
+       coefficient k for each material, and test the prediction that
+       k_MOR / k_CAR ≈ sqrt(alpha_CAR / alpha_MOR).
+    4. Quantify how much of a typical experimental MOR LER (~2-4 nm at
+       ~30 mJ/cm^2) is explained by photon shot noise alone, and discuss the
+       residual attributable to non-photon sources (secondary-electron yield
+       variance, blur, chemical stochastics, line-bridging defects).
+
+  DELIVERABLES.
+    - A single self-contained Python script (numpy + matplotlib, Agg backend,
+      headless, CPU-only, < 60 s) implementing the Monte Carlo + threshold model.
+    - Three figures: (a) sample edge profiles at low vs high dose;
+      (b) sigma_LER vs dose on log-log axes for MOR and CAR with the expected
+      -0.5 slope overlaid; (c) fitted shot-noise coefficient k and the residual
+      gap to a ~3 nm experimental reference.
+    - A concise IMRAD paper grounding every quantitative claim in either the
+      simulation or a cited primary source.
+
+  CONSTRAINTS.
+    - Pure numpy + matplotlib; no specialised stochastics packages.
+    - Treat secondary-electron blur and acid amplification as out of scope —
+      this is the photon-noise floor only.
+
+title: euv_ler_AGY_without_skill
+
+provider:
+  name: "antigravity_cli"
+  model: ""
+  node_model_fallbacks: {}
+
+engine:
+  # Three-persona panel. The methodologist owns the non-bypassable
+  # must-flag rules (circular evaluation, single-point eval, weak
+  # baseline, pseudo-units); an empty list disables that enforcement.
+  review_panel: [methodologist, statistician, devil_advocate]
+  framework: langgraph
+  clarify_mode: "off"           # unattended run — no interactive clarify
+  human_feedback_gate: "off"    # no mid-run pause
+  review_loop: true             # methodologist / statistician / devil's-advocate panel
+  degenerate_run_guard: true    # catch trivial / empty experiments
+  enable_analyze_reroute: true  # let cross_check's re_experiment loop back to redesign
+  cross_check_per_finding_k: 3  # verify each finding against the literature
+  max_iterations: 4             # give the self-repair loop room to converge
+
+  # A/B arm — every trusted skill is a candidate
+  skills: []
+  skills_exclude: [uncertainty-and-units]
+
+execution:
+  sandbox: venv
+  timeout_s: 600
+  python_version: "3.11"
+
+knowledge:
+  enabled: false   # Axon store unreadable — see Axon issue #165
+  web_search: true
+  web_search_backend: "auto"
+  web_search_top_k: 10
+  web_fetch_pages: true
+  try_fetch_full_text: true
+  relevance_guard: true
+  external_top_k: 12
+  literature_excerpt_chars: 4000
+  passage_ranking: "auto"
+  pause_for_user_papers: false  # never pause — fully unattended
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+    - slides
+    - poster
+    - speech
+  paper_format: generic          # IMRAD
+  output_dir: ./outputs

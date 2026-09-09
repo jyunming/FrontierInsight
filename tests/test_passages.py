@@ -3,6 +3,8 @@
 All deterministic + offline: the lexical ranker needs no model or network.
 """
 
+import os
+
 import pytest
 
 from core.passages import chunk_text, select_relevant_excerpt, _lexical_scores
@@ -103,11 +105,34 @@ def test_hybrid_surfaces_paraphrase_with_mocked_embedder(monkeypatch) -> None:
     assert scores[1] > scores[0]   # paraphrase chunk wins via the embedding term
 
 
-def test_hybrid_falls_back_to_lexical_offline(monkeypatch) -> None:
+def test_fi_offline_sets_hf_cache_only_vars(monkeypatch) -> None:
+    """FI_OFFLINE must not skip the model -- it must load it from the LOCAL
+    cache with zero network calls, matching core.knowledge's own offline
+    path. Asserting on HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE rather than on
+    what _embed_model() returns: the return value depends on whether this
+    machine happens to have all-MiniLM-L6-v2 already cached (it does on a
+    dev box that has run a real quest; it won't in a fresh CI image), so
+    asserting `is None` here would be asserting the wrong thing some of the
+    time -- the env vars getting set is the one outcome FI_OFFLINE
+    actually guarantees."""
     import core.passages as p
     monkeypatch.setenv("FI_OFFLINE", "1")
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     monkeypatch.setattr(p, "_EMBED_TRIED", False)
     monkeypatch.setattr(p, "_EMBED_MODEL", None)
-    assert p._embed_model() is None   # FI_OFFLINE → no model download
+    p._embed_model()
+    assert os.environ.get("HF_HUB_OFFLINE") == "1"
+    assert os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+
+
+def test_hybrid_falls_back_to_lexical_when_embeddings_unavailable(monkeypatch) -> None:
+    """Independent of *why* the model is unavailable (not cached, FI_OFFLINE
+    with nothing cached, import failure, ...) -- once _embed_model() has
+    settled on None, hybrid scoring must degrade to pure lexical rather than
+    erroring or silently ranking everything equal."""
+    import core.passages as p
+    monkeypatch.setattr(p, "_EMBED_TRIED", True)
+    monkeypatch.setattr(p, "_EMBED_MODEL", None)
     chunks = ["mortality rose sharply", "weather and sports"]
     assert p._hybrid_scores(chunks, "mortality") == p._lexical_scores(chunks, "mortality")

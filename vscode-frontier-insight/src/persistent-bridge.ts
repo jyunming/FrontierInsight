@@ -401,10 +401,49 @@ export class PersistentBridge {
             } finally {
                 cts.dispose();
             }
+            // A fresh token: the streaming one is disposed above, and
+            // countTokens needs a live one.
+            const cts2 = new vscode.CancellationTokenSource();
+            // Token counts, as far as this API can supply them.
+            //
+            // `LanguageModelChatResponse` carries no usage field — the whole
+            // `lm` namespace exposes no usage, quota, premium or billing
+            // surface, so what Copilot actually charged is not observable
+            // from an extension. What IS available is `countTokens`, which
+            // uses the model's own tokenizer, and that is far better than the
+            // char/4 estimate Python falls back to.
+            //
+            // Scope, stated so the numbers are not read as more than they
+            // are: this counts the text WE send and receive. It cannot see
+            // the system prompt and tool schema Copilot wraps around the
+            // request, which on the CLI providers turned out to be most of
+            // the input (20k-38k tokens on a one-word prompt). So these are
+            // real counts of our own traffic, not of the billed call.
+            let promptTokens = 0;
+            let completionTokens = 0;
+            try {
+                for (const m of messages) {
+                    promptTokens += await model.countTokens(m, cts2.token);
+                }
+                completionTokens = await model.countTokens(content, cts2.token);
+            } catch {
+                // countTokens can throw on a disposed model or a cancelled
+                // token; accounting must never fail the call that produced a
+                // good answer, so fall through with what we have.
+            }
             this.send(socket, {
                 type: "lm_done", id: req.id,
-                content, total_tokens: 0,
+                content,
+                total_tokens: promptTokens + completionTokens,
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                // "our traffic only" — the Python side records this so a
+                // vscode row is never silently compared against a CLI row
+                // that includes the platform's own overhead.
+                usage_scope: "sent_only",
+                measured: promptTokens > 0,
             });
+            cts2.dispose();
         } catch (e) {
             const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
             this.send(socket, { type: "lm_error", id: req.id, error: msg });

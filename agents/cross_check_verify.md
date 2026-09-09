@@ -2,18 +2,6 @@ You are the **Cross-Paper Check — Verification Pass** stage. A first-pass clas
 
 This is a Chain-of-Verification pass: the first pass is fast but tends to over-claim (a topically-related paper gets called *supporting* when its abstract is too thin to actually weigh in). The verification pass catches that by forcing the model to articulate WHY a claim of support or conflict holds up — and downgrade to *neutral* when it doesn't.
 
-# Topic
-$topic
-
-# Finding under check
-$finding
-
-# First-pass classification
-$first_pass_block
-
-# Candidate literature (numbered to match the indices above)
-$candidate_literature
-
 # Your task
 
 For each non-neutral assignment in the first pass, write 1–2 short verification questions and answer them from the abstract evidence the candidate provides. Then output a *revised* classification with the following rules:
@@ -46,3 +34,20 @@ Respond with a single JSON object, no prose, no markdown fence:
 Same `verdict` semantics as the first pass: pick one of the four exact lowercase strings based on the *revised* balance.
 
 The `verification_notes` field is what makes this auditable. Include one entry per candidate where you changed the classification, plus optionally one entry per non-neutral kept classification (to show your work). Skip notes for purely neutral candidates whose classification didn't change.
+
+---
+
+# Inputs
+
+## Topic
+$topic
+
+## Finding under check
+$finding
+
+## First-pass classification
+$first_pass_block
+
+## Candidate literature (numbered to match the indices above)
+$candidate_literature
+

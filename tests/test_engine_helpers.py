@@ -837,8 +837,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     g = engine._build_graph()
 
     expected_nodes = {
-        "clarify", "ideate", "literature", "design", "implement",
-        "execute", "analyze", "write", "review",
+        "clarify", "ideate", "literature", "select_skills", "design",
+        "implement", "execute", "analyze", "write", "review",
     }
     assert expected_nodes.issubset(set(g.nodes))
 
@@ -850,7 +850,11 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert (START, "clarify") in plain_edges
     assert ("clarify", "ideate") in plain_edges
     assert ("ideate", "literature") in plain_edges
-    assert ("literature", "design") in plain_edges
+    # `select_skills` sits between literature and design: it needs the chosen
+    # direction and the retrieved sources to match the topic against the skill
+    # catalogue, and design needs its answer.
+    assert ("literature", "select_skills") in plain_edges
+    assert ("select_skills", "design") in plain_edges
     assert ("implement", "execute") in plain_edges
     # `execute → execute_reflect` replaces the old `execute → analyze`
     # edge, plus a conditional `execute_reflect → execute | analyze`.
@@ -1356,7 +1360,8 @@ def test_no_sim_directive_renders_into_design_prompt() -> None:
          / "agents" / "design.md").read_text(encoding="utf-8")
     )
     kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
-              review_feedback="r", timeout_s="60", clarify_block="c")
+              review_feedback="r", timeout_s="60", clarify_block="c",
+              skills_block="(no simulation skills enabled)")
     on = tmpl.substitute(study_mode_directive=_NO_SIM_DESIGN_DIRECTIVE, **kw)
     off = tmpl.substitute(study_mode_directive="", **kw)
     assert "NO-SIMULATION" in on

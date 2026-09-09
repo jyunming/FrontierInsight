@@ -4,18 +4,6 @@ hold any mix of research papers, source code, study notes, experiment
 logs, or quest outputs — your job is to produce a single Markdown
 document that makes the contents legible at a glance.
 
-# Folder
-`$folder_path`
-
-# Auto-detected content kind
-$content_kind
-
-# File inventory (auto-classified)
-$file_manifest
-
-# Content (per-file truncated previews; do NOT assume the rest of each file is available to you)
-$content_blocks
-
 # Your task
 
 Produce a single Markdown summary. **Include only the sections that
@@ -92,3 +80,20 @@ the folder path + content kind. Examples:
 - `c:\papers\superconductors\` → `# Superconductors Reading List: A Cross-Domain Synthesis`
 - A code repo → `# Project <name>: Architecture and Module Map`
 - A logs folder → `# Quest Logs: Execution Summary`
+
+---
+
+# Inputs
+
+## Folder
+`$folder_path`
+
+## Auto-detected content kind
+$content_kind
+
+## File inventory (auto-classified)
+$file_manifest
+
+## Content (per-file truncated previews; do NOT assume the rest of each file is available to you)
+$content_blocks
+

@@ -19,6 +19,14 @@ import * as vscode from "vscode";
 import * as fsPromises from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
+import {
+    runApproveSkill,
+    runImportSkill,
+    runListSkills,
+    runRevokeSkill,
+    runScanSkill,
+    runTeachSkill,
+} from "./skills";
 import { Bridge } from "./bridge";
 import { PersistentBridge } from "./persistent-bridge";
 import { runInterview, writeInterviewYaml } from "./interview";
@@ -277,6 +285,30 @@ async function handleRequest(
         await runListDrafts(stream, token);
         return;
     }
+    if (cmd === "skills") {
+        await runListSkills(stream, token);
+        return;
+    }
+    if (cmd === "scan-skill") {
+        await runScanSkill(prompt, stream, token);
+        return;
+    }
+    if (cmd === "approve-skill") {
+        await runApproveSkill(prompt, stream, token);
+        return;
+    }
+    if (cmd === "revoke-skill") {
+        await runRevokeSkill(prompt, stream, token);
+        return;
+    }
+    if (cmd === "import-skill") {
+        await runImportSkill(prompt, stream, token);
+        return;
+    }
+    if (cmd === "teach-skill") {
+        await runTeachSkill(prompt, stream, token);
+        return;
+    }
     if (cmd === "axon-status" || cmd === "axon") {
         await runAxonStatus(stream);
         return;
@@ -316,6 +348,12 @@ function helpText(): string {
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
         "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
         "- `@fi /drafts` — list proposal drafts you've made (most-recent first) with a one-click `/start` command for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.",
+        "- `@fi /skills` — list the skill library with each entry's promotion status, scan findings, and domain tags. Mirrors `python launch.py --skills`.",
+        "- `@fi /scan-skill <name>` — statically review a skill before approving it: injection phrasing, hidden characters, network access, `eval`. Nothing is imported or run.",
+        "- `@fi /approve-skill <name>` — approve a skill for use. Shows the review first, then asks who is approving; a high-severity finding needs an extra confirmation. Approval binds to that exact content.",
+        "- `@fi /revoke-skill <name>` — withdraw approval, returning the skill to proposed.",
+        "- `@fi /import-skill [path]` — import a skill written for another agent (Agent Skills layout). Opens a picker with no path, then asks for optional domain tags.",
+        "- `@fi /teach-skill <name> <module>` — draft a skill from an installed library, reading its real signatures by introspection.",
         "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable. Its port is discovered automatically; override it with the `frontierInsight.axonUrl` setting. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
         "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",

@@ -271,3 +271,114 @@ async def test_quest_writeback_runs_on_revise_when_accept_gate_off(
 
     assert len(captured) == 1
     assert captured[0]["verdict"] == "revise"
+
+
+# ---------------------------------------------------------------------------
+# Document ids must identify documents (issue #237)
+#
+# A normalized title is not a key. Six substantively different papers were
+# found sharing one id in a live corpus; because the id is the vector store's
+# primary key, only one of the six was retrievable and the other five were
+# silently absent — present in BM25, missing from vector search, which is a
+# confusing state to debug from the outside.
+# ---------------------------------------------------------------------------
+
+
+def test_same_title_different_papers_get_different_ids() -> None:
+    """The exact collision from the field: one shared title, six abstracts."""
+    from core.knowledge import _paper_short_id
+
+    base = {"title": "Optical proximity effect and correction"}
+    abstracts = [
+        "increased mask complexity and runtime relative to no OPC",
+        "rule-based OPC and the limits of its correction table",
+        "model-based OPC convergence under low k1 imaging",
+        "inverse lithography compared against conventional OPC",
+        "OPC recipe tuning for sub-16 nm half-pitch line and space",
+        "a sixth paper that merely shares the same title",
+    ]
+    ids = {_paper_short_id({**base, "abstract": a}) for a in abstracts}
+    assert len(ids) == len(abstracts), (
+        "same-title papers collapsed to one id — the vector store keys on "
+        "this, so every collision is a document that cannot be retrieved"
+    )
+
+
+def test_an_external_identifier_still_wins() -> None:
+    """DOI, arXiv and PMID exist to identify papers; the hash is only for
+    when none of them is available."""
+    from core.knowledge import _paper_short_id
+
+    assert _paper_short_id(
+        {"title": "t", "doi": "10.1000/AbC", "abstract": "x"}
+    ) == "doi:10.1000/abc"
+    assert _paper_short_id(
+        {"title": "t", "arxiv_id": "2504.08066", "abstract": "x"}
+    ) == "arxiv:2504.08066"
+    assert _paper_short_id({"title": "t", "pmid": "12345", "abstract": "x"}) == "pmid:12345"
+
+
+def test_the_id_is_stable_across_re_ingest() -> None:
+    """The property that makes re-ingesting an update rather than a duplicate.
+    A counter or a timestamp would break it."""
+    from core.knowledge import _paper_short_id
+
+    meta = {"title": "A paper", "abstract": "the same body text"}
+    assert _paper_short_id(meta) == _paper_short_id(dict(meta))
+
+
+def test_distinguishing_material_falls_back_through_weaker_fields() -> None:
+    """Abstract identifies a document; url identifies where it came from;
+    year+authors is weakest because a preprint and its published version
+    share both. Any of them beats colliding."""
+    from core.knowledge import _paper_short_id
+
+    t = {"title": "Shared title"}
+    by_url = {_paper_short_id({**t, "url": u}) for u in ("http://a/x", "http://b/y")}
+    assert len(by_url) == 2
+    by_year = {
+        _paper_short_id({**t, "year": y, "authors": "Chen"}) for y in ("2024", "2025")
+    }
+    assert len(by_year) == 2
+
+
+def test_a_title_with_nothing_else_collides_honestly() -> None:
+    """Two documents that differ in no metadata at all genuinely cannot be
+    told apart, so sharing an id is the correct outcome — they dedupe. That
+    is different from losing five of six that DO differ."""
+    from core.knowledge import _paper_short_id
+
+    a = _paper_short_id({"title": "Manual"})
+    b = _paper_short_id({"title": "Manual"})
+    assert a == b == "title:manual"
+
+
+def test_the_id_does_not_repeat_the_title_twice() -> None:
+    """``tag`` is minted as ``fi-paper:<paper_id>``, so including both wrote
+    the title into the id twice — 164-235 character ids carrying no more
+    information than the first copy."""
+    from core.knowledge import Knowledge, _paper_short_id
+
+    pid = _paper_short_id(
+        {"title": "Optical proximity effect and correction", "abstract": "body"}
+    )
+    doc_id = Knowledge._mint_doc_id(
+        "fi_external_ref_spine", {"paper_id": pid, "tag": f"fi-paper:{pid}"}
+    )
+    assert doc_id.count("optical-proximity") == 1, doc_id
+    assert len(doc_id) < 120, f"{len(doc_id)} chars: {doc_id}"
+
+
+def test_a_genuinely_distinct_discriminator_is_still_kept() -> None:
+    """The de-duplication above must not swallow a discriminator that carries
+    real information — ``rel_path`` is what separates summary-input docs that
+    share one summary_id."""
+    from core.knowledge import Knowledge
+
+    a = Knowledge._mint_doc_id(
+        "fi_summary_input", {"summary_id": "s1", "rel_path": "a/one.md"}
+    )
+    b = Knowledge._mint_doc_id(
+        "fi_summary_input", {"summary_id": "s1", "rel_path": "b/two.md"}
+    )
+    assert a != b

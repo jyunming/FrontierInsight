@@ -1,22 +1,10 @@
 You are the **Claim Grounding** stage. The paper has been written. Your job is to extract its **substantive claims** and ground each one in actual evidence — either this quest's own experiment results, or a specific cited reference — so nothing ships unsupported.
 
-# Topic
-$topic
-
-# This quest's own evidence (experiment results + key findings)
-$evidence_block
-
-# The paper's numbered references (cite as [N])
-$references
-
-# The paper
-$paper
-
 # Your task
 
 1. Extract the paper's **substantive claims** — assertions of fact, result, or conclusion that a skeptical reader would want backed up. Skip background/motivation framing, definitions, and hedged "may/could" speculation in Limitations/Future Work.
 2. For each claim, assign exactly one **basis**:
-   - **experiment** — the claim restates a number or result this quest actually produced (it traces to the evidence block above).
+   - **experiment** — the claim restates a number or result this quest actually produced (it traces to the evidence block in the Inputs section).
    - **citation** — the claim rests on prior work that is cited; give the reference number it should map to in `citation_index`.
    - **unsupported** — the claim is neither backed by this quest's results NOR a cited reference. This includes a number that appears nowhere in the evidence block, a comparison to prior work with no citation, and a conclusion the results don't actually establish.
 
@@ -41,4 +29,21 @@ Respond with a single JSON object, no prose, no markdown fence:
 }
 ```
 
-`basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that exists in the references list above; otherwise use `basis: "unsupported"`.
+`basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that exists in the references list in the Inputs section; otherwise use `basis: "unsupported"`.
+
+---
+
+# Inputs
+
+## Topic
+$topic
+
+## This quest's own evidence (experiment results + key findings)
+$evidence_block
+
+## The paper's numbered references (cite as [N])
+$references
+
+## The paper
+$paper
+

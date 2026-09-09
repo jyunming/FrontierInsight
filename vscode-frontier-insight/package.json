@@ -98,6 +98,30 @@
             "description": "Check whether the Axon sidecar (`python -m axon.api`) is reachable. Its address is discovered automatically — the running server's lock file, Axon's config.yaml, then the defaults. The sidecar keeps the embedding model + vector index hot across quests; CLI/web launches auto-start it, but VSCode users run their own."
           },
           {
+            "name": "skills",
+            "description": "List the skill library with each entry's promotion status, scan findings and domain tags. Mirrors `python launch.py --skills`."
+          },
+          {
+            "name": "scan-skill",
+            "description": "Statically review a skill before approving it — injection phrasing, hidden characters, network access, eval. Nothing is imported or run."
+          },
+          {
+            "name": "approve-skill",
+            "description": "Approve a skill for use. Shows the static review first, then asks who is approving. Approval binds to that exact content."
+          },
+          {
+            "name": "revoke-skill",
+            "description": "Withdraw approval for a skill, returning it to proposed."
+          },
+          {
+            "name": "import-skill",
+            "description": "Import a skill written for another agent (Agent Skills layout). Opens a picker when given no path."
+          },
+          {
+            "name": "teach-skill",
+            "description": "Draft a skill from an installed library, reading its real signatures by introspection."
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }
@@ -132,6 +156,11 @@
           "type": "string",
           "default": "",
           "description": "Base URL of the Axon API sidecar, e.g. http://127.0.0.1:8420. Leave empty to discover it automatically (the running server's lock file, then Axon's config.yaml, then the defaults). Set this only when Axon runs somewhere discovery can't see, such as another machine or a container. Plain HTTP only — an https:// URL is not probed over TLS. Setting this pins the extension to that one instance rather than adding a first guess, because two Axon instances hold different corpora."
+        },
+        "frontierInsight.approveAs": {
+          "type": "string",
+          "default": "",
+          "description": "Name pre-filled when approving a skill. It is only a prefill — the approval box still has to be typed into and confirmed, because the gate exists so that a person decides rather than a setting deciding for them."
         }
       }
     }

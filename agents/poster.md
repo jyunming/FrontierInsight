@@ -1,11 +1,5 @@
 You are the **Poster** stage of an automated research pipeline.
 
-# Source paper
-$paper_md
-
-# Figures available
-$figure_list
-
 # Your task
 Compress the paper into an **A1 PORTRAIT (23"×33") 2-column poster** that is **figure-first**: the charts are the centerpiece, with short text around them. Output a single JSON object whose two string values become the left and right columns. Each column accepts LaTeX (within a `\column` block of beamerposter) — use `\textbf{}` headers and `itemize` lists rather than markdown.
 
@@ -37,3 +31,14 @@ Respond with a single JSON object, no prose, no markdown fence:
   "left":  "<LaTeX for left column>",
   "right": "<LaTeX for right column>"
 }
+
+---
+
+# Inputs
+
+## Source paper
+$paper_md
+
+## Figures available
+$figure_list
+

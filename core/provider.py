@@ -157,6 +157,251 @@ class _CliSpec:
     # turn at 1,048,576 chars; we sit under it to leave room for codex's own
     # system prompt + tool schema wrapped around our instructions.
     max_input_chars: int | None = None
+    # Optional transform applied to the prompt just before it is written to
+    # stdin. Needed by CLIs whose stdin is a structured stream rather than
+    # raw text: antigravity reads one NDJSON envelope per turn and rejects a
+    # bare string. ``None`` writes the prompt unchanged.
+    stdin_encoder: Callable[[str], str] | None = None
+    # Pull real token usage out of the CLI's own output. Several CLIs report
+    # what they actually consumed — including the system prompt and tool
+    # schema they wrap around ours, which the char-count estimator cannot
+    # see and which dominates the total. Returning None means "this CLI does
+    # not report usage", and the estimator stays in charge.
+    usage_extractor: Callable[[str], dict[str, Any] | None] | None = None
+    # Environment variables to clear for this CLI's subprocess, and the one
+    # variable whose presence means the user chose the env path deliberately
+    # and we must not touch anything.
+    #
+    # Copilot resolves credentials COPILOT_GITHUB_TOKEN > GH_TOKEN >
+    # GITHUB_TOKEN > its own stored login, so any ambient GITHUB_TOKEN
+    # silently outranks `copilot /login`. That variable is normally present
+    # for git and gh, where a repo-scoped fine-grained PAT is the usual
+    # thing to have -- and such a PAT has no "Copilot Requests" permission,
+    # so the call comes back 401 with a message about the token being
+    # invalid or expired. The login it displaced was working the whole time.
+    #
+    # Diagnosed the hard way: identical calls succeeded from a shell and
+    # failed from the quest process, through four rounds of ruling out auth,
+    # model, prompt size, prompt content, concurrency, cwd and binary path.
+    # Only a shim recording the child's environment showed the token.
+    env_unset: tuple[str, ...] = ()
+    env_unset_override: str | None = None
+
+
+def _child_env(spec: _CliSpec) -> dict[str, str] | None:
+    """The environment for a CLI subprocess, or None to inherit unchanged.
+
+    Only ``spec.env_unset`` is removed, and only when the spec's override
+    variable is absent -- setting that variable is how a user says "I mean
+    to authenticate through the environment", and then nothing is touched.
+    """
+    if not spec.env_unset:
+        return None
+    if spec.env_unset_override and os.environ.get(spec.env_unset_override):
+        return None
+    present = [k for k in spec.env_unset if k in os.environ]
+    if not present:
+        return None
+    env = dict(os.environ)
+    for key in present:
+        env.pop(key, None)
+    _log.info(
+        "cleared %s for the %s subprocess so its own stored login is used; "
+        "set %s to authenticate through the environment instead",
+        ", ".join(present), spec.argv[0], spec.env_unset_override,
+    )
+    return env
+
+
+def _encode_antigravity_stdin(prompt: str) -> str:
+    """Wrap a prompt as one antigravity stream-json turn.
+
+    ``agy`` will not take a prompt on stdin as plain text — ``-p ""`` is
+    rejected with *empty prompt*. Its only stdin path is
+    ``--input-format stream-json``, which reads one NDJSON envelope per line
+    and requires an ``event`` field; a bare string in ``message`` fails to
+    unmarshal.
+
+    This matters more than it looks. The alternative is passing the prompt in
+    argv like ``copilot_cli`` does, and on Windows that puts the whole prompt
+    under the ~8 KB command-line ceiling — which is why ``copilot_cli`` has to
+    trim heavily and is documented as a poor fit for FI's long nodes. Going
+    through stdin removes the ceiling entirely.
+    """
+    return json.dumps({
+        "event": "user",
+        "message": {"role": "user", "content": prompt},
+    }, ensure_ascii=False) + "\n"
+
+
+def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
+    """Real token counts from claude's ``result`` event.
+
+    Claude splits its input three ways — ``input_tokens`` is only what was
+    neither cached nor being cached, with ``cache_creation_input_tokens`` and
+    ``cache_read_input_tokens`` carrying the rest. On a one-word prompt those
+    were 2, 19807 and 15749: reporting the 2 as "the prompt" would understate
+    the call by four orders of magnitude, so the prompt total is the sum and
+    the cache split is kept alongside it.
+
+    That differs from codex and antigravity, where ``input_tokens`` is the
+    whole input and the cache figure is a subset of it. The shapes are not
+    interchangeable, which is why each CLI needs its own reader rather than
+    one generic "find a usage object" pass.
+
+    ``total_cost_usd`` is reported by the CLI itself and is carried through —
+    it is the only provider that supplies it, and a real figure beats FI's
+    per-token estimate.
+    """
+    for line in reversed(raw.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if evt.get("type") != "result":
+            continue
+        u = evt.get("usage") or {}
+        if not u:
+            return None
+        fresh = int(u.get("input_tokens") or 0)
+        cache_write = int(u.get("cache_creation_input_tokens") or 0)
+        cache_read = int(u.get("cache_read_input_tokens") or 0)
+        out = int(u.get("output_tokens") or 0)
+        prompt = fresh + cache_write + cache_read
+        measured: dict[str, Any] = {
+            "prompt_tokens": prompt,
+            "completion_tokens": out,
+            "total_tokens": prompt + out,
+            "cached_input_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+            "thinking_tokens": int(
+                (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0
+            ),
+            "estimated": False,
+        }
+        cost = evt.get("total_cost_usd")
+        if isinstance(cost, (int, float)):
+            measured["cost_usd_reported"] = float(cost)
+        return measured
+    return None
+
+
+def _extract_codex_usage(raw: str) -> dict[str, Any] | None:
+    """Real token counts from codex's ``turn.completed`` event.
+
+    codex emits this on stdout under ``--json`` while the assistant's answer
+    goes to the ``--output-last-message`` file, so the two are read from
+    different places.
+
+    The gap this closes is not a rounding difference. On a one-word prompt
+    the char-count estimator reported 7 tokens and codex reported 20,953 —
+    the rest being the system prompt and tool schema codex wraps around every
+    call, which the estimator cannot see. A cost or budget figure built on
+    the estimate is wrong by orders of magnitude.
+
+    ``cached_input_tokens`` is a subset of ``input_tokens``, not an addition,
+    so it is carried alongside rather than summed.
+    """
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if evt.get("type") != "turn.completed":
+            continue
+        u = evt.get("usage") or {}
+        if not u:
+            return None
+        inp = int(u.get("input_tokens") or 0)
+        out = int(u.get("output_tokens") or 0)
+        return {
+            "prompt_tokens": inp,
+            "completion_tokens": out,
+            "total_tokens": inp + out,
+            "cached_input_tokens": int(u.get("cached_input_tokens") or 0),
+            "cache_write_tokens": int(u.get("cache_write_input_tokens") or 0),
+            "reasoning_tokens": int(u.get("reasoning_output_tokens") or 0),
+            "estimated": False,
+        }
+    return None
+
+
+def _extract_antigravity_usage(raw: str) -> dict[str, Any] | None:
+    """Real token counts from antigravity's ``result`` event.
+
+    Worth having because the char-count estimator is not slightly wrong here,
+    it is wrong by orders of magnitude: on a one-word prompt the estimator
+    reported 7 tokens while the CLI reported ~10,900, the difference being
+    the system prompt and tool schema it wraps around ours on every call.
+    Cost and budget conclusions drawn from the estimate are meaningless.
+
+    ``cache_read_tokens`` is reported separately and is *part of* the input
+    rather than additional to it, so it is carried alongside rather than
+    summed — adding it would double-count the cheapest tokens in the call.
+    """
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if evt.get("event") != "result":
+            continue
+        u = (evt.get("result") or {}).get("usage") or {}
+        if not u:
+            return None
+        inp = int(u.get("input_tokens") or 0)
+        out = int(u.get("output_tokens") or 0)
+        return {
+            "prompt_tokens": inp,
+            "completion_tokens": out,
+            "total_tokens": int(u.get("total_tokens") or (inp + out)),
+            "cached_input_tokens": int(u.get("cache_read_tokens") or 0),
+            "thinking_tokens": int(u.get("thinking_tokens") or 0),
+            "estimated": False,
+        }
+    return None
+
+
+def _extract_antigravity_response(raw: str) -> str:
+    """Pull the assistant text out of antigravity's event stream.
+
+    The stream is NDJSON: an ``init`` event carrying the tool catalogue,
+    optional progress events, then a ``result`` event holding the answer. The
+    init event is large and irrelevant, so scanning for ``result`` is both
+    cheaper and more robust than assuming a position.
+
+    A non-SUCCESS result is raised rather than returned: the CLI reports
+    failures *inside* a 0-exit-status envelope, so silently returning the
+    empty ``response`` field would surface a model failure as an empty
+    completion, which the pipeline would then treat as a valid answer.
+    """
+    err = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if evt.get("event") != "result":
+            continue
+        res = evt.get("result") or {}
+        if str(res.get("status", "")).upper() == "SUCCESS":
+            return str(res.get("response") or "")
+        err = str(res.get("error") or "") or "antigravity reported a non-SUCCESS result"
+    if err:
+        raise RuntimeError(f"antigravity: {err}")
+    return raw.strip()
 
 
 _CLI_SPECS: dict[str, _CliSpec] = {
@@ -179,6 +424,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         ),
         pass_prompt_via="stdin",
         output_via="stream_json",
+        usage_extractor=lambda raw: _extract_claude_usage(raw),
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
     ),
     "codex_cli": _CliSpec(
@@ -189,9 +435,14 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # Manager and any other local process listing. stdout is the
         # agent log (token counts, tool calls); the final assistant
         # message is written to the file passed via --output-last-message.
-        argv=("codex", "exec"),
+        # ``--json`` turns stdout into JSONL carrying a ``turn.completed``
+        # event with the real token counts. The answer still comes from the
+        # --output-last-message file, so the two coexist: verified that both
+        # flags together return the answer AND the usage envelope.
+        argv=("codex", "exec", "--json"),
         pass_prompt_via="stdin",
         output_via="last_message_file",
+        usage_extractor=lambda raw: _extract_codex_usage(raw),
         model_flag="-m",        # provider.model = "gpt-5.5"; default reads ~/.codex/config.toml
         # codex `turn/start` rejects input over 1,048,576 chars with
         # ``input_too_large``. Sit ~150K under to leave room for codex's
@@ -219,6 +470,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="arg",
         output_via="stdout",
         model_flag="--model",   # provider.model = "gpt-5.2"
+        # See _CliSpec.env_unset: an ambient GITHUB_TOKEN outranks the
+        # copilot login and 401s if it lacks "Copilot Requests".
+        env_unset=("GITHUB_TOKEN", "GH_TOKEN"),
+        env_unset_override="COPILOT_GITHUB_TOKEN",
         # Prompt is passed as a command-line ARG, so on Windows the whole
         # command line is subject to the cmd.exe limit (~8191 chars) — copilot
         # ships as `copilot.BAT` and a long design/write prompt (with
@@ -245,6 +500,43 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         output_via="stdout",
         output_extractor=lambda raw: _extract_gemini_response(raw),
         model_flag="-m",        # provider.model = "gemini-3-pro"
+    ),
+    "antigravity_cli": _CliSpec(
+        # Google Antigravity (`agy`). Non-interactive via ``--print``, but
+        # unlike codex/claude it will NOT read a bare prompt from stdin —
+        # ``-p ""`` is rejected outright. Its stdin path is the stream-json
+        # input format, which takes one NDJSON envelope per turn; see
+        # ``_encode_antigravity_stdin``. That is worth the extra encoding
+        # step because the alternative (prompt in argv, as ``copilot_cli``
+        # does) caps the prompt at the Windows ~8 KB command-line limit.
+        #
+        # ``--dangerously-skip-permissions`` is deliberately NOT passed. FI
+        # asks this CLI for text completion, not for agentic work, so there
+        # is nothing to auto-approve — and handing a coding agent blanket
+        # tool permission to save a prompt round-trip is the wrong trade.
+        argv=(
+            "agy", "--print", "",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            # agy's own print-mode timeout defaults to 5 minutes, and when it
+            # fires the process exits rc=1 with an EMPTY stderr — there is no
+            # message saying what happened. FI's inactivity watchdog is longer,
+            # so it sits waiting while the child has already given up, and the
+            # quest dies with an unexplained transient error.
+            #
+            # Observed: an `execute_reflect` turn (failing code + traceback +
+            # repair instructions) ran 311s and was killed by agy at its 5m
+            # mark. Raised well past FI's own ceilings so FI's timeouts stay
+            # the ones that decide, and a slow node fails with a diagnosis
+            # instead of a bare rc=1.
+            "--print-timeout", "30m",
+        ),
+        pass_prompt_via="stdin",
+        stdin_encoder=lambda p: _encode_antigravity_stdin(p),
+        output_via="stdout",
+        output_extractor=lambda raw: _extract_antigravity_response(raw),
+        usage_extractor=lambda raw: _extract_antigravity_usage(raw),
+        model_flag="--model",   # provider.model = e.g. "gemini-3-pro"
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -873,6 +1165,7 @@ async def _run_cli(
     post_eof_reap_timeout_s: float = 60.0,
     heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     node: str = "",
+    usage_out: dict[str, Any] | None = None,
 ) -> str:
     """Spawn the CLI and collect its response. Three output modes:
 
@@ -957,15 +1250,23 @@ async def _run_cli(
         argv.append(prompt)
         stdin_bytes: bytes | None = None
     else:  # stdin
-        stdin_bytes = prompt.encode("utf-8")
+        payload = spec.stdin_encoder(prompt) if spec.stdin_encoder else prompt
+        stdin_bytes = payload.encode("utf-8")
 
-    # When the real answer lands in `tmp_out_path`, the CLI's stdout is
-    # just an agent log; capturing it into a PIPE for a long prompt
-    # wastes memory. Drop it. stderr stays piped so we can include its
-    # tail in error messages.
+    # When the real answer lands in `tmp_out_path`, the CLI's stdout is just
+    # an agent log; capturing it into a PIPE for a long prompt wastes memory,
+    # so it is dropped. stderr stays piped so we can include its tail in
+    # error messages.
+    #
+    # Unless the spec reads usage out of that log. codex reports what it
+    # actually consumed in a `turn.completed` event on stdout, and that is
+    # the only place the real number exists: the char-count estimator sees
+    # only the prompt FI sent, not the system prompt and tool schema codex
+    # wraps around it, which is most of the input. Measured on a one-word
+    # prompt — estimator 7 tokens, codex 20,953.
     stdout_target = (
         asyncio.subprocess.DEVNULL
-        if spec.output_via == "last_message_file"
+        if spec.output_via == "last_message_file" and spec.usage_extractor is None
         else asyncio.subprocess.PIPE
     )
 
@@ -983,6 +1284,7 @@ async def _run_cli(
                 ),
                 stdout=stdout_target,
                 stderr=asyncio.subprocess.PIPE,
+                env=_child_env(spec),
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -1004,6 +1306,7 @@ async def _run_cli(
                 post_eof_reap_timeout_s=post_eof_reap_timeout_s,
                 heartbeat_cb=heartbeat_cb,
                 node=node,
+                usage_out=usage_out,
             )
         # Legacy ``communicate()`` path for everything else
         # (codex_cli's ``last_message_file``, plus gemini_cli /
@@ -1015,7 +1318,7 @@ async def _run_cli(
         # tests that mock ``proc.communicate()`` keep working.
         return await _collect_via_communicate(
             proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
-            heartbeat_cb=heartbeat_cb, node=node,
+            heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
         )
     finally:
         if tmp_out_path is not None:
@@ -1039,6 +1342,7 @@ async def _collect_via_communicate(
     *,
     heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     node: str = "",
+    usage_out: dict[str, Any] | None = None,
 ) -> str:
     """Legacy ``communicate()`` path. Two sub-cases:
 
@@ -1103,11 +1407,28 @@ async def _collect_via_communicate(
                 f"{argv[0]} exited rc={proc.returncode}: "
                 f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
             )
+        raw_stdout = (stdout_b or b"").decode("utf-8", errors="replace")
         if spec.output_via == "last_message_file":
             assert tmp_out_path is not None
             content = tmp_out_path.read_text(encoding="utf-8", errors="replace")
         else:
-            content = (stdout_b or b"").decode("utf-8", errors="replace")
+            content = raw_stdout
+        # Usage is read from STDOUT, not from `content`.
+        #
+        # For most CLIs those are the same thing. For codex they are not: the
+        # answer arrives in the --output-last-message file while the token
+        # counts arrive as a `turn.completed` event on stdout. Reading usage
+        # from `content` would parse the assistant's prose looking for a
+        # usage envelope, find none, and fall back to the estimate — silently,
+        # since a missing reading is indistinguishable from a CLI that does
+        # not report one.
+        if usage_out is not None and spec.usage_extractor is not None:
+            try:
+                _measured = spec.usage_extractor(raw_stdout)
+            except Exception:  # noqa: BLE001 - accounting never fails a call
+                _measured = None
+            if _measured:
+                usage_out.update(_measured)
         if spec.output_extractor is not None:
             content = spec.output_extractor(content)
         final = content.strip()
@@ -1141,6 +1462,7 @@ async def _collect_via_streaming(
     post_eof_reap_timeout_s: float,
     heartbeat_cb: Callable[[dict[str, Any]], None] | None,
     node: str,
+    usage_out: dict[str, Any] | None = None,
 ) -> str:
     """Read the child's stdout line-by-line with two independent
     timeouts (total + inactivity) and emit periodic heartbeats.
@@ -1155,6 +1477,7 @@ async def _collect_via_streaming(
     last_activity = start
     stop = asyncio.Event()
     aggregated: list[str] = []
+    raw_result_lines: list[str] = []
     # Running counter so the heartbeat doesn't recompute
     # ``sum(len(s) for s in aggregated)`` on every 1-s tick (that
     # would be O(N²) in stream length). Always updated in lock-step
@@ -1188,6 +1511,14 @@ async def _collect_via_streaming(
                 return  # EOF
             last_activity = time.monotonic()
             if spec.output_via == "stream_json":
+                # Keep the raw ``result`` envelope: the usage counts live
+                # there, and `aggregated` holds only assembled text by the
+                # time the extractor runs. Without this the streaming CLIs
+                # silently stay on the char-count estimate.
+                if usage_out is not None and spec.usage_extractor is not None:
+                    raw_line = line.decode("utf-8", errors="replace")
+                    if '"type"' in raw_line and '"result"' in raw_line:
+                        raw_result_lines.append(raw_line)
                 text_delta, thinking_inc, err, is_result = (
                     _parse_stream_json_line(line)
                 )
@@ -1322,7 +1653,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
-            return _finalise_stream_content(aggregated, spec)
+            return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         # No output AND no exit — genuinely stuck.
         await _kill_and_reap(proc, spec.argv[0])
         stderr_b = b""
@@ -1363,7 +1694,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
-            return _finalise_stream_content(aggregated, spec)
+            return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         stderr_b = b""
         if proc.stderr is not None:
             try:
@@ -1381,10 +1712,15 @@ async def _collect_via_streaming(
         raise _CliTransientError(
             f"{spec.argv[0]} stream error: {error_message[:500]}"
         )
-    return _finalise_stream_content(aggregated, spec)
+    return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
 
 
-def _finalise_stream_content(aggregated: list[str], spec: _CliSpec) -> str:
+def _finalise_stream_content(
+    aggregated: list[str],
+    spec: _CliSpec,
+    usage_out: dict[str, Any] | None = None,
+    raw_lines: list[str] | None = None,
+) -> str:
     """Concatenate streamed text, apply per-spec extractor, and
     apply the rate-limit-pattern guard. Centralised so all three
     streaming return paths get the same protection — without this,
@@ -1394,6 +1730,17 @@ def _finalise_stream_content(aggregated: list[str], spec: _CliSpec) -> str:
     events instead of an error envelope, and the engine wrote it to
     disk as if it were the assistant's answer."""
     content = "".join(aggregated)
+    # Read usage from the RAW output, before the extractor narrows it to the
+    # assistant text — the usage lives in the envelope the extractor discards.
+    if usage_out is not None and spec.usage_extractor is not None:
+        # The envelope, not the assembled prose — see the capture above.
+        source = "\n".join(raw_lines) if raw_lines else content
+        try:
+            measured = spec.usage_extractor(source)
+        except Exception:  # noqa: BLE001 - accounting must never fail a call
+            measured = None
+        if measured:
+            usage_out.update(measured)
     if spec.output_extractor is not None and spec.output_via != "stream_json":
         content = spec.output_extractor(content)
     final = content.strip()
@@ -1939,6 +2286,13 @@ class LLMClient:
                 messages, model_override=model, temperature=temperature,
                 node=node,
             )
+            # The extension counts with the model's own tokenizer when it
+            # can, which beats the char/4 estimate — take it, and let the
+            # estimator fill in only when it could not.
+            bridge = getattr(self, "_bridge", None)
+            measured = getattr(bridge, "last_usage", None) if bridge else None
+            if measured:
+                self.last_usage = measured
             self._fill_usage_estimate_if_missing(messages, text)
             return text
         body: dict[str, Any] = {
@@ -2282,14 +2636,23 @@ class LLMClient:
                     if (attempt_no >= 2 and fallback_model)
                     else primary_model
                 )
-                return await _run_cli(
+                measured: dict[str, Any] = {}
+                text = await _run_cli(
                     spec, prompt,
                     model=effective_model,
                     timeout_s=effective_total_timeout,
                     inactivity_timeout_s=effective_inactivity,
                     heartbeat_cb=self._heartbeat_cb,
                     node=node,
+                    usage_out=measured,
                 )
+                # A real reading from the CLI beats the char-count estimate,
+                # and by a wide margin: these CLIs wrap our prompt in their
+                # own system prompt and tool schema, which is most of the
+                # input and which the estimator cannot see at all.
+                if measured:
+                    self.last_usage = measured
+                return text
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
 
 
