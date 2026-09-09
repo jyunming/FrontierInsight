@@ -123,15 +123,41 @@ def discover(skills_dir: Path | None = None) -> list[Skill]:
     return fs + [s for s in _from_entry_points() if s.name not in seen]
 
 
-def run_selftest(skill: Skill, *, timeout_s: int = SELFTEST_TIMEOUT_S) -> tuple[bool, str]:
+def run_selftest(skill: Skill, *, timeout_s: int | None = None) -> tuple[bool, str]:
     """Run the skill's own check. Returns (passed, combined output).
 
     A missing self-test is not a pass — see ``evaluate``. This function
     only reports what happened when one exists.
+
+    ``timeout_s`` defaults to a ceiling that scales with how many scripts
+    a GENERATED selftest bundles, not a flat constant. A generated test
+    probes every bundled script with its own ``--help`` timeout (see
+    ``scaffold.PER_SCRIPT_PROBE_TIMEOUT_S``); a flat outer ceiling that
+    doesn't grow with script count kills a multi-script selftest before
+    every script gets its full per-script allowance, which orphans
+    whichever probe subprocess was still running at that moment (observed
+    live: a 5-script skill where several scripts ignore `--help` and run
+    their demo instead reliably blew a flat 120s outer ceiling, each time
+    leaving that script's subprocess running with nothing left to kill
+    it — a real, reproducible resource leak, not a one-off). A hand-written
+    selftest has no such structural reason to be slow, so scriptless /
+    few-script skills still get the original flat floor.
     """
     script = skill.file(SELFTEST_PY)
     if not script.is_file():
         return False, "no selftest.py"
+
+    if timeout_s is None:
+        scripts_dir = skill.path / "scripts"
+        script_count = (
+            sum(1 for p in scripts_dir.rglob("*.py") if p.is_file())
+            if scripts_dir.is_dir() else 0
+        )
+        from core.skills.scaffold import PER_SCRIPT_PROBE_TIMEOUT_S
+        timeout_s = max(
+            SELFTEST_TIMEOUT_S,
+            script_count * (PER_SCRIPT_PROBE_TIMEOUT_S + 5) + 20,
+        )
 
     env = dict(os.environ)
     # The skill directory on the path so selftest.py can import skill.py

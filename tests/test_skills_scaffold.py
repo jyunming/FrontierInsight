@@ -335,6 +335,100 @@ def test_generated_selftest_fails_on_a_broken_script(tmp_path: Path) -> None:
     assert "tool.py" in out
 
 
+def test_generated_selftest_resolves_nested_sibling_imports(tmp_path: Path) -> None:
+    """A script two directories deep that imports a sibling package a level
+    up (``from helpers import x`` when ``helpers/`` sits next to ``scripts/``,
+    not next to the script itself) must not fail -- Python only puts the
+    invoked script's own directory on sys.path by default, so this failed
+    with ModuleNotFoundError before the probe started adding ancestor
+    directories to PYTHONPATH. Reproduces the real xlsx skill's layout
+    (scripts/office/validators/docx.py importing scripts/office/helpers/)."""
+    d = tmp_path / "nested"
+    (d / "scripts" / "helpers").mkdir(parents=True)
+    (d / "scripts" / "validators").mkdir(parents=True)
+    (d / "SKILL.md").write_text("# nested\n", encoding="utf-8")
+    (d / "scripts" / "helpers" / "__init__.py").write_text(
+        "def safe_extract():\n    pass\n", encoding="utf-8"
+    )
+    (d / "scripts" / "validators" / "docx.py").write_text(
+        "import argparse\n"
+        "from helpers import safe_extract\n"
+        "if __name__ == '__main__':\n"
+        "    argparse.ArgumentParser().parse_args()\n",
+        encoding="utf-8",
+    )
+    scaffold.generate_selftest(d, "nested")
+
+    from core.skills.registry import run_selftest
+
+    passed, out = run_selftest(Skill(name="nested", path=d))
+    assert passed, out
+    assert "present and loadable" in out
+
+
+def test_generated_selftest_tolerates_a_relative_import_submodule(tmp_path: Path) -> None:
+    """A file using `from . import x` cannot be run standalone by Python's
+    own import semantics, no matter what's on PYTHONPATH -- it raises
+    "attempted relative import with no known parent package" for a
+    correctly-installed package just as readily as a broken one. That
+    message must land in the lenient "unprobed" bucket, not "failures"."""
+    d = tmp_path / "relimport"
+    (d / "scripts").mkdir(parents=True)
+    (d / "SKILL.md").write_text("# relimport\n", encoding="utf-8")
+    (d / "scripts" / "_sibling.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (d / "scripts" / "submodule.py").write_text(
+        "from . import _sibling\n", encoding="utf-8"
+    )
+    scaffold.generate_selftest(d, "relimport")
+
+    from core.skills.registry import run_selftest
+
+    passed, out = run_selftest(Skill(name="relimport", path=d))
+    assert passed, out
+    assert "submodule.py" in out  # listed under "did not answer --help"
+
+
+def test_generated_selftest_treats_a_help_timeout_as_unprobed_not_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script that runs long enough to hit the --help probe's timeout has
+    already imported everything it needs -- a genuinely missing dependency
+    fails within milliseconds, not after the full timeout window. Verified
+    by calling the generated module's main() directly with subprocess.run
+    patched to raise TimeoutExpired, rather than actually waiting out a real
+    60s timeout in the test suite.
+
+    Patches via the `monkeypatch` fixture (auto-restored at test end) rather
+    than a raw `mod.subprocess.run = ...` assignment -- `import subprocess`
+    inside the generated module binds to the SAME process-wide module
+    object every other caller uses, so an unrestored raw assignment leaks
+    into every later test's `subprocess.run` calls in this session (caught
+    live: it broke run_selftest()'s OWN subprocess.run in two unrelated
+    tests below, each instantly "timing out" instead of actually running)."""
+    d = tmp_path / "slowdemo"
+    (d / "scripts").mkdir(parents=True)
+    (d / "SKILL.md").write_text("# slowdemo\n", encoding="utf-8")
+    (d / "scripts" / "demo.py").write_text(
+        "import time\ntime.sleep(9999)\n", encoding="utf-8"
+    )
+    selftest_path = scaffold.generate_selftest(d, "slowdemo")
+
+    import importlib.util
+    import subprocess as real_subprocess
+
+    spec = importlib.util.spec_from_file_location("generated_selftest", selftest_path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    def fake_run(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        raise real_subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 60))
+
+    monkeypatch.setattr(real_subprocess, "run", fake_run)
+    rc = mod.main()
+    assert rc == 0
+
+
 def test_a_scriptless_skill_says_it_proved_nothing(tmp_path: Path) -> None:
     """The honest edge of the user's choice.
 
