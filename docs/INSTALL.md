@@ -235,7 +235,36 @@ machine:
 points `HF_HOME` at the local cache. Both the in-process knowledge layer
 and the Axon sidecar honour them, so no model load ever touches the
 network. The env-var form applies across the CLI, web UI, and VSCode
-extension identically.
+extension identically. Skill-relevance ranking (the domain-tag matching
+that keeps a growing skill library from becoming every quest's candidate
+list) loads the same embedding model through a separate call path and
+honours `FI_OFFLINE` the same way — it loads from the local cache rather
+than skipping the model, so domain-tagged skills keep working on topic
+relevance offline too, falling back to lexical-only matching only if the
+model genuinely isn't cached.
+
+**What this does *not* cover:**
+
+- **A quest's generated experiment code.** The `execute` node installs
+  whatever packages the LLM's code declares (`pip install`, into a fresh,
+  fully isolated per-quest venv — it does not inherit this interpreter's
+  site-packages, so even an already-installed package is fetched again)
+  with no offline/mirror support today. A simulation-based quest on a
+  genuinely air-gapped box will fail this step. Two ways around it:
+  - Use `--analyze <data-dir>` / `engine.no_simulation: true` for
+    analysis of data you already have — that path never generates or
+    runs code, so it never calls `pip install`.
+  - Set `engine.web_derived_plots: false` if using the no-simulation path
+    and you'd rather skip figures than risk the smaller `pip install` the
+    `web_plots` node does on its own (it degrades to a figure-less paper
+    on failure rather than aborting the quest either way).
+- **A local LLM provider genuinely needs no network once its model is
+  pulled.** Verified directly: a local Ollama model, once `ollama pull`ed,
+  makes zero outbound connections during inference (checked with
+  `Get-NetTCPConnection` across a full load-and-generate call — every
+  connection stays on `127.0.0.1`). `provider: ollama` pointed at a local
+  (not `-cloud`-suffixed) model tag is the one provider path that's
+  network-free end to end.
 
 ## VSCode extension
 
