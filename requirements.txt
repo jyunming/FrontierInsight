@@ -67,6 +67,14 @@ pypdf>=4.0
 # when it's absent, so this is optional but strongly recommended.
 trafilatura>=1.8
 
+# pandoc, as a pip-installable binary. paper.pdf needs pandoc (markdown ->
+# LaTeX) and on a locked-down host the user often cannot run an installer or
+# edit PATH. `pypandoc_binary` bundles a real pandoc executable inside
+# site-packages, and `generation/_pandoc.py:find_pandoc` finds it after a
+# system pandoc and `tools/pandoc[.exe]`, so a system install still wins when
+# present. Cross-platform: the project ships wheels for Windows/macOS/Linux.
+pypandoc_binary>=1.13
+
 # ---- Dev / test ----------------------------------------------------------
 # Used by `python -m pytest`. Not strictly required for runtime FI usage.
 

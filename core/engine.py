@@ -6018,7 +6018,8 @@ class Engine:
         # Lazy import to avoid pulling generation/* into the engine
         # module just for a pre-flight; engine imports stay small.
         from generation.paper import PaperGenerator
-        pandoc_exe = shutil.which("pandoc")
+        from generation._pandoc import find_pandoc
+        pandoc_exe = find_pandoc()
         # ``PaperGenerator._find_pdf_engine`` is an instance method but
         # doesn't touch ``self.config`` for its lookup. Instantiate a
         # cheap one for the engine discovery.
@@ -6059,6 +6060,9 @@ class Engine:
         recipe = (
             "Install pandoc: Windows `winget install --id JohnMacFarlane.Pandoc`, "
             "macOS `brew install pandoc`, Linux via package manager. "
+            "No-admin alternative (any OS): `pip install pypandoc_binary` — it "
+            "ships a real pandoc and FI finds it automatically; or drop the "
+            "portable pandoc binary into `tools/`. "
             "For the LaTeX engine, the no-admin path is "
             "`python launch.py --install-tectonic` (drops a 70 MB binary "
             "into `tools/`); standard alternative is MiKTeX/TeX Live."

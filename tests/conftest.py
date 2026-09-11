@@ -49,3 +49,25 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "FI_SKILLS_APPROVALS", str(empty.parent / "approvals.json"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_pandoc_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``find_pandoc`` answerable by ``shutil.which`` alone in tests.
+
+    ``generation/_pandoc.find_pandoc`` deliberately looks past PATH — into
+    ``tools/pandoc[.exe]`` and then pypandoc's bundled binary — so a
+    locked-down host can render paper.pdf with nothing but ``pip``. That is
+    right for production and wrong for the suite: the many tests that
+    simulate "no pandoc" by patching ``shutil.which`` would otherwise pass or
+    fail based on whether ``pypandoc_binary`` happens to be installed on the
+    machine running them, which is the same machine-dependence the
+    ``FI_SKILLS_DIR`` fixture above exists to remove.
+
+    Neutralising the pypandoc tier by default keeps ``shutil.which`` the
+    single lever for those tests. Tests that specifically cover the new tiers
+    call ``generation._pandoc`` helpers directly, so they are unaffected.
+    """
+    monkeypatch.setattr(
+        "generation._pandoc._pypandoc_pandoc", lambda: None, raising=False,
+    )
