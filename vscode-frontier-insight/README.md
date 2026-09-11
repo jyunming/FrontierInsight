@@ -289,6 +289,15 @@ PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
 ingested as real full text. You can also pre-load a folder of papers via
 `knowledge.local_papers` (a directory is scanned recursively).
 
+Open-access sources never trigger that pause. An arXiv / PMC / preprint
+paper that came back abstract-only means FI's *download* failed — the
+host is usually unreachable behind a proxy or firewall — not that the
+paper costs money. Stopping to ask you to buy a free paper would be
+nonsense, so those are logged as a warning and listed in a separate
+"Open access — FI's download failed" section of `WANTED_PAPERS.md` as a
+manual fallback (a browser often succeeds where the agent's HTTP client
+is blocked). Fixing the network is the real fix.
+
 Before pausing, `auto_collect_data` runs:
 
 1. Knowledge retrieval against `topic + design.hypothesis` — Axon

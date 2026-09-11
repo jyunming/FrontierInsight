@@ -2185,11 +2185,33 @@ class Engine:
             self.config.pauses.papers
             and not _papers_dir_has_files(self.quest_root)
         ):
-            needed = [d for d in docs if _is_abstract_only(d)]
-            if needed:
-                _write_paper_need_stubs(
-                    self.quest_root, needed, self._log, query=_lit_query(state),
+            abstract_only = [d for d in docs if _is_abstract_only(d)]
+            # Split the genuinely paywalled from open-access sources we simply
+            # failed to fetch. Only the former justify stopping the quest to
+            # ask a person for help: an arXiv/PMC paper we could not download
+            # is OUR network problem, and a pause that asks the user to fetch
+            # a free paper is both confusing and usually futile (the same host
+            # is behind the same proxy). The OA ones are still listed in
+            # WANTED_PAPERS.md as a manual fallback -- a browser often works
+            # where httpx does not -- but they never trigger the pause.
+            oa_unfetched = [d for d in abstract_only if _is_open_access(d)]
+            needed = [d for d in abstract_only if not _is_open_access(d)]
+            if oa_unfetched:
+                self._log.warning(
+                    "[literature] %d open-access source(s) (arXiv/PMC/preprint) "
+                    "came back abstract-only -- full-text fetch failed for "
+                    "sources that are free to download. This usually means "
+                    "the host is unreachable (proxy/firewall), not a paywall. "
+                    "Listed in WANTED_PAPERS.md as a manual fallback; not "
+                    "pausing the quest for them.",
+                    len(oa_unfetched),
                 )
+            if needed or oa_unfetched:
+                _write_paper_need_stubs(
+                    self.quest_root, needed, self._log,
+                    query=_lit_query(state), oa_unfetched=oa_unfetched,
+                )
+            if needed:
                 self._pause_for_human(
                     kind="papers",
                     interaction="supply",
@@ -8075,6 +8097,34 @@ def _extract_pdf_text(path: Path) -> str:
 _ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
 
 
+def _is_open_access(doc: "RetrievedDoc") -> bool:
+    """True when the source is freely downloadable without a subscription.
+
+    arXiv / PMC / bioRxiv / medRxiv are open access by construction, and
+    OpenAlex reports an explicit ``open_access`` flag we preserve on the doc.
+
+    This is deliberately separate from :func:`_is_abstract_only`. That
+    predicate answers "did we end up with only an abstract?", which stays
+    true for an arXiv paper whose full-text fetch failed — the doc really is
+    abstract-only. What changes is what the pause gate does with it: asking a
+    person to hand-download an arXiv PDF is asking them to work around a
+    FETCH failure (blocked network, proxy, TLS interception), not a paywall,
+    and the request reads as nonsense to anyone who knows arXiv is free.
+    """
+    md = doc.metadata or {}
+    if md.get("open_access") is True:
+        return True
+    if md.get("arxiv_id") or md.get("pmcid"):
+        return True
+    if str(md.get("doi") or "").startswith("10.1101/"):  # bioRxiv / medRxiv
+        return True
+    url = str(md.get("url") or "").lower()
+    return any(
+        host in url for host in
+        ("arxiv.org", "ncbi.nlm.nih.gov/pmc", "biorxiv.org", "medrxiv.org")
+    )
+
+
 def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     """Heuristic: a doc is abstract-only if the retriever explicitly
     set ``metadata.abstract_only`` to truthy OR the content is short
@@ -8217,20 +8267,29 @@ def _rank_papers_by_relevance(
 
 def _write_wanted_papers_md(
     quest_root: Path, ranked: list["RetrievedDoc"], *, topic: str,
+    oa_unfetched: list["RetrievedDoc"] | None = None,
 ) -> None:
     """Write a single human-friendly, RANKED ``needs/WANTED_PAPERS.md`` —
     most relevant first, each with a download link, what it's about, and the
-    open-access status — so the user can grab the few that matter."""
+    open-access status — so the user can grab the few that matter.
+
+    ``oa_unfetched`` lists open-access sources whose full text FI failed to
+    download. They are reported separately and never counted as paywalled:
+    conflating the two produces the nonsensical request "please go download
+    this arXiv paper for me"."""
     lines = [
         f"# Papers to download — {topic[:120].strip()}",
         "",
-        "The agent found these papers relevant but could only get the "
-        "abstract; no open-access full text was reachable. Download the ones "
-        "that matter — **most relevant first** — drop the PDFs into "
-        "`inputs/papers/`, then re-run the quest. You don't have to get them "
-        "all; even the top few sharpen the research.",
-        "",
     ]
+    if ranked:
+        lines += [
+            "The agent found these papers relevant but could only get the "
+            "abstract; no open-access full text was reachable. Download the ones "
+            "that matter — **most relevant first** — drop the PDFs into "
+            "`inputs/papers/`, then re-run the quest. You don't have to get them "
+            "all; even the top few sharpen the research.",
+            "",
+        ]
     for i, doc in enumerate(ranked, 1):
         md = doc.metadata or {}
         title = _paper_display_title(md, f"paper-{i}")
@@ -8251,6 +8310,38 @@ def _write_wanted_papers_md(
             "subscription) — manual download needed"
         )
         lines.append("")
+    if oa_unfetched:
+        lines += [
+            "",
+            "---",
+            "",
+            "## Open access — FI's download failed",
+            "",
+            f"These {len(oa_unfetched)} source(s) are **free to read** (arXiv / "
+            "PMC / preprint servers), so they are NOT paywalled. FI tried to "
+            "fetch the full text and could not — usually the host is "
+            "unreachable from this machine (proxy, firewall, or TLS "
+            "interception), which is a network problem rather than something "
+            "you need to buy or request.",
+            "",
+            "The quest was **not** paused for these. Fixing the network "
+            "connection is the real fix and lets FI fetch them itself next "
+            "run. Listed here only because a browser often succeeds where the "
+            "agent's HTTP client is blocked — if you want them in this run, "
+            "download and drop them into `inputs/papers/` like the others.",
+            "",
+        ]
+        for i, doc in enumerate(oa_unfetched, 1):
+            md = doc.metadata or {}
+            title = _paper_display_title(md, f"oa-paper-{i}")
+            lines.append(f"### {i}. {title}")
+            link = _paper_resolve_link(md)
+            if link:
+                lines.append(f"- **Get it (free):** {link}")
+            gist = _paper_gist(doc.content or "", md)
+            if gist:
+                lines.append(f"- **What it's about:** {gist}")
+            lines.append("")
     lines.append(
         "Drop the PDFs into `inputs/papers/` (any subfolder works), then "
         f"`fi --resume {quest_root.name}`."
@@ -8269,6 +8360,7 @@ def _write_paper_need_stubs(
     log: logging.Logger,
     *,
     query: str = "",
+    oa_unfetched: list["RetrievedDoc"] | None = None,
 ) -> None:
     """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with the
     metadata FI knows (title, authors, DOI, URL, source) so the user can
@@ -8281,7 +8373,10 @@ def _write_paper_need_stubs(
     needs_dir.mkdir(parents=True, exist_ok=True)
     papers_dir.mkdir(parents=True, exist_ok=True)
     needed = _rank_papers_by_relevance(needed, query)
-    _write_wanted_papers_md(quest_root, needed, topic=query or quest_root.name)
+    oa_ranked = _rank_papers_by_relevance(list(oa_unfetched or []), query)
+    _write_wanted_papers_md(
+        quest_root, needed, topic=query or quest_root.name, oa_unfetched=oa_ranked,
+    )
     readme = papers_dir / "README.md"
     if not readme.exists():
         try:

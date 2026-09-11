@@ -134,7 +134,11 @@ execution:
   timeout_s: 600
 
 knowledge:
-  enabled: false            # set true after installing Axon
+  enabled: true             # master switch for ALL retrieval (Axon +
+                            # academic + web). Leave it TRUE even without
+                            # Axon: the Axon corpus is used only if
+                            # installed, but false kills web + academic
+                            # search too, leaving the quest no literature.
   # Air-gapped machines: ship the embedding + reranker models once with
   # `python launch.py --export-models <dir>`, copy <dir> over, then set
   # the two knobs below (or the FI_MODELS_DIR / FI_OFFLINE env vars) so
@@ -174,7 +178,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
 | **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
-| **literature** | SUPPLY | download the paywalled papers it lists | `pauses.papers: true` |
+| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` |
 | **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
 | **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
@@ -314,6 +318,7 @@ High-quality content is the foundation of the research, so the fetch layer works
 
 - **Clean extraction.** Pages run through `trafilatura` (when installed) to isolate the article body and drop nav / menus / reference cruft; a built-in extractor is the fallback.
 - **Open-access full-text cascade.** For an academic source (PMC, a DOI, a preprint, a major publisher) FI resolves the `PMCID` / `DOI` / arXiv-id and pulls the clean open-access full text directly — preferring the **PMC BioC API** (section-labelled, no HTML cruft), then **Europe PMC**, the **preprint** server (arXiv / bioRxiv / medRxiv), **Unpaywall** (every OA location, repository copies first), and **Semantic Scholar** / **CORE** when a key is set.
+- **Open access is never treated as paywalled.** An arXiv / PMC / bioRxiv / medRxiv source (or anything OpenAlex reports as `is_oa`) that came back abstract-only means FI's *download* failed, not that the paper costs money — typically the host is unreachable behind a proxy or firewall. Those never trigger the `pauses.papers` stop: asking a person to hand-fetch a free arXiv PDF is asking them to work around a network fault. They are logged as a WARNING and listed in a separate "Open access — FI's download failed" section of `needs/WANTED_PAPERS.md`, since a browser often succeeds where the agent's HTTP client is blocked. The quest pauses only when something is *genuinely* paywalled.
 - **Walls rejected, not stored.** reCAPTCHA / "checking your browser" interstitials and paywall / abstract-only stubs (detected via a schema.org `isAccessibleForFree` / paywall-vendor check) are discarded; the real search snippet is kept instead of challenge garbage, and the cascade above is tried for the genuine full text.
 - **Relevance-selected excerpts.** Full text is stored uncapped on disk, but each node's prompt gets the passages most relevant to the question — so a number buried mid-document reaches the writer, not just the abstract.
 
