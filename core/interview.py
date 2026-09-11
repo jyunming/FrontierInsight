@@ -209,10 +209,10 @@ REVIEW_PANELS: tuple[Choice, ...] = (
 
 
 KNOWLEDGE_CHOICES: tuple[Choice, ...] = (
-    Choice(False, "Disabled (recommended for first runs)",
-           "Literature retrieval falls back to free public sources (arXiv, OpenAlex, Crossref) when needed."),
-    Choice(True, "Enabled (requires Axon installed)",
-           "Use the Axon corpus for retrieval + write-back. Skip if you haven't set Axon up."),
+    Choice(False, "Disabled — turns OFF all retrieval",
+           "Master switch: no Axon, no academic search (arXiv/OpenAlex/Crossref), and no web search. The quest runs on the model's own knowledge only."),
+    Choice(True, "Enabled (recommended)",
+           "Turns retrieval ON. Axon is used as the corpus only if installed — academic + web search work either way, so enable this even without Axon."),
 )
 
 
@@ -558,7 +558,7 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="web_research",
         label="Web research",
-        prompt="Search the public web for current sources and download them into the quest's data/literature/ folder. Runs for simulation AND observational quests, on top of academic retrieval. Independent of the Axon knowledge layer above.",
+        prompt="Search the public web for current sources and download them into the quest's data/literature/ folder. Runs for simulation AND observational quests, on top of academic retrieval. Does NOT require Axon, but it does require the knowledge layer above to be Enabled — that setting is the master switch for all retrieval.",
         kind="single",
         choices=WEB_RESEARCH_CHOICES,
         default=True,

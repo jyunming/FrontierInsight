@@ -258,11 +258,17 @@ metrics. Survey mode is auto-suggested for "history/evolution/overview
 of X" topics and can also be turned on by the clarify step.
 
 The `/new` interview also has a **Web research** question (on by
-default, independent of the Axon knowledge layer): when on, the
-literature node searches the public web (Brave / DuckDuckGo) and
-**downloads every retrieved source to `outputs/<id>/data/literature/`**
-— for *every* quest, simulation and observational alike, not just the
-no-simulation path. Turn it off to rely on academic sources only.
+default): when on, the literature node searches the public web
+(Brave / DuckDuckGo) and **downloads every retrieved source to
+`outputs/<id>/data/literature/`** — for *every* quest, simulation and
+observational alike, not just the no-simulation path. Turn it off to
+rely on academic sources only.
+
+Web research does **not** require Axon to be installed, but it does
+require the **Knowledge layer** question to be *Enabled*: that setting
+is a master switch, and turning it off disables Axon, academic search
+(arXiv / OpenAlex / Crossref) **and** web search together — leaving the
+quest with no literature at all.
 
 When a source is fetched, FI works to get **real full text**, not a
 two-sentence snippet: HTML is cleaned with `trafilatura`; reCAPTCHA
