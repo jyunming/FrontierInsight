@@ -2087,25 +2087,76 @@ class Engine:
             )
         else:
             query = (chosen.get("title") or "") + " " + state["topic"][:200]
-        docs = await self.knowledge.asearch(
-            query.strip(),
-            top_k=self.config.knowledge.top_k,
-            # The literature node is the one path that explicitly wants
-            # broad external retrieval when Axon misses — pass the
-            # config's external cap so a web miss returns ~20 abstracts
-            # instead of being silently capped at the Axon top_k.
-            external_top_k=self.config.knowledge.external_top_k,
-            chosen_idea=chosen,
-            chat_fn=functools.partial(self._chat_messages, node="source_router"),
-        )
+        async def _retrieve(q: str) -> list:
+            return await self.knowledge.asearch(
+                q.strip(),
+                top_k=self.config.knowledge.top_k,
+                # The literature node is the one path that explicitly wants
+                # broad external retrieval when Axon misses — pass the
+                # config's external cap so a web miss returns ~20 abstracts
+                # instead of being silently capped at the Axon top_k.
+                external_top_k=self.config.knowledge.external_top_k,
+                chosen_idea=chosen,
+                chat_fn=functools.partial(self._chat_messages, node="source_router"),
+            )
+
+        docs = await _retrieve(query)
         # Relevance floor: drop off-topic sources the retriever returned before
         # they reach the corpus. This is the ONLY relevance filter on the
         # literature path — the LLM guard runs only under auto_collect, which
         # survey / simulation quests skip — so without this a humanities topic
         # carries e.g. change-point-math papers into analyze/write. Scored vs
         # the raw topic; fail-open + never-starve (see _filter_docs_by_relevance).
-        docs = self._filter_docs_by_relevance(
-            (state.get("topic") or "").strip() or query, docs)
+        rel_topic = (state.get("topic") or "").strip() or query
+        stats: dict = {}
+        filtered = self._filter_docs_by_relevance(rel_topic, docs, stats=stats)
+
+        # Re-search with different keywords when the whole retrieval missed.
+        # ``above_floor == 0`` means not one source cleared the threshold on
+        # its own merits and only never-starve retention kept anything — a
+        # symptom of a badly-worded query, not of a topic with no literature.
+        # Proceeding here is what produces "it gave me three irrelevant
+        # papers": min_keep pads the set and the writer treats the padding as
+        # evidence. Retrying with the model's alternative phrasings is the
+        # principled fix. Bounded, and skipped when unscored (see config).
+        kn = self.config.knowledge
+        tried_queries = [query.strip()]
+        if kn.requery_on_low_relevance and stats.get("scored") and docs:
+            attempt = 0
+            while stats.get("above_floor", 0) == 0 and attempt < kn.requery_max:
+                attempt += 1
+                alt = await self._propose_literature_queries(
+                    rel_topic, tried_queries, docs,
+                )
+                if not alt:
+                    self._log.info(
+                        "[literature] requery %d: no alternative query proposed; "
+                        "keeping the original results", attempt,
+                    )
+                    break
+                self._log.info(
+                    "[literature] requery %d/%d: nothing cleared the relevance "
+                    "floor (best cosine=%.2f) — retrying with %r",
+                    attempt, kn.requery_max, stats.get("best", 0.0), alt,
+                )
+                tried_queries.append(alt)
+                more = await _retrieve(alt)
+                if not more:
+                    continue
+                # Merge rather than replace: the first pass may still hold the
+                # single on-topic hit, and dedup happens downstream anyway.
+                docs = docs + more
+                stats = {}
+                filtered = self._filter_docs_by_relevance(
+                    rel_topic, docs, stats=stats,
+                )
+            if stats.get("above_floor", 0) > 0 and attempt:
+                self._log.info(
+                    "[literature] requery succeeded after %d retry(ies): "
+                    "%d doc(s) now clear the floor",
+                    attempt, stats.get("above_floor", 0),
+                )
+        docs = filtered
         # Keep the FULL fetched text (no truncation): it lands uncapped on
         # disk under data/literature/ for audit, and the prompt builders
         # relevance-select the passages each node needs (see
@@ -2937,7 +2988,51 @@ class Engine:
             )
         return kept
 
-    def _filter_docs_by_relevance(self, topic: str, docs: list) -> list:
+    async def _propose_literature_queries(
+        self, topic: str, tried: list[str], missed: list,
+    ) -> str:
+        """Ask for ONE better search query after a retrieval missed entirely.
+
+        Shows the model what was already tried and a sample of what came back,
+        so it can tell "wrong vocabulary" (the usual cause — a field's papers
+        use different terms than the topic statement) from "too narrow".
+        Returns "" on any failure; the caller then keeps the original results
+        rather than looping, so a flaky model degrades to today's behaviour.
+        """
+        titles = []
+        for d in missed[:6]:
+            meta = (d.get("metadata") if isinstance(d, dict) else getattr(d, "metadata", {})) or {}
+            t = str(meta.get("title") or "").strip()
+            if t:
+                titles.append(f"- {t[:120]}")
+        prompt = (
+            "A literature search returned results that are all off-topic.\n\n"
+            f"RESEARCH TOPIC:\n{topic[:600]}\n\n"
+            "QUERIES ALREADY TRIED (do not repeat these):\n"
+            + "\n".join(f"- {q[:160]}" for q in tried)
+            + "\n\nWHAT CAME BACK (all judged off-topic):\n"
+            + ("\n".join(titles) if titles else "- (no titles)")
+            + "\n\nThe likely cause is vocabulary: this field's papers may use "
+            "different terminology than the topic statement does. Propose ONE "
+            "alternative search query that uses the terms researchers in this "
+            "field would actually publish under. Prefer domain-standard terms "
+            "and spell out acronyms. Keep it under 20 words.\n\n"
+            'Reply as JSON only: {"query": "<your query>"}'
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_requery")
+            parsed = _parse_json_lenient(raw, node="literature_requery")
+            q = str((parsed or {}).get("query") or "").strip()
+        except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
+            self._log.info("[literature] requery proposal failed: %r", e)
+            return ""
+        if not q or q.lower() in {t.lower() for t in tried}:
+            return ""
+        return q[:300]
+
+    def _filter_docs_by_relevance(
+        self, topic: str, docs: list, *, stats: dict | None = None,
+    ) -> list:
         """Deterministic relevance floor for the literature node: score each
         retrieved doc by embedding cosine against the TOPIC and drop the
         off-topic tail. Unlike the LLM ``_filter_relevant_docs`` guard — which
@@ -2977,9 +3072,20 @@ class Engine:
             blobs.append(f"{title} {excerpt}".strip())
         scores = _embed_scores(blobs, str(topic or "")[:600])
         if scores is None:  # embeddings unavailable — never filter blind
+            if stats is not None:
+                stats["scored"] = False
             return docs
         order = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)
         keep_idx = {i for i in range(len(docs)) if scores[i] >= min_score}
+        if stats is not None:
+            # ``above_floor`` counts docs that cleared the threshold on their
+            # own merits, BEFORE never-starve retention pads the set back up.
+            # The requery loop needs that distinction: "3 docs kept" can mean
+            # "3 good hits" or "everything missed and min_keep held 3 back",
+            # and only the second is worth re-searching for.
+            stats["scored"] = True
+            stats["above_floor"] = len(keep_idx)
+            stats["best"] = max(scores) if scores else 0.0
         keep_idx.update(order[:max(0, min_keep)])  # never-starve retention
         kept = [d for i, d in enumerate(docs) if i in keep_idx]
         dropped = len(docs) - len(kept)

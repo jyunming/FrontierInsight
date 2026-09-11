@@ -833,6 +833,21 @@ class KnowledgeConfig(BaseModel):
     # even when all fall below ``relevance_min_score``, so a wholly-borderline
     # corpus is not emptied (the evidence_gate can then broaden instead).
     relevance_min_keep: int = Field(default=3, ge=0)
+    # Re-search with different keywords when a retrieval comes back
+    # wholly off-topic. When NO doc clears ``relevance_min_score`` on its own
+    # merits, the first query was probably worded badly -- so ask the model
+    # for alternative phrasings and search again, rather than handing the
+    # writer the ``relevance_min_keep`` least-bad hits and proceeding as if
+    # they were evidence. Each retry costs one small LLM call plus a
+    # retrieval, so it is bounded and only fires on the wholly-missed case
+    # (not on "few but good" results).
+    #
+    # Skipped entirely when embeddings are unavailable: without scores there
+    # is no signal that the query was bad, and retrying blind would just
+    # multiply cost on exactly the air-gapped machines that can least
+    # afford it.
+    requery_on_low_relevance: bool = True
+    requery_max: int = Field(default=2, ge=0, le=5)
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2

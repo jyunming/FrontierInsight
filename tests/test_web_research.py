@@ -683,3 +683,93 @@ def test_arxiv_ids_from_literature_old_and_new_style(tmp_path: Path) -> None:
     assert "2404.09143" in ids          # new-style from URL
     assert "hep-th/9701001" in ids      # old-style from URL (Copilot fix)
     assert "2210.04940" in ids          # from metadata
+
+
+# --- relevance stats + keyword requery -----------------------------------
+#
+# When a retrieval misses entirely, never-starve retention still hands the
+# writer `relevance_min_keep` least-bad docs. That is what produces "it gave
+# me three irrelevant papers". The stats out-param distinguishes "few but
+# good" from "everything missed", which is what gates the requery.
+
+
+def test_stats_reports_docs_above_floor(monkeypatch, tmp_path: Path) -> None:
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.4
+    eng.config.knowledge.relevance_min_keep = 2
+    docs = _lit_docs("a", "b", "c")
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.9, 0.1, 0.05])
+    stats: dict = {}
+    eng._filter_docs_by_relevance("t", docs, stats=stats)
+    assert stats["scored"] is True
+    assert stats["above_floor"] == 1        # only "a" cleared it on merit
+    assert stats["best"] == pytest.approx(0.9)
+
+
+def test_stats_zero_above_floor_when_all_missed(monkeypatch, tmp_path: Path) -> None:
+    """min_keep padding must NOT be counted as docs that cleared the floor."""
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.5
+    eng.config.knowledge.relevance_min_keep = 3
+    docs = _lit_docs("a", "b", "c")
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.1, 0.2, 0.05])
+    stats: dict = {}
+    kept = eng._filter_docs_by_relevance("t", docs, stats=stats)
+    assert len(kept) == 3                   # never-starve kept all three
+    assert stats["above_floor"] == 0        # but none earned their place
+
+
+def test_stats_marks_unscored_when_embeddings_absent(monkeypatch, tmp_path: Path) -> None:
+    """No scores → requery must not fire (retrying blind just costs money)."""
+    import core.passages as pmod
+    eng = _engine(tmp_path)
+    eng.config.knowledge.relevance_min_score = 0.2
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
+    stats: dict = {}
+    eng._filter_docs_by_relevance("t", _lit_docs("a"), stats=stats)
+    assert stats["scored"] is False
+    assert "above_floor" not in stats
+
+
+@pytest.mark.asyncio
+async def test_requery_proposes_alternative_query(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+
+    async def fake_chat(prompt, node=""):
+        assert node == "literature_requery"
+        assert "off-topic" in prompt
+        return '{"query": "metal oxide resist stochastic printing failure"}'
+
+    eng._chat = fake_chat
+    q = await eng._propose_literature_queries(
+        "EUV resist line edge roughness", ["euv ler"], _lit_docs("Unrelated Paper"),
+    )
+    assert q == "metal oxide resist stochastic printing failure"
+
+
+@pytest.mark.asyncio
+async def test_requery_rejects_repeat_of_tried_query(tmp_path: Path) -> None:
+    """Returning a query we already ran would loop without new information."""
+    eng = _engine(tmp_path)
+
+    async def fake_chat(prompt, node=""):
+        return '{"query": "euv ler"}'
+
+    eng._chat = fake_chat
+    assert await eng._propose_literature_queries(
+        "topic", ["EUV LER"], _lit_docs("x"),
+    ) == ""
+
+
+@pytest.mark.asyncio
+async def test_requery_degrades_to_empty_on_model_failure(tmp_path: Path) -> None:
+    """A flaky model must degrade to today's behaviour, not crash the node."""
+    eng = _engine(tmp_path)
+
+    async def boom(prompt, node=""):
+        raise RuntimeError("provider down")
+
+    eng._chat = boom
+    assert await eng._propose_literature_queries("t", ["q"], _lit_docs("x")) == ""
