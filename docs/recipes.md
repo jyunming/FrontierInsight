@@ -222,6 +222,8 @@ Installing into a possibly-shared interpreter is a real side effect, so it stays
 
 Note the cost: every skill runs its self-test, so a large library takes minutes.
 
+All three surfaces expose it, sharing one implementation so the gate cannot drift between them: the CLI flag above, **Approve all…** on the web dashboard's `/skills` page, and `@fi /approve-all-skills` in VS Code chat. Each asks for the approver every time and never remembers it — a browser session or an editor window is not a person.
+
 ### Check what this machine can actually produce
 
 ```bash

@@ -35,6 +35,7 @@
     <div class="flex items-center gap-4 flex-wrap">
       <button onclick="load(false)" class="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md">Refresh</button>
       <button onclick="load(true)" class="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md">Run self-tests</button>
+      <button onclick="approveAll()" class="px-4 py-2 rounded-lg bg-primary/20 hover:bg-primary/30 text-on-surface font-label-md">Approve all…</button>
       <span id="verified-note" class="text-body-sm text-on-surface-variant"></span>
     </div>
   </section>
@@ -168,6 +169,62 @@ async function approve(name, despite) {
     return;
   }
   if (!r.ok) { alert(d.detail || d.message || "Approval failed."); return; }
+  load(false);
+}
+
+async function approveAll() {
+  // Same gate as the single-skill path, just once: a name is still required
+  // and the server still refuses anything whose self-test fails.
+  const who = prompt(
+    "Approve every skill that passes its gates.
+
+" +
+    "Skills whose self-test fails are still refused, and high-severity " +
+    "findings are held unless you confirm them next.
+
+" +
+    "Enter your name — each approval is recorded against it:");
+  if (!who || !who.trim()) return;
+
+  const pip = confirm(
+    "Install missing Python packages first?
+
+" +
+    "A skill whose library isn't installed fails its self-test and can't be " +
+    "approved, so FI can pip-install what's missing, re-test, then approve.
+
+" +
+    "OK = install (changes this Python environment)
+" +
+    "Cancel = approve only what already passes");
+
+  const despite = confirm(
+    "Also approve skills carrying high-severity scan findings?
+
+" +
+    "These are heuristics, not verdicts — but sweeping them should be a " +
+    "decision, and it is recorded in the ledger.
+
+" +
+    "OK = include them
+Cancel = hold them for individual review");
+
+  const note = document.getElementById("verified-note");
+  if (note) note.textContent = "Approving… self-tests are running, this can take minutes.";
+
+  const r = await fetch("/api/skills/approve-all", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      approved_by: who.trim(), pip_install: !!pip, despite_findings: !!despite,
+    }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (note) note.textContent = "";
+  if (!r.ok) { alert(d.detail || d.message || "Bulk approval failed."); return; }
+  alert(`${d.approved_count} skill(s) now trusted.
+
+` + (d.report || ""));
   load(false);
 }
 

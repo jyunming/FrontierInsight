@@ -171,6 +171,62 @@ def register_skills_routes(app: FastAPI) -> None:
             "note": "Editing the skill lapses this approval.",
         })
 
+    @app.post("/api/skills/approve-all")
+    async def approve_all_skills(request: Request) -> JSONResponse:
+        """Bulk approval, same gates as the single-skill route.
+
+        Delegates to ``launch._approve_all_skills`` so the CLI, this route and
+        the VSCode panel share one implementation. A second copy of the gate
+        logic would eventually approve something the other surfaces refuse,
+        which is the failure mode the gate exists to prevent.
+
+        ``pip_install`` is what makes bulk more than a loop: a skill whose
+        library is missing fails its self-test and cannot be approved, so the
+        order has to be install -> re-test -> approve.
+        """
+        body = await request.json()
+        who = str(body.get("approved_by") or "").strip()
+        if not who:
+            raise HTTPException(
+                400,
+                "An approver's name is required — the gate exists so that a "
+                "person decides, and there is no anonymous approver.",
+            )
+
+        import io
+        from contextlib import redirect_stdout
+
+        import launch
+
+        # The shared helper reports by printing; capture it so the API can
+        # return the same summary the CLI shows rather than reimplementing it.
+        buf = io.StringIO()
+
+        def _run() -> int:
+            with redirect_stdout(buf):
+                return launch._approve_all_skills(
+                    who,
+                    despite=bool(body.get("despite_findings")),
+                    pip_install=bool(body.get("pip_install")),
+                    skip=str(body.get("skip") or ""),
+                )
+
+        rc = await asyncio.to_thread(_run)
+        report = buf.getvalue()
+
+        # Re-read state so the response describes what is NOW trusted rather
+        # than trusting the printed summary.
+        states = await asyncio.to_thread(_states, False)
+        approved = [s["name"] for s in states if s.get("status") == "trusted"]
+        return JSONResponse({
+            "ok": rc == 0,
+            "approved_by": who,
+            "approved_count": len(approved),
+            "approved": approved,
+            "report": report,
+            "note": "Editing a skill lapses its approval.",
+        })
+
     @app.post("/api/skills/{name}/revoke")
     async def revoke_skill(name: str) -> JSONResponse:
         from core.skills import approval

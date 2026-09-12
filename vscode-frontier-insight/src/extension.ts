@@ -20,6 +20,7 @@ import * as fsPromises from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
 import {
+    runApproveAllSkills,
     runApproveSkill,
     runImportSkill,
     runListSkills,
@@ -293,6 +294,10 @@ async function handleRequest(
         await runScanSkill(prompt, stream, token);
         return;
     }
+    if (cmd === "approve-all-skills") {
+        await runApproveAllSkills(prompt, stream, token);
+        return;
+    }
     if (cmd === "approve-skill") {
         await runApproveSkill(prompt, stream, token);
         return;
@@ -351,6 +356,7 @@ function helpText(): string {
         "- `@fi /skills` — list the skill library with each entry's promotion status, scan findings, and domain tags. Mirrors `python launch.py --skills`.",
         "- `@fi /scan-skill <name>` — statically review a skill before approving it: injection phrasing, hidden characters, network access, `eval`. Nothing is imported or run.",
         "- `@fi /approve-skill <name>` — approve a skill for use. Shows the review first, then asks who is approving; a high-severity finding needs an extra confirmation. Approval binds to that exact content.",
+        "- `@fi /approve-all-skills` — approve every skill that passes its gates at once, optionally pip-installing what quarantined skills are missing first. Still asks who is approving; a failing self-test is still refused.",
         "- `@fi /revoke-skill <name>` — withdraw approval, returning the skill to proposed.",
         "- `@fi /import-skill [path]` — import a skill written for another agent (Agent Skills layout). Opens a picker with no path, then asks for optional domain tags.",
         "- `@fi /teach-skill <name> <module>` — draft a skill from an installed library, reading its real signatures by introspection.",
