@@ -569,7 +569,18 @@ class EngineConfig(BaseModel):
     # a measurement. It never fails a quest: a bad pilot logs a warning naming
     # the likely cause and the full run proceeds, where execute_reflect can
     # still repair a genuine code fault with the traceback it needs.
-    pilot_run: bool = True
+    #
+    # OFF by default, unlike execute_replicates, because the two degrade
+    # differently when the generated script ignores its env var. A script that
+    # ignores FI_REPLICATE_SEED still produces valid (if correlated) results.
+    # A script that ignores FI_PILOT runs the experiment at FULL scale under a
+    # fifth of the timeout, so it times out, wastes that compute, and emits a
+    # warning that misdescribes a compliance failure as a design problem --
+    # on every quest. Honouring the var is a prompt instruction, not something
+    # the engine can enforce, so this stays opt-in until a given setup has
+    # shown its scripts comply. Turn it on per quest; the payoff is catching a
+    # wrong parameter range before paying the full timeout for it.
+    pilot_run: bool = False
     # Pilot timeout as a fraction of ``execution.timeout_s`` (floored at 30s).
     # Small on purpose -- a pilot that takes as long as the real run buys
     # nothing.
