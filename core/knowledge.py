@@ -864,7 +864,9 @@ def _ddg_search(
     return out
 
 
-def _sanitize_search_query(query: str, *, max_chars: int = 380) -> str:
+def _sanitize_search_query(
+    query: str, *, max_chars: int = 380, strip_operators: bool = False,
+) -> str:
     """Collapse a (possibly multi-line, paragraph-length) ``topic:`` into a
     single-line web-search query. Brave's API rejects embedded newlines
     with a 422 and caps query length (~400 chars); DuckDuckGo's HTML
@@ -872,6 +874,16 @@ def _sanitize_search_query(query: str, *, max_chars: int = 380) -> str:
     single spaces and trim to a word boundary under the limit, so a rich
     multi-line topic still yields real web results to fetch."""
     q = re.sub(r"\s+", " ", query or "").strip()
+    if strip_operators:
+        # Characters the scholarly APIs read as query SYNTAX rather than as
+        # text. A topic stating its model as `m * x'' + c * x' + k * x = 0`
+        # otherwise sends a bare `*` to OpenAlex, which answers 400 Bad
+        # Request and drops that source from the run entirely -- measured:
+        # the same query is accepted at 219 chars once the `*` is gone, so
+        # this is about syntax, not length. Replaced with a space rather
+        # than deleted, so `a*b` does not become the word `ab`.
+        q = re.sub(r"[*?~^\\]", " ", q)
+        q = re.sub(r"\s+", " ", q).strip()
     if len(q) <= max_chars:
         return q
     cut = q[:max_chars]
@@ -2198,6 +2210,15 @@ async def _route_external(
     """Run all requested adapters in parallel (each off the event loop)
     and merge. Returns up to top_k de-duplicated docs, preserving the
     original source-list order on collisions (first source wins)."""
+    # Every adapter below wants a SEARCH QUERY, not a topic statement. FI's
+    # `topic:` is routinely a paragraph-length block with newlines and a
+    # "GOALS:" list, and handing that over verbatim makes arXiv answer HTTP
+    # 500 and OpenAlex HTTP 400 -- so the academic pool silently collapses to
+    # whichever source happens to tolerate the blob, and the corpus fills up
+    # with whatever general web search returned instead. `_web_search` already
+    # collapsed the query for exactly this reason; doing it here covers all
+    # six academic adapters at once, and any adapter added later.
+    query = _sanitize_search_query(query, strip_operators=True)
     unknown = [s for s in sources if s not in _SOURCE_REGISTRY]
     if unknown:
         _log.warning(
@@ -2447,6 +2468,41 @@ def _render_topic_event(
     return "\n".join(lines)
 
 
+def _axon_config_from(spec: Any) -> Any:
+    """Build an ``AxonConfig`` from a config path or an inline mapping.
+
+    Axon's YAML is **nested** (``embedding: {provider:, model:}``) while
+    ``AxonConfig`` itself is a flat dataclass of ~160 fields. The nested ->
+    flat mapping, the env-var overrides (``OLLAMA_HOST``, ``VLLM_BASE_URL``,
+    ...), the removed-field warnings and the unknown-key filtering all live
+    inside ``AxonConfig.load``, which reads a *file*.
+
+    So an inline mapping is written to a temp YAML and handed to ``load``
+    rather than being splatted into the constructor. Reimplementing the
+    mapping here would duplicate logic that silently drifts every time Axon
+    renames or retires a field -- and Axon 0.5.0 retires several.
+    """
+    if isinstance(spec, (str, Path)):
+        return AxonConfig.load(str(spec))  # type: ignore[union-attr]
+
+    # A pydantic sub-model or any other mapping-ish object: normalise to
+    # plain containers first so yaml can represent it.
+    data = spec if isinstance(spec, dict) else yaml.safe_load(yaml.safe_dump(spec))
+
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="fi-axon-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
+        return AxonConfig.load(tmp)  # type: ignore[union-attr]
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:  # pragma: no cover — best effort cleanup
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Knowledge facade
 # ---------------------------------------------------------------------------
@@ -2575,14 +2631,8 @@ class Knowledge:
         _apply_offline_env(cfg)
         if cfg.axon_config is None:
             brain = AxonBrain(AxonConfig())  # type: ignore[misc]
-        elif isinstance(cfg.axon_config, Path):
-            brain = AxonBrain(AxonConfig.from_yaml(cfg.axon_config))  # type: ignore[misc]
-        elif isinstance(cfg.axon_config, dict):
-            ac = AxonConfig.model_validate(cfg.axon_config)  # type: ignore[union-attr]
-            brain = AxonBrain(ac)  # type: ignore[misc]
         else:
-            ac = AxonConfig.model_validate(yaml.safe_load(yaml.safe_dump(cfg.axon_config)))  # type: ignore[union-attr]
-            brain = AxonBrain(ac)  # type: ignore[misc]
+            brain = AxonBrain(_axon_config_from(cfg.axon_config))  # type: ignore[misc]
         # Pin the FI corpus to its own project so quest
         # write-back / retrieval doesn't mingle with whatever else
         # the user does in Axon. `default` is where AxonBrain

@@ -218,7 +218,16 @@ execution:
 
 knowledge:
   enabled: true
-  # Inline AxonConfig (or pass a path to a YAML):
+  # Inline AxonConfig (or pass a path to a YAML). Use Axon's NESTED shape
+  # as below, not its flat field names — FI hands this to AxonConfig.load,
+  # which does the nesting -> field mapping, env overrides and retired-key
+  # filtering itself.
+  #
+  # CAUTION on `embedding`: changing it on a store that already has vectors
+  # makes every search fail with `query dimension mismatch: expected 384,
+  # got 768` — embedding dimension is a property of the STORE, not of a run.
+  # Omit `embedding` to keep whatever the store was built with; only set it
+  # for a fresh store.
   axon_config:
     embedding: { provider: ollama, model: nomic-embed-text }
     llm:       { provider: ollama, model: qwen2.5-coder:32b }
