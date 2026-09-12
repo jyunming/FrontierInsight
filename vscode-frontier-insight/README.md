@@ -332,8 +332,10 @@ own files and re-run with `@fi /resume <quest_id>`.
 
 ## PDF strict mode
 
-For unattended fleet runs, add to the YAML so a missing pandoc /
-LaTeX engine fails fast at pre-flight instead of after a full quest:
+For unattended fleet runs, add to the YAML so a missing LaTeX
+engine fails fast at pre-flight instead of after a full quest.
+(pandoc itself now ships with the install, so in practice the
+LaTeX engine is the piece that goes missing):
 
 ```yaml
 output:

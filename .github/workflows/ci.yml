@@ -18,7 +18,10 @@ on:
       - "docs/**"
       - "outputs/**"
   pull_request:
-    branches: [main]
+    # Deliberately NOT filtered to `branches: [main]`. A stacked PR (one
+    # whose base is another feature branch) would otherwise run no checks
+    # at all and merge unverified, which is the opposite of what the
+    # header comment above promises. Every PR gets the fast tier.
     paths-ignore:
       - "**.md"
       - "docs/**"
