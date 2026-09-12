@@ -541,8 +541,20 @@ class EngineConfig(BaseModel):
     # in ``state['result_json_replicates']`` as a list; the analyze
     # node aggregates numeric fields with mean ± std and surfaces
     # the spread in its summary. Cost: N executions per design pass.
-    # Default 1 (no replication, current behaviour).
-    execute_replicates: int = Field(default=1, ge=1)
+    #
+    # Default 3, because a single run is not a result. A number produced
+    # once has no error bar, and a researcher reading "we ran it once" has
+    # no way to tell a real effect from a lucky seed -- so reporting it as
+    # a finding overstates what the experiment showed.
+    #
+    # This is the cheap kind of rigour: replication re-runs the generated
+    # SCRIPT only. ``implement`` is not re-invoked, so there are no extra
+    # LLM calls and no extra provider cost -- it spends local compute, and
+    # buys a mean +/- std instead of a point estimate. Wall-clock grows
+    # ~N x the execute step (bounded by ``execution.timeout_s`` each), so
+    # set 1 to opt out on a slow experiment, or higher when the measurement
+    # is noisy.
+    execute_replicates: int = Field(default=3, ge=1)
     # Generic mid-quest user-input pause point. When set, the engine
     # pauses (LangGraph ``interrupt()``) AFTER the named stage and
     # exits cleanly with rc=0; the user drops files into
