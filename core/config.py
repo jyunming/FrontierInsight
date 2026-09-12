@@ -555,6 +555,25 @@ class EngineConfig(BaseModel):
     # set 1 to opt out on a slow experiment, or higher when the measurement
     # is noisy.
     execute_replicates: int = Field(default=3, ge=1)
+    # Pilot pass: run the experiment small (``FI_PILOT=1``, which the
+    # implement prompt tells the script to honour) before running it for real.
+    #
+    # ``execute_reflect`` already repairs a script that CRASHES. It cannot
+    # catch one that runs fine and answers the wrong question -- a sweep over
+    # the wrong parameter range, a resolution too coarse to show the effect --
+    # which today costs the full timeout to discover. A researcher would run a
+    # cheap version first, check the numbers are the right order of magnitude,
+    # and only then commit the compute.
+    #
+    # The pilot's numbers are DISCARDED; it is a smoke test of the DESIGN, not
+    # a measurement. It never fails a quest: a bad pilot logs a warning naming
+    # the likely cause and the full run proceeds, where execute_reflect can
+    # still repair a genuine code fault with the traceback it needs.
+    pilot_run: bool = True
+    # Pilot timeout as a fraction of ``execution.timeout_s`` (floored at 30s).
+    # Small on purpose -- a pilot that takes as long as the real run buys
+    # nothing.
+    pilot_timeout_frac: float = Field(default=0.2, gt=0.0, le=1.0)
     # Generic mid-quest user-input pause point. When set, the engine
     # pauses (LangGraph ``interrupt()``) AFTER the named stage and
     # exits cleanly with rc=0; the user drops files into

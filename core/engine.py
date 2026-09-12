@@ -145,6 +145,13 @@ class QuestState(TypedDict, total=False):
     # additional retrievals at ``engine.max_iterations + 1``.
     literature_iter: int
     design: dict[str, Any]
+    # Every version of the design, in order. Entry 0 is the pre-registration
+    # (stated before any result existed); later entries are flagged
+    # ``post_hoc`` and carry what sent the engine back to design. `review` and
+    # `cross_check` can both re-enter design, so a hypothesis CAN legitimately
+    # be rewritten after its results are known -- but a finished paper looks
+    # identical either way, which is what makes the record necessary.
+    design_history: list[dict[str, Any]]
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -2457,6 +2464,19 @@ class Engine:
         )
 
         out: dict[str, Any] = {"design": design}
+        # Provenance for the hypothesis itself. The DAG lets `review` and
+        # `cross_check` route back here, so a design CAN be rewritten after
+        # its results are known. That iteration is legitimate research, but a
+        # paper that presents a post-hoc hypothesis as though it were
+        # pre-specified is not -- it is the thing methodologists call HARKing,
+        # and the reader has no way to detect it from the finished paper.
+        #
+        # So record every version: what it was, when, and what sent the engine
+        # back here. Nothing is blocked -- the record exists so the revision is
+        # auditable rather than invisible.
+        out["design_history"] = _append_design_revision(
+            state, design, self.quest_root, self._log,
+        )
         # Range assertions contributed by the trusted skills this quest may
         # call. Stashed in state because ``_assertion_violations`` is a
         # module-level function with no access to the engine, and the
@@ -3525,6 +3545,73 @@ class Engine:
                     "proceeding to real script anyway",
                     warmup.returncode, warmup.stderr[-200:],
                 )
+
+        # Pilot pass: run the experiment small before running it for real.
+        #
+        # ``execute_reflect`` already repairs a script that CRASHES. What it
+        # cannot catch is a script that runs fine and answers the wrong
+        # question -- a sweep over the wrong parameter range, a resolution too
+        # coarse to show the effect. Today that costs the full timeout to
+        # discover, and a researcher would never work that way: they run a
+        # cheap version, look at whether the numbers are the right order of
+        # magnitude, and only then commit the compute.
+        #
+        # ``FI_PILOT=1`` is honoured by the generated script the same way
+        # ``FI_REPLICATE_SEED`` is (the implement prompt instructs it), so
+        # this needs no separate code path in the experiment itself. The
+        # pilot's numbers are DISCARDED -- it is a smoke test of the design,
+        # not a measurement.
+        if self.config.engine.pilot_run:
+            pilot_timeout = max(
+                30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)
+            )
+            self._log.info(
+                "[execute] pilot pass (FI_PILOT=1, timeout=%ds) before the "
+                "full run", pilot_timeout,
+            )
+            pilot_env = {**(exec_env or os.environ), "FI_PILOT": "1"}
+            try:
+                pilot = await self.executor.execute(
+                    [str(py), str(code_path)],
+                    cwd=self.quest_root,
+                    timeout_s=pilot_timeout,
+                    env=pilot_env,
+                )
+            except Exception as e:  # noqa: BLE001 — a pilot must never abort the quest
+                self._log.info("[execute] pilot could not run (%r); continuing", e)
+                pilot = None
+            if pilot is not None:
+                pilot_rj = _extract_result_json(pilot.stdout)
+                if pilot.returncode != 0 or pilot_rj is None:
+                    # Not fatal: the full run still happens, and if the fault
+                    # is real, execute_reflect repairs it there with the
+                    # traceback it needs. Saying so early is the value.
+                    self._log.warning(
+                        "[execute] pilot did not produce a usable RESULT_JSON "
+                        "(rc=%s). Continuing to the full run, where "
+                        "execute_reflect can repair it. stderr_tail=%s",
+                        pilot.returncode, (pilot.stderr or "")[-300:],
+                    )
+                else:
+                    # ``_assertion_violations`` reads ``result_json`` off the
+                    # state, so hand it the PILOT's numbers rather than the
+                    # real ones (which don't exist yet) via a shallow copy.
+                    violations = _assertion_violations(
+                        {**state, "result_json": pilot_rj},
+                    )
+                    if violations:
+                        self._log.warning(
+                            "[execute] pilot produced out-of-range values: %s. "
+                            "The full run proceeds, but this usually means the "
+                            "DESIGN is wrong (parameter range, units) rather "
+                            "than the code -- worth reading before the results.",
+                            "; ".join(str(v) for v in violations[:3]),
+                        )
+                    else:
+                        self._log.info(
+                            "[execute] pilot passed: RESULT_JSON parsed and "
+                            "within declared ranges; running full scale",
+                        )
 
         # Run from quest_root so figures/ is the relative target. Wrapped in a
         # heartbeat: the experiment subprocess can run for many minutes (a
@@ -8201,6 +8288,70 @@ def _extract_pdf_text(path: Path) -> str:
 # is well above 5000 chars even when truncated. 1500 splits the two
 # comfortably without over- or under-flagging.
 _ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
+
+
+def _append_design_revision(
+    state: "QuestState", design: dict, quest_root: Path, log: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Record this version of the design, returning the full history.
+
+    A first entry is the pre-registration: the hypothesis as stated before any
+    result existed. Later entries are revisions, and each carries the reason
+    the engine came back -- ``analyze.next_step`` when cross_check re-routed,
+    or the reviewer verdict when the review loop did.
+
+    That distinction is the whole point. "The hypothesis was stated up front"
+    and "the hypothesis was rewritten after seeing the numbers" are different
+    scientific claims, and a finished paper looks identical either way. The
+    history is written to ``needs/DESIGN_HISTORY.json`` so it survives
+    alongside the quest rather than only in state.
+    """
+    prior = list(state.get("design_history") or [])
+    hypothesis = str((design or {}).get("hypothesis") or "").strip()
+
+    if not prior:
+        reason = "initial design, before any result existed"
+    else:
+        analysis = state.get("analysis") or {}
+        next_step = str(analysis.get("next_step") or "").strip()
+        verdict = str((state.get("review") or {}).get("verdict") or "").strip()
+        if next_step in ("re_experiment", "broaden_lit"):
+            reason = f"analyze.next_step={next_step} (results were seen)"
+        elif verdict:
+            reason = f"review verdict={verdict} (results were seen)"
+        else:
+            reason = "re-entered design (results were seen)"
+
+    entry = {
+        "revision": len(prior),
+        "iteration": int(state.get("iteration", 0) or 0),
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "post_hoc": bool(prior),
+        "reason": reason,
+        "hypothesis": hypothesis[:600],
+    }
+    history = prior + [entry]
+
+    if entry["post_hoc"]:
+        changed = hypothesis != str(prior[-1].get("hypothesis") or "")
+        log.warning(
+            "[design] revision %d recorded (%s)%s -- the paper's hypothesis "
+            "is being set after results were seen; DESIGN_HISTORY.json keeps "
+            "this auditable.",
+            entry["revision"], reason,
+            "; hypothesis TEXT CHANGED" if changed else "; hypothesis unchanged",
+        )
+
+    try:
+        d = quest_root / "needs"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "DESIGN_HISTORY.json").write_text(
+            json.dumps(history, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        log.debug("[design] could not write DESIGN_HISTORY.json: %r", e)
+    return history
 
 
 def _is_open_access(doc: "RetrievedDoc") -> bool:
