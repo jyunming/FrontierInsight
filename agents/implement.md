@@ -13,6 +13,17 @@ You are the **Implementation** stage of an automated research pipeline.
   Skip the `by_<factor>` key when the experiment is a single-condition run (no natural strata). Aggregate-only is correct for those; aggregate-with-fake-singleton-strata is not.
 - Keep wall-time under the wall-time limit given in the Inputs section, on a CPU.
 - No network access. No reading from outside the working directory.
+- **Honour `FI_PILOT` when present.** If the env var `FI_PILOT` is set
+  to `1`, run a deliberately CHEAP version of the same experiment: keep
+  the identical structure, metrics and `RESULT_JSON` keys, but shrink
+  whatever dominates the runtime — fewer grid points, fewer samples,
+  a shorter time span, a coarser sweep — so it finishes in roughly a
+  tenth of the normal budget. Do NOT change what is being measured or
+  the shape of the output. The engine runs this first as a smoke test
+  of the DESIGN (is the parameter range sensible? are the numbers the
+  right order of magnitude?) and discards the numbers, so a pilot that
+  silently measures something else defeats the point. When the var is
+  unset, run at full scale.
 - **Honour `FI_REPLICATE_SEED` when present.** If the env var
   `FI_REPLICATE_SEED` is set (the engine sets it on second-and-later
   replicate runs of a multi-seed experiment), read it as an integer

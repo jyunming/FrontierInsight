@@ -194,6 +194,8 @@ engine:
   ideate_reflect: true              # extra self-critique pass (1 LLM call)
   ideate_tournament: false          # pairwise tournament across brainstormed ideas; replaces ideate_reflect; C(N,2) calls in parallel
   exec_reflect_max_iterations: 3    # execute-repair loop bound
+  pilot_run: false                  # OPT-IN. Run the experiment SMALL first (FI_PILOT=1, which the implement prompt tells the script to honour), then full scale. execute_reflect already repairs a script that CRASHES; the pilot catches one that runs fine and answers the wrong question — a sweep over the wrong parameter range, a resolution too coarse to show the effect — which otherwise costs the full timeout to discover. The pilot's numbers are DISCARDED: it is a smoke test of the design, not a measurement, and it never fails a quest (a bad pilot warns and the full run proceeds). Off by default: honouring FI_PILOT is a prompt instruction the engine cannot enforce, and a script that ignores it runs full-scale under a fifth of the timeout — timing out and warning on every quest. Enable it once your scripts comply.
+  pilot_timeout_frac: 0.2           # Pilot timeout as a fraction of execution.timeout_s, floored at 30s. A pilot that takes as long as the real run buys nothing.
   cross_check_per_finding_k: 3      # per-finding lit-check hits, 0 to disable
   enable_analyze_reroute: true      # analyze can request re_experiment / broaden_lit
   review_panel:                     # empty = single reviewer

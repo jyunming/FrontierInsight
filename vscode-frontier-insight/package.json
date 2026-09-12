@@ -110,6 +110,10 @@
             "description": "Approve a skill for use. Shows the static review first, then asks who is approving. Approval binds to that exact content."
           },
           {
+            "name": "approve-all-skills",
+            "description": "Approve every skill that passes its gates at once, optionally installing the Python packages quarantined skills are missing first. Still asks who is approving."
+          },
+          {
             "name": "revoke-skill",
             "description": "Withdraw approval for a skill, returning it to proposed."
           },

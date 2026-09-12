@@ -290,6 +290,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "requires approving again. Pair with --approve-as.",
     )
     mode.add_argument(
+        "--approve-all-skills",
+        action="store_true",
+        help="Approve every skill that passes its gates, in one go. Still "
+             "needs --approve-as: bulk removes the typing, not the decision, "
+             "and the ledger records who signed off. A skill whose self-test "
+             "fails is still refused, and high-severity scan findings still "
+             "need --despite-findings. Pair with --pip-install to install "
+             "the Python packages quarantined skills are missing FIRST, then "
+             "re-test and approve -- the order a plain loop can't achieve.",
+    )
+    mode.add_argument(
         "--revoke-skill",
         metavar="NAME",
         default="",
@@ -322,6 +333,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "honestly weaker: statuses become 'as last known' rather than "
              "verified, which the output says. A self-test may take up to "
              "120s, so a large library is minutes of work.",
+    )
+    # Not a mode: it qualifies --approve-all-skills rather than standing alone.
+    p.add_argument(
+        "--skip-skills",
+        metavar="A,B",
+        default="",
+        help="Comma-separated skill names to leave alone during "
+             "--approve-all-skills. For the ones you want to review "
+             "individually rather than sweep.",
+    )
+    # Not a mode: it qualifies --approve-all-skills rather than standing alone.
+    p.add_argument(
+        "--pip-install",
+        action="store_true",
+        help="With --approve-all-skills, pip-install the packages that "
+             "quarantined skills are missing before re-testing them. A real "
+             "side effect on a possibly-shared interpreter, so it is opt-in; "
+             "without it the exact pip line is printed for you to run.",
     )
     # Not a mode: it qualifies --approve-skill rather than standing alone.
     p.add_argument(
@@ -1910,6 +1939,14 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.list_foreign_skills:
             return _list_foreign_skills()
+
+        if args.approve_all_skills:
+            return _approve_all_skills(
+                args.approve_as,
+                despite=args.despite_findings,
+                pip_install=args.pip_install,
+                skip=args.skip_skills,
+            )
 
         if args.approve_skill:
             return _approve_skill(
@@ -3793,7 +3830,10 @@ async def _why_skills(topic: str, provider_name: str, model: str) -> int:
     return 0
 
 
-def _import_skill(source: str, name: str, domains: str = "") -> int:
+def _import_skill(
+    source: str, name: str, domains: str = "",
+    pip_requires: list[str] | None = None,
+) -> int:
     """Adapt another agent's skill into FI's envelope."""
     from pathlib import Path as _P
 
@@ -3804,6 +3844,7 @@ def _import_skill(source: str, name: str, domains: str = "") -> int:
         got = importer.import_skill(
             _P(source), skills_root(), name=name,
             domains=[d for d in (domains or "").split(",") if d.strip()],
+            pip_requires=pip_requires,
         )
     except (FileNotFoundError, ValueError) as e:
         print(str(e))
@@ -4044,6 +4085,224 @@ def _scan_skill(name: str, as_json: bool = False) -> int:
     print("Nothing here was imported or executed — the files were parsed.")
     print()
     print(scan.render(scan.scan(skill)))
+    return 0
+
+
+# Module names that differ from the pip package providing them. Parsing
+# ``ModuleNotFoundError: No module named 'X'`` gives the IMPORT name, which is
+# not always installable: `pip install sklearn` installs a deprecation stub,
+# and `pip install cv2` installs an unrelated package. The import script's own
+# curated table already encodes one of these (cobrapy ships module `cobra`),
+# so the mismatch is real rather than theoretical. Anything absent here is
+# installed under its literal name and reported honestly if that fails.
+_MODULE_TO_PIP: dict[str, str] = {
+    "sklearn": "scikit-learn",
+    "cv2": "opencv-python",
+    "PIL": "pillow",
+    "yaml": "pyyaml",
+    "bs4": "beautifulsoup4",
+    "skbio": "scikit-bio",
+    "cobra": "cobrapy",
+    "Bio": "biopython",
+    "serial": "pyserial",
+    "dateutil": "python-dateutil",
+    "OpenSSL": "pyopenssl",
+    "attr": "attrs",
+    "usb": "pyusb",
+}
+
+_MISSING_MODULE_RE = re.compile(
+    r"No module named ['\"]([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE,
+)
+
+
+def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:
+    """Pip package names this skill needs, best-effort.
+
+    Two sources, in order of trust:
+
+    1. ``pip_requires`` in ``provenance.json`` -- declared, so exact.
+    2. ``ModuleNotFoundError`` lines in a failing self-test -- inferred, and
+       mapped through ``_MODULE_TO_PIP`` because the import name a traceback
+       reports is not always the installable name.
+
+    Inference exists because provenance carries no dependency key today for
+    skills imported before this landed; without it, bulk approval could not
+    help the very skills that are quarantined for a missing library.
+    """
+    out: list[str] = []
+    try:
+        declared = skill.provenance().get("pip_requires")
+    except Exception:  # noqa: BLE001 — unreadable provenance is just "none"
+        declared = None
+    if isinstance(declared, list):
+        out.extend(str(x).strip() for x in declared if str(x).strip())
+    for mod in _MISSING_MODULE_RE.findall(selftest_output or ""):
+        pkg = _MODULE_TO_PIP.get(mod, mod)
+        if pkg not in out:
+            out.append(pkg)
+    return out
+
+
+def _approve_one(skill: "Any", who: str, despite: bool, *, quiet: bool = False):
+    """Approve one skill's current content. Returns ``(outcome, detail)``.
+
+    The single and bulk entrances share this so they cannot drift: a bulk
+    path that re-implemented the gates would eventually approve something
+    ``--approve-skill`` refuses, which is the failure mode the gate exists to
+    prevent.
+
+    Outcomes: ``approved`` | ``quarantined`` | ``untested`` | ``needs_despite``
+    """
+    from core.skills import approval, evaluate
+    from core.skills.base import Status
+    from core.skills.scaffold import selftest_is_generated
+
+    state = evaluate(skill)
+    if state.status is Status.QUARANTINED:
+        return "quarantined", (state.selftest_output or "").strip()[-400:]
+    if state.status is Status.UNTESTED:
+        return "untested", "carries no selftest.py"
+
+    highs = [f for f in state.findings if f.startswith("[high")]
+    if highs and not despite:
+        return "needs_despite", f"{len(highs)} high-severity finding(s)"
+
+    generated = selftest_is_generated(skill.path)
+    note = "approved via launch.py"
+    if highs:
+        note += f" DESPITE {len(highs)} high-severity scan finding(s)"
+    if generated:
+        note += " [generated selftest]"
+    approval.approve(skill.name, skill.content_hash(), approved_by=who, note=note)
+    detail = ""
+    if highs:
+        detail = f"despite {len(highs)} high finding(s)"
+    if generated:
+        detail = (detail + "; " if detail else "") + "generated selftest"
+    return "approved", detail
+
+
+def _approve_all_skills(
+    approved_by: str,
+    *,
+    despite: bool = False,
+    pip_install: bool = False,
+    skip: str = "",
+) -> int:
+    """Approve every skill that passes its gates, optionally installing the
+    Python packages the quarantined ones are missing first.
+
+    Order matters: install -> re-test -> approve. Approving first would hit
+    the QUARANTINED refusal before an install could fix it, which is the
+    whole reason a plain loop over ``--approve-skill`` does not solve this.
+
+    Attribution and the gates are unchanged. ``--approve-as`` is still
+    required, a skill whose self-test fails is still refused, and a
+    high-severity scan finding still needs ``--despite-findings``. What bulk
+    removes is the typing, not the decision -- so the ledger note records
+    that the approval came through the bulk path.
+    """
+    # Imported lazily, matching the installer functions: launch.py keeps
+    # module-level imports minimal so --help and quest startup stay fast.
+    import subprocess
+
+    from core.skills import discover
+
+    who = (approved_by or "").strip()
+    if not who:
+        print(
+            "--approve-all-skills requires --approve-as <who>: the gate "
+            "exists so a person decides, so approvals are attributed."
+        )
+        return 2
+
+    skipped_names = {s.strip() for s in (skip or "").split(",") if s.strip()}
+    skills = [s for s in discover() if s.name not in skipped_names]
+    if not skills:
+        print("No skills found. Run --skills to see what is available.")
+        return 0
+
+    print(
+        f"Evaluating {len(skills)} skill(s). Each runs its self-test, so this "
+        f"takes a while on a large library.\n"
+    )
+
+    # ---- pass 1: evaluate, collecting what is missing -------------------
+    from core.skills import evaluate
+    from core.skills.base import Status
+
+    quarantined: list[tuple[Any, str]] = []
+    for sk in skills:
+        st = evaluate(sk)
+        if st.status is Status.QUARANTINED:
+            quarantined.append((sk, st.selftest_output or ""))
+
+    if pip_install and quarantined:
+        wanted: list[str] = []
+        for sk, out in quarantined:
+            for pkg in _pip_names_for_skill(sk, out):
+                if pkg not in wanted:
+                    wanted.append(pkg)
+        if wanted:
+            print(f"Installing packages for quarantined skills: {' '.join(wanted)}")
+            rc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", *wanted],
+            ).returncode
+            if rc != 0:
+                print(
+                    "  pip reported a failure; continuing -- skills whose "
+                    "dependency did not install will simply stay quarantined.\n"
+                )
+            print()
+        else:
+            print(
+                "No installable package names could be determined from the "
+                "quarantined skills' self-test output.\n"
+            )
+    elif quarantined and not pip_install:
+        wanted = []
+        for sk, out in quarantined:
+            for pkg in _pip_names_for_skill(sk, out):
+                if pkg not in wanted:
+                    wanted.append(pkg)
+        if wanted:
+            print(
+                f"{len(quarantined)} skill(s) fail their self-test; their "
+                f"missing packages look like:\n"
+                f"  {sys.executable} -m pip install {' '.join(wanted)}\n"
+                f"Re-run with --pip-install to have FI do that first.\n"
+            )
+
+    # ---- pass 2: approve ------------------------------------------------
+    tally: dict[str, list[str]] = {
+        "approved": [], "quarantined": [], "untested": [], "needs_despite": [],
+    }
+    for sk in skills:
+        outcome, detail = _approve_one(sk, who, despite)
+        tally[outcome].append(sk.name)
+        mark = {"approved": "OK  ", "quarantined": "FAIL",
+                "untested": "SKIP", "needs_despite": "HOLD"}[outcome]
+        line = f"[{mark}] {sk.name}"
+        if detail and outcome == "approved":
+            line += f"  ({detail})"
+        elif outcome == "needs_despite":
+            line += f"  ({detail}) -- re-run with --despite-findings"
+        elif outcome == "untested":
+            line += "  (no selftest.py; it can never be promoted)"
+        print(line)
+
+    print(
+        f"\nApproved {len(tally['approved'])} as {who}. "
+        f"{len(tally['needs_despite'])} held for findings, "
+        f"{len(tally['quarantined'])} failing self-test, "
+        f"{len(tally['untested'])} without a self-test."
+    )
+    if tally["needs_despite"]:
+        print(
+            "Read the findings before sweeping them:  "
+            f"python launch.py --scan-skill {tally['needs_despite'][0]}"
+        )
     return 0
 
 

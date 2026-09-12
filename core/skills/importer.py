@@ -94,6 +94,7 @@ def import_skill(
     name: str = "",
     overwrite: bool = False,
     domains: list[str] | None = None,
+    pip_requires: list[str] | None = None,
 ) -> Imported:
     """Bring a foreign skill into FI's envelope.
 
@@ -169,6 +170,15 @@ def import_skill(
                 "imported_at": time.strftime("%Y-%m-%d"),
                 "source_frontmatter": meta,
                 "taught_by_projects": [],
+                # Pip packages the skill's tooling needs. Declared here so the
+                # knowledge survives the import: the curated source->package
+                # mapping used to live only inside the import SCRIPT, which
+                # meant nothing downstream could tell why a skill was
+                # quarantined or what would fix it. --approve-all-skills reads
+                # this to install missing dependencies before re-testing.
+                "pip_requires": [
+                    str(x).strip() for x in (pip_requires or []) if str(x).strip()
+                ],
                 "result_assertions": [],
                 "_todo": (
                     "Imported skills carry no executable check. Add selftest.py "

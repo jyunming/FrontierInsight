@@ -12,6 +12,17 @@ A prior stage produced a structural outline for the experiment. Your job: fill i
 - **Keep `RESULT_JSON` to summary statistics, not raw arrays.** Emit scalars and small per-stratum breakdowns — never dump full image/pixel arrays or long per-sample vectors into it (those belong in the figures). Oversized result payloads get trimmed before analysis, losing detail.
 - Keep wall-time under the wall-time limit given in the Inputs section, on a CPU.
 - No network access. No reading from outside the working directory.
+- **Honour `FI_PILOT` when present.** If the env var `FI_PILOT` is set
+  to `1`, run a deliberately CHEAP version of the same experiment: keep
+  the identical structure, metrics and `RESULT_JSON` keys, but shrink
+  whatever dominates the runtime — fewer grid points, fewer samples,
+  a shorter time span, a coarser sweep — so it finishes in roughly a
+  tenth of the normal budget. Do NOT change what is being measured or
+  the shape of the output. The engine runs this first as a smoke test
+  of the DESIGN (is the parameter range sensible? are the numbers the
+  right order of magnitude?) and discards the numbers, so a pilot that
+  silently measures something else defeats the point. When the var is
+  unset, run at full scale.
 - **Honour `FI_REPLICATE_SEED` when present.** If the env var `FI_REPLICATE_SEED` is set, parse it as an integer and use it to seed every random generator the script uses (`random.seed`, `np.random.seed`, `torch.manual_seed`, etc.). When unset, fall back to a deterministic default (e.g., seed 0). The engine sets this env var on the second-and-later runs of a multi-seed replication so the analyze stage can quantify variance; without it the replicates collapse to a single point.
 - Function signatures from the outline are immutable. If you discover during implementation that a signature is unworkable, that's a structural mistake the outline should have caught — DO NOT silently change it. Surface the conflict as a comment at the top of the file (the execute_reflect loop downstream can see comments and either flag it or fix it).
 

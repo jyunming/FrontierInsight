@@ -206,6 +206,24 @@ The sections below cover each pause in more detail.
 
 ## Common things you might want next
 
+### Approve a whole skill library at once
+
+```bash
+python launch.py --approve-all-skills --approve-as <you> --pip-install
+```
+
+Approves every skill that passes its gates, in one command. Useful after `scripts/import_scientist_skills.py`, which imports ~70 skills that would otherwise need ~70 individual approvals.
+
+`--pip-install` is what makes this more than a shell loop. A skill wrapping a library FI doesn't have installed fails its self-test and is **quarantined**, and a quarantined skill cannot be approved — so looping `--approve-skill` over a fresh import just refuses most of them. Bulk approval runs **install → re-test → approve** in that order: it collects the packages the quarantined skills need (from `pip_requires` in each skill's `provenance.json`, falling back to parsing `ModuleNotFoundError` out of the failing self-test), installs them in one pip call, then re-runs the gates.
+
+Installing into a possibly-shared interpreter is a real side effect, so it stays opt-in — without the flag the exact pip line is printed for you to run.
+
+**What bulk does not relax.** `--approve-as` is still required: the ledger records who signed off, and there is still no anonymous approver. A skill whose self-test fails is still refused — approving something that provably does not work is the one case a person's sign-off shouldn't override. High-severity scan findings still need `--despite-findings`, and the ledger note records that they were swept. `--skip-skills a,b` leaves named skills out for individual review.
+
+Note the cost: every skill runs its self-test, so a large library takes minutes.
+
+All three surfaces expose it, sharing one implementation so the gate cannot drift between them: the CLI flag above, **Approve all…** on the web dashboard's `/skills` page, and `@fi /approve-all-skills` in VS Code chat. Each asks for the approver every time and never remembers it — a browser session or an editor window is not a person.
+
 ### Check what this machine can actually produce
 
 ```bash

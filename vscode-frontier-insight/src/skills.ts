@@ -320,6 +320,102 @@ export async function runApproveSkill(
     }
 }
 
+/**
+ * `@fi /approve-all-skills` — approve everything that passes its gates.
+ *
+ * Shells out to the same `--approve-all-skills` the CLI and the web dashboard
+ * use, so all three surfaces share one gate. Re-implementing the rules here
+ * would eventually approve something the other two refuse.
+ *
+ * The approver is asked every time and never auto-submitted: bulk removes the
+ * typing, not the decision. The pip question matters because a skill whose
+ * library is missing fails its self-test and therefore cannot be approved —
+ * so the order has to be install → re-test → approve.
+ */
+export async function runApproveAllSkills(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const env = resolveRepo(stream);
+    if (!env || token.isCancellationRequested) return;
+
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const who = await vscode.window.showInputBox({
+        title: "Approve all skills",
+        prompt:
+            "Every skill that passes its gates is approved against this name. " +
+            "Skills whose self-test fails are still refused.",
+        value: cfg.get<string>("approveAs") || "",
+        ignoreFocusOut: true,
+        validateInput: (v) =>
+            v.trim().length > 0
+                ? undefined
+                : "The gate exists so a person decides — there is no anonymous approver.",
+    });
+    if (!who || !who.trim()) {
+        stream.markdown("Not approved — no approver given.\n");
+        return;
+    }
+
+    const pip = await vscode.window.showQuickPick(
+        [
+            {
+                label: "$(cloud-download) Install missing packages first",
+                description: "pip-install, re-test, then approve",
+                value: true,
+            },
+            {
+                label: "$(circle-slash) Approve only what already passes",
+                description: "no changes to this Python environment",
+                value: false,
+            },
+        ],
+        { title: "Missing Python packages", ignoreFocusOut: true },
+    );
+    if (!pip) {
+        stream.markdown("Cancelled.\n");
+        return;
+    }
+
+    const despite = await vscode.window.showQuickPick(
+        [
+            {
+                label: "$(shield) Hold skills with high-severity findings",
+                value: false,
+            },
+            {
+                label: "$(warning) Include them",
+                description: "recorded in the ledger as a deliberate sweep",
+                value: true,
+            },
+        ],
+        { title: "High-severity scan findings", ignoreFocusOut: true },
+    );
+    if (!despite) {
+        stream.markdown("Cancelled.\n");
+        return;
+    }
+
+    const args = ["--approve-all-skills", "--approve-as", who.trim()];
+    if (pip.value) args.push("--pip-install");
+    if (despite.value) args.push("--despite-findings");
+
+    stream.progress("Running each skill's self-test — this can take minutes…");
+    const res = await runLaunch(env.python, env.repo, args);
+    const body = (res.stdout || res.stderr || "").slice(-3000);
+    if (res.code === 0) {
+        stream.markdown(
+            `Approved as \`${who.trim()}\`.\n\n\`\`\`\n${body}\n\`\`\`\n\n` +
+                "Editing a skill lapses its approval.\n",
+        );
+    } else {
+        stream.markdown(
+            `Bulk approval failed (exit ${res.code}):\n\n\`\`\`\n${body}\n\`\`\`\n`,
+        );
+    }
+}
+
 /** `@fi /revoke-skill <name>` — withdraw approval, returning it to proposed. */
 export async function runRevokeSkill(
     promptArgs: string,

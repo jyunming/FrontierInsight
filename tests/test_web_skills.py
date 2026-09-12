@@ -206,3 +206,49 @@ def test_editing_a_skill_lapses_a_web_approval_too(client, tmp_path: Path) -> No
     row = _by_name(client.get("/api/skills").json())["clean"]
     assert row["status"] == "proposed"
     assert "re-approval required" in row["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Bulk approval — the same ceremony, once
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_approval_requires_a_named_person(client) -> None:
+    """Doing it in bulk does not create an anonymous approver."""
+    for body in ({}, {"approved_by": ""}, {"approved_by": "   "}):
+        r = client.post("/api/skills/approve-all", json=body)
+        assert r.status_code == 400, body
+        assert "person decides" in r.json()["detail"]
+
+
+def test_bulk_approval_trusts_the_passing_skills(client) -> None:
+    r = client.post("/api/skills/approve-all", json={"approved_by": "jyunming"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True and d["approved_by"] == "jyunming"
+    assert "clean" in d["approved"]
+    assert _by_name(client.get("/api/skills").json())["clean"]["status"] == "trusted"
+
+
+def test_bulk_approval_holds_high_severity_findings(client) -> None:
+    """`risky` carries a high-severity finding, so a plain bulk sweep must
+    leave it alone — the same rule the single-skill route enforces."""
+    client.post("/api/skills/approve-all", json={"approved_by": "jyunming"})
+    states = _by_name(client.get("/api/skills").json())
+    assert states["risky"]["status"] != "trusted"
+
+
+def test_bulk_approval_can_sweep_findings_when_told(client) -> None:
+    r = client.post(
+        "/api/skills/approve-all",
+        json={"approved_by": "jyunming", "despite_findings": True},
+    )
+    assert r.status_code == 200
+    assert "risky" in r.json()["approved"]
+
+
+def test_bulk_approval_reports_what_it_did(client) -> None:
+    """The response carries the same summary the CLI prints, so the dashboard
+    doesn't have to reimplement the reporting."""
+    r = client.post("/api/skills/approve-all", json={"approved_by": "jyunming"})
+    assert "Approved" in r.json()["report"]
