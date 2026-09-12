@@ -56,7 +56,7 @@ What this does, per skill:
   2. Import via ``core.skills.importer`` — lands UNTESTED; a self-test is
      auto-generated if the source didn't ship one, same as any import.
   3. Run the static scan (``core.skills.scan``) and report the summary.
-  4. Print the exact approve command. Never runs it.
+  4. Print the exact approve command (bulk and per-skill). Never runs it.
 
 Usage:
     python scripts/import_scientist_skills.py
@@ -339,7 +339,12 @@ def main() -> int:
         skill_dir = repo_dir / rel if rel else repo_dir
         source = _resolve_source(skill_dir)
         print(f"-- {name}")
-        rc = launch._import_skill(str(source), name, domains="")
+        # Persist the curated package list into the skill's provenance so the
+        # mapping outlives this script -- `--approve-all-skills --pip-install`
+        # reads it to fix quarantined skills without re-deriving it.
+        rc = launch._import_skill(
+            str(source), name, domains="", pip_requires=list(pip_pkgs),
+        )
         imported = rc == 0
         results.append((name, imported, needs_despite, pip_pkgs))
         print()
@@ -369,8 +374,27 @@ def main() -> int:
     approve_as = "<you>"
 
     imported_count = sum(1 for _, ok, _, _ in results if ok)
-    print(f"Imported {imported_count}/{len(results)}. Nothing above was approved. Review each, then:")
-    print("Replace <you> with the name of whoever actually reviewed the skill.")
+    any_despite = any(nd for _, ok, nd, _ in results if ok)
+    print(f"Imported {imported_count}/{len(results)}. Nothing above was approved.")
+    print("Replace <you> with the name of whoever actually reviewed the skills.
+")
+    print("Review them, then approve in one go (installs missing packages first,")
+    print("re-tests, and still refuses anything whose self-test fails):")
+    despite_flag = " --despite-findings" if any_despite else ""
+    print(
+        f"  python launch.py --approve-all-skills --approve-as {approve_as} "
+        f"--pip-install{despite_flag}"
+    )
+    if any_despite:
+        print(
+            "
+  (--despite-findings is included because some of these carry "
+            "high-severity
+   scan findings. Read them first: "
+            "python launch.py --scan-skill <name>)"
+        )
+    print("
+Or one at a time:")
     for name, imported, needs_despite, _ in results:
         if not imported:
             continue
