@@ -10,10 +10,17 @@ if its CLI isn't installed:
    source of truth for the other two targets.
 2. ``marp slides.md -o slides.{html,pdf}`` — produced when the Marp
    CLI is on PATH.
-3. ``pandoc slides.md -o slides.pptx`` — produced when pandoc is on
-   PATH. Real PowerPoint file the user can open and edit in Office /
-   Google Slides / Keynote, satisfying the common "I want an
-   actual presentation, not a markdown file" use case.
+3. ``slides.pptx`` — rendered in-process by ``generation/_pptx_slides.py``
+   with python-pptx, applying the same ``fi.css`` design language as the
+   HTML/PDF deck. Real PowerPoint the user can open and edit in Office /
+   Google Slides / Keynote, satisfying the common "I want an actual
+   presentation, not a markdown file" use case.
+
+   Unlike (2) this target has NO external dependency, so it always
+   renders. It replaced a ``pandoc slides.md -o slides.pptx`` shell-out,
+   which needed pandoc on PATH — exactly what a locked-down host lacks —
+   and produced an unthemed plain-white deck that looked nothing like its
+   HTML sibling.
 
 The Marp YAML frontmatter at the top of slides.md is harmless to
 pandoc (it consumes the leading `---\\nmarp: true\\n...\\n---` block as
@@ -53,6 +60,7 @@ from core.provider import (
     model_for_node,
     resolve_endpoint_async,
 )
+from generation._pptx_slides import render_marp_to_pptx
 from generation._skip_md import render_skip_md
 
 _log = logging.getLogger("frontier_insight.slides")
@@ -222,22 +230,19 @@ class SlideGenerator:
         # an engine). A pandoc-pptx skip is logged but doesn't fan out
         # to a third diagnostic; the user still gets ``slides.md`` to
         # open in any tool they like.
-        pandoc_exe = shutil.which("pandoc")
-        if pandoc_exe is None:
-            _log.warning("pandoc not on PATH; slides.pptx skipped")
-        else:
-            pptx_path = out_dir / "slides.pptx"
-            # `--slide-level=2` makes H2 headings drive slide breaks,
-            # matching the structure the LLM produces (deck title at H1,
-            # one H2 per slide). Marp's `---` separators also become
-            # slide breaks under pandoc's default settings.
-            ok, _fail = await _run_cli(
-                [pandoc_exe, str(slides_md), "--slide-level=2",
-                 "-o", str(pptx_path)],
-                cwd=out_dir, label="pandoc pptx",
-            )
-            if ok:
-                result["slides_pptx"] = pptx_path
+        # Rendered in-process with python-pptx, applying the same fi.css
+        # design language as the HTML/PDF deck. This replaced a
+        # `pandoc slides.md -o slides.pptx` shell-out for two reasons:
+        # pandoc's built-in pptx template is unthemed (plain white Calibri),
+        # so the one artifact a colleague is most likely to open looked
+        # nothing like its siblings; and it needed pandoc on PATH, which is
+        # exactly what a locked-down host lacks. python-pptx ships with FI,
+        # so slides.pptx now always renders -- and stays editable.
+        pptx_path = out_dir / "slides.pptx"
+        if render_marp_to_pptx(
+            slides_md, pptx_path, figures_dir=out_dir / "figures",
+        ):
+            result["slides_pptx"] = pptx_path
 
         return result
 
