@@ -206,6 +206,27 @@ The sections below cover each pause in more detail.
 
 ## Common things you might want next
 
+### Check what this machine can actually produce
+
+```bash
+python launch.py --doctor
+```
+
+Reports, for each output kind, whether this host can render it and what to install if not. It calls the **same lookups the generators call** (`find_pandoc`, `find_pdf_engine`, `find_html_browser`, `find_marp`, the MiniLM loader), so a pass here predicts a real run rather than re-implementing the checks and drifting from them. No LLM calls, no network, no quest — run it before spending a pipeline, not after.
+
+This exists because only `paper_pdf` had a pre-flight; `slides` and `poster` had none, so a missing renderer surfaced only once the quest had already paid for every LLM call. It also reports whether the embedding model loaded, since without it the literature relevance floor fails open and off-topic sources reach the paper silently.
+
+No-admin installs for the gaps it finds:
+
+```bash
+python launch.py --install-tectonic     # LaTeX engine -> poster + paper.pdf (~70 MB)
+python launch.py --install-marp         # Marp CLI -> slides.html / slides.pdf
+pip install pypandoc_binary             # pandoc -> paper.pdf
+pip install sentence-transformers       # relevance filter
+```
+
+Both installers drop a standalone binary into the gitignored `tools/`, which the generators probe after PATH — so nothing needs admin rights or a PATH edit. Airgapped hosts use the `--install-tectonic-from <archive>` / `--install-marp-from <archive>` variants, installing from a file copied over by hand. The Marp binaries bundle Node, so Node is not required; note that `slides.html` needs no browser, but PDF export does (point marp at an existing one with `--browser-path` if it can't find Chromium/Edge itself).
+
 ### Bootstrap a starter set of scientist skills
 
 FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of 69 scientist-workflow skills from 11 real upstream repositories — geoscience (obspy, landlab, lasio, simpeg, ...), bioinformatics and genomics, structural and control engineering, neuroscience, numerical methods and simulation, reliability engineering, Bayesian statistics, cheminformatics and materials science, causal inference, and template-driven chart/report generation — and imports them, reproducing on a fresh machine the same sourcing step done once by hand.

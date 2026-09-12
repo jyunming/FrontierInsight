@@ -139,6 +139,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "paper analyzing it — the inverse of --proposal.",
     )
     mode.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Report which output kinds this machine can actually produce, "
+             "and what to install for the ones it can't. Checks the same "
+             "lookups the generators use (pandoc, LaTeX engine, Marp, a "
+             "Chromium-family browser, embeddings), so a pass here predicts "
+             "a real run. Costs nothing and makes no LLM calls — run it "
+             "before a quest rather than discovering a missing renderer "
+             "after paying for the whole pipeline.",
+    )
+    mode.add_argument(
+        "--install-marp",
+        action="store_true",
+        help="Download the Marp CLI standalone binary for this OS into "
+             "`tools/` so slides.html / slides.pdf render without npm or "
+             "Node. The binaries bundle Node themselves; MIT licensed. No "
+             "admin rights needed. Airgapped hosts: --install-marp-from.",
+    )
+    mode.add_argument(
+        "--install-marp-from",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="Airgapped / no-network variant of --install-marp: install from "
+             "a marp-cli release archive already on this machine (the .zip "
+             "or .tar.gz downloaded elsewhere). Same placement as "
+             "--install-marp.",
+    )
+    mode.add_argument(
         "--install-tectonic",
         action="store_true",
         help="Download the tectonic LaTeX binary (~70 MB) into "
@@ -1810,6 +1839,9 @@ async def main_async(args: argparse.Namespace) -> int:
         or getattr(args, "install_tectonic_from", None) is not None
         or getattr(args, "list_drafts", False)
         or getattr(args, "export_models", None) is not None
+        or getattr(args, "doctor", False)
+        or getattr(args, "install_marp", False)
+        or getattr(args, "install_marp_from", None) is not None
     )
     if not args.no_axon_sidecar and not _axon_inert_modes:
         from core.axon_sidecar import ensure_axon_up
@@ -1836,6 +1868,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.ingest:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
+
+        if args.doctor:
+            return _doctor()
+
+        if args.install_marp:
+            return _install_marp()
+
+        if args.install_marp_from is not None:
+            return _install_marp_from_local(args.install_marp_from)
 
         if args.install_tectonic:
             return _install_tectonic()
@@ -3007,6 +3048,307 @@ def _export_models(dest: Path) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _doctor() -> int:
+    """Report which output kinds this machine can produce, and how to fix
+    the rest. No LLM calls, no network, no quest.
+
+    The point is ordering: ``paper_pdf`` already had a pre-flight, but
+    ``slides`` and ``poster`` had none, so a missing renderer surfaced only
+    AFTER the pipeline had spent its calls. This front-loads every check.
+
+    Every probe calls the SAME function the generator calls
+    (``find_pandoc``, ``find_pdf_engine``, ``find_html_browser``,
+    ``find_marp``, ``core.passages._embed_model``) rather than
+    re-implementing the lookup. A doctor that drifts from the generators is
+    worse than none: it would report green on a machine that then fails.
+
+    Exit code is 0 even when things are missing -- "you cannot make a poster
+    here" is a successful diagnosis, not a tool failure. Only an unexpected
+    internal error returns non-zero.
+    """
+    import shutil
+
+    from generation._marp import find_marp
+    from generation._pandoc import find_pandoc
+    from generation._pdf_engine import find_pdf_engine
+    from generation._html_pdf import find_html_browser
+
+    ok_mark, no_mark = "  OK  ", " MISS "
+    lines: list[str] = []
+    fixes: list[str] = []
+
+    def row(label: str, found: object, detail: str = "") -> bool:
+        good = bool(found)
+        lines.append(
+            f"[{ok_mark if good else no_mark}] {label:<28} "
+            f"{(detail or (str(found) if good else 'not found'))[:90]}"
+        )
+        return good
+
+    print("Frontier Insight -- environment check\n")
+
+    pandoc = find_pandoc()
+    has_pandoc = row("pandoc", pandoc)
+    if not has_pandoc:
+        fixes.append(
+            "pandoc      pip install pypandoc_binary   (no admin, any OS)\n"
+            "                     or: winget install --id JohnMacFarlane.Pandoc"
+        )
+
+    engine = find_pdf_engine()
+    has_latex = row("LaTeX engine", engine, engine[1] if engine else "")
+    if not has_latex:
+        fixes.append(
+            "LaTeX       python launch.py --install-tectonic   (no admin, ~70 MB)\n"
+            "                     airgapped: --install-tectonic-from <archive>"
+        )
+
+    browser = find_html_browser()
+    has_browser = row(
+        "Chromium browser", browser, browser[1] if browser else "",
+    )
+
+    marp = find_marp()
+    has_marp = row("Marp CLI", marp)
+    if not has_marp:
+        fixes.append(
+            "Marp        python launch.py --install-marp   (no admin, no Node)\n"
+            "                     airgapped: --install-marp-from <archive>\n"
+            "                     only needed for slides.html / slides.pdf"
+        )
+
+    try:
+        from core.passages import _embed_model
+        has_embed = _embed_model() is not None
+    except Exception:  # noqa: BLE001 — a broken import is just "unavailable"
+        has_embed = False
+    row("Embeddings (MiniLM)", has_embed,
+        "all-MiniLM-L6-v2 loaded" if has_embed else "")
+    if not has_embed:
+        fixes.append(
+            "Embeddings  pip install sentence-transformers\n"
+            "                     offline: launch.py --export-models <dir> on a\n"
+            "                     connected machine, copy it, set FI_MODELS_DIR"
+        )
+
+    print("Tooling")
+    print("-" * 72)
+    print("\n".join(lines))
+
+    # ---- what that means for each artifact -----------------------------
+    print("\nOutput kinds")
+    print("-" * 72)
+
+    def kind(label: str, can: bool, why_not: str = "", note: str = "") -> None:
+        print(
+            f"[{ok_mark if can else no_mark}] {label:<28} "
+            f"{note if can else why_not}"
+        )
+
+    kind("paper_md", True, note="always available")
+    pdf_via = (
+        "pandoc + LaTeX" if (has_pandoc and has_latex)
+        else "pandoc + browser (HTML fallback)" if (has_pandoc and has_browser)
+        else ""
+    )
+    kind("paper_pdf", bool(pdf_via),
+         "needs pandoc, plus a LaTeX engine or a Chromium browser",
+         note=f"via {pdf_via}")
+    kind("poster", has_latex, "needs a LaTeX engine (poster is LaTeX-only)",
+         note="via " + (engine[1] if engine else ""))
+    # slides.pptx is rendered in-process by python-pptx, so it needs nothing.
+    kind("slides (.pptx)", True, note="rendered in-process, no binary needed")
+    kind("slides (.html/.pdf)", has_marp, "needs the Marp CLI",
+         note="via " + (marp or ""))
+
+    print("\nRetrieval quality")
+    print("-" * 72)
+    if has_embed:
+        print(f"[{ok_mark}] relevance filter active -- off-topic sources are dropped")
+    else:
+        print(
+            f"[{no_mark}] relevance filter INACTIVE -- without embeddings the "
+            "floor fails open,\n         so off-topic literature reaches the "
+            "paper and the keyword\n         re-search cannot trigger."
+        )
+
+    if fixes:
+        print("\nTo fix")
+        print("-" * 72)
+        for f in fixes:
+            print("  " + f)
+    else:
+        print("\nEverything checked is available on this machine.")
+    return 0
+
+
+# Marp CLI standalone releases. These bundle Node.js into the binary
+# ("no need to install Node.js separately" -- marp-cli README), which is the
+# whole reason this installer can exist: the documented install path is
+# `npm install -g @marp-team/marp-cli`, and a locked-down host usually has
+# neither npm nor the right to add it. MIT licensed, so redistribution and
+# vendoring are permitted.
+_MARP_VERSION = "4.5.1"
+_MARP_ASSET_NAMES: dict[tuple[str, str], str] = {
+    ("win32", "AMD64"): f"marp-cli-v{_MARP_VERSION}-win.zip",
+    ("win32", "x86_64"): f"marp-cli-v{_MARP_VERSION}-win.zip",
+    ("darwin", "arm64"): f"marp-cli-v{_MARP_VERSION}-mac.tar.gz",
+    ("darwin", "x86_64"): f"marp-cli-v{_MARP_VERSION}-mac.tar.gz",
+    ("linux", "x86_64"): f"marp-cli-v{_MARP_VERSION}-linux.tar.gz",
+    ("linux", "arm64"): f"marp-cli-v{_MARP_VERSION}-linux-arm64.tar.gz",
+}
+
+
+def _marp_exe_name() -> str:
+    return "marp.exe" if sys.platform == "win32" else "marp"
+
+
+def _place_marp_binary(archive: Path, tools_dir: Path) -> int:
+    """Extract the marp binary from ``archive`` into ``tools_dir`` atomically.
+
+    Shared by the network and airgapped installers. Mirrors the tectonic
+    placement: write to a sibling temp file, then ``os.replace`` (atomic on
+    one filesystem, Windows and POSIX alike) so an interrupted extraction
+    cannot leave a half-written ``marp`` that a later run would exec.
+    """
+    # launch.py imports these lazily inside the installer functions rather
+    # than at module scope, to keep `--help` and quest startup fast.
+    import os
+    import tarfile
+    import tempfile
+    import zipfile
+
+    exe_name = _marp_exe_name()
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    dest = tools_dir / exe_name
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".{exe_name}.partial-", dir=tools_dir)
+    os.close(tmp_fd)
+    tmp_dest = Path(tmp_path)
+    try:
+        found = False
+        if archive.name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as zf:
+                for member in zf.namelist():
+                    if Path(member).name in (exe_name, "marp", "marp.exe"):
+                        with zf.open(member) as src, open(tmp_dest, "wb") as dst:
+                            dst.write(src.read())
+                        found = True
+                        break
+        else:
+            with tarfile.open(archive) as tf:
+                for member in tf.getmembers():
+                    if member.isfile() and Path(member.name).name in (
+                        exe_name, "marp", "marp.exe",
+                    ):
+                        src = tf.extractfile(member)
+                        if src is None:
+                            continue
+                        with open(tmp_dest, "wb") as dst:
+                            dst.write(src.read())
+                        found = True
+                        break
+        if not found:
+            print(
+                f"[FI] --install-marp: no '{exe_name}' inside {archive.name}.",
+                file=sys.stderr,
+            )
+            return 1
+        if sys.platform != "win32":
+            os.chmod(tmp_dest, 0o755)
+        os.replace(tmp_dest, dest)
+    finally:
+        if tmp_dest.exists():
+            try:
+                tmp_dest.unlink()
+            except OSError:
+                pass
+
+    print(f"[FI] marp installed: {dest}")
+    print(
+        "[FI] note: slides.html needs no browser, but PDF/PPTX/PNG export "
+        "does. If no Chromium-family browser is found, point marp at one "
+        "with `--browser-path` (on Windows, Edge is already present at "
+        r"'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')."
+    )
+    return 0
+
+
+def _install_marp() -> int:
+    """Download the Marp CLI standalone binary for this OS+arch into
+    ``<repo_root>/tools/``.
+
+    Mirrors ``--install-tectonic``: no admin, no package manager, lands in a
+    gitignored ``tools/`` that the slide generator already probes. The
+    documented alternative (`npm install -g @marp-team/marp-cli`) needs Node
+    plus the right to install it globally, which is exactly what the machines
+    that lack slides also lack.
+
+    Verification is TLS-only: marp-cli publishes no SHA256SUMS asset (checked
+    against the release API), so github.com's certificate authenticates the
+    download -- the same trust model pip uses when no separate checksum
+    channel exists.
+    """
+    # Imported lazily, matching _install_tectonic: keeps `--help` and normal
+    # quest startup from paying for modules only an installer needs.
+    import platform
+    import tempfile
+    import urllib.error
+    import urllib.request
+
+    arch = platform.machine()
+    arch_norm = {
+        "aarch64": "arm64", "AMD64": "AMD64",
+        "x86_64": "x86_64", "arm64": "arm64",
+    }.get(arch, arch)
+    key = (sys.platform, arch_norm)
+    if key not in _MARP_ASSET_NAMES:
+        print(
+            f"[FI] --install-marp: unsupported platform "
+            f"({sys.platform}/{arch}). Manual download from "
+            f"github.com/marp-team/marp-cli/releases.",
+            file=sys.stderr,
+        )
+        return 1
+
+    asset_name = _MARP_ASSET_NAMES[key]
+    url = (
+        f"https://github.com/marp-team/marp-cli/releases/"
+        f"download/v{_MARP_VERSION}/{asset_name}"
+    )
+    tools_dir = Path(__file__).resolve().parent / "tools"
+
+    print(f"[FI] downloading {url}")
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive = Path(tmpdir) / asset_name
+            with urllib.request.urlopen(url, timeout=300) as r:
+                archive.write_bytes(r.read())
+            print(
+                "[FI] note: marp-cli publishes no SHA256SUMS asset; "
+                "proceeding with TLS-only trust."
+            )
+            return _place_marp_binary(archive, tools_dir)
+    except Exception as e:  # noqa: BLE001 — network/extract, report and exit
+        print(f"[FI] --install-marp failed: {e}", file=sys.stderr)
+        return 1
+
+
+def _install_marp_from_local(src: Path) -> int:
+    """Airgapped twin of ``--install-marp``: install from an archive the user
+    already copied onto the machine. No network call."""
+    src = Path(src).expanduser()
+    if not src.is_file():
+        print(f"[FI] --install-marp-from: no such file: {src}", file=sys.stderr)
+        return 1
+    tools_dir = Path(__file__).resolve().parent / "tools"
+    try:
+        return _place_marp_binary(src, tools_dir)
+    except Exception as e:  # noqa: BLE001
+        print(f"[FI] --install-marp-from failed: {e}", file=sys.stderr)
+        return 1
 
 
 def _install_tectonic() -> int:

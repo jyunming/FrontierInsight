@@ -60,6 +60,7 @@ from core.provider import (
     model_for_node,
     resolve_endpoint_async,
 )
+from generation._marp import find_marp
 from generation._pptx_slides import render_marp_to_pptx
 from generation._skip_md import render_skip_md
 
@@ -134,7 +135,7 @@ class SlideGenerator:
         # path so Windows `.cmd`/`.bat` shims work — `asyncio.create_
         # subprocess_exec` doesn't apply Windows PATHEXT, so spawning
         # bare "marp" fails on systems where marp lives as marp.CMD.
-        marp_exe = shutil.which("marp")
+        marp_exe = find_marp()
         # Security gate for --allow-local-files (see the flag's comment in
         # the render call below). That flag lets Marp read ANY local file
         # the deck references; since slides.md is LLM-authored and the repo
@@ -142,7 +143,7 @@ class SlideGenerator:
         # anything other than our own figures/, a remote URL, or a data URI.
         unsafe_refs = _disallowed_local_image_refs(slides_md)
         if marp_exe is None:
-            msg = "marp CLI not on PATH; slides.html/.pdf skipped"
+            msg = "marp CLI not found; slides.html/.pdf skipped"
             _log.warning(msg)
             marp_skip = (
                 "no_marp",
@@ -331,8 +332,12 @@ def _disallowed_local_image_refs(slides_md: Path) -> list[str]:
 
 
 _MARP_INSTALL_RECIPE = (
-    "Install the Marp CLI and ensure it lands on PATH. Recommended: "
-    "`npm install -g @marp-team/marp-cli` (requires Node.js >=14). "
+    "Install the Marp CLI. No-admin, no-Node option: "
+    "`python launch.py --install-marp` drops the standalone binary "
+    "(Node bundled, MIT licensed) into `tools/`, where FI finds it "
+    "automatically; airgapped hosts can use `--install-marp-from "
+    "<archive>`. Otherwise: `npm install -g @marp-team/marp-cli` "
+    "(requires Node.js >=14). "
     "On a first run Marp downloads a Chromium build (~150 MB) for its "
     "PDF renderer; the download happens inside `marp` itself, so kick "
     "it off once manually (`marp --version` is enough) before re-running "
