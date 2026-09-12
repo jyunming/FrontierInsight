@@ -707,7 +707,9 @@ def test_paper_pdf_skipped_md_written_when_pandoc_missing(
     # The user needs to know three things:
     assert "paper.pdf was requested but not produced" in body
     assert "no_pandoc" in body                 # reason code
-    assert "pandoc not on PATH" in body        # what happened
+    # "not found" rather than "not on PATH": the lookup also checks
+    # tools/pandoc[.exe] and pypandoc's bundled binary (generation/_pandoc.py).
+    assert "pandoc not found" in body          # what happened
     assert "winget" in body or "brew" in body or "pandoc.org" in body  # how to fix
 
     # And the result dict surfaces the diagnostic path so callers

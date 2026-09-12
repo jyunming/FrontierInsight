@@ -416,13 +416,14 @@ async def test_speech_skipped_when_kind_missing(
 
 
 @pytest.mark.asyncio
-async def test_slides_invokes_pandoc_for_pptx_when_available(
+async def test_slides_pptx_is_rendered_in_process_not_shelled_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """User feedback: 'the generated slide is not really a slide yet,
-    it's a md file. can we make it really a pptx?' — pin the new
-    pandoc invocation: argv includes pandoc + slides.md + --slide-level=2
-    + an output path ending in .pptx."""
+    it's a md file. can we make it really a pptx?' — slides.pptx is still
+    produced, but WITHOUT shelling out: it is rendered in-process by
+    generation/_pptx_slides.py with the fi.css design language, so no
+    pandoc (or any other binary) is spawned for it."""
     art = _make_artifacts(tmp_path, with_figure=False)
     cfg = _make_config(tmp_path, kinds=["slides"])
     out_dir = art.quest_root
@@ -462,12 +463,12 @@ async def test_slides_invokes_pandoc_for_pptx_when_available(
 
     result = await SlideGenerator(cfg).generate(art, out_dir)
 
-    assert any(
-        a[0].endswith("pandoc") and "--slide-level=2" in a and a[-1].endswith("slides.pptx")
-        for a in captured_argv
-    ), f"expected pandoc invocation; got {captured_argv!r}"
+    assert not any(
+        "slides.pptx" in " ".join(a) for a in captured_argv
+    ), f"slides.pptx must not shell out any more; got {captured_argv!r}"
     assert "slides_pptx" in result
     assert result["slides_pptx"] == out_dir / "slides.pptx"
+    assert result["slides_pptx"].is_file()
 
 
 @pytest.mark.asyncio
@@ -499,20 +500,26 @@ async def test_slides_spawn_failure_does_not_abort_other_targets(
         "generation.slides.asyncio.create_subprocess_exec", fake_exec,
     )
 
-    # Must NOT raise. result contains slides_md but no rendered targets.
+    # Must NOT raise. The marp targets (which DO spawn) are skipped; the
+    # pptx target is rendered in-process, so a spawn failure cannot take it
+    # down -- that independence is the point of the contract.
     result = await SlideGenerator(cfg).generate(art, out_dir)
     assert "slides_md" in result
     assert "slides_html" not in result
     assert "slides_pdf" not in result
-    assert "slides_pptx" not in result
+    assert "slides_pptx" in result
 
 
 @pytest.mark.asyncio
-async def test_slides_skips_pptx_when_pandoc_missing(
+async def test_slides_pptx_renders_without_any_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pandoc absent: the pptx branch must skip cleanly without erroring;
-    slides.md is still produced."""
+    """slides.pptx no longer needs pandoc (or any binary).
+
+    It is rendered in-process by generation/_pptx_slides.py, so with NOTHING
+    on PATH the user still gets a real, themed PowerPoint -- the whole point
+    of replacing the pandoc shell-out. marp's html/pdf targets still skip.
+    """
     art = _make_artifacts(tmp_path, with_figure=False)
     cfg = _make_config(tmp_path, kinds=["slides"])
     out_dir = art.quest_root
@@ -526,7 +533,8 @@ async def test_slides_skips_pptx_when_pandoc_missing(
 
     result = await SlideGenerator(cfg).generate(art, out_dir)
     assert "slides_md" in result
-    assert "slides_pptx" not in result
+    assert "slides_pptx" in result
+    assert result["slides_pptx"].is_file()
 
 
 # ---------- Wave 3: slides_skipped.md diagnostic (Pattern C) ----------

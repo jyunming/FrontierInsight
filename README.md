@@ -80,7 +80,8 @@ Full setup, cost trade-offs, and the billing model per provider are in **[docs/r
 
 - **Python 3.11+** — Windows / macOS / Linux, no WSL needed.
 - **One LLM provider** — Copilot (VSCode), an OpenAI / Anthropic / Gemini key, a signed-in CLI, or local Ollama.
-- *Optional:* `pandoc` for `paper.pdf`. For typeset PDFs add a LaTeX engine (MiKTeX / TeX Live, or the no-admin `--install-tectonic`); **with no LaTeX**, pandoc + any Chromium browser (Edge/Chrome) is enough — FI renders a Computer-Modern-styled PDF that matches the LaTeX look.
+- **Nothing else for `slides.pptx`** — the deck is rendered in-process, and `pandoc` now installs as a wheel alongside FI, so `paper.pdf` needs no system package either.
+- *Optional:* a LaTeX engine (MiKTeX / TeX Live, or the no-admin `--install-tectonic`) for typeset PDFs; **with no LaTeX**, any Chromium browser (Edge/Chrome) is enough — FI renders a Computer-Modern-styled PDF that matches the LaTeX look. `--install-marp` adds `slides.html` / `slides.pdf` without npm. Run `--doctor` to see what this machine has.
 - *Optional:* `pip install axon` for the knowledge layer (literature retrieval + cross-quest memory).
 
 ---

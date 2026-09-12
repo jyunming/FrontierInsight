@@ -51,10 +51,13 @@ prompts.
 # Frontier Insight itself:
 pip install --user frontier-insight
 
-# Optional system tools (per-user installs):
-winget install JohnMacFarlane.Pandoc    # for paper.pdf
+# Optional system tools (per-user installs). Note that pandoc already
+# came along with the pip install above -- a system copy is simply
+# preferred over the bundled one when both are present.
+winget install JohnMacFarlane.Pandoc     # optional; pip already bundles one
 winget install MiKTeX.MiKTeX             # for LaTeX engine (used by pandoc)
 npm install -g @marp-team/marp-cli       # for slides.html / slides.pdf
+                                         # (slides.pptx needs nothing)
 
 # One-time MiKTeX config: silence missing-package prompts so quests
 # don't pop GUI dialogs. Substitute the actual path if different.
@@ -136,14 +139,16 @@ so a wrong-arch tarball can't silently land.
 
 Each tool is OPTIONAL — Frontier Insight degrades gracefully without
 it (you'll get `paper.md` instead of `paper.pdf`, `slides.md` instead
-of `slides.html`, etc.):
+of `slides.html`, etc.). `slides.pptx` is the exception: it is rendered
+in-process and needs no system tool at all. Run `fi --doctor` to see
+what is present on this machine:
 
 | Tool | Used for | Install |
 |---|---|---|
-| pandoc | `paper.pdf`, `slides.pptx` | `winget install JohnMacFarlane.Pandoc` / `brew install pandoc` / `apt install pandoc` |
+| pandoc | `paper.pdf` (markdown → LaTeX) | **Already installed** — ships as a wheel with Frontier Insight. A system copy (`winget install JohnMacFarlane.Pandoc` / `brew install pandoc` / `apt install pandoc`) takes precedence when present. |
 | pdflatex (MiKTeX or TeX Live) | `paper.pdf`, `poster.pdf` | `winget install MiKTeX.MiKTeX` / `brew install --cask mactex` |
 | tectonic | LaTeX engine fallback (no-admin) | `fi --install-tectonic` |
-| Marp CLI | `slides.html`, `slides.pdf` | `npm install -g @marp-team/marp-cli` |
+| Marp CLI | `slides.html`, `slides.pdf` — **not** needed for `slides.pptx` | `npm install -g @marp-team/marp-cli`, or `fi --install-marp` for a standalone binary on hosts without npm |
 | Node.js | The VSCode extension build | `winget install OpenJS.NodeJS` / nvm |
 | Docker Desktop | `execution.sandbox: docker` | docker.com/products/docker-desktop |
 | Axon | Knowledge layer (literature search + cross-quest memory) | `pip install axon-rag` |
@@ -301,7 +306,7 @@ it to PATH and re-open your shell.
 
 ## Troubleshooting
 
-**"`pandoc` not on PATH"** — install pandoc (see [System tools](#system-tools)). Frontier Insight skips PDF generation gracefully when pandoc is missing; the `.md` is still produced.
+**"`pandoc` not on PATH"** — this should no longer happen: pandoc ships as a wheel with Frontier Insight and is found inside site-packages even when it is not on PATH. If you still see it, the install is incomplete — `pip install --force-reinstall pypandoc_binary`, then `fi --doctor` to confirm. The `.md` is produced either way.
 
 **"`pdflatex not found`"** during pandoc PDF compile — install MiKTeX or run `fi --install-tectonic`.
 

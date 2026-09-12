@@ -2087,25 +2087,76 @@ class Engine:
             )
         else:
             query = (chosen.get("title") or "") + " " + state["topic"][:200]
-        docs = await self.knowledge.asearch(
-            query.strip(),
-            top_k=self.config.knowledge.top_k,
-            # The literature node is the one path that explicitly wants
-            # broad external retrieval when Axon misses — pass the
-            # config's external cap so a web miss returns ~20 abstracts
-            # instead of being silently capped at the Axon top_k.
-            external_top_k=self.config.knowledge.external_top_k,
-            chosen_idea=chosen,
-            chat_fn=functools.partial(self._chat_messages, node="source_router"),
-        )
+        async def _retrieve(q: str) -> list:
+            return await self.knowledge.asearch(
+                q.strip(),
+                top_k=self.config.knowledge.top_k,
+                # The literature node is the one path that explicitly wants
+                # broad external retrieval when Axon misses — pass the
+                # config's external cap so a web miss returns ~20 abstracts
+                # instead of being silently capped at the Axon top_k.
+                external_top_k=self.config.knowledge.external_top_k,
+                chosen_idea=chosen,
+                chat_fn=functools.partial(self._chat_messages, node="source_router"),
+            )
+
+        docs = await _retrieve(query)
         # Relevance floor: drop off-topic sources the retriever returned before
         # they reach the corpus. This is the ONLY relevance filter on the
         # literature path — the LLM guard runs only under auto_collect, which
         # survey / simulation quests skip — so without this a humanities topic
         # carries e.g. change-point-math papers into analyze/write. Scored vs
         # the raw topic; fail-open + never-starve (see _filter_docs_by_relevance).
-        docs = self._filter_docs_by_relevance(
-            (state.get("topic") or "").strip() or query, docs)
+        rel_topic = (state.get("topic") or "").strip() or query
+        stats: dict = {}
+        filtered = self._filter_docs_by_relevance(rel_topic, docs, stats=stats)
+
+        # Re-search with different keywords when the whole retrieval missed.
+        # ``above_floor == 0`` means not one source cleared the threshold on
+        # its own merits and only never-starve retention kept anything — a
+        # symptom of a badly-worded query, not of a topic with no literature.
+        # Proceeding here is what produces "it gave me three irrelevant
+        # papers": min_keep pads the set and the writer treats the padding as
+        # evidence. Retrying with the model's alternative phrasings is the
+        # principled fix. Bounded, and skipped when unscored (see config).
+        kn = self.config.knowledge
+        tried_queries = [query.strip()]
+        if kn.requery_on_low_relevance and stats.get("scored") and docs:
+            attempt = 0
+            while stats.get("above_floor", 0) == 0 and attempt < kn.requery_max:
+                attempt += 1
+                alt = await self._propose_literature_queries(
+                    rel_topic, tried_queries, docs,
+                )
+                if not alt:
+                    self._log.info(
+                        "[literature] requery %d: no alternative query proposed; "
+                        "keeping the original results", attempt,
+                    )
+                    break
+                self._log.info(
+                    "[literature] requery %d/%d: nothing cleared the relevance "
+                    "floor (best cosine=%.2f) — retrying with %r",
+                    attempt, kn.requery_max, stats.get("best", 0.0), alt,
+                )
+                tried_queries.append(alt)
+                more = await _retrieve(alt)
+                if not more:
+                    continue
+                # Merge rather than replace: the first pass may still hold the
+                # single on-topic hit, and dedup happens downstream anyway.
+                docs = docs + more
+                stats = {}
+                filtered = self._filter_docs_by_relevance(
+                    rel_topic, docs, stats=stats,
+                )
+            if stats.get("above_floor", 0) > 0 and attempt:
+                self._log.info(
+                    "[literature] requery succeeded after %d retry(ies): "
+                    "%d doc(s) now clear the floor",
+                    attempt, stats.get("above_floor", 0),
+                )
+        docs = filtered
         # Keep the FULL fetched text (no truncation): it lands uncapped on
         # disk under data/literature/ for audit, and the prompt builders
         # relevance-select the passages each node needs (see
@@ -2185,11 +2236,33 @@ class Engine:
             self.config.pauses.papers
             and not _papers_dir_has_files(self.quest_root)
         ):
-            needed = [d for d in docs if _is_abstract_only(d)]
-            if needed:
-                _write_paper_need_stubs(
-                    self.quest_root, needed, self._log, query=_lit_query(state),
+            abstract_only = [d for d in docs if _is_abstract_only(d)]
+            # Split the genuinely paywalled from open-access sources we simply
+            # failed to fetch. Only the former justify stopping the quest to
+            # ask a person for help: an arXiv/PMC paper we could not download
+            # is OUR network problem, and a pause that asks the user to fetch
+            # a free paper is both confusing and usually futile (the same host
+            # is behind the same proxy). The OA ones are still listed in
+            # WANTED_PAPERS.md as a manual fallback -- a browser often works
+            # where httpx does not -- but they never trigger the pause.
+            oa_unfetched = [d for d in abstract_only if _is_open_access(d)]
+            needed = [d for d in abstract_only if not _is_open_access(d)]
+            if oa_unfetched:
+                self._log.warning(
+                    "[literature] %d open-access source(s) (arXiv/PMC/preprint) "
+                    "came back abstract-only -- full-text fetch failed for "
+                    "sources that are free to download. This usually means "
+                    "the host is unreachable (proxy/firewall), not a paywall. "
+                    "Listed in WANTED_PAPERS.md as a manual fallback; not "
+                    "pausing the quest for them.",
+                    len(oa_unfetched),
                 )
+            if needed or oa_unfetched:
+                _write_paper_need_stubs(
+                    self.quest_root, needed, self._log,
+                    query=_lit_query(state), oa_unfetched=oa_unfetched,
+                )
+            if needed:
                 self._pause_for_human(
                     kind="papers",
                     interaction="supply",
@@ -2915,7 +2988,51 @@ class Engine:
             )
         return kept
 
-    def _filter_docs_by_relevance(self, topic: str, docs: list) -> list:
+    async def _propose_literature_queries(
+        self, topic: str, tried: list[str], missed: list,
+    ) -> str:
+        """Ask for ONE better search query after a retrieval missed entirely.
+
+        Shows the model what was already tried and a sample of what came back,
+        so it can tell "wrong vocabulary" (the usual cause — a field's papers
+        use different terms than the topic statement) from "too narrow".
+        Returns "" on any failure; the caller then keeps the original results
+        rather than looping, so a flaky model degrades to today's behaviour.
+        """
+        titles = []
+        for d in missed[:6]:
+            meta = (d.get("metadata") if isinstance(d, dict) else getattr(d, "metadata", {})) or {}
+            t = str(meta.get("title") or "").strip()
+            if t:
+                titles.append(f"- {t[:120]}")
+        prompt = (
+            "A literature search returned results that are all off-topic.\n\n"
+            f"RESEARCH TOPIC:\n{topic[:600]}\n\n"
+            "QUERIES ALREADY TRIED (do not repeat these):\n"
+            + "\n".join(f"- {q[:160]}" for q in tried)
+            + "\n\nWHAT CAME BACK (all judged off-topic):\n"
+            + ("\n".join(titles) if titles else "- (no titles)")
+            + "\n\nThe likely cause is vocabulary: this field's papers may use "
+            "different terminology than the topic statement does. Propose ONE "
+            "alternative search query that uses the terms researchers in this "
+            "field would actually publish under. Prefer domain-standard terms "
+            "and spell out acronyms. Keep it under 20 words.\n\n"
+            'Reply as JSON only: {"query": "<your query>"}'
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_requery")
+            parsed = _parse_json_lenient(raw, node="literature_requery")
+            q = str((parsed or {}).get("query") or "").strip()
+        except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
+            self._log.info("[literature] requery proposal failed: %r", e)
+            return ""
+        if not q or q.lower() in {t.lower() for t in tried}:
+            return ""
+        return q[:300]
+
+    def _filter_docs_by_relevance(
+        self, topic: str, docs: list, *, stats: dict | None = None,
+    ) -> list:
         """Deterministic relevance floor for the literature node: score each
         retrieved doc by embedding cosine against the TOPIC and drop the
         off-topic tail. Unlike the LLM ``_filter_relevant_docs`` guard — which
@@ -2955,9 +3072,20 @@ class Engine:
             blobs.append(f"{title} {excerpt}".strip())
         scores = _embed_scores(blobs, str(topic or "")[:600])
         if scores is None:  # embeddings unavailable — never filter blind
+            if stats is not None:
+                stats["scored"] = False
             return docs
         order = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)
         keep_idx = {i for i in range(len(docs)) if scores[i] >= min_score}
+        if stats is not None:
+            # ``above_floor`` counts docs that cleared the threshold on their
+            # own merits, BEFORE never-starve retention pads the set back up.
+            # The requery loop needs that distinction: "3 docs kept" can mean
+            # "3 good hits" or "everything missed and min_keep held 3 back",
+            # and only the second is worth re-searching for.
+            stats["scored"] = True
+            stats["above_floor"] = len(keep_idx)
+            stats["best"] = max(scores) if scores else 0.0
         keep_idx.update(order[:max(0, min_keep)])  # never-starve retention
         kept = [d for i, d in enumerate(docs) if i in keep_idx]
         dropped = len(docs) - len(kept)
@@ -6018,7 +6146,8 @@ class Engine:
         # Lazy import to avoid pulling generation/* into the engine
         # module just for a pre-flight; engine imports stay small.
         from generation.paper import PaperGenerator
-        pandoc_exe = shutil.which("pandoc")
+        from generation._pandoc import find_pandoc
+        pandoc_exe = find_pandoc()
         # ``PaperGenerator._find_pdf_engine`` is an instance method but
         # doesn't touch ``self.config`` for its lookup. Instantiate a
         # cheap one for the engine discovery.
@@ -6059,6 +6188,9 @@ class Engine:
         recipe = (
             "Install pandoc: Windows `winget install --id JohnMacFarlane.Pandoc`, "
             "macOS `brew install pandoc`, Linux via package manager. "
+            "No-admin alternative (any OS): `pip install pypandoc_binary` — it "
+            "ships a real pandoc and FI finds it automatically; or drop the "
+            "portable pandoc binary into `tools/`. "
             "For the LaTeX engine, the no-admin path is "
             "`python launch.py --install-tectonic` (drops a 70 MB binary "
             "into `tools/`); standard alternative is MiKTeX/TeX Live."
@@ -8071,6 +8203,34 @@ def _extract_pdf_text(path: Path) -> str:
 _ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
 
 
+def _is_open_access(doc: "RetrievedDoc") -> bool:
+    """True when the source is freely downloadable without a subscription.
+
+    arXiv / PMC / bioRxiv / medRxiv are open access by construction, and
+    OpenAlex reports an explicit ``open_access`` flag we preserve on the doc.
+
+    This is deliberately separate from :func:`_is_abstract_only`. That
+    predicate answers "did we end up with only an abstract?", which stays
+    true for an arXiv paper whose full-text fetch failed — the doc really is
+    abstract-only. What changes is what the pause gate does with it: asking a
+    person to hand-download an arXiv PDF is asking them to work around a
+    FETCH failure (blocked network, proxy, TLS interception), not a paywall,
+    and the request reads as nonsense to anyone who knows arXiv is free.
+    """
+    md = doc.metadata or {}
+    if md.get("open_access") is True:
+        return True
+    if md.get("arxiv_id") or md.get("pmcid"):
+        return True
+    if str(md.get("doi") or "").startswith("10.1101/"):  # bioRxiv / medRxiv
+        return True
+    url = str(md.get("url") or "").lower()
+    return any(
+        host in url for host in
+        ("arxiv.org", "ncbi.nlm.nih.gov/pmc", "biorxiv.org", "medrxiv.org")
+    )
+
+
 def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     """Heuristic: a doc is abstract-only if the retriever explicitly
     set ``metadata.abstract_only`` to truthy OR the content is short
@@ -8213,20 +8373,29 @@ def _rank_papers_by_relevance(
 
 def _write_wanted_papers_md(
     quest_root: Path, ranked: list["RetrievedDoc"], *, topic: str,
+    oa_unfetched: list["RetrievedDoc"] | None = None,
 ) -> None:
     """Write a single human-friendly, RANKED ``needs/WANTED_PAPERS.md`` —
     most relevant first, each with a download link, what it's about, and the
-    open-access status — so the user can grab the few that matter."""
+    open-access status — so the user can grab the few that matter.
+
+    ``oa_unfetched`` lists open-access sources whose full text FI failed to
+    download. They are reported separately and never counted as paywalled:
+    conflating the two produces the nonsensical request "please go download
+    this arXiv paper for me"."""
     lines = [
         f"# Papers to download — {topic[:120].strip()}",
         "",
-        "The agent found these papers relevant but could only get the "
-        "abstract; no open-access full text was reachable. Download the ones "
-        "that matter — **most relevant first** — drop the PDFs into "
-        "`inputs/papers/`, then re-run the quest. You don't have to get them "
-        "all; even the top few sharpen the research.",
-        "",
     ]
+    if ranked:
+        lines += [
+            "The agent found these papers relevant but could only get the "
+            "abstract; no open-access full text was reachable. Download the ones "
+            "that matter — **most relevant first** — drop the PDFs into "
+            "`inputs/papers/`, then re-run the quest. You don't have to get them "
+            "all; even the top few sharpen the research.",
+            "",
+        ]
     for i, doc in enumerate(ranked, 1):
         md = doc.metadata or {}
         title = _paper_display_title(md, f"paper-{i}")
@@ -8247,6 +8416,38 @@ def _write_wanted_papers_md(
             "subscription) — manual download needed"
         )
         lines.append("")
+    if oa_unfetched:
+        lines += [
+            "",
+            "---",
+            "",
+            "## Open access — FI's download failed",
+            "",
+            f"These {len(oa_unfetched)} source(s) are **free to read** (arXiv / "
+            "PMC / preprint servers), so they are NOT paywalled. FI tried to "
+            "fetch the full text and could not — usually the host is "
+            "unreachable from this machine (proxy, firewall, or TLS "
+            "interception), which is a network problem rather than something "
+            "you need to buy or request.",
+            "",
+            "The quest was **not** paused for these. Fixing the network "
+            "connection is the real fix and lets FI fetch them itself next "
+            "run. Listed here only because a browser often succeeds where the "
+            "agent's HTTP client is blocked — if you want them in this run, "
+            "download and drop them into `inputs/papers/` like the others.",
+            "",
+        ]
+        for i, doc in enumerate(oa_unfetched, 1):
+            md = doc.metadata or {}
+            title = _paper_display_title(md, f"oa-paper-{i}")
+            lines.append(f"### {i}. {title}")
+            link = _paper_resolve_link(md)
+            if link:
+                lines.append(f"- **Get it (free):** {link}")
+            gist = _paper_gist(doc.content or "", md)
+            if gist:
+                lines.append(f"- **What it's about:** {gist}")
+            lines.append("")
     lines.append(
         "Drop the PDFs into `inputs/papers/` (any subfolder works), then "
         f"`fi --resume {quest_root.name}`."
@@ -8265,6 +8466,7 @@ def _write_paper_need_stubs(
     log: logging.Logger,
     *,
     query: str = "",
+    oa_unfetched: list["RetrievedDoc"] | None = None,
 ) -> None:
     """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with the
     metadata FI knows (title, authors, DOI, URL, source) so the user can
@@ -8277,7 +8479,10 @@ def _write_paper_need_stubs(
     needs_dir.mkdir(parents=True, exist_ok=True)
     papers_dir.mkdir(parents=True, exist_ok=True)
     needed = _rank_papers_by_relevance(needed, query)
-    _write_wanted_papers_md(quest_root, needed, topic=query or quest_root.name)
+    oa_ranked = _rank_papers_by_relevance(list(oa_unfetched or []), query)
+    _write_wanted_papers_md(
+        quest_root, needed, topic=query or quest_root.name, oa_unfetched=oa_ranked,
+    )
     readme = papers_dir / "README.md"
     if not readme.exists():
         try:

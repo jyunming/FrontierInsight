@@ -27,6 +27,7 @@ from pathlib import Path
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config
 from core.engine import QuestArtifacts, build_references
+from generation._pandoc import find_pandoc
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
 
@@ -665,9 +666,9 @@ class PaperGenerator:
         # `shutil.which` is mostly defensive (would matter if pandoc
         # ever shipped as a .cmd shim like marp does). We do it for
         # symmetry + so the absolute path lands in any stderr logs.
-        pandoc_exe = shutil.which("pandoc")
+        pandoc_exe = find_pandoc(REPO_ROOT)
         if pandoc_exe is None:
-            msg = "pandoc not on PATH; paper.pdf skipped (paper.md only)"
+            msg = "pandoc not found; paper.pdf skipped (paper.md only)"
             _log.warning(msg)
             return None, _PdfSkipReason(
                 code="no_pandoc",

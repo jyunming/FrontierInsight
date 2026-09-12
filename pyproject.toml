@@ -67,12 +67,29 @@ dependencies = [
   # Cross-process lock around a skill's provenance.json, so two quests
   # recording a use of the same skill can't lose each other's record.
   "filelock>=3.13",
+  # Document rendering. Core rather than an extra: these produce the
+  # artifacts users actually come for (slides.pptx, paper.pdf), and on a
+  # locked-down host an OS-level pandoc/marp install is often impossible,
+  # which is the whole reason they ship as wheels. An extra would mean the
+  # default install still silently skips the outputs.
+  #   python-pptx  -> generation/_pptx_slides.py renders slides.pptx with no
+  #                   external binary at all.
+  #   pypandoc_binary -> bundles a real pandoc; generation/_pandoc.py prefers
+  #                   a system install and falls back to this one.
+  #   pillow       -> imported directly by _pptx_slides.py (image sizing),
+  #                   scripts/render_icon.py, and the icon regression tests.
+  #                   python-pptx pulls it transitively, but a direct import
+  #                   riding a transitive dep is one resolver change from
+  #                   breaking.
+  "python-pptx>=0.6.23",
+  "pypandoc_binary>=1.13",
+  "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0"]
 docker = ["docker>=7.1"]
-knowledge = ["axon-rag>=0.4"]
+knowledge = ["axon-rag>=0.4.2", "tqdb>=0.8.4"]
 # Web-research full-text extraction (main-content / boilerplate removal).
 # Optional: the knowledge layer falls back to a built-in extractor when
 # absent, but trafilatura gives markedly cleaner article bodies.
@@ -83,13 +100,6 @@ dev = [
   "pytest-mock>=3.14",
   "pytest-cov>=6.0",
   "pytest-testmon>=2.2",
-  # Pillow is used by scripts/render_icon.py and the icon-asset
-  # regression tests in tests/test_vscode_extension_icon.py. We
-  # declare it explicitly rather than relying on the transitive
-  # install via matplotlib — a fresh dev env that installs only
-  # ``frontier-insight[dev]`` (no matplotlib) would otherwise
-  # ImportError on ``from PIL import Image``.
-  "pillow>=10.0",
 ]
 # Expanded to the concrete deps rather than a self-reference
 # (`frontier-insight[pdf,docker,knowledge]`) — some pip resolver
@@ -98,7 +108,8 @@ dev = [
 all = [
   "pypdf>=4.0",
   "docker>=7.1",
-  "axon-rag>=0.4",
+  "axon-rag>=0.4.2",
+  "tqdb>=0.8.4",
   "trafilatura>=1.8",
 ]
 

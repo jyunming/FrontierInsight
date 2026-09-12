@@ -134,7 +134,11 @@ execution:
   timeout_s: 600
 
 knowledge:
-  enabled: false            # set true after installing Axon
+  enabled: true             # master switch for ALL retrieval (Axon +
+                            # academic + web). Leave it TRUE even without
+                            # Axon: the Axon corpus is used only if
+                            # installed, but false kills web + academic
+                            # search too, leaving the quest no literature.
   # Air-gapped machines: ship the embedding + reranker models once with
   # `python launch.py --export-models <dir>`, copy <dir> over, then set
   # the two knobs below (or the FI_MODELS_DIR / FI_OFFLINE env vars) so
@@ -174,7 +178,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
 | **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
-| **literature** | SUPPLY | download the paywalled papers it lists | `pauses.papers: true` |
+| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` |
 | **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
 | **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
@@ -201,6 +205,27 @@ The sections below cover each pause in more detail.
 ---
 
 ## Common things you might want next
+
+### Check what this machine can actually produce
+
+```bash
+python launch.py --doctor
+```
+
+Reports, for each output kind, whether this host can render it and what to install if not. It calls the **same lookups the generators call** (`find_pandoc`, `find_pdf_engine`, `find_html_browser`, `find_marp`, the MiniLM loader), so a pass here predicts a real run rather than re-implementing the checks and drifting from them. No LLM calls, no network, no quest — run it before spending a pipeline, not after.
+
+This exists because only `paper_pdf` had a pre-flight; `slides` and `poster` had none, so a missing renderer surfaced only once the quest had already paid for every LLM call. It also reports whether the embedding model loaded, since without it the literature relevance floor fails open and off-topic sources reach the paper silently.
+
+No-admin installs for the gaps it finds:
+
+```bash
+python launch.py --install-tectonic     # LaTeX engine -> poster + paper.pdf (~70 MB)
+python launch.py --install-marp         # Marp CLI -> slides.html / slides.pdf
+pip install pypandoc_binary             # pandoc -> paper.pdf
+pip install sentence-transformers       # relevance filter
+```
+
+Both installers drop a standalone binary into the gitignored `tools/`, which the generators probe after PATH — so nothing needs admin rights or a PATH edit. Airgapped hosts use the `--install-tectonic-from <archive>` / `--install-marp-from <archive>` variants, installing from a file copied over by hand. The Marp binaries bundle Node, so Node is not required; note that `slides.html` needs no browser, but PDF export does (point marp at an existing one with `--browser-path` if it can't find Chromium/Edge itself).
 
 ### Bootstrap a starter set of scientist skills
 
@@ -314,6 +339,8 @@ High-quality content is the foundation of the research, so the fetch layer works
 
 - **Clean extraction.** Pages run through `trafilatura` (when installed) to isolate the article body and drop nav / menus / reference cruft; a built-in extractor is the fallback.
 - **Open-access full-text cascade.** For an academic source (PMC, a DOI, a preprint, a major publisher) FI resolves the `PMCID` / `DOI` / arXiv-id and pulls the clean open-access full text directly — preferring the **PMC BioC API** (section-labelled, no HTML cruft), then **Europe PMC**, the **preprint** server (arXiv / bioRxiv / medRxiv), **Unpaywall** (every OA location, repository copies first), and **Semantic Scholar** / **CORE** when a key is set.
+- **Off-topic retrievals are re-searched, not accepted.** The relevance floor keeps at least `knowledge.relevance_min_keep` sources (default 3) so a quest is never left with nothing — but when *no* source clears `relevance_min_score` on its own merits, that padding is the only thing keeping the corpus alive, and handing it to the writer is what produces "it found me three irrelevant papers". Instead FI asks the model for a better-worded query (the usual cause is vocabulary: a field publishes under different terms than the topic statement uses) and searches again, up to `knowledge.requery_max` times (default 2). Set `knowledge.requery_on_low_relevance: false` to disable. Skipped when embeddings are unavailable — without scores there is no signal that the query was bad, and retrying blind only multiplies cost.
+- **Open access is never treated as paywalled.** An arXiv / PMC / bioRxiv / medRxiv source (or anything OpenAlex reports as `is_oa`) that came back abstract-only means FI's *download* failed, not that the paper costs money — typically the host is unreachable behind a proxy or firewall. Those never trigger the `pauses.papers` stop: asking a person to hand-fetch a free arXiv PDF is asking them to work around a network fault. They are logged as a WARNING and listed in a separate "Open access — FI's download failed" section of `needs/WANTED_PAPERS.md`, since a browser often succeeds where the agent's HTTP client is blocked. The quest pauses only when something is *genuinely* paywalled.
 - **Walls rejected, not stored.** reCAPTCHA / "checking your browser" interstitials and paywall / abstract-only stubs (detected via a schema.org `isAccessibleForFree` / paywall-vendor check) are discarded; the real search snippet is kept instead of challenge garbage, and the cascade above is tried for the genuine full text.
 - **Relevance-selected excerpts.** Full text is stored uncapped on disk, but each node's prompt gets the passages most relevant to the question — so a number buried mid-document reaches the writer, not just the abstract.
 

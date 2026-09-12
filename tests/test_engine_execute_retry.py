@@ -44,7 +44,15 @@ def test_engine_quest_root_is_absolute(
         topic="abs-path test",
         title="abs",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        # execute_replicates=1 pins the unit under test. These cases assert
+        # RETRY semantics (suspicious fast-fail, venv warmup), which are
+        # orthogonal to multi-seed replication -- and the mock router scripts
+        # a fixed list of run results, so the extra replicate executions the
+        # default (3) triggers would drain it and raise IndexError rather than
+        # test anything. Replication itself is covered by test_replicates.py.
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False, execute_replicates=1,
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         # Intentionally relative output_dir to reproduce the bug.
@@ -78,7 +86,9 @@ def _mk_engine(tmp_path: Path) -> Engine:
         topic="execute-retry test",
         title="retry",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False, execute_replicates=1,
+        ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
@@ -304,7 +314,9 @@ async def test_execute_skips_warmup_in_docker_sandbox(tmp_path: Path) -> None:
         topic="docker warmup-skip test",
         title="docker-skip",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False, execute_replicates=1,
+        ),
         execution=ExecutionConfig(sandbox="docker", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),

@@ -541,8 +541,20 @@ class EngineConfig(BaseModel):
     # in ``state['result_json_replicates']`` as a list; the analyze
     # node aggregates numeric fields with mean ± std and surfaces
     # the spread in its summary. Cost: N executions per design pass.
-    # Default 1 (no replication, current behaviour).
-    execute_replicates: int = Field(default=1, ge=1)
+    #
+    # Default 3, because a single run is not a result. A number produced
+    # once has no error bar, and a researcher reading "we ran it once" has
+    # no way to tell a real effect from a lucky seed -- so reporting it as
+    # a finding overstates what the experiment showed.
+    #
+    # This is the cheap kind of rigour: replication re-runs the generated
+    # SCRIPT only. ``implement`` is not re-invoked, so there are no extra
+    # LLM calls and no extra provider cost -- it spends local compute, and
+    # buys a mean +/- std instead of a point estimate. Wall-clock grows
+    # ~N x the execute step (bounded by ``execution.timeout_s`` each), so
+    # set 1 to opt out on a slow experiment, or higher when the measurement
+    # is noisy.
+    execute_replicates: int = Field(default=3, ge=1)
     # Generic mid-quest user-input pause point. When set, the engine
     # pauses (LangGraph ``interrupt()``) AFTER the named stage and
     # exits cleanly with rc=0; the user drops files into
@@ -833,6 +845,21 @@ class KnowledgeConfig(BaseModel):
     # even when all fall below ``relevance_min_score``, so a wholly-borderline
     # corpus is not emptied (the evidence_gate can then broaden instead).
     relevance_min_keep: int = Field(default=3, ge=0)
+    # Re-search with different keywords when a retrieval comes back
+    # wholly off-topic. When NO doc clears ``relevance_min_score`` on its own
+    # merits, the first query was probably worded badly -- so ask the model
+    # for alternative phrasings and search again, rather than handing the
+    # writer the ``relevance_min_keep`` least-bad hits and proceeding as if
+    # they were evidence. Each retry costs one small LLM call plus a
+    # retrieval, so it is bounded and only fires on the wholly-missed case
+    # (not on "few but good" results).
+    #
+    # Skipped entirely when embeddings are unavailable: without scores there
+    # is no signal that the query was bad, and retrying blind would just
+    # multiply cost on exactly the air-gapped machines that can least
+    # afford it.
+    requery_on_low_relevance: bool = True
+    requery_max: int = Field(default=2, ge=0, le=5)
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2

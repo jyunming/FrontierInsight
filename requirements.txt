@@ -67,6 +67,22 @@ pypdf>=4.0
 # when it's absent, so this is optional but strongly recommended.
 trafilatura>=1.8
 
+# pandoc, as a pip-installable binary. paper.pdf needs pandoc (markdown ->
+# LaTeX) and on a locked-down host the user often cannot run an installer or
+# edit PATH. `pypandoc_binary` bundles a real pandoc executable inside
+# site-packages, and `generation/_pandoc.py:find_pandoc` finds it after a
+# system pandoc and `tools/pandoc[.exe]`, so a system install still wins when
+# present. Cross-platform: the project ships wheels for Windows/macOS/Linux.
+pypandoc_binary>=1.13
+
+# slides.pptx, rendered in-process. `generation/_pptx_slides.py` builds the
+# deck directly with python-pptx — no marp, no pandoc, no browser — so PPTX is
+# the one slide format that needs no external binary at all. pillow is imported
+# directly for image sizing; python-pptx pulls it in transitively, but a direct
+# import should carry its own declaration.
+python-pptx>=0.6.23
+pillow>=10.0
+
 # ---- Dev / test ----------------------------------------------------------
 # Used by `python -m pytest`. Not strictly required for runtime FI usage.
 
@@ -85,17 +101,20 @@ pytest-testmon>=2.2
 # ---- Required system tools (NOT pip-installable) -------------------------
 # These are not Python packages — install them via your OS package manager:
 #
-#   pandoc + pdflatex   for paper_pdf output (output.kinds includes paper_pdf)
-#       Windows:  install pandoc.org/installing.html + miktex.org
-#       mac/Linux: pandoc.org/installing.html + tinytex.org
+#   pdflatex            for paper_pdf and poster.pdf output. pandoc itself is
+#                       now installed above via pypandoc_binary, so this is
+#                       the only piece of that pipeline still OS-level.
+#                       Windows: miktex.org   mac/Linux: tinytex.org
 #
-#   marp                for slides.{html,pdf} output (`npm i -g @marp-team/marp-cli`)
-#
-#   pdflatex            for poster.pdf output (bundled with miktex/tinytex)
+#   marp                for slides.html and slides.pdf (`npm i -g
+#                       @marp-team/marp-cli`, or `launch.py --install-marp`
+#                       for a standalone binary on hosts without npm).
+#                       NOT needed for slides.pptx, which renders in-process.
 #
 #   Node.js 18+         for the FI VSCode extension (vscode-frontier-insight/)
 #                       AND for the proxy-based providers (claude_code,
 #                       github_copilot_*) which spawn npm packages.
 #
-# Without these, FI degrades gracefully — paper.md, slides.md, and
-# poster.tex are still produced, just not the rendered final formats.
+# Without these, FI degrades gracefully — paper.md, slides.md, slides.pptx
+# and poster.tex are still produced, just not the formats that need a LaTeX
+# engine or a browser. Run `launch.py --doctor` to see which are present.

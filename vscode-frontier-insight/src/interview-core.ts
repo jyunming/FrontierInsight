@@ -72,9 +72,12 @@ export interface InterviewAnswers {
     // Web research layer. When true (default), the literature node
     // searches the public web (Brave/DuckDuckGo) and downloads sources
     // into data/literature/ for every quest — sim and observational
-    // alike. Maps to knowledge.web_search + web_fetch_pages. Independent
-    // of knowledge_enabled (the Axon corpus toggle). Must stay in sync
-    // with core/interview.py:InterviewAnswers.
+    // alike. Maps to knowledge.web_search + web_fetch_pages.
+    // Does NOT require Axon to be installed, but DOES require
+    // knowledge_enabled: core/knowledge.py gates web search on
+    // `cfg.enabled and cfg.web_search`, so enabled=false is a master
+    // switch that turns off Axon, academic search AND web search.
+    // Must stay in sync with core/interview.py:InterviewAnswers.
     web_research?: boolean;
     // When true, pause on a paywalled / abstract-only relevant paper and
     // write needs/WANTED_PAPERS.md so the user can drop the PDF into

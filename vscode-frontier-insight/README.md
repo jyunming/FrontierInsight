@@ -258,11 +258,17 @@ metrics. Survey mode is auto-suggested for "history/evolution/overview
 of X" topics and can also be turned on by the clarify step.
 
 The `/new` interview also has a **Web research** question (on by
-default, independent of the Axon knowledge layer): when on, the
-literature node searches the public web (Brave / DuckDuckGo) and
-**downloads every retrieved source to `outputs/<id>/data/literature/`**
-— for *every* quest, simulation and observational alike, not just the
-no-simulation path. Turn it off to rely on academic sources only.
+default): when on, the literature node searches the public web
+(Brave / DuckDuckGo) and **downloads every retrieved source to
+`outputs/<id>/data/literature/`** — for *every* quest, simulation and
+observational alike, not just the no-simulation path. Turn it off to
+rely on academic sources only.
+
+Web research does **not** require Axon to be installed, but it does
+require the **Knowledge layer** question to be *Enabled*: that setting
+is a master switch, and turning it off disables Axon, academic search
+(arXiv / OpenAlex / Crossref) **and** web search together — leaving the
+quest with no literature at all.
 
 When a source is fetched, FI works to get **real full text**, not a
 two-sentence snippet: HTML is cleaned with `trafilatura`; reCAPTCHA
@@ -282,6 +288,15 @@ run, the chat panel surfaces that list with instructions to drop the
 PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
 ingested as real full text. You can also pre-load a folder of papers via
 `knowledge.local_papers` (a directory is scanned recursively).
+
+Open-access sources never trigger that pause. An arXiv / PMC / preprint
+paper that came back abstract-only means FI's *download* failed — the
+host is usually unreachable behind a proxy or firewall — not that the
+paper costs money. Stopping to ask you to buy a free paper would be
+nonsense, so those are logged as a warning and listed in a separate
+"Open access — FI's download failed" section of `WANTED_PAPERS.md` as a
+manual fallback (a browser often succeeds where the agent's HTTP client
+is blocked). Fixing the network is the real fix.
 
 Before pausing, `auto_collect_data` runs:
 
@@ -317,8 +332,10 @@ own files and re-run with `@fi /resume <quest_id>`.
 
 ## PDF strict mode
 
-For unattended fleet runs, add to the YAML so a missing pandoc /
-LaTeX engine fails fast at pre-flight instead of after a full quest:
+For unattended fleet runs, add to the YAML so a missing LaTeX
+engine fails fast at pre-flight instead of after a full quest.
+(pandoc itself now ships with the install, so in practice the
+LaTeX engine is the piece that goes missing):
 
 ```yaml
 output:

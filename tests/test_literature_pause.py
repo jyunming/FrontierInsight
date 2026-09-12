@@ -24,6 +24,7 @@ import pytest
 from core.engine import (
     _ingest_user_dropped_papers,
     _is_abstract_only,
+    _is_open_access,
     _papers_dir_has_files,
     _write_paper_need_stubs,
 )
@@ -302,3 +303,78 @@ def test_wanted_papers_md_title_falls_back_to_identifier(tmp_path: Path) -> None
     assert "paper-1" not in md
     # The slug is derived from the identifier, not a bare paper-N.
     assert (tmp_path / "needs" / "doi-10-1117-12-9999.json").is_file()
+
+
+# --- open-access sources are not paywalled -------------------------------
+#
+# An arXiv/PMC paper whose full-text fetch failed is still abstract-only, but
+# it is NOT something to stop the quest and ask a person to buy. Asking a user
+# to hand-download a free arXiv PDF is asking them to work around a network
+# failure, and reads as nonsense to anyone who knows arXiv is free.
+
+
+@pytest.mark.parametrize("md", [
+    {"arxiv_id": "2401.01234"},
+    {"pmcid": "PMC123456"},
+    {"doi": "10.1101/2024.01.01.573000"},          # bioRxiv / medRxiv
+    {"url": "https://arxiv.org/abs/2401.01234"},
+    {"url": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123456/"},
+    {"open_access": True, "doi": "10.1000/x"},      # OpenAlex is_oa flag
+])
+def test_open_access_sources_detected(md: dict) -> None:
+    assert _is_open_access(RetrievedDoc("x" * 400, md)) is True
+
+
+@pytest.mark.parametrize("md", [
+    {"doi": "10.1117/12.2634567"},                  # SPIE — genuinely paywalled
+    {"doi": "10.1109/TED.2023.1234567"},            # IEEE
+    {"url": "https://www.sciencedirect.com/science/article/pii/X"},
+    {},
+])
+def test_paywalled_sources_not_flagged_open_access(md: dict) -> None:
+    assert _is_open_access(RetrievedDoc("x" * 400, md)) is False
+
+
+def test_open_access_doc_is_still_abstract_only(tmp_path: Path) -> None:
+    """The two predicates are independent: the arXiv doc really did come back
+    as an abstract. What changes is what the pause gate does with it."""
+    doc = RetrievedDoc("short abstract", {"arxiv_id": "2401.01234", "title": "T"})
+    assert _is_abstract_only(doc) is True
+    assert _is_open_access(doc) is True
+
+
+def test_oa_papers_listed_separately_not_as_paywalled(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WANTED_PAPERS.md must not present a free arXiv paper as paywalled."""
+    paywalled = RetrievedDoc(
+        "abstract", {"doi": "10.1117/12.999", "title": "Paywalled SPIE Paper"},
+    )
+    oa = RetrievedDoc(
+        "abstract", {"arxiv_id": "2401.01234", "title": "Free ArXiv Paper"},
+    )
+    _write_paper_need_stubs(
+        tmp_path, [paywalled], logging.getLogger("t"),
+        query="topic", oa_unfetched=[oa],
+    )
+    md = (tmp_path / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
+    assert "Paywalled SPIE Paper" in md
+    assert "Free ArXiv Paper" in md
+    # The OA one sits under its own heading, described as a fetch failure.
+    assert "Open access" in md
+    oa_section = md.split("Open access")[1]
+    assert "Free ArXiv Paper" in oa_section
+    assert "Paywalled SPIE Paper" not in oa_section
+
+
+def test_oa_only_still_writes_manifest(tmp_path: Path) -> None:
+    """With nothing genuinely paywalled, the manifest is still written (the
+    links are a manual fallback) — the caller is what skips the pause."""
+    oa = RetrievedDoc("abstract", {"arxiv_id": "2401.01234", "title": "Free One"})
+    _write_paper_need_stubs(
+        tmp_path, [], logging.getLogger("t"), query="topic", oa_unfetched=[oa],
+    )
+    md = (tmp_path / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
+    assert "Free One" in md
+    # No paywalled preamble when there is nothing paywalled to download.
+    assert "no open-access full text was reachable" not in md

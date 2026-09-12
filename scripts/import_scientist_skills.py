@@ -359,15 +359,18 @@ def main() -> int:
         print(f"  {sys.executable} -m pip install {' '.join(all_pip)}")
         print()
 
-    try:
-        approve_as = subprocess.run(
-            ["git", "config", "user.name"], capture_output=True, text=True, check=True,
-        ).stdout.strip() or "<you>"
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        approve_as = "<you>"
+    # Deliberately a placeholder rather than `git config user.name`. The ledger
+    # records who reviewed a skill, and whoever runs this import is often not
+    # whoever ends up reviewing what it pulled in — on a shared clone they are
+    # frequently different people. Printing a real name makes the wrong
+    # attribution the copy-pasteable default, which is the thing the
+    # no-anonymous-approver rule exists to prevent. `<you>` is also a redirect
+    # in every common shell, so the line cannot be pasted without being edited.
+    approve_as = "<you>"
 
     imported_count = sum(1 for _, ok, _, _ in results if ok)
     print(f"Imported {imported_count}/{len(results)}. Nothing above was approved. Review each, then:")
+    print("Replace <you> with the name of whoever actually reviewed the skill.")
     for name, imported, needs_despite, _ in results:
         if not imported:
             continue
