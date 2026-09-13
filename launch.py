@@ -1455,6 +1455,19 @@ async def run_one(
         "paper_md": str(art.paper_md) if art.paper_md else None,
         "paper_pdf": str(written.get("paper_pdf")) if written.get("paper_pdf") else None,
     }
+    # Which literature / full-text sources failed during the run (written by
+    # the engine on every exit path). Surfaced here so the CLI and the VSCode
+    # chat see it without opening run.log.
+    failures_path = art.quest_root / ".fi" / "source_failures.json"
+    if failures_path.is_file():
+        try:
+            failures = json.loads(failures_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            failures = None
+        if isinstance(failures, dict):
+            summary["source_failures"] = failures
+            if failures.get("total"):
+                print(f"[FI] source failures: {failures.get('summary')}")
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")

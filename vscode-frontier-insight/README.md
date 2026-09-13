@@ -362,6 +362,14 @@ fix it — so the user discovers the failure by opening the quest
 folder instead of grepping `run.log`. A subsequent successful run
 of the same kind removes the stale breadcrumb.
 
+Literature sources get the same treatment. When OpenAlex, Crossref,
+arXiv, a publisher page or any other source rate-limits, blocks or
+times out during a quest, the chat shows one
+`⚠️ source failures: arxiv 3 (http_429=3); …` line at the end of the
+run, so a thin bibliography comes with its reason. The detail is in
+`.fi/source_failures.json` and in `run.log` (`[source-failure]` lines,
+credentials redacted).
+
 If a quest crashes mid-graph (a `_node_*` raises, or a pre-graph
 stage fails), the engine writes `quest_failed.md` to the quest
 root with the failing-node name, the exception text, a log tail,

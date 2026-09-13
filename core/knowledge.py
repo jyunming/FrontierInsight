@@ -77,6 +77,7 @@ from typing import Any
 import httpx
 import yaml
 
+from . import source_failures as _sf
 from .config import KnowledgeConfig
 
 _log = logging.getLogger("frontier_insight.knowledge")
@@ -208,25 +209,31 @@ class RetrievedDoc:
 # ---------------------------------------------------------------------------
 
 
-def _http_get_json(url: str, params: dict | None, timeout_s: float) -> dict | None:
+def _http_get_json(
+    url: str, params: dict | None, timeout_s: float, *, source: str = "",
+) -> dict | None:
     try:
         with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
             r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0"})
             r.raise_for_status()
             return r.json()
     except Exception as e:
-        _log.info("http GET %s failed: %s", url, e)
+        _log.info("http GET %s failed: %s", url, _sf.redact(e))
+        _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
         return None
 
 
-def _http_get_text(url: str, params: dict | None, timeout_s: float) -> str | None:
+def _http_get_text(
+    url: str, params: dict | None, timeout_s: float, *, source: str = "",
+) -> str | None:
     try:
         with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
             r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0"})
             r.raise_for_status()
             return r.text
     except Exception as e:
-        _log.info("http GET %s failed: %s", url, e)
+        _log.info("http GET %s failed: %s", url, _sf.redact(e))
+        _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
         return None
 
 
@@ -240,7 +247,7 @@ def _arxiv_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Re
         "sortBy": "relevance",
         "sortOrder": "descending",
     }
-    xml = _http_get_text("http://export.arxiv.org/api/query", params, timeout_s)
+    xml = _http_get_text("http://export.arxiv.org/api/query", params, timeout_s, source="arxiv")
     if not xml:
         return []
     ns = {"a": "http://www.w3.org/2005/Atom"}
@@ -282,7 +289,7 @@ def _openalex_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list
         "search": query.strip(),
         "per-page": str(max(1, min(top_k, 25))),
     }
-    data = _http_get_json("https://api.openalex.org/works", params, timeout_s)
+    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
     if not data or "results" not in data:
         return []
     out: list[RetrievedDoc] = []
@@ -334,7 +341,7 @@ def _crossref_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list
         "rows": str(max(1, min(top_k, 25))),
         "select": "DOI,title,abstract,author,container-title,published-print,published-online,publisher,URL",
     }
-    data = _http_get_json("https://api.crossref.org/works", params, timeout_s)
+    data = _http_get_json("https://api.crossref.org/works", params, timeout_s, source="crossref")
     if not data:
         return []
     items = (data.get("message") or {}).get("items") or []
@@ -379,6 +386,7 @@ def _semantic_scholar_search(query: str, top_k: int, *, timeout_s: float = 10.0)
     }
     data = _http_get_json(
         "https://api.semanticscholar.org/graph/v1/paper/search", params, timeout_s,
+        source="semantic_scholar",
     )
     if not data or "data" not in data:
         return []
@@ -409,7 +417,7 @@ def _pubmed_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[R
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
         {"db": "pubmed", "term": query.strip(),
          "retmax": str(max(1, min(top_k, 25))), "retmode": "json"},
-        timeout_s,
+        timeout_s, source="pubmed",
     )
     if not ids_data:
         return []
@@ -419,7 +427,7 @@ def _pubmed_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[R
     sum_data = _http_get_json(
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
         {"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
-        timeout_s,
+        timeout_s, source="pubmed",
     )
     if not sum_data:
         return []
@@ -468,7 +476,8 @@ def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
             r.raise_for_status()
             data = r.json()
     except Exception as e:
-        _log.info("core.ac.uk fallback failed: %s", e)
+        _log.info("core.ac.uk fallback failed: %s", _sf.redact(e))
+        _sf.record_exception("core", e)
         return []
     out: list[RetrievedDoc] = []
     for w in data.get("results") or []:
@@ -776,7 +785,8 @@ def _brave_search(
             r.raise_for_status()
             data = r.json()
     except Exception as e:
-        _log.info("brave web search failed: %s", e)
+        _log.info("brave web search failed: %s", _sf.redact(e))
+        _sf.record_exception("brave", e)
         return []
     out: list[RetrievedDoc] = []
     for item in ((data.get("web") or {}).get("results") or [])[:count]:
@@ -840,6 +850,7 @@ def _ddg_search(
             html = r.text
     except Exception as e:
         _log.info("duckduckgo search failed: %s", e)
+        _sf.record_exception("duckduckgo", e)
         return []
     anchors = re.findall(
         r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S,
@@ -1181,12 +1192,13 @@ def _resolve_ids(doc: RetrievedDoc, *, timeout_s: float) -> dict:
                         "resultType": "lite", "pageSize": 1},
                 headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
             )
+            _sf.record_response("europepmc", r)
             if r.status_code == 200:
                 res = ((r.json().get("resultList") or {}).get("result") or [{}])[0]
                 doi = doi or str(res.get("doi") or "").lower()
                 pmcid = pmcid or _normalize_pmcid(str(res.get("pmcid") or ""))
-        except Exception:
-            pass
+        except Exception as e:
+            _sf.record_exception("europepmc", e)
     return {"doi": doi, "pmcid": pmcid, "arxiv_id": arxiv_id}
 
 
@@ -1210,11 +1222,13 @@ def _pmc_bioc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
         r = httpx.get(
             url, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("pmc", r, url=url)
         if r.status_code != 200 or not r.content:
             return None
         data = r.json()
     except Exception as e:
         _log.info("pmc bioc %s failed: %s", pmcid, e)
+        _sf.record_exception("pmc", e, url=url)
         return None
     collections = data if isinstance(data, list) else [data]
     parts: list[str] = []
@@ -1249,6 +1263,7 @@ def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None
         r = httpx.get(
             url, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("europepmc", r, url=url)
         if r.status_code != 200 or not r.content:
             return None
         text = _xml_to_text(r.text)
@@ -1257,6 +1272,7 @@ def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None
             return text[:cap]
     except Exception as e:
         _log.info("europepmc fulltext %s failed: %s", pmcid, e)
+        _sf.record_exception("europepmc", e, url=url)
     return None
 
 
@@ -1285,12 +1301,14 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
         ) as c:
             if arxiv_id:
                 rr = c.get(f"https://arxiv.org/html/{arxiv_id}")
+                _sf.record_response("arxiv", rr, url=f"https://arxiv.org/html/{arxiv_id}")
                 if rr.status_code == 200 and b"<html" in rr.content[:2048].lower():
                     t = _html_to_text(rr.text)
                     if len(t) >= _MIN_FULL_TEXT_CHARS:
                         _log.info("arxiv: recovered HTML full text for %s", arxiv_id)
                         return t[:cap]
                 rr = c.get(f"https://arxiv.org/pdf/{arxiv_id}")
+                _sf.record_response("arxiv", rr, url=f"https://arxiv.org/pdf/{arxiv_id}")
                 if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
                     t = _pdf_bytes_to_text(rr.content, cap=cap)
                     if t and len(t) >= _MIN_FULL_TEXT_CHARS:
@@ -1300,8 +1318,10 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
                 for server in ("biorxiv", "medrxiv"):
                     try:
                         rr = c.get(f"https://www.{server}.org/content/{doi}v1.full.pdf")
-                    except Exception:
+                    except Exception as e:
+                        _sf.record_exception(server, e)
                         continue
+                    _sf.record_response(server, rr)
                     if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
                         t = _pdf_bytes_to_text(rr.content, cap=cap)
                         if t and len(t) >= _MIN_FULL_TEXT_CHARS:
@@ -1309,6 +1329,7 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
                             return t[:cap]
     except Exception as e:
         _log.info("preprint fetch failed (%s / %s): %s", arxiv_id, doi, e)
+        _sf.record_exception("arxiv" if arxiv_id else "preprint", e)
     return None
 
 
@@ -1342,6 +1363,7 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             r = c.get(f"https://api.unpaywall.org/v2/{doi}", params={"email": email})
+            _sf.record_response("unpaywall", r, url="https://api.unpaywall.org/v2/")
             if r.status_code != 200:
                 return None
             locs = sorted(r.json().get("oa_locations") or [], key=_loc_rank)
@@ -1354,8 +1376,10 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
             for u in candidates:
                 try:
                     rr = c.get(u)
-                except Exception:
+                except Exception as e:
+                    _sf.record_exception(_sf.source_for_url(u, "oa_copy"), e, url=u)
                     continue
+                _sf.record_response(_sf.source_for_url(u, "oa_copy"), rr, url=u)
                 if rr.status_code != 200 or not rr.content:
                     continue
                 text = _pdf_or_html_text(rr, cap=cap)
@@ -1366,7 +1390,8 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
                     )
                     return text[:cap]
     except Exception as e:
-        _log.info("unpaywall fulltext %s failed: %s", doi, e)
+        _log.info("unpaywall fulltext %s failed: %s", doi, _sf.redact(e))
+        _sf.record_exception("unpaywall", e)
     return None
 
 
@@ -1386,6 +1411,7 @@ def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
             params={"fields": "openAccessPdf"},
             headers=headers, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("semantic_scholar", r)
         if r.status_code != 200:
             return None
         pdf = (r.json().get("openAccessPdf") or {}).get("url") or ""
@@ -1394,6 +1420,7 @@ def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
         rr = httpx.get(
             pdf, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response(_sf.source_for_url(pdf, "oa_copy"), rr, url=pdf)
         if rr.status_code == 200:
             text = _pdf_or_html_text(rr, cap=cap)
             if text and len(text) >= _MIN_FULL_TEXT_CHARS:
@@ -1401,6 +1428,7 @@ def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
                 return text[:cap]
     except Exception as e:
         _log.info("s2 oa pdf %s failed: %s", doi, e)
+        _sf.record_exception("semantic_scholar", e)
     return None
 
 
@@ -1418,6 +1446,7 @@ def _core_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
             headers={"Authorization": f"Bearer {key}", **_BROWSER_HEADERS},
             timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("core", r)
         if r.status_code != 200:
             return None
         results = r.json().get("results") or []
@@ -1428,6 +1457,7 @@ def _core_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
                 return ft[:cap]
     except Exception as e:
         _log.info("core fulltext %s failed: %s", doi, e)
+        _sf.record_exception("core", e)
     return None
 
 
@@ -1497,6 +1527,7 @@ def _fetch_web_page_text(
             r = c.get(url)
             if r.status_code >= 400:
                 blocked = r.status_code in (401, 403, 429)
+                _sf.record_response(_sf.source_for_url(url, "web_page"), r, url=url)
                 raise _FetchBlocked()
             ctype = (r.headers.get("content-type") or "").lower()
             body = r.content
@@ -1504,6 +1535,7 @@ def _fetch_web_page_text(
         body = None
     except Exception as e:
         _log.info("web page fetch %s failed: %s", url, e)
+        _sf.record_exception(_sf.source_for_url(url, "web_page"), e, url=url)
         body = None
         blocked = True
 
@@ -1746,6 +1778,7 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
         ) as c:
             r = c.get(url)
             if r.status_code >= 400:
+                _sf.record_response(_sf.source_for_url(url, "publisher_pdf"), r, url=url)
                 return None
             body = r.content
             if not _looks_like_pdf(r.headers.get("content-type"), body[:8]):
@@ -1753,6 +1786,7 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
             return body
     except Exception as e:
         _log.info("full-text GET %s failed: %s", url, e)
+        _sf.record_exception(_sf.source_for_url(url, "publisher_pdf"), e, url=url)
         return None
 
 
@@ -1784,6 +1818,9 @@ def _fetch_full_text(
                 headers={"User-Agent": "FrontierInsight/1.0"},
             ) as c:
                 page = c.get(landing)
+                _sf.record_response(
+                    _sf.source_for_url(landing, "publisher_page"), page, url=landing,
+                )
                 if page.status_code < 400:
                     candidate = _find_pdf_url_in_html(page.content)
                     if candidate:
@@ -1794,6 +1831,9 @@ def _fetch_full_text(
                         pdf_bytes = _fetch_pdf_bytes(candidate, timeout_s=timeout_s)
         except Exception as e:
             _log.info("full-text landing-page %s failed: %s", landing, e)
+            _sf.record_exception(
+                _sf.source_for_url(landing, "publisher_page"), e, url=landing,
+            )
 
     if pdf_bytes:
         extracted = _pdf_bytes_to_text(pdf_bytes, cap=max_kb * 1024)
@@ -1911,6 +1951,10 @@ async def _enrich_with_full_text(
             "full-text fetch budget %.1fs exceeded; "
             "enriched %d/%d docs (%d abandoned)",
             total_budget_s, successes, len(targets), len(pending),
+        )
+        _sf.record_failure(
+            "full_text", "budget_abandoned", count=len(pending),
+            detail=f"{len(pending)} of {len(targets)} fetches unfinished after {total_budget_s:.0f}s",
         )
     else:
         _log.info(
@@ -2234,7 +2278,8 @@ async def _route_external(
         try:
             docs = await asyncio.to_thread(fn, query, top_k, timeout_s=timeout_s)
         except Exception as e:
-            _log.info("source %s raised: %s", name, e)
+            _log.info("source %s raised: %s", name, _sf.redact(e))
+            _sf.record_exception(name, e)
             docs = []
         return name, docs
 

@@ -468,6 +468,17 @@ class Engine:
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        import time as _time
+
+        from . import source_failures as _source_failures
+
+        # Every literature / full-text source records its failures against
+        # this quest. The adapters run in worker threads with no engine
+        # handle; asyncio copies this context into them, so under --fleet each
+        # quest still gets only its own. Summarised in the finally below.
+        _source_failures.reset(self.quest_id)
+        _quest_ctx = _source_failures.current_quest.set(self.quest_id)
+        _run_started_at = _time.time()
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
@@ -986,7 +997,37 @@ class Engine:
             # Without this, Windows test cleanup would intermittently
             # fail with PermissionError as soon as ANY of those paths
             # fired. ``_close_quest_logger`` is idempotent.
+            #
+            # The source-failure summary goes first, while run.log is still
+            # open, and on every path: a quest that failed or paused because
+            # its sources did is exactly the one whose summary matters.
+            try:
+                self._emit_source_failure_summary(started_at=_run_started_at)
+            except Exception:  # noqa: BLE001 - reporting must not mask the outcome
+                pass
+            try:
+                _source_failures.current_quest.reset(_quest_ctx)
+            except ValueError:
+                pass
             _close_quest_logger(self.quest_id)
+
+    def _emit_source_failure_summary(self, *, started_at: float) -> None:
+        """One ``[source-failures]`` line in run.log plus
+        ``.fi/source_failures.json`` for this run. A clean run says ``none``:
+        silence would be indistinguishable from the report being skipped."""
+        from . import source_failures as _source_failures
+
+        try:
+            payload = _source_failures.write_summary(
+                self.quest_id, self.fi_dir / "source_failures.json",
+                started_at=started_at,
+            )
+        except OSError as e:
+            self._log.warning("[source-failures] could not write summary: %r", e)
+            payload = _source_failures.snapshot(self.quest_id)
+            payload["summary"] = _source_failures.format_summary(payload)
+        emit = self._log.warning if payload.get("total") else self._log.info
+        emit("[source-failures] %s", payload["summary"])
 
     async def emit_artifacts_only(self) -> "QuestArtifacts":
         """Load a FINISHED quest's checkpoint READ-ONLY and bundle its

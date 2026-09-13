@@ -1012,6 +1012,13 @@ async function runQuest(
                 stream.markdown(`  📋 summary → \`${path.basename(summary[1])}\`\n\n`);
                 continue;
             }
+            // Literature / full-text sources that failed during the run
+            // (rate limits, blocks, timeouts) — otherwise only in run.log.
+            const failures = line.match(/^\[FI\] source failures: (.+)$/);
+            if (failures) {
+                stream.markdown(`  ⚠️ source failures: \`${failures[1]}\`\n\n`);
+                continue;
+            }
             // Drop other [FI] lines (start/resume quest_id=, paths the
             // user already saw in our header, etc.) — they're noise here.
         }
@@ -1306,6 +1313,11 @@ async function runSummarize(
             const m = line.match(/^\[FI\] summary -> (.+)$/);
             if (m) {
                 stream.markdown(`  ✅ summary written → \`${m[1]}\`\n\n`);
+                continue;
+            }
+            const sf = line.match(/^\[FI\] source failures: (.+)$/);
+            if (sf) {
+                stream.markdown(`  ⚠️ source failures: \`${sf[1]}\`\n\n`);
                 continue;
             }
             const km = line.match(/^\[FI\] (\d+) files; detected_kind=(\S+); ingested_to_axon=(\S+)$/);

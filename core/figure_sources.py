@@ -29,6 +29,8 @@ from pathlib import Path
 
 import httpx
 
+from . import source_failures as _sf
+
 _log = logging.getLogger("frontier_insight.figures")
 
 # Polite, policy-compliant UA — Wikimedia 403s generic agents.
@@ -124,11 +126,13 @@ def fetch_commons_figures(
             "https://commons.wikimedia.org/w/api.php",
             params=params, headers=_HEADERS, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("wikimedia_commons", r)
         if r.status_code != 200:
             return []
         pages = (r.json().get("query") or {}).get("pages") or {}
     except Exception as e:  # noqa: BLE001 — best-effort
         _log.info("commons search failed: %s", e)
+        _sf.record_exception("wikimedia_commons", e)
         return []
 
     out: list[WebFigure] = []
@@ -185,6 +189,7 @@ def fetch_arxiv_figure(
             headers=_HEADERS, timeout=timeout_s, follow_redirects=True,
         ) as c:
             ab = c.get(f"https://arxiv.org/abs/{aid}")
+            _sf.record_response("arxiv", ab, url=f"https://arxiv.org/abs/{aid}")
             m = _ARXIV_CC_RE.search(ab.text) if ab.status_code == 200 else None
             if not m:
                 return None  # default arXiv license is not redistributable
@@ -194,6 +199,7 @@ def fetch_arxiv_figure(
                 lic = f"CC0 {m.group(4)}".strip()
 
             h = c.get(f"https://arxiv.org/html/{aid}")
+            _sf.record_response("arxiv", h, url=f"https://arxiv.org/html/{aid}")
             if h.status_code != 200 or "<figure" not in h.text:
                 return None
             cands: list[tuple[str, str]] = []  # (caption, img_src)
@@ -230,14 +236,17 @@ def fetch_arxiv_figure(
             )
     except Exception as e:  # noqa: BLE001 — best-effort
         _log.info("arxiv figure %s failed: %s", aid, e)
+        _sf.record_exception("arxiv", e)
         return None
 
 
 def _download_image(url: str, *, timeout_s: float) -> bytes | None:
     try:
         r = httpx.get(url, headers=_HEADERS, timeout=timeout_s, follow_redirects=True)
-    except Exception:
+    except Exception as e:
+        _sf.record_exception(_sf.source_for_url(url, "image"), e, url=url)
         return None
+    _sf.record_response(_sf.source_for_url(url, "image"), r, url=url)
     if r.status_code != 200 or len(r.content) > _MAX_IMAGE_BYTES:
         return None
     ctype = (r.headers.get("content-type") or "").lower()

@@ -1813,6 +1813,15 @@ def make_app(
             node_progress_lines, _KNOWN_NODES,
         )
         quest_failed = _read_quest_failed_md(quest_root)
+        # Per-source retrieval failures for this run (the engine writes the
+        # file on every exit path, so a paused or failed quest has one too).
+        source_failures: dict[str, Any] | None = None
+        sf_path = quest_root / ".fi" / "source_failures.json"
+        if sf_path.is_file():
+            try:
+                source_failures = json.loads(sf_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                source_failures = None
         # Human-review gate state for the dashboard banner:
         #   - in-process pending future, OR
         #   - on-disk snapshot with no answer-file present yet.
@@ -1848,6 +1857,7 @@ def make_app(
                 if paper_md.exists() else None
             ),
             "summary": summary,
+            "source_failures": source_failures,
             "alive": (
                 registry.alive(quest_id)
                 or bool(launcher_status.get("alive"))

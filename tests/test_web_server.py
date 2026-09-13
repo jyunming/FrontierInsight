@@ -379,6 +379,28 @@ def test_app_start_400_on_invalid_yaml(tmp_path: Path) -> None:
     assert r2.status_code == 400
 
 
+# --- source failures ----------------------------------------------------
+
+
+def test_quest_detail_carries_the_source_failure_report(tmp_path: Path) -> None:
+    """The quest page shows which literature sources failed; the engine
+    writes the report to disk, so it must reach the detail payload."""
+    qid = "qsrcfail"
+    q = _mk_quest_dir(tmp_path, qid)
+    report = {"total": 3, "summary": "arxiv 3 (http_429=3)",
+              "by_source": {"arxiv": {"http_429": 3}}, "examples": []}
+    (q / ".fi" / "source_failures.json").write_text(json.dumps(report), encoding="utf-8")
+    body = TestClient(make_app(tmp_path)).get(f"/api/quests/{qid}").json()
+    assert body["source_failures"]["summary"] == "arxiv 3 (http_429=3)"
+
+
+def test_quest_detail_source_failures_is_null_without_a_report(tmp_path: Path) -> None:
+    qid = "qsrcnone"
+    _mk_quest_dir(tmp_path, qid)
+    body = TestClient(make_app(tmp_path)).get(f"/api/quests/{qid}").json()
+    assert body["source_failures"] is None
+
+
 # --- human-review endpoints ----------------------------------------------
 
 
