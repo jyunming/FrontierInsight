@@ -2208,6 +2208,55 @@ def _doc_dedup_key(d: RetrievedDoc) -> str:
     return f"title:{normalized}" if normalized else f"id:{id(d)}"
 
 
+# Titles too generic to identify a work: two "Introduction" chapters of two
+# different books are two documents.
+_GENERIC_TITLES = frozenset({
+    "introduction", "preface", "foreword", "editorial", "index", "contents",
+    "table of contents", "front matter", "back matter", "references",
+    "bibliography", "conclusion", "conclusions", "erratum", "corrigendum",
+    "correction", "reply", "discussion", "acknowledgments", "acknowledgements",
+    "abstract", "book review", "letter to the editor", "appendix",
+})
+
+
+def _normalize_title(title: str) -> str:
+    """Comparable form of a work's title, or "" when it is too generic (or
+    too short) to identify one.
+
+    Collapses what separates copies of the same record across indexes and
+    DOIs: case, dash variants (en dash vs hyphen), punctuation, HTML
+    entities, full-width forms, and the literal backslash-n OpenAlex leaves
+    in some titles. Fewer than three words never counts as an identity —
+    "Harmonic Oscillator" names a topic, not a work."""
+    import unicodedata
+
+    t = str(title or "").replace("\\n", " ")
+    t = unicodedata.normalize("NFKC", _htmlmod.unescape(t)).casefold()
+    # Punctuation, dash variants included (hyphen, en/em dash, minus), is
+    # replaced rather than deleted, so "Runge–Kutta" and "Runge-Kutta" meet.
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t.split()) < 3 or t in _GENERIC_TITLES:
+        return ""
+    return t
+
+
+def _doc_dedup_keys(d: RetrievedDoc) -> list[str]:
+    """Every identity a doc can collide on: its strongest id and, when the
+    title is specific enough, its normalized title.
+
+    One id is not enough. A real quest cited the same textbook appendix,
+    "Numerical Integration 4th-order Runge–Kutta Method", three times —
+    three books, three DOIs, one text — and the same arXiv preprint comes
+    back from OpenAlex once with its DOI and once without. Only the title
+    connects them."""
+    keys = [_doc_dedup_key(d)]
+    norm = _normalize_title((d.metadata or {}).get("title") or "")
+    if norm and f"title:{norm}" not in keys:
+        keys.append(f"title:{norm}")
+    return keys
+
+
 
 def _rank_by_relevance(docs: list[RetrievedDoc], query: str) -> list[RetrievedDoc]:
     """Order pooled candidates by how well they answer the query.
@@ -2292,10 +2341,10 @@ async def _route_external(
     merged: list[RetrievedDoc] = []
     for name in valid:
         for doc in by_source.get(name, []):
-            key = _doc_dedup_key(doc)
-            if key in seen:
+            keys = _doc_dedup_keys(doc)
+            if any(k in seen for k in keys):
                 continue
-            seen.add(key)
+            seen.update(keys)
             merged.append(doc)
             if len(merged) >= top_k:
                 _log.info(
@@ -2889,10 +2938,10 @@ class Knowledge:
         # everything else breaks it — a corpus entry still wins when it is
         # genuinely the best answer, which is the only reason to prefer it.
         for doc in pinned:
-            key = _doc_dedup_key(doc)
-            if key in seen:
+            keys = _doc_dedup_keys(doc)
+            if any(k in seen for k in keys):
                 continue
-            seen.add(key)
+            seen.update(keys)
             merged.append(doc)
 
         # Then academic and web together, ranked by relevance to the query.
@@ -2933,10 +2982,10 @@ class Knowledge:
             for doc in _rank_by_relevance(docs, query):
                 if limit <= 0 or len(merged) >= cap:
                     return
-                key = _doc_dedup_key(doc)
-                if key in seen:
+                keys = _doc_dedup_keys(doc)
+                if any(k in seen for k in keys):
                     continue
-                seen.add(key)
+                seen.update(keys)
                 merged.append(doc)
                 limit -= 1
 
@@ -2944,7 +2993,7 @@ class Knowledge:
         # Then everything else — including any academic docs beyond the floor
         # — ranked together for whatever slots are left.
         _take([d for d in (*academic_docs, *web_docs, *axon_docs)
-               if _doc_dedup_key(d) not in seen], cap - len(merged))
+               if not any(k in seen for k in _doc_dedup_keys(d))], cap - len(merged))
         return merged
 
     def search(self, query: str, *, top_k: int | None = None) -> list[RetrievedDoc]:

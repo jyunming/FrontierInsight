@@ -48,7 +48,7 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
 )
 from .execution import ExecutionResult, make_executor
-from .knowledge import Knowledge, RetrievedDoc
+from .knowledge import Knowledge, RetrievedDoc, _normalize_title
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
     FallbackLLMClient,
@@ -2253,6 +2253,8 @@ class Engine:
         # straight assignment; on broaden_lit re-entries we accumulate
         # so the design node sees the full corpus FI has seen for
         # this quest.
+        # A specific-enough title is a second identity: the same text reached
+        # under several DOIs (or once with a DOI, once without) is one source.
         seen: set[str] = set()
         merged: list[dict[str, Any]] = []
         for entry in (*prior, *new_entries):
@@ -2262,10 +2264,11 @@ class Engine:
                 or str(md.get("url") or "").strip()
                 or (entry.get("content") or "")[:200]
             )
-            if ident and ident in seen:
+            norm_title = _normalize_title(md.get("title") or "")
+            idents = [i for i in (ident, f"title:{norm_title}" if norm_title else "") if i]
+            if any(i in seen for i in idents):
                 continue
-            if ident:
-                seen.add(ident)
+            seen.update(idents)
             merged.append(entry)
         added = len(merged) - len(prior)
         # Pull in any PDFs the user dropped under ``inputs/papers/`` on
@@ -7066,9 +7069,13 @@ def build_references(
             meta.get("doi") or meta.get("arxiv_id") or meta.get("pmid")
             or meta.get("url") or (meta.get("title") or "")
         ).lower().strip()
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
+        norm_title = _normalize_title(meta.get("title") or "")
+        keys = [key] + ([f"title:{norm_title}"] if norm_title else [])
+        if any(k in seen for k in keys):
+            continue
+        seen.update(keys)
         authors = meta.get("authors") or []
         if not isinstance(authors, list):
             authors = [str(authors)]
