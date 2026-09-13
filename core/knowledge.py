@@ -588,6 +588,22 @@ _DOAJ_SYNTAX_RE = re.compile(r'[:/()\[\]{}"!+\-&|<>=]')
 # "action figures collectible toys popular culture history" on both, while
 # DOAJ-listed books on toys exist). One retry with the leading words.
 _AND_SEARCH_RETRY_WORDS = 3
+# DOAJ allows 2 requests a second (burst 5). A literature pass searches up to
+# three facet queries at once, each possibly with a retry, so its requests
+# take turns.
+_DOAJ_MIN_INTERVAL_S = 0.6
+_DOAJ_PACE_LOCK = threading.Lock()
+_DOAJ_LAST_REQUEST = [0.0]
+_doaj_monotonic = time.monotonic
+_doaj_sleep = time.sleep
+
+
+def _doaj_pace() -> None:
+    with _DOAJ_PACE_LOCK:
+        wait = _DOAJ_LAST_REQUEST[0] + _DOAJ_MIN_INTERVAL_S - _doaj_monotonic()
+        if wait > 0:
+            _doaj_sleep(wait)
+        _DOAJ_LAST_REQUEST[0] = _doaj_monotonic()
 
 
 def _and_search(query: str, run: Callable[[str], list[RetrievedDoc] | None]) -> list[RetrievedDoc]:
@@ -661,6 +677,7 @@ def _doaj_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
         return []
 
     def run(text: str) -> list[RetrievedDoc] | None:
+        _doaj_pace()
         data = _http_get_json(
             _DOAJ_URL + quote(text, safe=""),
             {"pageSize": str(max(1, min(top_k, 25)))},
@@ -3030,6 +3047,9 @@ class Knowledge:
         chosen_idea: dict | None = None,
         chat_fn: Any | None = None,
         work_scope: str = WORK_SCOPE_PAPERS,
+        sources: list[str] | None = None,
+        web: bool = True,
+        fetch_full_text: bool | None = None,
     ) -> list[RetrievedDoc]:
         """Async retrieval. Layers, merged + de-duplicated:
 
@@ -3082,14 +3102,12 @@ class Knowledge:
         # Decide the academic source list (router or YAML fallback). The
         # web layer is handled separately (always-on), so strip any
         # ``web_search`` entry the router/fallback may name.
-        fallback = self._fallback_sources()
-        if self.cfg.source_routing == "auto" and chat_fn is not None:
-            sources = await _route_sources_with_llm(
-                topic=query, chosen_idea=chosen_idea,
-                chat_fn=chat_fn, fallback_sources=fallback,
+        # A caller searching several phrasings of one topic routes once and
+        # passes the result, instead of asking the router again per phrasing.
+        if sources is None:
+            sources = await self.choose_sources(
+                query, chosen_idea=chosen_idea, chat_fn=chat_fn,
             )
-        else:
-            sources = fallback
         academic_sources = [s for s in sources if s != "web_search"]
 
         # Network layer, run concurrently:
@@ -3105,7 +3123,7 @@ class Knowledge:
         # ``web_search=False``. Gate on ``cfg.enabled`` (the config flag) NOT
         # ``self.enabled`` (which also requires Axon to be installed) — web
         # search is independent of the Axon corpus when enabled=True.
-        want_web = bool(self.cfg.enabled and self.cfg.web_search)
+        want_web = bool(self.cfg.enabled and self.cfg.web_search and web)
         if want_web:
             tasks.append(asyncio.to_thread(
                 _web_search, query, self.cfg.web_search_top_k,
@@ -3167,7 +3185,9 @@ class Knowledge:
                     _fetch_web_page_text, headless=self.cfg.headless_fetch,
                 ),
             )
-        if self.cfg.try_fetch_full_text and academic_docs:
+        if fetch_full_text is None:
+            fetch_full_text = self.cfg.try_fetch_full_text
+        if fetch_full_text and academic_docs:
             academic_docs = await _enrich_with_full_text(
                 academic_docs,
                 timeout_s=self.cfg.full_text_fetch_timeout_s,
@@ -3269,6 +3289,47 @@ class Knowledge:
         _take([d for d in (*academic_docs, *web_docs, *axon_docs)
                if not any(k in seen for k in _doc_dedup_keys(d))], cap - len(merged))
         return merged
+
+    async def choose_sources(
+        self, query: str, *, chosen_idea: dict | None = None, chat_fn: Any | None = None,
+    ) -> list[str]:
+        """The academic sources to search for ``query``: the router's pick when
+        ``source_routing`` is ``auto`` and a chat function is given, otherwise
+        ``external_fallback``. With retrieval off nothing would be searched, so
+        no routing call is spent."""
+        fallback = self._fallback_sources()
+        if not self.cfg.enabled or self.cfg.source_routing != "auto" or chat_fn is None:
+            return fallback
+        return await _route_sources_with_llm(
+            topic=query, chosen_idea=chosen_idea,
+            chat_fn=chat_fn, fallback_sources=fallback,
+        )
+
+    async def fetch_full_text(self, docs: list[RetrievedDoc]) -> list[RetrievedDoc]:
+        """Fetch legal full text for the scholarly records in ``docs`` when
+        ``try_fetch_full_text`` is on. Web pages already carry their page text
+        and records already fetched are left alone; order is preserved. A
+        caller that merges several searches passes ``fetch_full_text=False`` to
+        each and calls this once on the records it kept."""
+        if not (self.cfg.enabled and self.cfg.try_fetch_full_text) or not docs:
+            return docs
+        idx = [
+            i for i, d in enumerate(docs)
+            if (d.metadata or {}).get("source") != "web_search"
+            and not (d.metadata or {}).get("fetched_full_text")
+        ]
+        if not idx:
+            return docs
+        enriched = await _enrich_with_full_text(
+            [docs[i] for i in idx],
+            timeout_s=self.cfg.full_text_fetch_timeout_s,
+            total_budget_s=self.cfg.full_text_fetch_total_s,
+            max_kb=self.cfg.full_text_max_kb,
+        )
+        out = list(docs)
+        for i, doc in zip(idx, enriched):
+            out[i] = doc
+        return out
 
     def search(self, query: str, *, top_k: int | None = None) -> list[RetrievedDoc]:
         """Synchronous wrapper for non-async callers (tests, scripts).

@@ -909,6 +909,16 @@ class KnowledgeConfig(BaseModel):
     # afford it.
     requery_on_low_relevance: bool = True
     requery_max: int = Field(default=2, ge=0, le=5)
+    # LLM literature screen. After the relevance floor, one batched call
+    # grades every retrieved source 0-3 on "could the paper cite this for a
+    # claim?". Scholarly records need a 2 to stay; web pages are dropped only
+    # at 0, because they supply quotable text rather than citations. Keeps at
+    # least ``relevance_min_keep`` sources (highest grades first) and fails
+    # open: a failed or unreadable call keeps everything, and a source the
+    # model did not grade is kept. The embedding floor alone cannot tell a
+    # table of contents or an unrelated paper that shares the search terms
+    # from a real on-topic source; this can. Off → floor only.
+    literature_screen: bool = True
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2

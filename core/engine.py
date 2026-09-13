@@ -53,6 +53,7 @@ from .knowledge import (
     WORK_SCOPE_PAPERS_AND_BOOKS,
     Knowledge,
     RetrievedDoc,
+    _doc_dedup_keys,
     _normalize_title,
 )
 from .protocol import derive_protocol, route_for_topic_type
@@ -85,6 +86,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "claim_check",
     "cross_check",
     "relevance_guard",
+    "literature_screen",
 })
 
 
@@ -152,7 +154,10 @@ class QuestState(TypedDict, total=False):
     literature_iter: int
     # The search query the literature node actually sent -- derived from the
     # topic by the model when it could be, else the old title+topic string.
+    # With facet queries this is the first facet; all of them are in
+    # ``literature_queries``.
     literature_query: str
+    literature_queries: list[str]
     design: dict[str, Any]
     # Every version of the design, in order. Entry 0 is the pre-registration
     # (stated before any result existed); later entries are flagged
@@ -2174,14 +2179,23 @@ class Engine:
         # topic into the terms the field publishes under. On any failure the
         # concatenation above is kept, so a flaky model degrades to the old
         # query rather than to no search at all.
-        derived = await self._derive_literature_query(
-            state["topic"], chosen.get("title") or "", hypothesis,
+        scope = self._work_scope(state)
+        queries = await self._derive_literature_queries(
+            state["topic"], chosen.get("title") or "", hypothesis, work_scope=scope,
         )
-        if derived:
-            self._log.info("[literature] search query derived from the topic: %r", derived)
-            query = derived
+        if queries:
+            self._log.info("[literature] search queries derived from the topic: %r", queries)
+            query = queries[0]
+        else:
+            queries = [query.strip()]
+        chat_fn = functools.partial(self._chat_messages, node="source_router")
+        # One routing decision for all facets: they are phrasings of one
+        # topic, and routing each would spend a call re-deriving the same list.
+        sources = await self.knowledge.choose_sources(
+            query, chosen_idea=chosen, chat_fn=chat_fn,
+        )
 
-        async def _retrieve(q: str) -> list:
+        async def _retrieve(q: str, *, web: bool = True) -> list:
             return await self.knowledge.asearch(
                 q.strip(),
                 top_k=self.config.knowledge.top_k,
@@ -2191,11 +2205,22 @@ class Engine:
                 # instead of being silently capped at the Axon top_k.
                 external_top_k=self.config.knowledge.external_top_k,
                 chosen_idea=chosen,
-                chat_fn=functools.partial(self._chat_messages, node="source_router"),
-                work_scope=self._work_scope(state),
+                chat_fn=chat_fn,
+                work_scope=scope,
+                sources=sources,
+                # Web search runs for the first facet only: the keyless
+                # DuckDuckGo backend throttles a burst of queries, and the
+                # other facets are there to reach scholarly work.
+                web=web,
+                # Full text is fetched once, below, for the sources that
+                # survive the relevance screen -- not for every facet's hits.
+                fetch_full_text=False,
             )
 
-        docs = await _retrieve(query)
+        per_facet = await asyncio.gather(*(
+            _retrieve(q, web=(i == 0)) for i, q in enumerate(queries)
+        ))
+        docs = _merge_round_robin(list(per_facet))
         # Relevance floor: drop off-topic sources the retriever returned before
         # they reach the corpus. This is the ONLY relevance filter on the
         # literature path — the LLM guard runs only under auto_collect, which
@@ -2215,13 +2240,13 @@ class Engine:
         # evidence. Retrying with the model's alternative phrasings is the
         # principled fix. Bounded, and skipped when unscored (see config).
         kn = self.config.knowledge
-        tried_queries = [query.strip()]
+        tried_queries = list(queries)
         if kn.requery_on_low_relevance and stats.get("scored") and docs:
             attempt = 0
             while stats.get("above_floor", 0) == 0 and attempt < kn.requery_max:
                 attempt += 1
                 alt = await self._propose_literature_queries(
-                    rel_topic, tried_queries, docs,
+                    rel_topic, tried_queries, docs, work_scope=scope,
                 )
                 if not alt:
                     self._log.info(
@@ -2252,6 +2277,12 @@ class Engine:
                     attempt, stats.get("above_floor", 0),
                 )
         docs = filtered
+        # The floor scores word overlap; the screen asks whether the paper
+        # could cite each source for a claim (see _screen_literature).
+        docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
+        # Legal full text for the scholarly sources that were kept (web pages
+        # already carry their page text). Once here rather than per facet.
+        docs = await self.knowledge.fetch_full_text(docs)
         # Keep the FULL fetched text (no truncation): it lands uncapped on
         # disk under data/literature/ for audit, and the prompt builders
         # relevance-select the passages each node needs (see
@@ -2408,6 +2439,7 @@ class Engine:
             "literature": merged,
             "literature_iter": this_iter,
             "literature_query": query.strip(),
+            "literature_queries": queries,
         }
 
     async def _node_design(self, state: QuestState) -> QuestState:
@@ -3105,45 +3137,181 @@ class Engine:
             )
         return kept
 
-    async def _derive_literature_query(
-        self, topic: str, idea_title: str = "", hypothesis: str = "",
-    ) -> str:
-        """Turn a topic statement into a keyword search query.
+    async def _screen_literature(
+        self, topic: str, docs: list, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list:
+        """Grade every retrieved source 0-3 in one batched call and keep the
+        citable ones (rubric in ``agents/literature_screen.md``).
 
-        Returns "" when retrieval is off (nothing would read the query), when
-        the model fails, or when the reply is not a keyword query at all (a
-        long sentence is the topic echoed back). The caller then keeps its own
-        query, so this can only narrow what gets sent, never stop the search.
+        The embedding floor that runs first scores word overlap, so a table of
+        contents or a paper on another system that shares the search terms
+        passes it; this asks whether the paper could cite the source for a
+        claim. Scholarly records need a 2. Web pages are dropped only at 0:
+        they are kept for the text the writer quotes, and a page of general
+        background is exactly what a 1 describes. At least
+        ``knowledge.relevance_min_keep`` sources survive, best grades first,
+        so a thin retrieval is not emptied (the evidence gate can broaden).
+        Fail-open: when the screen is off, the call fails or the reply cannot
+        be read, every source is kept, and so is any source left ungraded.
+        Graded sources carry ``screen_grade``.
+        """
+        kn = self.config.knowledge
+        # Papers the user supplied are theirs to judge: never shown, never dropped.
+        own = {
+            i for i, d in enumerate(docs)
+            if (d.metadata or {}).get("source") in ("local_paper", "user_supplied")
+        }
+        if not kn.literature_screen or len(own) == len(docs):
+            return docs
+        lines: list[str] = []
+        for i, d in enumerate(docs):
+            if i in own:
+                continue
+            md = d.metadata or {}
+            kind = "web page" if md.get("source") == "web_search" else "paper"
+            title = " ".join(str(md.get("title") or md.get("url") or "(untitled)").split())
+            facts = ", ".join(
+                str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type")) if v
+            )
+            excerpt = " ".join(str(d.content or "").split())[:300]
+            lines.append(
+                f"[{i}] ({kind}) {title}" + (f" — {facts}" if facts else "") + f" :: {excerpt}"
+            )
+        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+            guidance = (
+                "This quest has no experiment, so books, book chapters and "
+                "humanities or social-science scholarship count as fully as "
+                "journal articles: judge them by subject, not by format."
+            )
+        else:
+            guidance = (
+                "This quest runs an experiment. Work on the same system, method "
+                "or measured quantity is the most useful; a paper from another "
+                "field that only shares vocabulary is a 0 or a 1."
+            )
+        prompt = self._prompts["literature_screen"].substitute(
+            topic=topic[:1200], kind_guidance=guidance, candidates="\n".join(lines),
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_screen")
+            parsed = _parse_json_lenient(raw, node="literature_screen")
+        except Exception as e:  # noqa: BLE001 — the screen must never cost the corpus
+            self._log.info("[literature] screen failed (%r); keeping all %d sources", e, len(docs))
+            return docs
+        grades = _screen_grades(parsed, len(docs))
+        if grades is None:
+            self._log.info("[literature] screen reply unreadable; keeping all %d sources", len(docs))
+            return docs
+        # A grade the model gave a user-supplied paper anyway does not count.
+        grades = {i: g for i, g in grades.items() if i not in own}
+        keep = [
+            i for i, d in enumerate(docs)
+            if i not in grades
+            or grades[i] >= (1 if (d.metadata or {}).get("source") == "web_search" else 2)
+        ]
+        minimum = min(kn.relevance_min_keep, len(docs))
+        if len(keep) < minimum:
+            # Stable sort: equal grades stay in retrieval order.
+            rest = sorted((i for i in range(len(docs)) if i not in keep),
+                          key=lambda i: -grades.get(i, 0))
+            keep = sorted(keep + rest[:minimum - len(keep)])
+        out = []
+        for i in keep:
+            md = dict(docs[i].metadata or {})
+            if i in grades:
+                md["screen_grade"] = grades[i]
+            out.append(RetrievedDoc(content=docs[i].content, metadata=md))
+        values = list(grades.values())
+        self._log.info(
+            "[literature] screen kept %d/%d sources (grade counts: %s)",
+            len(out), len(docs), {g: values.count(g) for g in sorted(set(values))},
+        )
+        return out
+
+    async def _derive_literature_queries(
+        self, topic: str, idea_title: str = "", hypothesis: str = "",
+        *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list[str]:
+        """Turn a topic statement into up to three keyword search queries,
+        one per facet of the topic.
+
+        A search engine matches keywords, and one query reaches only the work
+        written in its own words. Three facets -- the core subject, a specific
+        angle and the wider frame -- reach work a single query misses; the
+        results are merged and screened afterwards. The vocabulary follows the
+        kind of quest. One with an experiment searches under the names of
+        methods, systems and measured quantities. One without searches under
+        the names scholars of that subject write about -- works, people,
+        periods, places, movements -- because wording decides what a database
+        returns: on one humanities topic the same database gave 0 of 10
+        on-topic hits for the STEM-style query and 8 of 10 for the other.
+
+        Returns [] when retrieval is off (nothing would read the queries), when
+        the model fails, or when no reply is a keyword query (a long sentence
+        is the topic echoed back). The caller then keeps its own query, so
+        this changes what gets sent but never stops the search.
         """
         if not self.config.knowledge.enabled:
-            return ""
+            return []
+        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+            engines = "OpenAlex, Crossref, CORE, OpenAIRE, DOAJ"
+            angle = "a specific period, place, work, group or case within the topic"
+            frame = "the discipline or theoretical frame the topic is studied in"
+            vocabulary = (
+                "Use the words scholars of this subject write under: the names "
+                "of the works, people, periods, places, movements, genres and "
+                "concepts involved, and the discipline's own terms. Do not add "
+                "method words such as model, simulation, dataset or analysis "
+                "unless the topic itself is about them."
+            )
+        else:
+            engines = "arXiv, OpenAlex, Crossref"
+            angle = "the method, mechanism or measured quantity"
+            frame = "the broader problem or application area it belongs to"
+            vocabulary = (
+                "Use the terms researchers in this field publish under: the "
+                "standard names of the methods, the system studied and the "
+                "quantity measured."
+            )
         prompt = (
-            "Write ONE literature search query for this research topic. It "
-            "goes to academic search engines (arXiv, OpenAlex, Crossref) and "
-            "to web search.\n\n"
+            "Write THREE literature search queries for this research topic, one "
+            f"per facet below. They go to academic search engines ({engines}); "
+            "the first also goes to web search.\n\n"
             f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
             + (f"CHOSEN RESEARCH DIRECTION:\n{idea_title[:200]}\n\n" if idea_title else "")
             + (f"HYPOTHESIS UNDER TEST:\n{hypothesis[:300]}\n\n" if hypothesis else "")
-            + "A search engine matches keywords, not sentences. Use the terms "
-            "researchers in this field publish under: the standard names of "
-            "the methods, the system studied and the quantity measured. Spell "
-            "out acronyms. No full sentences, quotes, boolean operators or "
-            "wildcards. 3 to 10 words.\n\n"
-            'Reply as JSON only: {"query": "<your query>"}'
+            + "FACETS:\n"
+            "1. the core subject, in the field's standard terms\n"
+            f"2. {angle}\n"
+            f"3. {frame}\n\n"
+            "A search engine matches keywords, not sentences. " + vocabulary
+            + " Spell out acronyms. No full sentences, quotes, boolean "
+            "operators or wildcards. 3 to 8 words each; shorter queries match "
+            "more.\n\n"
+            'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
         )
         try:
             raw = await self._chat(prompt, node="literature_query")
             parsed = _parse_json_lenient(raw, node="literature_query")
-            q = " ".join(str((parsed or {}).get("query") or "").split())
         except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
             self._log.info("[literature] query derivation failed: %r", e)
-            return ""
-        if not q or len(q.split()) > 20:
-            return ""
-        return q[:300]
+            return []
+        if not isinstance(parsed, dict):
+            return []
+        replies = parsed.get("queries")
+        if not isinstance(replies, list):
+            # A reply in the one-query shape still yields one facet.
+            replies = [parsed.get("query")]
+        out: list[str] = []
+        for reply in replies:
+            q = " ".join(str(reply or "").split())[:300]
+            if q and len(q.split()) <= 20 and q.lower() not in {o.lower() for o in out}:
+                out.append(q)
+        return out[:3]
 
     async def _propose_literature_queries(
         self, topic: str, tried: list[str], missed: list,
+        *, work_scope: str = WORK_SCOPE_PAPERS,
     ) -> str:
         """Ask for ONE better search query after a retrieval missed entirely.
 
@@ -3169,8 +3337,13 @@ class Engine:
             + "\n\nThe likely cause is vocabulary: this field's papers may use "
             "different terminology than the topic statement does. Propose ONE "
             "alternative search query that uses the terms researchers in this "
-            "field would actually publish under. Prefer domain-standard terms "
-            "and spell out acronyms. Keep it under 20 words.\n\n"
+            "field would actually publish under. "
+            + ("Prefer the names scholars of this subject write under -- works, "
+               "people, periods, places, movements, genres, concepts -- over "
+               "method words. "
+               if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS else
+               "Prefer domain-standard terms. ")
+            + "Spell out acronyms. Keep it under 20 words.\n\n"
             'Reply as JSON only: {"query": "<your query>"}'
         )
         try:
@@ -6815,6 +6988,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence
         "evidence_gate",        # weigh evidence sufficiency before write
+        "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
@@ -7006,6 +7180,51 @@ def _lit_query(state: QuestState) -> str:
     if isinstance(design, dict) and design.get("hypothesis"):
         parts.append(str(design["hypothesis"]))
     return " ".join(p for p in parts if p)[:500]
+
+
+def _screen_grades(parsed: Any, n: int) -> dict[int, int] | None:
+    """Read the literature screen's reply -- ``{"grades": [{"i": 0, "grade":
+    3}, ...]}`` or ``{"grades": {"0": 3}}`` -- into ``{index: grade}``. None
+    when the reply carries no grades at all. Entries naming an index outside
+    the ``n`` candidates, or a grade outside 0-3, are ignored."""
+    if not isinstance(parsed, dict):
+        return None
+    raw = parsed.get("grades")
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, list):
+        pairs = [(e.get("i"), e.get("grade")) for e in raw if isinstance(e, dict)]
+    else:
+        return None
+    out: dict[int, int] = {}
+    for i, g in pairs:
+        try:
+            i, g = int(i), int(g)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < n and 0 <= g <= 3:
+            out[i] = g
+    return out
+
+
+def _merge_round_robin(result_lists: list[list]) -> list:
+    """Interleave several searches' results -- the first of each, then the
+    second of each, and so on -- keeping the first copy of a work found by
+    more than one. Each search keeps its own ranking, and no search's best
+    results end up behind another search's tail."""
+    seen: set[str] = set()
+    out: list = []
+    for rank in range(max((len(r) for r in result_lists), default=0)):
+        for results in result_lists:
+            if rank >= len(results):
+                continue
+            doc = results[rank]
+            keys = _doc_dedup_keys(doc)
+            if any(k in seen for k in keys):
+                continue
+            seen.update(keys)
+            out.append(doc)
+    return out
 
 
 def _format_lit(

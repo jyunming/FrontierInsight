@@ -333,7 +333,14 @@ the quest YAML (an environment variable wins). CORE, OpenAIRE and DOAJ
 need no key and are where humanities and social-science topics find
 open-access books, theses and journals. Academic search keeps only
 citable record types: papers for a quest with an experiment, and papers
-plus books and book chapters for a quest without one.
+plus books and book chapters for a quest without one. Each literature
+pass searches three short keyword queries, one per facet of the topic,
+worded for its kind (methods and measured quantities, or the names
+scholars of the subject write under), and fetches full text once, for
+the sources it keeps. Before that, one model call grades every
+retrieved source 0–3 on whether the paper could cite it: papers need a
+2, web pages are dropped only at 0, and your own papers are never
+screened (`knowledge.literature_screen`, on by default).
 
 If any files land, the chat panel shows the count and the quest
 continues — many no-simulation quests run end-to-end without

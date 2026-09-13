@@ -788,16 +788,22 @@ async def test_first_query_is_derived_from_the_topic(tmp_path: Path) -> None:
     eng.config.knowledge.enabled = True
     seen: dict = {}
 
+    facets = [
+        "damped harmonic oscillator numerical integrators",
+        "energy drift symplectic integration",
+        "numerical methods ordinary differential equations",
+    ]
+
     async def fake_chat(prompt, node=""):
         seen["node"], seen["prompt"] = node, prompt
-        return '{"query": "damped harmonic oscillator numerical integrators energy drift"}'
+        return json.dumps({"queries": facets})
 
     eng._chat = fake_chat
-    q = await eng._derive_literature_query(
+    qs = await eng._derive_literature_queries(
         "Compare how accurately explicit Euler and RK4 track a damped oscillator.",
         "Integrator bake-off",
     )
-    assert q == "damped harmonic oscillator numerical integrators energy drift"
+    assert qs == facets
     assert seen["node"] == "literature_query"
     assert "Integrator bake-off" in seen["prompt"]
 
@@ -810,7 +816,7 @@ async def test_derivation_spends_no_call_when_retrieval_is_off(tmp_path: Path) -
         raise AssertionError("nothing would read the query")
 
     eng._chat = must_not_call
-    assert await eng._derive_literature_query("topic") == ""
+    assert await eng._derive_literature_queries("topic") == []
 
 
 @pytest.mark.asyncio
@@ -823,7 +829,7 @@ async def test_derivation_rejects_the_topic_echoed_back(tmp_path: Path) -> None:
         return '{"query": "' + sentence + '"}'
 
     eng._chat = echo
-    assert await eng._derive_literature_query(sentence) == ""
+    assert await eng._derive_literature_queries(sentence) == []
 
 
 @pytest.mark.asyncio
@@ -835,7 +841,7 @@ async def test_derivation_degrades_to_empty_on_model_failure(tmp_path: Path) -> 
         raise RuntimeError("provider down")
 
     eng._chat = boom
-    assert await eng._derive_literature_query("t") == ""
+    assert await eng._derive_literature_queries("t") == []
 
 
 async def _literature_queries(monkeypatch, tmp_path: Path, chat) -> tuple[list, dict]:
