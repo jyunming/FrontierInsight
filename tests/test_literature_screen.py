@@ -164,11 +164,17 @@ async def test_papers_the_user_supplied_are_never_screened(tmp_path: Path) -> No
     assert "My notes on toys" not in seen["prompt"]
     assert "[1] (paper) Plastic moulding" in seen["prompt"]
 
-    async def must_not_call(prompt, node=""):
-        raise AssertionError("nothing to grade")
+    calls: list[str] = []
 
-    eng._chat = must_not_call
+    async def record(prompt, node=""):
+        # Recorded, not raised: the screen fails open, so an exception raised
+        # here would be swallowed and the test could not see the call.
+        calls.append(node)
+        return "{}"
+
+    eng._chat = record
     assert await eng._screen_literature(TOPIC, [own, dropped_in]) == [own, dropped_in]
+    assert calls == [], "nothing to grade, so no call"
 
 
 def test_the_screen_runs_at_temperature_zero() -> None:
@@ -178,15 +184,18 @@ def test_the_screen_runs_at_temperature_zero() -> None:
 @pytest.mark.asyncio
 async def test_no_call_when_the_screen_is_off_or_there_is_nothing_to_grade(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
+    calls: list[str] = []
 
-    async def must_not_call(prompt, node=""):
-        raise AssertionError("no screen call expected")
+    async def record(prompt, node=""):
+        calls.append(node)  # recorded, not raised: the screen fails open
+        return "{}"
 
-    eng._chat = must_not_call
+    eng._chat = record
     assert await eng._screen_literature(TOPIC, []) == []
     eng.config.knowledge.literature_screen = False
     docs = [_paper("Plastic moulding", "10.1/a")]
     assert await eng._screen_literature(TOPIC, docs) == docs
+    assert calls == []
 
 
 @pytest.mark.asyncio
