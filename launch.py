@@ -4503,8 +4503,9 @@ def main() -> int:
     # the streams are reconfigured up here.
     _force_utf8_streams()
     # Load .env before anything reads the environment (KnowledgeConfig's
-    # brave_api_key / offline defaults resolve BRAVE_API_KEY / FI_* at
-    # Config construction time).
+    # brave_api_key / openalex_api_key / semantic_scholar_api_key / offline
+    # defaults resolve BRAVE_API_KEY / OPENALEX_API_KEY /
+    # SEMANTIC_SCHOLAR_API_KEY / FI_* at Config construction time).
     _load_dotenv()
     args = parse_args()
     # Hold the coroutine so we can close() it if asyncio.run never consumes

@@ -240,7 +240,9 @@ knowledge:
   write_back_quests: true
   write_back_only_on_accept: true
 
-  external_fallback: [openalex, arxiv, crossref]
+  external_fallback: [openalex, arxiv, crossref]   # arxiv is searched through OpenAlex's arXiv source (arXiv's own query API is throttled for everyone)
+  openalex_api_key: ""              # or env OPENALEX_API_KEY. Without a key OpenAlex allows ~100 searches/day; a quest uses dozens. Env wins over YAML.
+  semantic_scholar_api_key: ""      # or env SEMANTIC_SCHOLAR_API_KEY. The keyless pool mostly answers 429.
   source_routing: auto              # auto (LLM picks) | manual
   seed_source_catalog: true
 

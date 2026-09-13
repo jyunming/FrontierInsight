@@ -838,6 +838,21 @@ class KnowledgeConfig(BaseModel):
     brave_api_key: str = Field(
         default_factory=lambda: os.environ.get("BRAVE_API_KEY", "").strip()
     )
+    # OpenAlex API key (free at openalex.org). Since February 2026 OpenAlex
+    # gives its full free daily budget only to keyed requests; without a key
+    # a machine gets about a tenth of it — roughly 100 searches a day, and a
+    # quest uses dozens, since arXiv is searched through OpenAlex too. Env
+    # fallback ``OPENALEX_API_KEY``; a set env var wins over YAML. Sent as
+    # OpenAlex's ``api_key`` parameter and redacted from FI's logs.
+    openalex_api_key: str = Field(
+        default_factory=lambda: os.environ.get("OPENALEX_API_KEY", "").strip()
+    )
+    # Semantic Scholar API key (free on request). The keyless pool is shared
+    # by everyone and answers 429 most of the time. Env fallback
+    # ``SEMANTIC_SCHOLAR_API_KEY``; a set env var wins over YAML.
+    semantic_scholar_api_key: str = Field(
+        default_factory=lambda: os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    )
     # Number of web results to request per query. Independent of
     # ``external_top_k`` (which caps the merged external set) so users can
     # widen web breadth without changing the academic cap.

@@ -43,10 +43,14 @@ Two responsibilities:
 External sources currently implemented (all free, all best-effort —
 network failures log and return [] rather than raising):
   - openalex          — broadest single open index, ~200M works
-  - arxiv             — physics / CS / math / quant-ph / q-bio / stats
+                        (OPENALEX_API_KEY for the full daily budget)
+  - arxiv             — physics / CS / math / quant-ph / q-bio / stats,
+                        searched through OpenAlex's arXiv source: arXiv's
+                        own query API is capacity-throttled for everyone
   - crossref          — DOI metadata across paywalled publishers
                         (Springer, Elsevier, IEEE, ACM, SPIE, ACS, …)
   - semantic_scholar  — broad coverage with citation graph
+                        (SEMANTIC_SCHOLAR_API_KEY; the keyless pool 429s)
   - pubmed            — biomedical (NCBI E-utilities)
   - core              — 240M open-access papers (requires CORE_API_KEY)
   - google_scholar    — EXPERIMENTAL via `scholarly`; no official API,
@@ -68,7 +72,6 @@ import re
 import threading
 from itertools import zip_longest
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -211,10 +214,11 @@ class RetrievedDoc:
 
 def _http_get_json(
     url: str, params: dict | None, timeout_s: float, *, source: str = "",
+    headers: dict | None = None,
 ) -> dict | None:
     try:
         with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0"})
+            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0", **(headers or {})})
             r.raise_for_status()
             return r.json()
     except Exception as e:
@@ -223,78 +227,106 @@ def _http_get_json(
         return None
 
 
-def _http_get_text(
-    url: str, params: dict | None, timeout_s: float, *, source: str = "",
-) -> str | None:
-    try:
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0"})
-            r.raise_for_status()
-            return r.text
-    except Exception as e:
-        _log.info("http GET %s failed: %s", url, _sf.redact(e))
-        _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
-        return None
+# OpenAlex's id for the arXiv repository ("arXiv (Cornell University)").
+_OPENALEX_ARXIV_SOURCE_ID = "S4306400194"
+# New-style (2401.01234) and old-style (hep-th/9701001) ids, from an arXiv
+# DOI (10.48550/arXiv.<id>) or an abs/pdf URL; any vN suffix is dropped.
+_ARXIV_ID_IN_TEXT_RE = re.compile(
+    r"(?i)(?:arxiv\.org/(?:abs|pdf)/|10\.48550/arxiv\.)"
+    r"([a-z][a-z\-]*(?:\.[a-z]{2})?/\d{7}|\d{4}\.\d{4,5})"
+)
 
 
-def _arxiv_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _openalex_params(params: dict, api_key: str = "") -> dict:
+    """Add the OpenAlex key when one is configured. OpenAlex has required a
+    key for its full free daily budget since February 2026; without one a
+    machine gets about a tenth of it (roughly 100 searches a day)."""
+    key = (api_key or os.environ.get("OPENALEX_API_KEY", "")).strip()
+    return {**params, "api_key": key} if key else params
+
+
+def _clean_openalex_title(title: Any) -> str:
+    # Some OpenAlex titles carry a literal backslash-n from the source feed.
+    return re.sub(r"\s+", " ", str(title or "").replace("\\n", " ")).strip()
+
+
+def _openalex_authors(w: dict) -> list[str]:
+    return [
+        (a.get("author", {}) or {}).get("display_name", "")
+        for a in (w.get("authorships") or [])
+    ]
+
+
+def _arxiv_id_from_openalex(w: dict) -> str:
+    loc = w.get("primary_location") or {}
+    for text in (w.get("doi"), loc.get("landing_page_url"), loc.get("pdf_url")):
+        m = _ARXIV_ID_IN_TEXT_RE.search(str(text or ""))
+        if m:
+            return m.group(1).lower() if "/" in m.group(1) else m.group(1)
+    return ""
+
+
+def _arxiv_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+) -> list[RetrievedDoc]:
+    """arXiv preprints, searched through OpenAlex's index of arXiv.
+
+    arXiv's own query API (export.arxiv.org/api/query) has been
+    capacity-throttled for everyone since its move to the cloud: a single
+    request made hours after the last one still gets HTTP 429, while
+    arxiv.org abstract and PDF pages answer normally. OpenAlex indexes arXiv
+    as one source, with the arXiv DOI, abstract and PDF link, so the same
+    papers come back without touching the throttled endpoint. Full text is
+    still fetched from arxiv.org by the full-text cascade."""
     if not query.strip():
         return []
-    params = {
-        "search_query": f"all:{query.strip()}",
-        "start": "0",
-        "max_results": str(max(1, min(top_k, 20))),
-        "sortBy": "relevance",
-        "sortOrder": "descending",
-    }
-    xml = _http_get_text("http://export.arxiv.org/api/query", params, timeout_s, source="arxiv")
-    if not xml:
-        return []
-    ns = {"a": "http://www.w3.org/2005/Atom"}
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
+    params = _openalex_params({
+        "search": query.strip(),
+        "filter": f"primary_location.source.id:{_OPENALEX_ARXIV_SOURCE_ID}",
+        "per-page": str(max(1, min(top_k, 25))),
+    }, api_key)
+    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="arxiv")
+    if not data or "results" not in data:
         return []
     out: list[RetrievedDoc] = []
-    for entry in root.findall("a:entry", ns):
-        title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
-        summary = (entry.findtext("a:summary", default="", namespaces=ns) or "").strip()
-        published = (entry.findtext("a:published", default="", namespaces=ns) or "").strip()
-        arxiv_url = (entry.findtext("a:id", default="", namespaces=ns) or "").strip()
-        m = re.search(r"abs/([^/?#]+)$", arxiv_url)
-        arxiv_id = m.group(1) if m else ""
-        authors = [
-            (a.findtext("a:name", default="", namespaces=ns) or "").strip()
-            for a in entry.findall("a:author", ns)
-        ]
-        pdf_url = next(
-            (link.get("href", "") for link in entry.findall("a:link", ns) if link.get("title") == "pdf"),
-            "",
-        )
+    for w in data.get("results", []):
+        title = _clean_openalex_title(w.get("title"))
+        abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
+        arxiv_id = _arxiv_id_from_openalex(w)
+        loc = w.get("primary_location") or {}
         out.append(RetrievedDoc(
-            content=f"{title}\n\n{summary}".strip(),
+            content=f"{title}\n\n{abstract}".strip(),
             metadata={
-                "source": "arxiv", "title": title, "authors": authors,
-                "published": published, "arxiv_id": arxiv_id,
-                "url": arxiv_url, "pdf_url": pdf_url,
+                "source": "arxiv", "title": title, "authors": _openalex_authors(w),
+                "published": w.get("publication_date") or "",
+                "year": w.get("publication_year"),
+                "arxiv_id": arxiv_id,
+                "doi": (w.get("doi") or "").replace("https://doi.org/", ""),
+                "url": (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id
+                        else loc.get("landing_page_url") or w.get("id") or ""),
+                "pdf_url": loc.get("pdf_url") or (
+                    f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else ""),
+                "venue": "arXiv", "open_access": True,
             },
         ))
     return out
 
 
-def _openalex_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _openalex_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+) -> list[RetrievedDoc]:
     if not query.strip():
         return []
-    params = {
+    params = _openalex_params({
         "search": query.strip(),
         "per-page": str(max(1, min(top_k, 25))),
-    }
+    }, api_key)
     data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
     if not data or "results" not in data:
         return []
     out: list[RetrievedDoc] = []
     for w in data.get("results", []):
-        title = w.get("title") or ""
+        title = _clean_openalex_title(w.get("title"))
         # OpenAlex returns an inverted index for abstracts; reconstruct.
         abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
         doi = (w.get("doi") or "").replace("https://doi.org/", "")
@@ -376,7 +408,9 @@ def _crossref_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list
     return out
 
 
-def _semantic_scholar_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _semantic_scholar_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+) -> list[RetrievedDoc]:
     if not query.strip():
         return []
     params = {
@@ -384,9 +418,12 @@ def _semantic_scholar_search(query: str, top_k: int, *, timeout_s: float = 10.0)
         "limit": str(max(1, min(top_k, 25))),
         "fields": "title,abstract,authors,year,venue,externalIds,openAccessPdf,url",
     }
+    # The shared keyless pool answers 429 most of the time; a free key
+    # gets a dedicated lane.
+    key = (api_key or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")).strip()
     data = _http_get_json(
         "https://api.semanticscholar.org/graph/v1/paper/search", params, timeout_s,
-        source="semantic_scholar",
+        source="semantic_scholar", headers={"x-api-key": key} if key else None,
     )
     if not data or "data" not in data:
         return []
@@ -1992,7 +2029,7 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
         "fields": ["all"],
         "access": "open",
         "has_search_adapter": True,
-        "when_to_use": "broadest single open index (~200M works). Strong default for any topic.",
+        "when_to_use": "broadest single open index (~200M works). Strong default for any topic. Set OPENALEX_API_KEY for the full daily budget.",
     },
     {
         "name": "arxiv",
@@ -2001,7 +2038,7 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
                    "quantitative biology", "statistics", "electrical engineering"],
         "access": "open",
         "has_search_adapter": True,
-        "when_to_use": "physics, CS, math, quantum, anything posted as a preprint before peer review.",
+        "when_to_use": "physics, CS, math, quantum, anything posted as a preprint before peer review. Searched through OpenAlex's arXiv source; full text from arxiv.org.",
     },
     {
         "name": "crossref",
@@ -2015,7 +2052,7 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
         "name": "semantic_scholar",
         "title": "Semantic Scholar",
         "fields": ["all"],
-        "access": "open (rate-limited without API key)",
+        "access": "open (keyless pool mostly rate-limited; set SEMANTIC_SCHOLAR_API_KEY)",
         "has_search_adapter": True,
         "when_to_use": "broad coverage with abstracts + citation graph. Good for follow-the-citations workflows.",
     },
@@ -2605,6 +2642,17 @@ def _axon_config_from(spec: Any) -> Any:
 class Knowledge:
     def __init__(self, cfg: KnowledgeConfig) -> None:
         self.cfg = cfg
+        # Scholarly API keys set in YAML reach every adapter through the
+        # environment — the same channel `.env` uses — because the adapters
+        # are plain functions called from the router, the source registry
+        # and the full-text cascade alike. A real environment variable still
+        # wins over YAML.
+        for env_name, value in (
+            ("OPENALEX_API_KEY", getattr(cfg, "openalex_api_key", "")),
+            ("SEMANTIC_SCHOLAR_API_KEY", getattr(cfg, "semantic_scholar_api_key", "")),
+        ):
+            if value and not os.environ.get(env_name):
+                os.environ[env_name] = value
         self.enabled = cfg.enabled and _AXON_AVAILABLE
         self._brain: Any | None = None
         self._retriever: Any | None = None

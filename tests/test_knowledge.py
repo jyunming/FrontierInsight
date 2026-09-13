@@ -320,23 +320,31 @@ def test_add_quest_artifacts_includes_caller_metadata(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _arxiv_atom(*entries: dict) -> str:
-    """Minimal arXiv Atom XML for the search-result envelope."""
-    items = "".join(
-        f"""
-        <entry>
-          <id>http://arxiv.org/abs/{e.get("id", "9999.99999")}v1</id>
-          <title>{e.get("title", "T")}</title>
-          <summary>{e.get("summary", "S")}</summary>
-          <published>{e.get("published", "2020-01-01T00:00:00Z")}</published>
-          <author><name>{e.get("author", "A. Person")}</name></author>
-          <link title="pdf" href="http://arxiv.org/pdf/{e.get("id", "9999.99999")}.pdf"/>
-        </entry>
-        """
-        for e in entries
-    )
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-    <feed xmlns="http://www.w3.org/2005/Atom">{items}</feed>"""
+def _arxiv_atom(*entries: dict) -> dict:
+    """Minimal OpenAlex /works payload for arXiv works — the arXiv adapter
+    searches OpenAlex's arXiv source, not arXiv's throttled query API. (The
+    helper keeps its old name so the dispatch tests below read unchanged.)"""
+    results = []
+    for e in entries:
+        aid = e.get("id", "9999.99999")
+        words = str(e.get("summary", "S")).split()
+        results.append({
+            "id": f"https://openalex.org/W{abs(hash(aid)) % 10**9}",
+            "title": e.get("title", "T"),
+            "doi": f"https://doi.org/10.48550/arxiv.{aid}",
+            "publication_year": 2024,
+            "publication_date": e.get("published", "2024-01-01"),
+            "type": "preprint",
+            "authorships": [{"author": {"display_name": e.get("author", "A. Person")}}],
+            "abstract_inverted_index": {w: [i] for i, w in enumerate(words)},
+            "primary_location": {
+                "landing_page_url": f"http://arxiv.org/abs/{aid}v2",
+                "pdf_url": f"https://arxiv.org/pdf/{aid}",
+                "source": {"id": "https://openalex.org/S4306400194",
+                           "display_name": "arXiv (Cornell University)"},
+            },
+        })
+    return {"results": results}
 
 
 def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
@@ -375,7 +383,7 @@ def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
             captured["url"] = url
             captured["params"] = params
             r = MagicMock()
-            r.text = atom
+            r.json.return_value = atom
             r.raise_for_status = MagicMock()
             return r
 
@@ -386,20 +394,21 @@ def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
     assert all(d.metadata["source"] == "arxiv" for d in docs)
     # Order is decided by relevance to the query now, not by the order the
     # adapter returned, so assert the SET rather than a position.
-    # arXiv URLs include a version suffix (vN); the parser keeps it.
-    assert {d.metadata["arxiv_id"].split("v")[0] for d in docs} == {
-        "2401.00001", "2401.00002",
-    }
+    # The landing URL carries a version suffix (vN); the id drops it.
+    assert {d.metadata["arxiv_id"] for d in docs} == {"2401.00001", "2401.00002"}
     # Field-parsing assertions target the entry by id rather than by
     # position — relevance ranking decides the order now, and this test is
     # about the adapter parsing the Atom feed correctly.
     first = next(d for d in docs
                  if d.metadata["arxiv_id"].startswith("2401.00001"))
-    assert first.metadata["pdf_url"].endswith(".pdf")
+    assert first.metadata["pdf_url"] == "https://arxiv.org/pdf/2401.00001"
+    assert first.metadata["url"] == "https://arxiv.org/abs/2401.00001"
     assert "X. Yu" in first.metadata["authors"]
     assert "BV under noise" in first.content
-    assert captured["params"]["max_results"] == "3"
-    assert "all:" in captured["params"]["search_query"]
+    assert captured["url"] == "https://api.openalex.org/works"
+    assert captured["params"]["filter"] == "primary_location.source.id:S4306400194"
+    assert captured["params"]["per-page"] == "3"
+    assert captured["params"]["search"] == "Bernstein-Vazirani depolarizing"
 
 
 def test_external_top_k_used_when_caller_explicitly_passes_it(monkeypatch) -> None:
@@ -433,14 +442,14 @@ def test_external_top_k_used_when_caller_explicitly_passes_it(monkeypatch) -> No
         def get(self, url, params=None, **_):
             captured["params"] = params
             r = MagicMock()
-            r.text = atom
+            r.json.return_value = atom
             r.raise_for_status = MagicMock()
             return r
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
     import asyncio as _asyncio
     _asyncio.run(k.asearch("anything", top_k=5, external_top_k=20))
-    assert captured["params"]["max_results"] == "20"
+    assert captured["params"]["per-page"] == "20"
 
 
 def test_disabled_knowledge_does_not_web_search(monkeypatch) -> None:
@@ -502,14 +511,14 @@ def test_external_top_k_honours_caller_per_call_cap(monkeypatch) -> None:
         def get(self, url, params=None, **_):
             captured["params"] = params
             r = MagicMock()
-            r.text = atom
+            r.json.return_value = atom
             r.raise_for_status = MagicMock()
             return r
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
     import asyncio as _asyncio
     _asyncio.run(k.asearch("ideate seed", top_k=3))
-    assert captured["params"]["max_results"] == "3"
+    assert captured["params"]["per-page"] == "3"
 
 
 def test_external_top_k_uses_config_when_no_caller_caps(monkeypatch) -> None:
@@ -541,14 +550,14 @@ def test_external_top_k_uses_config_when_no_caller_caps(monkeypatch) -> None:
         def get(self, url, params=None, **_):
             captured["params"] = params
             r = MagicMock()
-            r.text = atom
+            r.json.return_value = atom
             r.raise_for_status = MagicMock()
             return r
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
     import asyncio as _asyncio
     _asyncio.run(k.asearch("anything"))
-    assert captured["params"]["max_results"] == "20"
+    assert captured["params"]["per-page"] == "20"
 
 
 def test_arxiv_fallback_disabled_when_external_fallback_none(monkeypatch) -> None:

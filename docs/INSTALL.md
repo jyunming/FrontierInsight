@@ -201,6 +201,32 @@ search entirely with `knowledge.web_search: false`; force a backend with
 `knowledge.web_search_backend: brave | duckduckgo` (default `auto` = Brave
 when a key is present, else DuckDuckGo).
 
+## Scholarly API keys (OpenAlex, Semantic Scholar — optional, recommended)
+
+**OpenAlex** is FI's main academic index, and arXiv is searched through it
+too: arXiv's own query API is throttled for everyone, so FI asks OpenAlex for
+the arXiv papers instead and fetches full text from arxiv.org. Since February
+2026 OpenAlex gives its full free daily budget only to requests with a key;
+without one a machine gets about a tenth of it — roughly 100 searches a day,
+and a quest uses dozens. A free key is at [openalex.org](https://openalex.org/).
+
+**Semantic Scholar**'s keyless pool is shared by everyone and answers HTTP 429
+most of the time; a free key (request one at
+[semanticscholar.org/product/api](https://www.semanticscholar.org/product/api))
+gets a dedicated lane.
+
+```bash
+export OPENALEX_API_KEY=...your-key...
+export SEMANTIC_SCHOLAR_API_KEY=...your-key...
+```
+
+Or in `.env` at the repo root, or per quest in YAML
+(`knowledge.openalex_api_key`, `knowledge.semantic_scholar_api_key`). An
+environment variable wins over YAML. Prefer the environment or `.env`: a key
+written into a quest YAML is copied into that quest's `config.yaml`. FI
+redacts keys from its own logs, and a rate-limited source shows up in the
+quest's source failure report (`.fi/source_failures.json`).
+
 ## Air-gapped / no-network machines
 
 The knowledge layer loads two models from Hugging Face on first use —

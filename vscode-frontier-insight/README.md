@@ -323,7 +323,13 @@ cited CC-licensed arXiv paper plus Wikimedia Commons diagrams (CC /
 public-domain only), each attributed to its source + license. Set a
 free [Brave Search API key](https://brave.com/search/api/) via the
 `BRAVE_API_KEY` env var for better relevance (optional; DuckDuckGo is
-the keyless default).
+the keyless default). For the academic side, `OPENALEX_API_KEY` unlocks
+OpenAlex's full daily budget — without it a machine gets about 100
+searches a day, and arXiv is searched through OpenAlex too — and
+`SEMANTIC_SCHOLAR_API_KEY` gets Semantic Scholar off its mostly
+rate-limited shared pool. Both are free, and both also work as
+`knowledge.openalex_api_key` / `knowledge.semantic_scholar_api_key` in
+the quest YAML (an environment variable wins).
 
 If any files land, the chat panel shows the count and the quest
 continues — many no-simulation quests run end-to-end without
