@@ -124,7 +124,9 @@ async def test_poster_writes_tex_with_substituted_columns(
 
     assert "poster_tex" in result
     tex = result["poster_tex"].read_text(encoding="utf-8")
-    assert r"\title{On Toy Scaling}" in tex
+    # The headline is the paper's own H1, not the model's paraphrase of it.
+    assert r"\title{Toy Paper}" in tex
+    assert "On Toy Scaling" not in tex
     assert r"\textbf{Abstract.} We study scaling." in tex
     assert r"\textbf{Results.} Monotonic curve." in tex
     # No leftover Python Template placeholders (portrait template: 2 columns).
@@ -170,6 +172,7 @@ async def test_poster_handles_inline_latex_math_in_llm_output(
     appear verbatim in poster.tex."""
     cfg = _make_config(tmp_path, kinds=["poster"])
     art = _make_artifacts(tmp_path)
+    art.paper_md.write_text("# Energy $E=mc^2$\n\nBody.\n", encoding="utf-8")
 
     payload = {
         "title": "Energy $E=mc^2$",
@@ -197,8 +200,8 @@ async def test_poster_handles_inline_latex_math_in_llm_output(
 async def test_poster_falls_back_when_llm_returns_garbage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Malformed LLM output -> poster.tex is still written with the default
-    placeholder columns (Untitled / empty)."""
+    """Malformed LLM output -> poster.tex is still written, with empty columns
+    and the paper's own title: the headline never depended on the model."""
     cfg = _make_config(tmp_path, kinds=["poster"])
     art = _make_artifacts(tmp_path)
 
@@ -212,7 +215,58 @@ async def test_poster_falls_back_when_llm_returns_garbage(
     result = await PosterGenerator(cfg).generate(art, art.quest_root)
 
     tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert r"\title{Toy Paper}" in tex
+
+
+async def _poster_tex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paper: str, reply: str,
+) -> str:
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(paper, encoding="utf-8")
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return reply
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    return result["poster_tex"].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_poster_uses_the_model_title_only_when_the_paper_has_no_h1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tex = await _poster_tex(
+        tmp_path, monkeypatch, "Methods only, no heading.\n",
+        json.dumps({"title": "Model Title", "left": "L", "right": "R"}),
+    )
+    assert r"\title{Model Title}" in tex
+
+
+@pytest.mark.asyncio
+async def test_poster_is_untitled_only_when_nothing_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tex = await _poster_tex(
+        tmp_path, monkeypatch, "Methods only, no heading.\n", "not json",
+    )
     assert r"\title{Untitled}" in tex
+
+
+@pytest.mark.asyncio
+async def test_poster_title_skips_comment_lines_in_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A YAML ``# comment`` is not the paper's H1."""
+    tex = await _poster_tex(
+        tmp_path, monkeypatch,
+        "---\n# generated\nauthor: x\n---\n# Real Title\n\nBody.\n",
+        json.dumps({"title": "Model Title", "left": "L", "right": "R"}),
+    )
+    assert r"\title{Real Title}" in tex
 
 
 @pytest.mark.skipif(

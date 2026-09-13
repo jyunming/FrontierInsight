@@ -144,6 +144,9 @@ class QuestState(TypedDict, total=False):
     # vs replace the literature list, and (c) optionally cap
     # additional retrievals at ``engine.max_iterations + 1``.
     literature_iter: int
+    # The search query the literature node actually sent -- derived from the
+    # topic by the model when it could be, else the old title+topic string.
+    literature_query: str
     design: dict[str, Any]
     # Every version of the design, in order. Entry 0 is the pre-registration
     # (stated before any result existed); later entries are flagged
@@ -2089,6 +2092,7 @@ class Engine:
         # design, not just the original chosen idea. First pass keeps
         # the lean ``title + topic`` query because design hasn't run
         # yet.
+        hypothesis = ""
         if this_iter > 1 and state.get("design"):
             hypothesis = str(state["design"].get("hypothesis") or "")[:200]
             query = (chosen.get("title") or "") + " " + hypothesis + " " + state["topic"][:160]
@@ -2098,6 +2102,20 @@ class Engine:
             )
         else:
             query = (chosen.get("title") or "") + " " + state["topic"][:200]
+        # A topic statement is written for a person; a search engine matches
+        # keywords. A real quest's 365-character topic came back from the
+        # academic sources with HTTP 200 and zero hits, where a 79-character
+        # keyword query found three on-target papers. One small call turns the
+        # topic into the terms the field publishes under. On any failure the
+        # concatenation above is kept, so a flaky model degrades to the old
+        # query rather than to no search at all.
+        derived = await self._derive_literature_query(
+            state["topic"], chosen.get("title") or "", hypothesis,
+        )
+        if derived:
+            self._log.info("[literature] search query derived from the topic: %r", derived)
+            query = derived
+
         async def _retrieve(q: str) -> list:
             return await self.knowledge.asearch(
                 q.strip(),
@@ -2320,6 +2338,7 @@ class Engine:
         return {
             "literature": merged,
             "literature_iter": this_iter,
+            "literature_query": query.strip(),
         }
 
     async def _node_design(self, state: QuestState) -> QuestState:
@@ -3011,6 +3030,43 @@ class Engine:
                 len(kept), len(docs), dropped,
             )
         return kept
+
+    async def _derive_literature_query(
+        self, topic: str, idea_title: str = "", hypothesis: str = "",
+    ) -> str:
+        """Turn a topic statement into a keyword search query.
+
+        Returns "" when retrieval is off (nothing would read the query), when
+        the model fails, or when the reply is not a keyword query at all (a
+        long sentence is the topic echoed back). The caller then keeps its own
+        query, so this can only narrow what gets sent, never stop the search.
+        """
+        if not self.config.knowledge.enabled:
+            return ""
+        prompt = (
+            "Write ONE literature search query for this research topic. It "
+            "goes to academic search engines (arXiv, OpenAlex, Crossref) and "
+            "to web search.\n\n"
+            f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
+            + (f"CHOSEN RESEARCH DIRECTION:\n{idea_title[:200]}\n\n" if idea_title else "")
+            + (f"HYPOTHESIS UNDER TEST:\n{hypothesis[:300]}\n\n" if hypothesis else "")
+            + "A search engine matches keywords, not sentences. Use the terms "
+            "researchers in this field publish under: the standard names of "
+            "the methods, the system studied and the quantity measured. Spell "
+            "out acronyms. No full sentences, quotes, boolean operators or "
+            "wildcards. 3 to 10 words.\n\n"
+            'Reply as JSON only: {"query": "<your query>"}'
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_query")
+            parsed = _parse_json_lenient(raw, node="literature_query")
+            q = " ".join(str((parsed or {}).get("query") or "").split())
+        except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
+            self._log.info("[literature] query derivation failed: %r", e)
+            return ""
+        if not q or len(q.split()) > 20:
+            return ""
+        return q[:300]
 
     async def _propose_literature_queries(
         self, topic: str, tried: list[str], missed: list,
@@ -3861,6 +3917,43 @@ class Engine:
             )
             returncode_for_prompt = "0 (ran, but result is degenerate)"
             result_json_note = "yes (degenerate — all metrics ~0)"
+        elif rc == 0 and has_result_json and implausible:
+            # Say WHICH declared bound broke. Without this the model saw rc=0,
+            # a parsed RESULT_JSON and "the script just failed", had nothing
+            # to repair, and invented a code fault -- then capped the diverging
+            # value at the bound on the next pass so the gate would take it.
+            # The repair has to be told that an honest null beats a plausible
+            # number.
+            clamped = any(getattr(v, "kind", "") == "clamped" for v in implausible)
+            self._log.warning(
+                "[execute_reflect] rc=0 but %d value(s) break the design's "
+                "declared bounds%s — attempting repair (iter %d)",
+                len(implausible),
+                " (at least one is capped at its bound)" if clamped else "",
+                iters + 1,
+            )
+            rj_preview = json.dumps(state.get("result_json") or {}, indent=2)[:1500]
+            stdout_for_prompt = (
+                "IMPLAUSIBLE RESULT: the script exited 0 and printed RESULT_JSON, "
+                "but these values break the bounds the DESIGN declared for them:\n"
+                + "\n".join(f"- {v.describe()}" for v in implausible[:10])
+                + "\n\nFind the cause before changing anything. If it is a bug "
+                "(wrong units, a factor of two, a sign error, a mis-set "
+                "parameter), fix it. If the value is genuinely what the method "
+                "produces here (a scheme that diverges at this step size, an "
+                "unstable fit), that is a finding, not a bug: emit null for that "
+                "value and a flag saying why (for example \"diverged\": true). "
+                "NEVER clamp, cap or clip a result to the bound or replace it "
+                "with any constant: a capped value is detected and rejected, and "
+                "it would state something false."
+                + ("\n\nA value above is already capped at its bound by the "
+                   "script itself; remove that cap." if clamped else "")
+                + "\n\nRESULT_JSON was:\n"
+                f"{rj_preview}\n\nOriginal stdout tail:\n"
+                + exec_result.get("stdout_tail", "")[:1000]
+            )
+            returncode_for_prompt = "0 (ran, but values break the declared bounds)"
+            result_json_note = "yes (rejected — see stdout)"
         else:
             stdout_for_prompt = exec_result.get("stdout_tail", "")[:2000]
             returncode_for_prompt = str(rc)
@@ -5232,7 +5325,7 @@ class Engine:
     def _numeric_oracle_hits(
         self, paper_md: str, state: QuestState,
     ) -> list[str]:
-        """Deterministic number check; returns must-flag strings.
+        """Deterministic number check; returns one advisory string per finding.
 
         Runs on the FULL paper text, not the 16 000-character slice the
         review prompt gets — a wrong number in a late results table is
@@ -5505,6 +5598,12 @@ class Engine:
         mod_suggs = mod_parsed.get("suggestions")
         if isinstance(mod_suggs, list) and mod_suggs:
             review["suggestions"] = [str(s) for s in mod_suggs]
+        # The same advisory arithmetic check as the single-reviewer path, and
+        # kept out of must_flag_hits for the same reason: the iteration bump
+        # below reads only must_flag_hits, so a finding costs no budget.
+        numeric_warnings = self._numeric_oracle_hits(paper_md, state)
+        if numeric_warnings:
+            review["numeric_oracle_warnings"] = numeric_warnings
 
         update: QuestState = {"review": review, "review_panel": panel_results}
         # Bump iteration on EITHER verdict=revise OR a non-empty
@@ -7221,91 +7320,126 @@ def _aggregate_result_json_replicates(
     return out
 
 
-def _stratum_series(
-    replicates: list[dict[str, Any]], factor: str, stratum: str, metric: str,
+def _series_at(
+    replicates: list[dict[str, Any]], path: tuple[str, ...],
 ) -> list[float] | None:
-    """The per-seed values of ``replicates[*][factor][stratum][metric]`` — only
-    when it's a scalar number in EVERY replicate (else None: can't compare it)."""
+    """The per-seed values at ``path`` — only when it's a scalar number in
+    EVERY replicate (else None: a value some seeds lack can't be compared)."""
     vals: list[float] = []
     for r in replicates:
-        by = r.get(factor) if isinstance(r, dict) else None
-        st = by.get(stratum) if isinstance(by, dict) else None
-        v = st.get(metric) if isinstance(st, dict) else None
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
+        node: Any = r
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, bool) or not isinstance(node, (int, float)):
             return None
-        vals.append(float(v))
+        vals.append(float(node))
     return vals
 
 
 def _result_comparison_stats(
     replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
+    max_depth: int = 6,
 ) -> dict[str, Any]:
-    """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the
-    ``by_<factor>`` strata the experiment broke results down by, plus a
-    multiple-comparison guard. Lets the paper report *how big* a between-group
-    difference is and whether it survives correction for the number of
-    comparisons — not just its direction.
+    """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the strata
+    the experiment broke results down by, plus a multiple-comparison guard.
+    Lets the paper report *how big* a between-group difference is and whether
+    it survives correction for the number of comparisons — not just its
+    direction.
+
+    Strata nest. A crossed design writes ``by_h → step size → method →
+    metric``, and the comparison a reader wants — method A against method B
+    at one step size — lives BELOW the ``by_*`` key. So every level under a
+    ``by_*`` key is compared as well, labelled by its dotted path
+    (``by_h.0.5``), with each stratum's numeric leaves as its metrics
+    (``RK4.err`` at the step-size level, ``err`` at the method level). A
+    nested level counts only when its children share one key structure:
+    ``{"errors": {...}, "timing": {...}}`` groups unlike things, and pairing
+    them would be noise. The ``by_*`` level itself is always a factor.
 
     Returns ``{"strata": {factor: {stratum: {metric: {mean, ci_lower,
     ci_upper, n}}}}, "effect_sizes": [{factor, metric, a, b, cohens_d,
     magnitude}], "comparisons": {"n", "bonferroni_alpha", "many"}}``. Empty
-    when no ``by_*`` factor has ≥2 numeric strata to compare."""
-    if not replicates:
+    when no level has ≥2 numeric strata to compare."""
+    if not replicates or not all(isinstance(r, dict) for r in replicates):
         return {}
-    # Factors present (and a dict) in EVERY replicate.
-    factors = sorted({
-        k for k in (replicates[0] if isinstance(replicates[0], dict) else {})
-        if k.startswith("by_")
-        and all(isinstance(r.get(k), dict) for r in replicates)
-    })
     strata_out: dict[str, Any] = {}
     effect_sizes: list[dict[str, Any]] = []
     n_comparisons = 0
-    for factor in factors:
-        # Strata present in every replicate's factor dict.
+
+    def _at(obj: Any, path: tuple[str, ...]) -> Any:
+        for key in path:
+            obj = obj.get(key) if isinstance(obj, dict) else None
+        return obj
+
+    def _shape(obj: Any, depth: int = 0) -> Any:
+        # Keys only: a method that emitted null for a metric still has the
+        # same shape as one that emitted a number.
+        if isinstance(obj, dict) and depth < max_depth:
+            return tuple(sorted((k, _shape(v, depth + 1)) for k, v in obj.items()))
+        return None
+
+    def _leaf_paths(obj: Any, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+        if not isinstance(obj, dict):
+            return [prefix] if prefix else []
+        if len(prefix) >= max_depth:
+            return []
+        return [p for k, v in obj.items() for p in _leaf_paths(v, (*prefix, k))]
+
+    def _visit(path: tuple[str, ...], depth: int) -> None:
+        nonlocal n_comparisons
+        nodes = [_at(r, path) for r in replicates]
+        if not all(isinstance(n, dict) for n in nodes):
+            return
+        # Strata present — and themselves dicts — in every replicate.
         strata = sorted(
-            set(replicates[0][factor])
-            .intersection(*(set(r[factor]) for r in replicates))
+            k for k in set(nodes[0]).intersection(*(set(n) for n in nodes[1:]))
+            if all(isinstance(n[k], dict) for n in nodes)
         )
-        if len(strata) < 2:
-            continue
-        # Metrics scalar-numeric across all reps for at least one stratum.
-        metrics: set[str] = set()
-        for st in strata:
-            metrics.update(
-                m for m in replicates[0][factor].get(st, {})
-                if _stratum_series(replicates, factor, st, m) is not None
-            )
-        per_stratum: dict[str, Any] = {}
-        for st in strata:
-            cell: dict[str, Any] = {}
-            for m in sorted(metrics):
-                series = _stratum_series(replicates, factor, st, m)
-                if series is None:
-                    continue
-                mean, _, n = _stats.mean_std(series)
-                cell[m] = {"mean": mean, "n": n,
-                           **_stats.confidence_interval(series)}
-            if cell:
-                per_stratum[st] = cell
-        if per_stratum:
-            strata_out[factor] = per_stratum
-        # Pairwise effect sizes between strata, per shared metric.
-        for m in sorted(metrics):
-            for i in range(len(strata)):
-                for j in range(i + 1, len(strata)):
-                    a = _stratum_series(replicates, factor, strata[i], m)
-                    b = _stratum_series(replicates, factor, strata[j], m)
-                    if a is None or b is None:
+        label = ".".join(path)
+        comparable = len(strata) >= 2 and (
+            depth == 0 or len({_shape(nodes[0][s]) for s in strata}) == 1
+        )
+        if comparable:
+            metrics = sorted({
+                m for s in strata for m in _leaf_paths(nodes[0][s])
+                if _series_at(replicates, (*path, s, *m)) is not None
+            })
+            per_stratum: dict[str, Any] = {}
+            for s in strata:
+                cell: dict[str, Any] = {}
+                for m in metrics:
+                    series = _series_at(replicates, (*path, s, *m))
+                    if series is None:
                         continue
-                    n_comparisons += 1
-                    d = _stats.cohens_d(a, b)
-                    effect_sizes.append({
-                        "factor": factor, "metric": m,
-                        "a": strata[i], "b": strata[j],
-                        "cohens_d": d,
-                        "magnitude": _stats.effect_magnitude(d),
-                    })
+                    mean, _, n = _stats.mean_std(series)
+                    cell[".".join(m)] = {"mean": mean, "n": n,
+                                         **_stats.confidence_interval(series)}
+                if cell:
+                    per_stratum[s] = cell
+            if per_stratum:
+                strata_out[label] = per_stratum
+            # Pairwise effect sizes between strata, per shared metric.
+            for m in metrics:
+                for i in range(len(strata)):
+                    for j in range(i + 1, len(strata)):
+                        a = _series_at(replicates, (*path, strata[i], *m))
+                        b = _series_at(replicates, (*path, strata[j], *m))
+                        if a is None or b is None:
+                            continue
+                        n_comparisons += 1
+                        d = _stats.cohens_d(a, b)
+                        effect_sizes.append({
+                            "factor": label, "metric": ".".join(m),
+                            "a": strata[i], "b": strata[j],
+                            "cohens_d": d,
+                            "magnitude": _stats.effect_magnitude(d),
+                        })
+        if depth + 1 < max_depth:
+            for s in strata:
+                _visit((*path, s), depth + 1)
+
+    for factor in sorted(k for k in replicates[0] if str(k).startswith("by_")):
+        _visit((factor,), 0)
     if not strata_out and not effect_sizes:
         return {}
     # Surface the largest effects first; cap the list so the analyze prompt
@@ -8004,7 +8138,11 @@ def _assertion_violations(state: "QuestState") -> list:
             design["result_assertions"] = list(
                 design.get("result_assertions") or []
             ) + list(extra)
-        return plausibility.check_design(state.get("result_json") or {}, design)
+        # The script rides along so a value capped exactly at a non-zero
+        # bound is caught too; see core/plausibility.py for why.
+        return plausibility.check_design(
+            state.get("result_json") or {}, design, code=state.get("code") or "",
+        )
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
         return []
 

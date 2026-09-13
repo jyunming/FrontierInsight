@@ -228,3 +228,36 @@ def test_human_review_snapshot_carries_the_warnings(tmp_path: Path) -> None:
     snap = json.loads((tmp_path / ".fi" / "human_review.json").read_text("utf-8"))
     assert snap["numeric_oracle_warnings"] == ["unverified_number: 2.41 vs nils=2.14"]
     assert snap["must_flag_hits"] == [], "kept apart so the UIs can label them"
+
+
+def test_panel_review_runs_the_check_too(tmp_path: Path) -> None:
+    """Panel mode used to skip the oracle entirely, so asking for more
+    reviewers meant fewer checks on the numbers."""
+    import asyncio
+
+    eng = _review_engine(tmp_path)
+    eng.config.engine.review_panel = ["methodologist", "statistician"]
+    nodes: list[str] = []
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001
+        nodes.append(node or "")
+        if node == "review_moderator":
+            return json.dumps({"rationale": "both reviewers accept"})
+        return json.dumps({"verdict": "accept", "score": 4,
+                           "suggestions": [], "must_flag_hits": []})
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    paper = tmp_path / "paper.md"
+    paper.write_text("Dipole illumination raised NILS to 2.41 at best focus.",
+                     encoding="utf-8")
+    patch = asyncio.run(eng._node_review({  # type: ignore[arg-type]
+        "topic": "t", "iteration": 0, "review": {},
+        "paper_md": str(paper), "result_json": {"nils_dipole": 2.14},
+    }))
+    review = patch["review"]
+
+    assert any(n.startswith("review_panel.") for n in nodes), "panel path not taken"
+    warnings = review.get("numeric_oracle_warnings") or []
+    assert len(warnings) == 1 and warnings[0].startswith("unverified_number:")
+    assert review["must_flag_hits"] == [], "a numeric finding must not block"
+    assert "iteration" not in patch, "an advisory finding must not spend budget"

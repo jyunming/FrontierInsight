@@ -127,3 +127,77 @@ def test_comparison_stats_empty_without_strata() -> None:
     assert _result_comparison_stats(
         [{"_seed": s, "by_x": {"only": {"m": 1.0}}} for s in range(3)]
     ) == {}
+
+
+# --- nested strata (crossed designs) ---------------------------------------
+
+
+def _crossed_reps() -> list[dict]:
+    """by_h -> step size -> integrator -> metric, three seeds with spread."""
+    return [
+        {"_seed": s, "by_h": {
+            "0.1": {"Euler": {"err": 1.0 + j}, "RK4": {"err": 0.1 + j / 2}},
+            "0.5": {"Euler": {"err": 5.0 + j}, "RK4": {"err": 0.5 + j / 3}},
+        }}
+        for s, j in enumerate([0.0, 0.01, -0.01])
+    ]
+
+
+def test_crossed_design_compares_methods_within_each_step_size() -> None:
+    """Method A against method B lives below the by_* key. That comparison
+    used to produce nothing at all."""
+    cs = _result_comparison_stats(_crossed_reps())
+    pairs = {(e["factor"], e["metric"], e["a"], e["b"]) for e in cs["effect_sizes"]}
+    assert ("by_h.0.1", "err", "Euler", "RK4") in pairs
+    assert ("by_h.0.5", "err", "Euler", "RK4") in pairs
+    euler = cs["strata"]["by_h.0.5"]["Euler"]["err"]
+    assert math.isclose(euler["mean"], 5.0, abs_tol=1e-9) and euler["n"] == 3
+
+
+def test_crossed_design_also_compares_step_sizes_per_method() -> None:
+    cs = _result_comparison_stats(_crossed_reps())
+    pairs = {(e["factor"], e["metric"]) for e in cs["effect_sizes"]}
+    assert ("by_h", "Euler.err") in pairs and ("by_h", "RK4.err") in pairs
+    # 2 metrics at the step-size level + 1 per step size at the method level;
+    # the guard counts every one of them.
+    assert cs["comparisons"]["n"] == 4
+
+
+def test_nested_level_of_unlike_groups_is_not_compared() -> None:
+    """``errors`` and ``timing`` are groupings of different things, not strata
+    of one factor."""
+    reps = [
+        {"_seed": s, "by_method": {
+            m: {"errors": {"l2": b + s * 0.01, "linf": 2 * b + s * 0.01},
+                "timing": {"wall_s": 3 * b + s * 0.01}}
+            for m, b in {"A": 1.0, "B": 2.0}.items()
+        }}
+        for s in range(3)
+    ]
+    cs = _result_comparison_stats(reps)
+    assert {e["factor"] for e in cs["effect_sizes"]} == {"by_method"}
+
+
+def test_a_null_metric_leaves_the_other_pairs_comparable() -> None:
+    """A diverged method reports null; the remaining pair is still compared
+    and the null never turns into a number."""
+    reps = [
+        {"_seed": s, "by_h": {"0.5": {
+            "Euler": {"err": None},
+            "Heun": {"err": 0.8 + s * 0.01},
+            "RK4": {"err": 0.5 + s * 0.01},
+        }}}
+        for s in range(3)
+    ]
+    cs = _result_comparison_stats(reps)
+    pairs = {(e["a"], e["b"]) for e in cs["effect_sizes"] if e["factor"] == "by_h.0.5"}
+    assert pairs == {("Heun", "RK4")}
+    assert "Euler" not in cs["strata"]["by_h.0.5"]
+
+
+def test_identical_replicates_give_no_effect_size_without_crashing() -> None:
+    """Replication stops at two seeds once they agree, so zero spread is the
+    common input now, not an edge case."""
+    reps = [{"_seed": s, "by_m": {"A": {"x": 1.0}, "B": {"x": 2.0}}} for s in range(2)]
+    es = _result_comparison_stats(reps)["effect_sizes"]
+    assert es[0]["cohens_d"] is None and es[0]["magnitude"] == "n/a"

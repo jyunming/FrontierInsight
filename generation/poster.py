@@ -293,9 +293,16 @@ class PosterGenerator:
             if own_supervisor:
                 await sup.shutdown()
 
-        parsed = _lenient_json(text) or {
-            "title": "Untitled", "left": "", "right": ""
-        }
+        parsed = _lenient_json(text) or {"left": "", "right": ""}
+        # The headline is the paper's own H1, not the model's paraphrase of
+        # it: a poster titled differently from the paper it summarises reads
+        # as a different work, and a reply without a ``title`` key used to
+        # print the literal "Untitled" over a paper that had a perfectly good
+        # title. The model's title is only a fallback for a paper with no H1.
+        from generation.paper import _FIRST_H1_RE, _FRONTMATTER_RE
+
+        h1 = _FIRST_H1_RE.search(_FRONTMATTER_RE.sub("", paper_md, count=1))
+        title = (h1.group(1).strip() if h1 else "") or parsed.get("title") or "Untitled"
         # Sources band — built from the quest's actual retrieved
         # literature (web pages carry citable URLs) and injected straight
         # into the template, NOT left to the LLM, so the poster always
@@ -318,7 +325,7 @@ class PosterGenerator:
         # are LaTeX with arbitrary `$math$` content that would break
         # substitute()'s strict placeholder matcher.
         body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
-            title=_escape_latex_text_specials(parsed.get("title") or "Untitled"),
+            title=_escape_latex_text_specials(title),
             left=_escape_latex_text_specials(parsed.get("left") or ""),
             right=_escape_latex_text_specials(parsed.get("right") or ""),
             references=references_tex,   # already LaTeX-escaped by build step
