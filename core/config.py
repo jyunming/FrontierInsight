@@ -780,9 +780,13 @@ class ExecutionConfig(BaseModel):
 class KnowledgeConfig(BaseModel):
     """Wraps the Axon knowledge layer.
 
-    `axon_config` may be either an inline dict (passed straight to
-    `AxonConfig.model_validate(...)`) or a path to an existing Axon YAML
-    (`AxonConfig.from_yaml(path)`).
+    `axon_config` may be either an inline mapping or a path to an existing
+    Axon YAML. Both end up at `AxonConfig.load(path)`, which is the only
+    constructor Axon offers that understands its own file format: an inline
+    mapping is written to a temp YAML first. Use Axon's **nested** shape
+    (`embedding: {provider:, model:}`), not the flat dataclass field names —
+    `load` performs that mapping, along with env overrides and dropping keys
+    Axon has retired.
     """
 
     enabled: bool = True
@@ -1016,8 +1020,9 @@ class KnowledgeConfig(BaseModel):
     @field_validator("axon_config", mode="before")
     @classmethod
     def _expand_axon_path(cls, v: object) -> object:
-        # Path-shaped input (str or Path) gets `~` expansion; dicts pass
-        # through untouched so they reach AxonConfig.model_validate(...).
+        # Path-shaped input (str or Path) gets `~` expansion; mappings pass
+        # through untouched for `core.knowledge._axon_config_from` to render
+        # into the temp YAML that `AxonConfig.load` reads.
         if isinstance(v, (str, Path)):
             return _expand(v)
         return v

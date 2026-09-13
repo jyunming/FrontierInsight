@@ -773,3 +773,111 @@ async def test_requery_degrades_to_empty_on_model_failure(tmp_path: Path) -> Non
 
     eng._chat = boom
     assert await eng._propose_literature_queries("t", ["q"], _lit_docs("x")) == ""
+
+
+# --- the first query: keywords, not the topic statement ---------------------
+#
+# A topic statement is written for a person. Sent as-is, a real quest's
+# 365-character topic came back from the academic sources with zero hits,
+# where a 79-character keyword query found three on-target papers.
+
+
+@pytest.mark.asyncio
+async def test_first_query_is_derived_from_the_topic(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng.config.knowledge.enabled = True
+    seen: dict = {}
+
+    async def fake_chat(prompt, node=""):
+        seen["node"], seen["prompt"] = node, prompt
+        return '{"query": "damped harmonic oscillator numerical integrators energy drift"}'
+
+    eng._chat = fake_chat
+    q = await eng._derive_literature_query(
+        "Compare how accurately explicit Euler and RK4 track a damped oscillator.",
+        "Integrator bake-off",
+    )
+    assert q == "damped harmonic oscillator numerical integrators energy drift"
+    assert seen["node"] == "literature_query"
+    assert "Integrator bake-off" in seen["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_derivation_spends_no_call_when_retrieval_is_off(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)  # knowledge.enabled=False
+
+    async def must_not_call(prompt, node=""):
+        raise AssertionError("nothing would read the query")
+
+    eng._chat = must_not_call
+    assert await eng._derive_literature_query("topic") == ""
+
+
+@pytest.mark.asyncio
+async def test_derivation_rejects_the_topic_echoed_back(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng.config.knowledge.enabled = True
+    sentence = " ".join(["word"] * 40)
+
+    async def echo(prompt, node=""):
+        return '{"query": "' + sentence + '"}'
+
+    eng._chat = echo
+    assert await eng._derive_literature_query(sentence) == ""
+
+
+@pytest.mark.asyncio
+async def test_derivation_degrades_to_empty_on_model_failure(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng.config.knowledge.enabled = True
+
+    async def boom(prompt, node=""):
+        raise RuntimeError("provider down")
+
+    eng._chat = boom
+    assert await eng._derive_literature_query("t") == ""
+
+
+async def _literature_queries(monkeypatch, tmp_path: Path, chat) -> tuple[list, dict]:
+    import core.passages as pmod
+    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
+    eng = _engine(tmp_path)
+    eng.config.knowledge.enabled = True
+    eng._chat = chat
+    sent: list[str] = []
+
+    async def fake_search(query, **kw):
+        sent.append(query)
+        return []
+
+    eng.knowledge.asearch = fake_search
+    patch = await eng._node_literature({
+        "topic": "A long topic statement\nwith a second line.",
+        "chosen_idea": {"title": "Bake-off"},
+    })
+    return sent, patch
+
+
+@pytest.mark.asyncio
+async def test_literature_node_searches_with_the_derived_query(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    async def chat(prompt, node=""):
+        assert node == "literature_query"
+        return '{"query": "numerical integrators damped oscillator"}'
+
+    sent, patch = await _literature_queries(monkeypatch, tmp_path, chat)
+    assert sent == ["numerical integrators damped oscillator"]
+    assert patch["literature_query"] == "numerical integrators damped oscillator"
+
+
+@pytest.mark.asyncio
+async def test_literature_node_keeps_the_old_query_when_derivation_fails(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    async def chat(prompt, node=""):
+        raise RuntimeError("provider down")
+
+    sent, patch = await _literature_queries(monkeypatch, tmp_path, chat)
+    assert sent == ["Bake-off A long topic statement\nwith a second line."]
+    assert patch["literature_query"] == sent[0]

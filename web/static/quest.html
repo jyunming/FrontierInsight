@@ -867,6 +867,18 @@
       mfh.classList.add('hidden'); mfh.classList.remove('flex');
       mfh.innerHTML = '';
     }
+    // Advisory numeric findings. Deliberately NOT styled like must-flag hits:
+    // those are non-bypassable, these are a regex over prose asking a human to
+    // look, and borrowing the error vocabulary would claim a certainty the
+    // check does not have.
+    const nw = snap.numeric_oracle_warnings || [];
+    if (nw.length) {
+      summary.insertAdjacentHTML('beforeend',
+        '<div class="font-label-sm text-label-sm text-outline uppercase">Numeric checks (advisory, not blocking):</div>' +
+        '<div class="flex flex-wrap gap-2">' +
+        nw.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
+        '</div>');
+    }
     const suggestions = snap.suggestions || [];
     document.getElementById('human-review-suggestions').innerHTML = suggestions.length
       ? '<b>Suggestions:</b><ul class="list-disc list-inside">' +

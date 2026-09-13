@@ -74,8 +74,22 @@ _CONTEXT_SKIP = re.compile(
     r"figure|fig\.|table|tab\.|section|sect\.|chapter|eq\.|equation|"
     r"reference|ref\.|page|p\.|pp\.|doi|arxiv|isbn|"
     r"\[|version|v"
-    r")\s*$",
+    # A separator may sit between the keyword and the number. Anchoring on
+    # ``\s*$`` alone meant "DOI 10.5281" was skipped but "DOI: 10.5281" was
+    # not -- and every reference list writes the colon. A real quest flagged
+    # three DOI registrant prefixes (10.5281 / 10.1088 / 10.1016) as
+    # contradicted measurements because of this one character.
+    r")\s*[:.\-–—=]?\s*$",
     re.IGNORECASE,
+)
+
+# LaTeX scientific notation, normalised to e-notation BEFORE numbers are
+# extracted. Papers write ``$9.65 \times 10^{-6}$``; reading that as the bare
+# mantissa ``9.65`` invents a claim the paper never made and then compares it
+# against unrelated results. Observed doing exactly that: a paper stating
+# ``1.21 \times 10^{-2}`` was reported as "paper says 1.21".
+_LATEX_SCI = re.compile(
+    r"(-?\d+(?:\.\d+)?)\s*(?:\\times|\\cdot|×|\\!)\s*10\s*\^\s*\{?\s*(-?\+?\d+)\s*\}?"
 )
 
 # Number tokens: optional sign, digits, optional decimal, optional exponent.
@@ -221,6 +235,9 @@ def extract_paper_numbers(text: str) -> list[tuple[float, str, str]]:
     cleaned = text
     for pat in _STRIP_BLOCKS[:1] + _STRIP_BLOCKS[2:]:  # keep table rows
         cleaned = pat.sub(" ", cleaned)
+    # Fold `1.21 \times 10^{-2}` into `1.21e-2` so the exponent survives into
+    # the extracted value instead of being dropped on the floor.
+    cleaned = _LATEX_SCI.sub(lambda m: f"{m.group(1)}e{m.group(2).replace('+', '')}", cleaned)
 
     out: list[tuple[float, str, str]] = []
     for m in _NUMBER.finditer(cleaned):

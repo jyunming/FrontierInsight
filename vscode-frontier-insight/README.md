@@ -30,8 +30,9 @@ also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON), and a `paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, a cited source, or are unsupported (unsupported claims
 force a revise). With `engine.execute_replicates > 1` the results are reported
-with 95% confidence intervals, effect sizes, and a multiple-comparison guard
-instead of bare numbers. You see every node firing live in the chat panel.
+with 95% confidence intervals, effect sizes (including between methods nested
+inside a parameter sweep), and a multiple-comparison guard instead of bare
+numbers. You see every node firing live in the chat panel.
 
 ## One-time setup
 
@@ -179,7 +180,7 @@ In the chat panel you'll see progress messages:
 
 ### Review the result before it ships
 
-By default the engine pauses after the LLM review so you can accept, reject, or refine the paper before it's final. The chat panel renders the verdict + must-flag hits + suggestions, then surfaces a QuickPick (Accept / Reject / Refine). Refine opens a second input box for one line of feedback that the next revise pass honours alongside every previous refinement ask.
+By default the engine pauses after the LLM review so you can accept, reject, or refine the paper before it's final. The chat panel renders the verdict + must-flag hits + suggestions, then surfaces a QuickPick (Accept / Reject / Refine). Numbers in the paper that the arithmetic check could not reconcile with the run's results appear on their own line as **advisory** — they are shown for you to judge and never force a rewrite, because a pattern match over prose misreads DOIs and scientific notation often enough that an automatic revise does more harm than a flagged number. Refine opens a second input box for one line of feedback that the next revise pass honours alongside every previous refinement ask.
 
 The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are non-bypassable: a flagged paper forces another revise pass even when `engine.review_loop: false` is set.
 
