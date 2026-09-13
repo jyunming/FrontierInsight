@@ -22,6 +22,7 @@ import re as _re
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
+    build_further_reading,
     build_references,
     render_poster_references_latex,
 )
@@ -233,7 +234,9 @@ def _brand_references_band(references_tex: str, icon_ok: bool) -> str:
     icon-only band so the poster still carries the mark."""
     if not icon_ok:
         return references_tex
-    anchor = r"{\scriptsize\textbf{Sources:}"
+    # The first line of the band: Sources, or Further reading when a quest
+    # drew only on web pages.
+    anchor = r"{\scriptsize\textbf{"
     if anchor in references_tex:
         return references_tex.replace(anchor, _POSTER_ICON_TEX + anchor, 1)
     if references_tex.strip():
@@ -308,11 +311,10 @@ class PosterGenerator:
         # into the template, NOT left to the LLM, so the poster always
         # carries its references even when the 8000-char paper.md slice
         # the LLM saw cut the References section off the end.
-        refs = build_references(
-            art.raw_state.get("literature") or [],
-            audience=self.config.output.audience,
-        )
-        references_tex = render_poster_references_latex(refs)
+        literature = art.raw_state.get("literature") or []
+        refs = build_references(literature, audience=self.config.output.audience)
+        further = build_further_reading(literature, audience=self.config.output.audience)
+        references_tex = render_poster_references_latex(refs, further)
         # Copy the teal glyph next to poster.tex, then brand both the
         # masthead (header lockup) and the Sources band (a small corner
         # mark at the start of the band, so a long citation list can't

@@ -5212,6 +5212,14 @@ class Engine:
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
+        # The web pages are listed apart from the References, by the engine,
+        # so every page is listed and none is invented.
+        markdown = _append_further_reading(
+            markdown,
+            build_further_reading(
+                state.get("literature") or [], audience=self.config.output.audience,
+            ),
+        )
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -5238,13 +5246,16 @@ class Engine:
             self._log.info("[claim_check] no paper to check; skipping")
             return {}
         paper_text = Path(paper_md).read_text(encoding="utf-8")[:16000]
-        refs = build_references(
-            state.get("literature") or [], audience=self.config.output.audience,
-        )
+        literature = state.get("literature") or []
+        refs = build_references(literature, audience=self.config.output.audience)
+        # Web pages are Further reading, labelled W1, W2...; a claim resting on
+        # one is grounded in a source too.
+        further = build_further_reading(literature, audience=self.config.output.audience)
         refs_block = "\n".join(
-            f"[{r['n']}] {r['title']}"
-            + (f" · DOI:{r['doi']}" if r.get("doi") else "")
-            for r in refs
+            [f"[{r['n']}] {r['title']}" + (f" · DOI:{r['doi']}" if r.get("doi") else "")
+             for r in refs]
+            + [f"[{w['label']}] {w['title']}" + (f" · {w['url']}" if w.get("url") else "")
+               for w in further]
         ) or "(no references)"
         analysis = state.get("analysis") or {}
         evidence = {
@@ -5284,17 +5295,26 @@ class Engine:
             basis = str(c.get("basis") or "unsupported").strip().lower()
             if basis not in ("experiment", "citation", "unsupported"):
                 basis = "unsupported"
-            # A "citation" basis only counts if it points at a real reference:
-            # validate the index is an int in [1, n_refs], else it's effectively
-            # unsupported (a claim that names no source isn't grounded).
-            cite_idx = c.get("citation_index")
-            try:
-                cite_idx = int(cite_idx)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                cite_idx = None
-            if basis == "citation" and not (cite_idx and 1 <= cite_idx <= n_refs):
+            # A "citation" basis only counts if it points at a real source: a
+            # References number in [1, n_refs] or a Further reading label
+            # W1..W<len(further)>. Anything else is effectively unsupported (a
+            # claim that names no source isn't grounded).
+            raw_idx = c.get("citation_index")
+            cite_idx: int | str | None = None
+            web = (re.fullmatch(r"\[?\s*[Ww](\d+)\s*\]?", str(raw_idx).strip())
+                   if raw_idx is not None else None)
+            if web:
+                if 1 <= int(web.group(1)) <= len(further):
+                    cite_idx = f"W{int(web.group(1))}"
+            else:
+                try:
+                    number = int(raw_idx)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    number = 0
+                if 1 <= number <= n_refs:
+                    cite_idx = number
+            if basis == "citation" and cite_idx is None:
                 basis = "unsupported"
-                cite_idx = None
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
@@ -7265,20 +7285,18 @@ def _format_lit_from_state(
     budget: int | None = None,
     mode: str = "lexical",
 ) -> str:
+    """The prior-work block from ``state['literature']``. Entries carry the
+    labels the paper's References ([1], [2]…) and Further reading ([W1],
+    [W2]…) use, taken from the same de-duplicated list
+    (:func:`_labelled_sources`), so the writer's [2] is the claim check's and
+    the bib's [2]."""
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
-    keep_idx = 0
-    for item in items:
-        meta = item.get("metadata") or {}
-        if not _is_citable(meta):
-            continue
-        if not _is_audience_appropriate(meta, audience):
-            continue
-        keep_idx += 1
-        title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
-        header = _format_lit_header(meta, keep_idx)
+    for label, meta, item in _labelled_sources(items, audience):
+        title = meta.get("title") or meta.get("source") or f"item-{label}"
+        header = _format_lit_header(meta, label)
         excerpt = _format_lit_excerpt(
             item.get("content", "") or "", title,
             query=query, budget=budget, mode=mode,
@@ -7289,35 +7307,35 @@ def _format_lit_from_state(
     return "\n\n".join(lines)
 
 
-def build_references(
-    literature: list[Any],
-    *,
-    audience: str = "external",
-    max_n: int | None = None,
-) -> list[dict[str, Any]]:
-    """Build a clean, de-duplicated, numbered citation list from the
-    quest's retrieved literature (``state['literature']`` dict items
-    ``{content, metadata}`` or ``RetrievedDoc`` objects).
+def _is_web_page(meta: dict[str, Any]) -> bool:
+    """A source found by general web search. It is Further reading, not a
+    numbered Reference, even when the page names a DOI: what the writer read
+    is the page."""
+    return str(meta.get("source") or "") == "web_search"
 
-    Applies the same citability + audience rules as the paper's
-    References (:func:`_is_citable` / :func:`_is_audience_appropriate`),
-    so a **web page** (title + URL) is a first-class citation and
-    FI-internal cross-quest memory artifacts are dropped. Shared by the
-    poster + slides generators so every output surfaces the same sources
-    the writer cited. Each entry: ``{n, title, authors, year, venue,
-    doi, arxiv_id, url, site, source}``."""
-    refs: list[dict[str, Any]] = []
+
+def _labelled_sources(
+    literature: list[Any], audience: str = "external",
+) -> list[tuple[str, dict[str, Any], Any]]:
+    """The quest's citable sources, de-duplicated once and labelled in
+    literature order: scholarly records ``"1"``, ``"2"``… and web pages
+    ``"W1"``, ``"W2"``…. The writer's prior-work block, the References,
+    Further reading, claim grounding, the poster, the slides and the bib all
+    label from this one list, so a label names the same source everywhere.
+    Applies :func:`_is_citable` and :func:`_is_audience_appropriate`, so
+    FI-internal cross-quest memory never appears. Returns ``(label,
+    metadata, item)`` triples."""
+    out: list[tuple[str, dict[str, Any], Any]] = []
     seen: set[str] = set()
+    papers = pages = 0
     for item in literature or []:
-        if isinstance(item, dict):
-            meta = item.get("metadata") or {}
-        else:
-            meta = getattr(item, "metadata", {}) or {}
+        meta = (item.get("metadata") if isinstance(item, dict)
+                else getattr(item, "metadata", None)) or {}
         if not _is_citable(meta) or not _is_audience_appropriate(meta, audience):
             continue
-        key = (
+        key = str(
             meta.get("doi") or meta.get("arxiv_id") or meta.get("pmid")
-            or meta.get("url") or (meta.get("title") or "")
+            or meta.get("url") or meta.get("title") or ""
         ).lower().strip()
         if not key:
             continue
@@ -7326,24 +7344,73 @@ def build_references(
         if any(k in seen for k in keys):
             continue
         seen.update(keys)
-        authors = meta.get("authors") or []
-        if not isinstance(authors, list):
-            authors = [str(authors)]
-        refs.append({
-            "n": len(refs) + 1,
-            "title": (meta.get("title") or "").strip(),
-            "authors": [a for a in authors if a],
-            "year": meta.get("year") or (meta.get("published") or "")[:4] or "",
-            "venue": meta.get("venue") or meta.get("publisher") or "",
-            "doi": meta.get("doi") or "",
-            "arxiv_id": meta.get("arxiv_id") or "",
-            "url": meta.get("url") or "",
-            "site": meta.get("site") or "",
-            "source": meta.get("source") or "",
-        })
-        if max_n and len(refs) >= max_n:
-            break
-    return refs
+        if _is_web_page(meta):
+            pages += 1
+            out.append((f"W{pages}", meta, item))
+        else:
+            papers += 1
+            out.append((str(papers), meta, item))
+    return out
+
+
+def _reference_entry(label: str, meta: dict[str, Any]) -> dict[str, Any]:
+    authors = meta.get("authors") or []
+    if not isinstance(authors, list):
+        authors = [str(authors)]
+    entry = {
+        "title": (meta.get("title") or "").strip(),
+        "authors": [a for a in authors if a],
+        "year": meta.get("year") or (meta.get("published") or "")[:4] or "",
+        "venue": meta.get("venue") or meta.get("publisher") or "",
+        "doi": meta.get("doi") or "",
+        "arxiv_id": meta.get("arxiv_id") or "",
+        "url": meta.get("url") or "",
+        "site": meta.get("site") or "",
+        "source": meta.get("source") or "",
+    }
+    if label.startswith("W"):
+        return {"label": label, **entry}
+    return {"n": int(label), **entry}
+
+
+def build_references(
+    literature: list[Any],
+    *,
+    audience: str = "external",
+    max_n: int | None = None,
+) -> list[dict[str, Any]]:
+    """The numbered References: the quest's citable scholarly sources from
+    ``state['literature']`` (dict items ``{content, metadata}`` or
+    ``RetrievedDoc`` objects), de-duplicated and numbered as in
+    :func:`_labelled_sources`. Web pages are not here; they are
+    :func:`build_further_reading`. Shared by the claim check, the poster, the
+    slides and the bib export so every output cites the same numbers. Each
+    entry: ``{n, title, authors, year, venue, doi, arxiv_id, url, site,
+    source}``."""
+    refs = [
+        _reference_entry(label, meta)
+        for label, meta, _ in _labelled_sources(literature, audience)
+        if not label.startswith("W")
+    ]
+    return refs[:max_n] if max_n else refs
+
+
+def build_further_reading(
+    literature: list[Any],
+    *,
+    audience: str = "external",
+    max_n: int | None = None,
+) -> list[dict[str, Any]]:
+    """Further reading: the web pages the quest drew on, labelled ``W1``,
+    ``W2``… as in :func:`_labelled_sources`. The writer may quote them, but
+    they are listed apart from the scholarly References. Each entry carries
+    ``label`` instead of ``n``, with the same other fields."""
+    further = [
+        _reference_entry(label, meta)
+        for label, meta, _ in _labelled_sources(literature, audience)
+        if label.startswith("W")
+    ]
+    return further[:max_n] if max_n else further
 
 
 def _ref_citation_text(r: dict[str, Any]) -> str:
@@ -7400,20 +7467,70 @@ def render_references_marp_slide(refs: list[dict[str, Any]], *, max_n: int = 18)
     return "\n".join(lines)
 
 
+# A "Further reading" heading at any level, however the writer capitalised it.
+_FURTHER_READING_HEADING_RE = re.compile(
+    r"^#{1,6}\s*further\s+reading\s*$", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _further_reading_lines(further: list[dict[str, Any]]) -> list[str]:
+    return [f"- [{w['label']}] {_ref_citation_text(w)}" for w in further]
+
+
+def render_further_reading_marp_slide(
+    further: list[dict[str, Any]], *, max_n: int = 18,
+) -> str:
+    """A Marp slide listing the web pages the quest drew on, appended after
+    the References slide: web pages are Further reading, not References."""
+    if not further:
+        return ""
+    lines = ["---", "", "## Further reading", ""]
+    lines += _further_reading_lines(further[:max_n])
+    if len(further) > max_n:
+        lines.append(f"\n_(+{len(further) - max_n} more pages)_")
+    return "\n".join(lines)
+
+
+def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str:
+    """Append a ``## Further reading`` section listing the web pages, unless
+    there are none or the paper already has that heading. The engine writes
+    it rather than the writer, so every page is listed and none is invented."""
+    if not further or _FURTHER_READING_HEADING_RE.search(markdown):
+        return markdown
+    section = "\n".join(["## Further reading", "", *_further_reading_lines(further)])
+    return markdown.rstrip() + "\n\n" + section + "\n"
+
+
 def render_poster_references_latex(
-    refs: list[dict[str, Any]], *, max_n: int = 12,
+    refs: list[dict[str, Any]],
+    further: list[dict[str, Any]] | None = None,
+    *,
+    max_n: int = 12,
+    max_further: int = 6,
 ) -> str:
     """A compact full-width Sources band for the poster footer — injected
-    by the template (not the LLM) so references always render."""
-    if not refs:
+    by the template (not the LLM) so references always render. Web pages
+    follow on their own ``Further reading`` line, labelled [W1], [W2]…."""
+    further = list(further or [])
+    if not refs and not further:
         return ""
-    shown = refs[:max_n]
-    parts = [f"[{r['n']}]~{_latex_esc(_ref_citation_text(r))}" for r in shown]
-    more = "" if len(refs) <= max_n else f" \\quad (+{len(refs) - max_n} more)"
-    return (
-        "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n"
-        "{\\scriptsize\\textbf{Sources:}~ " + " \\quad ".join(parts) + more + "}\n"
-    )
+    blocks: list[str] = []
+    if refs:
+        shown = refs[:max_n]
+        parts = [f"[{r['n']}]~{_latex_esc(_ref_citation_text(r))}" for r in shown]
+        more = "" if len(refs) <= max_n else f" \\quad (+{len(refs) - max_n} more)"
+        blocks.append(
+            "{\\scriptsize\\textbf{Sources:}~ " + " \\quad ".join(parts) + more + "}\n"
+        )
+    if further:
+        shown_w = further[:max_further]
+        parts = [f"[{w['label']}]~{_latex_esc(_ref_citation_text(w))}" for w in shown_w]
+        more = ("" if len(further) <= max_further
+                else f" \\quad (+{len(further) - max_further} more)")
+        blocks.append(
+            "{\\scriptsize\\textbf{Further reading:}~ " + " \\quad ".join(parts) + more + "}\n"
+        )
+    return "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n" + "\\par\\vspace{0.2em}\n".join(blocks)
 
 
 _CLARIFY_LABELS = {

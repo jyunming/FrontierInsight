@@ -25,9 +25,11 @@ When you type `@fi /start config.yaml` in Copilot Chat, the extension:
 4. Streams the response back, renders progress in the chat panel.
 
 The engine runs to a finished paper, slide deck, figures, and a
-machine-readable summary in `outputs/<quest_id>/`. The paper's sources are
+machine-readable summary in `outputs/<quest_id>/`. The paper's cited papers are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
-(CSL-JSON), and a `paper/CLAIMS.md` ledger records which of the paper's claims
+(CSL-JSON). The web pages it drew on are listed under Further reading, not
+References, and exported as `paper/further_reading.bib` / `.csl.json`. A
+`paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, a cited source, or are unsupported (unsupported claims
 force a revise). With `engine.execute_replicates > 1` the results are reported
 with 95% confidence intervals, effect sizes (including between methods nested

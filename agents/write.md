@@ -24,8 +24,8 @@ Include all available figures this way.
 **Length is determined by the `Study depth` slot in the clarifications block in the Inputs section.** Honor it:
 
 - `brief preprint` — 1–2 pages, terse opening (1 paragraph), focus on novel findings only. Citations OK to be few; don't pad.
-- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** cited sources **by content** (not just listed in References), and an explicit Limitations subsection. Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
-- `comprehensive review` — 10–15 pages with a Background / Context section near the start, a Comparison or Synthesis section in the middle, and a closing section that integrates every cited source by content. Aim for 4000+ words and at least 10 citations actually discussed.
+- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** sources from References or Further reading **by content** (not just listed), and an explicit Limitations subsection. Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
+- `comprehensive review` — 10–15 pages with a Background / Context section near the start, a Comparison or Synthesis section in the middle, and a closing section that integrates every listed source by content. Aim for 4000+ words and at least 10 sources from References or Further reading actually discussed.
 
 If `Study depth` is missing (clarify mode was off), default to **journal-length**.
 
@@ -93,7 +93,7 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 - **Discussion** — what the literature broadly says about the comparison, where consensus exists, where it doesn't.
 - **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question.
 
-End with `## References` in numbered-list style citing concrete sources from the prior-work block in the Inputs section. The "References — required format" section below is the binding rule for what each entry must contain; do NOT invent author names or DOIs to plug missing fields.
+End with `## References` in numbered-list style citing concrete **scholarly** sources from the prior-work block in the Inputs section — the entries numbered `[1]`, `[2]`, …. The entries labelled `[W1]`, `[W2]`, … are web pages: you may draw on them and cite them inline by that label, but do NOT list them under References and do NOT write a Further reading section yourself — the engine appends a `## Further reading` section listing every web page after your References. The "References — required format" section below is the binding rule for what each entry must contain; do NOT invent author names or DOIs to plug missing fields.
 
 ## References — required format
 

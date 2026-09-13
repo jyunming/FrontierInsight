@@ -16,9 +16,11 @@ Grade on three axes (each 1–5) and combine into the overall `score`:
 
 **Calibrate depth against the `Study depth` slot** from the Pre-flight clarifications block in the Inputs section. Apply the right citation-discussion floor for the requested depth:
 
-- `brief preprint` — citations can be few; depth=5 is awarded when the Discussion engages meaningfully with at least 1 cited source by content.
-- `journal-length` (default if absent) — depth=5 requires the Discussion to engage with **at least 3** cited sources by content (what each showed, how this study relates) — not merely list them in References.
-- `comprehensive review` — depth=5 requires the Discussion to integrate every cited source by content; aim for ≥10 citations actually discussed.
+A source counts toward these floors whether it is listed in References (scholarly work, numbered `[N]`) or in Further reading (web pages, labelled `[W1]`, `[W2]`, …).
+
+- `brief preprint` — citations can be few; depth=5 is awarded when the Discussion engages meaningfully with at least 1 source from References or Further reading by content.
+- `journal-length` (default if absent) — depth=5 requires the Discussion to engage with **at least 3** sources from References or Further reading combined, by content (what each showed, how this study relates) — not merely list them.
+- `comprehensive review` — depth=5 requires the Discussion to integrate every listed source by content; aim for ≥10 sources from References or Further reading actually discussed.
 
 A `brief preprint` is allowed to be shallower than a `journal-length` paper. Do NOT request "more citations" as a revise suggestion if the depth floor for the requested level is already met.
 

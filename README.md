@@ -22,7 +22,8 @@ After one quest, `outputs/<quest_id>/` contains:
 ```
 paper/paper.md            the finished paper (IMRAD or essay/report/brief/whitepaper)
 paper/paper.pdf           typeset PDF — via LaTeX, or a LaTeX-free HTML fallback
-paper/references.bib      sources as BibTeX + CSL-JSON (drop into Zotero / a LaTeX flow)
+paper/references.bib      cited papers as BibTeX + CSL-JSON (drop into Zotero / a LaTeX flow)
+paper/further_reading.bib the web pages the paper drew on, listed apart from its References
 paper/CLAIMS.md           claim-grounding ledger: each claim → experiment / citation / unsupported
 figures/*.png             every plot the experiment produced
 code/experiment.py        the exact code that ran (re-runnable from .fi/requirements.lock.txt)
