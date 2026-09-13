@@ -215,7 +215,9 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         knowledge_top_k=_coerce_int(knowledge.get("top_k", 8), 8),
         knowledge_external_top_k=_coerce_int(knowledge.get("external_top_k", 20), 20),
         web_research=bool(knowledge.get("web_search", True)),
-        supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", False)),
+        # Default True, matching the engine: a config that never set the paper
+        # pause runs with it on, so --update must not write it back as off.
+        supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
         max_iterations=_coerce_int(engine.get("max_iterations", 2), 2),

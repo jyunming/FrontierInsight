@@ -94,6 +94,35 @@ def test_load_current_answers_missing_config(tmp_path: Path) -> None:
         load_current_answers(quest_root)
 
 
+@pytest.mark.parametrize(
+    ("papers_yaml", "expected"),
+    [
+        ("", True),
+        ("pauses:\n  papers: false\n", False),
+        ("knowledge:\n  pause_for_user_papers: false\n", False),
+    ],
+)
+def test_load_current_answers_reads_the_paper_pause_the_engine_uses(
+    tmp_path: Path, papers_yaml: str, expected: bool,
+) -> None:
+    """A config that never set the paper pause runs with it on, so --update
+    must load it as on; otherwise re-writing the YAML turns the pause off."""
+    quest_root = tmp_path / "quest-papers"
+    quest_root.mkdir()
+    cfg_path = quest_root / "config.yaml"
+    cfg_path.write_text(
+        "topic: \"t\"\n"
+        "title: \"q\"\n"
+        "provider:\n  name: \"openai\"\n"
+        "output:\n  kinds: [\"paper_md\"]\n"
+        + papers_yaml,
+        encoding="utf-8",
+    )
+    loaded, _, _ = load_current_answers(quest_root)
+    assert loaded.supply_papers is expected
+    assert Config.from_yaml(cfg_path).pauses.papers is expected
+
+
 def test_load_current_answers_handles_yaml_literal_topic(tmp_path: Path) -> None:
     """Topics are usually written as YAML literal blocks (``topic: |``).
     The parser may return them as a single multi-line string or a
