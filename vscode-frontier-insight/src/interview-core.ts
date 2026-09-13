@@ -82,7 +82,7 @@ export interface InterviewAnswers {
     // When true, pause on a paywalled / abstract-only relevant paper and
     // write needs/WANTED_PAPERS.md so the user can drop the PDF into
     // inputs/papers/ and resume. Maps to pauses.papers.
-    // Off by default. Must stay in sync with core/interview.py.
+    // On by default (the engine default). Must stay in sync with core/interview.py.
     supply_papers?: boolean;
     // Multi-model ensemble preset. "off" (default) keeps single-call
     // semantics; other values expand into provider.node_ensemble via
@@ -302,9 +302,8 @@ export function answersToYaml(answers: InterviewAnswers): string {
         answers.clarify_mode === "interactive" ? "ask" : answers.clarify_mode;
     lines.push("pauses:");
     lines.push(`${indent}clarify: "${clarifyPause}"`);
-    if (answers.supply_papers === true) {
-        lines.push(`${indent}papers: true`);
-    }
+    // Written either way: the engine default is on, so "off" must be explicit.
+    lines.push(`${indent}papers: ${answers.supply_papers === false ? "false" : "true"}`);
     lines.push("");
 
     lines.push("execution:");

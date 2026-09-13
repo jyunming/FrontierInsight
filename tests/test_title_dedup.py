@@ -109,6 +109,7 @@ async def test_literature_node_merge_drops_a_same_title_copy(tmp_path: Path) -> 
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
+        pauses={"papers": False},  # about dedup, not the paywalled-paper pause
     )
     eng = Engine(cfg)
 

@@ -188,7 +188,7 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
-Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers: true`), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
+Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
 
 ### Fleet (multiple quests in parallel)
 
@@ -285,8 +285,9 @@ node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
 When a relevant paper is genuinely paywalled (SPIE / IEEE / Elsevier …)
-and only its abstract is reachable, turn on **Supply paywalled papers**
-in the interview: the quest pauses and writes a ranked
+and only its abstract is reachable, **Supply paywalled papers** (on by
+default; turn it off in the interview for an unattended run) makes the
+quest pause and write a ranked
 `needs/WANTED_PAPERS.md` (download links + why each matters). After the
 run, the chat panel surfaces that list with instructions to drop the
 PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then

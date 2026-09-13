@@ -178,7 +178,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
 | **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
-| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` |
+| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` (the default; `false` turns it off) |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` |
 | **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
 | **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
@@ -193,7 +193,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 # A quest that involves you at both ends and lets you feed it papers mid-run:
 pauses:
   clarify: ask            # answer setup questions before it starts
-  papers: true            # pause to let you download paywalled papers it finds
+  papers: true            # default: pause to let you download paywalled papers it finds (false = never)
   supply: before_build    # one drop-in point for your own papers/data
   review: ask             # accept / reject / refine before the paper is final
 ```

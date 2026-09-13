@@ -43,6 +43,9 @@ def _mk_cfg(
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
+        # About routing and literature merging, not the paywalled-paper pause
+        # (on by default), which the DOI-bearing fake docs would trigger.
+        pauses={"papers": False},
     )
 
 

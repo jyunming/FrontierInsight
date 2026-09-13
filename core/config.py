@@ -385,7 +385,9 @@ class PausesConfig(BaseModel):
     clarify: ClarifyPause = "off"
     # SUPPLY — pause when a relevant paper came back abstract-only (paywalled)
     # so the user can download it and drop the PDF into inputs/papers/.
-    papers: bool = False
+    # On by default: a relevant paywalled paper the open-access cascade could
+    # not fetch is listed in needs/WANTED_PAPERS.md and the quest waits for it.
+    papers: bool = True
     # SUPPLY — fixed drop-in checkpoint(s) for papers/data.
     #   "never" · "before_build" (after design) · "before_review" (after the
     #   first draft) · "both".
@@ -929,11 +931,12 @@ class KnowledgeConfig(BaseModel):
     # and proceeds — giving the writer real full text instead of
     # abstracts.
     #
-    # Default ``False`` so existing quests keep running unattended.
-    # Pairs naturally with the ``knowledge.try_fetch_full_text`` knob:
-    # turn that on first, then this gate only fires for the subset of
-    # papers the host couldn't open-text-fetch.
-    pause_for_user_papers: bool = False
+    # Default ``True``, matching ``pauses.papers``: this legacy flag is merged
+    # into it, and the programmatic merge copies the attribute through, so
+    # the two defaults must agree. Pairs with ``knowledge.try_fetch_full_text``
+    # (also on): the gate fires only for the papers the open-access cascade
+    # could not fetch. Set ``pauses.papers: false`` for an unattended run.
+    pause_for_user_papers: bool = True
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
     # `Knowledge.search()` when Axon is disabled OR returns zero results.
@@ -984,8 +987,10 @@ class KnowledgeConfig(BaseModel):
     # (institutional VPN / Shibboleth / EZproxy already authenticated at
     # the OS level). Login-wall HTML pages are rejected by a
     # Content-Type + %PDF-magic check, so the quest never hangs on a
-    # paywalled venue. Off by default — opt-in per quest.
-    try_fetch_full_text: bool = False
+    # paywalled venue. On by default: a legal copy is the difference between
+    # the writer quoting a paper and quoting its abstract. The whole batch
+    # shares ``full_text_fetch_total_s``; set false for abstracts only.
+    try_fetch_full_text: bool = True
     # Per-doc HTTP timeout (landing-page GET, PDF GET). Short is good.
     full_text_fetch_timeout_s: float = Field(default=15.0, gt=0)
     # Total budget across all docs in one literature batch — caps wall

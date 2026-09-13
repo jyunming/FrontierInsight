@@ -361,7 +361,7 @@ def test_arxiv_fallback_fires_when_axon_returns_empty(monkeypatch) -> None:
     # deterministic — without setting it the default is 20 and the
     # arxiv stub would need to return 20 entries.
     k.cfg = KnowledgeConfig(
-        enabled=True, external_fallback=["arxiv"],
+        enabled=True, external_fallback=["arxiv"], try_fetch_full_text=False,
         top_k=3, external_top_k=3,
     )
     class _Empty:
@@ -421,7 +421,7 @@ def test_external_top_k_used_when_caller_explicitly_passes_it(monkeypatch) -> No
     k = Knowledge(KnowledgeConfig(enabled=False))
     k.enabled = True
     k.cfg = KnowledgeConfig(
-        enabled=True, external_fallback=["arxiv"],
+        enabled=True, external_fallback=["arxiv"], try_fetch_full_text=False,
         top_k=5, external_top_k=20,
     )
     class _Empty:
@@ -489,7 +489,7 @@ def test_external_top_k_honours_caller_per_call_cap(monkeypatch) -> None:
     k = Knowledge(KnowledgeConfig(enabled=False))
     k.enabled = True
     k.cfg = KnowledgeConfig(
-        enabled=True, external_fallback=["arxiv"],
+        enabled=True, external_fallback=["arxiv"], try_fetch_full_text=False,
         top_k=5, external_top_k=20,
     )
     class _Empty:
@@ -529,7 +529,7 @@ def test_external_top_k_uses_config_when_no_caller_caps(monkeypatch) -> None:
     k = Knowledge(KnowledgeConfig(enabled=False))
     k.enabled = True
     k.cfg = KnowledgeConfig(
-        enabled=True, external_fallback=["arxiv"],
+        enabled=True, external_fallback=["arxiv"], try_fetch_full_text=False,
         top_k=8, external_top_k=20,
     )
     class _Empty:

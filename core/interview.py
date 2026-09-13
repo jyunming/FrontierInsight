@@ -241,9 +241,9 @@ WEB_RESEARCH_CHOICES: tuple[Choice, ...] = (
 
 
 SUPPLY_PAPERS_CHOICES: tuple[Choice, ...] = (
-    Choice(False, "Off (default)",
-           "Use whatever the open-web / open-access fetch can get. Paywalled papers (SPIE, IEEE, …) are cited by their abstract only."),
-    Choice(True, "Pause for my PDFs",
+    Choice(False, "Off",
+           "Use whatever the open-web / open-access fetch can get. Paywalled papers (SPIE, IEEE, …) are cited by their abstract only. Choose this for an unattended run."),
+    Choice(True, "Pause for my PDFs (default)",
            "When the agent can only get the abstract of a relevant paper, it pauses and writes a ranked needs/WANTED_PAPERS.md (download links + why each matters). Drop the PDFs into inputs/papers/ and resume — they're ingested as full text. Tip: you can also pre-load a folder of papers via knowledge.local_papers."),
 )
 
@@ -579,10 +579,10 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="supply_papers",
         label="Supply paywalled papers",
-        prompt="When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, pause and list the papers to download (ranked, with links) so you can drop the PDFs into inputs/papers/ and resume with real full text. Off by default.",
+        prompt="When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, pause and list the papers to download (ranked, with links) so you can drop the PDFs into inputs/papers/ and resume with real full text. On by default.",
         kind="single",
         choices=SUPPLY_PAPERS_CHOICES,
-        default=False,
+        default=True,
         mid_quest_editable=True,
         tier=3,
     ),
@@ -1151,10 +1151,10 @@ class InterviewAnswers:
     # ``interview-core.ts:InterviewAnswers.survey_mode``.
     survey_mode: bool = False
     web_research: bool = True
-    # When True, pause on a paywalled/abstract-only relevant paper and write
-    # needs/WANTED_PAPERS.md so the user can drop the PDF into inputs/papers/
-    # and resume → ``knowledge.pause_for_user_papers``.
-    supply_papers: bool = False
+    # When True (the default), pause on a paywalled/abstract-only relevant
+    # paper and write needs/WANTED_PAPERS.md so the user can drop the PDF
+    # into inputs/papers/ and resume → ``pauses.papers``.
+    supply_papers: bool = True
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1359,8 +1359,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     )
     if _supply and _supply != "never":
         lines.append(f"{indent}supply: {json.dumps(_supply)}")
-    if answers.supply_papers:
-        lines.append(f"{indent}papers: true")
+    # Written either way: the engine default is on, so "off" must be explicit.
+    lines.append(f"{indent}papers: {'true' if answers.supply_papers else 'false'}")
     lines.append("")
 
     lines.append("execution:")
