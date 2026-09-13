@@ -938,7 +938,10 @@ class KnowledgeConfig(BaseModel):
     #   crossref         — DOI metadata across paywalled publishers (free).
     #   semantic_scholar — broad coverage + citation graph (free, rate-limited).
     #   pubmed           — biomedical via NCBI E-utilities (free).
-    #   core             — 240M open-access papers (free; needs CORE_API_KEY env).
+    #   core             — 240M open-access papers (free, keyless; CORE_API_KEY
+    #                      raises its rate limit).
+    #   openaire         — European open-access research graph (free, keyless).
+    #   doaj             — Directory of Open Access Journals articles (free, keyless).
     #   google_scholar   — EXPERIMENTAL via `scholarly` package; no official API;
     #                      rate-limited / blocked by Google. Prefer openalex / s2.
     external_fallback: list[str] | str = Field(

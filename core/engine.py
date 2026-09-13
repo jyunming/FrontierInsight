@@ -48,7 +48,13 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
 )
 from .execution import ExecutionResult, make_executor
-from .knowledge import Knowledge, RetrievedDoc, _normalize_title
+from .knowledge import (
+    WORK_SCOPE_PAPERS,
+    WORK_SCOPE_PAPERS_AND_BOOKS,
+    Knowledge,
+    RetrievedDoc,
+    _normalize_title,
+)
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
     FallbackLLMClient,
@@ -1872,6 +1878,7 @@ class Engine:
         seeded = await self.knowledge.asearch(
             state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
+            work_scope=self._work_scope(state),
         )
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
@@ -2121,6 +2128,18 @@ class Engine:
             "mode": k.passage_ranking,
         }
 
+    @staticmethod
+    def _work_scope(state: QuestState) -> str:
+        """Which scholarly record types academic search keeps for this quest.
+        A quest with an experiment cites papers; one without (a survey, a
+        history, a humanities or policy question) also keeps books and book
+        chapters, where much of that scholarship is published. Keyed on the
+        resolved run mode, not on a separate subject classifier, so a
+        misclassified topic gets the other rule rather than no search."""
+        if state.get("no_simulation_resolved"):
+            return WORK_SCOPE_PAPERS_AND_BOOKS
+        return WORK_SCOPE_PAPERS
+
     async def _node_literature(self, state: QuestState) -> QuestState:
         if self.config.engine.analyze_local_first:
             # --analyze: local-data-first, so NO external literature is
@@ -2173,6 +2192,7 @@ class Engine:
                 external_top_k=self.config.knowledge.external_top_k,
                 chosen_idea=chosen,
                 chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                work_scope=self._work_scope(state),
             )
 
         docs = await _retrieve(query)
@@ -2845,7 +2865,9 @@ class Engine:
         # rate-limit-prone re-search in the common case.
         axon_written = 0
         if lit_written == 0:
-            axon_written = await self._axon_collect_step(query, auto_dir)
+            axon_written = await self._axon_collect_step(
+                query, auto_dir, work_scope=self._work_scope(state),
+            )
 
         # ---- Dataset adapters --------------------------------------
         adapter_written = await self._run_dataset_adapters(query, auto_dir)
@@ -2942,7 +2964,9 @@ class Engine:
                 )
         return written
 
-    async def _axon_collect_step(self, query: str, auto_dir: Path) -> int:
+    async def _axon_collect_step(
+        self, query: str, auto_dir: Path, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> int:
         """Axon-backed retrieval. Returns the
         count of files written under ``auto_dir`` (not in a
         sub-directory). Returns 0 on any of: knowledge disabled,
@@ -2974,6 +2998,7 @@ class Engine:
                 query,
                 top_k=top_k,
                 chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                work_scope=work_scope,
             )
         except Exception as e:
             self._log.warning(
@@ -4597,6 +4622,7 @@ class Engine:
                 hits = await self.knowledge.asearch(
                     text, top_k=per_finding_k,
                     chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                    work_scope=self._work_scope(state),
                 )
             except Exception as e:
                 self._log.warning("[cross_check] retrieval failed: %s", e)

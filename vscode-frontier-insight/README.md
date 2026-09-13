@@ -329,7 +329,11 @@ searches a day, and arXiv is searched through OpenAlex too — and
 `SEMANTIC_SCHOLAR_API_KEY` gets Semantic Scholar off its mostly
 rate-limited shared pool. Both are free, and both also work as
 `knowledge.openalex_api_key` / `knowledge.semantic_scholar_api_key` in
-the quest YAML (an environment variable wins).
+the quest YAML (an environment variable wins). CORE, OpenAIRE and DOAJ
+need no key and are where humanities and social-science topics find
+open-access books, theses and journals. Academic search keeps only
+citable record types: papers for a quest with an experiment, and papers
+plus books and book chapters for a quest without one.
 
 If any files land, the chat panel shows the count and the quest
 continues — many no-simulation quests run end-to-end without

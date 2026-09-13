@@ -52,7 +52,10 @@ network failures log and return [] rather than raising):
   - semantic_scholar  — broad coverage with citation graph
                         (SEMANTIC_SCHOLAR_API_KEY; the keyless pool 429s)
   - pubmed            — biomedical (NCBI E-utilities)
-  - core              — 240M open-access papers (requires CORE_API_KEY)
+  - core              — 240M open-access papers and theses, keyless
+                        (CORE_API_KEY raises the rate limit)
+  - openaire          — European open-access research graph, keyless
+  - doaj              — Directory of Open Access Journals articles, keyless
   - google_scholar    — EXPERIMENTAL via `scholarly`; no official API,
                         rate-limited / sometimes blocked by Google
 
@@ -75,7 +78,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import quote
 
 import httpx
 import yaml
@@ -246,6 +250,40 @@ def _openalex_params(params: dict, api_key: str = "") -> dict:
     return {**params, "api_key": key} if key else params
 
 
+# Which kinds of scholarly record a search keeps. A scholarly index holds far
+# more than papers -- datasets, figure "components", peer-review reports,
+# dictionary entries, journal issues -- and none of those is a source a paper
+# can cite for a claim. A quest with an experiment keeps journal articles,
+# conference papers and preprints. A quest without one (a survey, a history, a
+# humanities or policy question) also keeps books and book chapters, because
+# much of that scholarship is published there: on a popular-culture topic 6 of
+# Crossref's 10 on-topic hits were book chapters.
+WORK_SCOPE_PAPERS = "papers"
+WORK_SCOPE_PAPERS_AND_BOOKS = "papers_and_books"
+_BOOK_TYPES_CROSSREF = ("book-chapter", "book", "edited-book", "monograph", "dissertation")
+_WORK_TYPES_CROSSREF = {
+    WORK_SCOPE_PAPERS: ("journal-article", "proceedings-article", "posted-content"),
+}
+_WORK_TYPES_CROSSREF[WORK_SCOPE_PAPERS_AND_BOOKS] = (
+    _WORK_TYPES_CROSSREF[WORK_SCOPE_PAPERS] + _BOOK_TYPES_CROSSREF)
+_WORK_TYPES_OPENALEX = {
+    WORK_SCOPE_PAPERS: ("article", "preprint", "review", "conference-paper"),
+}
+_WORK_TYPES_OPENALEX[WORK_SCOPE_PAPERS_AND_BOOKS] = (
+    _WORK_TYPES_OPENALEX[WORK_SCOPE_PAPERS] + ("book", "book-chapter", "dissertation"))
+# OpenAIRE labels each copy of a work ("instance") in words.
+_WORK_TYPES_OPENAIRE = {
+    WORK_SCOPE_PAPERS: ("article", "preprint", "review", "conference object"),
+}
+_WORK_TYPES_OPENAIRE[WORK_SCOPE_PAPERS_AND_BOOKS] = (
+    _WORK_TYPES_OPENAIRE[WORK_SCOPE_PAPERS]
+    + ("book", "part of book or chapter of book", "doctoral thesis"))
+
+
+def _scope_types(table: dict[str, tuple[str, ...]], scope: str) -> tuple[str, ...]:
+    return table.get(scope) or table[WORK_SCOPE_PAPERS]
+
+
 def _clean_openalex_title(title: Any) -> str:
     # Some OpenAlex titles carry a literal backslash-n from the source feed.
     return re.sub(r"\s+", " ", str(title or "").replace("\\n", " ")).strip()
@@ -315,11 +353,13 @@ def _arxiv_search(
 
 def _openalex_search(
     query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+    scope: str = WORK_SCOPE_PAPERS,
 ) -> list[RetrievedDoc]:
     if not query.strip():
         return []
     params = _openalex_params({
         "search": query.strip(),
+        "filter": "type:" + "|".join(_scope_types(_WORK_TYPES_OPENALEX, scope)),
         "per-page": str(max(1, min(top_k, 25))),
     }, api_key)
     data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
@@ -345,6 +385,7 @@ def _openalex_search(
                 "doi": doi, "url": w.get("id") or "", "pdf_url": oa_pdf,
                 "cited_by": w.get("cited_by_count"),
                 "open_access": (w.get("open_access") or {}).get("is_oa"),
+                "work_type": w.get("type") or "",
             },
         ))
     return out
@@ -363,16 +404,21 @@ def _openalex_reconstruct_abstract(inverted: dict | None) -> str:
     return " ".join(w for _, w in positions)
 
 
-def _crossref_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _crossref_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, scope: str = WORK_SCOPE_PAPERS,
+) -> list[RetrievedDoc]:
     """DOI metadata across all major publishers (paywalled or not).
     Abstracts present when the publisher submitted them; many won't
-    have one but title + venue + author + year is still useful."""
+    have one but title + venue + author + year is still useful, so a
+    missing abstract does not exclude a record."""
     if not query.strip():
         return []
     params = {
         "query": query.strip(),
         "rows": str(max(1, min(top_k, 25))),
-        "select": "DOI,title,abstract,author,container-title,published-print,published-online,publisher,URL",
+        # Repeated `type:` filters are OR-ed by Crossref.
+        "filter": ",".join(f"type:{t}" for t in _scope_types(_WORK_TYPES_CROSSREF, scope)),
+        "select": "DOI,title,type,abstract,author,container-title,published-print,published-online,publisher,URL",
     }
     data = _http_get_json("https://api.crossref.org/works", params, timeout_s, source="crossref")
     if not data:
@@ -404,6 +450,7 @@ def _crossref_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list
                 "source": "crossref", "title": title, "authors": authors,
                 "venue": venue, "publisher": pub, "year": year,
                 "doi": it.get("DOI", ""), "url": it.get("URL", ""),
+                "work_type": it.get("type", ""),
             },
         ))
     return out
@@ -494,28 +541,21 @@ def _pubmed_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[R
 
 
 def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
-    """CORE (https://core.ac.uk) — 240M+ open-access papers. Requires
-    a free API key via `CORE_API_KEY` env var; degrades to [] if unset.
-    Covers all fields with full-text where available."""
-    import os
-    api_key = os.environ.get("CORE_API_KEY", "").strip()
-    if not api_key or not query.strip():
+    """CORE (https://core.ac.uk) — 240M+ open-access papers, theses and
+    repository copies, strong on the humanities and social sciences that
+    the STEM indices under-cover. Searching works without a key; a free
+    `CORE_API_KEY` raises the rate limit."""
+    if not query.strip():
         return []
-    try:
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(
-                "https://api.core.ac.uk/v3/search/works",
-                params={"q": query.strip(), "limit": str(max(1, min(top_k, 25)))},
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": "FrontierInsight/1.0",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        _log.info("core.ac.uk fallback failed: %s", _sf.redact(e))
-        _sf.record_exception("core", e)
+    api_key = os.environ.get("CORE_API_KEY", "").strip()
+    data = _http_get_json(
+        # With the trailing slash: the bare path answers 301 to this one.
+        "https://api.core.ac.uk/v3/search/works/",
+        {"q": query.strip(), "limit": str(max(1, min(top_k, 25)))},
+        timeout_s, source="core",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
+    )
+    if not data:
         return []
     out: list[RetrievedDoc] = []
     for w in data.get("results") or []:
@@ -528,12 +568,135 @@ def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
                 "source": "core", "title": title, "authors": authors,
                 "year": w.get("yearPublished"),
                 "doi": (w.get("doi") or "").replace("https://doi.org/", ""),
-                "url": w.get("downloadUrl") or w.get("sourceFulltextUrls", [""])[0],
-                "pdf_url": w.get("downloadUrl", ""),
+                "arxiv_id": w.get("arxivId") or "",
+                "url": w.get("downloadUrl") or (w.get("sourceFulltextUrls") or [""])[0],
+                "pdf_url": w.get("downloadUrl") or "",
                 "venue": (w.get("publisher") or ""),
+                "work_type": w.get("documentType") or "",
             },
         ))
     return out
+
+
+_OPENAIRE_URL = "https://api.openaire.eu/graph/v1/researchProducts"
+_DOAJ_URL = "https://doaj.org/api/search/articles/"
+# DOAJ reads its query as Elasticsearch query-string syntax: a `:` names a
+# field, a leading `-` negates, brackets and quotes group.
+_DOAJ_SYNTAX_RE = re.compile(r'[:/()\[\]{}"!+\-&|<>=]')
+# OpenAIRE and DOAJ require every query word to match, so a six-word keyword
+# query that OpenAlex answers well finds nothing there (measured: 0 hits for
+# "action figures collectible toys popular culture history" on both, while
+# DOAJ-listed books on toys exist). One retry with the leading words.
+_AND_SEARCH_RETRY_WORDS = 3
+
+
+def _and_search(query: str, run: Callable[[str], list[RetrievedDoc] | None]) -> list[RetrievedDoc]:
+    docs = run(query)
+    words = query.split()
+    if docs is not None and not docs and len(words) > _AND_SEARCH_RETRY_WORDS:
+        docs = run(" ".join(words[:_AND_SEARCH_RETRY_WORDS]))
+    return docs or []
+
+
+def _openaire_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, scope: str = WORK_SCOPE_PAPERS,
+) -> list[RetrievedDoc]:
+    """OpenAIRE research graph — European open-access publications, keyless."""
+    if not query.strip():
+        return []
+    allowed = set(_scope_types(_WORK_TYPES_OPENAIRE, scope))
+
+    def run(q: str) -> list[RetrievedDoc] | None:
+        data = _http_get_json(
+            _OPENAIRE_URL,
+            {"search": q, "type": "publication", "pageSize": str(max(1, min(top_k, 25)))},
+            timeout_s, source="openaire",
+        )
+        if data is None:
+            return None
+        out: list[RetrievedDoc] = []
+        for r in data.get("results") or []:
+            instances = r.get("instances") or []
+            types = {str(i.get("type") or "").strip().lower() for i in instances}
+            if not types & allowed:
+                continue
+            title = re.sub(r"\s+", " ", str(r.get("mainTitle") or "")).strip()
+            if not title:
+                continue
+            abstract = " ".join(
+                re.sub(r"<[^>]+>", " ", str(d)) for d in (r.get("descriptions") or [])
+            )
+            abstract = re.sub(r"\s+", " ", abstract).strip()
+            pids = {str(p.get("scheme") or "").lower(): str(p.get("value") or "")
+                    for p in (r.get("pids") or [])}
+            urls = [u for i in instances for u in (i.get("urls") or []) if u]
+            date = str(r.get("publicationDate") or "")
+            access = str((r.get("bestAccessRight") or {}).get("label") or "")
+            out.append(RetrievedDoc(
+                content=f"{title}\n\n{abstract}".strip(),
+                metadata={
+                    "source": "openaire", "title": title,
+                    "authors": [a.get("fullName", "") for a in (r.get("authors") or [])],
+                    "year": int(date[:4]) if date[:4].isdigit() else None,
+                    "published": date,
+                    "doi": pids.get("doi", ""), "pmid": pids.get("pmid", ""),
+                    "url": (f"https://doi.org/{pids['doi']}" if pids.get("doi")
+                            else (urls[0] if urls else "")),
+                    "venue": str((r.get("container") or {}).get("name") or r.get("publisher") or ""),
+                    "publisher": str(r.get("publisher") or ""),
+                    "open_access": access.upper().startswith("OPEN"),
+                    "work_type": next((t for t in types if t in allowed), ""),
+                },
+            ))
+        return out
+
+    return _and_search(query.strip(), run)
+
+
+def _doaj_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+    """Directory of Open Access Journals — peer-reviewed open-access journal
+    articles, keyless. Every hit is a journal article with free full text."""
+    q = re.sub(r"\s+", " ", _DOAJ_SYNTAX_RE.sub(" ", query or "")).strip()
+    if not q:
+        return []
+
+    def run(text: str) -> list[RetrievedDoc] | None:
+        data = _http_get_json(
+            _DOAJ_URL + quote(text, safe=""),
+            {"pageSize": str(max(1, min(top_k, 25)))},
+            timeout_s, source="doaj",
+        )
+        if data is None:
+            return None
+        out: list[RetrievedDoc] = []
+        for r in data.get("results") or []:
+            b = r.get("bibjson") or {}
+            title = re.sub(r"\s+", " ", str(b.get("title") or "")).strip()
+            if not title:
+                continue
+            doi = next((str(i.get("id") or "") for i in (b.get("identifier") or [])
+                        if str(i.get("type") or "").lower() == "doi"), "")
+            fulltext = next((str(link.get("url") or "") for link in (b.get("link") or [])
+                             if str(link.get("type") or "").lower() == "fulltext"), "")
+            journal = b.get("journal") or {}
+            year = str(b.get("year") or "")
+            out.append(RetrievedDoc(
+                content=f"{title}\n\n{b.get('abstract') or ''}".strip(),
+                metadata={
+                    "source": "doaj", "title": title,
+                    "authors": [a.get("name", "") for a in (b.get("author") or [])],
+                    "year": int(year) if year.isdigit() else None,
+                    "doi": doi,
+                    "url": f"https://doi.org/{doi}" if doi else fulltext,
+                    "venue": str(journal.get("title") or ""),
+                    "publisher": str(journal.get("publisher") or ""),
+                    "open_access": True,
+                    "work_type": "journal-article",
+                },
+            ))
+        return out
+
+    return _and_search(q, run)
 
 
 def _google_scholar_search(query: str, top_k: int, *, timeout_s: float = 30.0) -> list[RetrievedDoc]:
@@ -1646,9 +1809,13 @@ _SOURCE_REGISTRY = {
     "semantic_scholar": _semantic_scholar_search,
     "pubmed": _pubmed_search,
     "core": _core_search,
+    "openaire": _openaire_search,
+    "doaj": _doaj_search,
     "google_scholar": _google_scholar_search,
     "web_search": _web_search_source,
 }
+# Adapters that take `scope=` (which record types to keep).
+_SCOPED_SOURCES = frozenset({"openalex", "crossref", "openaire"})
 
 
 # ---------------------------------------------------------------------------
@@ -2101,9 +2268,25 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
         "name": "core",
         "title": "CORE open-access aggregator",
         "fields": ["all"],
-        "access": "open (free API key required: CORE_API_KEY env var)",
+        "access": "open, keyless (CORE_API_KEY raises the rate limit)",
         "has_search_adapter": True,
-        "when_to_use": "240M+ open-access papers, useful when seeking PDFs not just abstracts.",
+        "when_to_use": "240M+ open-access papers, theses and repository copies from universities worldwide; strong on humanities and social sciences, and useful when seeking PDFs not just abstracts.",
+    },
+    {
+        "name": "openaire",
+        "title": "OpenAIRE research graph",
+        "fields": ["all", "humanities", "social sciences"],
+        "access": "open, keyless",
+        "has_search_adapter": True,
+        "when_to_use": "European open-access publications, including books and chapters from university repositories. Use short keyword queries: every word must match.",
+    },
+    {
+        "name": "doaj",
+        "title": "Directory of Open Access Journals",
+        "fields": ["all", "humanities", "social sciences"],
+        "access": "open, keyless",
+        "has_search_adapter": True,
+        "when_to_use": "peer-reviewed open-access journal articles, many from regional and non-English humanities and social-science journals the big indices miss.",
     },
     {
         "name": "google_scholar",
@@ -2199,9 +2382,10 @@ async def _route_sources_with_llm(
             "(physics, CS, math, statistics, quantitative biology, EE) and PubMed "
             "is biomedical — do NOT pick them for humanities, arts, history, "
             "culture, business, or current-events topics. For those prefer the "
-            "multidisciplinary indices (OpenAlex, Crossref); the always-on web "
-            "search already covers popular / encyclopedic / museum / trade "
-            "sources.\n\n"
+            "multidisciplinary indices (OpenAlex, Crossref) and the open-access "
+            "sources that carry humanities and social-science books, theses and "
+            "journals (CORE, OpenAIRE, DOAJ); the always-on web search already "
+            "covers popular / encyclopedic / museum / trade sources.\n\n"
             "# Topic\n"
             f"{topic[:1500]}\n"
             f"{idea_text}\n"
@@ -2369,10 +2553,13 @@ def _rank_by_relevance(docs: list[RetrievedDoc], query: str) -> list[RetrievedDo
 
 async def _route_external(
     query: str, top_k: int, sources: list[str], *, timeout_s: float = 10.0,
+    work_scope: str = WORK_SCOPE_PAPERS,
 ) -> list[RetrievedDoc]:
     """Run all requested adapters in parallel (each off the event loop)
     and merge. Returns up to top_k de-duplicated docs, preserving the
-    original source-list order on collisions (first source wins)."""
+    original source-list order on collisions (first source wins).
+    ``work_scope`` decides which record types the adapters that can filter
+    by type keep (see ``WORK_SCOPE_PAPERS``)."""
     # Every adapter below wants a SEARCH QUERY, not a topic statement. FI's
     # `topic:` is routinely a paragraph-length block with newlines and a
     # "GOALS:" list, and handing that over verbatim makes arXiv answer HTTP
@@ -2394,8 +2581,11 @@ async def _route_external(
 
     async def run_one(name: str) -> tuple[str, list[RetrievedDoc]]:
         fn = _SOURCE_REGISTRY[name]
+        kwargs: dict[str, Any] = {"timeout_s": timeout_s}
+        if name in _SCOPED_SOURCES:
+            kwargs["scope"] = work_scope
         try:
-            docs = await asyncio.to_thread(fn, query, top_k, timeout_s=timeout_s)
+            docs = await asyncio.to_thread(fn, query, top_k, **kwargs)
         except Exception as e:
             _log.info("source %s raised: %s", name, _sf.redact(e))
             _sf.record_exception(name, e)
@@ -2839,6 +3029,7 @@ class Knowledge:
         external_top_k: int | None = None,
         chosen_idea: dict | None = None,
         chat_fn: Any | None = None,
+        work_scope: str = WORK_SCOPE_PAPERS,
     ) -> list[RetrievedDoc]:
         """Async retrieval. Layers, merged + de-duplicated:
 
@@ -2947,7 +3138,9 @@ class Knowledge:
         # the next quest's academic search.
         run_academic = self.cfg.enabled and bool(academic_sources)
         if run_academic:
-            tasks.append(_route_external(query, external_k, academic_sources))
+            tasks.append(_route_external(
+                query, external_k, academic_sources, work_scope=work_scope,
+            ))
 
         web_docs: list[RetrievedDoc] = []
         academic_docs: list[RetrievedDoc] = []

@@ -227,6 +227,11 @@ written into a quest YAML is copied into that quest's `config.yaml`. FI
 redacts keys from its own logs, and a rate-limited source shows up in the
 quest's source failure report (`.fi/source_failures.json`).
 
+**CORE, OpenAIRE and DOAJ** — the open-access sources FI uses for humanities
+and social-science topics — need no key. A free CORE key
+([core.ac.uk/services/api](https://core.ac.uk/services/api)) raises CORE's
+rate limit: `export CORE_API_KEY=...your-key...`.
+
 **arXiv itself** needs no key. FI queues every request it makes to arxiv.org
 (one at a time, 3 s apart, backing off 1 / 2 / 4 minutes on a rate limit) and
 caches successful responses for 24 hours under `~/.frontier-insight/cache`.
