@@ -72,6 +72,7 @@ interface HumanReviewRequest {
         weaknesses?: string[];
         suggestions?: string[];
         must_flag_hits?: string[];
+        numeric_oracle_warnings?: string[];
         feedback_history?: Array<{ iteration?: number; text?: string }>;
         paper_md_path?: string;
     };
@@ -332,6 +333,14 @@ export class Bridge {
         if (mfh.length) {
             md += `- **Must-flag hits (non-bypassable):** ${mfh
                 .map((h) => `\`${escapeMd(h)}\``)
+                .join(", ")}\n`;
+        }
+        // Advisory, not blocking -- labelled apart from the must-flag list,
+        // which is the engine's non-bypassable vocabulary.
+        const nw = snap.numeric_oracle_warnings || [];
+        if (nw.length) {
+            md += `- **Numeric checks (advisory, not blocking):** ${nw
+                .map((w) => `\`${escapeMd(w)}\``)
                 .join(", ")}\n`;
         }
         if (sugs.length) {

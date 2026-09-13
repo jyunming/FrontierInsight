@@ -1,10 +1,18 @@
-"""The numeric oracle must reach ``must_flag_hits``, not just compute.
+"""The numeric oracle must reach a HUMAN, and must not force a rewrite.
 
-``test_numeric_oracle.py`` pins the arithmetic. These pin the wiring: a
-correct checker that never reaches the router changes nothing, and the
-router is what makes a finding blocking (``engine.py:_route_after_review``
-forces ``revise`` when ``must_flag_hits`` is non-empty, overriding
-``review_loop=False``).
+``test_numeric_oracle.py`` pins the arithmetic. These pin the wiring.
+
+The findings used to be merged into ``must_flag_hits``, which the router treats
+as non-bypassable (``_route_after_review`` forces ``revise`` even with
+``review_loop=False``). A real quest showed the cost when a finding is wrong:
+false positives -- DOI prefixes read as measurements, a mantissa read without
+its exponent -- forced a re-design, a re-implement, twelve more experiment runs
+and a rewrite that left the paper worse (11/11 claims grounded -> 9/11).
+
+So findings are now ADVISORY: recorded in ``review["numeric_oracle_warnings"]``,
+copied into the human-review snapshot every interface renders, and kept OUT of
+``must_flag_hits``. A correct checker that nobody sees still changes nothing,
+which is why the snapshot test below matters as much as the router one.
 """
 from __future__ import annotations
 
@@ -33,8 +41,10 @@ class _Recorder:
         return Engine._numeric_oracle_hits(self, paper, self.state)  # type: ignore[arg-type]
 
 
-def test_transcription_error_becomes_a_must_flag(tmp_path: Path) -> None:
-    """The end the whole feature exists for: computed 2.14, written 2.41."""
+def test_transcription_error_becomes_a_finding(tmp_path: Path) -> None:
+    """The end the whole feature exists for: computed 2.14, written 2.41.
+    The helper still returns one line per finding; whether that line blocks is
+    decided by where the review node puts it (see the snapshot tests)."""
     rec = _Recorder(tmp_path, {"nils_dipole": 2.14})
     hits = rec.hits("Dipole illumination raised NILS to 2.41 at best focus.")
     assert len(hits) == 1
@@ -94,8 +104,9 @@ def test_checker_failure_is_never_quest_fatal(tmp_path: Path, monkeypatch) -> No
 
 
 def test_router_treats_the_hit_as_blocking() -> None:
-    """Pin the contract the hit depends on: a non-empty must_flag_hits
-    forces revise even when review_loop is off."""
+    """Pin the router's contract for must-flag hits in general: a non-empty
+    list forces revise even when review_loop is off. Methodologist must-flags
+    still rely on this. The numeric oracle deliberately no longer does."""
     engine = SimpleNamespace(
         config=SimpleNamespace(
             engine=SimpleNamespace(max_iterations=4, review_loop=False),
@@ -129,3 +140,91 @@ def test_max_iterations_zero_still_bypasses_the_gate() -> None:
         "iteration": 0,
     }
     assert Engine._route_after_review(engine, state) != "revise"
+
+
+# --- advisory, not blocking: the path a finding takes now ---------------------
+
+def _review_engine(tmp_path: Path, *, gate: str = "off") -> Engine:
+    from core.config import (
+        Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
+        ProviderConfig,
+    )
+    cfg = Config(
+        topic="t", title="t",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            clarify_mode="off", review_loop=True, max_iterations=2,
+            human_feedback_gate=gate,  # type: ignore[arg-type]
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    eng = Engine(cfg)
+    eng.quest_root = tmp_path  # type: ignore[attr-defined]
+    eng.fi_dir = tmp_path / ".fi"  # type: ignore[attr-defined]
+    return eng
+
+
+def test_review_records_the_finding_as_advisory_not_blocking(tmp_path: Path) -> None:
+    """Drives the real review node, so the merge itself is under test -- not a
+    hand-built state. The reviewer accepts; the paper misquotes a number."""
+    import asyncio
+
+    eng = _review_engine(tmp_path)
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001
+        return json.dumps({"verdict": "accept", "score": 4,
+                           "suggestions": [], "must_flag_hits": []})
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    paper = tmp_path / "paper.md"
+    paper.write_text("Dipole illumination raised NILS to 2.41 at best focus.",
+                     encoding="utf-8")
+    state = {"topic": "t", "iteration": 0, "review": {},
+             "paper_md": str(paper), "result_json": {"nils_dipole": 2.14}}
+
+    patch = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
+    review = patch["review"]
+
+    warnings = review.get("numeric_oracle_warnings") or []
+    assert len(warnings) == 1 and warnings[0].startswith("unverified_number:")
+    assert review["must_flag_hits"] == [], "a numeric finding must not block"
+    assert "iteration" not in patch, "an advisory finding must not spend budget"
+
+
+def test_clean_paper_leaves_no_warning_key(tmp_path: Path) -> None:
+    import asyncio
+
+    eng = _review_engine(tmp_path)
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001
+        return json.dumps({"verdict": "accept", "score": 4, "suggestions": []})
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    paper = tmp_path / "paper.md"
+    paper.write_text("Dipole illumination raised NILS to 2.14.", encoding="utf-8")
+    patch = asyncio.run(eng._node_review({  # type: ignore[arg-type]
+        "topic": "t", "iteration": 0, "review": {},
+        "paper_md": str(paper), "result_json": {"nils_dipole": 2.14},
+    }))
+    assert "numeric_oracle_warnings" not in patch["review"]
+
+
+def test_human_review_snapshot_carries_the_warnings(tmp_path: Path) -> None:
+    """The snapshot is what the web UI and the VSCode chat panel render. A
+    warning that never reaches it is invisible in two of three interfaces."""
+    import asyncio
+
+    eng = _review_engine(tmp_path, gate="after_review")
+    eng._pause_for_human = lambda **_kw: {"action": "accept"}  # type: ignore[method-assign]
+    state = {
+        "iteration": 0,
+        "review": {"verdict": "accept", "must_flag_hits": [],
+                   "numeric_oracle_warnings": ["unverified_number: 2.41 vs nils=2.14"]},
+    }
+    asyncio.run(eng._node_human_feedback(state))  # type: ignore[arg-type]
+
+    snap = json.loads((tmp_path / ".fi" / "human_review.json").read_text("utf-8"))
+    assert snap["numeric_oracle_warnings"] == ["unverified_number: 2.41 vs nils=2.14"]
+    assert snap["must_flag_hits"] == [], "kept apart so the UIs can label them"

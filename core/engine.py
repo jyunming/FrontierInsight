@@ -177,6 +177,10 @@ class QuestState(TypedDict, total=False):
     # downstream stay unchanged. ``_node_analyze`` reads this list
     # when present and aggregates numeric fields with mean ± std.
     result_json_replicates: list[dict[str, Any]]
+    # True when two seeds produced byte-identical results, so replication
+    # stopped early. Distinguishes "no error bars because the experiment is
+    # deterministic" from "no error bars because nothing could be aggregated".
+    result_json_deterministic: bool
     # Execute-repair loop counter + history. The reflect
     # node increments `exec_reflect_iter` and appends a one-line
     # record per attempt, so analyze/write/review can describe what
@@ -3675,13 +3679,33 @@ class Engine:
         # single-seed code paths are unchanged.
         replicates_n = max(1, int(self.config.engine.execute_replicates))
         result_json_replicates: list[dict[str, Any]] = []
+        deterministic = False
         if result.returncode == 0 and result_json is not None:
             # Tag seed 0 explicitly so the aggregator can attribute it.
             result_json_replicates.append({"_seed": 0, **result_json})
+
+        # Error bars are worth paying for only on a result that is going to
+        # survive. ``execute_reflect`` judges plausibility AFTER this node, so
+        # replicating first meant every futile repair iteration cost three runs
+        # instead of one -- measured on a real quest, where a diverging
+        # integrator tripped the gate three times over.
+        gate_violations = (
+            _assertion_violations({**state, "result_json": result_json})
+            if result.returncode == 0 and result_json is not None
+            else []
+        )
+        if gate_violations and replicates_n > 1:
+            self._log.info(
+                "[execute] skipping %d replicate(s): the primary result already "
+                "violates %d assertion(s), so execute_reflect is about to "
+                "regenerate it",
+                replicates_n - 1, len(gate_violations),
+            )
         if (
             replicates_n > 1
             and result.returncode == 0
             and result_json is not None
+            and not gate_violations
         ):
             self._log.info(
                 "[execute] replicating: %d additional seeds (1..%d)",
@@ -3710,6 +3734,25 @@ class Engine:
                         "[execute] replicate seed=%d rc=0 duration=%.1fs",
                         seed, rep_result.duration_s,
                     )
+                    # A deterministic experiment yields the same numbers at
+                    # every seed, so further replicates buy nothing but wall
+                    # clock -- and the aggregate can only ever report std=0.
+                    # Honouring FI_REPLICATE_SEED is not the same as consuming
+                    # randomness: a real quest was observed seeding numpy and
+                    # then integrating an ODE, so all three runs were byte
+                    # identical. One extra run is the cheapest way to find out,
+                    # and unlike asking the design to declare itself, it cannot
+                    # be wrong about what the script actually did.
+                    if seed == 1 and rep_rj == result_json:
+                        deterministic = True
+                        if replicates_n > 2:
+                            self._log.info(
+                                "[execute] seeds 0 and 1 produced identical "
+                                "results -- experiment is deterministic; "
+                                "skipping the remaining %d replicate(s)",
+                                replicates_n - 2,
+                            )
+                        break
                 else:
                     self._log.warning(
                         "[execute] replicate seed=%d FAILED rc=%d duration=%.1fs "
@@ -3735,6 +3778,9 @@ class Engine:
         # as a "did we run multi-seed" sentinel.
         if len(result_json_replicates) > 1:
             patch["result_json_replicates"] = result_json_replicates
+            # Lets ``analyze`` say "every seed agreed" instead of reporting an
+            # empty aggregate, which reads like the aggregator broke.
+            patch["result_json_deterministic"] = deterministic
         return patch
 
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
@@ -4228,13 +4274,28 @@ class Engine:
         replicates = state.get("result_json_replicates") or []
         if replicates and len(replicates) > 1:
             agg = _aggregate_result_json_replicates(replicates)
+            # Flattening a crossed design yields one entry per numeric leaf —
+            # easily hundreds on a parameter sweep, each carrying seven stats.
+            # Only the ones that actually MOVED between seeds tell the reader
+            # anything, and the rest would crowd out the analysis they are
+            # meant to inform (``_compact_result_json_block`` would otherwise
+            # truncate at an arbitrary point). Entries that never varied are
+            # dropped and counted; the per-seed JSON above still carries them.
+            constant = {k for k, v in agg.items() if v.get("n", 0) > 1 and not v.get("std")}
+            varying = {k: v for k, v in agg.items() if k not in constant}
             payload: dict[str, Any] = {
                 "result_json_seed_0": state.get("result_json") or {},
                 "replicates": replicates,
                 # Each metric carries mean/std/n/min/max + se + 95% CI bounds.
-                "aggregate_mean_std": agg,
+                "aggregate_mean_std": varying,
                 "n_replicates": len(replicates),
             }
+            if constant:
+                payload["aggregate_note"] = (
+                    f"{len(constant)} further metric(s) were identical across "
+                    f"all {len(replicates)} seeds and are omitted here; see "
+                    f"result_json_seed_0 for their values."
+                )
             # Per-stratum CIs + pairwise effect sizes + multiple-comparison
             # guard for any by_<factor> breakdowns (empty otherwise).
             comparison_stats = _result_comparison_stats(replicates)
@@ -4243,11 +4304,22 @@ class Engine:
             if all_ds:
                 payload["_user_supplied_datasets"] = all_ds
             result_json_block, _rj_orig = _compact_result_json_block(payload)
-            self._log.info(
-                "[analyze] using replicate aggregate (n=%d, %d numeric keys, "
-                "%d comparison(s))", len(replicates), len(agg),
-                (comparison_stats.get("comparisons") or {}).get("n", 0),
-            )
+            if state.get("result_json_deterministic"):
+                # Without this the line reads "0 numeric keys", which is what a
+                # broken aggregator looks like. Every seed agreeing is a fact
+                # about the experiment, not a failure to measure.
+                self._log.info(
+                    "[analyze] replicates agreed exactly (n=%d): the experiment "
+                    "is deterministic, so there are no error bars to report",
+                    len(replicates),
+                )
+            else:
+                self._log.info(
+                    "[analyze] using replicate aggregate (n=%d, %d varying "
+                    "metric(s), %d identical, %d comparison(s))",
+                    len(replicates), len(varying), len(constant),
+                    (comparison_stats.get("comparisons") or {}).get("n", 0),
+                )
         else:
             result_json_block_data: dict[str, Any] = dict(state.get("result_json") or {})
             if all_ds:
@@ -5302,12 +5374,25 @@ class Engine:
             # Arithmetic, not judgement: compare the paper's numbers against
             # the ones the run actually produced. Every other gate here ends
             # in a model reading text, so a mis-transcription (2.14 computed,
-            # 2.41 written) survives all of them. Appended to must_flag_hits
-            # so it rides the existing non-bypassable revise path and
-            # consumes the iteration budget like any other hit.
-            for hit in self._numeric_oracle_hits(paper_md, state):
-                if hit not in review["must_flag_hits"]:
-                    review["must_flag_hits"].append(hit)
+            # 2.41 written) survives all of them.
+            #
+            # Reported, NOT forced. These used to ride must_flag_hits onto the
+            # non-bypassable revise path, and a real quest showed the cost of
+            # that when the finding is wrong: a false positive (a DOI prefix
+            # read as a measurement; a mantissa read without its exponent)
+            # triggered a full re-design, a re-implement, twelve further
+            # experiment runs, and a rewrite that left the paper WORSE than
+            # the draft it replaced -- 11 of 11 claims grounded became 9 of 11.
+            # The parser bugs behind that instance are fixed, but the exposure
+            # is structural: this check is a regex over prose, and prose keeps
+            # inventing new ways to write a number. A wrong number in the
+            # paper is bad; silently burning the iteration budget on a
+            # correct one is worse, so the findings are surfaced to the human
+            # (log, paper/numeric_audit.json, and the human-review panel in all
+            # three interfaces) and the verdict is left to the reviewer.
+            numeric_warnings = self._numeric_oracle_hits(paper_md, state)
+            if numeric_warnings:
+                review["numeric_oracle_warnings"] = numeric_warnings
             update: QuestState = {"review": review}
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
@@ -5478,6 +5563,11 @@ class Engine:
             "weaknesses": review.get("weaknesses") or [],
             "suggestions": review.get("suggestions") or [],
             "must_flag_hits": review.get("must_flag_hits") or [],
+            # Advisory, never blocking: numbers the arithmetic check could not
+            # reconcile with the results. Kept apart from must_flag_hits so
+            # every UI can label them differently -- a regex over prose is
+            # not grounds for a forced rewrite, but a human should see it.
+            "numeric_oracle_warnings": review.get("numeric_oracle_warnings") or [],
             "rationale": review.get("rationale", ""),
             "paper_md_path": paper_md_path,
             # Accumulated user-feedback history across refine
@@ -7056,38 +7146,58 @@ def _aggregate_result_json_replicates(
     with a synthetic ``_seed`` field. We skip the ``_seed`` key, scan
     the union of remaining keys, and emit an aggregate only for keys
     whose values are scalar floats/ints in ALL replicates — mixed-type
-    keys (strings, lists, dicts) are skipped silently so the analyze
+    keys (strings, lists) are skipped silently so the analyze
     LLM can still reason about them from the raw per-seed JSON.
 
-    Returns ``{key: {"mean": float, "std": float, "n": int, "min": float, "max": float}}``.
+    **Nested results are flattened to dotted paths.** Scanning only the top
+    level was a silent no-op for any experiment that groups its results, which
+    is the normal shape for a parameter sweep — a real quest reported
+    ``0 numeric keys`` from three replicates because every top-level value was
+    a dict (``by_h``, ``by_integrator``). Now
+    ``by_h["0.5"]["RK4"]["trajectory_error"]`` aggregates under
+    ``by_h.0.5.RK4.trajectory_error``. Path segments containing dots stay
+    as-is, so a literal ``{"a.b": 1}`` and a nested ``{"a": {"b": 1}}`` would
+    collide; that is accepted because the output is read, not indexed.
+
+    Returns ``{path: {"mean": float, "std": float, "n": int, "min": float, "max": float}}``.
     Empty input → empty dict. n=1 (single replicate) → emits min=max=value,
     std=0.0.
     """
     if not replicates:
         return {}
 
-    # Union of all keys (excluding _seed).
+    def _flat(obj: Any, prefix: str = "") -> dict[str, float]:
+        """Numeric leaves of a nested mapping, keyed by dotted path."""
+        found: dict[str, float] = {}
+        if not isinstance(obj, dict):
+            return found
+        for k, v in obj.items():
+            if not prefix and k == "_seed":
+                continue
+            path = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, dict):
+                found.update(_flat(v, path))
+            elif not isinstance(v, bool) and isinstance(v, (int, float)):
+                found[path] = float(v)
+        return found
+
+    flattened = [_flat(r) for r in replicates]
+
+    # Union of all paths; a path must be numeric in EVERY replicate to be
+    # aggregated, so a key that appears in only some seeds is skipped.
     all_keys: set[str] = set()
-    for r in replicates:
-        if not isinstance(r, dict):
-            continue
-        for k in r.keys():
-            if k != "_seed":
-                all_keys.add(k)
+    for f in flattened:
+        all_keys.update(f)
 
     out: dict[str, dict[str, float | int]] = {}
     for key in sorted(all_keys):
         vals: list[float] = []
         all_scalar_numeric = True
-        for r in replicates:
-            if not isinstance(r, dict) or key not in r:
+        for f in flattened:
+            if key not in f:
                 all_scalar_numeric = False
                 break
-            v = r[key]
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                all_scalar_numeric = False
-                break
-            vals.append(float(v))
+            vals.append(f[key])
         if not all_scalar_numeric or not vals:
             continue
         n = len(vals)
