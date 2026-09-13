@@ -477,6 +477,11 @@ class Engine:
         # handle; asyncio copies this context into them, so under --fleet each
         # quest still gets only its own. Summarised in the finally below.
         _source_failures.reset(self.quest_id)
+        # A new run of this quest may try arXiv again even if an earlier run
+        # paused it after repeated rate limits.
+        from . import arxiv_gate as _arxiv_gate
+
+        _arxiv_gate.reset_quest(self.quest_id)
         _quest_ctx = _source_failures.current_quest.set(self.quest_id)
         _run_started_at = _time.time()
         try:

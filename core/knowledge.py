@@ -80,6 +80,7 @@ from typing import Any
 import httpx
 import yaml
 
+from . import arxiv_gate as _gate
 from . import source_failures as _sf
 from .config import KnowledgeConfig
 
@@ -1145,7 +1146,11 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
                     locale="en-US",
                 )
                 page = ctx.new_page()
-                page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                if nav is not None and nav.status == 429 and _gate.is_arxiv_url(url):
+                    _gate.report(url, 429)
+                    _sf.record_failure("arxiv", "http_429", status=429, url=url, detail="headless render")
+                    return None
                 # Wait (best-effort) for a Cloudflare-style interstitial to
                 # resolve into the real page before grabbing content.
                 deadline = time.monotonic() + min(timeout_s, 20.0)
@@ -1337,16 +1342,18 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             if arxiv_id:
-                rr = c.get(f"https://arxiv.org/html/{arxiv_id}")
-                _sf.record_response("arxiv", rr, url=f"https://arxiv.org/html/{arxiv_id}")
-                if rr.status_code == 200 and b"<html" in rr.content[:2048].lower():
+                html_url = f"https://arxiv.org/html/{arxiv_id}"
+                rr = _gate.request(html_url, lambda: c.get(html_url))
+                _sf.record_response("arxiv", rr, url=html_url)
+                if rr is not None and rr.status_code == 200 and b"<html" in rr.content[:2048].lower():
                     t = _html_to_text(rr.text)
                     if len(t) >= _MIN_FULL_TEXT_CHARS:
                         _log.info("arxiv: recovered HTML full text for %s", arxiv_id)
                         return t[:cap]
-                rr = c.get(f"https://arxiv.org/pdf/{arxiv_id}")
-                _sf.record_response("arxiv", rr, url=f"https://arxiv.org/pdf/{arxiv_id}")
-                if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
+                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+                rr = _gate.request(pdf_url, lambda: c.get(pdf_url))
+                _sf.record_response("arxiv", rr, url=pdf_url)
+                if rr is not None and rr.status_code == 200 and rr.content[:5] == b"%PDF-":
                     t = _pdf_bytes_to_text(rr.content, cap=cap)
                     if t and len(t) >= _MIN_FULL_TEXT_CHARS:
                         _log.info("arxiv: recovered PDF full text for %s", arxiv_id)
@@ -1412,9 +1419,11 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
                         candidates.append(u)
             for u in candidates:
                 try:
-                    rr = c.get(u)
+                    rr = _gate.request(u, lambda u=u: c.get(u))
                 except Exception as e:
                     _sf.record_exception(_sf.source_for_url(u, "oa_copy"), e, url=u)
+                    continue
+                if rr is None:  # an arXiv copy the queue skipped
                     continue
                 _sf.record_response(_sf.source_for_url(u, "oa_copy"), rr, url=u)
                 if rr.status_code != 200 or not rr.content:
@@ -1454,9 +1463,11 @@ def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
         pdf = (r.json().get("openAccessPdf") or {}).get("url") or ""
         if not pdf:
             return None
-        rr = httpx.get(
+        rr = _gate.request(pdf, lambda: httpx.get(
             pdf, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
-        )
+        ))
+        if rr is None:
+            return None
         _sf.record_response(_sf.source_for_url(pdf, "oa_copy"), rr, url=pdf)
         if rr.status_code == 200:
             text = _pdf_or_html_text(rr, cap=cap)
@@ -1561,7 +1572,9 @@ def _fetch_web_page_text(
         with httpx.Client(
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
-            r = c.get(url)
+            r = _gate.request(url, lambda: c.get(url))
+            if r is None:  # an arXiv page the queue skipped (paused / over budget)
+                raise _FetchBlocked()
             if r.status_code >= 400:
                 blocked = r.status_code in (401, 403, 429)
                 _sf.record_response(_sf.source_for_url(url, "web_page"), r, url=url)
@@ -1600,7 +1613,17 @@ def _fetch_web_page_text(
     # Direct fetch was blocked / empty / a challenge page. Try the headless
     # renderer (which clears Cloudflare and JS-only pages).
     if headless:
-        html = _playwright_fetch_html(url, timeout_s=timeout_s)
+        # The headless render is kept for arXiv too (it is how FI reads
+        # JS-built pages), but it takes its turn in the arXiv queue like
+        # any other request, so a refused page is not immediately re-asked
+        # for through a browser.
+        html = None
+        release = _gate.acquire_slot(url) if _gate.is_arxiv_url(url) else (lambda: None)
+        if release is not None:
+            try:
+                html = _playwright_fetch_html(url, timeout_s=timeout_s)
+            finally:
+                release()
         if html:
             text = _html_to_text(html)
             if _keep_fetched_text(text, snippet) and not _is_paywall_or_stub(html, text):
@@ -1813,7 +1836,9 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
             timeout=timeout_s, follow_redirects=True,
             headers={"User-Agent": "FrontierInsight/1.0"},
         ) as c:
-            r = c.get(url)
+            r = _gate.request(url, lambda: c.get(url))
+            if r is None:
+                return None
             if r.status_code >= 400:
                 _sf.record_response(_sf.source_for_url(url, "publisher_pdf"), r, url=url)
                 return None
@@ -1854,11 +1879,11 @@ def _fetch_full_text(
                 timeout=timeout_s, follow_redirects=True,
                 headers={"User-Agent": "FrontierInsight/1.0"},
             ) as c:
-                page = c.get(landing)
+                page = _gate.request(landing, lambda: c.get(landing))
                 _sf.record_response(
                     _sf.source_for_url(landing, "publisher_page"), page, url=landing,
                 )
-                if page.status_code < 400:
+                if page is not None and page.status_code < 400:
                     candidate = _find_pdf_url_in_html(page.content)
                     if candidate:
                         # Resolve relative URLs against the landing page.
@@ -1914,12 +1939,20 @@ async def _enrich_with_full_text(
         return docs
 
     async def fetch_one(idx: int) -> tuple[int, str | None]:
-        text = await asyncio.to_thread(
-            fetch_fn,
-            docs[idx],
-            timeout_s=timeout_s,
-            max_kb=max_kb,
-        )
+        # The batch budget is also the arXiv queue's deadline: a fetch that
+        # could not get an arXiv slot in time gives up instead of sleeping
+        # through a multi-minute backoff in a worker thread — and a thread
+        # abandoned at the budget stops at its next arXiv request.
+        token = _gate.fetch_deadline.set(start + total_budget_s)
+        try:
+            text = await asyncio.to_thread(
+                fetch_fn,
+                docs[idx],
+                timeout_s=timeout_s,
+                max_kb=max_kb,
+            )
+        finally:
+            _gate.fetch_deadline.reset(token)
         return idx, text
 
     start = time.monotonic()

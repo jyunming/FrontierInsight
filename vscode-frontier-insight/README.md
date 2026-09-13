@@ -376,6 +376,12 @@ run, so a thin bibliography comes with its reason. The detail is in
 `.fi/source_failures.json` and in `run.log` (`[source-failure]` lines,
 credentials redacted).
 
+arXiv requests from every quest on the machine — including quests
+started from this chat — share one queue (one at a time, 3 s apart,
+backing off 1 / 2 / 4 minutes on a rate limit) and a 24-hour response
+cache, so running several quests at once no longer multiplies arXiv
+traffic.
+
 If a quest crashes mid-graph (a `_node_*` raises, or a pre-graph
 stage fails), the engine writes `quest_failed.md` to the quest
 root with the failing-node name, the exception text, a log tail,

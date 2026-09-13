@@ -52,6 +52,21 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_arxiv_gate(tmp_path_factory, monkeypatch):
+    """The arXiv queue keeps its pacing state and a 24-hour response cache
+    under ``FI_CACHE_DIR`` (default ``~/.frontier-insight/cache``). No test may
+    read or write the developer's real cache — a stale entry there would
+    answer a later test's fake request — and no test should wait three
+    seconds between fake arXiv requests. Tests of the queue itself restore
+    the spacing and drive a fake clock."""
+    monkeypatch.setenv("FI_CACHE_DIR", str(tmp_path_factory.mktemp("fi_cache")))
+    from core import arxiv_gate
+
+    monkeypatch.setattr(arxiv_gate, "MIN_INTERVAL_S", 0.0)
+    arxiv_gate._PAUSED_QUESTS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_pandoc_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep ``find_pandoc`` answerable by ``shutil.which`` alone in tests.
 

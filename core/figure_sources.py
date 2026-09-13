@@ -29,6 +29,7 @@ from pathlib import Path
 
 import httpx
 
+from . import arxiv_gate as _gate
 from . import source_failures as _sf
 
 _log = logging.getLogger("frontier_insight.figures")
@@ -188,8 +189,11 @@ def fetch_arxiv_figure(
         with httpx.Client(
             headers=_HEADERS, timeout=timeout_s, follow_redirects=True,
         ) as c:
-            ab = c.get(f"https://arxiv.org/abs/{aid}")
-            _sf.record_response("arxiv", ab, url=f"https://arxiv.org/abs/{aid}")
+            abs_url = f"https://arxiv.org/abs/{aid}"
+            ab = _gate.request(abs_url, lambda: c.get(abs_url))
+            if ab is None:
+                return None
+            _sf.record_response("arxiv", ab, url=abs_url)
             m = _ARXIV_CC_RE.search(ab.text) if ab.status_code == 200 else None
             if not m:
                 return None  # default arXiv license is not redistributable
@@ -198,8 +202,11 @@ def fetch_arxiv_figure(
             else:
                 lic = f"CC0 {m.group(4)}".strip()
 
-            h = c.get(f"https://arxiv.org/html/{aid}")
-            _sf.record_response("arxiv", h, url=f"https://arxiv.org/html/{aid}")
+            html_url = f"https://arxiv.org/html/{aid}"
+            h = _gate.request(html_url, lambda: c.get(html_url))
+            if h is None:
+                return None
+            _sf.record_response("arxiv", h, url=html_url)
             if h.status_code != 200 or "<figure" not in h.text:
                 return None
             cands: list[tuple[str, str]] = []  # (caption, img_src)
@@ -242,9 +249,13 @@ def fetch_arxiv_figure(
 
 def _download_image(url: str, *, timeout_s: float) -> bytes | None:
     try:
-        r = httpx.get(url, headers=_HEADERS, timeout=timeout_s, follow_redirects=True)
+        r = _gate.request(url, lambda: httpx.get(
+            url, headers=_HEADERS, timeout=timeout_s, follow_redirects=True,
+        ))
     except Exception as e:
         _sf.record_exception(_sf.source_for_url(url, "image"), e, url=url)
+        return None
+    if r is None:
         return None
     _sf.record_response(_sf.source_for_url(url, "image"), r, url=url)
     if r.status_code != 200 or len(r.content) > _MAX_IMAGE_BYTES:

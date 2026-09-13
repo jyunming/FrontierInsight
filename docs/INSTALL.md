@@ -227,6 +227,13 @@ written into a quest YAML is copied into that quest's `config.yaml`. FI
 redacts keys from its own logs, and a rate-limited source shows up in the
 quest's source failure report (`.fi/source_failures.json`).
 
+**arXiv itself** needs no key. FI queues every request it makes to arxiv.org
+(one at a time, 3 s apart, backing off 1 / 2 / 4 minutes on a rate limit) and
+caches successful responses for 24 hours under `~/.frontier-insight/cache`.
+Set `FI_CACHE_DIR` to put the cache elsewhere (it also holds the queue's lock
+file, so point every FI process on a machine at the same directory) or
+`FI_ARXIV_CACHE=0` to turn the cache off.
+
 ## Air-gapped / no-network machines
 
 The knowledge layer loads two models from Hugging Face on first use —
