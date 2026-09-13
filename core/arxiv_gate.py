@@ -211,14 +211,20 @@ def acquire_slot(url: str) -> Callable[[], None] | None:
             _THREAD_LOCK.release()
             _sf.record_failure("arxiv", "throttled_skip", url=url, detail="queue wait exceeded budget")
             return None
-        state = _read_state()
-        now = _now()
-        if max(state["blocked_until"], state["last_request"] + MIN_INTERVAL_S) > now:
+        # Same lock as report(): both read-modify-write gate_state.json, and
+        # without it a backoff written by a request that just finished could
+        # be overwritten by this one recording its start time.
+        with _lock("state.lock"):
+            state = _read_state()
+            now = _now()
+            ready = max(state["blocked_until"], state["last_request"] + MIN_INTERVAL_S) <= now
+            if ready:
+                state["last_request"] = now
+                _write_state(state)
+        if not ready:
             conn.release()
             _THREAD_LOCK.release()
             continue
-        state["last_request"] = now
-        _write_state(state)
 
         def release() -> None:
             try:
