@@ -56,6 +56,7 @@ from core.provider import (
     LLMClient,
     ProxySupervisor,
     PROXY_PROVIDERS,
+    append_cost_row,
     model_for_node,
     resolve_endpoint_async,
 )
@@ -964,6 +965,7 @@ class PosterGenerator:
                 model=model_for_node(self.config.provider.node_models, "poster"),
                 node="poster",
             )
+            append_cost_row(art.quest_root / ".fi", node="poster", model=client.last_model, usage=client.last_usage)
         finally:
             await client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:
