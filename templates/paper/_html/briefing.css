@@ -102,6 +102,11 @@ a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--
 ul, ol { margin: 5pt 0; padding-left: 18pt; }
 li { margin-bottom: 3pt; }
 li::marker { color: var(--accent); }
+/* The keywords line under the abstract. */
+.keywords p {
+  font-family: var(--mono); font-size: 8.4pt; letter-spacing: 0.2px;
+  color: var(--muted); text-align: left; margin: -2pt 0 12pt 0;
+}
 blockquote {
   font-style: italic; color: var(--ink); border: none;
   border-left: 4px solid var(--accent); margin: 8pt 0; padding: 2pt 0 2pt 12pt;

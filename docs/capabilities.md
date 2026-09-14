@@ -166,7 +166,7 @@ is the index.
 
 ### Outputs
 
-- **Paper PDF** via pandoc + LaTeX — real venue-flavored templates for `generic` / `neurips` / `iclr` / `ieee_access` two-column / `nature_mi`. Preprocessor lifts `# H1` into YAML `title:`, lifts `## Abstract` into YAML `abstract:`, shifts heading levels by −1, dedupes `"Title. Title."` patterns, sets PDF metadata via `\hypersetup`. The LaTeX engine is found via a 3-tier search: `pdflatex` (MiKTeX/TeX Live) → system `tectonic` → repo-local `tools/tectonic[.exe]`. pdflatex stops at the first Chinese, Japanese or Korean character, so a paper with such text in its title, body or author line compiles with **XeLaTeX + `xeCJK`** in an installed CJK font instead.
+- **Paper PDF** via pandoc + LaTeX — real venue-flavored templates for `generic` / `neurips` / `iclr` / `ieee_access` two-column / `nature_mi`. Preprocessor lifts `# H1` into YAML `title:`, lifts `## Abstract` into YAML `abstract:` and the `**Keywords:**` line under it into `keywords:` (printed under the abstract and set as the PDF's keywords), shifts heading levels by −1, dedupes `"Title. Title."` patterns, sets PDF metadata via `\hypersetup`. The LaTeX engine is found via a 3-tier search: `pdflatex` (MiKTeX/TeX Live) → system `tectonic` → repo-local `tools/tectonic[.exe]`. pdflatex stops at the first Chinese, Japanese or Korean character, so a paper with such text in its title, body or author line compiles with **XeLaTeX + `xeCJK`** in an installed CJK font instead.
   - Font choice: Noto Sans CJK / Source Han Sans first, then Microsoft JhengHei, Microsoft YaHei, Yu Gothic or Malgun Gothic, found through fontconfig or the Windows fonts folder.
   - With no XeLaTeX or no CJK font, the paper goes straight to the HTML fallback.
   - Tables in the two-column `ieee_access` template: LaTeX's `longtable` cannot run in two-column mode, so a table that fits a column is set as a table float, and a table taller than a column gets single-column pages where it breaks across pages.
@@ -297,7 +297,7 @@ bundle so Axon stays title-searchable and topic-linkable:
 
 | kind | Purpose |
 |---|---|
-| `fi_paper_spine` | One tight chunk per paper — title / authors / DOI / abstract / key claims. Title queries hit this directly. |
+| `fi_paper_spine` | One tight chunk per paper — title / authors / DOI / keywords / abstract / key claims. Title queries hit this directly, and the keywords the writer picked (shown under a scientific paper's abstract, kept out of sight in a report, brief, essay or whitepaper) give later searches the paper's subject terms. |
 | `fi_quest_paper` | Full paper body with a 1-line `[Title · Year · Venue · DOI]` citation header on every chunk. |
 | `fi_quest_summary` | Structured-findings JSON (hypothesis, key_findings, result_json, verdict, score, model). |
 | `fi_topic_event` | One pointer per accepted quest keyed by topic slug — enables "what do we know about X" rollups. |

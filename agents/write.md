@@ -9,8 +9,10 @@ these instructions first, then work from those inputs.
 
 Produce a single Markdown paper. **Structure depends on the persona block in the Inputs section:**
 
-- If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats.
-- If the persona block is empty (scientific venues — `generic` / `neurips` / `iclr` / `ieee_access` / `nature_mi`), use **IMRAD** (Introduction, Methods, Results, Discussion).
+- If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats. Do not write an abstract. Put the keywords in a comment on the line right after the title, which readers never see: `<!-- Keywords: <keyword>, <keyword>, <keyword>, <keyword> -->`.
+- If the persona block is empty (scientific venues — `generic` / `neurips` / `iclr` / `ieee_access` / `nature_mi`), open with `## Abstract`: one paragraph of 150–250 words giving the question, what was done, the main result with its number, and what it means. Directly under that paragraph, on a line of its own, give the keywords: `**Keywords:** <keyword>, <keyword>, <keyword>, <keyword>`. Then use **IMRAD** (Introduction, Methods, Results, Discussion).
+
+**Keywords:** 4–6 of them, separated by commas, replacing every `<keyword>`. Take them from the paper you wrote, not from the search terms: its subject, system, method and the terms of its main result, each as the field's standard term (`symplectic integrator`, not `energy-keeping method`). They index the paper for later searches.
 
 **Hard rule on figures:** you may ONLY emit `![caption](figures/<filename>)` for filenames that appear in the figure list in the Inputs section. If a figure was planned but the experiment did not produce it, describe what it would have shown in prose ("The planned scatter plot of GDP vs. scores would have...") instead of emitting a broken image link. Pandoc treats a missing image as a placeholder, so a stale link both wastes space and yields a partial-success PDF.
 

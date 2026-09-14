@@ -2864,6 +2864,7 @@ def _render_paper_spine(
     *,
     abstract: str = "",
     key_claims: list[str] | None = None,
+    keywords: list[str] | None = None,
 ) -> str:
     """Pattern A: a single-chunk 'card catalog entry' for a paper. The
     text intentionally repeats title/authors/DOI in label-prefixed lines
@@ -2899,6 +2900,8 @@ def _render_paper_spine(
         lines.append("   ".join(bib))
     if topic:
         lines.append(f"TOPIC: {topic}")
+    if keywords:
+        lines.append("KEYWORDS: " + ", ".join(str(k) for k in keywords[:10]))
     abs_text = (abstract or meta.get("abstract") or "").strip()
     if abs_text:
         lines.append("")
@@ -3762,6 +3765,7 @@ class Knowledge:
                 quest_paper_meta_for_helpers,
                 abstract=summary[:1200],
                 key_claims=list(meta_no_refs.get("key_findings") or []),
+                keywords=list(meta_no_refs.get("keywords") or []),
             )
             _enq("fi_paper_spine", spine_text, {**base_meta, "origin": "quest_paper"})
 

@@ -6996,9 +6996,18 @@ class Engine:
         except ValueError:
             # paper_md outside quest_root (shouldn't happen, but be safe).
             paper_md_relpath = artifacts.paper_md.name
+        # The writer's keywords: a line under the abstract, or a comment in
+        # the formats that show none. The index card carries them in its text.
+        from generation._keywords import paper_keywords
+
+        try:
+            keywords = paper_keywords(artifacts.paper_md.read_text(encoding="utf-8"))
+        except OSError:
+            keywords = []
         meta: dict[str, Any] = {
             "title": state.get("title", ""),
             "topic": state.get("topic", "")[:1000],
+            "keywords": keywords,
             "verdict": verdict,
             "score": review.get("score"),
             "iteration": state.get("iteration", 0),
