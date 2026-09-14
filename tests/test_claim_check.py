@@ -89,7 +89,8 @@ def test_claim_check_grounds_and_writes_ledger(tmp_path: Path) -> None:
             {"claim": "Overlay error is 2.1 nm", "basis": "experiment",
              "citation_index": None, "evidence": "result_json overlay=2.1"},
             {"claim": "EUV outperforms DUV here", "basis": "citation",
-             "citation_index": 1, "evidence": "ref 1 reports the same"},
+             "citation_index": 1, "evidence": "ref 1 reports the same",
+             "quote": "EUV overlay beat DUV overlay on every wafer"},
             {"claim": "This is the best method ever", "basis": "unsupported",
              "citation_index": None, "evidence": "no result or source backs it"},
             {"claim": "junk", "basis": "nonsense-basis", "evidence": ""},
@@ -101,7 +102,7 @@ def test_claim_check_grounds_and_writes_ledger(tmp_path: Path) -> None:
         "analysis": {"key_findings": ["Overlay error is 2.1 nm"]},
         "result_json": {"overlay": 2.1},
         # One real reference so citation_index=1 is valid.
-        "literature": [{"content": "x", "metadata": {
+        "literature": [{"content": "In our fab, EUV overlay beat DUV overlay on every wafer.", "metadata": {
             "title": "EUV vs DUV overlay", "doi": "10.1/x", "source": "crossref"}}],
     }
     out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
@@ -137,6 +138,86 @@ def test_claim_check_citation_without_valid_index_is_unsupported(tmp_path: Path)
     assert sorted(g["unsupported"]) == ["A", "B", "C"]
     assert all(c["basis"] == "unsupported" and c["citation_index"] is None
                for c in g["claims"])
+
+
+MCLACHLAN = (
+    "Geometric integration using discrete gradients\n\n"
+    "This paper discusses the discrete analogue of the gradient of a function and shows how "
+    "discrete gradients can be used in the numerical integration of ordinary differential "
+    "equations. The method applies to all Hamil-\ntonian, Poisson and gradient systems, and also "
+    "to many dissipative systems (those with a known first integral or Lyapunov function)."
+)
+
+
+def _literature() -> list[dict]:
+    return [
+        {"content": MCLACHLAN, "metadata": {
+            "title": "Geometric integration using discrete gradients", "doi": "10.1098/rsta.1999.0363",
+            "source": "openalex"}},
+        {"content": "An unrelated abstract about plasma echoes.", "metadata": {
+            "title": "Vlasov simulation", "doi": "10.1/v", "source": "openalex"}},
+        {"content": "Forum answer: explicit Euler adds energy to an undamped oscillator every step.", "metadata": {
+            "title": "Energy of a damped oscillator grows", "url": "https://forum.example/q/1",
+            "source": "web_search"}},
+    ]
+
+
+def test_a_citation_counts_only_with_a_quote_from_the_sources_text(tmp_path: Path) -> None:
+    """The validation quest cited McLachlan et al. [2] for "the instability of
+    explicit Euler methods in oscillatory systems"; its abstract never
+    mentions Euler, and the check, which saw only titles, grounded it."""
+    eng = _engine(tmp_path)
+    _set_chat(eng, json.dumps({"claims": [
+        {"claim": "Discrete gradients cover dissipative systems [1]", "basis": "citation", "citation_index": 1,
+         "quote": "applies to all Hamiltonian, Poisson and gradient systems, and also to “many dissipative systems”"},
+        {"claim": "Explicit Euler is unstable for oscillators [1]", "basis": "citation", "citation_index": 1,
+         "quote": "explicit Euler methods are unstable in oscillatory systems"},
+        {"claim": "Euler is conditionally stable [1]", "basis": "citation", "citation_index": 1},
+        {"claim": "Too short a quote [1]", "basis": "citation", "citation_index": 1, "quote": "gradient systems"},
+        {"claim": "Euler adds energy [W1]", "basis": "citation", "citation_index": "W1",
+         "quote": "explicit Euler adds energy to an undamped oscillator ... every step"},
+    ], "summary": ""}))
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# P\n\nClaims [1] and [W1].\n"),
+             "literature": _literature()}
+    claims = asyncio.run(eng._node_claim_check(state))["claim_grounding"]["claims"]  # type: ignore[arg-type]
+    assert [c["basis"] for c in claims] == ["citation", "unsupported", "unsupported", "unsupported", "citation"]
+    assert "the quote is not in the text of [1]" in claims[1]["evidence"]
+    assert "no quote from [1] given" in claims[2]["evidence"]
+    assert claims[4]["citation_index"] == "W1"
+    ledger = (tmp_path / "paper" / "CLAIMS.md").read_text(encoding="utf-8")
+    assert 'quoted: "explicit Euler methods are unstable in oscillatory systems"' in ledger
+
+
+def test_the_check_sees_the_text_of_each_source_the_paper_cites(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    seen: list[str] = []
+
+    async def fake_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
+        seen.append(prompt)
+        return json.dumps({"claims": [], "summary": ""})
+
+    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
+    paper = "# P\n\nEuler is unstable in oscillatory systems [1]. See also [W1].\n\n## References\n\n2. Vlasov [2]\n"
+    state = {"topic": "t", "paper_md": _paper(tmp_path, paper), "literature": _literature()}
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    prompt = seen[0]
+    assert "[1] Geometric integration using discrete gradients · DOI:10.1098/rsta.1999.0363\nText:" in prompt
+    assert "many dissipative systems" in prompt and "explicit Euler adds energy" in prompt
+    # Cited only in the paper's own reference list: title only.
+    assert "[2] Vlasov simulation · DOI:10.1/v" in prompt and "plasma echoes" not in prompt
+
+
+def test_citing_sentences_spell_out_lists_and_ranges() -> None:
+    from core.engine import _citing_sentences
+
+    paper = (
+        "# T\n\nFirst claim [1, 3]. Second claim [2–4] and a page [W2].\n"
+        "Third [5-5].\n\n## References\n\n1. Something [9].\n"
+    )
+    found = _citing_sentences(paper)
+    assert sorted(found) == ["1", "2", "3", "4", "5", "W2"]
+    assert found["3"] == ["First claim [1, 3].", "Second claim [2–4] and a page [W2]."]
+    assert "9" not in found
 
 
 def test_claim_check_no_paper_skips(tmp_path: Path) -> None:

@@ -36,7 +36,7 @@ Respond with a single JSON object, no prose, no markdown fence:
   "weaknesses": ["<bullet>", ...],
   "suggestions": ["<actionable change — particularly any that would raise rigor_score or depth_score>", ...],
   "blocking": "<one sentence — only if verdict is 'revise'; otherwise empty string>",
-  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'unsupported_claim' when the Claim grounding block lists unsupported claims, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
+  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'unsupported_claim' when the Claim grounding block lists unsupported claims, 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
 }
 
 The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and forces another revision pass (or escalates to human review). Personas without their own MUST-FLAG rules return ``[]``.
@@ -58,6 +58,9 @@ $analysis_block
 
 ## Claim grounding (which paper claims trace to evidence)
 $claim_grounding_block
+
+## Figures (what each figure draws, recorded when the experiment saved it)
+$figure_check_block
 
 ## Paper draft
 $paper_md

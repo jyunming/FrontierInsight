@@ -226,12 +226,11 @@ section.lead p {
 }
 
 /* ---- References slide ----------------------------------------------- */
-/* Auto-appended `## References` + numbered list, and the `## Further reading`
-   list of web pages after it — keep both compact + mono so many sources fit,
-   with teal numerals. A long list continues under "References (continued)" /
-   "Further reading (continued)", whose heading ids start with the same slug,
-   so the id-prefix selectors style those slides the same way. */
+/* The auto-appended `## References` slide ("- [4] ..." entries), a numbered
+   list a deck wrote itself, and a `## Further reading` slide a deck wrote
+   itself: compact + mono so several sources fit, with teal markers. */
 section:has(h2[id^="references"]) ol,
+section:has(h2[id^="references"]) ul,
 section:has(h2[id^="further-reading"]) ul,
 section:has(h2 + ol) ol {
   font-family: var(--mono);
@@ -247,3 +246,6 @@ section:has(h2 + ol) li::marker { color: var(--accent); }
 section:has(h2[id^="references"]) a,
 section:has(h2[id^="further-reading"]) a,
 section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }
+/* The "(8 more sources in the paper)" line under the list, at the list's size. */
+section:has(h2[id^="references"]) :is(ul, ol) + p,
+section:has(h2[id^="further-reading"]) ul + p { font-size: 0.6em; }

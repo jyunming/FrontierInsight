@@ -112,11 +112,14 @@ img {
   background: #fff; border: 1px solid var(--hair); border-radius: 3px;
   box-shadow: 0 2px 14px rgba(22,34,43,0.07);
 }
-figure { margin: 12pt 0; text-align: center; break-inside: avoid; }
+body { counter-reset: fig; }
+figure { margin: 12pt 0; text-align: center; break-inside: avoid; counter-increment: fig; }
 figcaption, p > img + em, .caption {
   display: block; font-family: var(--mono); font-size: 8pt; color: var(--faint);
   text-align: center; letter-spacing: 0.2px; margin-bottom: 10pt;
 }
+/* The renderer takes the writer's "Figure N." off the caption; the theme numbers. */
+figcaption::before { content: "Figure " counter(fig) ". "; color: var(--accent-2); font-weight: 600; }
 /* ---- Tables --------------------------------------------------------- */
 table { border-collapse: collapse; margin: 10pt auto; font-size: 9.2pt; width: auto; }
 thead th {

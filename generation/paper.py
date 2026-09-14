@@ -29,6 +29,7 @@ from core.config import Config
 from core.engine import QuestArtifacts, build_further_reading, build_references
 from generation._pandoc import find_pandoc
 from generation import _cjk
+from generation._figure_captions import numbers_off_figure_captions
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
 
@@ -826,6 +827,9 @@ class PaperGenerator:
             # "Undefined control sequence" errors on quests whose LLM
             # emitted math with whitespace inside the delimiters).
             sanitized_md = _tighten_inline_math(sanitized_md)
+            # The template numbers figures, so the writer's "**Figure 2.**"
+            # would print as "Figure 2: Figure 2.".
+            sanitized_md = numbers_off_figure_captions(sanitized_md)
             if glyph_count:
                 _log.info(
                     "paper.pdf: rewrote %d Unicode glyph occurrence(s) "

@@ -99,6 +99,43 @@ def test_directives_other_than_lead_are_dropped() -> None:
     assert s.h2 == "T" and len(s.bullets) == 1
 
 
+SOURCE_SLIDE = (
+    "---\nmarp: true\ntheme: fi\n---\n\n## References\n\n- [1] one source\n- [2] two sources\n\n"
+    "_(8 more sources in the paper)_\n"
+)
+
+
+def _body_paragraphs(path: Path) -> list:
+    from pptx import Presentation
+    return [
+        p for sh in Presentation(str(path)).slides[0].shapes if sh.has_text_frame
+        for p in sh.text_frame.paragraphs if "source" in p.text
+    ]
+
+
+def test_a_line_under_a_list_stays_under_it(tmp_path: Path) -> None:
+    """The References slide's "(8 more sources in the paper)" line was drawn
+    above its list, and with its underscores."""
+    assert [kind for kind, _level, _text in parse_marp(SOURCE_SLIDE)[0].body] == ["bullet", "bullet", "para"]
+    md = tmp_path / "slides.md"
+    md.write_text(SOURCE_SLIDE, encoding="utf-8")
+    assert render_marp_to_pptx(md, tmp_path / "slides.pptx") is True
+    paragraphs = _body_paragraphs(tmp_path / "slides.pptx")
+    assert [p.text.lstrip("•  ") for p in paragraphs] == [
+        "[1] one source", "[2] two sources", "(8 more sources in the paper)",
+    ]
+    assert all(r.font.italic for r in paragraphs[-1].runs)
+
+
+def test_an_underscore_inside_a_word_is_not_emphasis(tmp_path: Path) -> None:
+    md = tmp_path / "slides.md"
+    md.write_text("## T\n\n- forward_euler and __init__ source _stay_ as written\n", encoding="utf-8")
+    assert render_marp_to_pptx(md, tmp_path / "slides.pptx") is True
+    (p,) = _body_paragraphs(tmp_path / "slides.pptx")
+    assert p.text.endswith("forward_euler and __init__ source stay as written")
+    assert [r.text for r in p.runs if r.font.italic] == ["stay"]
+
+
 def test_estimate_lines_detects_wrapping() -> None:
     """Reserving too little height is what made titles overlap the bullets."""
     assert _estimate_lines("Short", 11.5, 30) == 1
@@ -266,7 +303,17 @@ def test_the_exported_deck_has_no_figure_over_its_text(tmp_path: Path) -> None:
     pdf, reason = pptx_to_pdf(_figure_deck(tmp_path), tmp_path / "export")
     assert pdf is not None, reason
     report = slides_report(measure_pdf(pdf))
-    assert [f for f in report["findings"] if f["check"] in ("overlap", "overflow")] == []
+    assert [f for f in report["findings"] if f["check"] in ("overlap", "overflow", "figure_gap")] == []
+
+
+def test_the_text_estimate_is_as_tall_as_the_renderers_draw_it() -> None:
+    """Five bullets at full size: LibreOffice drew them 158 pt tall and
+    PowerPoint 155 pt. The estimate had them at 147 pt, so a figure under
+    them landed on the last bullet."""
+    from generation._pptx_slides import MARGIN_IN, SLIDE_W_IN, _body_height
+
+    five = parse_marp("## T\n\n" + "".join(f"- Bullet {n} with a few words.\n" for n in range(5)))[0]
+    assert 155 <= _body_height(five, SLIDE_W_IN - 2 * MARGIN_IN, 1.0) * 72 <= 166
 
 
 # The validation quest's formulas, as its deck wrote them.

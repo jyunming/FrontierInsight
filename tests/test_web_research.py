@@ -30,7 +30,6 @@ from core.engine import (
     QuestArtifacts,
     build_further_reading,
     build_references,
-    render_further_reading_marp_slide,
     render_references_marp_slide,
 )
 from core.knowledge import RetrievedDoc
@@ -87,17 +86,6 @@ def test_poster_band_escapes_latex_and_prints_no_url() -> None:
     band = _band_latex([_band_entry(w, w["label"]) for w in further], "References", 2, False)
     assert r"Q1 \& Q2 report" in band  # & escaped for LaTeX
     assert "e.com" in band and "https://" not in band
-
-
-def test_marp_further_reading_slide_built() -> None:
-    further = build_further_reading([
-        {"content": "", "metadata": {
-            "source": "web_search", "title": "T", "url": "https://e.com/a"}},
-    ])
-    slide = render_further_reading_marp_slide(further)
-    assert slide.startswith("---")
-    assert "## Further reading" in slide
-    assert "https://e.com/a" in slide
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +527,7 @@ async def test_poster_lists_cited_web_sources_by_site_name(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_slides_append_a_further_reading_slide_for_web_sources(tmp_path, monkeypatch) -> None:
+async def test_slides_leave_web_sources_to_the_paper(tmp_path, monkeypatch) -> None:
     from core.provider import ResolvedEndpoint
     from generation.slides import SlideGenerator
 
@@ -560,10 +548,10 @@ async def test_slides_append_a_further_reading_slide_for_web_sources(tmp_path, m
 
     result = await SlideGenerator(cfg).generate(art, art.quest_root)
     md = result["slides_md"].read_text(encoding="utf-8")
-    # Web pages are Further reading; with no papers there is no References slide.
-    assert "## Further reading" in md and "- [W1] SpaceX 2023 revenue" in md
-    assert "## References" not in md
-    assert "https://payloadspace.com/spacex-2023" in md
+    # Web pages are the paper's Further reading, not a slide; with no papers
+    # there is no References slide either.
+    assert "## Further reading" not in md and "## References" not in md
+    assert "payloadspace.com" not in md
 
 
 # ---------------------------------------------------------------------------

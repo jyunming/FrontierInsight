@@ -202,6 +202,24 @@ def test_html_render_puts_the_author_line_in_the_byline(
     assert authors(author_line=("Jane Chen", "R&D Lab")) == ["author=Jane Chen", "author=R&D Lab"]
 
 
+def test_the_html_render_takes_the_writers_figure_number_off_the_caption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both themes number figures with a CSS counter."""
+    def fake_run(cmd, **_kw):  # noqa: ANN001
+        raise OSError("stop after writing the body")
+
+    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    pmd = tmp_path / "paper.md"
+    pmd.write_text("# T\n\n![**Figure 1.** Energy decay.](figures/energy.png)\n", encoding="utf-8")
+    render_paper_html_pdf(pmd, tmp_path / "paper.pdf", pandoc_path="pandoc", browser=("msedge", "edge"))
+    body = (tmp_path / "paper_html_body.md").read_text(encoding="utf-8")
+    assert "![Energy decay.](figures/energy.png)" in body
+    for theme in ("latexlike.css", "briefing.css"):
+        css = (Path(_html_pdf.__file__).resolve().parents[1] / "templates" / "paper" / "_html" / theme).read_text(encoding="utf-8")
+        assert 'figcaption::before { content: "Figure " counter(fig)' in css, theme
+
+
 def test_compile_pdf_hands_the_author_line_to_the_html_render(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

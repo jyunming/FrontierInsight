@@ -49,11 +49,8 @@ from pathlib import Path
 
 from core.config import Config
 from core.engine import (
-    _FURTHER_READING_HEADING_RE,
     QuestArtifacts,
-    build_further_reading,
     build_references,
-    render_further_reading_marp_slide,
     render_references_marp_slide,
 )
 from core.provider import (
@@ -290,22 +287,17 @@ class SlideGenerator:
                 await sup.shutdown()
 
         content = _figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text)))
-        # Append a References slide built from the quest's actual sources
-        # (web pages + papers), guaranteed rather than left to the LLM —
-        # the deck author only saw the first 8000 chars of paper.md and
-        # would usually miss the References section at the end. Skip if the
-        # LLM already produced one (avoid a duplicate).
+        # Append one References slide built from the quest's actual papers,
+        # guaranteed rather than left to the LLM: the deck author only saw the
+        # first 8000 chars of paper.md and would usually miss the References
+        # section at the end. It lists the sources the paper cites most and
+        # points to the paper for the rest; the web pages stay in the paper's
+        # Further reading. Skip if the LLM already produced one.
         literature = art.raw_state.get("literature") or []
-        audience = self.config.output.audience
         ref_slide = render_references_marp_slide(
-            build_references(literature, audience=audience))
+            build_references(literature, audience=self.config.output.audience), paper_md=paper_md)
         if ref_slide and "## References" not in content:
             content = content.rstrip() + "\n\n" + ref_slide + "\n"
-        # The web pages get their own slide after it, unless the deck has one.
-        further_slide = render_further_reading_marp_slide(
-            build_further_reading(literature, audience=audience))
-        if further_slide and not _FURTHER_READING_HEADING_RE.search(content):
-            content = content.rstrip() + "\n\n" + further_slide + "\n"
         content = _with_author_line(content, self.config.output)
 
         slides_md = out_dir / "slides.md"

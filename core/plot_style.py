@@ -167,6 +167,130 @@ try:
     matplotlib.rcParams["axes.prop_cycle"] = cycler(color={cycle})
 except Exception:
     pass
+''' + _RECORDER_SOURCE
+
+
+# Name of the dir, under <quest>/.fi/, where the bootstrap records what each
+# saved figure draws; the engine passes it in FI_FIGURE_RECORDS.
+RECORDS_DIRNAME = "figure_records"
+
+# Appended to the bootstrap. A figure of the validation quest was captioned
+# "energy drift rates for RK4 and Velocity-Verlet" while both lines lay flat at
+# 0 under forward Euler's 0.44 J spike: the writer knew only the file name.
+# On each savefig this writes <stem>.json with every Axes' title, labels, y
+# scale and limits, and each labelled series' range and whether it shows on
+# that axis ("yes", "flat" under 1% of the axis span, or "outside the axis").
+_RECORDER_SOURCE = '''\
+try:
+    import os as _fi_os
+
+    _fi_records = _fi_os.environ.get("FI_FIGURE_RECORDS")
+    if _fi_records:
+        import json as _fi_json
+        import math as _fi_math
+        from matplotlib.figure import Figure as _FiFigure
+
+        def _fi_values(values):
+            out = []
+            for value in values:
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if _fi_math.isfinite(value):
+                    out.append(value)
+            return out
+
+        def _fi_series(label, ys, lo, hi, log):
+            if log:
+                ys = [y for y in ys if y > 0]
+            if not ys:
+                return {"label": label, "shows": "no points"}
+            low, high = min(ys), max(ys)
+            bottom, top = min(lo, hi), max(lo, hi)
+            if high < bottom or low > top:
+                return {"label": label, "min": low, "max": high, "shows": "outside the axis"}
+            if log and bottom <= 0:
+                return {"label": label, "min": low, "max": high, "shows": "yes"}
+            pos = _fi_math.log10 if log else float
+            span = abs(pos(top) - pos(bottom))
+            own = abs(pos(min(high, top)) - pos(max(low, bottom)))
+            shows = "flat" if span > 0 and own < 0.01 * span else "yes"
+            return {"label": label, "min": low, "max": high, "shows": shows}
+
+        def _fi_style(artist):
+            try:
+                if hasattr(artist, "get_marker"):
+                    return ("line", str(artist.get_color()), str(artist.get_linestyle()), str(artist.get_marker()))
+                return ("points", str([round(float(v), 3) for v in artist.get_facecolor()[0]]))
+            except Exception:
+                return None
+
+        def _fi_legend_names(ax, artists):
+            # A series named only in ax.legend(["a", "b"]) keeps its "_child" label.
+            # The legend draws each entry in its series' style, which pairs the two.
+            legend = ax.get_legend()
+            if legend is None:
+                return {}
+            handles = getattr(legend, "legend_handles", None) or getattr(legend, "legendHandles", None) or []
+            labelled = {str(a.get_label() or "") for a in artists}
+            names = {}
+            for handle, text in zip(handles, legend.get_texts()):
+                style, name = _fi_style(handle), text.get_text()
+                if style is None or not name or name in labelled:
+                    continue
+                for artist in artists:
+                    if (id(artist) not in names and str(artist.get_label() or "").startswith("_")
+                            and _fi_style(artist) == style):
+                        names[id(artist)] = name
+                        break
+            return names
+
+        def _fi_axes(ax):
+            lo, hi = ax.get_ylim()
+            log = ax.get_yscale() == "log"
+            series = []
+            try:
+                names = _fi_legend_names(ax, list(ax.get_lines()) + list(ax.collections))
+            except Exception:
+                names = {}
+            for line in ax.get_lines():
+                label = names.get(id(line)) or str(line.get_label() or "")
+                if label and not label.startswith("_"):
+                    series.append(_fi_series(label, _fi_values(line.get_ydata()), lo, hi, log))
+            for collection in ax.collections:
+                label = names.get(id(collection)) or str(collection.get_label() or "")
+                if label and not label.startswith("_"):
+                    try:
+                        ys = _fi_values(point[1] for point in collection.get_offsets())
+                    except Exception:
+                        continue
+                    series.append(_fi_series(label, ys, lo, hi, log))
+            # The house style puts titles on the left, where get_title() alone misses them.
+            title = " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t)
+            return {
+                "title": title, "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
+                "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
+            }
+
+        _fi_savefig = _FiFigure.savefig
+
+        def _fi_recording_savefig(self, fname, *args, **kwargs):
+            result = _fi_savefig(self, fname, *args, **kwargs)
+            try:
+                name = _fi_os.path.basename(_fi_os.fspath(fname))
+                record = {"file": name, "axes": [_fi_axes(ax) for ax in self.get_axes()]}
+                _fi_os.makedirs(_fi_records, exist_ok=True)
+                path = _fi_os.path.join(_fi_records, _fi_os.path.splitext(name)[0] + ".json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    _fi_json.dump(record, handle)
+            except Exception:
+                pass
+            return result
+
+        _FiFigure.savefig = _fi_recording_savefig
+except Exception:
+    pass
 '''
 
 

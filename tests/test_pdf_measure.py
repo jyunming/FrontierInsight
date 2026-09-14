@@ -261,6 +261,26 @@ def test_slides_report_finds_a_figure_drawn_over_text(tmp_path):
     assert "Third bullet the figure covers" in findings[0]["problem"]
 
 
+def test_slides_report_finds_a_figure_that_starts_right_under_text(tmp_path):
+    bullets = [
+        ("text", "A slide title", 40, 60, 460, True),
+        ("text", "First bullet above the figure", 25, 60, 380, False),
+        ("text", "Last bullet right over the figure", 25, 60, 300, False),
+    ]
+    # The pptx deck of the validation quest: nothing overlapped, but the
+    # figure's top edge was 0.1 pt under the last bullet.
+    touching = bullets + [("image", 40, 60, 700, 292)]
+    spaced = bullets + [("image", 40, 60, 700, 262)]
+    # A small logo beside a line is not a figure.
+    logo = bullets + [("image", 700, 282, 730, 292)]
+    path = _pdf(tmp_path, [(*SLIDE, touching), (*SLIDE, spaced), (*SLIDE, logo)])
+    findings = slides_report(measure_pdf(path))["findings"]
+    gaps = [f for f in findings if f["check"] == "figure_gap"]
+    assert [(f["page"], f["severity"]) for f in gaps] == [(1, "low")]
+    assert "Last bullet right over the figure" in gaps[0]["problem"] and gaps[0]["gap_pt"] < 6
+    assert [f for f in findings if f["check"] == "overlap"] == []
+
+
 def test_slides_report_finds_latex_math_shown_as_text(tmp_path):
     title = [("text", "A slide title", 40, 60, 460, True)]
     # The validation quest's pptx printed its formulas as LaTeX.

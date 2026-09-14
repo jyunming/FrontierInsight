@@ -20,6 +20,7 @@ import re
 import shutil
 import string
 import time
+import unicodedata
 import uuid
 
 import yaml
@@ -182,6 +183,9 @@ class QuestState(TypedDict, total=False):
     # source_url / license / attribution, so the writer captions them and the
     # references record their provenance.
     figure_credits: list[dict[str, Any]]
+    # What each experiment figure draws, by file name, as the plot-style
+    # bootstrap recorded it on savefig (core/plot_style.py).
+    figure_records: dict[str, Any]
     result_json: dict[str, Any]
     # Multi-seed replication: when ``engine.execute_replicates > 1``,
     # ``_node_execute`` runs the script N times with different seeds
@@ -2277,6 +2281,9 @@ class Engine:
                     attempt, stats.get("above_floor", 0),
                 )
         docs = filtered
+        # The original papers and textbooks a keyword search does not reach
+        # join the candidates, and the screen judges them like the rest.
+        docs = docs + await self._foundational_works(rel_topic, docs, work_scope=scope)
         # The floor scores word overlap; the screen asks whether the paper
         # could cite each source for a claim (see _screen_literature).
         docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
@@ -3169,9 +3176,11 @@ class Engine:
                 continue
             md = d.metadata or {}
             kind = "web page" if md.get("source") == "web_search" else "paper"
+            if md.get("foundational"):
+                kind = "foundational " + ("book" if md.get("work_type") in ("book", "book-chapter") else "paper")
             title = " ".join(str(md.get("title") or md.get("url") or "(untitled)").split())
             facts = ", ".join(
-                str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type")) if v
+                str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type"), md.get("foundational")) if v
             )
             excerpt = " ".join(str(d.content or "").split())[:300]
             lines.append(
@@ -3227,6 +3236,64 @@ class Engine:
             len(out), len(docs), {g: values.count(g) for g in sorted(set(values))},
         )
         return out
+
+    async def _foundational_works(
+        self, topic: str, docs: list, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list:
+        """Candidates a keyword search does not reach: the original papers and
+        standard textbooks of what a topic rests on. One call asks the model
+        for up to five, each is looked up by title in OpenAlex and dropped when
+        not found, and the works several retrieved papers cite are added. They
+        are labelled foundational and go through the literature screen. Off
+        with ``knowledge.foundational_works: false``; any failure adds nothing."""
+        kn = self.config.knowledge
+        if not (kn.enabled and kn.foundational_works):
+            return []
+        suggestions = await self._suggest_foundational_works(topic, work_scope=work_scope)
+        try:
+            found = await self.knowledge.find_foundational_works(suggestions, docs)
+        except Exception as e:  # noqa: BLE001 — never costs the retrieval
+            self._log.info("[literature] foundational works lookup failed: %r", e)
+            return []
+        have = {_normalize_title((d.metadata or {}).get("title") or "") for d in docs} - {""}
+        new = [d for d in found if _normalize_title(d.metadata.get("title") or "") not in have]
+        self._log.info(
+            "[literature] foundational works: %d suggested, %d new candidate(s)%s",
+            len(suggestions), len(new),
+            (": " + "; ".join(f"{d.metadata.get('title')} ({d.metadata.get('year')}, "
+                              f"{d.metadata.get('foundational')})" for d in new))[:600] if new else "",
+        )
+        return new
+
+    async def _suggest_foundational_works(
+        self, topic: str, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list[dict]:
+        """Up to five foundational works the model names for ``topic``, each
+        ``{title, authors, year}``. Empty when the call fails."""
+        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+            what = "the classic books and articles scholars of this subject cite as its foundations"
+        else:
+            what = ("the original papers that introduced the methods, models or effects it "
+                    "relies on, and the standard textbooks on them")
+        prompt = (
+            f"List up to FIVE foundational works for this research topic: {what}. "
+            "Name only works you are sure exist, with their exact titles: each one is "
+            "looked up by title, and a work that is not found is dropped.\n\n"
+            f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
+            'Reply as JSON only: {"works": [{"title": "<exact title>", '
+            '"authors": "<first author\'s surname>", "year": <year>}]}'
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_foundational")
+            parsed = _parse_json_lenient(raw, node="literature_foundational")
+        except Exception as e:  # noqa: BLE001 — best-effort
+            self._log.info("[literature] foundational works suggestion failed: %r", e)
+            return []
+        works = parsed.get("works") if isinstance(parsed, dict) else None
+        return [
+            w for w in (works if isinstance(works, list) else [])
+            if isinstance(w, dict) and str(w.get("title") or "").strip()
+        ][:5]
 
     async def _derive_literature_queries(
         self, topic: str, idea_title: str = "", hypothesis: str = "",
@@ -3800,15 +3867,21 @@ class Engine:
         # backdrop) with zero edits to the LLM-authored code. Failure-isolated:
         # if anything goes wrong we run with the plain inherited env.
         exec_env: dict[str, str] | None = None
+        records_dir = self.fi_dir / "figure_records"
         try:
-            from .plot_style import write_boot
+            from .plot_style import RECORDS_DIRNAME, write_boot
 
+            records_dir = self.fi_dir / RECORDS_DIRNAME
+            # The same bootstrap records what each figure draws; a previous
+            # version's records go with its figures.
+            shutil.rmtree(records_dir, ignore_errors=True)
             boot_dir = write_boot(self.fi_dir, self.config.output.paper_style)
             exec_env = {
                 **os.environ,
                 "PYTHONPATH": os.pathsep.join(
                     p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p
                 ),
+                "FI_FIGURE_RECORDS": str(records_dir),
             }
         except Exception as exc:  # styling must never break execution
             self._log.warning("[execute] plot-style bootstrap skipped: %s", exc)
@@ -4072,6 +4145,7 @@ class Engine:
                 "stderr_tail": result.stderr[-2000:],
             },
             "figures": figures,
+            "figure_records": _read_figure_records(records_dir, figures),
             "result_json": result_json or {},
         }
         # Only populate ``result_json_replicates`` when replication
@@ -5247,15 +5321,24 @@ class Engine:
             return {}
         paper_text = Path(paper_md).read_text(encoding="utf-8")[:16000]
         literature = state.get("literature") or []
-        refs = build_references(literature, audience=self.config.output.audience)
+        audience = self.config.output.audience
+        refs = build_references(literature, audience=audience)
         # Web pages are Further reading, labelled W1, W2...; a claim resting on
         # one is grounded in a source too.
-        further = build_further_reading(literature, audience=self.config.output.audience)
-        refs_block = "\n".join(
-            [f"[{r['n']}] {r['title']}" + (f" · DOI:{r['doi']}" if r.get("doi") else "")
-             for r in refs]
-            + [f"[{w['label']}] {w['title']}" + (f" · {w['url']}" if w.get("url") else "")
-               for w in further]
+        further = build_further_reading(literature, audience=audience)
+        # Each source the paper cites comes with its text, and a citation must
+        # quote it: the model checks what the source says, and the quote is
+        # then looked up in the source.
+        sources = {
+            label: (meta, _item_content(item))
+            for label, meta, item in _labelled_sources(literature, audience)
+        }
+        citing = _citing_sentences(paper_text)
+        refs_block = "\n\n".join(
+            _claim_source_block(label, meta, text, citing.get(label) or [])
+            for label, (meta, text) in sorted(
+                sources.items(), key=lambda kv: (kv[0].startswith("W"), int(kv[0].lstrip("W")))
+            )
         ) or "(no references)"
         analysis = state.get("analysis") or {}
         evidence = {
@@ -5313,13 +5396,22 @@ class Engine:
                     number = 0
                 if 1 <= number <= n_refs:
                     cite_idx = number
+            quote = " ".join(str(c.get("quote") or "").split())
+            evidence = str(c.get("evidence") or "").strip()
             if basis == "citation" and cite_idx is None:
                 basis = "unsupported"
+            elif basis == "citation" and not _quote_in_source(quote, sources[str(cite_idx)][1]):
+                # The model had the source's text; a citation it cannot quote
+                # from that text is not one the source supports.
+                basis = "unsupported"
+                why = f"no quote from [{cite_idx}] given" if not quote else f"the quote is not in the text of [{cite_idx}]"
+                evidence = f"{evidence} ({why})".strip()
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
                 "citation_index": cite_idx,
-                "evidence": str(c.get("evidence") or "").strip(),
+                "quote": quote,
+                "evidence": evidence,
             })
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         grounding = {
@@ -5642,6 +5734,15 @@ class Engine:
             f"unverified_number: {f.describe()}" for f in report.findings
         ]
 
+    def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
+        """Captions naming a series their figure draws flat or not at all.
+        The review prompt carries the same list; this logs it and keeps it for
+        the human review."""
+        findings = _figure_caption_findings(paper_md, state.get("figure_records") or {})
+        for finding in findings:
+            self._log.warning("[figure_check] %s", finding)
+        return findings
+
     def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
         """Persist the claim-grounding result as a transparency ledger:
         ``paper/claims.json`` (structured) + ``paper/CLAIMS.md`` (readable).
@@ -5668,7 +5769,8 @@ class Engine:
                 tag = (f"cite [{c['citation_index']}]"
                        if c["basis"] == "citation" else c["basis"])
                 lines.append(f"- **[{tag}]** {c['claim']}"
-                             + (f" — {c['evidence']}" if c["evidence"] else ""))
+                             + (f" — {c['evidence']}" if c["evidence"] else "")
+                             + (f" — quoted: \"{c['quote']}\"" if c.get("quote") else ""))
             (paper_dir / "CLAIMS.md").write_text(
                 "\n".join(lines) + "\n", encoding="utf-8",
             )
@@ -5701,6 +5803,7 @@ class Engine:
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
+            figure_check_block=_format_figure_check(paper_md, state),
             # 16 KB ≈ ~4 K tokens — fits a comprehensive-review-length
             # paper plus an abstract + references block. The 8 KB cap
             # was truncating mid-Discussion on journal-length papers
@@ -5754,6 +5857,9 @@ class Engine:
             numeric_warnings = self._numeric_oracle_hits(paper_md, state)
             if numeric_warnings:
                 review["numeric_oracle_warnings"] = numeric_warnings
+            figure_warnings = self._figure_caption_hits(paper_md, state)
+            if figure_warnings:
+                review["figure_caption_warnings"] = figure_warnings
             update: QuestState = {"review": review}
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
@@ -5872,6 +5978,9 @@ class Engine:
         numeric_warnings = self._numeric_oracle_hits(paper_md, state)
         if numeric_warnings:
             review["numeric_oracle_warnings"] = numeric_warnings
+        figure_warnings = self._figure_caption_hits(paper_md, state)
+        if figure_warnings:
+            review["figure_caption_warnings"] = figure_warnings
 
         update: QuestState = {"review": review, "review_panel": panel_results}
         # Bump iteration on EITHER verdict=revise OR a non-empty
@@ -5935,6 +6044,9 @@ class Engine:
             # every UI can label them differently -- a regex over prose is
             # not grounds for a forced rewrite, but a human should see it.
             "numeric_oracle_warnings": review.get("numeric_oracle_warnings") or [],
+            # Captions that name a series their figure does not show; the
+            # reviewer was asked to must-flag them.
+            "figure_caption_warnings": review.get("figure_caption_warnings") or [],
             "rationale": review.get("rationale", ""),
             "paper_md_path": paper_md_path,
             # Accumulated user-feedback history across refine
@@ -7455,46 +7567,136 @@ def _latex_esc(s: str) -> str:
     return s
 
 
-# A slide of sources holds about this much list text; a longer list continues
-# on a "(continued)" slide instead of running off the slide (the HTML/PDF
-# deck) or shrinking its type below a readable size (the pptx, which scaled a
-# twelve-entry References slide down to 9.4 pt). Each entry costs its wrapped
-# lines plus half a line of spacing.
+# The deck ends on one slide of sources: the ones the paper cites most, as many
+# as fit, and a pointer to the paper for the rest. The validation quest's
+# nine-slide talk ended on three References and three Further reading slides
+# that no slide cited. A slide holds about this much list text; each entry
+# costs its wrapped lines plus half a line of spacing.
 _SOURCE_SLIDE_CHARS_PER_LINE = 95
 _SOURCE_SLIDE_LINES = 12
+_SOURCE_SLIDE_MAX = 6
+# A citation in a paper's text: "[3]", "[1, 4]", "[2-5]", "[W1]" or "[2, W1]".
+_CITATION_PART = r"(?:W\d+|\d+(?:\s*[–-]\s*\d+)?)"
+_CITATION_BRACKET_RE = re.compile(rf"\[({_CITATION_PART}(?:\s*[,;]\s*{_CITATION_PART})*)\]")
+_REFERENCES_HEADING_RE = re.compile(r"^#{1,6}\s*references\s*$", re.IGNORECASE | re.MULTILINE)
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\[])")
 
 
-def _source_slides(heading: str, entries: list[str], note: str = "") -> str:
-    """Marp slides listing ``entries`` under ``heading``, split where a slide
-    would hold more than ``_SOURCE_SLIDE_LINES`` lines of text."""
-    chunks: list[list[str]] = []
-    used = 0.0
-    for entry in entries:
-        cost = -(-len(entry) // _SOURCE_SLIDE_CHARS_PER_LINE) + 0.5
-        if not chunks or (chunks[-1] and used + cost > _SOURCE_SLIDE_LINES):
-            chunks.append([])
-            used = 0.0
-        chunks[-1].append(entry)
-        used += cost
-    slides = []
-    for index, chunk in enumerate(chunks):
-        title = heading if index == 0 else f"{heading} (continued)"
-        lines = ["---", "", f"## {title}", "", *chunk]
-        if note and index == len(chunks) - 1:
-            lines.append(f"\n{note}")
-        slides.append("\n".join(lines))
-    return "\n\n".join(slides)
+def _citation_labels(inside: str) -> list[str]:
+    """The source labels one citation bracket names, ranges spelled out."""
+    labels: list[str] = []
+    for part in re.split(r"[,;]", inside):
+        part = part.strip()
+        if part.startswith("W"):
+            labels.append(part)
+            continue
+        ends = [int(x) for x in re.split(r"[–-]", part) if x.strip()]
+        labels += [str(n) for n in range(ends[0], min(ends[-1], ends[0] + 50) + 1)]
+    return labels
 
 
-def render_references_marp_slide(refs: list[dict[str, Any]], *, max_n: int = 18) -> str:
-    """Marp slides listing sources, appended after the LLM's deck so a
-    References slide always lands when sources exist. A long list continues
-    on further slides."""
+def _paper_body(paper_md: str) -> str:
+    """The paper without its own reference list and what follows it."""
+    return _REFERENCES_HEADING_RE.split(paper_md or "", maxsplit=1)[0]
+
+
+def _citation_counts(paper_md: str) -> dict[int, int]:
+    """How often the paper's text cites each numbered reference."""
+    counts: dict[int, int] = {}
+    for match in _CITATION_BRACKET_RE.finditer(_paper_body(paper_md)):
+        for label in _citation_labels(match.group(1)):
+            if label.isdigit():
+                counts[int(label)] = counts.get(int(label), 0) + 1
+    return counts
+
+
+def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
+    """Each source label the paper's text cites, with the sentences that cite it."""
+    found: dict[str, list[str]] = {}
+    for block in re.split(r"\n\s*\n", _paper_body(paper_md)):
+        for sentence in _SENTENCE_END_RE.split(" ".join(block.split())):
+            for match in _CITATION_BRACKET_RE.finditer(sentence):
+                for label in _citation_labels(match.group(1)):
+                    sentences = found.setdefault(label, [])
+                    if sentence not in sentences:
+                        sentences.append(sentence)
+    return found
+
+
+# Claim grounding shows the model this much of each cited source's text: the
+# passages most related to the sentences citing it. It saw only titles before,
+# and grounded "explicit Euler is unstable in oscillatory systems" in a paper
+# on discrete gradients whose abstract never mentions Euler.
+_CLAIM_SOURCE_CHARS = 1500
+# A quote shorter than this could be found in almost any source.
+_QUOTE_MIN_CHARS = 25
+
+
+def _item_content(item: Any) -> str:
+    content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+    return str(content or "")
+
+
+def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str]) -> str:
+    """One source for the claim check: its label and title, and, when the
+    paper cites it, the passages of its text most related to the citing
+    sentences."""
+    title = str(meta.get("title") or "").strip()
+    ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
+    head = f"[{label}] {title}" + (f" · {ident}" if ident else "")
+    if not sentences:
+        return head
+    if not text.strip():
+        return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
+    excerpt = _format_lit_excerpt(text, title, query=" ".join(sentences), budget=_CLAIM_SOURCE_CHARS)
+    return head + "\nText:\n" + excerpt.strip()
+
+
+def _normalized_text(text: str) -> str:
+    """Lower case, one space between words, straight dashes, no quote marks,
+    and words a PDF hyphenated across lines joined again."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
+    text = re.sub(r"[‘’‚‛“”„\"'`´]", "", text.lower())
+    text = re.sub(r"[‐-―−]", "-", text)
+    return " ".join(text.split())
+
+
+def _quote_in_source(quote: str, source: str) -> bool:
+    """Whether ``quote`` is words ``source`` has. Parts an ellipsis joins are
+    looked for one by one, and together they must be long enough to mean
+    something."""
+    haystack = _normalized_text(source)
+    parts = [p.strip(" .,;:[]") for p in re.split(r"\.\.\.", _normalized_text(quote))]
+    parts = [p for p in parts if p]
+    return (
+        bool(parts) and sum(len(p) for p in parts) >= _QUOTE_MIN_CHARS
+        and all(p in haystack for p in parts)
+    )
+
+
+def render_references_marp_slide(refs: list[dict[str, Any]], *, paper_md: str = "") -> str:
+    """One Marp slide listing the sources ``paper_md`` cites most, in
+    reference order and as many as fit, appended after the LLM's deck so a
+    References slide always lands when sources exist."""
     if not refs:
         return ""
-    entries = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs[:max_n]]
-    note = f"_(+{len(refs) - max_n} more sources)_" if len(refs) > max_n else ""
-    return _source_slides("References", entries, note)
+    counts = _citation_counts(paper_md)
+    ranked = sorted(refs, key=lambda r: (-counts.get(r["n"], 0), r["n"]))
+    chosen: list[tuple[int, str]] = []
+    used = 0.0
+    for ref in ranked[:_SOURCE_SLIDE_MAX]:
+        entry = f"- [{ref['n']}] {_ref_citation_text(ref)}"
+        cost = -(-len(entry) // _SOURCE_SLIDE_CHARS_PER_LINE) + 0.5
+        if chosen and used + cost > _SOURCE_SLIDE_LINES:
+            break
+        chosen.append((ref["n"], entry))
+        used += cost
+    lines = ["---", "", "## References", "", *(entry for _n, entry in sorted(chosen))]
+    rest = len(refs) - len(chosen)
+    if rest:
+        lines += ["", f"_({rest} more {'source' if rest == 1 else 'sources'} in the paper)_"]
+    return "\n".join(lines)
 
 
 # A "Further reading" heading at any level, however the writer capitalised it.
@@ -7505,18 +7707,6 @@ _FURTHER_READING_HEADING_RE = re.compile(
 
 def _further_reading_lines(further: list[dict[str, Any]]) -> list[str]:
     return [f"- [{w['label']}] {_ref_citation_text(w)}" for w in further]
-
-
-def render_further_reading_marp_slide(
-    further: list[dict[str, Any]], *, max_n: int = 18,
-) -> str:
-    """Marp slides listing the web pages the quest drew on, appended after
-    the References slides: web pages are Further reading, not References. A
-    long list continues on further slides."""
-    if not further:
-        return ""
-    note = f"_(+{len(further) - max_n} more pages)_" if len(further) > max_n else ""
-    return _source_slides("Further reading", _further_reading_lines(further[:max_n]), note)
 
 
 def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str:
@@ -8197,6 +8387,7 @@ def _figure_list_for_prompt(state: QuestState) -> str:
     if not figs:
         return "(none)"
     credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
+    records = state.get("figure_records") or {}
     lines: list[str] = []
     for f in figs:
         c = credits.get(f)
@@ -8208,8 +8399,127 @@ def _figure_list_for_prompt(state: QuestState) -> str:
                 f"{c.get('license', '')}]"
             )
         else:
-            lines.append(f"- figures/{f}")
+            lines.append(f"- figures/{f}" + _figure_record_note(records.get(f)))
+    if any(_hidden_series(records.get(f)) for f in figs):
+        lines.append(
+            "A series marked FLAT is drawn at one value on its axis, and one NOT SHOWN "
+            "is not visible at all: a caption must describe what its figure shows, so "
+            "it cannot describe how such a series changes."
+        )
     return "\n".join(lines)
+
+
+def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
+    """The plot-style bootstrap's record of what each figure draws, by file
+    name. A figure saved without the bootstrap (or in a sandbox that could not
+    write the record) has none."""
+    records: dict[str, Any] = {}
+    for name in figures:
+        try:
+            data = json.loads((folder / f"{Path(name).stem}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("axes"), list):
+            records[name] = data
+    return records
+
+
+def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """``(axes, series)`` for each labelled series a figure draws flat or not at all."""
+    return [
+        (ax, s)
+        for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)
+        for s in (ax.get("series") or []) if isinstance(s, dict) and s.get("shows") != "yes"
+    ]
+
+
+def _figure_record_note(record: dict[str, Any] | None) -> str:
+    """What a figure draws, for the writer: each panel's title, y axis and series."""
+    panels = []
+    for ax in (record or {}).get("axes") or []:
+        if not isinstance(ax, dict):
+            continue
+        bits = [f'"{ax["title"]}"'] if ax.get("title") else []
+        ylim = ax.get("ylim") or []
+        if len(ylim) == 2:
+            bits.append(
+                f'y axis "{ax.get("ylabel") or "y"}" ({ax.get("yscale") or "linear"}, '
+                f"{ylim[0]:.3g} to {ylim[1]:.3g})"
+            )
+        series = []
+        for s in ax.get("series") or []:
+            if not isinstance(s, dict):
+                continue
+            span = f'{s["min"]:.3g} to {s["max"]:.3g}' if "min" in s else "no points"
+            shows = s.get("shows")
+            tail = "" if shows == "yes" else ", FLAT on this axis" if shows == "flat" else ", NOT SHOWN"
+            series.append(f"{s.get('label')} {span}{tail}")
+        if series:
+            bits.append("series: " + "; ".join(series))
+        if bits:
+            panels.append(", ".join(bits))
+    return (" — " + " | ".join(panels)) if panels else ""
+
+
+_PAPER_IMAGE_RE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")
+
+
+def _plain_words(text: str) -> str:
+    return " ".join(re.sub(r"[_\-*`]+", " ", text.lower()).split())
+
+
+# What a caption says of a series that lies flat, which is what its figure shows.
+_FLAT_WORDS_RE = re.compile(
+    r"\b(?:flat|constant|unchanged|negligible|indistinguishable|invisible|not visible|overlap\w*"
+    r"|at this scale|(?:at|near|around|close to) zero)\b"
+)
+# A caption's clauses: "Euler starts flat, while RK4 climbs" says nothing flat of RK4.
+_CAPTION_CLAUSE_RE = re.compile(r"[.;:,]\s|\s(?:while|whereas|but)\s")
+
+
+def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str]:
+    """Captions that name a series their figure does not show, or one it draws
+    flat without saying so."""
+    findings: list[str] = []
+    for match in _PAPER_IMAGE_RE.finditer(paper_md or ""):
+        name = Path(match.group("src")).name
+        caption = f" {_plain_words(match.group('alt'))} "
+        for ax, s in _hidden_series(records.get(name)):
+            label = _plain_words(str(s.get("label") or ""))
+            named = rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])"
+            if not label or not re.search(named, caption):
+                continue
+            if s.get("shows") == "flat" and any(
+                re.search(named, clause) and _FLAT_WORDS_RE.search(clause)
+                for clause in _CAPTION_CLAUSE_RE.split(caption)
+            ):
+                continue
+            how = "draws it flat at one value" if s.get("shows") == "flat" else "does not show it"
+            finding = (
+                f'figure_caption: the caption of figures/{name} names "{s.get("label")}", but the '
+                f'figure {how} on its axis "{ax.get("ylabel") or "y"}"'
+            )
+            if finding not in findings:
+                findings.append(finding)
+    return findings
+
+
+def _format_figure_check(paper_md: str, state: QuestState) -> str:
+    """The figure check for the review prompt's ``$figure_check_block``."""
+    records = state.get("figure_records") or {}
+    if not records:
+        return "(no record of what the figures draw)"
+    findings = _figure_caption_findings(paper_md, records)
+    if not findings:
+        return "No caption names a series its figure does not show."
+    return "\n".join([
+        f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(findings)}):",
+        *(f"  - {f}" for f in findings),
+        "",
+        "You MUST add a `figure_caption` entry to must_flag_hits and set verdict=revise, "
+        "asking for the caption to describe what the figure shows (or the figure to show "
+        "what the caption describes).",
+    ])
 
 
 def _parse_json_lenient(

@@ -191,6 +191,9 @@ async def test_execute_runs_n_times_with_replicate_env_var(tmp_path: Path) -> No
     assert call_envs[0] is not None
     assert "FI_REPLICATE_SEED" not in call_envs[0]
     assert "PYTHONPATH" in call_envs[0]
+    # The same bootstrap records what each figure draws into .fi/figure_records.
+    assert Path(call_envs[0]["FI_FIGURE_RECORDS"]) == eng.fi_dir / "figure_records"
+    assert patch["figure_records"] == {}
     # Replicate calls carry FI_REPLICATE_SEED=<i> ALONGSIDE the parent
     # environment (PATH/PYTHONPATH/LANG etc) — the engine merges with
     # os.environ rather than replacing it so the venv python.exe can

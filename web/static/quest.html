@@ -942,6 +942,16 @@
         nw.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
         '</div>');
     }
+    // Captions naming a series their figure draws flat or not at all; the
+    // reviewer was asked to must-flag them.
+    const fw = snap.figure_caption_warnings || [];
+    if (fw.length) {
+      summary.insertAdjacentHTML('beforeend',
+        '<div class="font-label-sm text-label-sm text-outline uppercase">Figure captions (sent to the reviewer):</div>' +
+        '<div class="flex flex-wrap gap-2">' +
+        fw.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
+        '</div>');
+    }
     const suggestions = snap.suggestions || [];
     document.getElementById('human-review-suggestions').innerHTML = suggestions.length
       ? '<b>Suggestions:</b><ul class="list-disc list-inside">' +

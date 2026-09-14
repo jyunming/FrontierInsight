@@ -60,6 +60,7 @@ from core.provider import (
     resolve_endpoint_async,
 )
 from generation import _cjk
+from generation._figure_captions import without_number
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
 from generation.paper import _sanitize_unicode_for_latex
@@ -88,6 +89,8 @@ _FIGURE_STEP = 0.05
 # Columns planned to end within this of each other; the measurement flags
 # 5 cm or more.
 _BALANCE_CM = 3.0
+# Added to the heading a column repeats when it opens inside a section.
+_CONTINUED = " (continued)"
 # A compile that measures this much more column room than the plan assumed
 # is planned again for the measured room.
 _MORE_ROOM_CM = 3.0
@@ -334,15 +337,14 @@ def _blocks_from_reply(parsed: dict, figure_files: set[str]) -> list[_Block]:
 
 
 _PAPER_FIGURE_RE = _re.compile(r"!\[(?P<alt>[^\]]*)\]\((?:\./)?figures/(?P<name>[^)\s]+)")
-_FIGURE_PREFIX_RE = _re.compile(r"^\W*(?:figure|fig\.?)\s*\d+\s*[.:]?\s*", _re.IGNORECASE)
 
 
 def _paper_captions(paper_md: str) -> dict[str, str]:
     """Each figure's caption as the paper wrote it, without "Figure N."."""
     captions: dict[str, str] = {}
     for m in _PAPER_FIGURE_RE.finditer(paper_md):
-        alt = _plain(m.group("alt").replace("**", ""))
-        captions.setdefault(m.group("name"), _FIGURE_PREFIX_RE.sub("", alt).strip())
+        alt = _plain(without_number(m.group("alt")).replace("**", ""))
+        captions.setdefault(m.group("name"), alt.strip())
     return captions
 
 
@@ -494,16 +496,19 @@ def _sections(blocks: list[_Block]) -> list[list[int]]:
 
 
 def _units(blocks: list[_Block]) -> list[list[int]]:
-    """Blocks one by one, except that a heading stays with the next block."""
+    """Blocks one by one, except that a heading stays with the next block and
+    the text or list after a figure stays with the figure. A column opened on
+    the two sentences that discussed the previous column's figure, under no
+    heading."""
     units: list[list[int]] = []
     i = 0
     while i < len(blocks):
-        if blocks[i].kind == "heading" and i + 1 < len(blocks):
-            units.append([i, i + 1])
-            i += 2
-        else:
-            units.append([i])
-            i += 1
+        unit = [i, i + 1] if blocks[i].kind == "heading" and i + 1 < len(blocks) else [i]
+        after = unit[-1] + 1
+        if blocks[unit[-1]].kind == "figure" and after < len(blocks) and blocks[after].kind in ("text", "bullets"):
+            unit.append(after)
+        units.append(unit)
+        i = unit[-1] + 1
     return units
 
 
@@ -574,12 +579,16 @@ class _Layout:
 
     # -- estimates ---------------------------------------------------------
 
+    def _heading_height(self, text: str) -> float:
+        s = self.sheet
+        return _lines(len(text), s.column_cm * _PT_PER_CM, s.head_pt) * 1.15 * s.head_pt + 1.3 * s.body_pt
+
     def _raw_height(self, i: int) -> float:
         block, s = self.blocks[i], self.sheet
         width = s.column_cm * _PT_PER_CM
         body, lead = s.body_pt, 1.25 * s.body_pt
         if block.kind == "heading":
-            return _lines(len(block.text), width, s.head_pt) * 1.15 * s.head_pt + 1.3 * body
+            return self._heading_height(block.text)
         if block.kind == "text":
             return _lines(len(block.text), width, body) * lead + 0.7 * body
         if block.kind == "bullets":
@@ -596,8 +605,20 @@ class _Layout:
     def estimate(self, i: int) -> float:
         return self._raw_height(i) * self.factors[i]
 
+    def continued_heading(self, c: int) -> int | None:
+        """The heading of the section column ``c`` continues, when the column
+        does not open on a heading of its own. The column then repeats it."""
+        group = self.groups[c]
+        if c == 0 or not group or self.blocks[group[0]].kind == "heading":
+            return None
+        return next((i for i in range(group[0] - 1, -1, -1) if self.blocks[i].kind == "heading"), None)
+
+    def _continuation_height(self, c: int) -> float:
+        heading = self.continued_heading(c)
+        return 0.0 if heading is None else self._heading_height(self.blocks[heading].text + _CONTINUED)
+
     def column_height(self, c: int) -> float:
-        return sum(self.estimate(i) for i in self.groups[c])
+        return sum(self.estimate(i) for i in self.groups[c]) + self._continuation_height(c)
 
     def column_heights(self) -> list[float]:
         return [self.column_height(c) for c in range(len(self.groups))]
@@ -612,8 +633,8 @@ class _Layout:
         estimate was from the measured column (less the space the plan
         added between its blocks)."""
         for c, height in enumerate(measured[:len(self.groups)]):
-            content = height - sum(self.space[i] for i in self.groups[c])
-            estimated = self.column_height(c)
+            content = height - sum(self.space[i] for i in self.groups[c]) - self._continuation_height(c)
+            estimated = sum(self.estimate(i) for i in self.groups[c])
             if self.groups[c] and estimated > 0 and content > 0:
                 for i in self.groups[c]:
                     self.factors[i] *= content / estimated
@@ -663,6 +684,9 @@ class _Layout:
             if units_fit or not cut or not self._cut():
                 self.groups, self.widths = units
                 break
+        # A first plan is made for a guessed room and never cuts, so it can be
+        # over its own limit; the fit loop then plans again for the measured room.
+        self.over_limit = max(self.column_heights() or [0.0]) > limit
         self._spread(limit)
 
     def _narrow_figures(self, c: int) -> bool:
@@ -680,8 +704,8 @@ class _Layout:
         space is capped, so a short column keeps its sections together."""
         scale = self.sheet.body_pt / 26
         self.space = [0.0] * len(self.blocks)
-        for group in self.groups:
-            slack = limit - sum(self.estimate(i) for i in group)
+        for c, group in enumerate(self.groups):
+            slack = limit - self.column_height(c)
             before_headings = [i for i in group[1:] if self.blocks[i].kind == "heading"]
             within = [
                 i for prev, i in zip(group, group[1:])
@@ -775,8 +799,11 @@ class _Layout:
             if block.kind == "figure":
                 numbers[i] = len(numbers) + 1
         columns = []
-        for group in self.groups:
+        for c, group in enumerate(self.groups):
             body = "\n".join(self._block_latex(i, numbers.get(i)) for i in group)
+            heading = self.continued_heading(c)
+            if heading is not None:
+                body = r"\posterhead{" + _inline_latex(self.blocks[heading].text + _CONTINUED) + "}\n" + body
             columns.append(
                 r"\begin{column}{" + f"{self.sheet.column_cm:.2f}" + "cm}\n"
                 + r"\begin{minipage}[t][\dimexpr\textheight-1cm\relax][t]{\linewidth}" + "\n"
@@ -1062,7 +1089,10 @@ class PosterGenerator:
             report = poster_report(doc, columns=sheet.columns, header_terms=author_terms)
             checks = {f["check"] for f in report["findings"]}
             spilled = bool(checks & {"overflow", "band_overlap"})
-            if compiles >= _MAX_COMPILES or not (spilled or checks & {"column_balance", "empty_space"}):
+            # A plan over its own limit fit only because the sheet had more
+            # room than guessed, and it may have split a section to get close.
+            over = layout.over_limit
+            if compiles >= _MAX_COMPILES or not (spilled or over or checks & {"column_balance", "empty_space"}):
                 break
             heights, available = _measured_columns(doc, report, sheet)
             if heights is None:
@@ -1074,7 +1104,7 @@ class PosterGenerator:
                 not spilled and "empty_space" in checks
                 and available - layout.available > _MORE_ROOM_CM * _PT_PER_CM
             )
-            if not (spilled or more_room or "column_balance" in checks):
+            if not (spilled or more_room or over or "column_balance" in checks):
                 break
             candidate = copy.deepcopy(layout)
             candidate.rescale(heights)
@@ -1085,12 +1115,13 @@ class PosterGenerator:
                 candidate.plan(available)
             if candidate.signature() == layout.signature():
                 break
-            if not (spilled or more_room) and candidate.planned_gap() > max(heights) - min(heights) - 2 * _PT_PER_CM:
+            if not (spilled or more_room or over) and candidate.planned_gap() > max(heights) - min(heights) - 2 * _PT_PER_CM:
                 break  # another compile would not even the columns out noticeably
             layout = candidate
+            reasons = sorted(checks & {"overflow", "band_overlap", "column_balance", "empty_space"})
             _log.info(
                 "poster.pdf: compile %d measured %s; re-planned (figure widths %s, %d cut, %d dropped)",
-                compiles, ", ".join(sorted(checks & {"overflow", "band_overlap", "column_balance", "empty_space"})),
+                compiles, ", ".join(reasons + (["a first plan over its limit"] if over else [])),
                 [w for w, b in zip(layout.widths, layout.blocks) if b.kind == "figure"],
                 layout.trimmed, layout.dropped,
             )

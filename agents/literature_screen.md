@@ -11,6 +11,8 @@ Keyword search is noisy. A candidate can share every search term and still be ab
 
 Judge from the title, venue, year, record type and excerpt shown. Grade what the candidate **is**, not what its search terms suggest. Do not reward length or prestige; a short on-topic web article is a `2`, a famous but unrelated paper is a `0` or `1`.
 
+A **foundational** candidate (a foundational paper or book) was added as an original paper or a standard textbook for this question: suggested for it and found by title, or cited by several of the retrieved papers. Grade it `2` when the paper would cite it for a method, model, effect or result the question uses, even when it is decades old or its title names another application (Verlet's 1967 paper on liquid argon introduced the Verlet integrator). A famous work the question does not use is still a `0` or `1`.
+
 $kind_guidance
 
 # Output format
@@ -27,6 +29,6 @@ A single JSON object, no prose, no markdown fence. The first character must be `
 $topic
 
 ## Candidates
-Each line: `[index] (paper | web page) title — venue, year, record type :: excerpt`
+Each line: `[index] (paper | web page | foundational paper | foundational book) title — venue, year, record type[, how a foundational one was found] :: excerpt`
 
 $candidates

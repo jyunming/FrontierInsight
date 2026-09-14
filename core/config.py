@@ -921,6 +921,16 @@ class KnowledgeConfig(BaseModel):
     # table of contents or an unrelated paper that shares the search terms
     # from a real on-topic source; this can. Off → floor only.
     literature_screen: bool = True
+    # Foundational works. A search engine matches every word of a query, so
+    # the original method papers and textbooks a topic rests on rarely come
+    # back: a damped-oscillator integrator quest found none of Verlet (1967),
+    # Hairer, Lubich & Wanner, or Butcher. One call asks the model for up to
+    # five, each is looked up by title in OpenAlex and dropped when not found,
+    # and the works at least two retrieved papers cite are added (books too,
+    # whatever the quest's work scope). All of them go through the literature
+    # screen, labelled foundational. Costs one LLM call and up to seven OpenAlex
+    # requests per literature pass. Off → no extra candidates.
+    foundational_works: bool = True
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2

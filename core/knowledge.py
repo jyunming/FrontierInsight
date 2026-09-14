@@ -365,30 +365,144 @@ def _openalex_search(
     data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
     if not data or "results" not in data:
         return []
-    out: list[RetrievedDoc] = []
-    for w in data.get("results", []):
-        title = _clean_openalex_title(w.get("title"))
-        # OpenAlex returns an inverted index for abstracts; reconstruct.
-        abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
-        doi = (w.get("doi") or "").replace("https://doi.org/", "")
-        authors = [
-            (a.get("author", {}) or {}).get("display_name", "")
-            for a in (w.get("authorships") or [])
-        ]
-        venue = ((w.get("primary_location") or {}).get("source") or {}).get("display_name", "")
-        oa_pdf = ((w.get("primary_location") or {}).get("pdf_url")) or ""
-        out.append(RetrievedDoc(
-            content=f"{title}\n\n{abstract}".strip(),
-            metadata={
-                "source": "openalex", "title": title, "authors": authors,
-                "venue": venue, "year": w.get("publication_year"),
-                "doi": doi, "url": w.get("id") or "", "pdf_url": oa_pdf,
-                "cited_by": w.get("cited_by_count"),
-                "open_access": (w.get("open_access") or {}).get("is_oa"),
-                "work_type": w.get("type") or "",
-            },
-        ))
-    return out
+    return [_openalex_work_doc(w) for w in data.get("results", [])]
+
+
+def _openalex_work_doc(w: dict, **extra: Any) -> RetrievedDoc:
+    """One OpenAlex work as a retrieved source; ``extra`` joins its metadata."""
+    title = _clean_openalex_title(w.get("title"))
+    # OpenAlex returns an inverted index for abstracts; reconstruct.
+    abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
+    location = w.get("primary_location") or {}
+    return RetrievedDoc(
+        content=f"{title}\n\n{abstract}".strip(),
+        metadata={
+            "source": "openalex", "title": title, "authors": _openalex_authors(w),
+            "venue": (location.get("source") or {}).get("display_name", ""),
+            "year": w.get("publication_year"),
+            "doi": (w.get("doi") or "").replace("https://doi.org/", ""),
+            "url": w.get("id") or "", "pdf_url": location.get("pdf_url") or "",
+            "cited_by": w.get("cited_by_count"),
+            "open_access": (w.get("open_access") or {}).get("is_oa"),
+            "work_type": w.get("type") or "",
+            **extra,
+        },
+    )
+
+
+# Foundational works: the original method papers and standard textbooks a
+# keyword search does not reach. OpenAlex matches every word of a search, so on
+# the validation quest none of its three facet queries returned Verlet (1967),
+# Hairer, Lubich & Wanner, or Butcher in the first 200 hits, and sorting by
+# citations only pulled in famous off-topic work. A lookup by title finds each
+# at rank 1, and the works several retrieved papers cite include the textbooks.
+# Books count here whatever the quest's work scope.
+_FOUNDATIONAL_TYPES = ("article", "review", "preprint", "conference-paper", "book", "book-chapter", "dissertation")
+_OPENALEX_WORK_ID_RE = re.compile(r"openalex\.org/(W\d+)", re.IGNORECASE)
+FOUNDATIONAL_SUGGESTED = "suggested as a foundational work"
+# Between the lookups' requests, which go one at a time.
+_OPENALEX_GAP_S = 1.0
+
+
+def _title_words(title: str) -> list[str]:
+    return re.findall(r"[^\W_]+", str(title or "").lower())
+
+
+def _titles_match(suggested: str, found: str) -> bool:
+    """Every word of the shorter title is in the longer one. A title of one or
+    two words must match exactly."""
+    a, b = _title_words(suggested), _title_words(found)
+    if not a or not b:
+        return False
+    short, longer = sorted((a, b), key=len)
+    if len(short) < 3:
+        return short == longer
+    return set(short) <= set(longer)
+
+
+def _first_surname(authors: Any) -> str:
+    first = authors[0] if isinstance(authors, list) and authors else authors
+    first = re.split(r";|,|&|\band\b", str(first or ""))[0]
+    words = re.findall(r"[^\W\d_][^\W\d_'\-]+", first)
+    return words[-1].lower() if words else ""
+
+
+def _openalex_filter_text(text: str) -> str:
+    # Commas separate filters and "|" joins values, so neither may stay in a value.
+    return " ".join(re.sub(r"[,|:]", " ", text).split())
+
+
+def _openalex_title_lookup(
+    work: dict, *, timeout_s: float = 15.0, api_key: str = "",
+) -> RetrievedDoc | None:
+    """The OpenAlex record of a suggested work: a title match whose year is
+    within two of the suggested one or whose authors include the suggested
+    first author. None when OpenAlex has no such record."""
+    title = " ".join(str(work.get("title") or "").split())
+    if len(_title_words(title)) < 2:
+        return None
+    params = _openalex_params({
+        "filter": f"title.search:{_openalex_filter_text(title)},type:{'|'.join(_FOUNDATIONAL_TYPES)}",
+        "sort": "cited_by_count:desc",
+        "per-page": "5",
+    }, api_key)
+    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
+    try:
+        year: int | None = int(work.get("year"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        year = None
+    surname = _first_surname(work.get("authors"))
+    for w in (data or {}).get("results") or []:
+        if not _titles_match(title, _clean_openalex_title(w.get("title"))):
+            continue
+        found_year = w.get("publication_year")
+        same_year = year is not None and isinstance(found_year, int) and abs(found_year - year) <= 2
+        same_author = bool(surname) and any(surname in a.lower() for a in _openalex_authors(w))
+        if same_year or same_author:
+            return _openalex_work_doc(w, foundational=FOUNDATIONAL_SUGGESTED)
+    return None
+
+
+def _openalex_cited_by_retrieved(
+    docs: list[RetrievedDoc], *, min_citing: int = 2, limit: int = 5,
+    timeout_s: float = 15.0, api_key: str = "",
+) -> list[RetrievedDoc]:
+    """The works at least ``min_citing`` of the retrieved OpenAlex records
+    cite, most cited first and not already retrieved. Two requests: the
+    reference lists, then the works."""
+    ids: list[str] = []
+    for doc in docs:
+        m = _OPENALEX_WORK_ID_RE.search(str((doc.metadata or {}).get("url") or ""))
+        if m and m.group(1) not in ids:
+            ids.append(m.group(1))
+    ids = ids[:50]
+    if len(ids) < min_citing:
+        return []
+    url = "https://api.openalex.org/works"
+    data = _http_get_json(url, _openalex_params({
+        "filter": "openalex:" + "|".join(ids), "select": "id,referenced_works", "per-page": "50",
+    }, api_key), timeout_s, source="openalex")
+    counts: dict[str, int] = {}
+    for w in (data or {}).get("results") or []:
+        cited = {m.group(1) for m in map(_OPENALEX_WORK_ID_RE.search, map(str, w.get("referenced_works") or [])) if m}
+        for ref in cited - set(ids):
+            counts[ref] = counts.get(ref, 0) + 1
+    top = sorted((ref for ref, n in counts.items() if n >= min_citing), key=lambda ref: -counts[ref])[:limit]
+    if not top:
+        return []
+    time.sleep(_OPENALEX_GAP_S)
+    data = _http_get_json(url, _openalex_params({
+        "filter": "openalex:" + "|".join(top), "per-page": str(len(top)),
+    }, api_key), timeout_s, source="openalex")
+    works: dict[str, dict] = {}
+    for w in (data or {}).get("results") or []:
+        m = _OPENALEX_WORK_ID_RE.search(str(w.get("id") or ""))
+        if m and w.get("type") in _FOUNDATIONAL_TYPES:
+            works[m.group(1)] = w
+    return [
+        _openalex_work_doc(works[ref], foundational=f"cited by {counts[ref]} of the retrieved papers")
+        for ref in top if ref in works
+    ]
 
 
 def _openalex_reconstruct_abstract(inverted: dict | None) -> str:
@@ -3304,6 +3418,46 @@ class Knowledge:
             topic=query, chosen_idea=chosen_idea,
             chat_fn=chat_fn, fallback_sources=fallback,
         )
+
+    async def find_foundational_works(
+        self, suggestions: list[dict], docs: list[RetrievedDoc],
+    ) -> list[RetrievedDoc]:
+        """Foundational works for a literature pass: each suggested work looked
+        up by title in OpenAlex (kept only when found), then the works the
+        retrieved papers cite most. None already in ``docs`` comes back, and a
+        failed lookup only loses its own works."""
+        api_key = str(getattr(self.cfg, "openalex_api_key", "") or "")
+
+        def lookups() -> list[RetrievedDoc]:
+            # One request at a time: fired together, three of five title
+            # lookups came back 429 from OpenAlex's keyless pool.
+            found: list[RetrievedDoc] = []
+            for suggestion in [s for s in suggestions[:5] if isinstance(s, dict)]:
+                try:
+                    doc = _openalex_title_lookup(suggestion, api_key=api_key)
+                except Exception:  # noqa: BLE001 — one lookup, not the rest
+                    doc = None
+                if doc is not None:
+                    found.append(doc)
+                time.sleep(_OPENALEX_GAP_S)
+            try:
+                found += _openalex_cited_by_retrieved(docs, api_key=api_key)
+            except Exception:  # noqa: BLE001
+                pass
+            return found
+
+        seen = {
+            str(value).lower()
+            for d in docs for value in ((d.metadata or {}).get("url"), (d.metadata or {}).get("doi")) if value
+        }
+        out: list[RetrievedDoc] = []
+        for doc in await asyncio.to_thread(lookups):
+            keys = {str(v).lower() for v in (doc.metadata.get("url"), doc.metadata.get("doi")) if v}
+            if keys & seen:
+                continue
+            seen |= keys
+            out.append(doc)
+        return out
 
     async def fetch_full_text(self, docs: list[RetrievedDoc]) -> list[RetrievedDoc]:
         """Fetch legal full text for the scholarly records in ``docs`` when
