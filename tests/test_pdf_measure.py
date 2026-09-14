@@ -165,6 +165,33 @@ def test_poster_text_below_the_sheet_is_reported_as_cut_off(tmp_path):
     assert cut and cut[0]["severity"] == "high"
 
 
+def test_a_column_that_runs_off_the_sheet_is_one_finding(tmp_path):
+    items = _good_poster_items() + _column(880, -40, -400, 26, BODY_50, 36)
+    report = poster_report(measure_pdf(_pdf(tmp_path, [(*A1, items)])))
+    cut = [f for f in report["findings"] if f["check"] == "overflow"]
+    assert len(cut) == 1
+    assert cut[0]["lines_cut"] == 11 and cut[0]["severity"] == "high"
+
+
+def test_a_sheet_without_a_header_rule_still_finds_its_columns_and_band(tmp_path):
+    # Only the band rule is left. It must not be read as the header's lower
+    # edge, which made the whole sheet "header" and the band the "body".
+    items = [item for item in _good_poster_items() if not (item[0] == "rule" and item[2] > 1200)]
+    report = poster_report(measure_pdf(_pdf(tmp_path, [(*A1, items)])))
+    m = report["metrics"]
+    assert (m["body_pt"], m["heading_pt"], m["references_pt"]) == (26, 40, 16)
+    assert m["column_gap_cm"] < 2
+
+
+def test_column_text_running_into_the_references_band_is_reported(tmp_path):
+    items = _good_poster_items() + _column(880, 180, 60, 26, BODY_50, 36)
+    report = poster_report(measure_pdf(_pdf(tmp_path, [(*A1, items)])))
+    spill = [f for f in report["findings"] if f["check"] == "band_overlap"]
+    assert len(spill) == 1 and spill[0]["severity"] == "high"
+    # The spilled body lines are not mistaken for the reference list.
+    assert report["metrics"]["references_pt"] == 16
+
+
 def test_landscape_posters_are_measured_in_three_columns(tmp_path):
     width, height = 3456.0, 2592.0  # 48 x 36 in
     items = [

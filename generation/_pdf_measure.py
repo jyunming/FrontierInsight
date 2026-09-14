@@ -317,17 +317,31 @@ def _outside(box: Box, page: Page) -> float:
 def _overflow_findings(page: Page, *, region: str = "page") -> list[dict]:
     """Content reaching past the page edge. Even a figure 2 pt over is cut
     visibly (its frame and axis label lose their bottom edge), so any
-    overhang past 1 pt counts; losing a tenth of the object is high."""
+    overhang past 1 pt counts; losing a tenth of the object is high.
+
+    Cut-off text is one finding per page, however many lines ran over: a
+    column that overflows by a page's worth is one problem to fix, not
+    three hundred."""
     found = []
-    for line in page.lines:
-        height = max(1.0, line.box[3] - line.box[1])
-        beyond = _outside(line.box, page)
-        if line.visible and beyond > 1.0:
-            found.append(_finding(
-                "overflow", page.number, region,
-                f"Text runs {beyond:.0f} pt past the page edge and is cut off: \"{line.text[:60]}\".",
-                "high" if beyond > 0.25 * height else "medium",
-            ))
+    cut = [
+        (line, _outside(line.box, page)) for line in page.lines
+        if line.visible and _outside(line.box, page) > 1.0
+    ]
+    if cut:
+        worst = max(beyond for _line, beyond in cut)
+        high = any(beyond > 0.25 * max(1.0, line.box[3] - line.box[1]) for line, beyond in cut)
+        count = (
+            f"{len(cut)} lines of text run past the page edge and are cut off"
+            if len(cut) > 1 else "A line of text runs past the page edge and is cut off"
+        )
+        found.append(_finding(
+            "overflow", page.number, region,
+            f"{count} (up to {worst:.0f} pt), "
+            f"starting with \"{cut[0][0].text[:60]}\".",
+            "high" if high else "medium",
+            lines_cut=len(cut),
+            overhang_pt=round(worst, 1),
+        ))
     for image in page.images:
         if image[2] - image[0] >= 0.9 * page.width or image[3] - image[1] >= 0.9 * page.height:
             # A full-bleed decoration (a slide's accent bar, a background)
@@ -375,8 +389,14 @@ def poster_report(
     )
     title_bottom = title.box[1] if title else page.height
     below_title = [rule for rule in page.rules if rule[3] <= title_bottom + 1]
-    header_bottom = max((rule[1] for rule in below_title), default=title_bottom)
-    band_rules = [rule for rule in below_title if rule[3] < header_bottom - 1]
+    # A rule in the top half closes the header and one in the bottom half
+    # opens the band, so a sheet with no header rule does not take the band
+    # rule for the header's edge and call the whole sheet its header.
+    middle = page.height / 2
+    header_bottom = max(
+        (rule[1] for rule in below_title if rule[1] >= middle), default=title_bottom,
+    )
+    band_rules = [rule for rule in below_title if rule[3] < min(middle, header_bottom - 1)]
     band_top = max((rule[3] for rule in band_rules), default=None)
     floor = band_top if band_top is not None else 0.0
 
@@ -384,7 +404,10 @@ def poster_report(
         return (box[1] + box[3]) / 2
 
     header = [line for line in lines if centre_y(line.box) >= header_bottom]
-    band = [line for line in lines if band_top is not None and centre_y(line.box) <= band_top]
+    in_band = [
+        line for line in lines
+        if band_top is not None and 0 <= centre_y(line.box) <= band_top
+    ]
     body = [line for line in lines if floor < centre_y(line.box) < header_bottom]
     figures = [
         image for image in page.images
@@ -414,6 +437,16 @@ def poster_report(
     heading_pt = _size_mode(headings)
     caption_pt = _size_mode(captions)
     title_pt = max((line.size for line in header), default=title.size if title else None)
+    # Column text that ran down into the band keeps its body size; the
+    # reference list itself is set smaller.
+    spilled = [
+        line for line in in_band
+        if body_pt is not None and line.size >= 0.95 * body_pt
+    ]
+    band = [line for line in in_band if line not in spilled]
+    spilled_figures = [
+        image for image in figures if band_top is not None and image[1] < band_top - 1
+    ]
     references_pt = _size_mode(band)
     body_lengths = [
         len(line.text) for line in body
@@ -454,6 +487,17 @@ def poster_report(
 
     findings = _overflow_findings(page)
     n = page.number
+    if spilled or spilled_figures:
+        what = []
+        if spilled:
+            what.append(f"{len(spilled)} lines of text" if len(spilled) > 1 else "a line of text")
+        if spilled_figures:
+            what.append(f"{len(spilled_figures)} figures" if len(spilled_figures) > 1 else "a figure")
+        findings.append(_finding(
+            "band_overlap", n, "references band",
+            f"Column content runs down into the references band: {' and '.join(what)}.",
+            "high",
+        ))
 
     def too_small(check: str, key: str, value: float | None, region: str, what: str) -> None:
         floor_pt = POSTER_MIN_PT[key]
