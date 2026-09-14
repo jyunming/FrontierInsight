@@ -31,6 +31,7 @@ from core.engine import Engine, QuestArtifacts
 from core.provider import ProxySupervisor
 from generation.paper import PaperGenerator
 from generation.poster import PosterGenerator
+from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
 from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
@@ -1468,6 +1469,10 @@ async def run_one(
             summary["source_failures"] = failures
             if failures.get("total"):
                 print(f"[FI] source failures: {failures.get('summary')}")
+    # The visual check's per-output result, for the web quest page.
+    visual_check = report_summary(art.quest_root)
+    if visual_check is not None:
+        summary["visual_check"] = visual_check
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")
@@ -1541,6 +1546,25 @@ async def _emit_one(
     return 1
 
 
+def _visual_check_line(report: dict) -> str:
+    """One line for the CLI and the VSCode chat: how an output was checked
+    and what the check found."""
+    measured = len((report.get("measured") or {}).get("findings") or [])
+    seen = len(report.get("findings") or [])
+    reason = report.get("reason") or report.get("error") or ""
+    redos = [a for a in report.get("attempts") or [] if a.get("attempt")]
+    if redos:
+        kept = next((a["attempt"] for a in report["attempts"] if a.get("kept")), 0)
+        redone = f"; redone {len(redos)} time(s), kept " + ("the first version" if kept == 0 else f"redo {kept}")
+    else:
+        redone = ""
+    if report.get("transport") == "images":
+        return f"{seen} problem(s) seen on the pages, {measured} measured{redone} (.fi/visual_check.json)"
+    if report.get("transport") == "measurements only":
+        return f"measurements only ({reason}); {measured} measured problem(s){redone}"
+    return f"not checked ({reason})"
+
+
 def _kind_final_output(art: QuestArtifacts, kind: str) -> list[Path]:
     """The FINAL rendered deliverable(s) for a configured output kind. A kind
     counts as already produced if any of these exists on disk. Intermediates
@@ -1606,6 +1630,7 @@ async def _run_generators(
     decks. Fresh runs (skip_existing=False) regenerate unconditionally, and
     ``--emit`` stays a force-regenerate path."""
     written: dict[str, Path] = {}
+    carried: set[str] = set()
     _apply_paper_venue_override(cfg, art)
 
     def _already(kind: str) -> Path | None:
@@ -1614,6 +1639,7 @@ async def _run_generators(
         existing = _existing_output(art, kind)
         if existing is not None:
             print(f"[FI] {kind}: {existing.name} already present — skipping regeneration")
+            carried.add(kind)
         return existing
 
     # 1) Paper (sync — pandoc shell-out is fine without async).
@@ -1669,6 +1695,53 @@ async def _run_generators(
             )
         except Exception as e:
             print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
+    # 5) Screenshot + AI check of each PDF this pass produced (a PDF carried
+    # through on a resume was checked when it was made). Slides and poster
+    # are redone with the problems a new version can fix; the paper is never
+    # rewritten, only recompiled by script.
+    if cfg.output.visual_check:
+        paper_lines = 0
+
+        async def redo_paper(feedback: str) -> None:
+            # Each attempt makes the text area one more line taller, so a last
+            # page holding a line or two moves back onto the page before.
+            nonlocal paper_lines
+            paper_lines += 1
+            source = written.get("paper_md") or art.paper_md
+            pdf, skip = PaperGenerator(cfg)._compile_pdf(Path(source), art.quest_root, extra_lines=paper_lines)
+            if pdf is None:
+                raise RuntimeError(skip.summary if skip else "the paper did not recompile")
+
+        async def redo_slides(feedback: str) -> None:
+            written.update(await SlideGenerator(cfg).generate(
+                art, art.quest_root, supervisor=supervisor, feedback=feedback,
+            ))
+
+        async def redo_poster(feedback: str) -> None:
+            written.update(await PosterGenerator(cfg).generate(
+                art, art.quest_root, supervisor=supervisor, feedback=feedback,
+            ))
+
+        redo = {"paper": redo_paper, "slides": redo_slides, "poster": redo_poster}
+        for kind, key, output_kind in (
+            ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),
+        ):
+            pdf = written.get(key)
+            if pdf is None or output_kind in carried:
+                continue
+            if kind in redo:
+                report = await check_and_redo(
+                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor,
+                )
+            else:
+                report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
+            print(f"[FI] visual check {kind}: {_visual_check_line(report)}")
+        # The pptx comes from the same slides.md, so a slides redo already
+        # remade it; it is checked once, as the redo left it.
+        pptx = written.get("slides_pptx")
+        if pptx is not None and "slides" not in carried:
+            report = await check_pptx(cfg, Path(pptx), art.quest_root, supervisor=supervisor)
+            print(f"[FI] visual check {LABELS['slides_pptx']}: {_visual_check_line(report)}")
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")
     # On a resume, surface any configured output still missing after the pass
@@ -3133,6 +3206,7 @@ def _doctor() -> int:
     from generation._pandoc import find_pandoc
     from generation._pdf_engine import find_pdf_engine
     from generation._html_pdf import find_html_browser
+    from generation._office_pdf import find_libreoffice
 
     ok_mark, no_mark = "  OK  ", " MISS "
     lines: list[str] = []
@@ -3176,6 +3250,14 @@ def _doctor() -> int:
             "Marp        python launch.py --install-marp   (no admin, no Node)\n"
             "                     airgapped: --install-marp-from <archive>\n"
             "                     only needed for slides.html / slides.pdf"
+        )
+
+    libreoffice = find_libreoffice()
+    has_libreoffice = row("LibreOffice", libreoffice, libreoffice or "")
+    if not has_libreoffice:
+        fixes.append(
+            "LibreOffice https://www.libreoffice.org/download/\n"
+            "                     only needed to check slides.pptx in the visual check"
         )
 
     try:

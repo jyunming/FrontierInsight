@@ -159,6 +159,71 @@ def test_fences_as_slide_breaks_leaves_decks_with_real_breaks_alone() -> None:
     assert _fences_as_slide_breaks(single) == single
 
 
+# ---------- figures as their own paragraphs ----------
+
+
+def test_a_caption_under_a_figure_line_becomes_its_own_paragraph() -> None:
+    """gemma4 wrote the caption on the line under the image; in one paragraph
+    with the figure it was pushed below the slide's bottom edge."""
+    from generation.slides import _figures_as_own_paragraphs
+
+    slide = (
+        "## Energy decay\n"
+        "- Both methods avoid energy growth.\n"
+        "![w:800](figures/energy_decay_comparison.png)\n"
+        "**Figure 2:** Comparison against the analytical reference.\n"
+    )
+    assert _figures_as_own_paragraphs(slide) == (
+        "## Energy decay\n"
+        "- Both methods avoid energy growth.\n"
+        "\n"
+        "![w:800](figures/energy_decay_comparison.png)\n"
+        "\n"
+        "**Figure 2:** Comparison against the analytical reference.\n"
+    )
+
+
+def test_background_figures_code_and_spaced_figures_are_left_alone() -> None:
+    from generation.slides import _figures_as_own_paragraphs
+
+    deck = (
+        "## Side figure\n"
+        "- A point\n"
+        "![bg right:40% fit](figures/a.png)\n"
+        "---\n"
+        "## Code\n"
+        "```md\n"
+        "text\n"
+        "![w:800](figures/b.png)\n"
+        "```\n"
+        "---\n"
+        "## Spaced\n"
+        "\n"
+        "![w:800](figures/c.png)\n"
+        "\n"
+        "Takeaway.\n"
+    )
+    assert _figures_as_own_paragraphs(deck) == deck
+    assert _figures_as_own_paragraphs(_figures_as_own_paragraphs(deck)) == deck
+
+
+@pytest.mark.asyncio
+async def test_the_written_deck_puts_each_figure_in_its_own_paragraph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return "---\nmarp: true\n---\n\n## Energy\n\n- A point\n![w:800](figures/fig.png)\n**Figure 1:** Caption.\n"
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+    await SlideGenerator(cfg).generate(art, art.quest_root)
+    body = (art.quest_root / "slides.md").read_text(encoding="utf-8")
+    assert "- A point\n\n![w:800](figures/fig.png)\n\n**Figure 1:** Caption." in body
+
+
 # ---------- --allow-local-files safety gate ----------
 
 

@@ -240,6 +240,62 @@ def test_slides_get_a_separate_further_reading_slide() -> None:
     assert "museum.example" not in render_references_marp_slide(build_references(LIT))
 
 
+def _long_refs(count: int) -> list[dict]:
+    return [
+        {
+            "n": k, "title": f"A long study title number {k} about damped oscillators and symplectic integration",
+            "authors": ["A. Author", "B. Author", "C. Author"], "year": 2000 + k,
+            "venue": "Journal of Computational Physics", "doi": f"10.1016/j.jcp.2014.{k:02d}.008",
+        }
+        for k in range(1, count + 1)
+    ]
+
+
+def test_a_long_reference_list_continues_on_further_slides() -> None:
+    from core import engine
+
+    deck = render_references_marp_slide(_long_refs(12))
+    slides = [s for s in deck.split("---") if s.strip()]
+    headings = [s.strip().splitlines()[0] for s in slides]
+    assert len(slides) >= 2
+    assert headings[0] == "## References" and set(headings[1:]) == {"## References (continued)"}
+    for k in range(1, 13):
+        assert sum(s.count(f"\n{k}. ") for s in slides) == 1, k
+    budget = engine._SOURCE_SLIDE_LINES
+    per_line = engine._SOURCE_SLIDE_CHARS_PER_LINE
+    for slide in slides:
+        entries = [line for line in slide.splitlines() if line[:1].isdigit()]
+        assert sum(-(-len(e) // per_line) + 0.5 for e in entries) <= budget
+
+
+def test_a_short_source_list_stays_on_one_slide_and_keeps_its_note() -> None:
+    deck = render_references_marp_slide(_long_refs(3))
+    assert deck.count("## References") == 1 and "(continued)" not in deck
+    capped = render_references_marp_slide(_long_refs(20), max_n=18)
+    assert capped.rstrip().endswith("_(+2 more sources)_")
+    assert "18. " in capped and "19. " not in capped
+
+
+def test_a_long_further_reading_list_continues_too() -> None:
+    web = [
+        {"label": f"W{k}", "title": f"A web page with a long descriptive title, number {k}",
+         "url": f"https://example.org/questions/{k}/energy-of-a-damped-harmonic-oscillator-begins-to-increase"}
+        for k in range(1, 11)
+    ]
+    deck = render_further_reading_marp_slide(web)
+    assert "## Further reading\n" in deck and "## Further reading (continued)" in deck
+    assert all(deck.count(f"[W{k}] ") == 1 for k in range(1, 11))
+
+
+def test_the_deck_theme_styles_continuation_source_slides_like_the_first() -> None:
+    """Marp gives "Further reading (continued)" the id further-reading-continued;
+    an exact-id selector left those slides in the large body type."""
+    css = (Path(__file__).resolve().parent.parent / "templates" / "slides" / "fi.css").read_text(encoding="utf-8")
+    assert 'section:has(h2[id^="references"]) ol' in css
+    assert 'section:has(h2[id^="further-reading"]) ul' in css
+    assert "h2#further-reading)" not in css
+
+
 @pytest.mark.parametrize("deck,further_slides", [
     ("---\nmarp: true\n---\n\n# Play\n", 1),
     ("---\nmarp: true\n---\n\n# Play\n\n---\n\n## Further reading\n\n- a page\n", 1),

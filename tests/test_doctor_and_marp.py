@@ -112,6 +112,7 @@ def test_doctor_reports_everything_missing(
     monkeypatch.setattr("generation._pdf_engine.find_pdf_engine", lambda *a, **k: None)
     monkeypatch.setattr("generation._html_pdf.find_html_browser", lambda *a, **k: None)
     monkeypatch.setattr("generation._marp.find_marp", lambda *a, **k: None)
+    monkeypatch.setattr("generation._office_pdf.find_libreoffice", lambda *a, **k: None)
     monkeypatch.setattr("core.passages._embed_model", lambda: None)
 
     assert launch._doctor() == 0
@@ -124,6 +125,7 @@ def test_doctor_reports_everything_missing(
     assert "pypandoc_binary" in out
     assert "--install-tectonic" in out
     assert "--install-marp" in out
+    assert "only needed to check slides.pptx in the visual check" in out
     assert "sentence-transformers" in out
     # The silent-failure mode that started all this.
     assert "relevance filter INACTIVE" in out
@@ -138,6 +140,7 @@ def test_doctor_reports_all_present(
     monkeypatch.setattr(
         "generation._html_pdf.find_html_browser", lambda *a, **k: ("edge", "/e/edge"))
     monkeypatch.setattr("generation._marp.find_marp", lambda *a, **k: "/m/marp")
+    monkeypatch.setattr("generation._office_pdf.find_libreoffice", lambda *a, **k: "/l/soffice")
     monkeypatch.setattr("core.passages._embed_model", lambda: object())
 
     assert launch._doctor() == 0

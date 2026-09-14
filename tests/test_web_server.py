@@ -401,6 +401,34 @@ def test_quest_detail_source_failures_is_null_without_a_report(tmp_path: Path) -
     assert body["source_failures"] is None
 
 
+# --- visual check -------------------------------------------------------
+
+
+def test_quest_detail_carries_each_outputs_visual_check(tmp_path: Path) -> None:
+    """The quest page lists how each output's screenshot check went, read
+    from the report the check writes, so a running quest shows it too."""
+    qid = "qvisual"
+    q = _mk_quest_dir(tmp_path, qid)
+    report = {
+        "poster": {"transport": "images", "findings": [], "measured": {"findings": [{"check": "empty_space"}]}},
+        "slides_pptx": {"transport": "none", "reason": "LibreOffice was not found"},
+    }
+    (q / ".fi" / "visual_check.json").write_text(json.dumps(report), encoding="utf-8")
+    body = TestClient(make_app(tmp_path)).get(f"/api/quests/{qid}").json()
+    assert body["visual_check"]["poster"]["problems_measured"] == 1
+    assert body["visual_check"]["slides_pptx"] == {
+        "label": "slides.pptx", "transport": "none", "problems_seen": 0, "problems_measured": 0,
+        "redos": 0, "reason": "LibreOffice was not found",
+    }
+
+
+def test_quest_detail_visual_check_is_null_before_any_check(tmp_path: Path) -> None:
+    qid = "qvisualnone"
+    _mk_quest_dir(tmp_path, qid)
+    body = TestClient(make_app(tmp_path)).get(f"/api/quests/{qid}").json()
+    assert body["visual_check"] is None
+
+
 # --- human-review endpoints ----------------------------------------------
 
 

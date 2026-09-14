@@ -67,6 +67,15 @@
     </div>
   </div>
 
+  <!-- The screenshot + AI check of each output: one line per output. -->
+  <div id="visual-check-banner" class="hidden fi-banner fi-banner-info">
+    <div class="font-body-md text-body-md text-on-surface flex flex-col gap-1">
+      <b>Visual check</b>
+      <div id="visual-check-lines" class="text-on-surface-variant font-code-md text-code-md flex flex-col gap-0.5"></div>
+      <span class="text-on-surface-variant">Findings and screenshots in <code class="font-code-md">.fi/visual_check.json</code> and <code class="font-code-md">.fi/visual_check/</code>.</span>
+    </div>
+  </div>
+
   <!-- Unified "Action needed" banner — shown whenever the quest paused for
        you (any of clarify / papers / supply / data / review). Sourced from the
        single NEXT_STEP.md every pause writes. -->
@@ -274,6 +283,7 @@
     renderNodeProgress(data);
     renderQuestFailedBanner(data.quest_failed);
     renderSourceFailures(data.source_failures);
+    renderVisualCheck(data.visual_check);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -688,6 +698,36 @@
       return;
     }
     document.getElementById('source-failures-line').textContent = sf.summary || '';
+    banner.classList.remove('hidden');
+  }
+
+  // One line per checked output, worded like the CLI's "[FI] visual check" line.
+  function visualCheckLine(c) {
+    const reason = c.reason ? ` (${c.reason})` : '';
+    const redone = c.redos ? `; redone ${c.redos} time(s)` : '';
+    if (c.transport === 'images') {
+      return `${c.problems_seen} problem(s) seen on the pages, ${c.problems_measured} measured${redone}`;
+    }
+    if (c.transport === 'measurements only') {
+      return `measurements only${reason}; ${c.problems_measured} measured problem(s)${redone}`;
+    }
+    return `not checked${reason}`;
+  }
+
+  function renderVisualCheck(vc) {
+    const banner = document.getElementById('visual-check-banner');
+    if (!banner) return;
+    const entries = Object.entries(vc || {});
+    if (!entries.length) {
+      banner.classList.add('hidden');
+      return;
+    }
+    const lines = document.getElementById('visual-check-lines');
+    lines.replaceChildren(...entries.map(([kind, c]) => {
+      const row = document.createElement('span');
+      row.textContent = `${c.label || kind}: ${visualCheckLine(c)}`;
+      return row;
+    }));
     banner.classList.remove('hidden');
   }
 

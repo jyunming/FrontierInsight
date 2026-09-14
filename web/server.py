@@ -44,6 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from core.config import Config
 from core.engine import Engine
 from core.provider import ProxySupervisor
+from generation._visual_check import report_summary
 
 
 # ---- per-process state ----------------------------------------------------
@@ -1858,6 +1859,8 @@ def make_app(
             ),
             "summary": summary,
             "source_failures": source_failures,
+            # How each output's visual check went (.fi/visual_check.json).
+            "visual_check": report_summary(quest_root),
             "alive": (
                 registry.alive(quest_id)
                 or bool(launcher_status.get("alive"))

@@ -242,6 +242,40 @@ def test_slides_report_finds_cut_off_text_and_tiny_text_on_the_right_slide(tmp_p
     assert report["metrics"]["pages"] == 4
 
 
+def test_slides_report_finds_a_figure_drawn_over_text(tmp_path):
+    bullets = [
+        ("text", "A slide title", 40, 60, 460, True),
+        ("text", "First bullet above the figure", 25, 60, 380, False),
+        ("text", "Second bullet above the figure", 25, 60, 340, False),
+        ("text", "Third bullet the figure covers", 25, 60, 300, False),
+    ]
+    # The pptx deck of the validation quest: the figure's top edge sat on the
+    # third bullet.
+    covering = bullets + [("image", 40, 60, 700, 318)]
+    below = bullets + [("image", 297, 40, 663, 285)]
+    # A full-slide background behind the text is not a figure over it.
+    background = bullets + [("image", 0, 0, 960, 540)]
+    path = _pdf(tmp_path, [(*SLIDE, covering), (*SLIDE, below), (*SLIDE, background)])
+    findings = [f for f in slides_report(measure_pdf(path))["findings"] if f["check"] == "overlap"]
+    assert [(f["page"], f["severity"], f["lines_covered"]) for f in findings] == [(1, "high", 1)]
+    assert "Third bullet the figure covers" in findings[0]["problem"]
+
+
+def test_slides_report_finds_latex_math_shown_as_text(tmp_path):
+    title = [("text", "A slide title", 40, 60, 460, True)]
+    # The validation quest's pptx printed its formulas as LaTeX.
+    raw = title + [
+        ("text", "Diverges completely at $h = 0.5$ and $h = 0.1$.", 25, 60, 380, False),
+        ("text", "RK4 error is 5.297 \\times 10^{-9} m.", 25, 60, 340, False),
+    ]
+    # Prices by pandoc's rule are not math, and a typeset formula has no $.
+    prices = title + [("text", "Licences cost $5-$10 per seat.", 25, 60, 380, False)]
+    typeset = title + [("text", "RK4 error is 5.297 × 10−9 m.", 25, 60, 380, False)]
+    path = _pdf(tmp_path, [(*SLIDE, raw), (*SLIDE, prices), (*SLIDE, typeset)])
+    findings = [f for f in slides_report(measure_pdf(path))["findings"] if f["check"] == "raw_markup"]
+    assert [(f["page"], f["lines_with_latex"]) for f in findings] == [(1, 2)]
+
+
 def test_paper_report_finds_a_line_running_into_the_margin(tmp_path):
     justified = "x" * 70  # the same text gives every line the same right edge
     page1 = _column(72, 760, 80, 10, justified, 14)
@@ -261,6 +295,36 @@ def test_paper_report_accepts_a_two_column_layout(tmp_path):
     path = _pdf(tmp_path, [(*A4, items)])
     report = paper_report(measure_pdf(path))
     assert [f for f in report["findings"] if f["check"] == "overwide"] == []
+
+
+def _footer(number):
+    return [("text", "Frontier Insight", 8, 72, 40, False), ("text", str(number), 8, 500, 40, False)]
+
+
+def test_a_last_page_holding_one_line_is_reported(tmp_path):
+    # The validation quest's paper: page 6 held only the tail of a URL.
+    text = "x" * 70
+    page1 = _column(72, 760, 80, 10, text, 14) + _footer(1)
+    page2 = [("text", "ebooks rst/3 Ordinary Differential Equations/02 Examples", 10, 72, 760, False)] + _footer(2)
+    report = paper_report(measure_pdf(_pdf(tmp_path, [(*A4, page1), (*A4, page2)])))
+    last = [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
+    assert [(f["page"], f["severity"]) for f in last] == [(2, "medium")]
+    assert report["metrics"]["last_page_lines"] == 1
+
+
+def test_a_last_page_with_real_text_is_not_reported(tmp_path):
+    text = "x" * 70
+    page1 = _column(72, 760, 80, 10, text, 14) + _footer(1)
+    page2 = _column(72, 760, 634, 10, text, 14) + _footer(2)
+    report = paper_report(measure_pdf(_pdf(tmp_path, [(*A4, page1), (*A4, page2)])))
+    assert not [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
+    assert report["metrics"]["last_page_lines"] == 10
+
+
+def test_a_one_page_paper_is_never_reported_as_a_nearly_empty_last_page(tmp_path):
+    page = [("text", "A one-line note.", 10, 72, 760, False)] + _footer(1)
+    report = paper_report(measure_pdf(_pdf(tmp_path, [(*A4, page)])))
+    assert not [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
 
 
 def test_measure_pdf_fails_open_on_a_file_that_is_not_a_pdf(tmp_path):

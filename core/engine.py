@@ -7455,16 +7455,46 @@ def _latex_esc(s: str) -> str:
     return s
 
 
+# A slide of sources holds about this much list text; a longer list continues
+# on a "(continued)" slide instead of running off the slide (the HTML/PDF
+# deck) or shrinking its type below a readable size (the pptx, which scaled a
+# twelve-entry References slide down to 9.4 pt). Each entry costs its wrapped
+# lines plus half a line of spacing.
+_SOURCE_SLIDE_CHARS_PER_LINE = 95
+_SOURCE_SLIDE_LINES = 12
+
+
+def _source_slides(heading: str, entries: list[str], note: str = "") -> str:
+    """Marp slides listing ``entries`` under ``heading``, split where a slide
+    would hold more than ``_SOURCE_SLIDE_LINES`` lines of text."""
+    chunks: list[list[str]] = []
+    used = 0.0
+    for entry in entries:
+        cost = -(-len(entry) // _SOURCE_SLIDE_CHARS_PER_LINE) + 0.5
+        if not chunks or (chunks[-1] and used + cost > _SOURCE_SLIDE_LINES):
+            chunks.append([])
+            used = 0.0
+        chunks[-1].append(entry)
+        used += cost
+    slides = []
+    for index, chunk in enumerate(chunks):
+        title = heading if index == 0 else f"{heading} (continued)"
+        lines = ["---", "", f"## {title}", "", *chunk]
+        if note and index == len(chunks) - 1:
+            lines.append(f"\n{note}")
+        slides.append("\n".join(lines))
+    return "\n\n".join(slides)
+
+
 def render_references_marp_slide(refs: list[dict[str, Any]], *, max_n: int = 18) -> str:
-    """A standalone Marp slide listing sources, appended after the LLM's
-    deck so a References slide always lands when sources exist."""
+    """Marp slides listing sources, appended after the LLM's deck so a
+    References slide always lands when sources exist. A long list continues
+    on further slides."""
     if not refs:
         return ""
-    lines = ["---", "", "## References", ""]
-    lines += [f"{r['n']}. {_ref_citation_text(r)}" for r in refs[:max_n]]
-    if len(refs) > max_n:
-        lines.append(f"\n_(+{len(refs) - max_n} more sources)_")
-    return "\n".join(lines)
+    entries = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs[:max_n]]
+    note = f"_(+{len(refs) - max_n} more sources)_" if len(refs) > max_n else ""
+    return _source_slides("References", entries, note)
 
 
 # A "Further reading" heading at any level, however the writer capitalised it.
@@ -7480,15 +7510,13 @@ def _further_reading_lines(further: list[dict[str, Any]]) -> list[str]:
 def render_further_reading_marp_slide(
     further: list[dict[str, Any]], *, max_n: int = 18,
 ) -> str:
-    """A Marp slide listing the web pages the quest drew on, appended after
-    the References slide: web pages are Further reading, not References."""
+    """Marp slides listing the web pages the quest drew on, appended after
+    the References slides: web pages are Further reading, not References. A
+    long list continues on further slides."""
     if not further:
         return ""
-    lines = ["---", "", "## Further reading", ""]
-    lines += _further_reading_lines(further[:max_n])
-    if len(further) > max_n:
-        lines.append(f"\n_(+{len(further) - max_n} more pages)_")
-    return "\n".join(lines)
+    note = f"_(+{len(further) - max_n} more pages)_" if len(further) > max_n else ""
+    return _source_slides("Further reading", _further_reading_lines(further[:max_n]), note)
 
 
 def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str:

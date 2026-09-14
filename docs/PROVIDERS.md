@@ -58,6 +58,16 @@ config YAML, and runs the quest. Every LLM call streams through the
 | `github_copilot_cli` | HTTP via proxy | `gh auth login` + spawned `copilot-api` | Copilot models via reverse-engineered proxy | ⚠️ Against ToS spirit (use `vscode_extension` instead) |
 | `github_copilot_vscode` | HTTP via proxy | VSCode Copilot extension + spawned `copilot-api` | Copilot models via reverse-engineered proxy | ⚠️ Against ToS spirit (use `vscode_extension` instead) |
 
+### Which providers can see images
+
+The visual check (`output.visual_check`) sends page screenshots of the paper, slides and poster (and of `slides.pptx`, when LibreOffice is installed) to the configured provider. Where a provider cannot take images, the check runs on its measurements alone and its report says so.
+
+- **HTTP providers** (`ollama`, `vllm`, `openai`, `gemini`, …) send the screenshots as image parts. The model itself must accept images; checked with `gemma4:31b-cloud` on Ollama.
+- **`claude_cli`** sends them inline in a stream-json turn. Checked with `haiku`.
+- **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input.
+- **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with the account's default model.
+- **`copilot_cli`, `gemini_cli`, `antigravity_cli`:** measurements only for now.
+
 ## Per-node model routing
 
 Different nodes of the research DAG can use different models. Cheap

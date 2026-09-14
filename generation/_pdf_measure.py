@@ -358,6 +358,59 @@ def _overflow_findings(page: Page, *, region: str = "page") -> list[dict]:
     return found
 
 
+def _figure_over_text_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """Text a figure is drawn over, one finding per figure. The pptx placed a
+    figure over a slide's third bullet, and only the model's look at the
+    screenshot noticed. A line the figure covers by more than half its height
+    cannot be read: high."""
+    found = []
+    for image in page.images:
+        if image[2] - image[0] >= 0.9 * page.width or image[3] - image[1] >= 0.9 * page.height:
+            continue  # a full-bleed decoration sits behind everything
+        covered = []
+        for line in page.lines:
+            if not line.visible:
+                continue
+            across = min(line.box[2], image[2]) - max(line.box[0], image[0])
+            down = min(line.box[3], image[3]) - max(line.box[1], image[1])
+            if across > 2.0 and down > 2.0:
+                covered.append((line, down / max(1.0, line.box[3] - line.box[1])))
+        if covered:
+            count = f"{len(covered)} lines of text" if len(covered) > 1 else "a line of text"
+            found.append(_finding(
+                "overlap", page.number, region,
+                f"A figure is drawn over {count}, starting with \"{covered[0][0].text[:60]}\".",
+                "high" if any(share > 0.5 for _line, share in covered) else "medium",
+                lines_covered=len(covered),
+            ))
+    return found
+
+
+# LaTeX a slide prints instead of typesetting: a $...$ span by pandoc's rule
+# (a non-space inside each $, no digit right after the closing one, so "$5 to
+# $10" is not one) or a bare math command.
+_RAW_MATH_RE = re.compile(
+    r"(?<!\\)\$(?=\S)[^$]*?[^\s\\]\$(?!\d)"
+    r"|\\(?:times|frac|text|mathrm|sqrt|cdot|pm|leq?|geq?|approx|infty|exp|log|sum|int|partial"
+    r"|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|pi)\b"
+)
+
+
+def _raw_math_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """One finding per page whose text layer shows LaTeX math as text. The
+    pptx printed every `$h = 0.5$` of the validation deck, and only the
+    model's look at the screenshots noticed."""
+    shown = [line for line in page.lines if line.visible and _RAW_MATH_RE.search(line.text)]
+    if not shown:
+        return []
+    count = f"{len(shown)} lines show" if len(shown) > 1 else "A line shows"
+    return [_finding(
+        "raw_markup", page.number, region,
+        f"{count} LaTeX math as text instead of a formula, starting with \"{shown[0].text[:60]}\".",
+        lines_with_latex=len(shown),
+    )]
+
+
 # ---------------------------------------------------------------------------
 # Poster
 
@@ -609,6 +662,8 @@ def slides_report(doc: Document) -> dict:
             "figures": len(page.images),
         })
         findings += _overflow_findings(page, region="slide")
+        findings += _figure_over_text_findings(page, region="slide")
+        findings += _raw_math_findings(page, region="slide")
         if smallest is not None and smallest < SLIDE_MIN_PT - 0.5:
             findings.append(_finding(
                 "small_font", page.number, "slide",
@@ -672,6 +727,12 @@ def paper_report(doc: Document) -> dict:
                     f"A figure runs {over:.0f} pt into the margin.",
                     object="figure", overhang_pt=round(over, 1),
                 ))
+    last_lines = _last_page_text_lines(doc)
+    if len(doc.pages) >= 2 and last_lines <= 2:
+        findings.append(_finding(
+            "last_page_nearly_empty", doc.pages[-1].number, "last page",
+            f"The last page holds only {last_lines} line(s) of text; the rest of it is empty.",
+        ))
     return {
         "kind": "paper",
         "metrics": {
@@ -679,9 +740,35 @@ def paper_report(doc: Document) -> dict:
             "body_pt": body_pt,
             "text_block_pt": list(block) if block else None,
             "words": sum(line.words for line in lines),
+            "last_page_lines": last_lines,
         },
         "findings": findings,
     }
+
+
+def _last_page_text_lines(doc: Document) -> int:
+    """Lines of text on the last page. A running header or footer (a line in
+    the top or bottom 8% of the page at a height that recurs on another page)
+    and a bare page number there are not counted."""
+    def in_margin(line: Line, page: Page) -> bool:
+        band = 0.08 * page.height
+        return line.box[3] < band or line.box[1] > page.height - band
+
+    heights: Counter[int] = Counter()
+    for page in doc.pages:
+        heights.update({round(line.box[1]) for line in page.lines if line.visible and in_margin(line, page)})
+    last = doc.pages[-1]
+    count = 0
+    for line in last.lines:
+        if not line.visible:
+            continue
+        if in_margin(line, last) and (
+            line.text.strip().isdigit()
+            or any(heights[y] >= 2 for y in range(round(line.box[1]) - 1, round(line.box[1]) + 2))
+        ):
+            continue
+        count += 1
+    return count
 
 
 def _shared_edges(lines: Sequence[Line]) -> tuple[float, float] | None:

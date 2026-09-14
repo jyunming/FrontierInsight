@@ -125,6 +125,34 @@ section img {
   height: auto !important;
 }
 
+/* A figure takes only the room left under its slide's text. The 48vh cap
+   alone let a figure under a long text run off the bottom, taking a caption
+   below it along. So a slide with a figure paragraph lays out as a column
+   in which that paragraph, and only it, shrinks. The pipeline puts every
+   figure in its own paragraph (generation/slides.py), so a caption keeps
+   its full height. Flex items do not collapse margins; the margin rules
+   keep the text above a figure where it is on any other slide. */
+section:has(> p > img) {
+  display: flex;
+  flex-direction: column;
+}
+section:has(> p > img) > * + * { margin-top: 0; }
+section:has(> p > img) > :is(ul, ol) > li:first-child { margin-top: 0; }
+section:has(> p > img) > :is(ul, ol) > li:last-child { margin-bottom: 0; }
+section:has(> p > img) > p:has(> img) {
+  flex: 0 1 auto;
+  min-height: 0;
+  /* Its flex basis is the figure's uncapped height, since a percentage cap
+     does not count while sizing; without this cap the paragraph grows to
+     fill the slide under a short text. */
+  max-height: 48vh;
+  margin-block: 0.45em;
+}
+section:has(> p > img) > p > img {
+  max-height: min(48vh, 100%);
+  margin-block: 0;
+}
+
 /* ---- Tables ---------------------------------------------------------- */
 section table { font-size: 0.86em; border-collapse: collapse; }
 section th {
@@ -200,9 +228,11 @@ section.lead p {
 /* ---- References slide ----------------------------------------------- */
 /* Auto-appended `## References` + numbered list, and the `## Further reading`
    list of web pages after it — keep both compact + mono so many sources fit,
-   with teal numerals. */
-section:has(h2#references) ol,
-section:has(h2#further-reading) ul,
+   with teal numerals. A long list continues under "References (continued)" /
+   "Further reading (continued)", whose heading ids start with the same slug,
+   so the id-prefix selectors style those slides the same way. */
+section:has(h2[id^="references"]) ol,
+section:has(h2[id^="further-reading"]) ul,
 section:has(h2 + ol) ol {
   font-family: var(--mono);
   font-size: 0.6em;
@@ -211,9 +241,9 @@ section:has(h2 + ol) ol {
   columns: 2;
   column-gap: 2.4em;
 }
-section:has(h2#references) li::marker,
-section:has(h2#further-reading) li::marker,
+section:has(h2[id^="references"]) li::marker,
+section:has(h2[id^="further-reading"]) li::marker,
 section:has(h2 + ol) li::marker { color: var(--accent); }
-section:has(h2#references) a,
-section:has(h2#further-reading) a,
+section:has(h2[id^="references"]) a,
+section:has(h2[id^="further-reading"]) a,
 section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }
