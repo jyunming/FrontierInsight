@@ -447,8 +447,9 @@ async def _run_cli(
             *argv,
             cwd=str(cwd),
             # Marp reads stdin until it closes, even when given a file. A
-            # quest started with an open stdin pipe (the web launcher, a
-            # background shell) left Marp waiting until the 120 s timeout.
+            # quest whose stdin is an open pipe (a background shell; the web
+            # launcher passes on the server's stdin) left Marp waiting until
+            # the 120 s timeout.
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

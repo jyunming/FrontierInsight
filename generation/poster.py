@@ -599,8 +599,10 @@ def _double_latex_backslashes(s: str) -> str:
 
 # LaTeX commands that begin with ``n``: anything else after ``\n`` is a newline.
 _LATEX_N_COMMANDS = frozenset({
-    "nabla", "ne", "neq", "newline", "newpage", "noindent", "nonumber",
-    "normalsize", "not", "notin", "nu",
+    "nabla", "natural", "ne", "nearrow", "neg", "neq", "newcommand", "newline",
+    "newpage", "nexists", "ngeq", "ni", "nleftarrow", "nleq", "nmid",
+    "noindent", "nolinebreak", "nonumber", "normalsize", "not", "notin",
+    "nparallel", "nrightarrow", "nsubseteq", "nu", "nwarrow",
 })
 
 

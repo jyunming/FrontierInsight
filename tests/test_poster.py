@@ -574,6 +574,7 @@ def test_lenient_json_keeps_latex_backslashes_the_model_left_single() -> None:
         "\\textbf{A}\n\\begin{itemize}\\item 50\\% \\frac{1}{2}\\end{itemize}"
     )
     assert parsed["right"] == "\\textbf{B}\nNext line \u00e9 \\noindent \\times"
+    assert _lenient_json(r'{"t": "$\neg x \nleq y$"}')["t"] == "$\\neg x \\nleq y$"
 
 
 @pytest.mark.asyncio
@@ -608,6 +609,7 @@ def test_literal_newlines_from_doubled_json_become_line_breaks() -> None:
         "\\textbf{A}\n\\includegraphics{f.png}"
     )
     assert fix(r"\noindent x \nabla y") == r"\noindent x \nabla y"
+    assert fix(r"$\neg x \nleq y$") == r"$\neg x \nleq y$"
     assert fix(r"line\\next") == r"line\\next"
 
 
