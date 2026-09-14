@@ -2166,6 +2166,32 @@ def estimate_cost_usd(
     return None
 
 
+def append_cost_row(
+    fi_dir: Path, *, node: str, model: str | None, usage: dict[str, Any] | None,
+) -> None:
+    """Append one model call to ``<fi_dir>/cost.jsonl`` as ``{ts, node,
+    model, usage, cost_usd}``. The engine's nodes and the output generators
+    (slides, poster, talk script, visual check) all write through here, so a
+    quest's log counts every call it made. A call without ``usage`` still gets
+    its row and is counted. Best-effort: a failed write is logged and never
+    stops the caller."""
+    model = model or ""
+    cost = None
+    if usage:
+        cost = estimate_cost_usd(
+            model,
+            int(usage.get("prompt_tokens", 0) or 0),
+            int(usage.get("completion_tokens", 0) or 0),
+        )
+    record = {"ts": time.time(), "node": node, "model": model, "usage": usage, "cost_usd": cost}
+    try:
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        with (fi_dir / "cost.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError as e:
+        _log.debug("[cost] failed to write cost.jsonl: %r", e)
+
+
 class LLMClient:
     """Thin async wrapper that speaks OpenAI Chat Completions.
 

@@ -34,6 +34,7 @@ from core.provider import (
     ImageInputUnsupported,
     LLMClient,
     ProxySupervisor,
+    append_cost_row,
     image_part,
     model_for_node,
     resolve_endpoint_async,
@@ -164,7 +165,7 @@ async def _check(
     )
     message = {"role": "user", "content": [{"type": "text", "text": prompt}, *(image_part(data) for data in images)]}
     try:
-        reply = await _ask(config, [message], supervisor)
+        reply = await _ask(config, [message], supervisor, quest_root)
     except ImageInputUnsupported as exc:
         return {**result, "transport": "measurements only", "reason": str(exc)}
     result["transport"] = "images"
@@ -186,18 +187,22 @@ _KIND_NAMES = {
 }
 
 
-async def _ask(config: Config, messages: list[dict[str, Any]], supervisor: ProxySupervisor | None) -> str:
+async def _ask(
+    config: Config, messages: list[dict[str, Any]], supervisor: ProxySupervisor | None, quest_root: Path,
+) -> str:
     own_supervisor = supervisor is None
     sup = supervisor or ProxySupervisor()
     endpoint = await resolve_endpoint_async(config.provider, sup)
     client = LLMClient(endpoint)
     try:
-        return await client.chat(
+        reply = await client.chat(
             messages,
             temperature=0.0,
             model=model_for_node(config.provider.node_models, "visual_check"),
             node="visual_check",
         )
+        append_cost_row(quest_root / ".fi", node="visual_check", model=client.last_model, usage=client.last_usage)
+        return reply
     finally:
         await client.aclose()
         if config.provider.name in PROXY_PROVIDERS:

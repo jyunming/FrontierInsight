@@ -51,7 +51,7 @@ async def test_the_exported_pptx_is_checked_as_a_slide_deck_under_its_own_name(t
         exports.append((pptx, out_dir))
         return _exported_pdf(out_dir), ""
 
-    async def model(config, messages, supervisor):  # noqa: ANN001
+    async def model(config, messages, supervisor, quest_root):  # noqa: ANN001
         prompts.append(messages[0]["content"][0]["text"])
         return json.dumps({"findings": []})
 
