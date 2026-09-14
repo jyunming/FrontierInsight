@@ -83,6 +83,12 @@ pypandoc_binary>=1.13
 python-pptx>=0.6.23
 pillow>=10.0
 
+# Reads the rendered PDFs: `generation/_pdf_measure.py` takes font sizes, text
+# and figure positions from paper.pdf / slides.pdf / poster.pdf and renders the
+# page screenshots for the visual check. BSD/Apache licensed, wheels for every
+# platform, no system binary.
+pypdfium2>=4.30
+
 # ---- Dev / test ----------------------------------------------------------
 # Used by `python -m pytest`. Not strictly required for runtime FI usage.
 

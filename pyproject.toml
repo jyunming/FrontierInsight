@@ -81,9 +81,14 @@ dependencies = [
   #                   python-pptx pulls it transitively, but a direct import
   #                   riding a transitive dep is one resolver change from
   #                   breaking.
+  #   pypdfium2    -> generation/_pdf_measure.py reads font sizes, text and
+  #                   figure positions out of the rendered PDFs and takes the
+  #                   page screenshots for the visual check. BSD/Apache
+  #                   licensed, wheels for every platform.
   "python-pptx>=0.6.23",
   "pypandoc_binary>=1.13",
   "pillow>=10.0",
+  "pypdfium2>=4.30",
 ]
 
 [project.optional-dependencies]
