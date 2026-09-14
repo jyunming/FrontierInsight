@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -511,6 +512,49 @@ def test_escape_latex_text_specials() -> None:
     assert esc(r"keep \& and \% intact") == r"keep \& and \% intact"
     assert esc(r"$x^2$ \textbf{bold}") == r"$x^2$ \textbf{bold}"
     assert esc("") == ""
+
+
+def test_strip_column_commands_keeps_column_lengths() -> None:
+    """A bare ``\\column`` inside the template's column stops pdflatex with
+    'Missing number'; ``\\columnwidth`` and ``\\columnsep`` are real lengths."""
+    from generation.poster import _strip_column_commands as strip
+    assert strip("\\column\n\\textbf{Results}") == "\n\\textbf{Results}"
+    assert strip(r"\column{0.47\linewidth}\textbf{A}") == r"\textbf{A}"
+    assert strip(r"\includegraphics[width=\columnwidth]{f.png}") == (
+        r"\includegraphics[width=\columnwidth]{f.png}"
+    )
+    assert strip(r"\setlength{\columnsep}{1em}") == r"\setlength{\columnsep}{1em}"
+    assert strip("") == ""
+
+
+@pytest.mark.asyncio
+async def test_poster_strips_column_commands_from_llm_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real gemma4 poster began both columns with ``\\column`` and failed to
+    compile; the generator removes them before substituting the template."""
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    payload = {
+        "title": "T",
+        "left": "\\column\n\\textbf{Left header}",
+        "right": "  \\column\n\\textbf{Right header}",
+    }
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(payload)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert r"\textbf{Left header}" in tex
+    assert r"\textbf{Right header}" in tex
+    assert re.search(r"\\column(?![A-Za-z])", tex) is None
 
 
 def test_cleanup_poster_artifacts_success_keeps_pdf_and_tex(tmp_path: Path) -> None:

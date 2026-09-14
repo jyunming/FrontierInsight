@@ -70,6 +70,18 @@ def _escape_latex_text_specials(s: str) -> str:
     return _LATEX_TEXT_SPECIAL_RE.sub(r"\\\1", s or "")
 
 
+# The template already wraps each LLM column in ``\begin{column}{…}``. A stray
+# beamer ``\column`` inside it reads the next token as a width and stops
+# pdflatex with "Missing number, treated as zero". ``(?![A-Za-z])`` keeps
+# ``\columnwidth`` / ``\columnsep``; an optional ``{width}`` goes with it.
+_BARE_COLUMN_RE = _re.compile(r"\\column(?![A-Za-z])(?:[ \t]*\{[^{}]*\})?")
+
+
+def _strip_column_commands(s: str) -> str:
+    """Remove ``\\column`` commands an LLM writes into a poster column."""
+    return _BARE_COLUMN_RE.sub("", s or "")
+
+
 # LaTeX scratch pdflatex/tectonic leave next to poster.pdf — pure compile
 # byproducts. We delete them once we have the PDF so the quest dir holds the
 # deliverables (poster.pdf + poster.tex), not a pile of poster.aux/.out/…
@@ -328,8 +340,8 @@ class PosterGenerator:
         # substitute()'s strict placeholder matcher.
         body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
             title=_escape_latex_text_specials(title),
-            left=_escape_latex_text_specials(parsed.get("left") or ""),
-            right=_escape_latex_text_specials(parsed.get("right") or ""),
+            left=_escape_latex_text_specials(_strip_column_commands(parsed.get("left") or "")),
+            right=_escape_latex_text_specials(_strip_column_commands(parsed.get("right") or "")),
             references=references_tex,   # already LaTeX-escaped by build step
             brandlogo=brandlogo,
         )
