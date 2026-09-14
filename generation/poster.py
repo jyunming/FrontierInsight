@@ -88,6 +88,9 @@ _FIGURE_STEP = 0.05
 # Columns planned to end within this of each other; the measurement flags
 # 5 cm or more.
 _BALANCE_CM = 3.0
+# A compile that measures this much more column room than the plan assumed
+# is planned again for the measured room.
+_MORE_ROOM_CM = 3.0
 # Room kept free when planning, for estimates that run a little short.
 _PLAN_ROOM = 0.97
 # The share of the sheet's height the columns get before a compile has
@@ -564,7 +567,10 @@ class _Layout:
         self.trimmed = 0
         self.dropped = 0
         self.groups: list[list[int]] = []
-        self.plan(_FIRST_GUESS_ROOM * sheet.height_cm * _PT_PER_CM)
+        # The header and band heights are only known once the sheet is
+        # compiled, so the first plan never cuts content to fit a guess;
+        # a measured spill or measured room decides.
+        self.plan(_FIRST_GUESS_ROOM * sheet.height_cm * _PT_PER_CM, cut=False)
 
     # -- estimates ---------------------------------------------------------
 
@@ -629,14 +635,15 @@ class _Layout:
             for start, end in _partition(heights, self.sheet.columns)
         ]
 
-    def plan(self, available: float) -> None:
+    def plan(self, available: float, *, cut: bool = True) -> None:
         """Place the blocks for columns of ``available`` points.
 
         Both whole sections and heading-and-block units are tried, with
         figures narrowed only in a column that is over. Whole sections win
         unless splitting them evens the columns out by a clear margin.
-        Content is cut only when neither fits. Short columns are then
-        carried down with extra space."""
+        Content is cut only when neither fits and ``cut`` allows it. Short
+        columns are then carried down with extra space."""
+        self.available = available
         limit = self.room * available
         margin = 2 * _BALANCE_CM * _PT_PER_CM
         while True:
@@ -653,7 +660,7 @@ class _Layout:
             if sections_fit and (not units_fit or sections_gap <= units_gap + margin):
                 self.groups, self.widths = sections
                 break
-            if units_fit or not self._cut():
+            if units_fit or not cut or not self._cut():
                 self.groups, self.widths = units
                 break
         self._spread(limit)
@@ -931,6 +938,7 @@ class PosterGenerator:
                 await sup.release(self.config.provider.name)
             if own_supervisor:
                 await sup.shutdown()
+        self._write_reply(out_dir, text)
         parsed = _lenient_json(text) or {}
 
         # The headline is the finding; the paper's own H1 goes under it. A
@@ -1049,10 +1057,19 @@ class PosterGenerator:
             report = poster_report(doc, columns=sheet.columns, header_terms=author_terms)
             checks = {f["check"] for f in report["findings"]}
             spilled = bool(checks & {"overflow", "band_overlap"})
-            if compiles >= _MAX_COMPILES or not (spilled or "column_balance" in checks):
+            if compiles >= _MAX_COMPILES or not (spilled or checks & {"column_balance", "empty_space"}):
                 break
             heights, available = _measured_columns(doc, report, sheet)
             if heights is None:
+                break
+            # The sheet measured more room than the plan assumed: plan again
+            # for the real room, so figures take their full width and the
+            # columns reach the band.
+            more_room = (
+                not spilled and "empty_space" in checks
+                and available - layout.available > _MORE_ROOM_CM * _PT_PER_CM
+            )
+            if not (spilled or more_room or "column_balance" in checks):
                 break
             candidate = copy.deepcopy(layout)
             candidate.rescale(heights)
@@ -1063,12 +1080,12 @@ class PosterGenerator:
                 candidate.plan(available)
             if candidate.signature() == layout.signature():
                 break
-            if not spilled and candidate.planned_gap() > max(heights) - min(heights) - 2 * _PT_PER_CM:
+            if not (spilled or more_room) and candidate.planned_gap() > max(heights) - min(heights) - 2 * _PT_PER_CM:
                 break  # another compile would not even the columns out noticeably
             layout = candidate
             _log.info(
                 "poster.pdf: compile %d measured %s; re-planned (figure widths %s, %d cut, %d dropped)",
-                compiles, ", ".join(sorted(checks & {"overflow", "band_overlap", "column_balance"})),
+                compiles, ", ".join(sorted(checks & {"overflow", "band_overlap", "column_balance", "empty_space"})),
                 [w for w, b in zip(layout.widths, layout.blocks) if b.kind == "figure"],
                 layout.trimmed, layout.dropped,
             )
@@ -1196,6 +1213,17 @@ class PosterGenerator:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(fit, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            _log.info("poster.pdf: could not write %s (%r)", path, exc)
+
+    @staticmethod
+    def _write_reply(out_dir: Path, text: str) -> None:
+        """Keep the model's reply next to the fit report, so a layout can be
+        replayed without another model call."""
+        path = out_dir / ".fi" / "poster_reply.txt"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text or "", encoding="utf-8")
         except OSError as exc:
             _log.info("poster.pdf: could not write %s (%r)", path, exc)
 

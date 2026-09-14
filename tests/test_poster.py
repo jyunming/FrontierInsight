@@ -523,6 +523,7 @@ def test_plan_cuts_lists_and_sentences_but_never_the_opening_or_closing_block() 
         _Block("heading", text="What it means"), _Block("text", text=_sentences(10)),
     ]
     layout = _Layout(A1, blocks, {}, {})
+    assert layout.trimmed == layout.dropped == 0  # never cut to fit the first guess
     available = 40 * PT_PER_CM
     layout.plan(available)
     assert max(layout.column_heights()) <= available
@@ -583,8 +584,12 @@ def test_rescale_learns_from_the_measured_column_without_its_added_space() -> No
 def _fake_compile(monkeypatch: pytest.MonkeyPatch, engine=("pdflatex", "/fake/pdflatex")) -> list[dict]:
     monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: engine)
     runs: list[dict] = []
+    real_run = subprocess.run
 
     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        # Only the compile is faked; the patch is on the shared module.
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **kwargs)
         cwd = Path(kwargs.get("cwd") or ".")
         runs.append({"cmd": list(cmd), "tex": (cwd / "poster.tex").read_text(encoding="utf-8")})
         (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
@@ -660,8 +665,45 @@ async def test_a_poster_that_measures_clean_compiles_once(
     runs = _fake_compile(monkeypatch)
     monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
     monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: _report("empty_space"))
+    # The sheet measures about the room the first plan assumed (52 cm).
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([30 * PT_PER_CM, 30 * PT_PER_CM], 53 * PT_PER_CM),
+    )
     await _generate(tmp_path, monkeypatch, _reply())
     assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_more_room_than_planned_replans_without_cutting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    reports = iter([_report("empty_space"), _report()])
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: next(reports))
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([30 * PT_PER_CM, 30 * PT_PER_CM], 60 * PT_PER_CM),
+    )
+    planned: list[tuple[float, bool]] = []
+    plan = poster_mod._Layout.plan
+
+    def recording_plan(self, available, **kw):  # type: ignore[no-untyped-def]
+        planned.append((round(available / PT_PER_CM, 1), kw.get("cut", True)))
+        return plan(self, available, **kw)
+
+    monkeypatch.setattr(poster_mod._Layout, "plan", recording_plan)
+    # A plan for other room reads as a new layout, whatever the estimates.
+    monkeypatch.setattr(poster_mod._Layout, "signature", lambda self: round(self.available))
+    reply = _reply()
+    result, art = await _generate(tmp_path, monkeypatch, reply)
+    first_guess = round(poster_mod._FIRST_GUESS_ROOM * A1.height_cm, 1)
+    assert planned == [(first_guess, False), (60.0, True)]
+    assert len(runs) == 2
+    fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
+    assert fit["compiles"] == 2 and fit["trimmed"] == 0 and fit["dropped_blocks"] == 0
+    assert (art.quest_root / ".fi" / "poster_reply.txt").read_text(encoding="utf-8") == json.dumps(reply)
 
 
 def test_measured_columns_count_spilled_text_but_not_the_reference_list() -> None:
@@ -739,8 +781,13 @@ async def test_poster_falls_back_to_tectonic_when_pdflatex_missing(
         return "/fake/tectonic.exe" if name == "tectonic" else None
     monkeypatch.setattr(poster_mod.shutil, "which", fake_which)
     captured_cmd: list[str] = []
+    real_run = subprocess.run
 
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        # The patch is on the shared subprocess module, so other callers
+        # (platform's ``ver`` lookup on Windows) reach it too.
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **_kwargs)
         captured_cmd[:] = list(cmd)
         cwd = Path(_kwargs.get("cwd") or ".")
         (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
@@ -803,8 +850,11 @@ async def test_poster_uses_same_engine_discovery_as_paper(
     sentinel = ("tectonic", "/sentinel/tectonic.exe")
     monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: sentinel)
     captured: list[list[str]] = []
+    real_run = subprocess.run
 
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **_kwargs)
         captured.append(list(cmd))
         (Path(_kwargs.get("cwd") or ".") / "poster.pdf").write_bytes(b"%PDF-fake\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")

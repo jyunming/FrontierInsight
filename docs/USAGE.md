@@ -417,8 +417,11 @@ paper onto a page.
   never a raw URL. A poster that cites nothing lists five selected sources.
 - **Fitting:** FI plans the columns from estimated block heights, compiles
   the poster, and measures the PDF. Each measurement corrects the plan.
-  When content runs off the sheet or into the reference band, FI cuts in
-  this order, stopping as soon as it fits:
+  The header and reference band are only known after the first compile, so
+  that first plan never cuts content. When a compile measures more room
+  than the plan assumed, FI plans again for the measured room. When
+  content runs off the sheet or into the reference band, FI cuts in this
+  order, stopping as soon as it fits:
   1. Figures narrow, down to 70% width.
   2. The longest list loses its last items.
   3. The longest text loses its last sentences.
@@ -430,7 +433,7 @@ paper onto a page.
 - **Report:** `.fi/poster_fit.json` in the quest folder records the sheet,
   the number of compiles, the figure widths, what was cut, the final
   measurements, and any findings still open (for example, columns that end
-  a few centimetres apart).
+  a few centimetres apart). `.fi/poster_reply.txt` keeps the model's reply.
 - **Chinese, Japanese or Korean** text on the poster compiles with XeLaTeX
   and a CJK font, as for the paper. Without either, the poster is skipped
   with a `cjk_no_xelatex` or `cjk_no_font` diagnostic.
