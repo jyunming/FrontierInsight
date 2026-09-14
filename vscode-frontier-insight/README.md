@@ -507,7 +507,7 @@ Approximate per-quest burn:
 - Full panel (3 personas + moderator) + clarify-auto: ~18 premium requests
 - Worst case (panel + re_experiment + 2 revise iterations): ~30+
 - No-simulation quest (skips `implement → execute → execute_reflect`): ~6 premium requests — the saving comes from cutting the implement/execute self-correction loop entirely.
-- Outputs add one request each for the slide deck, poster and talk script. With the visual check on, each checked output (paper, slides, pptx, poster) adds one more, and a slides or poster redo adds two. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
+- Outputs add one request each for the slide deck, poster and talk script. A slides or poster redo after the visual check adds one more. With `output.visual_check_ai: true`, each checked output (paper, slides, pptx, poster) and each redo's new check add one more as well. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
 
 On Copilot Pro (~300 premium requests/month) you can run ~15–30 quests
 a month depending on configuration. On Business / Enterprise the
