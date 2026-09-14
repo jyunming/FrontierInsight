@@ -242,6 +242,25 @@ def test_slides_report_finds_cut_off_text_and_tiny_text_on_the_right_slide(tmp_p
     assert report["metrics"]["pages"] == 4
 
 
+def test_slides_report_finds_a_figure_drawn_over_text(tmp_path):
+    bullets = [
+        ("text", "A slide title", 40, 60, 460, True),
+        ("text", "First bullet above the figure", 25, 60, 380, False),
+        ("text", "Second bullet above the figure", 25, 60, 340, False),
+        ("text", "Third bullet the figure covers", 25, 60, 300, False),
+    ]
+    # The pptx deck of the validation quest: the figure's top edge sat on the
+    # third bullet.
+    covering = bullets + [("image", 40, 60, 700, 318)]
+    below = bullets + [("image", 297, 40, 663, 285)]
+    # A full-slide background behind the text is not a figure over it.
+    background = bullets + [("image", 0, 0, 960, 540)]
+    path = _pdf(tmp_path, [(*SLIDE, covering), (*SLIDE, below), (*SLIDE, background)])
+    findings = [f for f in slides_report(measure_pdf(path))["findings"] if f["check"] == "overlap"]
+    assert [(f["page"], f["severity"], f["lines_covered"]) for f in findings] == [(1, "high", 1)]
+    assert "Third bullet the figure covers" in findings[0]["problem"]
+
+
 def test_paper_report_finds_a_line_running_into_the_margin(tmp_path):
     justified = "x" * 70  # the same text gives every line the same right edge
     page1 = _column(72, 760, 80, 10, justified, 14)

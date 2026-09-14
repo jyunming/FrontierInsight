@@ -223,24 +223,32 @@ _PARA_PT, _BULLET_PT, _SUB_BULLET_PT = 17.0, 16.5, 15.0
 _MIN_BODY_SCALE = 0.55
 
 
+def _body_height(s: "Slide", width_in: float, k: float) -> float:
+    """Estimated height (inches) of a slide's paragraphs and bullets at body
+    scale ``k``, by the wrap estimate."""
+    h = 0.0
+    for text in s.paras:
+        size = _PARA_PT * k
+        h += _estimate_lines(text, width_in, size) * size * 1.32 / 72 + 9 * k / 72
+    for level, text in s.bullets:
+        size = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k
+        h += _estimate_lines("•  " + text, width_in, size) * size * 1.30 / 72 + 8 * k / 72
+    return h
+
+
 def _body_scale(s: "Slide", width_in: float, avail_h: float) -> float:
     """The factor (at most 1) that fits a slide's paragraphs and bullets into
     ``avail_h`` by the wrap estimate. A twelve-entry References or Further
     reading slide at full size otherwise ran inches past the slide bottom."""
-    def height(k: float) -> float:
-        h = 0.0
-        for text in s.paras:
-            size = _PARA_PT * k
-            h += _estimate_lines(text, width_in, size) * size * 1.32 / 72 + 9 * k / 72
-        for level, text in s.bullets:
-            size = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k
-            h += _estimate_lines("•  " + text, width_in, size) * size * 1.30 / 72 + 8 * k / 72
-        return h
-
     k = 1.0
-    while k > _MIN_BODY_SCALE and height(k) > avail_h:
+    while k > _MIN_BODY_SCALE and _body_height(s, width_in, k) > avail_h:
         k = round(k - 0.05, 2)
     return max(k, _MIN_BODY_SCALE)
+
+
+# A figure under a slide's text keeps at least this much height; the text
+# shrinks before the figure does. The gap separates the two.
+_FIG_MIN_IN, _FIG_GAP_IN = 2.2, 0.2
 
 
 def _textbox(slide, x, y, w, h):
@@ -400,9 +408,16 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
 
     body_top = max(y, 2.15)
     avail_h = SLIDE_H_IN - body_top - 0.85
+    block_img = (
+        _resolve_image(s.image, figures_dir) if s.image and s.image_mode == "block" else None
+    )
+    body_h = 0.0
     if s.bullets or s.paras:
-        tf = _textbox(slide, MARGIN_IN, body_top, text_w, avail_h)
-        k = _body_scale(s, text_w, avail_h)
+        # A figure goes under the text, so the text fits into what is left
+        # above the figure's minimum height.
+        k = _body_scale(s, text_w, avail_h - (_FIG_MIN_IN + _FIG_GAP_IN if block_img else 0.0))
+        body_h = _body_height(s, text_w, k)
+        tf = _textbox(slide, MARGIN_IN, body_top, text_w, min(body_h, avail_h) if block_img else avail_h)
         first = True
         for text in s.paras:
             p = tf.paragraphs[0] if first else tf.add_paragraph()
@@ -444,14 +459,15 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
             r.font.size, r.font.name = Pt(11), MONO
             r.font.color.rgb = _rgb((0xE6, 0xE9, 0xEE))
 
-    if s.image and s.image_mode == "block":
-        img = _resolve_image(s.image, figures_dir)
-        if img:
-            top = body_top if not (s.bullets or s.paras) else body_top + 1.6
-            _fit_picture(
-                slide, img, MARGIN_IN, top, text_w,
-                max(1.5, SLIDE_H_IN - top - 0.85),
-            )
+    if block_img:
+        # Under the text's estimated height, not at a fixed offset: a fixed
+        # 1.6 in put the figure over the third bullet of a slide with a lead
+        # line and three bullets.
+        top = body_top + body_h + _FIG_GAP_IN if body_h else body_top
+        _fit_picture(
+            slide, block_img, MARGIN_IN, top, text_w,
+            max(1.5, SLIDE_H_IN - top - 0.85),
+        )
 
     _footer(slide, page, dark=False)
 

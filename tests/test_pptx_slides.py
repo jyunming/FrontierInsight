@@ -177,3 +177,93 @@ def test_empty_deck_returns_false(tmp_path: Path) -> None:
     md = tmp_path / "slides.md"
     md.write_text("---\nmarp: true\n---\n", encoding="utf-8")
     assert render_marp_to_pptx(md, tmp_path / "o.pptx") is False
+
+
+# Slide 5 of the validation quest's deck: a lead line, three bullets (one
+# wrapping) and a figure under them. The figure used to sit a fixed 1.6 in
+# under the body top, on the third bullet.
+FIGURE_DECK = """---
+marp: true
+theme: fi
+---
+
+## Numerical schemes successfully capture exponential decay
+
+**Both RK4 and Velocity-Verlet accurately track the system's dissipative energy loss.**
+
+- The system follows an analytical decay curve for the energy of the damped oscillator.
+- Figure 2 shows that both stable methods avoid the catastrophic energy growth seen in Forward Euler.
+- The aggregate relative energy error remains low for both methods over the simulation interval.
+- Velocity-Verlet keeps its error bounded while Forward Euler grows without limit.
+
+![w:800](figures/energy.png)
+
+---
+
+## A figure alone
+
+![w:800](figures/energy.png)
+
+---
+
+## Many points above a figure
+
+- Point one with enough words to fill most of a line on this slide here.
+- Point two with enough words to fill most of a line on this slide here.
+- Point three with enough words to fill most of a line on this slide here.
+- Point four with enough words to fill most of a line on this slide here.
+- Point five with enough words to fill most of a line on this slide here.
+- Point six with enough words to fill most of a line on this slide here.
+- Point seven with enough words to fill most of a line on this slide here.
+
+![w:800](figures/energy.png)
+"""
+
+
+def _figure_deck(tmp_path: Path) -> Path:
+    from PIL import Image, ImageDraw
+
+    figures = tmp_path / "figures"
+    figures.mkdir()
+    chart = Image.new("RGB", (1500, 900), "white")
+    ImageDraw.Draw(chart).rectangle((40, 40, 1460, 860), outline="black", width=8)
+    chart.save(figures / "energy.png")
+    md = tmp_path / "slides.md"
+    md.write_text(FIGURE_DECK, encoding="utf-8")
+    out = tmp_path / "slides.pptx"
+    assert render_marp_to_pptx(md, out, figures_dir=figures) is True
+    return out
+
+
+def test_a_figure_goes_under_the_text_it_follows(tmp_path: Path) -> None:
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    prs = Presentation(str(_figure_deck(tmp_path)))
+    slide = prs.slides[0]
+    picture = next(sh for sh in slide.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE)
+    body = next(sh for sh in slide.shapes if sh.has_text_frame and "aggregate relative" in sh.text_frame.text)
+    assert picture.top >= body.top + body.height
+    assert picture.top + picture.height <= prs.slide_height - int(0.85 * 914400)
+    assert picture.height >= int(2.0 * 914400), "the figure stays readable"
+    # With no text above it the figure starts where the body would.
+    alone = next(sh for sh in prs.slides[1].shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE)
+    assert alone.top < picture.top
+    # Seven points leave no room at full size: the text shrinks, and the
+    # figure keeps its minimum height above the footer.
+    crowded = next(sh for sh in prs.slides[2].shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE)
+    assert crowded.top + crowded.height <= prs.slide_height - int(0.85 * 914400)
+    assert crowded.height >= int(2.0 * 914400)
+
+
+@pytest.mark.slow
+def test_the_exported_deck_has_no_figure_over_its_text(tmp_path: Path) -> None:
+    from generation._office_pdf import find_libreoffice, pptx_to_pdf
+    from generation._pdf_measure import measure_pdf, slides_report
+
+    if find_libreoffice() is None:
+        pytest.skip("LibreOffice is not installed")
+    pdf, reason = pptx_to_pdf(_figure_deck(tmp_path), tmp_path / "export")
+    assert pdf is not None, reason
+    report = slides_report(measure_pdf(pdf))
+    assert [f for f in report["findings"] if f["check"] in ("overlap", "overflow")] == []

@@ -358,6 +358,34 @@ def _overflow_findings(page: Page, *, region: str = "page") -> list[dict]:
     return found
 
 
+def _figure_over_text_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """Text a figure is drawn over, one finding per figure. The pptx placed a
+    figure over a slide's third bullet, and only the model's look at the
+    screenshot noticed. A line the figure covers by more than half its height
+    cannot be read: high."""
+    found = []
+    for image in page.images:
+        if image[2] - image[0] >= 0.9 * page.width or image[3] - image[1] >= 0.9 * page.height:
+            continue  # a full-bleed decoration sits behind everything
+        covered = []
+        for line in page.lines:
+            if not line.visible:
+                continue
+            across = min(line.box[2], image[2]) - max(line.box[0], image[0])
+            down = min(line.box[3], image[3]) - max(line.box[1], image[1])
+            if across > 2.0 and down > 2.0:
+                covered.append((line, down / max(1.0, line.box[3] - line.box[1])))
+        if covered:
+            count = f"{len(covered)} lines of text" if len(covered) > 1 else "a line of text"
+            found.append(_finding(
+                "overlap", page.number, region,
+                f"A figure is drawn over {count}, starting with \"{covered[0][0].text[:60]}\".",
+                "high" if any(share > 0.5 for _line, share in covered) else "medium",
+                lines_covered=len(covered),
+            ))
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Poster
 
@@ -609,6 +637,7 @@ def slides_report(doc: Document) -> dict:
             "figures": len(page.images),
         })
         findings += _overflow_findings(page, region="slide")
+        findings += _figure_over_text_findings(page, region="slide")
         if smallest is not None and smallest < SLIDE_MIN_PT - 0.5:
             findings.append(_finding(
                 "small_font", page.number, "slide",
