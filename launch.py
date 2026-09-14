@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.config import Config
-from core.engine import Engine, QuestArtifacts
+from core.engine import Engine, QuestArtifacts, write_cost_summary
 from core.provider import ProxySupervisor
 from generation.paper import PaperGenerator
 from generation.poster import PosterGenerator
@@ -1757,6 +1757,9 @@ async def _run_generators(
                 f"{', '.join(still_missing)} (toolchain issue? see "
                 f"<quest>/*_skipped.md)", file=sys.stderr,
             )
+    # The quest wrote its cost summary before this pass; the slides, poster,
+    # talk script and visual checks have logged their calls since.
+    write_cost_summary(art.quest_root / ".fi")
     return written
 
 

@@ -126,7 +126,7 @@ def _real_pdf(tmp_path: Path, text: str = "Results: the textbf command shows as 
 
 @pytest.mark.asyncio
 async def test_a_transport_without_images_leaves_a_measurements_only_report(tmp_path: Path, monkeypatch) -> None:
-    async def no_images(config, messages, supervisor):  # noqa: ANN001
+    async def no_images(config, messages, supervisor, quest_root):  # noqa: ANN001
         raise ImageInputUnsupported("gemini_cli cannot send images to its model")
 
     monkeypatch.setattr(vc, "_ask", no_images)
@@ -142,7 +142,7 @@ async def test_a_transport_without_images_leaves_a_measurements_only_report(tmp_
 async def test_the_model_sees_every_page_and_its_grounded_findings_are_reported(tmp_path: Path, monkeypatch) -> None:
     sent: list = []
 
-    async def model(config, messages, supervisor):  # noqa: ANN001
+    async def model(config, messages, supervisor, quest_root):  # noqa: ANN001
         sent.extend(messages)
         return "```json\n" + json.dumps({"findings": [_finding(quote="appears nowhere at all")]}) + "\n```"
 
@@ -159,7 +159,7 @@ async def test_the_model_sees_every_page_and_its_grounded_findings_are_reported(
 
 @pytest.mark.asyncio
 async def test_reports_for_several_outputs_share_one_file_and_a_broken_pdf_never_raises(tmp_path: Path, monkeypatch) -> None:
-    async def model(config, messages, supervisor):  # noqa: ANN001
+    async def model(config, messages, supervisor, quest_root):  # noqa: ANN001
         return json.dumps({"findings": []})
 
     monkeypatch.setattr(vc, "_ask", model)

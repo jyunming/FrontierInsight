@@ -63,6 +63,7 @@ from .provider import (
     LLMClient,
     PROXY_PROVIDERS,
     ProxySupervisor,
+    append_cost_row,
     model_for_node,
     resolve_endpoint_async,
 )
@@ -6804,24 +6805,7 @@ class Engine:
         Best-effort: a missing / unreadable cost.jsonl produces a
         summary with zeros; no exception bubbles out.
         """
-        try:
-            path = self.fi_dir / "cost.jsonl"
-            if not path.is_file():
-                return
-            rows: list[dict[str, Any]] = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-            summary = _aggregate_cost_rows(rows)
-            (self.fi_dir / "cost.summary.json").write_text(
-                json.dumps(summary, indent=2) + "\n", encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.debug("[cost] failed to write cost.summary.json: %r", e)
+        write_cost_summary(self.fi_dir)
 
     def _log_chat_cost(
         self, *, node: str,
@@ -6848,11 +6832,6 @@ class Engine:
         correct model.
         """
         assert self._client is not None
-        # Lazy-import: web UI quests touch this file every chat call;
-        # importing json + time once and keeping a bound reference at
-        # the function level is the same cost path most stdlib code
-        # uses. The provider module is the source of `estimate_cost_usd`.
-        from core.provider import estimate_cost_usd
         # Tolerate test stubs that pre-date the cost-tracking fields —
         # engine + test suite share dozens of fake LLMClient
         # implementations, and patching each one to add ``last_usage``
@@ -6864,30 +6843,7 @@ class Engine:
             usage = getattr(self._client, "last_usage", None)
         if model is None:
             model = getattr(self._client, "last_model", None) or ""
-        cost = None
-        if usage:
-            cost = estimate_cost_usd(
-                model,
-                int(usage.get("prompt_tokens", 0) or 0),
-                int(usage.get("completion_tokens", 0) or 0),
-            )
-        record = {
-            "ts": time.time(),
-            "node": node,
-            "model": model,
-            "usage": usage,
-            "cost_usd": cost,
-        }
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            with (self.fi_dir / "cost.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-        except OSError as e:
-            # Cost logging is best-effort — a disk-full or
-            # permission failure must NOT crash the quest. Log to the
-            # quest's own logger and move on; the chart will just
-            # show fewer rows.
-            self._log.debug("[cost] failed to write cost.jsonl: %r", e)
+        append_cost_row(self.fi_dir, node=node, model=model, usage=usage)
 
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node via the shared
@@ -7161,6 +7117,31 @@ class Engine:
 
 
 # ---- module-level helpers ------------------------------------------------
+
+
+def write_cost_summary(fi_dir: Path) -> None:
+    """Roll ``<fi_dir>/cost.jsonl`` up into ``<fi_dir>/cost.summary.json``
+    (schema in :meth:`Engine._write_cost_summary`). Quest finalization writes
+    it, and the output pass writes it again: the slides, poster, talk script
+    and visual checks come after the quest and log their calls too. A missing
+    log writes nothing; no exception bubbles out."""
+    path = fi_dir / "cost.jsonl"
+    try:
+        if not path.is_file():
+            return
+        rows: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        (fi_dir / "cost.summary.json").write_text(
+            json.dumps(_aggregate_cost_rows(rows), indent=2) + "\n", encoding="utf-8",
+        )
+    except OSError as e:
+        logging.getLogger("frontier_insight.engine").debug("[cost] failed to write cost.summary.json: %r", e)
 
 
 def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:

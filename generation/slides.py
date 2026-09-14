@@ -57,6 +57,7 @@ from core.provider import (
     LLMClient,
     ProxySupervisor,
     PROXY_PROVIDERS,
+    append_cost_row,
     model_for_node,
     resolve_endpoint_async,
 )
@@ -279,6 +280,7 @@ class SlideGenerator:
                 model=model_for_node(self.config.provider.node_models, "slides"),
                 node="slides",
             )
+            append_cost_row(art.quest_root / ".fi", node="slides", model=client.last_model, usage=client.last_usage)
         finally:
             await client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:
