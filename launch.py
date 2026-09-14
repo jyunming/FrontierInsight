@@ -31,6 +31,7 @@ from core.engine import Engine, QuestArtifacts
 from core.provider import ProxySupervisor
 from generation.paper import PaperGenerator
 from generation.poster import PosterGenerator
+from generation._visual_check import check_pdf
 from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
@@ -1468,6 +1469,23 @@ async def run_one(
             summary["source_failures"] = failures
             if failures.get("total"):
                 print(f"[FI] source failures: {failures.get('summary')}")
+    # The visual check's per-output result, for the web quest page.
+    visual_path = art.quest_root / ".fi" / "visual_check.json"
+    if visual_path.is_file():
+        try:
+            checks = json.loads(visual_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            checks = None
+        if isinstance(checks, dict):
+            summary["visual_check"] = {
+                kind: {
+                    "transport": report.get("transport"),
+                    "problems_seen": len(report.get("findings") or []),
+                    "problems_measured": len((report.get("measured") or {}).get("findings") or []),
+                    "reason": report.get("reason") or report.get("error"),
+                }
+                for kind, report in checks.items() if isinstance(report, dict)
+            }
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")
@@ -1541,6 +1559,19 @@ async def _emit_one(
     return 1
 
 
+def _visual_check_line(report: dict) -> str:
+    """One line for the CLI and the VSCode chat: how an output was checked
+    and what the check found."""
+    measured = len((report.get("measured") or {}).get("findings") or [])
+    seen = len(report.get("findings") or [])
+    reason = report.get("reason") or report.get("error") or ""
+    if report.get("transport") == "images":
+        return f"{seen} problem(s) seen on the pages, {measured} measured (.fi/visual_check.json)"
+    if report.get("transport") == "measurements only":
+        return f"measurements only ({reason}); {measured} measured problem(s)"
+    return f"not checked ({reason})"
+
+
 def _kind_final_output(art: QuestArtifacts, kind: str) -> list[Path]:
     """The FINAL rendered deliverable(s) for a configured output kind. A kind
     counts as already produced if any of these exists on disk. Intermediates
@@ -1606,6 +1637,7 @@ async def _run_generators(
     decks. Fresh runs (skip_existing=False) regenerate unconditionally, and
     ``--emit`` stays a force-regenerate path."""
     written: dict[str, Path] = {}
+    carried: set[str] = set()
     _apply_paper_venue_override(cfg, art)
 
     def _already(kind: str) -> Path | None:
@@ -1614,6 +1646,7 @@ async def _run_generators(
         existing = _existing_output(art, kind)
         if existing is not None:
             print(f"[FI] {kind}: {existing.name} already present — skipping regeneration")
+            carried.add(kind)
         return existing
 
     # 1) Paper (sync — pandoc shell-out is fine without async).
@@ -1669,6 +1702,17 @@ async def _run_generators(
             )
         except Exception as e:
             print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
+    # 5) Screenshot + AI check of each PDF this pass produced (a PDF carried
+    # through on a resume was checked when it was made).
+    if cfg.output.visual_check:
+        for kind, key, output_kind in (
+            ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),
+        ):
+            pdf = written.get(key)
+            if pdf is None or output_kind in carried:
+                continue
+            report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
+            print(f"[FI] visual check {kind}: {_visual_check_line(report)}")
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")
     # On a resume, surface any configured output still missing after the pass

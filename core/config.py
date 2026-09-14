@@ -1144,6 +1144,15 @@ class OutputConfig(BaseModel):
     # 48 x 36 in landscape in three; font sizes meet the published poster
     # minimums at every size.
     poster_size: Literal["a1_portrait", "a0_portrait", "landscape_48x36"] = "a1_portrait"
+    # After the outputs render, screenshot each PDF (paper, slides, poster),
+    # measure it, and ask the configured LLM provider to check the pages
+    # against a fixed checklist. The screenshots go to that provider. A
+    # provider that cannot take images leaves a measurements-only check. The
+    # report is .fi/visual_check.json; nothing here stops the quest.
+    visual_check: bool = True
+    # How many times an output may be redone after its check finds problems
+    # the redo can fix, before the findings are only reported.
+    visual_check_max_redos: int = Field(2, ge=0, le=2)
 
     @field_validator("author", "affiliation", "contact_email", "url", mode="before")
     @classmethod

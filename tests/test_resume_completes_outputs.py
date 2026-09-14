@@ -19,13 +19,25 @@ import launch as fi_launch
 from core.engine import QuestArtifacts
 
 
-def _cfg() -> SimpleNamespace:
+def _cfg(visual_check: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         output=SimpleNamespace(
             kinds=["paper_pdf", "slides", "poster", "speech"],
             require_pdf=False,
+            visual_check=visual_check,
         )
     )
+
+
+def _record_checks(monkeypatch) -> list[tuple[str, str]]:
+    checked: list[tuple[str, str]] = []
+
+    async def fake_check(cfg, kind, pdf, quest_root, *, supervisor):  # noqa: ANN001
+        checked.append((kind, pdf.name))
+        return {"kind": kind, "transport": "images", "findings": [], "measured": {"findings": []}}
+
+    monkeypatch.setattr(fi_launch, "check_pdf", fake_check)
+    return checked
 
 
 def _install_fake_generators(monkeypatch, calls: list[str]) -> None:
@@ -95,6 +107,37 @@ async def test_fresh_run_regenerates_everything(tmp_path: Path, monkeypatch):
         _cfg(), art, supervisor=MagicMock(), skip_existing=False,
     )
     assert calls == ["paper", "slides", "poster", "speech"]
+
+
+@pytest.mark.asyncio
+async def test_the_visual_check_runs_on_each_pdf_the_pass_made(tmp_path: Path, monkeypatch, capsys):
+    _install_fake_generators(monkeypatch, [])
+    checked = _record_checks(monkeypatch)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
+    await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock())
+    assert checked == [("paper", "paper.pdf"), ("slides", "slides.pdf"), ("poster", "poster.pdf")]
+    out = capsys.readouterr().out
+    assert "[FI] visual check poster: 0 problem(s) seen on the pages, 0 measured" in out
+
+
+@pytest.mark.asyncio
+async def test_a_resume_checks_only_the_outputs_it_made(tmp_path: Path, monkeypatch):
+    _install_fake_generators(monkeypatch, [])
+    checked = _record_checks(monkeypatch)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
+    (tmp_path / "paper.pdf").write_bytes(b"%PDF-1.5\n...\n%%EOF\n")
+    (tmp_path / "slides.pdf").write_bytes(b"%PDF-1.5\n...\n%%EOF\n")
+    await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock(), skip_existing=True)
+    assert checked == [("poster", "poster.pdf")]
+
+
+@pytest.mark.asyncio
+async def test_the_visual_check_can_be_turned_off(tmp_path: Path, monkeypatch):
+    _install_fake_generators(monkeypatch, [])
+    checked = _record_checks(monkeypatch)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
+    await fi_launch._run_generators(_cfg(visual_check=False), art, supervisor=MagicMock())
+    assert checked == []
 
 
 def test_existing_output_detects_final_deliverables(tmp_path: Path):
