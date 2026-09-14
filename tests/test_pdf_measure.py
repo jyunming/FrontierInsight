@@ -189,6 +189,9 @@ def test_slides_report_finds_cut_off_text_and_tiny_text_on_the_right_slide(tmp_p
     # Slide 5 of the gemma4 validation deck: the figure sat 2 pt below the
     # slide, and its frame and axis label lost their bottom edge.
     low_figure = ok + [("image", 297, -2, 663, 257)]
+    # The pptx accent bar as LibreOffice exports it: 3 pt past both sides,
+    # on purpose. Not a cut-off figure.
+    ok.append(("image", -3.1, 527.9, 963.1, 541.4))
     path = _pdf(tmp_path, [(*SLIDE, ok), (*SLIDE, cut), (*SLIDE, tiny), (*SLIDE, low_figure)])
     report = slides_report(measure_pdf(path))
     by_check = {(f["check"], f["page"]) for f in report["findings"]}

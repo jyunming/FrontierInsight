@@ -329,6 +329,11 @@ def _overflow_findings(page: Page, *, region: str = "page") -> list[dict]:
                 "high" if beyond > 0.25 * height else "medium",
             ))
     for image in page.images:
+        if image[2] - image[0] >= 0.9 * page.width or image[3] - image[1] >= 0.9 * page.height:
+            # A full-bleed decoration (a slide's accent bar, a background)
+            # is meant to run off the edge; LibreOffice exports the pptx
+            # accent bar 3 pt wider than the slide on each side.
+            continue
         beyond = _outside(image, page)
         if beyond > 1.0:
             found.append(_finding(
