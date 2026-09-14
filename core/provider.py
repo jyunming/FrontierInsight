@@ -490,6 +490,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         output_via="last_message_file",
         usage_extractor=lambda raw: _extract_codex_usage(raw),
         model_flag="-m",        # provider.model = "gpt-5.5"; default reads ~/.codex/config.toml
+        # `codex exec -i <file>` attaches an image to the prompt; checked with
+        # a test image, which it named correctly.
+        image_input="file_flag",
+        image_flag="-i",
         # codex `turn/start` rejects input over 1,048,576 chars with
         # ``input_too_large``. Sit ~150K under to leave room for codex's
         # own system prompt + tools schema. Hit by analyze/write on quests

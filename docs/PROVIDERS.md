@@ -65,7 +65,8 @@ The visual check (`output.visual_check`) sends page screenshots of the paper, sl
 - **HTTP providers** (`ollama`, `vllm`, `openai`, `gemini`, …) send the screenshots as image parts. The model itself must accept images; checked with `gemma4:31b-cloud` on Ollama.
 - **`claude_cli`** sends them inline in a stream-json turn. Checked with `haiku`.
 - **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input.
-- **`codex_cli`, `copilot_cli`, `gemini_cli`, `antigravity_cli`:** measurements only for now.
+- **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with the account's default model.
+- **`copilot_cli`, `gemini_cli`, `antigravity_cli`:** measurements only for now.
 
 ## Per-node model routing
 

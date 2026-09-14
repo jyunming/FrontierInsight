@@ -119,8 +119,9 @@ async def test_claude_gets_the_images_inline_in_a_stream_json_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_cli_with_an_image_flag_reads_temp_files_that_are_removed_afterwards() -> None:
-    spec = dataclasses.replace(_CLI_SPECS["codex_cli"], image_input="file_flag", image_flag="-i")
+async def test_codex_reads_the_images_from_temp_files_that_are_removed_afterwards() -> None:
+    spec = _CLI_SPECS["codex_cli"]
+    assert (spec.image_input, spec.image_flag) == ("file_flag", "-i")
     seen: dict[str, bytes] = {}
     paths: list[Path] = []
 
