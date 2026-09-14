@@ -2281,6 +2281,9 @@ class Engine:
                     attempt, stats.get("above_floor", 0),
                 )
         docs = filtered
+        # The original papers and textbooks a keyword search does not reach
+        # join the candidates, and the screen judges them like the rest.
+        docs = docs + await self._foundational_works(rel_topic, docs, work_scope=scope)
         # The floor scores word overlap; the screen asks whether the paper
         # could cite each source for a claim (see _screen_literature).
         docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
@@ -3173,9 +3176,11 @@ class Engine:
                 continue
             md = d.metadata or {}
             kind = "web page" if md.get("source") == "web_search" else "paper"
+            if md.get("foundational"):
+                kind = "foundational " + ("book" if md.get("work_type") in ("book", "book-chapter") else "paper")
             title = " ".join(str(md.get("title") or md.get("url") or "(untitled)").split())
             facts = ", ".join(
-                str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type")) if v
+                str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type"), md.get("foundational")) if v
             )
             excerpt = " ".join(str(d.content or "").split())[:300]
             lines.append(
@@ -3231,6 +3236,64 @@ class Engine:
             len(out), len(docs), {g: values.count(g) for g in sorted(set(values))},
         )
         return out
+
+    async def _foundational_works(
+        self, topic: str, docs: list, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list:
+        """Candidates a keyword search does not reach: the original papers and
+        standard textbooks of what a topic rests on. One call asks the model
+        for up to five, each is looked up by title in OpenAlex and dropped when
+        not found, and the works several retrieved papers cite are added. They
+        are labelled foundational and go through the literature screen. Off
+        with ``knowledge.foundational_works: false``; any failure adds nothing."""
+        kn = self.config.knowledge
+        if not (kn.enabled and kn.foundational_works):
+            return []
+        suggestions = await self._suggest_foundational_works(topic, work_scope=work_scope)
+        try:
+            found = await self.knowledge.find_foundational_works(suggestions, docs)
+        except Exception as e:  # noqa: BLE001 — never costs the retrieval
+            self._log.info("[literature] foundational works lookup failed: %r", e)
+            return []
+        have = {_normalize_title((d.metadata or {}).get("title") or "") for d in docs} - {""}
+        new = [d for d in found if _normalize_title(d.metadata.get("title") or "") not in have]
+        self._log.info(
+            "[literature] foundational works: %d suggested, %d new candidate(s)%s",
+            len(suggestions), len(new),
+            (": " + "; ".join(f"{d.metadata.get('title')} ({d.metadata.get('year')}, "
+                              f"{d.metadata.get('foundational')})" for d in new))[:600] if new else "",
+        )
+        return new
+
+    async def _suggest_foundational_works(
+        self, topic: str, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list[dict]:
+        """Up to five foundational works the model names for ``topic``, each
+        ``{title, authors, year}``. Empty when the call fails."""
+        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+            what = "the classic books and articles scholars of this subject cite as its foundations"
+        else:
+            what = ("the original papers that introduced the methods, models or effects it "
+                    "relies on, and the standard textbooks on them")
+        prompt = (
+            f"List up to FIVE foundational works for this research topic: {what}. "
+            "Name only works you are sure exist, with their exact titles: each one is "
+            "looked up by title, and a work that is not found is dropped.\n\n"
+            f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
+            'Reply as JSON only: {"works": [{"title": "<exact title>", '
+            '"authors": "<first author\'s surname>", "year": <year>}]}'
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_foundational")
+            parsed = _parse_json_lenient(raw, node="literature_foundational")
+        except Exception as e:  # noqa: BLE001 — best-effort
+            self._log.info("[literature] foundational works suggestion failed: %r", e)
+            return []
+        works = parsed.get("works") if isinstance(parsed, dict) else None
+        return [
+            w for w in (works if isinstance(works, list) else [])
+            if isinstance(w, dict) and str(w.get("title") or "").strip()
+        ][:5]
 
     async def _derive_literature_queries(
         self, topic: str, idea_title: str = "", hypothesis: str = "",
