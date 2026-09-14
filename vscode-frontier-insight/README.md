@@ -25,7 +25,10 @@ When you type `@fi /start config.yaml` in Copilot Chat, the extension:
 4. Streams the response back, renders progress in the chat panel.
 
 The engine runs to a finished paper, slide deck, figures, and a
-machine-readable summary in `outputs/<quest_id>/`. The paper's cited papers are
+machine-readable summary in `outputs/<quest_id>/`. A scientific paper opens with
+an abstract and 4–6 keywords; a report, brief, essay or whitepaper keeps its
+keywords out of sight, and an accepted paper's keywords go into its Axon index
+card. The paper's cited papers are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON). The web pages it drew on are listed under Further reading, not
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A

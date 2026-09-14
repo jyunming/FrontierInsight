@@ -30,6 +30,7 @@ from core.engine import QuestArtifacts, build_further_reading, build_references
 from generation._pandoc import find_pandoc
 from generation import _cjk
 from generation._figure_captions import numbers_off_figure_captions
+from generation._keywords import extract_keywords
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
 
@@ -385,16 +386,18 @@ def _add_metadata_frontmatter(
     body: str,
     title: str,
     abstract: str | None = None,
+    keywords: list[str] | tuple[str, ...] = (),
 ) -> str:
     """Prepend a YAML metadata block carrying the title (and optional
-    abstract).
+    abstract and keywords).
 
     Title is JSON-quoted — handles colons, quotes, backslashes, and
     Unicode without bespoke escaping. Abstract uses a YAML literal
     block scalar (``|``) so multi-line content + inline LaTeX math
     pass through to pandoc verbatim; pandoc then parses the indented
     block as markdown so emphasis / math / inline code still render
-    inside ``\\begin{abstract}``."""
+    inside ``\\begin{abstract}``. Keywords are a JSON list, which YAML
+    reads as a list the template joins."""
     lines = [f"title: {json.dumps(title)}"]
     if abstract:
         # YAML literal block scalar: every body line indented by 2
@@ -403,6 +406,8 @@ def _add_metadata_frontmatter(
         # ``$abstract$``.
         indented = "\n".join("  " + line for line in abstract.splitlines())
         lines.append(f"abstract: |\n{indented}")
+    if keywords:
+        lines.append(f"keywords: {json.dumps(list(keywords))}")
     return "---\n" + "\n".join(lines) + "\n---\n\n" + body
 
 
@@ -852,9 +857,12 @@ class PaperGenerator:
             # to attach the abstract to.
             abstract: str | None = None
             if title is not None:
+                # The keywords line sits under the abstract, which would
+                # otherwise carry it into the abstract block.
+                keywords, sanitized_md = extract_keywords(sanitized_md)
                 abstract, sanitized_md = _extract_abstract_and_strip(sanitized_md)
                 sanitized_md = _add_metadata_frontmatter(
-                    sanitized_md, title, abstract=abstract,
+                    sanitized_md, title, abstract=abstract, keywords=keywords,
                 )
                 _log.info(
                     "paper.pdf: lifted H1 title%s into frontmatter",

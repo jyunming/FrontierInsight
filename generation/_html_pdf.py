@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 
 from generation._figure_captions import numbers_off_figure_captions
+from generation._keywords import keywords_block
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "paper" / "_html"
 _CSS_PATH = _ASSETS_DIR / "latexlike.css"
@@ -142,6 +143,8 @@ def render_paper_html_pdf(
         return None, f"could not read {paper_md}: {e}"
     # Both themes number figures, so the writer's "**Figure 2.**" comes off.
     title, body = _split_title(numbers_off_figure_captions(md_text))
+    # The keywords line under the abstract becomes a block the themes style.
+    keywords, body = keywords_block(body)
 
     # Resolve the @FONT_DIR@ token to the assets dir's absolute file:/// URL
     # so pandoc --embed-resources can find + inline any vendored OTFs (the
@@ -169,6 +172,7 @@ def render_paper_html_pdf(
         "--metadata", f"title={title or 'Untitled'}",
         *byline_args,
         "--metadata", "pagetitle=paper",
+        *(["--metadata", "keywords=" + ", ".join(keywords)] if keywords else []),
         "-o", html_path.name,
     ]
     try:

@@ -51,12 +51,13 @@ h2 {
   counter-reset: sub; break-after: avoid;
 }
 h2::before { content: counter(sec) "\2003"; font-weight: bold; }
-/* First h2 is the Abstract: unnumbered + centered (LaTeX \begin{abstract}). */
-h2:first-of-type {
+/* The Abstract (pandoc's id "abstract"): unnumbered + centered (LaTeX
+   \begin{abstract}). A paper without one numbers its first section. */
+h2#abstract {
   text-align: center; counter-increment: none; counter-reset: sec;
   font-size: 11pt; margin-bottom: 5pt;
 }
-h2:first-of-type::before { content: none; }
+h2#abstract::before { content: none; }
 
 h3 {
   font-family: "LM Roman", serif; font-weight: bold; font-size: 11pt;
@@ -66,8 +67,10 @@ h3::before { content: counter(sec) "." counter(sub) "\2003"; font-weight: bold; 
 
 /* ---- Body: justified, first-line indent, no inter-paragraph space --- */
 p { margin: 0; text-align: justify; text-indent: 1.6em; hyphens: auto; }
-h1 + p, h2 + p, h3 + p, h2:first-of-type + p { text-indent: 0; }
-h2:first-of-type + p { margin: 0 14pt 8pt 14pt; }
+h1 + p, h2 + p, h3 + p { text-indent: 0; }
+h2#abstract + p { margin: 0 14pt 8pt 14pt; }
+/* The keywords line under the abstract. */
+.keywords p { text-indent: 0; text-align: left; margin: 0 14pt 10pt 14pt; font-size: 10pt; }
 
 strong { font-weight: bold; }
 em { font-style: italic; }

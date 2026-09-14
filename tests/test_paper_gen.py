@@ -1636,6 +1636,30 @@ def test_preprocessor_lifts_abstract_into_yaml_frontmatter(
     )
 
 
+def test_preprocessor_lifts_the_keywords_line_out_of_the_abstract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The keywords line under the abstract lands in the frontmatter as a
+    list the template prints under the abstract, not inside it."""
+    _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# Title\n\n"
+        "## Abstract\nFirst sentence.\n**Keywords:** energy drift, RK4\n\n"
+        "## Introduction\nBody.\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    PaperGenerator(cfg).generate(art, out_dir)
+
+    sanitized = (out_dir / "paper_pdf_source.md").read_text(encoding="utf-8")
+    keywords = 'keywords: ["energy drift", "RK4"]'
+    assert "abstract: |\n  First sentence.\n" + keywords in sanitized
+    assert "Keywords" not in sanitized.replace(keywords, "")
+
+
 def test_preprocessor_enables_list_extension_and_shifts_headings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
