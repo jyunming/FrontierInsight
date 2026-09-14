@@ -552,6 +552,55 @@ def _render_poster_skip_md(*, code: str, summary: str, how_to_fix: str) -> str:
     )
 
 
+def _double_latex_backslashes(s: str) -> str:
+    """Double the lone backslashes that start LaTeX inside a JSON reply.
+
+    A model often leaves LaTeX backslashes single inside its JSON strings.
+    ``\\textbf`` then parses as a tab plus "extbf", ``\\frac`` as a form feed,
+    and ``\\item`` or ``\\%`` is an invalid escape that fails the whole reply.
+    Runs of an even length are already escaped and left alone."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] != "\\":
+            out.append(s[i])
+            i += 1
+            continue
+        j = i
+        while j < len(s) and s[j] == "\\":
+            j += 1
+        out.append(s[i:j])
+        if (j - i) % 2 == 1 and _latex_not_json_escape(s, j):
+            out.append("\\")
+        i = j
+    return "".join(out)
+
+
+# LaTeX commands that begin with ``n``: anything else after ``\n`` is a newline.
+_LATEX_N_COMMANDS = frozenset({
+    "nabla", "ne", "neq", "newline", "newpage", "noindent", "nonumber",
+    "normalsize", "not", "notin", "nu",
+})
+
+
+def _latex_not_json_escape(s: str, k: int) -> bool:
+    """Whether the character after a lone backslash starts LaTeX rather than a
+    JSON escape: ``\\"`` and ``\\/`` keep their JSON meaning, as do ``\\uXXXX``,
+    ``\\n`` before ordinary text and a one-letter ``\\b \\f \\r \\t``."""
+    if k >= len(s) or s[k] in "\"/":
+        return False
+    if not ("a" <= s[k].lower() <= "z"):
+        return True
+    word = _re.match(r"[A-Za-z]+", s[k:]).group(0)
+    if word[0] == "u":
+        return _re.match(r"u[0-9a-fA-F]{4}", s[k:]) is None
+    if word[0] == "n":
+        return word in _LATEX_N_COMMANDS
+    if word[0] in "bfrt":
+        return len(word) > 1 and word[1].islower()
+    return True
+
+
 def _lenient_json(text: str) -> dict | None:
     s = text.strip()
     # Strip fence if present.
@@ -559,6 +608,7 @@ def _lenient_json(text: str) -> dict | None:
         nl = s.find("\n")
         if nl > 0 and s.endswith("```"):
             s = s[nl + 1 : -3].strip()
+    s = _double_latex_backslashes(s)
     try:
         return json.loads(s)
     except Exception:

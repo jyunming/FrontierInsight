@@ -557,6 +557,47 @@ async def test_poster_strips_column_commands_from_llm_columns(
     assert re.search(r"\\column(?![A-Za-z])", tex) is None
 
 
+def test_lenient_json_keeps_latex_backslashes_the_model_left_single() -> None:
+    """gemma4 wrote ``\\textbf`` with one backslash inside its JSON: the header
+    rendered as "extbf…". An ``\\item`` or ``\\%`` would have failed the whole
+    reply and left both columns empty."""
+    from generation.poster import _lenient_json
+
+    reply = (
+        r'{"title": "T", '
+        r'"left": "\textbf{A}\n\begin{itemize}\item 50\% \frac{1}{2}\end{itemize}", '
+        r'"right": "\\textbf{B}\nNext line \u00e9 \noindent \times"}'
+    )
+    parsed = _lenient_json(reply)
+    assert parsed is not None
+    assert parsed["left"] == (
+        "\\textbf{A}\n\\begin{itemize}\\item 50\\% \\frac{1}{2}\\end{itemize}"
+    )
+    assert parsed["right"] == "\\textbf{B}\nNext line \u00e9 \\noindent \\times"
+
+
+@pytest.mark.asyncio
+async def test_poster_keeps_single_backslash_textbf_from_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return r'{"title": "T", "left": "\textbf{Left header}", "right": "\item R"}'
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert r"\textbf{Left header}" in tex
+    assert r"\item R" in tex
+    assert "\textbf" not in tex
+
+
 def test_cleanup_poster_artifacts_success_keeps_pdf_and_tex(tmp_path: Path) -> None:
     from generation.poster import _cleanup_poster_artifacts
     for name in ("poster.pdf", "poster.tex", "poster.aux", "poster.log",

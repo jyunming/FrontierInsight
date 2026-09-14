@@ -6,7 +6,7 @@ Compress the paper into a Marp slide deck of **8–12 slides**. Embed each figur
 ## This is an audience-facing presentation — present FINDINGS, not process
 - Lead with what the research **found**. Each content slide should make one substantive point about the topic (a number, a trend, a comparison), supported by the evidence.
 - **Do NOT narrate the pipeline.** Never mention "this run", "the collector", "the dataset was not recovered", "the planned analysis was not produced", "snippets", "auto-collected", or how the data was gathered. That is internal machinery, not content for an audience.
-- Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as scope ("Regional attribution beyond top-line shares is out of scope here"), not as a confession about tooling.
+- Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as this topic's own scope, not as a confession about tooling. Quoted examples in this prompt show the form only; never copy their wording or subject into the deck.
 - When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
 
 ## Style — use the project's clean theme
