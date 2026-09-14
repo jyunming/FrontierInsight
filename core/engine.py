@@ -183,6 +183,9 @@ class QuestState(TypedDict, total=False):
     # source_url / license / attribution, so the writer captions them and the
     # references record their provenance.
     figure_credits: list[dict[str, Any]]
+    # What each experiment figure draws, by file name, as the plot-style
+    # bootstrap recorded it on savefig (core/plot_style.py).
+    figure_records: dict[str, Any]
     result_json: dict[str, Any]
     # Multi-seed replication: when ``engine.execute_replicates > 1``,
     # ``_node_execute`` runs the script N times with different seeds
@@ -3801,15 +3804,21 @@ class Engine:
         # backdrop) with zero edits to the LLM-authored code. Failure-isolated:
         # if anything goes wrong we run with the plain inherited env.
         exec_env: dict[str, str] | None = None
+        records_dir = self.fi_dir / "figure_records"
         try:
-            from .plot_style import write_boot
+            from .plot_style import RECORDS_DIRNAME, write_boot
 
+            records_dir = self.fi_dir / RECORDS_DIRNAME
+            # The same bootstrap records what each figure draws; a previous
+            # version's records go with its figures.
+            shutil.rmtree(records_dir, ignore_errors=True)
             boot_dir = write_boot(self.fi_dir, self.config.output.paper_style)
             exec_env = {
                 **os.environ,
                 "PYTHONPATH": os.pathsep.join(
                     p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p
                 ),
+                "FI_FIGURE_RECORDS": str(records_dir),
             }
         except Exception as exc:  # styling must never break execution
             self._log.warning("[execute] plot-style bootstrap skipped: %s", exc)
@@ -4073,6 +4082,7 @@ class Engine:
                 "stderr_tail": result.stderr[-2000:],
             },
             "figures": figures,
+            "figure_records": _read_figure_records(records_dir, figures),
             "result_json": result_json or {},
         }
         # Only populate ``result_json_replicates`` when replication
@@ -5661,6 +5671,15 @@ class Engine:
             f"unverified_number: {f.describe()}" for f in report.findings
         ]
 
+    def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
+        """Captions naming a series their figure draws flat or not at all.
+        The review prompt carries the same list; this logs it and keeps it for
+        the human review."""
+        findings = _figure_caption_findings(paper_md, state.get("figure_records") or {})
+        for finding in findings:
+            self._log.warning("[figure_check] %s", finding)
+        return findings
+
     def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
         """Persist the claim-grounding result as a transparency ledger:
         ``paper/claims.json`` (structured) + ``paper/CLAIMS.md`` (readable).
@@ -5721,6 +5740,7 @@ class Engine:
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
+            figure_check_block=_format_figure_check(paper_md, state),
             # 16 KB ≈ ~4 K tokens — fits a comprehensive-review-length
             # paper plus an abstract + references block. The 8 KB cap
             # was truncating mid-Discussion on journal-length papers
@@ -5774,6 +5794,9 @@ class Engine:
             numeric_warnings = self._numeric_oracle_hits(paper_md, state)
             if numeric_warnings:
                 review["numeric_oracle_warnings"] = numeric_warnings
+            figure_warnings = self._figure_caption_hits(paper_md, state)
+            if figure_warnings:
+                review["figure_caption_warnings"] = figure_warnings
             update: QuestState = {"review": review}
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
@@ -5892,6 +5915,9 @@ class Engine:
         numeric_warnings = self._numeric_oracle_hits(paper_md, state)
         if numeric_warnings:
             review["numeric_oracle_warnings"] = numeric_warnings
+        figure_warnings = self._figure_caption_hits(paper_md, state)
+        if figure_warnings:
+            review["figure_caption_warnings"] = figure_warnings
 
         update: QuestState = {"review": review, "review_panel": panel_results}
         # Bump iteration on EITHER verdict=revise OR a non-empty
@@ -5955,6 +5981,9 @@ class Engine:
             # every UI can label them differently -- a regex over prose is
             # not grounds for a forced rewrite, but a human should see it.
             "numeric_oracle_warnings": review.get("numeric_oracle_warnings") or [],
+            # Captions that name a series their figure does not show; the
+            # reviewer was asked to must-flag them.
+            "figure_caption_warnings": review.get("figure_caption_warnings") or [],
             "rationale": review.get("rationale", ""),
             "paper_md_path": paper_md_path,
             # Accumulated user-feedback history across refine
@@ -8295,6 +8324,7 @@ def _figure_list_for_prompt(state: QuestState) -> str:
     if not figs:
         return "(none)"
     credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
+    records = state.get("figure_records") or {}
     lines: list[str] = []
     for f in figs:
         c = credits.get(f)
@@ -8306,8 +8336,111 @@ def _figure_list_for_prompt(state: QuestState) -> str:
                 f"{c.get('license', '')}]"
             )
         else:
-            lines.append(f"- figures/{f}")
+            lines.append(f"- figures/{f}" + _figure_record_note(records.get(f)))
+    if any(_hidden_series(records.get(f)) for f in figs):
+        lines.append(
+            "A series marked FLAT is drawn at one value on its axis, and one NOT SHOWN "
+            "is not visible at all: a caption must describe what its figure shows, so "
+            "it cannot describe how such a series changes."
+        )
     return "\n".join(lines)
+
+
+def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
+    """The plot-style bootstrap's record of what each figure draws, by file
+    name. A figure saved without the bootstrap (or in a sandbox that could not
+    write the record) has none."""
+    records: dict[str, Any] = {}
+    for name in figures:
+        try:
+            data = json.loads((folder / f"{Path(name).stem}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("axes"), list):
+            records[name] = data
+    return records
+
+
+def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """``(axes, series)`` for each labelled series a figure draws flat or not at all."""
+    return [
+        (ax, s)
+        for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)
+        for s in (ax.get("series") or []) if isinstance(s, dict) and s.get("shows") != "yes"
+    ]
+
+
+def _figure_record_note(record: dict[str, Any] | None) -> str:
+    """What a figure draws, for the writer: each panel's title, y axis and series."""
+    panels = []
+    for ax in (record or {}).get("axes") or []:
+        if not isinstance(ax, dict):
+            continue
+        bits = [f'"{ax["title"]}"'] if ax.get("title") else []
+        ylim = ax.get("ylim") or []
+        if len(ylim) == 2:
+            bits.append(
+                f'y axis "{ax.get("ylabel") or "y"}" ({ax.get("yscale") or "linear"}, '
+                f"{ylim[0]:.3g} to {ylim[1]:.3g})"
+            )
+        series = []
+        for s in ax.get("series") or []:
+            if not isinstance(s, dict):
+                continue
+            span = f'{s["min"]:.3g} to {s["max"]:.3g}' if "min" in s else "no points"
+            shows = s.get("shows")
+            tail = "" if shows == "yes" else ", FLAT on this axis" if shows == "flat" else ", NOT SHOWN"
+            series.append(f"{s.get('label')} {span}{tail}")
+        if series:
+            bits.append("series: " + "; ".join(series))
+        if bits:
+            panels.append(", ".join(bits))
+    return (" — " + " | ".join(panels)) if panels else ""
+
+
+_PAPER_IMAGE_RE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")
+
+
+def _plain_words(text: str) -> str:
+    return " ".join(re.sub(r"[_\-*`]+", " ", text.lower()).split())
+
+
+def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str]:
+    """Captions that name a series their figure draws flat or does not show."""
+    findings: list[str] = []
+    for match in _PAPER_IMAGE_RE.finditer(paper_md or ""):
+        name = Path(match.group("src")).name
+        caption = f" {_plain_words(match.group('alt'))} "
+        for ax, s in _hidden_series(records.get(name)):
+            label = _plain_words(str(s.get("label") or ""))
+            if not label or not re.search(rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])", caption):
+                continue
+            how = "draws it flat at one value" if s.get("shows") == "flat" else "does not show it"
+            finding = (
+                f'figure_caption: the caption of figures/{name} names "{s.get("label")}", but the '
+                f'figure {how} on its axis "{ax.get("ylabel") or "y"}"'
+            )
+            if finding not in findings:
+                findings.append(finding)
+    return findings
+
+
+def _format_figure_check(paper_md: str, state: QuestState) -> str:
+    """The figure check for the review prompt's ``$figure_check_block``."""
+    records = state.get("figure_records") or {}
+    if not records:
+        return "(no record of what the figures draw)"
+    findings = _figure_caption_findings(paper_md, records)
+    if not findings:
+        return "No caption names a series its figure does not show."
+    return "\n".join([
+        f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(findings)}):",
+        *(f"  - {f}" for f in findings),
+        "",
+        "You MUST add a `figure_caption` entry to must_flag_hits and set verdict=revise, "
+        "asking for the caption to describe what the figure shows (or the figure to show "
+        "what the caption describes).",
+    ])
 
 
 def _parse_json_lenient(

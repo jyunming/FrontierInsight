@@ -74,6 +74,7 @@ interface HumanReviewRequest {
         suggestions?: string[];
         must_flag_hits?: string[];
         numeric_oracle_warnings?: string[];
+        figure_caption_warnings?: string[];
         feedback_history?: Array<{ iteration?: number; text?: string }>;
         paper_md_path?: string;
     };
@@ -341,6 +342,13 @@ export class Bridge {
         const nw = snap.numeric_oracle_warnings || [];
         if (nw.length) {
             md += `- **Numeric checks (advisory, not blocking):** ${nw
+                .map((w) => `\`${escapeMd(w)}\``)
+                .join(", ")}\n`;
+        }
+        // Captions naming a series their figure draws flat or not at all.
+        const fw = snap.figure_caption_warnings || [];
+        if (fw.length) {
+            md += `- **Figure captions (sent to the reviewer):** ${fw
                 .map((w) => `\`${escapeMd(w)}\``)
                 .join(", ")}\n`;
         }

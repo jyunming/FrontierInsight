@@ -154,3 +154,61 @@ def test_bootstrap_applies_in_subprocess(tmp_path) -> None:
     assert data["cmap"] == "fi_teal"
     assert data["top"] is False
     assert data["reg"] is True
+
+
+def test_bootstrap_records_what_each_saved_figure_draws(tmp_path) -> None:
+    """The validation quest's drift figure: forward Euler's 0.44 J spike on a
+    linear axis, with RK4 and Velocity-Verlet flat at 0 under it."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    script = tmp_path / "plot.py"
+    script.write_text(
+        "import math\n"
+        "import matplotlib\n"
+        "matplotlib.use('Agg')\n"
+        "import matplotlib.pyplot as plt\n"
+        "t = [i * 0.1 for i in range(2000)]\n"
+        "fig, (drift, errors) = plt.subplots(1, 2)\n"
+        "drift.plot(t, [0.44 * math.exp(-(x - 2) ** 2) for x in t], label='forward_euler')\n"
+        "drift.plot(t, [1e-8 * math.sin(x) for x in t], label='rk4')\n"
+        "drift.plot(t, [4e-5 * x / 200 for x in t], label='velocity_verlet')\n"
+        "drift.axhline(0.0)\n"
+        "drift.set_title('Long-term Energy Drift'); drift.set_ylabel('Energy Difference (J)')\n"
+        "errors.set_yscale('log')\n"
+        "errors.scatter([0.01, 0.05, 0.1], [5e-9, 3e-6, 5e-5], label='rk4')\n"
+        "errors.plot([0.01, 0.05, 0.1], [float('nan'), 1e-3, 1e-1], label='euler')\n"
+        "errors.set_ylim(1e-10, 1)\n"
+        "plt.savefig('long_term_energy_drift.png')\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run([sys.executable, str(script)], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "long_term_energy_drift.png").is_file()
+    record = json.loads((records / "long_term_energy_drift.json").read_text(encoding="utf-8"))
+    assert record["file"] == "long_term_energy_drift.png"
+    drift, errors = record["axes"]
+    assert drift["title"] == "Long-term Energy Drift" and drift["yscale"] == "linear"
+    assert {s["label"]: s["shows"] for s in drift["series"]} == {
+        "forward_euler": "yes", "rk4": "flat", "velocity_verlet": "flat",
+    }
+    assert {s["label"]: s["shows"] for s in errors["series"]} == {"euler": "yes", "rk4": "yes"}
+
+
+def test_bootstrap_records_nothing_without_a_records_folder(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    env = {k: v for k, v in os.environ.items() if k != "FI_FIGURE_RECORDS"}
+    env["PYTHONPATH"] = str(boot_dir)
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; "
+             "plt.plot([1, 2], label='a'); plt.savefig('a.png')")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".json") == []
