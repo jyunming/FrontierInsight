@@ -331,6 +331,29 @@ style. Set `html_pdf_fallback: false` to force the strict LaTeX-only
 path — then a missing engine skips the PDF (or, with `require_pdf:
 true`, aborts) exactly as before.
 
+### Chinese, Japanese and Korean text
+
+pdflatex stops at the first Chinese, Japanese or Korean character,
+whether it is in the title, the body or the author line. When
+`paper.md` or the author line has such text, FI compiles the paper
+with **XeLaTeX** and the `xeCJK` package in an installed CJK font. The
+template and its layout stay the same.
+
+- **Font:** the first one installed of Noto Sans CJK / Source Han Sans,
+  then the system font for the language. That is Microsoft JhengHei
+  (Traditional Chinese), Microsoft YaHei (Simplified), Yu Gothic or
+  Meiryo (Japanese), or Malgun Gothic (Korean). FI finds fonts through
+  fontconfig (`fc-list`, which ships with MiKTeX and TeX Live) or, on
+  Windows, in the fonts folder.
+- **XeLaTeX** comes with MiKTeX and TeX Live. tectonic is XeTeX
+  underneath and works as is.
+- **Linux:** install a CJK font first, for example `sudo apt install
+  fonts-noto-cjk`.
+- **No XeLaTeX or no CJK font:** the paper goes straight to the HTML
+  fallback above, which sets the text in the browser's fonts. With
+  `html_pdf_fallback: false` it is skipped with a `cjk_no_xelatex` or
+  `cjk_no_font` diagnostic.
+
 ### `output.paper_style` — choose the paper.pdf look
 
 `latex` (default) renders `paper.pdf` with the venue LaTeX template —

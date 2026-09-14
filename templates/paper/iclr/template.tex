@@ -3,7 +3,20 @@
 % for pandoc to compile paper.md with ICLR-style metadata blocks
 % (single-column 10pt, abstract env, named author block).
 \documentclass[10pt,letterpaper]{article}
-\usepackage[utf8]{inputenc}
+% pdflatex cannot set Chinese, Japanese or Korean text; generation/paper.py
+% compiles such a paper with XeLaTeX and passes fi-cjk-font.
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+$if(fi-cjk-font)$
+  \usepackage{xeCJK}
+  \setCJKmainfont{$fi-cjk-font$}
+  \setCJKsansfont{$fi-cjk-font$}
+  \setCJKmonofont{$fi-cjk-font$}
+$endif$
+\else
+  \usepackage[utf8]{inputenc}
+\fi
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
 % Required for pandoc-rendered markdown tables (pandoc emits egin{longtable}).
