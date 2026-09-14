@@ -56,18 +56,29 @@ def mean_std(vals: list[float]) -> tuple[float, float, int]:
     return mean, math.sqrt(var), n
 
 
-def confidence_interval(vals: list[float]) -> dict[str, Any]:
+def confidence_interval(
+    vals: list[float], *, lower: float | None = None, upper: float | None = None,
+) -> dict[str, Any]:
     """95% confidence interval of the mean via the t-distribution.
 
     Returns ``{"se", "ci_lower", "ci_upper"}``. With n<2 there's no spread to
     estimate, so the interval is undefined (``None``) — a single seed reports a
-    point estimate, honestly, not a fake zero-width interval."""
+    point estimate, honestly, not a fake zero-width interval.
+
+    ``lower`` and ``upper`` are values the quantity cannot pass, such as a
+    probability's 0 and 1. The interval stops at them: a t interval around a
+    small probability otherwise runs below zero."""
     mean, std, n = mean_std(vals)
     if n < 2:
         return {"se": None, "ci_lower": None, "ci_upper": None}
     se = std / math.sqrt(n)
     half = _t95(n - 1) * se
-    return {"se": se, "ci_lower": mean - half, "ci_upper": mean + half}
+    ci_lower, ci_upper = mean - half, mean + half
+    if lower is not None:
+        ci_lower = max(ci_lower, lower)
+    if upper is not None:
+        ci_upper = min(ci_upper, upper)
+    return {"se": se, "ci_lower": ci_lower, "ci_upper": ci_upper}
 
 
 def cohens_d(a: list[float], b: list[float]) -> float | None:

@@ -25,6 +25,45 @@ def test_confidence_interval_t_distribution() -> None:
     assert math.isclose(ci["ci_upper"], 0.2 + 4.303 * se, rel_tol=1e-6)
 
 
+def test_confidence_interval_stops_at_the_bounds_it_is_given() -> None:
+    # The validation quest's outbreak probability: seeds 0.0033, 0.0067, 0.01.
+    seeds = [0.0033, 0.0067, 0.01]
+    free = stats.confidence_interval(seeds)
+    assert free["ci_lower"] < 0
+    bounded = stats.confidence_interval(seeds, lower=0.0, upper=1.0)
+    assert bounded["ci_lower"] == 0.0 and bounded["ci_upper"] == free["ci_upper"]
+    assert bounded["se"] == free["se"]
+    near_one = stats.confidence_interval([0.99, 0.995, 1.0], lower=0.0, upper=1.0)
+    assert near_one["ci_upper"] == 1.0 and near_one["ci_lower"] > 0.9
+
+
+def test_replicate_intervals_of_probabilities_and_declared_ranges_stay_in_range() -> None:
+    from core.plausibility import parse_assertions
+
+    seeds = [0.0033, 0.0067, 0.01]
+    reps = [
+        {"_seed": i, "by_r0": {"0.9": {"5000": {"outbreak_probability": p}}}, "extinction_share": p,
+         "final_size": p, "temperature_k": t, "gain_db": g}
+        for i, (p, t, g) in enumerate(zip(seeds, [300.1, 300.4, 300.2], [-0.1, 0.05, 0.3]))
+    ]
+    assertions = parse_assertions({"result_assertions": [{"path": "final_size", "min": 0, "max": 1}]})
+    agg = _aggregate_result_json_replicates(reps, assertions=assertions)
+    assert agg["by_r0.0.9.5000.outbreak_probability"]["ci_lower"] == 0.0, "named a probability"
+    assert agg["extinction_share"]["ci_lower"] == 0.0, "named a proportion"
+    assert agg["final_size"]["ci_lower"] == 0.0, "declared by the design"
+    assert agg["gain_db"]["ci_lower"] < -0.1, "an unbounded metric keeps its interval"
+    unbounded = _aggregate_result_json_replicates(reps)
+    assert unbounded["final_size"]["ci_lower"] < 0, "without the design's range, a plain name is not bounded"
+    strata = _result_comparison_stats(
+        [{"_seed": i, "by_n": {"1000": {"outbreak_probability": p}, "5000": {"outbreak_probability": p / 2}}}
+         for i, p in enumerate(seeds)],
+    )["strata"]["by_n"]
+    assert strata["5000"]["outbreak_probability"]["ci_lower"] == 0.0
+    # A metric named like a probability but reported in percent is not forced into [0, 1].
+    percent = _aggregate_result_json_replicates([{"accuracy": v} for v in (91.0, 93.5, 99.0)])
+    assert percent["accuracy"]["ci_upper"] > 99.0
+
+
 def test_confidence_interval_single_value_is_undefined() -> None:
     ci = stats.confidence_interval([0.42])
     assert ci == {"se": None, "ci_lower": None, "ci_upper": None}

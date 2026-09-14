@@ -85,7 +85,6 @@ def test_write_md_forbids_url_or_doi_fabrication(
 @pytest.mark.parametrize(
     "token",
     [
-        "Prior work",
         "Item-N",
         "Reference N",
         "Source N",
@@ -99,28 +98,20 @@ def test_write_md_forbids_stub_labels(
     assert token in write_md_text
 
 
-# ---- Reference format examples are placeholders, not look-alike authors ----
+# ---- The engine writes the source lists, so there is no format to copy ----
 
 
-def test_write_md_reference_examples_are_angle_bracket_placeholders(
+def test_write_md_has_no_reference_entries_to_copy(
     write_md_text: str,
 ) -> None:
-    """Earlier versions of write.md showed real-looking example
-    citations like ``Smith, J. & Lee, M. (2021)``; the LLM copied
-    those verbatim into actual papers. The current version must
-    use ``<...>`` placeholder syntax instead."""
-    # The new placeholder shape we want to see in the examples block.
-    assert "<Author 1 lastname>" in write_md_text, (
-        "reference format examples should use <Author 1 lastname>-style "
-        "placeholders, not concrete-looking names"
-    )
-    # The old leak-prone style must be gone from the EXAMPLE lines.
-    # We can't assert "Smith, J." doesn't appear at all — the
-    # forbidden-list section legitimately names it. So we just check
-    # the examples block doesn't start a citation with "Smith, J. &":
-    assert "1. Smith, J. & Lee, M." not in write_md_text, (
-        "reference format examples should not seed copyable concrete names"
-    )
+    """Earlier versions of write.md showed example citations
+    (``Smith, J. & Lee, M. (2021)``, then ``<Author 1 lastname>``
+    shapes); the LLM copied them into actual papers. The engine now
+    writes References and Further reading itself, so the prompt tells
+    the writer not to write them and shows no entry format at all."""
+    assert "Do not write a `## References` or a `## Further reading` section." in write_md_text
+    assert "<Author 1 lastname>" not in write_md_text
+    assert "1. Smith, J. & Lee, M." not in write_md_text
 
 
 # ---- Persona-driven format overrides forbid IMRAD ----
