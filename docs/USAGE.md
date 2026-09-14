@@ -264,6 +264,11 @@ output:
   require_pdf: false                # strict mode for paper_pdf — see below
   html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
   paper_style: latex                # paper.pdf look: latex (Computer Modern article, default) | briefing (FI brand look, HTML-rendered)
+  author: ""                        # optional author line on the paper, slides and poster — see below
+  affiliation: ""
+  contact_email: ""
+  url: ""                           # project link; the poster prints it as a QR code
+  poster_size: a1_portrait          # a1_portrait (default) | a0_portrait | landscape_48x36
 
 # Reserved free-text steering slot — declared in ``core/config.py``
 # but NOT YET wired into any prompt template or ``Engine._chat`` path
@@ -340,6 +345,31 @@ both present. Because it's HTML, it's single-column regardless of
 `paper_format`. Pick it in YAML (`output.paper_style: briefing`) or
 during the interview (`--new` / `@fi /new` / web — the *Paper style*
 question).
+
+### Author line and poster size
+
+`output.author`, `output.affiliation`, `output.contact_email` and
+`output.url` put your name on the outputs. The paper prints them under
+the title (and uses the author as the PDF's Author field), the slides put
+them on the title slide, and the poster puts them in its header, with the
+link as a QR code. Every field is optional: with no author set the byline
+stays "Frontier Insight", and a field left empty is simply not printed.
+All three interviews ask for them right after the main questions; press
+Enter to skip any of them.
+
+These values are written only into the quest's own files. They are not
+sent to the literature or web search services. If the visual check of the
+outputs is on, the page screenshots it sends to your configured LLM
+provider show the author line, as they show the rest of the paper.
+
+`output.poster_size` picks the poster sheet: `a1_portrait` (59.4 × 84.1 cm,
+two columns, the default), `a0_portrait` (84.1 × 118.9 cm, two columns) or
+`landscape_48x36` (48 × 36 in, three columns). It is an advanced
+interview question.
+
+Changing any of these on a finished quest takes effect when the output is
+rendered again: `python launch.py --config <yaml> --resume <id> --emit poster`
+(or `paper_pdf`, `slides`).
 
 ### `execution.sandbox: docker` — what it actually does
 

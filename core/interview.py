@@ -171,6 +171,16 @@ PAPER_STYLES: tuple[Choice, ...] = (
            "Warm paper, deep-teal accents, serif display + brand mark — the same identity as the slides and poster. Rendered via pandoc + a browser (no LaTeX); single-column regardless of venue."),
 )
 
+# Poster sheet sizes. Mirrors ``OutputConfig.poster_size`` in core/config.py.
+POSTER_SIZES: tuple[Choice, ...] = (
+    Choice("a1_portrait", "A1 portrait — 59.4 × 84.1 cm (default)",
+           "Two columns. The usual conference poster size outside North America."),
+    Choice("a0_portrait", "A0 portrait — 84.1 × 118.9 cm",
+           "Two columns on a larger sheet, so it holds more words."),
+    Choice("landscape_48x36", "48 × 36 in landscape — 121.9 × 91.4 cm",
+           "Three columns. A common size at North American conferences."),
+)
+
 
 PROSE_FORMATS: frozenset[str] = frozenset(
     {"essay", "report", "policy_brief", "whitepaper"}
@@ -432,6 +442,16 @@ QUESTIONS: tuple[Question, ...] = (
         tier=3,
     ),
     Question(
+        id="poster_size",
+        label="Poster size",
+        prompt="Sheet size for poster.pdf. Text meets the poster font-size standards at every size; a bigger sheet holds more words.",
+        kind="single",
+        choices=POSTER_SIZES,
+        default="a1_portrait",
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
         id="study_depth",
         label="Study depth",
         prompt="How mature should the resulting paper be? Drives word count + citation depth.",
@@ -668,6 +688,49 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=True,
         tier=3,
     ),
+    # ─── Author line (tier 1, every field optional) ──────────────────
+    # Printed on the paper, slides and poster. Asked on every frontend so
+    # nobody has to find a hidden setting to put their name on a poster.
+    Question(
+        id="author",
+        label="Author (optional)",
+        prompt="Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
+        kind="text",
+        placeholder="e.g. Jane Chen",
+        default="",
+        mid_quest_editable=True,
+        tier=1,
+    ),
+    Question(
+        id="affiliation",
+        label="Affiliation (optional)",
+        prompt="Lab, company or school to print under the author. Leave blank to omit.",
+        kind="text",
+        placeholder="e.g. Materials Lab, Example University",
+        default="",
+        mid_quest_editable=True,
+        tier=1,
+    ),
+    Question(
+        id="contact_email",
+        label="Contact email (optional)",
+        prompt="Printed on the poster and under the paper title so readers can reach you. It goes only into your own output files. Leave blank to omit.",
+        kind="text",
+        placeholder="e.g. jane@example.org",
+        default="",
+        mid_quest_editable=True,
+        tier=1,
+    ),
+    Question(
+        id="url",
+        label="Project link (optional)",
+        prompt="A web page for this work, such as a repository or lab page. The poster prints it as a QR code. Leave blank for no QR code.",
+        kind="text",
+        placeholder="e.g. https://github.com/you/project",
+        default="",
+        mid_quest_editable=True,
+        tier=1,
+    ),
 )
 
 
@@ -733,6 +796,14 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # retrieved list, so a re-fetch should be followed by a re-write.
     "knowledge_top_k": ("literature", "write"),
     "knowledge_external_top_k": ("literature", "write"),
+    # The author line and the poster size change only the rendered
+    # outputs, which no LLM node produces. An output that already exists
+    # is regenerated with `launch.py --resume <id> --emit <kind>`.
+    "author": (),
+    "affiliation": (),
+    "contact_email": (),
+    "url": (),
+    "poster_size": (),
 }
 
 
@@ -1165,6 +1236,14 @@ class InterviewAnswers:
     # nothing — no behavior change until the user opts in. See
     # ``parse_node_models_answer``.
     node_models: str = ""
+    # Author line printed on the paper, slides and poster. All optional;
+    # ``answers_to_yaml`` writes each under ``output:`` only when set.
+    author: str = ""
+    affiliation: str = ""
+    contact_email: str = ""
+    url: str = ""
+    # Poster sheet: "a1_portrait" (default) | "a0_portrait" | "landscape_48x36".
+    poster_size: str = "a1_portrait"
 
 
 def parse_node_models_answer(raw: str) -> dict[str, str]:
@@ -1394,6 +1473,14 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         lines.append(f"{indent}paper_style: {json.dumps(answers.paper_style)}")
     if answers.audience != "external":
         lines.append(f"{indent}audience: {json.dumps(answers.audience)}")
+    # Author line: only the fields the user filled in. ensure_ascii=False
+    # keeps a CJK name readable in the YAML (still a valid quoted scalar).
+    for key in ("author", "affiliation", "contact_email", "url"):
+        value = " ".join(str(getattr(answers, key, "") or "").split())
+        if value:
+            lines.append(f"{indent}{key}: {json.dumps(value, ensure_ascii=False)}")
+    if getattr(answers, "poster_size", "a1_portrait") != "a1_portrait":
+        lines.append(f"{indent}poster_size: {json.dumps(answers.poster_size)}")
     lines.append(f"{indent}output_dir: \"./outputs\"")
     lines.append("")
 

@@ -112,3 +112,51 @@ async def test_run_new_draft_only_produces_valid_config_yaml(
     # Model picker was the first of that provider's curated list.
     first_model = PROVIDER_MODEL_OPTIONS[cfg.provider.name][0].value
     assert cfg.provider.model == first_model
+
+
+@pytest.mark.asyncio
+async def test_run_new_writes_the_tier1_ensemble_pick_and_author_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ensemble profile and the author line are tier-1 answers. The CLI
+    used to read the ensemble pick from the tier-3 dict, where it never is,
+    so every CLI quest ran with the ensemble off whatever the user chose."""
+    from launch import _run_new
+    from core.provider import ProxySupervisor
+
+    async def fake_preflight(**_kw: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
+    # One answer per tier-1 question, in order, then Enter to launch
+    # from the review screen.
+    answers = iter([
+        "Author line probe topic",   # topic
+        "",                          # paper_format (default generic)
+        "",                          # output_kinds (default)
+        "",                          # study_depth (default)
+        "1",                         # provider
+        "1",                         # provider_model
+        "4",                         # ensemble_profile: full
+        "  Jane   Chen ",            # author
+        "R&D Lab",                   # affiliation
+        "",                          # contact_email (skipped)
+        "https://example.org/p",     # url
+        "",                          # review screen: launch
+    ])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers, ""))
+
+    output_root = tmp_path / "outputs"
+    rc = await _run_new(
+        output_root=output_root,
+        draft_only=True,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=ProxySupervisor(),
+    )
+    assert rc == 0
+    (draft,) = list((output_root / "_drafts").glob("*.yaml"))
+    cfg = Config.model_validate(yaml.safe_load(draft.read_text(encoding="utf-8")))
+    assert set(cfg.provider.node_ensemble) == {"cross_check", "ideate", "analyze"}
+    assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "R&D Lab")
+    assert (cfg.output.contact_email, cfg.output.url) == ("", "https://example.org/p")

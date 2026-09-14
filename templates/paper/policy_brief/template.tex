@@ -71,7 +71,9 @@ $endif$
 \begin{document}
 {\Large\bfseries $title$ \par}
 \vspace{0.4em}
-{\small Frontier Insight — $date$ \par}
+% The byline names the configured author (output.author and friends,
+% escaped by pandoc), or Frontier Insight when none is set.
+{\small $if(fi-author)$$fi-author$$if(fi-affiliation)$, $fi-affiliation$$endif$$if(fi-email)$, $fi-email$$endif$$if(fi-url)$, $fi-url$$endif$$else$Frontier Insight$endif$ — $date$ \par}
 \vspace{1.2em}
 
 $body$

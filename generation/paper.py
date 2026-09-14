@@ -411,6 +411,30 @@ def _add_title_frontmatter(body: str, title: str) -> str:
     return _add_metadata_frontmatter(body, title, abstract=None)
 
 
+def _author_line(output) -> tuple[str, ...]:
+    """The configured author, affiliation, contact email and link, in that
+    order, each collapsed to one line; unset fields are left out."""
+    fields = (output.author, output.affiliation, output.contact_email, output.url)
+    return tuple(" ".join(str(v).split()) for v in fields if str(v or "").strip())
+
+
+def _author_metadata_args(output) -> list[str]:
+    """``-M`` flags for the LaTeX templates' author block. Pandoc escapes
+    metadata values for LaTeX, while a ``-V`` variable is pasted in raw: an
+    ``&`` in an affiliation or a ``_`` in an email would stop the compile."""
+    args: list[str] = []
+    for key, value in (
+        ("fi-author", output.author),
+        ("fi-affiliation", output.affiliation),
+        ("fi-email", output.contact_email),
+        ("fi-url", output.url),
+    ):
+        value = " ".join(str(value or "").split())
+        if value:
+            args += ["-M", f"{key}={value}"]
+    return args
+
+
 def _dedupe_duplicated_references(markdown: str) -> str:
     """Collapse ``"1. Foo. Foo."`` reference lines to ``"1. Foo."``.
 
@@ -635,6 +659,7 @@ class PaperGenerator:
         pdf, detail = render_paper_html_pdf(
             paper_md, out_dir / "paper.pdf",
             pandoc_path=pandoc_exe, browser=browser, log=_log,
+            author_line=_author_line(self.config.output),
         )
         if pdf is not None:
             return pdf
@@ -705,6 +730,7 @@ class PaperGenerator:
                     paper_md, out_dir / "paper.pdf",
                     pandoc_path=pandoc_exe, browser=browser,
                     css_path=theme_css_path("briefing"), log=_log,
+                    author_line=_author_line(self.config.output),
                 )
                 if pdf is not None:
                     return pdf, None
@@ -880,6 +906,7 @@ class PaperGenerator:
         # compiles unbranded rather than failing on a missing image.
         if _copy_brand_icon(out_dir):
             cmd.extend(["-V", "brandfoot=true"])
+        cmd.extend(_author_metadata_args(self.config.output))
         if template.exists():
             cmd.extend(["--template", str(template)])
         else:

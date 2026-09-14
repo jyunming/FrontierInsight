@@ -97,7 +97,7 @@ Then change `provider.name` to `ollama`. Slower but $0.
 
 ## Headless interactive interview — `python launch.py --new`
 
-If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same 14-question interview the VSCode `@fi /new` flow uses:
+If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same interview the VSCode `@fi /new` flow uses. Its last questions are the optional author line (author, affiliation, contact email, project link) that the paper, slides and poster print; press Enter to skip any of them.
 
 ```bash
 python launch.py --new                  # walks you through, then auto-starts the quest

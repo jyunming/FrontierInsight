@@ -300,11 +300,30 @@ class SlideGenerator:
             build_further_reading(literature, audience=audience))
         if further_slide and not _FURTHER_READING_HEADING_RE.search(content):
             content = content.rstrip() + "\n\n" + further_slide + "\n"
+        content = _with_author_line(content, self.config.output)
 
         slides_md = out_dir / "slides.md"
         slides_md.write_text(content, encoding="utf-8")
         _log.info("slides.md written (%d bytes)", slides_md.stat().st_size)
         return slides_md
+
+
+def _with_author_line(content: str, output) -> str:
+    """Add the configured author line to the title slide, as a paragraph
+    under its headings. The deck is unchanged when no author field is set."""
+    parts = (output.author, output.affiliation, output.contact_email, output.url)
+    line = " · ".join(" ".join(str(p).split()) for p in parts if str(p or "").strip())
+    if not line:
+        return content
+    match = _FRONT_MATTER_RE.match(content)
+    head = content[: match.end()] if match else ""
+    body = content[len(head):]
+    start = 0
+    for brk in _SLIDE_BREAK_RE.finditer(body):
+        if body[start:brk.start()].strip():
+            return head + body[:brk.start()].rstrip() + "\n\n" + line + "\n\n" + body[brk.start():]
+        start = brk.end()
+    return head + body.rstrip() + "\n\n" + line + "\n"
 
 
 # Markdown / Marp image reference: ``![alt](path ...)`` — captures the

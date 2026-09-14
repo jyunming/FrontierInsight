@@ -55,7 +55,9 @@ function looksLikeSurvey(topic: string): boolean {
  * cancelled at any step (Esc on a modal, or empty topic).
  *
  * Flow:
- *   1. Tier-1 — four modals (topic, paper_format, output_kinds, study_depth).
+ *   1. Tier-1 — four modals (topic, paper_format, output_kinds, study_depth),
+ *      then the optional author line (author, affiliation, contact email,
+ *      project link), where an empty box skips the field.
  *      Provider + model are pinned silently by the extension (provider =
  *      vscode_extension, model = whatever the chat picker showed).
  *   2. Tier-2 — derive title / no_simulation / clarify_mode / review_panel /
@@ -69,7 +71,7 @@ export async function runInterview(
     stream: vscode.ChatResponseStream,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** Four quick questions, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
+        "🧪 **Let's set up a new research quest.** Four quick questions and an optional author line, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
@@ -295,6 +297,15 @@ export async function runInterview(
     const studyDepth = studyDepthChoice.value;
     stream.markdown(`  **Study depth:** \`${studyDepth}\`\n\n`);
 
+    // 7. Author line — optional, printed on the paper, slides and poster.
+    // Mirrors the tier-1 author questions in core/interview.py.
+    const authorLine = await askAuthorLine();
+    if (!authorLine) return undefined;
+    const byline = formatAuthorLine(authorLine);
+    if (byline) {
+        stream.markdown(`  **Author line:** ${truncate(byline, 200)}\n\n`);
+    }
+
     // ─── Tier-2 derivation (mirrors core/interview.py SMART_DEFAULTS) ───
     // title — slug from topic; no_simulation — prose vs scientific;
     // others are static or auto-probed.
@@ -337,6 +348,8 @@ export async function runInterview(
         web_research: true,
         // Pause for paywalled papers on by default (the engine default).
         supply_papers: true,
+        ...authorLine,
+        poster_size: "a1_portrait",
     };
 
     // ─── Review block + action picker loop ──────────────────────────
@@ -417,6 +430,8 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
+    const authorCell = formatAuthorLine(a).replace(/\|/g, "\\|");
+    lines.push(`| Author line | ${authorCell || "Frontier Insight (no author set)"} |`);
     // ``knowledge_top_k`` is Tier-2 in core/interview.py — show it in
     // the always-visible review block alongside the other defaults so
     // the VSCode flow matches the schema-backed web/CLI tiering.
@@ -427,6 +442,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     const hasOverride = (
         a.comparative_baseline || a.success_metric || a.budget || a.node_models
         || (ext !== undefined && ext !== 20)
+        || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
     );
     if (hasOverride) {
         lines.push("\n_Advanced overrides:_");
@@ -435,6 +451,9 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         if (a.budget) lines.push(`  • budget: ${a.budget}`);
         if (a.node_models) lines.push(`  • per-node models: ${a.node_models}`);
         if (ext !== undefined && ext !== 20) lines.push(`  • external_top_k (web): ${ext}`);
+        if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") {
+            lines.push(`  • poster size: ${a.poster_size}`);
+        }
     }
     lines.push("");
     return lines.join("\n");
@@ -462,6 +481,71 @@ function validatePositiveInt(s: string): string | null {
 }
 
 
+interface AuthorLine {
+    author: string;
+    affiliation: string;
+    contact_email: string;
+    url: string;
+}
+
+// One input box per field; the prompts mirror the tier-1 author questions
+// in core/interview.py.
+const AUTHOR_LINE_FIELDS: { key: keyof AuthorLine; title: string; prompt: string; placeHolder: string }[] = [
+    {
+        key: "author",
+        title: "Frontier Insight — author (optional)",
+        prompt: "Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
+        placeHolder: "e.g. Jane Chen",
+    },
+    {
+        key: "affiliation",
+        title: "Frontier Insight — affiliation (optional)",
+        prompt: "Lab, company or school to print under the author. Leave blank to omit.",
+        placeHolder: "e.g. Materials Lab, Example University",
+    },
+    {
+        key: "contact_email",
+        title: "Frontier Insight — contact email (optional)",
+        prompt: "Printed on the poster and under the paper title so readers can reach you. It goes only into your own output files. Leave blank to omit.",
+        placeHolder: "e.g. jane@example.org",
+    },
+    {
+        key: "url",
+        title: "Frontier Insight — project link (optional)",
+        prompt: "A web page for this work, such as a repository or lab page. The poster prints it as a QR code. Leave blank for no QR code.",
+        placeHolder: "e.g. https://github.com/you/project",
+    },
+];
+
+/**
+ * Ask the four optional author-line fields. An empty box skips that field;
+ * Esc returns undefined. ``current`` pre-fills the boxes when the user edits
+ * the line from the review screen.
+ */
+async function askAuthorLine(current?: Partial<AuthorLine>): Promise<AuthorLine | undefined> {
+    const out: AuthorLine = { author: "", affiliation: "", contact_email: "", url: "" };
+    for (const field of AUTHOR_LINE_FIELDS) {
+        const v = await vscode.window.showInputBox({
+            title: field.title,
+            prompt: field.prompt,
+            placeHolder: field.placeHolder,
+            value: current?.[field.key] ?? "",
+            ignoreFocusOut: true,
+        });
+        if (v === undefined) return undefined;
+        out[field.key] = v.trim().replace(/\s+/g, " ");
+    }
+    return out;
+}
+
+function formatAuthorLine(a: Partial<AuthorLine>): string {
+    return [a.author, a.affiliation, a.contact_email, a.url]
+        .map((v) => (v ?? "").trim())
+        .filter(Boolean)
+        .join(" · ");
+}
+
+
 /** Inline editor for the seven tier-2 defaults. */
 async function editTier2Field(a: InterviewAnswers): Promise<void> {
     const which = await vscode.window.showQuickPick(
@@ -475,10 +559,16 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Supply paywalled papers", value: "supply_papers" },
             { label: "Paper audience", value: "audience" },
             { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
+            { label: "Author line (author, affiliation, email, link)", value: "author_line" },
         ],
         { title: "Edit which default?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "author_line") {
+        const v = await askAuthorLine(a);
+        if (v) Object.assign(a, v);
+        return;
+    }
     if (which.value === "knowledge_top_k") {
         const v = await vscode.window.showInputBox({
             title: "Axon (RAG) retrievals per quest",
@@ -610,10 +700,23 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "Time / compute budget", value: "budget" },
             { label: "Per-node model overrides", value: "node_models" },
             { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
+            { label: "Poster size", value: "poster_size" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "poster_size") {
+        const v = await vscode.window.showQuickPick(
+            [
+                { label: "A1 portrait — 59.4 × 84.1 cm (default)", description: "Two columns", value: "a1_portrait" as const },
+                { label: "A0 portrait — 84.1 × 118.9 cm", description: "Two columns on a larger sheet", value: "a0_portrait" as const },
+                { label: "48 × 36 in landscape — 121.9 × 91.4 cm", description: "Three columns", value: "landscape_48x36" as const },
+            ],
+            { title: "Poster size", ignoreFocusOut: true },
+        );
+        if (v) a.poster_size = v.value;
+        return;
+    }
     if (which.value === "knowledge_external_top_k") {
         const v = await vscode.window.showInputBox({
             title: "External (web) hits per quest",

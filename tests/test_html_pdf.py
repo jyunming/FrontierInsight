@@ -176,6 +176,63 @@ def test_compile_pdf_briefing_style_uses_briefing_theme(
     assert css is not None and Path(css).name == "briefing.css", captured
 
 
+def test_html_render_puts_the_author_line_in_the_byline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each set author field becomes a pandoc ``author`` entry (one byline
+    row); with none set the byline stays Frontier Insight."""
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **_kw):  # noqa: ANN001
+        seen.append(list(cmd))
+        raise OSError("stop after pandoc")
+
+    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    pmd = tmp_path / "paper.md"
+    pmd.write_text("# T\n\nbody\n", encoding="utf-8")
+
+    def authors(**kw) -> list[str]:  # noqa: ANN003
+        seen.clear()
+        render_paper_html_pdf(pmd, tmp_path / "paper.pdf", pandoc_path="pandoc",
+                              browser=("msedge", "edge"), **kw)
+        cmd = seen[0]
+        return [cmd[i + 1] for i, a in enumerate(cmd) if a == "--metadata" and cmd[i + 1].startswith("author=")]
+
+    assert authors() == ["author=Frontier Insight"]
+    assert authors(author_line=("Jane Chen", "R&D Lab")) == ["author=Jane Chen", "author=R&D Lab"]
+
+
+def test_compile_pdf_hands_the_author_line_to_the_html_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = Config.model_validate({
+        "topic": "t", "title": "t",
+        "output": {"kinds": ["paper_md", "paper_pdf"],
+                   "output_dir": str(tmp_path / "outputs"),
+                   "paper_style": "briefing",
+                   "author": "Jane Chen", "contact_email": "jane@example.org"},
+    })
+    gen = PaperGenerator(cfg)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    paper_md = tmp_path / "paper.md"
+    paper_md.write_text("# T\n\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(
+        paper_mod.shutil, "which", lambda n: "pandoc" if n == "pandoc" else None)
+    monkeypatch.setattr(
+        "generation._html_pdf.find_html_browser", lambda: ("msedge", "edge"))
+    captured: dict[str, object] = {}
+
+    def fake_render(pmd, out_pdf, **kw):  # noqa: ANN001
+        captured.update(kw)
+        out_pdf.write_bytes(b"%PDF-1.4 fake")
+        return out_pdf, ""
+
+    monkeypatch.setattr("generation._html_pdf.render_paper_html_pdf", fake_render)
+    gen._compile_pdf(paper_md, out_dir)
+    assert captured["author_line"] == ("Jane Chen", "jane@example.org")
+
+
 @pytest.mark.skipif(
     shutil.which("pandoc") is None or find_html_browser() is None,
     reason="needs pandoc + a Chromium-family browser for a real render",

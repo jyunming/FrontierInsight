@@ -336,6 +336,17 @@ def _render_lead(slide, s: Slide, page: int) -> None:
         _inline_runs(p2, s.h2, 18, _rgb((0xC3, 0xCD, 0xD3)), font=SANS)
         for r in p2.runs:
             r.font.color.rgb = _rgb((0xC3, 0xCD, 0xD3))
+    if s.paras:
+        # The author line the generator puts under the title, or a short
+        # line the model wrote on a closing slide. Two lines at most, so a
+        # long paragraph cannot run into the footer.
+        tf3 = _textbox(slide, MARGIN_IN, 5.85 if (s.h1 and s.h2) else 4.95, body_w, 0.9)
+        for i, text in enumerate(s.paras[:2]):
+            p3 = tf3.paragraphs[0] if i == 0 else tf3.add_paragraph()
+            p3.alignment = PP_ALIGN.CENTER
+            _inline_runs(p3, text, 14, _rgb((0xC3, 0xCD, 0xD3)), font=SANS)
+            for r in p3.runs:
+                r.font.color.rgb = _rgb((0xC3, 0xCD, 0xD3))
     _footer(slide, page, dark=True)
 
 
