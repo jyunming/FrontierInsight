@@ -385,7 +385,9 @@ class PausesConfig(BaseModel):
     clarify: ClarifyPause = "off"
     # SUPPLY — pause when a relevant paper came back abstract-only (paywalled)
     # so the user can download it and drop the PDF into inputs/papers/.
-    papers: bool = False
+    # On by default: a relevant paywalled paper the open-access cascade could
+    # not fetch is listed in needs/WANTED_PAPERS.md and the quest waits for it.
+    papers: bool = True
     # SUPPLY — fixed drop-in checkpoint(s) for papers/data.
     #   "never" · "before_build" (after design) · "before_review" (after the
     #   first draft) · "both".
@@ -838,6 +840,21 @@ class KnowledgeConfig(BaseModel):
     brave_api_key: str = Field(
         default_factory=lambda: os.environ.get("BRAVE_API_KEY", "").strip()
     )
+    # OpenAlex API key (free at openalex.org). Since February 2026 OpenAlex
+    # gives its full free daily budget only to keyed requests; without a key
+    # a machine gets about a tenth of it — roughly 100 searches a day, and a
+    # quest uses dozens, since arXiv is searched through OpenAlex too. Env
+    # fallback ``OPENALEX_API_KEY``; a set env var wins over YAML. Sent as
+    # OpenAlex's ``api_key`` parameter and redacted from FI's logs.
+    openalex_api_key: str = Field(
+        default_factory=lambda: os.environ.get("OPENALEX_API_KEY", "").strip()
+    )
+    # Semantic Scholar API key (free on request). The keyless pool is shared
+    # by everyone and answers 429 most of the time. Env fallback
+    # ``SEMANTIC_SCHOLAR_API_KEY``; a set env var wins over YAML.
+    semantic_scholar_api_key: str = Field(
+        default_factory=lambda: os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    )
     # Number of web results to request per query. Independent of
     # ``external_top_k`` (which caps the merged external set) so users can
     # widen web breadth without changing the academic cap.
@@ -894,6 +911,16 @@ class KnowledgeConfig(BaseModel):
     # afford it.
     requery_on_low_relevance: bool = True
     requery_max: int = Field(default=2, ge=0, le=5)
+    # LLM literature screen. After the relevance floor, one batched call
+    # grades every retrieved source 0-3 on "could the paper cite this for a
+    # claim?". Scholarly records need a 2 to stay; web pages are dropped only
+    # at 0, because they supply quotable text rather than citations. Keeps at
+    # least ``relevance_min_keep`` sources (highest grades first) and fails
+    # open: a failed or unreadable call keeps everything, and a source the
+    # model did not grade is kept. The embedding floor alone cannot tell a
+    # table of contents or an unrelated paper that shares the search terms
+    # from a real on-topic source; this can. Off → floor only.
+    literature_screen: bool = True
     # Pause-for-user-papers gate. When True, the literature node pauses
     # after retrieval IF any retrieved doc came back as abstract-only
     # (no full text available — typical for paywalled / Crossref / S2
@@ -904,11 +931,12 @@ class KnowledgeConfig(BaseModel):
     # and proceeds — giving the writer real full text instead of
     # abstracts.
     #
-    # Default ``False`` so existing quests keep running unattended.
-    # Pairs naturally with the ``knowledge.try_fetch_full_text`` knob:
-    # turn that on first, then this gate only fires for the subset of
-    # papers the host couldn't open-text-fetch.
-    pause_for_user_papers: bool = False
+    # Default ``True``, matching ``pauses.papers``: this legacy flag is merged
+    # into it, and the programmatic merge copies the attribute through, so
+    # the two defaults must agree. Pairs with ``knowledge.try_fetch_full_text``
+    # (also on): the gate fires only for the papers the open-access cascade
+    # could not fetch. Set ``pauses.papers: false`` for an unattended run.
+    pause_for_user_papers: bool = True
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
     # `Knowledge.search()` when Axon is disabled OR returns zero results.
@@ -923,7 +951,10 @@ class KnowledgeConfig(BaseModel):
     #   crossref         — DOI metadata across paywalled publishers (free).
     #   semantic_scholar — broad coverage + citation graph (free, rate-limited).
     #   pubmed           — biomedical via NCBI E-utilities (free).
-    #   core             — 240M open-access papers (free; needs CORE_API_KEY env).
+    #   core             — 240M open-access papers (free, keyless; CORE_API_KEY
+    #                      raises its rate limit).
+    #   openaire         — European open-access research graph (free, keyless).
+    #   doaj             — Directory of Open Access Journals articles (free, keyless).
     #   google_scholar   — EXPERIMENTAL via `scholarly` package; no official API;
     #                      rate-limited / blocked by Google. Prefer openalex / s2.
     external_fallback: list[str] | str = Field(
@@ -956,8 +987,10 @@ class KnowledgeConfig(BaseModel):
     # (institutional VPN / Shibboleth / EZproxy already authenticated at
     # the OS level). Login-wall HTML pages are rejected by a
     # Content-Type + %PDF-magic check, so the quest never hangs on a
-    # paywalled venue. Off by default — opt-in per quest.
-    try_fetch_full_text: bool = False
+    # paywalled venue. On by default: a legal copy is the difference between
+    # the writer quoting a paper and quoting its abstract. The whole batch
+    # shares ``full_text_fetch_total_s``; set false for abstracts only.
+    try_fetch_full_text: bool = True
     # Per-doc HTTP timeout (landing-page GET, PDF GET). Short is good.
     full_text_fetch_timeout_s: float = Field(default=15.0, gt=0)
     # Total budget across all docs in one literature batch — caps wall

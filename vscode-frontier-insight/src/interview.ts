@@ -335,8 +335,8 @@ export async function runInterview(
         // Web research on by default — searches the public web and
         // downloads sources into data/literature/ for every quest.
         web_research: true,
-        // Pause-for-paywalled-papers off by default (opt-in power feature).
-        supply_papers: false,
+        // Pause for paywalled papers on by default (the engine default).
+        supply_papers: true,
     };
 
     // ─── Review block + action picker loop ──────────────────────────
@@ -415,7 +415,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
-    lines.push(`| Supply paywalled papers | ${a.supply_papers === true ? "pause for my PDFs" : "off"} |`);
+    lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
     // ``knowledge_top_k`` is Tier-2 in core/interview.py — show it in
     // the always-visible review block alongside the other defaults so
@@ -571,8 +571,8 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
         case "supply_papers": {
             const v = await vscode.window.showQuickPick(
                 [
+                    { label: "$(book) Pause for my PDFs — list paywalled papers to download (default)", value: true },
                     { label: "$(circle-slash) Off — use what open access can get", value: false },
-                    { label: "$(book) Pause for my PDFs — list paywalled papers to download", value: true },
                 ],
                 { title: "Supply paywalled papers (pause → drop PDFs into inputs/papers/)", ignoreFocusOut: true },
             );

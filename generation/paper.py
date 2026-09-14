@@ -26,7 +26,7 @@ from pathlib import Path
 
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config
-from core.engine import QuestArtifacts, build_references
+from core.engine import QuestArtifacts, build_further_reading, build_references
 from generation._pandoc import find_pandoc
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
@@ -481,22 +481,27 @@ class PaperGenerator:
         # Machine-readable citations: emit the paper's references as BibTeX +
         # CSL-JSON so they drop straight into a reference manager. Reuses the
         # same de-duped reference list the paper / poster / slides cite.
-        refs = build_references(
-            (art.raw_state or {}).get("literature") or [],
-            audience=self.config.output.audience,
-        )
-        if refs:
+        # Papers are the numbered References; the web pages the paper drew on
+        # are Further reading and get their own pair of files.
+        literature = (art.raw_state or {}).get("literature") or []
+        audience = self.config.output.audience
+        for stem, entries in (
+            ("references", build_references(literature, audience=audience)),
+            ("further_reading", build_further_reading(literature, audience=audience)),
+        ):
+            if not entries:
+                continue
             paper_sub = out_dir / "paper"
             try:
                 paper_sub.mkdir(parents=True, exist_ok=True)
-                bib = paper_sub / "references.bib"
-                csl = paper_sub / "references.csl.json"
-                bib.write_text(to_bibtex(refs), encoding="utf-8")
-                csl.write_text(to_csl_json(refs), encoding="utf-8")
-                result["references_bib"] = bib
-                result["references_csl_json"] = csl
+                bib = paper_sub / f"{stem}.bib"
+                csl = paper_sub / f"{stem}.csl.json"
+                bib.write_text(to_bibtex(entries), encoding="utf-8")
+                csl.write_text(to_csl_json(entries), encoding="utf-8")
+                result[f"{stem}_bib"] = bib
+                result[f"{stem}_csl_json"] = csl
             except OSError as e:
-                _log.warning("references export failed: %r", e)
+                _log.warning("%s export failed: %r", stem, e)
 
         if art.figures_dir is not None and art.figures_dir.exists():
             dst = out_dir / "figures"

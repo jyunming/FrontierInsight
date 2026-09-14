@@ -28,7 +28,9 @@ from core.config import (
 from core.engine import (
     Engine,
     QuestArtifacts,
+    build_further_reading,
     build_references,
+    render_further_reading_marp_slide,
     render_poster_references_latex,
     render_references_marp_slide,
 )
@@ -57,7 +59,7 @@ def _engine(tmp_path: Path, **engine_kw) -> Engine:
 # ---------------------------------------------------------------------------
 
 
-def test_build_references_includes_web_drops_internal() -> None:
+def test_references_keep_papers_further_reading_keeps_web_both_drop_internal() -> None:
     lit = [
         {"content": "p", "metadata": {
             "source": "web_search", "kind": "web_page",
@@ -70,31 +72,31 @@ def test_build_references_includes_web_drops_internal() -> None:
         {"content": "p", "metadata": {"url": "https://no-title"}},  # not citable
     ]
     refs = build_references(lit, audience="external")
-    assert len(refs) == 2
-    assert refs[0]["url"] == "https://payloadspace.com/x"
-    assert refs[1]["doi"] == "10.1/x"
+    assert [(r["n"], r["doi"]) for r in refs] == [(1, "10.1/x")]
+    further = build_further_reading(lit, audience="external")
+    assert [(w["label"], w["url"]) for w in further] == [("W1", "https://payloadspace.com/x")]
 
 
-def test_poster_references_latex_escapes_urls() -> None:
-    refs = build_references([
+def test_poster_further_reading_latex_escapes_urls() -> None:
+    further = build_further_reading([
         {"content": "", "metadata": {
             "source": "web_search", "title": "Q1 & Q2 report",
             "url": "https://e.com/a?x=1&y=2"}},
     ])
-    band = render_poster_references_latex(refs)
-    assert "\\textbf{Sources:}" in band
+    band = render_poster_references_latex([], further)
+    assert "\\textbf{Further reading:}" in band
     assert "\\&" in band          # & escaped for LaTeX
     assert "Q1 \\& Q2 report" in band
 
 
-def test_marp_references_slide_built() -> None:
-    refs = build_references([
+def test_marp_further_reading_slide_built() -> None:
+    further = build_further_reading([
         {"content": "", "metadata": {
             "source": "web_search", "title": "T", "url": "https://e.com/a"}},
     ])
-    slide = render_references_marp_slide(refs)
+    slide = render_further_reading_marp_slide(further)
     assert slide.startswith("---")
-    assert "## References" in slide
+    assert "## Further reading" in slide
     assert "https://e.com/a" in slide
 
 
@@ -508,7 +510,7 @@ def _gen_config(tmp_path: Path, kind: str) -> Config:
 
 
 @pytest.mark.asyncio
-async def test_poster_injects_web_sources_band(tmp_path, monkeypatch) -> None:
+async def test_poster_injects_web_sources_as_further_reading(tmp_path, monkeypatch) -> None:
     from core.provider import ResolvedEndpoint
     from generation.poster import PosterGenerator
 
@@ -527,14 +529,16 @@ async def test_poster_injects_web_sources_band(tmp_path, monkeypatch) -> None:
 
     result = await PosterGenerator(cfg).generate(art, art.quest_root)
     tex = result["poster_tex"].read_text(encoding="utf-8")
-    # Sources band injected by the template (not the LLM) with the web URL.
-    assert "\\textbf{Sources:}" in tex
+    # The band is injected by the template (not the LLM). Web pages are
+    # Further reading, so a web-only quest has no numbered Sources line.
+    assert "\\textbf{Further reading:}" in tex and "[W1]~" in tex
+    assert "\\textbf{Sources:}" not in tex
     assert "https://payloadspace.com/spacex-2023" in tex
     assert "$references" not in tex  # placeholder fully substituted
 
 
 @pytest.mark.asyncio
-async def test_slides_appends_references_slide(tmp_path, monkeypatch) -> None:
+async def test_slides_append_a_further_reading_slide_for_web_sources(tmp_path, monkeypatch) -> None:
     from core.provider import ResolvedEndpoint
     from generation.slides import SlideGenerator
 
@@ -555,7 +559,9 @@ async def test_slides_appends_references_slide(tmp_path, monkeypatch) -> None:
 
     result = await SlideGenerator(cfg).generate(art, art.quest_root)
     md = result["slides_md"].read_text(encoding="utf-8")
-    assert "## References" in md
+    # Web pages are Further reading; with no papers there is no References slide.
+    assert "## Further reading" in md and "- [W1] SpaceX 2023 revenue" in md
+    assert "## References" not in md
     assert "https://payloadspace.com/spacex-2023" in md
 
 
@@ -788,16 +794,22 @@ async def test_first_query_is_derived_from_the_topic(tmp_path: Path) -> None:
     eng.config.knowledge.enabled = True
     seen: dict = {}
 
+    facets = [
+        "damped harmonic oscillator numerical integrators",
+        "energy drift symplectic integration",
+        "numerical methods ordinary differential equations",
+    ]
+
     async def fake_chat(prompt, node=""):
         seen["node"], seen["prompt"] = node, prompt
-        return '{"query": "damped harmonic oscillator numerical integrators energy drift"}'
+        return json.dumps({"queries": facets})
 
     eng._chat = fake_chat
-    q = await eng._derive_literature_query(
+    qs = await eng._derive_literature_queries(
         "Compare how accurately explicit Euler and RK4 track a damped oscillator.",
         "Integrator bake-off",
     )
-    assert q == "damped harmonic oscillator numerical integrators energy drift"
+    assert qs == facets
     assert seen["node"] == "literature_query"
     assert "Integrator bake-off" in seen["prompt"]
 
@@ -810,7 +822,7 @@ async def test_derivation_spends_no_call_when_retrieval_is_off(tmp_path: Path) -
         raise AssertionError("nothing would read the query")
 
     eng._chat = must_not_call
-    assert await eng._derive_literature_query("topic") == ""
+    assert await eng._derive_literature_queries("topic") == []
 
 
 @pytest.mark.asyncio
@@ -823,7 +835,7 @@ async def test_derivation_rejects_the_topic_echoed_back(tmp_path: Path) -> None:
         return '{"query": "' + sentence + '"}'
 
     eng._chat = echo
-    assert await eng._derive_literature_query(sentence) == ""
+    assert await eng._derive_literature_queries(sentence) == []
 
 
 @pytest.mark.asyncio
@@ -835,7 +847,7 @@ async def test_derivation_degrades_to_empty_on_model_failure(tmp_path: Path) -> 
         raise RuntimeError("provider down")
 
     eng._chat = boom
-    assert await eng._derive_literature_query("t") == ""
+    assert await eng._derive_literature_queries("t") == []
 
 
 async def _literature_queries(monkeypatch, tmp_path: Path, chat) -> tuple[list, dict]:

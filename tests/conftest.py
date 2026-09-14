@@ -11,6 +11,63 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_NETWORK_LEAKS: dict[str, list[str]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network(request, monkeypatch):
+    """No test reaches a real server through httpx.
+
+    FI's retrieval code is best-effort by design: a failed request is logged
+    and returns nothing. So a test that forgets to mock a request does not
+    fail — it quietly depends on whether the machine is online and whether
+    Crossref or Europe PMC answered, and it is slower. Such requests are
+    refused here (the code under test sees a connection error, exactly as it
+    would offline) and listed at the end of the run so they can be mocked.
+    Loopback stays open for tests that start a local server;
+    ``httpx.MockTransport`` never reaches this layer.
+    ``FI_TEST_ALLOW_NETWORK=1`` lifts the block for a deliberate live run.
+    """
+    import os
+
+    if os.environ.get("FI_TEST_ALLOW_NETWORK") == "1":
+        return
+    import httpx
+
+    real_sync = httpx.HTTPTransport.handle_request
+    real_async = httpx.AsyncHTTPTransport.handle_async_request
+
+    def _refuse(req):
+        _NETWORK_LEAKS.setdefault(request.node.nodeid, []).append(
+            f"{req.method} {req.url.scheme}://{req.url.host}{req.url.path}"
+        )
+        return httpx.ConnectError("real network is disabled in tests", request=req)
+
+    def handle(self, req):
+        if (req.url.host or "") in _LOOPBACK_HOSTS:
+            return real_sync(self, req)
+        raise _refuse(req)
+
+    async def handle_async(self, req):
+        if (req.url.host or "") in _LOOPBACK_HOSTS:
+            return await real_async(self, req)
+        raise _refuse(req)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _NETWORK_LEAKS:
+        return
+    terminalreporter.section("real network requests refused")
+    for nodeid, urls in sorted(_NETWORK_LEAKS.items()):
+        shown = sorted(set(urls))
+        terminalreporter.write_line(f"{nodeid}: {len(urls)} request(s)")
+        for url in shown[:5]:
+            terminalreporter.write_line(f"    {url}")
+
 
 @pytest.fixture(autouse=True)
 def _no_embed_model_download(monkeypatch):
@@ -49,6 +106,21 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "FI_SKILLS_APPROVALS", str(empty.parent / "approvals.json"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_arxiv_gate(tmp_path_factory, monkeypatch):
+    """The arXiv queue keeps its pacing state and a 24-hour response cache
+    under ``FI_CACHE_DIR`` (default ``~/.frontier-insight/cache``). No test may
+    read or write the developer's real cache — a stale entry there would
+    answer a later test's fake request — and no test should wait three
+    seconds between fake arXiv requests. Tests of the queue itself restore
+    the spacing and drive a fake clock."""
+    monkeypatch.setenv("FI_CACHE_DIR", str(tmp_path_factory.mktemp("fi_cache")))
+    from core import arxiv_gate
+
+    monkeypatch.setattr(arxiv_gate, "MIN_INTERVAL_S", 0.0)
+    arxiv_gate._PAUSED_QUESTS.clear()
 
 
 @pytest.fixture(autouse=True)

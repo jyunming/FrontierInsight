@@ -56,6 +56,17 @@
     </div>
   </div>
 
+  <!-- Literature / full-text sources that failed during the run (rate limits,
+       blocks, timeouts). Written by the engine on every exit path, so a
+       paused or failed quest shows it too. -->
+  <div id="source-failures-banner" class="hidden fi-banner fi-banner-warning">
+    <div class="font-body-md text-body-md text-on-surface flex flex-col gap-1">
+      <b>Some sources failed during this run.</b>
+      <span id="source-failures-line" class="text-on-surface-variant font-code-md text-code-md"></span>
+      <span class="text-on-surface-variant">The literature may be thinner than it should be. Details in <code class="font-code-md">.fi/source_failures.json</code> and <code class="font-code-md">.fi/run.log</code>.</span>
+    </div>
+  </div>
+
   <!-- Unified "Action needed" banner — shown whenever the quest paused for
        you (any of clarify / papers / supply / data / review). Sourced from the
        single NEXT_STEP.md every pause writes. -->
@@ -262,6 +273,7 @@
     document.getElementById('current-node').textContent = data.current_node ? `node: ${data.current_node}` : '';
     renderNodeProgress(data);
     renderQuestFailedBanner(data.quest_failed);
+    renderSourceFailures(data.source_failures);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -665,6 +677,17 @@
     const whatLine = document.getElementById('quest-failed-what-line');
     nodeLine.textContent = qf.failing_node ? `Failed in node: ${qf.failing_node}` : '';
     whatLine.textContent = qf.what_broke || '';
+    banner.classList.remove('hidden');
+  }
+
+  function renderSourceFailures(sf) {
+    const banner = document.getElementById('source-failures-banner');
+    if (!banner) return;
+    if (!sf || !sf.total) {
+      banner.classList.add('hidden');
+      return;
+    }
+    document.getElementById('source-failures-line').textContent = sf.summary || '';
     banner.classList.remove('hidden');
   }
 

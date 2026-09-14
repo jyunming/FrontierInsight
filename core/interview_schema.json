@@ -543,22 +543,22 @@
     {
       "id": "supply_papers",
       "label": "Supply paywalled papers",
-      "prompt": "When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, pause and list the papers to download (ranked, with links) so you can drop the PDFs into inputs/papers/ and resume with real full text. Off by default.",
+      "prompt": "When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, pause and list the papers to download (ranked, with links) so you can drop the PDFs into inputs/papers/ and resume with real full text. On by default.",
       "kind": "single",
       "choices": [
         {
           "value": false,
-          "label": "Off (default)",
-          "description": "Use whatever the open-web / open-access fetch can get. Paywalled papers (SPIE, IEEE, …) are cited by their abstract only."
+          "label": "Off",
+          "description": "Use whatever the open-web / open-access fetch can get. Paywalled papers (SPIE, IEEE, …) are cited by their abstract only. Choose this for an unattended run."
         },
         {
           "value": true,
-          "label": "Pause for my PDFs",
+          "label": "Pause for my PDFs (default)",
           "description": "When the agent can only get the abstract of a relevant paper, it pauses and writes a ranked needs/WANTED_PAPERS.md (download links + why each matters). Drop the PDFs into inputs/papers/ and resume — they're ingested as full text. Tip: you can also pre-load a folder of papers via knowledge.local_papers."
         }
       ],
       "placeholder": "",
-      "default": false,
+      "default": true,
       "mid_quest_editable": true,
       "frontends": [
         "cli",

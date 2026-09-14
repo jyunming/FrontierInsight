@@ -25,9 +25,11 @@ When you type `@fi /start config.yaml` in Copilot Chat, the extension:
 4. Streams the response back, renders progress in the chat panel.
 
 The engine runs to a finished paper, slide deck, figures, and a
-machine-readable summary in `outputs/<quest_id>/`. The paper's sources are
+machine-readable summary in `outputs/<quest_id>/`. The paper's cited papers are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
-(CSL-JSON), and a `paper/CLAIMS.md` ledger records which of the paper's claims
+(CSL-JSON). The web pages it drew on are listed under Further reading, not
+References, and exported as `paper/further_reading.bib` / `.csl.json`. A
+`paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, a cited source, or are unsupported (unsupported claims
 force a revise). With `engine.execute_replicates > 1` the results are reported
 with 95% confidence intervals, effect sizes (including between methods nested
@@ -186,7 +188,7 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
-Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers: true`), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
+Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
 
 ### Fleet (multiple quests in parallel)
 
@@ -283,8 +285,9 @@ node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
 When a relevant paper is genuinely paywalled (SPIE / IEEE / Elsevier …)
-and only its abstract is reachable, turn on **Supply paywalled papers**
-in the interview: the quest pauses and writes a ranked
+and only its abstract is reachable, **Supply paywalled papers** (on by
+default; turn it off in the interview for an unattended run) makes the
+quest pause and write a ranked
 `needs/WANTED_PAPERS.md` (download links + why each matters). After the
 run, the chat panel surfaces that list with instructions to drop the
 PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
@@ -323,7 +326,24 @@ cited CC-licensed arXiv paper plus Wikimedia Commons diagrams (CC /
 public-domain only), each attributed to its source + license. Set a
 free [Brave Search API key](https://brave.com/search/api/) via the
 `BRAVE_API_KEY` env var for better relevance (optional; DuckDuckGo is
-the keyless default).
+the keyless default). For the academic side, `OPENALEX_API_KEY` unlocks
+OpenAlex's full daily budget — without it a machine gets about 100
+searches a day, and arXiv is searched through OpenAlex too — and
+`SEMANTIC_SCHOLAR_API_KEY` gets Semantic Scholar off its mostly
+rate-limited shared pool. Both are free, and both also work as
+`knowledge.openalex_api_key` / `knowledge.semantic_scholar_api_key` in
+the quest YAML (an environment variable wins). CORE, OpenAIRE and DOAJ
+need no key and are where humanities and social-science topics find
+open-access books, theses and journals. Academic search keeps only
+citable record types: papers for a quest with an experiment, and papers
+plus books and book chapters for a quest without one. Each literature
+pass searches three short keyword queries, one per facet of the topic,
+worded for its kind (methods and measured quantities, or the names
+scholars of the subject write under), and fetches full text once, for
+the sources it keeps. Before that, one model call grades every
+retrieved source 0–3 on whether the paper could cite it: papers need a
+2, web pages are dropped only at 0, and your own papers are never
+screened (`knowledge.literature_screen`, on by default).
 
 If any files land, the chat panel shows the count and the quest
 continues — many no-simulation quests run end-to-end without
@@ -361,6 +381,20 @@ each explain what was requested, why it couldn't be produced
 fix it — so the user discovers the failure by opening the quest
 folder instead of grepping `run.log`. A subsequent successful run
 of the same kind removes the stale breadcrumb.
+
+Literature sources get the same treatment. When OpenAlex, Crossref,
+arXiv, a publisher page or any other source rate-limits, blocks or
+times out during a quest, the chat shows one
+`⚠️ source failures: arxiv 3 (http_429=3); …` line at the end of the
+run, so a thin bibliography comes with its reason. The detail is in
+`.fi/source_failures.json` and in `run.log` (`[source-failure]` lines,
+credentials redacted).
+
+arXiv requests from every quest on the machine — including quests
+started from this chat — share one queue (one at a time, 3 s apart,
+backing off 1 / 2 / 4 minutes on a rate limit) and a 24-hour response
+cache, so running several quests at once no longer multiplies arXiv
+traffic.
 
 If a quest crashes mid-graph (a `_node_*` raises, or a pre-graph
 stage fails), the engine writes `quest_failed.md` to the quest

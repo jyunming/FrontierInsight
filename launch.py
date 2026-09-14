@@ -1455,6 +1455,19 @@ async def run_one(
         "paper_md": str(art.paper_md) if art.paper_md else None,
         "paper_pdf": str(written.get("paper_pdf")) if written.get("paper_pdf") else None,
     }
+    # Which literature / full-text sources failed during the run (written by
+    # the engine on every exit path). Surfaced here so the CLI and the VSCode
+    # chat see it without opening run.log.
+    failures_path = art.quest_root / ".fi" / "source_failures.json"
+    if failures_path.is_file():
+        try:
+            failures = json.loads(failures_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            failures = None
+        if isinstance(failures, dict):
+            summary["source_failures"] = failures
+            if failures.get("total"):
+                print(f"[FI] source failures: {failures.get('summary')}")
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")
@@ -2715,7 +2728,7 @@ async def _run_new(
         knowledge_top_k=int(derived.get("knowledge_top_k", 8) or 8),
         knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
         web_research=bool(derived.get("web_research", True)),
-        supply_papers=bool(advanced.get("supply_papers", False)),
+        supply_papers=bool(advanced.get("supply_papers", True)),
         ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
         max_iterations=int(advanced.get("max_iterations", 2) or 2),
     )
@@ -4490,8 +4503,9 @@ def main() -> int:
     # the streams are reconfigured up here.
     _force_utf8_streams()
     # Load .env before anything reads the environment (KnowledgeConfig's
-    # brave_api_key / offline defaults resolve BRAVE_API_KEY / FI_* at
-    # Config construction time).
+    # brave_api_key / openalex_api_key / semantic_scholar_api_key / offline
+    # defaults resolve BRAVE_API_KEY / OPENALEX_API_KEY /
+    # SEMANTIC_SCHOLAR_API_KEY / FI_* at Config construction time).
     _load_dotenv()
     args = parse_args()
     # Hold the coroutine so we can close() it if asyncio.run never consumes

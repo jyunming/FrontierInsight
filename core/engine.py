@@ -48,7 +48,14 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
 )
 from .execution import ExecutionResult, make_executor
-from .knowledge import Knowledge, RetrievedDoc
+from .knowledge import (
+    WORK_SCOPE_PAPERS,
+    WORK_SCOPE_PAPERS_AND_BOOKS,
+    Knowledge,
+    RetrievedDoc,
+    _doc_dedup_keys,
+    _normalize_title,
+)
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
     FallbackLLMClient,
@@ -79,6 +86,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "claim_check",
     "cross_check",
     "relevance_guard",
+    "literature_screen",
 })
 
 
@@ -146,7 +154,10 @@ class QuestState(TypedDict, total=False):
     literature_iter: int
     # The search query the literature node actually sent -- derived from the
     # topic by the model when it could be, else the old title+topic string.
+    # With facet queries this is the first facet; all of them are in
+    # ``literature_queries``.
     literature_query: str
+    literature_queries: list[str]
     design: dict[str, Any]
     # Every version of the design, in order. Entry 0 is the pre-registration
     # (stated before any result existed); later entries are flagged
@@ -468,6 +479,22 @@ class Engine:
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        import time as _time
+
+        from . import source_failures as _source_failures
+
+        # Every literature / full-text source records its failures against
+        # this quest. The adapters run in worker threads with no engine
+        # handle; asyncio copies this context into them, so under --fleet each
+        # quest still gets only its own. Summarised in the finally below.
+        _source_failures.reset(self.quest_id)
+        # A new run of this quest may try arXiv again even if an earlier run
+        # paused it after repeated rate limits.
+        from . import arxiv_gate as _arxiv_gate
+
+        _arxiv_gate.reset_quest(self.quest_id)
+        _quest_ctx = _source_failures.current_quest.set(self.quest_id)
+        _run_started_at = _time.time()
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
@@ -986,7 +1013,37 @@ class Engine:
             # Without this, Windows test cleanup would intermittently
             # fail with PermissionError as soon as ANY of those paths
             # fired. ``_close_quest_logger`` is idempotent.
+            #
+            # The source-failure summary goes first, while run.log is still
+            # open, and on every path: a quest that failed or paused because
+            # its sources did is exactly the one whose summary matters.
+            try:
+                self._emit_source_failure_summary(started_at=_run_started_at)
+            except Exception:  # noqa: BLE001 - reporting must not mask the outcome
+                pass
+            try:
+                _source_failures.current_quest.reset(_quest_ctx)
+            except ValueError:
+                pass
             _close_quest_logger(self.quest_id)
+
+    def _emit_source_failure_summary(self, *, started_at: float) -> None:
+        """One ``[source-failures]`` line in run.log plus
+        ``.fi/source_failures.json`` for this run. A clean run says ``none``:
+        silence would be indistinguishable from the report being skipped."""
+        from . import source_failures as _source_failures
+
+        try:
+            payload = _source_failures.write_summary(
+                self.quest_id, self.fi_dir / "source_failures.json",
+                started_at=started_at,
+            )
+        except OSError as e:
+            self._log.warning("[source-failures] could not write summary: %r", e)
+            payload = _source_failures.snapshot(self.quest_id)
+            payload["summary"] = _source_failures.format_summary(payload)
+        emit = self._log.warning if payload.get("total") else self._log.info
+        emit("[source-failures] %s", payload["summary"])
 
     async def emit_artifacts_only(self) -> "QuestArtifacts":
         """Load a FINISHED quest's checkpoint READ-ONLY and bundle its
@@ -1826,6 +1883,7 @@ class Engine:
         seeded = await self.knowledge.asearch(
             state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
+            work_scope=self._work_scope(state),
         )
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
@@ -2075,6 +2133,18 @@ class Engine:
             "mode": k.passage_ranking,
         }
 
+    @staticmethod
+    def _work_scope(state: QuestState) -> str:
+        """Which scholarly record types academic search keeps for this quest.
+        A quest with an experiment cites papers; one without (a survey, a
+        history, a humanities or policy question) also keeps books and book
+        chapters, where much of that scholarship is published. Keyed on the
+        resolved run mode, not on a separate subject classifier, so a
+        misclassified topic gets the other rule rather than no search."""
+        if state.get("no_simulation_resolved"):
+            return WORK_SCOPE_PAPERS_AND_BOOKS
+        return WORK_SCOPE_PAPERS
+
     async def _node_literature(self, state: QuestState) -> QuestState:
         if self.config.engine.analyze_local_first:
             # --analyze: local-data-first, so NO external literature is
@@ -2109,14 +2179,23 @@ class Engine:
         # topic into the terms the field publishes under. On any failure the
         # concatenation above is kept, so a flaky model degrades to the old
         # query rather than to no search at all.
-        derived = await self._derive_literature_query(
-            state["topic"], chosen.get("title") or "", hypothesis,
+        scope = self._work_scope(state)
+        queries = await self._derive_literature_queries(
+            state["topic"], chosen.get("title") or "", hypothesis, work_scope=scope,
         )
-        if derived:
-            self._log.info("[literature] search query derived from the topic: %r", derived)
-            query = derived
+        if queries:
+            self._log.info("[literature] search queries derived from the topic: %r", queries)
+            query = queries[0]
+        else:
+            queries = [query.strip()]
+        chat_fn = functools.partial(self._chat_messages, node="source_router")
+        # One routing decision for all facets: they are phrasings of one
+        # topic, and routing each would spend a call re-deriving the same list.
+        sources = await self.knowledge.choose_sources(
+            query, chosen_idea=chosen, chat_fn=chat_fn,
+        )
 
-        async def _retrieve(q: str) -> list:
+        async def _retrieve(q: str, *, web: bool = True) -> list:
             return await self.knowledge.asearch(
                 q.strip(),
                 top_k=self.config.knowledge.top_k,
@@ -2126,10 +2205,22 @@ class Engine:
                 # instead of being silently capped at the Axon top_k.
                 external_top_k=self.config.knowledge.external_top_k,
                 chosen_idea=chosen,
-                chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                chat_fn=chat_fn,
+                work_scope=scope,
+                sources=sources,
+                # Web search runs for the first facet only: the keyless
+                # DuckDuckGo backend throttles a burst of queries, and the
+                # other facets are there to reach scholarly work.
+                web=web,
+                # Full text is fetched once, below, for the sources that
+                # survive the relevance screen -- not for every facet's hits.
+                fetch_full_text=False,
             )
 
-        docs = await _retrieve(query)
+        per_facet = await asyncio.gather(*(
+            _retrieve(q, web=(i == 0)) for i, q in enumerate(queries)
+        ))
+        docs = _merge_round_robin(list(per_facet))
         # Relevance floor: drop off-topic sources the retriever returned before
         # they reach the corpus. This is the ONLY relevance filter on the
         # literature path — the LLM guard runs only under auto_collect, which
@@ -2149,13 +2240,13 @@ class Engine:
         # evidence. Retrying with the model's alternative phrasings is the
         # principled fix. Bounded, and skipped when unscored (see config).
         kn = self.config.knowledge
-        tried_queries = [query.strip()]
+        tried_queries = list(queries)
         if kn.requery_on_low_relevance and stats.get("scored") and docs:
             attempt = 0
             while stats.get("above_floor", 0) == 0 and attempt < kn.requery_max:
                 attempt += 1
                 alt = await self._propose_literature_queries(
-                    rel_topic, tried_queries, docs,
+                    rel_topic, tried_queries, docs, work_scope=scope,
                 )
                 if not alt:
                     self._log.info(
@@ -2186,6 +2277,12 @@ class Engine:
                     attempt, stats.get("above_floor", 0),
                 )
         docs = filtered
+        # The floor scores word overlap; the screen asks whether the paper
+        # could cite each source for a claim (see _screen_literature).
+        docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
+        # Legal full text for the scholarly sources that were kept (web pages
+        # already carry their page text). Once here rather than per facet.
+        docs = await self.knowledge.fetch_full_text(docs)
         # Keep the FULL fetched text (no truncation): it lands uncapped on
         # disk under data/literature/ for audit, and the prompt builders
         # relevance-select the passages each node needs (see
@@ -2212,6 +2309,8 @@ class Engine:
         # straight assignment; on broaden_lit re-entries we accumulate
         # so the design node sees the full corpus FI has seen for
         # this quest.
+        # A specific-enough title is a second identity: the same text reached
+        # under several DOIs (or once with a DOI, once without) is one source.
         seen: set[str] = set()
         merged: list[dict[str, Any]] = []
         for entry in (*prior, *new_entries):
@@ -2221,10 +2320,11 @@ class Engine:
                 or str(md.get("url") or "").strip()
                 or (entry.get("content") or "")[:200]
             )
-            if ident and ident in seen:
+            norm_title = _normalize_title(md.get("title") or "")
+            idents = [i for i in (ident, f"title:{norm_title}" if norm_title else "") if i]
+            if any(i in seen for i in idents):
                 continue
-            if ident:
-                seen.add(ident)
+            seen.update(idents)
             merged.append(entry)
         added = len(merged) - len(prior)
         # Pull in any PDFs the user dropped under ``inputs/papers/`` on
@@ -2339,6 +2439,7 @@ class Engine:
             "literature": merged,
             "literature_iter": this_iter,
             "literature_query": query.strip(),
+            "literature_queries": queries,
         }
 
     async def _node_design(self, state: QuestState) -> QuestState:
@@ -2796,7 +2897,9 @@ class Engine:
         # rate-limit-prone re-search in the common case.
         axon_written = 0
         if lit_written == 0:
-            axon_written = await self._axon_collect_step(query, auto_dir)
+            axon_written = await self._axon_collect_step(
+                query, auto_dir, work_scope=self._work_scope(state),
+            )
 
         # ---- Dataset adapters --------------------------------------
         adapter_written = await self._run_dataset_adapters(query, auto_dir)
@@ -2893,7 +2996,9 @@ class Engine:
                 )
         return written
 
-    async def _axon_collect_step(self, query: str, auto_dir: Path) -> int:
+    async def _axon_collect_step(
+        self, query: str, auto_dir: Path, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> int:
         """Axon-backed retrieval. Returns the
         count of files written under ``auto_dir`` (not in a
         sub-directory). Returns 0 on any of: knowledge disabled,
@@ -2925,6 +3030,7 @@ class Engine:
                 query,
                 top_k=top_k,
                 chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                work_scope=work_scope,
             )
         except Exception as e:
             self._log.warning(
@@ -3031,45 +3137,181 @@ class Engine:
             )
         return kept
 
-    async def _derive_literature_query(
-        self, topic: str, idea_title: str = "", hypothesis: str = "",
-    ) -> str:
-        """Turn a topic statement into a keyword search query.
+    async def _screen_literature(
+        self, topic: str, docs: list, *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list:
+        """Grade every retrieved source 0-3 in one batched call and keep the
+        citable ones (rubric in ``agents/literature_screen.md``).
 
-        Returns "" when retrieval is off (nothing would read the query), when
-        the model fails, or when the reply is not a keyword query at all (a
-        long sentence is the topic echoed back). The caller then keeps its own
-        query, so this can only narrow what gets sent, never stop the search.
+        The embedding floor that runs first scores word overlap, so a table of
+        contents or a paper on another system that shares the search terms
+        passes it; this asks whether the paper could cite the source for a
+        claim. Scholarly records need a 2. Web pages are dropped only at 0:
+        they are kept for the text the writer quotes, and a page of general
+        background is exactly what a 1 describes. At least
+        ``knowledge.relevance_min_keep`` sources survive, best grades first,
+        so a thin retrieval is not emptied (the evidence gate can broaden).
+        Fail-open: when the screen is off, the call fails or the reply cannot
+        be read, every source is kept, and so is any source left ungraded.
+        Graded sources carry ``screen_grade``.
+        """
+        kn = self.config.knowledge
+        # Papers the user supplied are theirs to judge: never shown, never dropped.
+        own = {
+            i for i, d in enumerate(docs)
+            if (d.metadata or {}).get("source") in ("local_paper", "user_supplied")
+        }
+        if not kn.literature_screen or len(own) == len(docs):
+            return docs
+        lines: list[str] = []
+        for i, d in enumerate(docs):
+            if i in own:
+                continue
+            md = d.metadata or {}
+            kind = "web page" if md.get("source") == "web_search" else "paper"
+            title = " ".join(str(md.get("title") or md.get("url") or "(untitled)").split())
+            facts = ", ".join(
+                str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type")) if v
+            )
+            excerpt = " ".join(str(d.content or "").split())[:300]
+            lines.append(
+                f"[{i}] ({kind}) {title}" + (f" — {facts}" if facts else "") + f" :: {excerpt}"
+            )
+        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+            guidance = (
+                "This quest has no experiment, so books, book chapters and "
+                "humanities or social-science scholarship count as fully as "
+                "journal articles: judge them by subject, not by format."
+            )
+        else:
+            guidance = (
+                "This quest runs an experiment. Work on the same system, method "
+                "or measured quantity is the most useful; a paper from another "
+                "field that only shares vocabulary is a 0 or a 1."
+            )
+        prompt = self._prompts["literature_screen"].substitute(
+            topic=topic[:1200], kind_guidance=guidance, candidates="\n".join(lines),
+        )
+        try:
+            raw = await self._chat(prompt, node="literature_screen")
+            parsed = _parse_json_lenient(raw, node="literature_screen")
+        except Exception as e:  # noqa: BLE001 — the screen must never cost the corpus
+            self._log.info("[literature] screen failed (%r); keeping all %d sources", e, len(docs))
+            return docs
+        grades = _screen_grades(parsed, len(docs))
+        if grades is None:
+            self._log.info("[literature] screen reply unreadable; keeping all %d sources", len(docs))
+            return docs
+        # A grade the model gave a user-supplied paper anyway does not count.
+        grades = {i: g for i, g in grades.items() if i not in own}
+        keep = [
+            i for i, d in enumerate(docs)
+            if i not in grades
+            or grades[i] >= (1 if (d.metadata or {}).get("source") == "web_search" else 2)
+        ]
+        minimum = min(kn.relevance_min_keep, len(docs))
+        if len(keep) < minimum:
+            # Stable sort: equal grades stay in retrieval order.
+            rest = sorted((i for i in range(len(docs)) if i not in keep),
+                          key=lambda i: -grades.get(i, 0))
+            keep = sorted(keep + rest[:minimum - len(keep)])
+        out = []
+        for i in keep:
+            md = dict(docs[i].metadata or {})
+            if i in grades:
+                md["screen_grade"] = grades[i]
+            out.append(RetrievedDoc(content=docs[i].content, metadata=md))
+        values = list(grades.values())
+        self._log.info(
+            "[literature] screen kept %d/%d sources (grade counts: %s)",
+            len(out), len(docs), {g: values.count(g) for g in sorted(set(values))},
+        )
+        return out
+
+    async def _derive_literature_queries(
+        self, topic: str, idea_title: str = "", hypothesis: str = "",
+        *, work_scope: str = WORK_SCOPE_PAPERS,
+    ) -> list[str]:
+        """Turn a topic statement into up to three keyword search queries,
+        one per facet of the topic.
+
+        A search engine matches keywords, and one query reaches only the work
+        written in its own words. Three facets -- the core subject, a specific
+        angle and the wider frame -- reach work a single query misses; the
+        results are merged and screened afterwards. The vocabulary follows the
+        kind of quest. One with an experiment searches under the names of
+        methods, systems and measured quantities. One without searches under
+        the names scholars of that subject write about -- works, people,
+        periods, places, movements -- because wording decides what a database
+        returns: on one humanities topic the same database gave 0 of 10
+        on-topic hits for the STEM-style query and 8 of 10 for the other.
+
+        Returns [] when retrieval is off (nothing would read the queries), when
+        the model fails, or when no reply is a keyword query (a long sentence
+        is the topic echoed back). The caller then keeps its own query, so
+        this changes what gets sent but never stops the search.
         """
         if not self.config.knowledge.enabled:
-            return ""
+            return []
+        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+            engines = "OpenAlex, Crossref, CORE, OpenAIRE, DOAJ"
+            angle = "a specific period, place, work, group or case within the topic"
+            frame = "the discipline or theoretical frame the topic is studied in"
+            vocabulary = (
+                "Use the words scholars of this subject write under: the names "
+                "of the works, people, periods, places, movements, genres and "
+                "concepts involved, and the discipline's own terms. Do not add "
+                "method words such as model, simulation, dataset or analysis "
+                "unless the topic itself is about them."
+            )
+        else:
+            engines = "arXiv, OpenAlex, Crossref"
+            angle = "the method, mechanism or measured quantity"
+            frame = "the broader problem or application area it belongs to"
+            vocabulary = (
+                "Use the terms researchers in this field publish under: the "
+                "standard names of the methods, the system studied and the "
+                "quantity measured."
+            )
         prompt = (
-            "Write ONE literature search query for this research topic. It "
-            "goes to academic search engines (arXiv, OpenAlex, Crossref) and "
-            "to web search.\n\n"
+            "Write THREE literature search queries for this research topic, one "
+            f"per facet below. They go to academic search engines ({engines}); "
+            "the first also goes to web search.\n\n"
             f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
             + (f"CHOSEN RESEARCH DIRECTION:\n{idea_title[:200]}\n\n" if idea_title else "")
             + (f"HYPOTHESIS UNDER TEST:\n{hypothesis[:300]}\n\n" if hypothesis else "")
-            + "A search engine matches keywords, not sentences. Use the terms "
-            "researchers in this field publish under: the standard names of "
-            "the methods, the system studied and the quantity measured. Spell "
-            "out acronyms. No full sentences, quotes, boolean operators or "
-            "wildcards. 3 to 10 words.\n\n"
-            'Reply as JSON only: {"query": "<your query>"}'
+            + "FACETS:\n"
+            "1. the core subject, in the field's standard terms\n"
+            f"2. {angle}\n"
+            f"3. {frame}\n\n"
+            "A search engine matches keywords, not sentences. " + vocabulary
+            + " Spell out acronyms. No full sentences, quotes, boolean "
+            "operators or wildcards. 3 to 8 words each; shorter queries match "
+            "more.\n\n"
+            'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
         )
         try:
             raw = await self._chat(prompt, node="literature_query")
             parsed = _parse_json_lenient(raw, node="literature_query")
-            q = " ".join(str((parsed or {}).get("query") or "").split())
         except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
             self._log.info("[literature] query derivation failed: %r", e)
-            return ""
-        if not q or len(q.split()) > 20:
-            return ""
-        return q[:300]
+            return []
+        if not isinstance(parsed, dict):
+            return []
+        replies = parsed.get("queries")
+        if not isinstance(replies, list):
+            # A reply in the one-query shape still yields one facet.
+            replies = [parsed.get("query")]
+        out: list[str] = []
+        for reply in replies:
+            q = " ".join(str(reply or "").split())[:300]
+            if q and len(q.split()) <= 20 and q.lower() not in {o.lower() for o in out}:
+                out.append(q)
+        return out[:3]
 
     async def _propose_literature_queries(
         self, topic: str, tried: list[str], missed: list,
+        *, work_scope: str = WORK_SCOPE_PAPERS,
     ) -> str:
         """Ask for ONE better search query after a retrieval missed entirely.
 
@@ -3095,8 +3337,13 @@ class Engine:
             + "\n\nThe likely cause is vocabulary: this field's papers may use "
             "different terminology than the topic statement does. Propose ONE "
             "alternative search query that uses the terms researchers in this "
-            "field would actually publish under. Prefer domain-standard terms "
-            "and spell out acronyms. Keep it under 20 words.\n\n"
+            "field would actually publish under. "
+            + ("Prefer the names scholars of this subject write under -- works, "
+               "people, periods, places, movements, genres, concepts -- over "
+               "method words. "
+               if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS else
+               "Prefer domain-standard terms. ")
+            + "Spell out acronyms. Keep it under 20 words.\n\n"
             'Reply as JSON only: {"query": "<your query>"}'
         )
         try:
@@ -4548,6 +4795,7 @@ class Engine:
                 hits = await self.knowledge.asearch(
                     text, top_k=per_finding_k,
                     chat_fn=functools.partial(self._chat_messages, node="source_router"),
+                    work_scope=self._work_scope(state),
                 )
             except Exception as e:
                 self._log.warning("[cross_check] retrieval failed: %s", e)
@@ -4964,6 +5212,14 @@ class Engine:
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
+        # The web pages are listed apart from the References, by the engine,
+        # so every page is listed and none is invented.
+        markdown = _append_further_reading(
+            markdown,
+            build_further_reading(
+                state.get("literature") or [], audience=self.config.output.audience,
+            ),
+        )
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -4990,13 +5246,16 @@ class Engine:
             self._log.info("[claim_check] no paper to check; skipping")
             return {}
         paper_text = Path(paper_md).read_text(encoding="utf-8")[:16000]
-        refs = build_references(
-            state.get("literature") or [], audience=self.config.output.audience,
-        )
+        literature = state.get("literature") or []
+        refs = build_references(literature, audience=self.config.output.audience)
+        # Web pages are Further reading, labelled W1, W2...; a claim resting on
+        # one is grounded in a source too.
+        further = build_further_reading(literature, audience=self.config.output.audience)
         refs_block = "\n".join(
-            f"[{r['n']}] {r['title']}"
-            + (f" · DOI:{r['doi']}" if r.get("doi") else "")
-            for r in refs
+            [f"[{r['n']}] {r['title']}" + (f" · DOI:{r['doi']}" if r.get("doi") else "")
+             for r in refs]
+            + [f"[{w['label']}] {w['title']}" + (f" · {w['url']}" if w.get("url") else "")
+               for w in further]
         ) or "(no references)"
         analysis = state.get("analysis") or {}
         evidence = {
@@ -5036,17 +5295,26 @@ class Engine:
             basis = str(c.get("basis") or "unsupported").strip().lower()
             if basis not in ("experiment", "citation", "unsupported"):
                 basis = "unsupported"
-            # A "citation" basis only counts if it points at a real reference:
-            # validate the index is an int in [1, n_refs], else it's effectively
-            # unsupported (a claim that names no source isn't grounded).
-            cite_idx = c.get("citation_index")
-            try:
-                cite_idx = int(cite_idx)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                cite_idx = None
-            if basis == "citation" and not (cite_idx and 1 <= cite_idx <= n_refs):
+            # A "citation" basis only counts if it points at a real source: a
+            # References number in [1, n_refs] or a Further reading label
+            # W1..W<len(further)>. Anything else is effectively unsupported (a
+            # claim that names no source isn't grounded).
+            raw_idx = c.get("citation_index")
+            cite_idx: int | str | None = None
+            web = (re.fullmatch(r"\[?\s*[Ww](\d+)\s*\]?", str(raw_idx).strip())
+                   if raw_idx is not None else None)
+            if web:
+                if 1 <= int(web.group(1)) <= len(further):
+                    cite_idx = f"W{int(web.group(1))}"
+            else:
+                try:
+                    number = int(raw_idx)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    number = 0
+                if 1 <= number <= n_refs:
+                    cite_idx = number
+            if basis == "citation" and cite_idx is None:
                 basis = "unsupported"
-                cite_idx = None
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
@@ -6740,6 +7008,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence
         "evidence_gate",        # weigh evidence sufficiency before write
+        "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "write", "review",
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
@@ -6933,6 +7202,51 @@ def _lit_query(state: QuestState) -> str:
     return " ".join(p for p in parts if p)[:500]
 
 
+def _screen_grades(parsed: Any, n: int) -> dict[int, int] | None:
+    """Read the literature screen's reply -- ``{"grades": [{"i": 0, "grade":
+    3}, ...]}`` or ``{"grades": {"0": 3}}`` -- into ``{index: grade}``. None
+    when the reply carries no grades at all. Entries naming an index outside
+    the ``n`` candidates, or a grade outside 0-3, are ignored."""
+    if not isinstance(parsed, dict):
+        return None
+    raw = parsed.get("grades")
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, list):
+        pairs = [(e.get("i"), e.get("grade")) for e in raw if isinstance(e, dict)]
+    else:
+        return None
+    out: dict[int, int] = {}
+    for i, g in pairs:
+        try:
+            i, g = int(i), int(g)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < n and 0 <= g <= 3:
+            out[i] = g
+    return out
+
+
+def _merge_round_robin(result_lists: list[list]) -> list:
+    """Interleave several searches' results -- the first of each, then the
+    second of each, and so on -- keeping the first copy of a work found by
+    more than one. Each search keeps its own ranking, and no search's best
+    results end up behind another search's tail."""
+    seen: set[str] = set()
+    out: list = []
+    for rank in range(max((len(r) for r in result_lists), default=0)):
+        for results in result_lists:
+            if rank >= len(results):
+                continue
+            doc = results[rank]
+            keys = _doc_dedup_keys(doc)
+            if any(k in seen for k in keys):
+                continue
+            seen.update(keys)
+            out.append(doc)
+    return out
+
+
 def _format_lit(
     docs: list[RetrievedDoc],
     audience: str = "external",
@@ -6971,20 +7285,18 @@ def _format_lit_from_state(
     budget: int | None = None,
     mode: str = "lexical",
 ) -> str:
+    """The prior-work block from ``state['literature']``. Entries carry the
+    labels the paper's References ([1], [2]…) and Further reading ([W1],
+    [W2]…) use, taken from the same de-duplicated list
+    (:func:`_labelled_sources`), so the writer's [2] is the claim check's and
+    the bib's [2]."""
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
-    keep_idx = 0
-    for item in items:
-        meta = item.get("metadata") or {}
-        if not _is_citable(meta):
-            continue
-        if not _is_audience_appropriate(meta, audience):
-            continue
-        keep_idx += 1
-        title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
-        header = _format_lit_header(meta, keep_idx)
+    for label, meta, item in _labelled_sources(items, audience):
+        title = meta.get("title") or meta.get("source") or f"item-{label}"
+        header = _format_lit_header(meta, label)
         excerpt = _format_lit_excerpt(
             item.get("content", "") or "", title,
             query=query, budget=budget, mode=mode,
@@ -6995,57 +7307,110 @@ def _format_lit_from_state(
     return "\n\n".join(lines)
 
 
+def _is_web_page(meta: dict[str, Any]) -> bool:
+    """A source found by general web search. It is Further reading, not a
+    numbered Reference, even when the page names a DOI: what the writer read
+    is the page."""
+    return str(meta.get("source") or "") == "web_search"
+
+
+def _labelled_sources(
+    literature: list[Any], audience: str = "external",
+) -> list[tuple[str, dict[str, Any], Any]]:
+    """The quest's citable sources, de-duplicated once and labelled in
+    literature order: scholarly records ``"1"``, ``"2"``… and web pages
+    ``"W1"``, ``"W2"``…. The writer's prior-work block, the References,
+    Further reading, claim grounding, the poster, the slides and the bib all
+    label from this one list, so a label names the same source everywhere.
+    Applies :func:`_is_citable` and :func:`_is_audience_appropriate`, so
+    FI-internal cross-quest memory never appears. Returns ``(label,
+    metadata, item)`` triples."""
+    out: list[tuple[str, dict[str, Any], Any]] = []
+    seen: set[str] = set()
+    papers = pages = 0
+    for item in literature or []:
+        meta = (item.get("metadata") if isinstance(item, dict)
+                else getattr(item, "metadata", None)) or {}
+        if not _is_citable(meta) or not _is_audience_appropriate(meta, audience):
+            continue
+        key = str(
+            meta.get("doi") or meta.get("arxiv_id") or meta.get("pmid")
+            or meta.get("url") or meta.get("title") or ""
+        ).lower().strip()
+        if not key:
+            continue
+        norm_title = _normalize_title(meta.get("title") or "")
+        keys = [key] + ([f"title:{norm_title}"] if norm_title else [])
+        if any(k in seen for k in keys):
+            continue
+        seen.update(keys)
+        if _is_web_page(meta):
+            pages += 1
+            out.append((f"W{pages}", meta, item))
+        else:
+            papers += 1
+            out.append((str(papers), meta, item))
+    return out
+
+
+def _reference_entry(label: str, meta: dict[str, Any]) -> dict[str, Any]:
+    authors = meta.get("authors") or []
+    if not isinstance(authors, list):
+        authors = [str(authors)]
+    entry = {
+        "title": (meta.get("title") or "").strip(),
+        "authors": [a for a in authors if a],
+        "year": meta.get("year") or (meta.get("published") or "")[:4] or "",
+        "venue": meta.get("venue") or meta.get("publisher") or "",
+        "doi": meta.get("doi") or "",
+        "arxiv_id": meta.get("arxiv_id") or "",
+        "url": meta.get("url") or "",
+        "site": meta.get("site") or "",
+        "source": meta.get("source") or "",
+    }
+    if label.startswith("W"):
+        return {"label": label, **entry}
+    return {"n": int(label), **entry}
+
+
 def build_references(
     literature: list[Any],
     *,
     audience: str = "external",
     max_n: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Build a clean, de-duplicated, numbered citation list from the
-    quest's retrieved literature (``state['literature']`` dict items
-    ``{content, metadata}`` or ``RetrievedDoc`` objects).
+    """The numbered References: the quest's citable scholarly sources from
+    ``state['literature']`` (dict items ``{content, metadata}`` or
+    ``RetrievedDoc`` objects), de-duplicated and numbered as in
+    :func:`_labelled_sources`. Web pages are not here; they are
+    :func:`build_further_reading`. Shared by the claim check, the poster, the
+    slides and the bib export so every output cites the same numbers. Each
+    entry: ``{n, title, authors, year, venue, doi, arxiv_id, url, site,
+    source}``."""
+    refs = [
+        _reference_entry(label, meta)
+        for label, meta, _ in _labelled_sources(literature, audience)
+        if not label.startswith("W")
+    ]
+    return refs[:max_n] if max_n else refs
 
-    Applies the same citability + audience rules as the paper's
-    References (:func:`_is_citable` / :func:`_is_audience_appropriate`),
-    so a **web page** (title + URL) is a first-class citation and
-    FI-internal cross-quest memory artifacts are dropped. Shared by the
-    poster + slides generators so every output surfaces the same sources
-    the writer cited. Each entry: ``{n, title, authors, year, venue,
-    doi, arxiv_id, url, site, source}``."""
-    refs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in literature or []:
-        if isinstance(item, dict):
-            meta = item.get("metadata") or {}
-        else:
-            meta = getattr(item, "metadata", {}) or {}
-        if not _is_citable(meta) or not _is_audience_appropriate(meta, audience):
-            continue
-        key = (
-            meta.get("doi") or meta.get("arxiv_id") or meta.get("pmid")
-            or meta.get("url") or (meta.get("title") or "")
-        ).lower().strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        authors = meta.get("authors") or []
-        if not isinstance(authors, list):
-            authors = [str(authors)]
-        refs.append({
-            "n": len(refs) + 1,
-            "title": (meta.get("title") or "").strip(),
-            "authors": [a for a in authors if a],
-            "year": meta.get("year") or (meta.get("published") or "")[:4] or "",
-            "venue": meta.get("venue") or meta.get("publisher") or "",
-            "doi": meta.get("doi") or "",
-            "arxiv_id": meta.get("arxiv_id") or "",
-            "url": meta.get("url") or "",
-            "site": meta.get("site") or "",
-            "source": meta.get("source") or "",
-        })
-        if max_n and len(refs) >= max_n:
-            break
-    return refs
+
+def build_further_reading(
+    literature: list[Any],
+    *,
+    audience: str = "external",
+    max_n: int | None = None,
+) -> list[dict[str, Any]]:
+    """Further reading: the web pages the quest drew on, labelled ``W1``,
+    ``W2``… as in :func:`_labelled_sources`. The writer may quote them, but
+    they are listed apart from the scholarly References. Each entry carries
+    ``label`` instead of ``n``, with the same other fields."""
+    further = [
+        _reference_entry(label, meta)
+        for label, meta, _ in _labelled_sources(literature, audience)
+        if label.startswith("W")
+    ]
+    return further[:max_n] if max_n else further
 
 
 def _ref_citation_text(r: dict[str, Any]) -> str:
@@ -7102,20 +7467,70 @@ def render_references_marp_slide(refs: list[dict[str, Any]], *, max_n: int = 18)
     return "\n".join(lines)
 
 
+# A "Further reading" heading at any level, however the writer capitalised it.
+_FURTHER_READING_HEADING_RE = re.compile(
+    r"^#{1,6}\s*further\s+reading\s*$", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _further_reading_lines(further: list[dict[str, Any]]) -> list[str]:
+    return [f"- [{w['label']}] {_ref_citation_text(w)}" for w in further]
+
+
+def render_further_reading_marp_slide(
+    further: list[dict[str, Any]], *, max_n: int = 18,
+) -> str:
+    """A Marp slide listing the web pages the quest drew on, appended after
+    the References slide: web pages are Further reading, not References."""
+    if not further:
+        return ""
+    lines = ["---", "", "## Further reading", ""]
+    lines += _further_reading_lines(further[:max_n])
+    if len(further) > max_n:
+        lines.append(f"\n_(+{len(further) - max_n} more pages)_")
+    return "\n".join(lines)
+
+
+def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str:
+    """Append a ``## Further reading`` section listing the web pages, unless
+    there are none or the paper already has that heading. The engine writes
+    it rather than the writer, so every page is listed and none is invented."""
+    if not further or _FURTHER_READING_HEADING_RE.search(markdown):
+        return markdown
+    section = "\n".join(["## Further reading", "", *_further_reading_lines(further)])
+    return markdown.rstrip() + "\n\n" + section + "\n"
+
+
 def render_poster_references_latex(
-    refs: list[dict[str, Any]], *, max_n: int = 12,
+    refs: list[dict[str, Any]],
+    further: list[dict[str, Any]] | None = None,
+    *,
+    max_n: int = 12,
+    max_further: int = 6,
 ) -> str:
     """A compact full-width Sources band for the poster footer — injected
-    by the template (not the LLM) so references always render."""
-    if not refs:
+    by the template (not the LLM) so references always render. Web pages
+    follow on their own ``Further reading`` line, labelled [W1], [W2]…."""
+    further = list(further or [])
+    if not refs and not further:
         return ""
-    shown = refs[:max_n]
-    parts = [f"[{r['n']}]~{_latex_esc(_ref_citation_text(r))}" for r in shown]
-    more = "" if len(refs) <= max_n else f" \\quad (+{len(refs) - max_n} more)"
-    return (
-        "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n"
-        "{\\scriptsize\\textbf{Sources:}~ " + " \\quad ".join(parts) + more + "}\n"
-    )
+    blocks: list[str] = []
+    if refs:
+        shown = refs[:max_n]
+        parts = [f"[{r['n']}]~{_latex_esc(_ref_citation_text(r))}" for r in shown]
+        more = "" if len(refs) <= max_n else f" \\quad (+{len(refs) - max_n} more)"
+        blocks.append(
+            "{\\scriptsize\\textbf{Sources:}~ " + " \\quad ".join(parts) + more + "}\n"
+        )
+    if further:
+        shown_w = further[:max_further]
+        parts = [f"[{w['label']}]~{_latex_esc(_ref_citation_text(w))}" for w in shown_w]
+        more = ("" if len(further) <= max_further
+                else f" \\quad (+{len(further) - max_further} more)")
+        blocks.append(
+            "{\\scriptsize\\textbf{Further reading:}~ " + " \\quad ".join(parts) + more + "}\n"
+        )
+    return "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n" + "\\par\\vspace{0.2em}\n".join(blocks)
 
 
 _CLARIFY_LABELS = {

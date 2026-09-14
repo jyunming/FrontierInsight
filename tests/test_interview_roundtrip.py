@@ -110,3 +110,40 @@ def test_defaults_stay_clean(tmp_path: Path):
     cfg = Config.from_yaml(p)
     assert cfg.output.paper_style == "latex"
     assert not cfg.provider.node_ensemble
+
+
+def test_turning_the_paper_pause_off_survives_the_round_trip(tmp_path: Path):
+    """The pause for paywalled PDFs is on by default, so an interview answer of
+    "off" has to be written out explicitly or it silently reverts to on."""
+    ans = _full_answers()
+    ans.supply_papers = False
+    assert "papers: false" in answers_to_yaml(ans, frontend="cli")
+    assert _load(tmp_path, ans).pauses.papers is False
+
+
+def _find_question(node, qid: str):
+    if isinstance(node, dict):
+        if node.get("id") == qid and "default" in node:
+            return node
+        node = list(node.values())
+    if isinstance(node, list):
+        for child in node:
+            found = _find_question(child, qid)
+            if found is not None:
+                return found
+    return None
+
+
+def test_new_quests_fetch_full_text_and_pause_for_paywalled_papers_by_default():
+    import json
+
+    cfg = Config(topic="t", title="t")
+    assert cfg.pauses.papers is True
+    assert cfg.knowledge.try_fetch_full_text is True
+    # The legacy flag is merged into pauses.papers, and a programmatic Config
+    # copies it through, so its default must agree with the new one.
+    assert cfg.knowledge.pause_for_user_papers is True
+    schema = json.loads(
+        (Path(__file__).resolve().parent.parent / "core" / "interview_schema.json").read_text(encoding="utf-8"))
+    question = _find_question(schema, "supply_papers")
+    assert question is not None and question["default"] is True

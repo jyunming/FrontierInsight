@@ -437,7 +437,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         raise TypeError(
             f"web_research must be bool, got {type(web_research).__name__}"
         )
-    supply_papers = body.get("supply_papers", False)
+    supply_papers = body.get("supply_papers", True)
     if not isinstance(supply_papers, bool):
         raise TypeError(
             f"supply_papers must be bool, got {type(supply_papers).__name__}"

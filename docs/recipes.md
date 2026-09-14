@@ -178,7 +178,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
 | **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
-| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` |
+| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` (the default; `false` turns it off) |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` |
 | **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
 | **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
@@ -193,7 +193,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 # A quest that involves you at both ends and lets you feed it papers mid-run:
 pauses:
   clarify: ask            # answer setup questions before it starts
-  papers: true            # pause to let you download paywalled papers it finds
+  papers: true            # default: pause to let you download paywalled papers it finds (false = never)
   supply: before_build    # one drop-in point for your own papers/data
   review: ask             # accept / reject / refine before the paper is final
 ```
@@ -377,6 +377,8 @@ knowledge:
   passage_ranking: auto          # hybrid semantic+lexical when a model loads, else lexical
   relevance_guard: true          # drop confident-but-off-topic hits; pause if nothing fits
   # brave_api_key: BSA...        # or set the BRAVE_API_KEY env var instead
+  # openalex_api_key: ...        # or OPENALEX_API_KEY — full OpenAlex budget (arXiv is searched through it)
+  # semantic_scholar_api_key: .. # or SEMANTIC_SCHOLAR_API_KEY — the keyless pool mostly 429s
 ```
 
 For a non-simulation web-research quest, FI also turns the numbers it finds into **figures**: `engine.web_derived_plots` (default on) has the model extract quantitative data from the collected pages and render matplotlib charts — each stamped with its source — so the paper/poster/slides aren't text-only. The charts are drawn in the **Frontier Insight house style** (Palatino-style serif, teal-anchored palette, warm ground, hairline grid) so they match the paper, poster, and slides rather than looking like default matplotlib. If the sources carry no plottable numbers it skips cleanly.

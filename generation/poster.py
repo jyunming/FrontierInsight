@@ -22,6 +22,7 @@ import re as _re
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
+    build_further_reading,
     build_references,
     render_poster_references_latex,
 )
@@ -67,6 +68,39 @@ def _escape_latex_text_specials(s: str) -> str:
     """Escape bare ``&``, ``%``, ``#`` in LLM-authored poster column text so
     a literal ampersand or percent doesn't fatally break the compile."""
     return _LATEX_TEXT_SPECIAL_RE.sub(r"\\\1", s or "")
+
+
+# The template already wraps each LLM column in ``\begin{column}{…}``. A stray
+# beamer ``\column`` inside it reads the next token as a width and stops
+# pdflatex with "Missing number, treated as zero". ``(?![A-Za-z])`` keeps
+# ``\columnwidth`` / ``\columnsep``; an optional ``{width}`` goes with it.
+_BARE_COLUMN_RE = _re.compile(r"\\column(?![A-Za-z])(?:[ \t]*\{[^{}]*\})?")
+
+
+def _strip_column_commands(s: str) -> str:
+    """Remove ``\\column`` commands an LLM writes into a poster column."""
+    return _BARE_COLUMN_RE.sub("", s or "")
+
+
+# A model that doubles every backslash in its JSON doubles the ``\n`` it meant
+# as a line break too, and LaTeX stops on the undefined ``\n`` it receives
+# (``\textbf{Rates}\nThe slope``). LaTeX has no ``\n`` command, so a ``\n`` that
+# does not begin a real one (``\noindent``, ``\nabla``) is a line break.
+_LITERAL_NEWLINE_RE = _re.compile(r"(?<!\\)\\n([A-Za-z]*)")
+
+
+def _literal_newlines_to_breaks(s: str) -> str:
+    """Turn the literal ``\\n`` a model left in a poster column into a newline."""
+    def fix(m: "_re.Match[str]") -> str:
+        if "n" + m.group(1) in _LATEX_N_COMMANDS:
+            return m.group(0)
+        return "\n" + m.group(1)
+    return _LITERAL_NEWLINE_RE.sub(fix, s or "")
+
+
+def _clean_model_column(s: str) -> str:
+    """The model's column LaTeX with its known JSON and beamer slips undone."""
+    return _strip_column_commands(_literal_newlines_to_breaks(s))
 
 
 # LaTeX scratch pdflatex/tectonic leave next to poster.pdf — pure compile
@@ -233,7 +267,9 @@ def _brand_references_band(references_tex: str, icon_ok: bool) -> str:
     icon-only band so the poster still carries the mark."""
     if not icon_ok:
         return references_tex
-    anchor = r"{\scriptsize\textbf{Sources:}"
+    # The first line of the band: Sources, or Further reading when a quest
+    # drew only on web pages.
+    anchor = r"{\scriptsize\textbf{"
     if anchor in references_tex:
         return references_tex.replace(anchor, _POSTER_ICON_TEX + anchor, 1)
     if references_tex.strip():
@@ -308,11 +344,10 @@ class PosterGenerator:
         # into the template, NOT left to the LLM, so the poster always
         # carries its references even when the 8000-char paper.md slice
         # the LLM saw cut the References section off the end.
-        refs = build_references(
-            art.raw_state.get("literature") or [],
-            audience=self.config.output.audience,
-        )
-        references_tex = render_poster_references_latex(refs)
+        literature = art.raw_state.get("literature") or []
+        refs = build_references(literature, audience=self.config.output.audience)
+        further = build_further_reading(literature, audience=self.config.output.audience)
+        references_tex = render_poster_references_latex(refs, further)
         # Copy the teal glyph next to poster.tex, then brand both the
         # masthead (header lockup) and the Sources band (a small corner
         # mark at the start of the band, so a long citation list can't
@@ -326,8 +361,8 @@ class PosterGenerator:
         # substitute()'s strict placeholder matcher.
         body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
             title=_escape_latex_text_specials(title),
-            left=_escape_latex_text_specials(parsed.get("left") or ""),
-            right=_escape_latex_text_specials(parsed.get("right") or ""),
+            left=_escape_latex_text_specials(_clean_model_column(parsed.get("left") or "")),
+            right=_escape_latex_text_specials(_clean_model_column(parsed.get("right") or "")),
             references=references_tex,   # already LaTeX-escaped by build step
             brandlogo=brandlogo,
         )
@@ -538,6 +573,57 @@ def _render_poster_skip_md(*, code: str, summary: str, how_to_fix: str) -> str:
     )
 
 
+def _double_latex_backslashes(s: str) -> str:
+    """Double the lone backslashes that start LaTeX inside a JSON reply.
+
+    A model often leaves LaTeX backslashes single inside its JSON strings.
+    ``\\textbf`` then parses as a tab plus "extbf", ``\\frac`` as a form feed,
+    and ``\\item`` or ``\\%`` is an invalid escape that fails the whole reply.
+    Runs of an even length are already escaped and left alone."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] != "\\":
+            out.append(s[i])
+            i += 1
+            continue
+        j = i
+        while j < len(s) and s[j] == "\\":
+            j += 1
+        out.append(s[i:j])
+        if (j - i) % 2 == 1 and _latex_not_json_escape(s, j):
+            out.append("\\")
+        i = j
+    return "".join(out)
+
+
+# LaTeX commands that begin with ``n``: anything else after ``\n`` is a newline.
+_LATEX_N_COMMANDS = frozenset({
+    "nabla", "natural", "ne", "nearrow", "neg", "neq", "newcommand", "newline",
+    "newpage", "nexists", "ngeq", "ni", "nleftarrow", "nleq", "nmid",
+    "noindent", "nolinebreak", "nonumber", "normalsize", "not", "notin",
+    "nparallel", "nrightarrow", "nsubseteq", "nu", "nwarrow",
+})
+
+
+def _latex_not_json_escape(s: str, k: int) -> bool:
+    """Whether the character after a lone backslash starts LaTeX rather than a
+    JSON escape: ``\\"`` and ``\\/`` keep their JSON meaning, as do ``\\uXXXX``,
+    ``\\n`` before ordinary text and a one-letter ``\\b \\f \\r \\t``."""
+    if k >= len(s) or s[k] in "\"/":
+        return False
+    if not ("a" <= s[k].lower() <= "z"):
+        return True
+    word = _re.match(r"[A-Za-z]+", s[k:]).group(0)
+    if word[0] == "u":
+        return _re.match(r"u[0-9a-fA-F]{4}", s[k:]) is None
+    if word[0] == "n":
+        return word in _LATEX_N_COMMANDS
+    if word[0] in "bfrt":
+        return len(word) > 1 and word[1].islower()
+    return True
+
+
 def _lenient_json(text: str) -> dict | None:
     s = text.strip()
     # Strip fence if present.
@@ -545,6 +631,7 @@ def _lenient_json(text: str) -> dict | None:
         nl = s.find("\n")
         if nl > 0 and s.endswith("```"):
             s = s[nl + 1 : -3].strip()
+    s = _double_latex_backslashes(s)
     try:
         return json.loads(s)
     except Exception:

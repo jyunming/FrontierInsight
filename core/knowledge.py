@@ -43,12 +43,19 @@ Two responsibilities:
 External sources currently implemented (all free, all best-effort —
 network failures log and return [] rather than raising):
   - openalex          — broadest single open index, ~200M works
-  - arxiv             — physics / CS / math / quant-ph / q-bio / stats
+                        (OPENALEX_API_KEY for the full daily budget)
+  - arxiv             — physics / CS / math / quant-ph / q-bio / stats,
+                        searched through OpenAlex's arXiv source: arXiv's
+                        own query API is capacity-throttled for everyone
   - crossref          — DOI metadata across paywalled publishers
                         (Springer, Elsevier, IEEE, ACM, SPIE, ACS, …)
   - semantic_scholar  — broad coverage with citation graph
+                        (SEMANTIC_SCHOLAR_API_KEY; the keyless pool 429s)
   - pubmed            — biomedical (NCBI E-utilities)
-  - core              — 240M open-access papers (requires CORE_API_KEY)
+  - core              — 240M open-access papers and theses, keyless
+                        (CORE_API_KEY raises the rate limit)
+  - openaire          — European open-access research graph, keyless
+  - doaj              — Directory of Open Access Journals articles, keyless
   - google_scholar    — EXPERIMENTAL via `scholarly`; no official API,
                         rate-limited / sometimes blocked by Google
 
@@ -68,15 +75,17 @@ import re
 import threading
 from itertools import zip_longest
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import quote
 
 import httpx
 import yaml
 
+from . import arxiv_gate as _gate
+from . import source_failures as _sf
 from .config import KnowledgeConfig
 
 _log = logging.getLogger("frontier_insight.knowledge")
@@ -208,86 +217,157 @@ class RetrievedDoc:
 # ---------------------------------------------------------------------------
 
 
-def _http_get_json(url: str, params: dict | None, timeout_s: float) -> dict | None:
+def _http_get_json(
+    url: str, params: dict | None, timeout_s: float, *, source: str = "",
+    headers: dict | None = None,
+) -> dict | None:
     try:
         with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0"})
+            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0", **(headers or {})})
             r.raise_for_status()
             return r.json()
     except Exception as e:
-        _log.info("http GET %s failed: %s", url, e)
+        _log.info("http GET %s failed: %s", url, _sf.redact(e))
+        _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
         return None
 
 
-def _http_get_text(url: str, params: dict | None, timeout_s: float) -> str | None:
-    try:
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0"})
-            r.raise_for_status()
-            return r.text
-    except Exception as e:
-        _log.info("http GET %s failed: %s", url, e)
-        return None
+# OpenAlex's id for the arXiv repository ("arXiv (Cornell University)").
+_OPENALEX_ARXIV_SOURCE_ID = "S4306400194"
+# New-style (2401.01234) and old-style (hep-th/9701001) ids, from an arXiv
+# DOI (10.48550/arXiv.<id>) or an abs/pdf URL; any vN suffix is dropped.
+_ARXIV_ID_IN_TEXT_RE = re.compile(
+    r"(?i)(?:arxiv\.org/(?:abs|pdf)/|10\.48550/arxiv\.)"
+    r"([a-z][a-z\-]*(?:\.[a-z]{2})?/\d{7}|\d{4}\.\d{4,5})"
+)
 
 
-def _arxiv_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _openalex_params(params: dict, api_key: str = "") -> dict:
+    """Add the OpenAlex key when one is configured. OpenAlex has required a
+    key for its full free daily budget since February 2026; without one a
+    machine gets about a tenth of it (roughly 100 searches a day)."""
+    key = (api_key or os.environ.get("OPENALEX_API_KEY", "")).strip()
+    return {**params, "api_key": key} if key else params
+
+
+# Which kinds of scholarly record a search keeps. A scholarly index holds far
+# more than papers -- datasets, figure "components", peer-review reports,
+# dictionary entries, journal issues -- and none of those is a source a paper
+# can cite for a claim. A quest with an experiment keeps journal articles,
+# conference papers and preprints. A quest without one (a survey, a history, a
+# humanities or policy question) also keeps books and book chapters, because
+# much of that scholarship is published there: on a popular-culture topic 6 of
+# Crossref's 10 on-topic hits were book chapters.
+WORK_SCOPE_PAPERS = "papers"
+WORK_SCOPE_PAPERS_AND_BOOKS = "papers_and_books"
+_BOOK_TYPES_CROSSREF = ("book-chapter", "book", "edited-book", "monograph", "dissertation")
+_WORK_TYPES_CROSSREF = {
+    WORK_SCOPE_PAPERS: ("journal-article", "proceedings-article", "posted-content"),
+}
+_WORK_TYPES_CROSSREF[WORK_SCOPE_PAPERS_AND_BOOKS] = (
+    _WORK_TYPES_CROSSREF[WORK_SCOPE_PAPERS] + _BOOK_TYPES_CROSSREF)
+_WORK_TYPES_OPENALEX = {
+    WORK_SCOPE_PAPERS: ("article", "preprint", "review", "conference-paper"),
+}
+_WORK_TYPES_OPENALEX[WORK_SCOPE_PAPERS_AND_BOOKS] = (
+    _WORK_TYPES_OPENALEX[WORK_SCOPE_PAPERS] + ("book", "book-chapter", "dissertation"))
+# OpenAIRE labels each copy of a work ("instance") in words.
+_WORK_TYPES_OPENAIRE = {
+    WORK_SCOPE_PAPERS: ("article", "preprint", "review", "conference object"),
+}
+_WORK_TYPES_OPENAIRE[WORK_SCOPE_PAPERS_AND_BOOKS] = (
+    _WORK_TYPES_OPENAIRE[WORK_SCOPE_PAPERS]
+    + ("book", "part of book or chapter of book", "doctoral thesis"))
+
+
+def _scope_types(table: dict[str, tuple[str, ...]], scope: str) -> tuple[str, ...]:
+    return table.get(scope) or table[WORK_SCOPE_PAPERS]
+
+
+def _clean_openalex_title(title: Any) -> str:
+    # Some OpenAlex titles carry a literal backslash-n from the source feed.
+    return re.sub(r"\s+", " ", str(title or "").replace("\\n", " ")).strip()
+
+
+def _openalex_authors(w: dict) -> list[str]:
+    return [
+        (a.get("author", {}) or {}).get("display_name", "")
+        for a in (w.get("authorships") or [])
+    ]
+
+
+def _arxiv_id_from_openalex(w: dict) -> str:
+    loc = w.get("primary_location") or {}
+    for text in (w.get("doi"), loc.get("landing_page_url"), loc.get("pdf_url")):
+        m = _ARXIV_ID_IN_TEXT_RE.search(str(text or ""))
+        if m:
+            return m.group(1).lower() if "/" in m.group(1) else m.group(1)
+    return ""
+
+
+def _arxiv_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+) -> list[RetrievedDoc]:
+    """arXiv preprints, searched through OpenAlex's index of arXiv.
+
+    arXiv's own query API (export.arxiv.org/api/query) has been
+    capacity-throttled for everyone since its move to the cloud: a single
+    request made hours after the last one still gets HTTP 429, while
+    arxiv.org abstract and PDF pages answer normally. OpenAlex indexes arXiv
+    as one source, with the arXiv DOI, abstract and PDF link, so the same
+    papers come back without touching the throttled endpoint. Full text is
+    still fetched from arxiv.org by the full-text cascade."""
     if not query.strip():
         return []
-    params = {
-        "search_query": f"all:{query.strip()}",
-        "start": "0",
-        "max_results": str(max(1, min(top_k, 20))),
-        "sortBy": "relevance",
-        "sortOrder": "descending",
-    }
-    xml = _http_get_text("http://export.arxiv.org/api/query", params, timeout_s)
-    if not xml:
-        return []
-    ns = {"a": "http://www.w3.org/2005/Atom"}
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
+    params = _openalex_params({
+        "search": query.strip(),
+        "filter": f"primary_location.source.id:{_OPENALEX_ARXIV_SOURCE_ID}",
+        "per-page": str(max(1, min(top_k, 25))),
+    }, api_key)
+    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="arxiv")
+    if not data or "results" not in data:
         return []
     out: list[RetrievedDoc] = []
-    for entry in root.findall("a:entry", ns):
-        title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
-        summary = (entry.findtext("a:summary", default="", namespaces=ns) or "").strip()
-        published = (entry.findtext("a:published", default="", namespaces=ns) or "").strip()
-        arxiv_url = (entry.findtext("a:id", default="", namespaces=ns) or "").strip()
-        m = re.search(r"abs/([^/?#]+)$", arxiv_url)
-        arxiv_id = m.group(1) if m else ""
-        authors = [
-            (a.findtext("a:name", default="", namespaces=ns) or "").strip()
-            for a in entry.findall("a:author", ns)
-        ]
-        pdf_url = next(
-            (link.get("href", "") for link in entry.findall("a:link", ns) if link.get("title") == "pdf"),
-            "",
-        )
+    for w in data.get("results", []):
+        title = _clean_openalex_title(w.get("title"))
+        abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
+        arxiv_id = _arxiv_id_from_openalex(w)
+        loc = w.get("primary_location") or {}
         out.append(RetrievedDoc(
-            content=f"{title}\n\n{summary}".strip(),
+            content=f"{title}\n\n{abstract}".strip(),
             metadata={
-                "source": "arxiv", "title": title, "authors": authors,
-                "published": published, "arxiv_id": arxiv_id,
-                "url": arxiv_url, "pdf_url": pdf_url,
+                "source": "arxiv", "title": title, "authors": _openalex_authors(w),
+                "published": w.get("publication_date") or "",
+                "year": w.get("publication_year"),
+                "arxiv_id": arxiv_id,
+                "doi": (w.get("doi") or "").replace("https://doi.org/", ""),
+                "url": (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id
+                        else loc.get("landing_page_url") or w.get("id") or ""),
+                "pdf_url": loc.get("pdf_url") or (
+                    f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else ""),
+                "venue": "arXiv", "open_access": True,
             },
         ))
     return out
 
 
-def _openalex_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _openalex_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+    scope: str = WORK_SCOPE_PAPERS,
+) -> list[RetrievedDoc]:
     if not query.strip():
         return []
-    params = {
+    params = _openalex_params({
         "search": query.strip(),
+        "filter": "type:" + "|".join(_scope_types(_WORK_TYPES_OPENALEX, scope)),
         "per-page": str(max(1, min(top_k, 25))),
-    }
-    data = _http_get_json("https://api.openalex.org/works", params, timeout_s)
+    }, api_key)
+    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
     if not data or "results" not in data:
         return []
     out: list[RetrievedDoc] = []
     for w in data.get("results", []):
-        title = w.get("title") or ""
+        title = _clean_openalex_title(w.get("title"))
         # OpenAlex returns an inverted index for abstracts; reconstruct.
         abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
         doi = (w.get("doi") or "").replace("https://doi.org/", "")
@@ -305,6 +385,7 @@ def _openalex_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list
                 "doi": doi, "url": w.get("id") or "", "pdf_url": oa_pdf,
                 "cited_by": w.get("cited_by_count"),
                 "open_access": (w.get("open_access") or {}).get("is_oa"),
+                "work_type": w.get("type") or "",
             },
         ))
     return out
@@ -323,18 +404,23 @@ def _openalex_reconstruct_abstract(inverted: dict | None) -> str:
     return " ".join(w for _, w in positions)
 
 
-def _crossref_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _crossref_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, scope: str = WORK_SCOPE_PAPERS,
+) -> list[RetrievedDoc]:
     """DOI metadata across all major publishers (paywalled or not).
     Abstracts present when the publisher submitted them; many won't
-    have one but title + venue + author + year is still useful."""
+    have one but title + venue + author + year is still useful, so a
+    missing abstract does not exclude a record."""
     if not query.strip():
         return []
     params = {
         "query": query.strip(),
         "rows": str(max(1, min(top_k, 25))),
-        "select": "DOI,title,abstract,author,container-title,published-print,published-online,publisher,URL",
+        # Repeated `type:` filters are OR-ed by Crossref.
+        "filter": ",".join(f"type:{t}" for t in _scope_types(_WORK_TYPES_CROSSREF, scope)),
+        "select": "DOI,title,type,abstract,author,container-title,published-print,published-online,publisher,URL",
     }
-    data = _http_get_json("https://api.crossref.org/works", params, timeout_s)
+    data = _http_get_json("https://api.crossref.org/works", params, timeout_s, source="crossref")
     if not data:
         return []
     items = (data.get("message") or {}).get("items") or []
@@ -364,12 +450,15 @@ def _crossref_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list
                 "source": "crossref", "title": title, "authors": authors,
                 "venue": venue, "publisher": pub, "year": year,
                 "doi": it.get("DOI", ""), "url": it.get("URL", ""),
+                "work_type": it.get("type", ""),
             },
         ))
     return out
 
 
-def _semantic_scholar_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+def _semantic_scholar_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, api_key: str = "",
+) -> list[RetrievedDoc]:
     if not query.strip():
         return []
     params = {
@@ -377,8 +466,12 @@ def _semantic_scholar_search(query: str, top_k: int, *, timeout_s: float = 10.0)
         "limit": str(max(1, min(top_k, 25))),
         "fields": "title,abstract,authors,year,venue,externalIds,openAccessPdf,url",
     }
+    # The shared keyless pool answers 429 most of the time; a free key
+    # gets a dedicated lane.
+    key = (api_key or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")).strip()
     data = _http_get_json(
         "https://api.semanticscholar.org/graph/v1/paper/search", params, timeout_s,
+        source="semantic_scholar", headers={"x-api-key": key} if key else None,
     )
     if not data or "data" not in data:
         return []
@@ -409,7 +502,7 @@ def _pubmed_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[R
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
         {"db": "pubmed", "term": query.strip(),
          "retmax": str(max(1, min(top_k, 25))), "retmode": "json"},
-        timeout_s,
+        timeout_s, source="pubmed",
     )
     if not ids_data:
         return []
@@ -419,7 +512,7 @@ def _pubmed_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[R
     sum_data = _http_get_json(
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
         {"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
-        timeout_s,
+        timeout_s, source="pubmed",
     )
     if not sum_data:
         return []
@@ -448,27 +541,21 @@ def _pubmed_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[R
 
 
 def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
-    """CORE (https://core.ac.uk) — 240M+ open-access papers. Requires
-    a free API key via `CORE_API_KEY` env var; degrades to [] if unset.
-    Covers all fields with full-text where available."""
-    import os
-    api_key = os.environ.get("CORE_API_KEY", "").strip()
-    if not api_key or not query.strip():
+    """CORE (https://core.ac.uk) — 240M+ open-access papers, theses and
+    repository copies, strong on the humanities and social sciences that
+    the STEM indices under-cover. Searching works without a key; a free
+    `CORE_API_KEY` raises the rate limit."""
+    if not query.strip():
         return []
-    try:
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(
-                "https://api.core.ac.uk/v3/search/works",
-                params={"q": query.strip(), "limit": str(max(1, min(top_k, 25)))},
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": "FrontierInsight/1.0",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        _log.info("core.ac.uk fallback failed: %s", e)
+    api_key = os.environ.get("CORE_API_KEY", "").strip()
+    data = _http_get_json(
+        # With the trailing slash: the bare path answers 301 to this one.
+        "https://api.core.ac.uk/v3/search/works/",
+        {"q": query.strip(), "limit": str(max(1, min(top_k, 25)))},
+        timeout_s, source="core",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
+    )
+    if not data:
         return []
     out: list[RetrievedDoc] = []
     for w in data.get("results") or []:
@@ -481,12 +568,152 @@ def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
                 "source": "core", "title": title, "authors": authors,
                 "year": w.get("yearPublished"),
                 "doi": (w.get("doi") or "").replace("https://doi.org/", ""),
-                "url": w.get("downloadUrl") or w.get("sourceFulltextUrls", [""])[0],
-                "pdf_url": w.get("downloadUrl", ""),
+                "arxiv_id": w.get("arxivId") or "",
+                "url": w.get("downloadUrl") or (w.get("sourceFulltextUrls") or [""])[0],
+                "pdf_url": w.get("downloadUrl") or "",
                 "venue": (w.get("publisher") or ""),
+                "work_type": w.get("documentType") or "",
             },
         ))
     return out
+
+
+_OPENAIRE_URL = "https://api.openaire.eu/graph/v1/researchProducts"
+_DOAJ_URL = "https://doaj.org/api/search/articles/"
+# DOAJ reads its query as Elasticsearch query-string syntax: a `:` names a
+# field, a leading `-` negates, brackets and quotes group.
+_DOAJ_SYNTAX_RE = re.compile(r'[:/()\[\]{}"!+\-&|<>=]')
+# OpenAIRE and DOAJ require every query word to match, so a six-word keyword
+# query that OpenAlex answers well finds nothing there (measured: 0 hits for
+# "action figures collectible toys popular culture history" on both, while
+# DOAJ-listed books on toys exist). One retry with the leading words.
+_AND_SEARCH_RETRY_WORDS = 3
+# DOAJ allows 2 requests a second (burst 5). A literature pass searches up to
+# three facet queries at once, each possibly with a retry, so its requests
+# take turns.
+_DOAJ_MIN_INTERVAL_S = 0.6
+_DOAJ_PACE_LOCK = threading.Lock()
+_DOAJ_LAST_REQUEST = [0.0]
+_doaj_monotonic = time.monotonic
+_doaj_sleep = time.sleep
+
+
+def _doaj_pace() -> None:
+    with _DOAJ_PACE_LOCK:
+        wait = _DOAJ_LAST_REQUEST[0] + _DOAJ_MIN_INTERVAL_S - _doaj_monotonic()
+        if wait > 0:
+            _doaj_sleep(wait)
+        _DOAJ_LAST_REQUEST[0] = _doaj_monotonic()
+
+
+def _and_search(query: str, run: Callable[[str], list[RetrievedDoc] | None]) -> list[RetrievedDoc]:
+    docs = run(query)
+    words = query.split()
+    if docs is not None and not docs and len(words) > _AND_SEARCH_RETRY_WORDS:
+        docs = run(" ".join(words[:_AND_SEARCH_RETRY_WORDS]))
+    return docs or []
+
+
+def _openaire_search(
+    query: str, top_k: int, *, timeout_s: float = 10.0, scope: str = WORK_SCOPE_PAPERS,
+) -> list[RetrievedDoc]:
+    """OpenAIRE research graph — European open-access publications, keyless."""
+    if not query.strip():
+        return []
+    allowed = set(_scope_types(_WORK_TYPES_OPENAIRE, scope))
+
+    def run(q: str) -> list[RetrievedDoc] | None:
+        data = _http_get_json(
+            _OPENAIRE_URL,
+            {"search": q, "type": "publication", "pageSize": str(max(1, min(top_k, 25)))},
+            timeout_s, source="openaire",
+        )
+        if data is None:
+            return None
+        out: list[RetrievedDoc] = []
+        for r in data.get("results") or []:
+            instances = r.get("instances") or []
+            types = {str(i.get("type") or "").strip().lower() for i in instances}
+            if not types & allowed:
+                continue
+            title = re.sub(r"\s+", " ", str(r.get("mainTitle") or "")).strip()
+            if not title:
+                continue
+            abstract = " ".join(
+                re.sub(r"<[^>]+>", " ", str(d)) for d in (r.get("descriptions") or [])
+            )
+            abstract = re.sub(r"\s+", " ", abstract).strip()
+            pids = {str(p.get("scheme") or "").lower(): str(p.get("value") or "")
+                    for p in (r.get("pids") or [])}
+            urls = [u for i in instances for u in (i.get("urls") or []) if u]
+            date = str(r.get("publicationDate") or "")
+            access = str((r.get("bestAccessRight") or {}).get("label") or "")
+            out.append(RetrievedDoc(
+                content=f"{title}\n\n{abstract}".strip(),
+                metadata={
+                    "source": "openaire", "title": title,
+                    "authors": [a.get("fullName", "") for a in (r.get("authors") or [])],
+                    "year": int(date[:4]) if date[:4].isdigit() else None,
+                    "published": date,
+                    "doi": pids.get("doi", ""), "pmid": pids.get("pmid", ""),
+                    "url": (f"https://doi.org/{pids['doi']}" if pids.get("doi")
+                            else (urls[0] if urls else "")),
+                    "venue": str((r.get("container") or {}).get("name") or r.get("publisher") or ""),
+                    "publisher": str(r.get("publisher") or ""),
+                    "open_access": access.upper().startswith("OPEN"),
+                    "work_type": next((t for t in types if t in allowed), ""),
+                },
+            ))
+        return out
+
+    return _and_search(query.strip(), run)
+
+
+def _doaj_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[RetrievedDoc]:
+    """Directory of Open Access Journals — peer-reviewed open-access journal
+    articles, keyless. Every hit is a journal article with free full text."""
+    q = re.sub(r"\s+", " ", _DOAJ_SYNTAX_RE.sub(" ", query or "")).strip()
+    if not q:
+        return []
+
+    def run(text: str) -> list[RetrievedDoc] | None:
+        _doaj_pace()
+        data = _http_get_json(
+            _DOAJ_URL + quote(text, safe=""),
+            {"pageSize": str(max(1, min(top_k, 25)))},
+            timeout_s, source="doaj",
+        )
+        if data is None:
+            return None
+        out: list[RetrievedDoc] = []
+        for r in data.get("results") or []:
+            b = r.get("bibjson") or {}
+            title = re.sub(r"\s+", " ", str(b.get("title") or "")).strip()
+            if not title:
+                continue
+            doi = next((str(i.get("id") or "") for i in (b.get("identifier") or [])
+                        if str(i.get("type") or "").lower() == "doi"), "")
+            fulltext = next((str(link.get("url") or "") for link in (b.get("link") or [])
+                             if str(link.get("type") or "").lower() == "fulltext"), "")
+            journal = b.get("journal") or {}
+            year = str(b.get("year") or "")
+            out.append(RetrievedDoc(
+                content=f"{title}\n\n{b.get('abstract') or ''}".strip(),
+                metadata={
+                    "source": "doaj", "title": title,
+                    "authors": [a.get("name", "") for a in (b.get("author") or [])],
+                    "year": int(year) if year.isdigit() else None,
+                    "doi": doi,
+                    "url": f"https://doi.org/{doi}" if doi else fulltext,
+                    "venue": str(journal.get("title") or ""),
+                    "publisher": str(journal.get("publisher") or ""),
+                    "open_access": True,
+                    "work_type": "journal-article",
+                },
+            ))
+        return out
+
+    return _and_search(q, run)
 
 
 def _google_scholar_search(query: str, top_k: int, *, timeout_s: float = 30.0) -> list[RetrievedDoc]:
@@ -776,7 +1003,8 @@ def _brave_search(
             r.raise_for_status()
             data = r.json()
     except Exception as e:
-        _log.info("brave web search failed: %s", e)
+        _log.info("brave web search failed: %s", _sf.redact(e))
+        _sf.record_exception("brave", e)
         return []
     out: list[RetrievedDoc] = []
     for item in ((data.get("web") or {}).get("results") or [])[:count]:
@@ -840,6 +1068,7 @@ def _ddg_search(
             html = r.text
     except Exception as e:
         _log.info("duckduckgo search failed: %s", e)
+        _sf.record_exception("duckduckgo", e)
         return []
     anchors = re.findall(
         r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S,
@@ -1097,7 +1326,11 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
                     locale="en-US",
                 )
                 page = ctx.new_page()
-                page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                if nav is not None and nav.status == 429 and _gate.is_arxiv_url(url):
+                    _gate.report(url, 429)
+                    _sf.record_failure("arxiv", "http_429", status=429, url=url, detail="headless render")
+                    return None
                 # Wait (best-effort) for a Cloudflare-style interstitial to
                 # resolve into the real page before grabbing content.
                 deadline = time.monotonic() + min(timeout_s, 20.0)
@@ -1181,12 +1414,13 @@ def _resolve_ids(doc: RetrievedDoc, *, timeout_s: float) -> dict:
                         "resultType": "lite", "pageSize": 1},
                 headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
             )
+            _sf.record_response("europepmc", r)
             if r.status_code == 200:
                 res = ((r.json().get("resultList") or {}).get("result") or [{}])[0]
                 doi = doi or str(res.get("doi") or "").lower()
                 pmcid = pmcid or _normalize_pmcid(str(res.get("pmcid") or ""))
-        except Exception:
-            pass
+        except Exception as e:
+            _sf.record_exception("europepmc", e)
     return {"doi": doi, "pmcid": pmcid, "arxiv_id": arxiv_id}
 
 
@@ -1210,11 +1444,13 @@ def _pmc_bioc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
         r = httpx.get(
             url, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("pmc", r, url=url)
         if r.status_code != 200 or not r.content:
             return None
         data = r.json()
     except Exception as e:
         _log.info("pmc bioc %s failed: %s", pmcid, e)
+        _sf.record_exception("pmc", e, url=url)
         return None
     collections = data if isinstance(data, list) else [data]
     parts: list[str] = []
@@ -1249,6 +1485,7 @@ def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None
         r = httpx.get(
             url, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("europepmc", r, url=url)
         if r.status_code != 200 or not r.content:
             return None
         text = _xml_to_text(r.text)
@@ -1257,6 +1494,7 @@ def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None
             return text[:cap]
     except Exception as e:
         _log.info("europepmc fulltext %s failed: %s", pmcid, e)
+        _sf.record_exception("europepmc", e, url=url)
     return None
 
 
@@ -1284,14 +1522,18 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             if arxiv_id:
-                rr = c.get(f"https://arxiv.org/html/{arxiv_id}")
-                if rr.status_code == 200 and b"<html" in rr.content[:2048].lower():
+                html_url = f"https://arxiv.org/html/{arxiv_id}"
+                rr = _gate.request(html_url, lambda: c.get(html_url))
+                _sf.record_response("arxiv", rr, url=html_url)
+                if rr is not None and rr.status_code == 200 and b"<html" in rr.content[:2048].lower():
                     t = _html_to_text(rr.text)
                     if len(t) >= _MIN_FULL_TEXT_CHARS:
                         _log.info("arxiv: recovered HTML full text for %s", arxiv_id)
                         return t[:cap]
-                rr = c.get(f"https://arxiv.org/pdf/{arxiv_id}")
-                if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
+                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+                rr = _gate.request(pdf_url, lambda: c.get(pdf_url))
+                _sf.record_response("arxiv", rr, url=pdf_url)
+                if rr is not None and rr.status_code == 200 and rr.content[:5] == b"%PDF-":
                     t = _pdf_bytes_to_text(rr.content, cap=cap)
                     if t and len(t) >= _MIN_FULL_TEXT_CHARS:
                         _log.info("arxiv: recovered PDF full text for %s", arxiv_id)
@@ -1300,8 +1542,10 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
                 for server in ("biorxiv", "medrxiv"):
                     try:
                         rr = c.get(f"https://www.{server}.org/content/{doi}v1.full.pdf")
-                    except Exception:
+                    except Exception as e:
+                        _sf.record_exception(server, e)
                         continue
+                    _sf.record_response(server, rr)
                     if rr.status_code == 200 and rr.content[:5] == b"%PDF-":
                         t = _pdf_bytes_to_text(rr.content, cap=cap)
                         if t and len(t) >= _MIN_FULL_TEXT_CHARS:
@@ -1309,6 +1553,7 @@ def _preprint_fulltext(ids: dict, *, timeout_s: float, cap: int) -> str | None:
                             return t[:cap]
     except Exception as e:
         _log.info("preprint fetch failed (%s / %s): %s", arxiv_id, doi, e)
+        _sf.record_exception("arxiv" if arxiv_id else "preprint", e)
     return None
 
 
@@ -1342,6 +1587,7 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
             r = c.get(f"https://api.unpaywall.org/v2/{doi}", params={"email": email})
+            _sf.record_response("unpaywall", r, url="https://api.unpaywall.org/v2/")
             if r.status_code != 200:
                 return None
             locs = sorted(r.json().get("oa_locations") or [], key=_loc_rank)
@@ -1353,9 +1599,13 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
                         candidates.append(u)
             for u in candidates:
                 try:
-                    rr = c.get(u)
-                except Exception:
+                    rr = _gate.request(u, lambda u=u: c.get(u))
+                except Exception as e:
+                    _sf.record_exception(_sf.source_for_url(u, "oa_copy"), e, url=u)
                     continue
+                if rr is None:  # an arXiv copy the queue skipped
+                    continue
+                _sf.record_response(_sf.source_for_url(u, "oa_copy"), rr, url=u)
                 if rr.status_code != 200 or not rr.content:
                     continue
                 text = _pdf_or_html_text(rr, cap=cap)
@@ -1366,7 +1616,8 @@ def _unpaywall_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
                     )
                     return text[:cap]
     except Exception as e:
-        _log.info("unpaywall fulltext %s failed: %s", doi, e)
+        _log.info("unpaywall fulltext %s failed: %s", doi, _sf.redact(e))
+        _sf.record_exception("unpaywall", e)
     return None
 
 
@@ -1386,14 +1637,18 @@ def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
             params={"fields": "openAccessPdf"},
             headers=headers, timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("semantic_scholar", r)
         if r.status_code != 200:
             return None
         pdf = (r.json().get("openAccessPdf") or {}).get("url") or ""
         if not pdf:
             return None
-        rr = httpx.get(
+        rr = _gate.request(pdf, lambda: httpx.get(
             pdf, headers=_BROWSER_HEADERS, timeout=timeout_s, follow_redirects=True,
-        )
+        ))
+        if rr is None:
+            return None
+        _sf.record_response(_sf.source_for_url(pdf, "oa_copy"), rr, url=pdf)
         if rr.status_code == 200:
             text = _pdf_or_html_text(rr, cap=cap)
             if text and len(text) >= _MIN_FULL_TEXT_CHARS:
@@ -1401,6 +1656,7 @@ def _s2_oa_pdf(doi: str, *, timeout_s: float, cap: int) -> str | None:
                 return text[:cap]
     except Exception as e:
         _log.info("s2 oa pdf %s failed: %s", doi, e)
+        _sf.record_exception("semantic_scholar", e)
     return None
 
 
@@ -1418,6 +1674,7 @@ def _core_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
             headers={"Authorization": f"Bearer {key}", **_BROWSER_HEADERS},
             timeout=timeout_s, follow_redirects=True,
         )
+        _sf.record_response("core", r)
         if r.status_code != 200:
             return None
         results = r.json().get("results") or []
@@ -1428,6 +1685,7 @@ def _core_fulltext(doi: str, *, timeout_s: float, cap: int) -> str | None:
                 return ft[:cap]
     except Exception as e:
         _log.info("core fulltext %s failed: %s", doi, e)
+        _sf.record_exception("core", e)
     return None
 
 
@@ -1494,9 +1752,12 @@ def _fetch_web_page_text(
         with httpx.Client(
             timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
         ) as c:
-            r = c.get(url)
+            r = _gate.request(url, lambda: c.get(url))
+            if r is None:  # an arXiv page the queue skipped (paused / over budget)
+                raise _FetchBlocked()
             if r.status_code >= 400:
                 blocked = r.status_code in (401, 403, 429)
+                _sf.record_response(_sf.source_for_url(url, "web_page"), r, url=url)
                 raise _FetchBlocked()
             ctype = (r.headers.get("content-type") or "").lower()
             body = r.content
@@ -1504,6 +1765,7 @@ def _fetch_web_page_text(
         body = None
     except Exception as e:
         _log.info("web page fetch %s failed: %s", url, e)
+        _sf.record_exception(_sf.source_for_url(url, "web_page"), e, url=url)
         body = None
         blocked = True
 
@@ -1531,7 +1793,17 @@ def _fetch_web_page_text(
     # Direct fetch was blocked / empty / a challenge page. Try the headless
     # renderer (which clears Cloudflare and JS-only pages).
     if headless:
-        html = _playwright_fetch_html(url, timeout_s=timeout_s)
+        # The headless render is kept for arXiv too (it is how FI reads
+        # JS-built pages), but it takes its turn in the arXiv queue like
+        # any other request, so a refused page is not immediately re-asked
+        # for through a browser.
+        html = None
+        release = _gate.acquire_slot(url) if _gate.is_arxiv_url(url) else (lambda: None)
+        if release is not None:
+            try:
+                html = _playwright_fetch_html(url, timeout_s=timeout_s)
+            finally:
+                release()
         if html:
             text = _html_to_text(html)
             if _keep_fetched_text(text, snippet) and not _is_paywall_or_stub(html, text):
@@ -1554,9 +1826,13 @@ _SOURCE_REGISTRY = {
     "semantic_scholar": _semantic_scholar_search,
     "pubmed": _pubmed_search,
     "core": _core_search,
+    "openaire": _openaire_search,
+    "doaj": _doaj_search,
     "google_scholar": _google_scholar_search,
     "web_search": _web_search_source,
 }
+# Adapters that take `scope=` (which record types to keep).
+_SCOPED_SOURCES = frozenset({"openalex", "crossref", "openaire"})
 
 
 # ---------------------------------------------------------------------------
@@ -1744,8 +2020,11 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
             timeout=timeout_s, follow_redirects=True,
             headers={"User-Agent": "FrontierInsight/1.0"},
         ) as c:
-            r = c.get(url)
+            r = _gate.request(url, lambda: c.get(url))
+            if r is None:
+                return None
             if r.status_code >= 400:
+                _sf.record_response(_sf.source_for_url(url, "publisher_pdf"), r, url=url)
                 return None
             body = r.content
             if not _looks_like_pdf(r.headers.get("content-type"), body[:8]):
@@ -1753,6 +2032,7 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
             return body
     except Exception as e:
         _log.info("full-text GET %s failed: %s", url, e)
+        _sf.record_exception(_sf.source_for_url(url, "publisher_pdf"), e, url=url)
         return None
 
 
@@ -1783,8 +2063,11 @@ def _fetch_full_text(
                 timeout=timeout_s, follow_redirects=True,
                 headers={"User-Agent": "FrontierInsight/1.0"},
             ) as c:
-                page = c.get(landing)
-                if page.status_code < 400:
+                page = _gate.request(landing, lambda: c.get(landing))
+                _sf.record_response(
+                    _sf.source_for_url(landing, "publisher_page"), page, url=landing,
+                )
+                if page is not None and page.status_code < 400:
                     candidate = _find_pdf_url_in_html(page.content)
                     if candidate:
                         # Resolve relative URLs against the landing page.
@@ -1794,6 +2077,9 @@ def _fetch_full_text(
                         pdf_bytes = _fetch_pdf_bytes(candidate, timeout_s=timeout_s)
         except Exception as e:
             _log.info("full-text landing-page %s failed: %s", landing, e)
+            _sf.record_exception(
+                _sf.source_for_url(landing, "publisher_page"), e, url=landing,
+            )
 
     if pdf_bytes:
         extracted = _pdf_bytes_to_text(pdf_bytes, cap=max_kb * 1024)
@@ -1837,12 +2123,20 @@ async def _enrich_with_full_text(
         return docs
 
     async def fetch_one(idx: int) -> tuple[int, str | None]:
-        text = await asyncio.to_thread(
-            fetch_fn,
-            docs[idx],
-            timeout_s=timeout_s,
-            max_kb=max_kb,
-        )
+        # The batch budget is also the arXiv queue's deadline: a fetch that
+        # could not get an arXiv slot in time gives up instead of sleeping
+        # through a multi-minute backoff in a worker thread — and a thread
+        # abandoned at the budget stops at its next arXiv request.
+        token = _gate.fetch_deadline.set(start + total_budget_s)
+        try:
+            text = await asyncio.to_thread(
+                fetch_fn,
+                docs[idx],
+                timeout_s=timeout_s,
+                max_kb=max_kb,
+            )
+        finally:
+            _gate.fetch_deadline.reset(token)
         return idx, text
 
     start = time.monotonic()
@@ -1912,6 +2206,10 @@ async def _enrich_with_full_text(
             "enriched %d/%d docs (%d abandoned)",
             total_budget_s, successes, len(targets), len(pending),
         )
+        _sf.record_failure(
+            "full_text", "budget_abandoned", count=len(pending),
+            detail=f"{len(pending)} of {len(targets)} fetches unfinished after {total_budget_s:.0f}s",
+        )
     else:
         _log.info(
             "full-text fetch: enriched %d/%d docs in %.1fs",
@@ -1948,7 +2246,7 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
         "fields": ["all"],
         "access": "open",
         "has_search_adapter": True,
-        "when_to_use": "broadest single open index (~200M works). Strong default for any topic.",
+        "when_to_use": "broadest single open index (~200M works). Strong default for any topic. Set OPENALEX_API_KEY for the full daily budget.",
     },
     {
         "name": "arxiv",
@@ -1957,7 +2255,7 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
                    "quantitative biology", "statistics", "electrical engineering"],
         "access": "open",
         "has_search_adapter": True,
-        "when_to_use": "physics, CS, math, quantum, anything posted as a preprint before peer review.",
+        "when_to_use": "physics, CS, math, quantum, anything posted as a preprint before peer review. Searched through OpenAlex's arXiv source; full text from arxiv.org.",
     },
     {
         "name": "crossref",
@@ -1971,7 +2269,7 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
         "name": "semantic_scholar",
         "title": "Semantic Scholar",
         "fields": ["all"],
-        "access": "open (rate-limited without API key)",
+        "access": "open (keyless pool mostly rate-limited; set SEMANTIC_SCHOLAR_API_KEY)",
         "has_search_adapter": True,
         "when_to_use": "broad coverage with abstracts + citation graph. Good for follow-the-citations workflows.",
     },
@@ -1987,9 +2285,25 @@ _SOURCE_CATALOG: list[dict[str, Any]] = [
         "name": "core",
         "title": "CORE open-access aggregator",
         "fields": ["all"],
-        "access": "open (free API key required: CORE_API_KEY env var)",
+        "access": "open, keyless (CORE_API_KEY raises the rate limit)",
         "has_search_adapter": True,
-        "when_to_use": "240M+ open-access papers, useful when seeking PDFs not just abstracts.",
+        "when_to_use": "240M+ open-access papers, theses and repository copies from universities worldwide; strong on humanities and social sciences, and useful when seeking PDFs not just abstracts.",
+    },
+    {
+        "name": "openaire",
+        "title": "OpenAIRE research graph",
+        "fields": ["all", "humanities", "social sciences"],
+        "access": "open, keyless",
+        "has_search_adapter": True,
+        "when_to_use": "European open-access publications, including books and chapters from university repositories. Use short keyword queries: every word must match.",
+    },
+    {
+        "name": "doaj",
+        "title": "Directory of Open Access Journals",
+        "fields": ["all", "humanities", "social sciences"],
+        "access": "open, keyless",
+        "has_search_adapter": True,
+        "when_to_use": "peer-reviewed open-access journal articles, many from regional and non-English humanities and social-science journals the big indices miss.",
     },
     {
         "name": "google_scholar",
@@ -2085,9 +2399,10 @@ async def _route_sources_with_llm(
             "(physics, CS, math, statistics, quantitative biology, EE) and PubMed "
             "is biomedical — do NOT pick them for humanities, arts, history, "
             "culture, business, or current-events topics. For those prefer the "
-            "multidisciplinary indices (OpenAlex, Crossref); the always-on web "
-            "search already covers popular / encyclopedic / museum / trade "
-            "sources.\n\n"
+            "multidisciplinary indices (OpenAlex, Crossref) and the open-access "
+            "sources that carry humanities and social-science books, theses and "
+            "journals (CORE, OpenAIRE, DOAJ); the always-on web search already "
+            "covers popular / encyclopedic / museum / trade sources.\n\n"
             "# Topic\n"
             f"{topic[:1500]}\n"
             f"{idea_text}\n"
@@ -2164,6 +2479,55 @@ def _doc_dedup_key(d: RetrievedDoc) -> str:
     return f"title:{normalized}" if normalized else f"id:{id(d)}"
 
 
+# Titles too generic to identify a work: two "Introduction" chapters of two
+# different books are two documents.
+_GENERIC_TITLES = frozenset({
+    "introduction", "preface", "foreword", "editorial", "index", "contents",
+    "table of contents", "front matter", "back matter", "references",
+    "bibliography", "conclusion", "conclusions", "erratum", "corrigendum",
+    "correction", "reply", "discussion", "acknowledgments", "acknowledgements",
+    "abstract", "book review", "letter to the editor", "appendix",
+})
+
+
+def _normalize_title(title: str) -> str:
+    """Comparable form of a work's title, or "" when it is too generic (or
+    too short) to identify one.
+
+    Collapses what separates copies of the same record across indexes and
+    DOIs: case, dash variants (en dash vs hyphen), punctuation, HTML
+    entities, full-width forms, and the literal backslash-n OpenAlex leaves
+    in some titles. Fewer than three words never counts as an identity —
+    "Harmonic Oscillator" names a topic, not a work."""
+    import unicodedata
+
+    t = str(title or "").replace("\\n", " ")
+    t = unicodedata.normalize("NFKC", _htmlmod.unescape(t)).casefold()
+    # Punctuation, dash variants included (hyphen, en/em dash, minus), is
+    # replaced rather than deleted, so "Runge–Kutta" and "Runge-Kutta" meet.
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t.split()) < 3 or t in _GENERIC_TITLES:
+        return ""
+    return t
+
+
+def _doc_dedup_keys(d: RetrievedDoc) -> list[str]:
+    """Every identity a doc can collide on: its strongest id and, when the
+    title is specific enough, its normalized title.
+
+    One id is not enough. A real quest cited the same textbook appendix,
+    "Numerical Integration 4th-order Runge–Kutta Method", three times —
+    three books, three DOIs, one text — and the same arXiv preprint comes
+    back from OpenAlex once with its DOI and once without. Only the title
+    connects them."""
+    keys = [_doc_dedup_key(d)]
+    norm = _normalize_title((d.metadata or {}).get("title") or "")
+    if norm and f"title:{norm}" not in keys:
+        keys.append(f"title:{norm}")
+    return keys
+
+
 
 def _rank_by_relevance(docs: list[RetrievedDoc], query: str) -> list[RetrievedDoc]:
     """Order pooled candidates by how well they answer the query.
@@ -2206,10 +2570,13 @@ def _rank_by_relevance(docs: list[RetrievedDoc], query: str) -> list[RetrievedDo
 
 async def _route_external(
     query: str, top_k: int, sources: list[str], *, timeout_s: float = 10.0,
+    work_scope: str = WORK_SCOPE_PAPERS,
 ) -> list[RetrievedDoc]:
     """Run all requested adapters in parallel (each off the event loop)
     and merge. Returns up to top_k de-duplicated docs, preserving the
-    original source-list order on collisions (first source wins)."""
+    original source-list order on collisions (first source wins).
+    ``work_scope`` decides which record types the adapters that can filter
+    by type keep (see ``WORK_SCOPE_PAPERS``)."""
     # Every adapter below wants a SEARCH QUERY, not a topic statement. FI's
     # `topic:` is routinely a paragraph-length block with newlines and a
     # "GOALS:" list, and handing that over verbatim makes arXiv answer HTTP
@@ -2231,10 +2598,14 @@ async def _route_external(
 
     async def run_one(name: str) -> tuple[str, list[RetrievedDoc]]:
         fn = _SOURCE_REGISTRY[name]
+        kwargs: dict[str, Any] = {"timeout_s": timeout_s}
+        if name in _SCOPED_SOURCES:
+            kwargs["scope"] = work_scope
         try:
-            docs = await asyncio.to_thread(fn, query, top_k, timeout_s=timeout_s)
+            docs = await asyncio.to_thread(fn, query, top_k, **kwargs)
         except Exception as e:
-            _log.info("source %s raised: %s", name, e)
+            _log.info("source %s raised: %s", name, _sf.redact(e))
+            _sf.record_exception(name, e)
             docs = []
         return name, docs
 
@@ -2247,10 +2618,10 @@ async def _route_external(
     merged: list[RetrievedDoc] = []
     for name in valid:
         for doc in by_source.get(name, []):
-            key = _doc_dedup_key(doc)
-            if key in seen:
+            keys = _doc_dedup_keys(doc)
+            if any(k in seen for k in keys):
                 continue
-            seen.add(key)
+            seen.update(keys)
             merged.append(doc)
             if len(merged) >= top_k:
                 _log.info(
@@ -2511,6 +2882,17 @@ def _axon_config_from(spec: Any) -> Any:
 class Knowledge:
     def __init__(self, cfg: KnowledgeConfig) -> None:
         self.cfg = cfg
+        # Scholarly API keys set in YAML reach every adapter through the
+        # environment — the same channel `.env` uses — because the adapters
+        # are plain functions called from the router, the source registry
+        # and the full-text cascade alike. A real environment variable still
+        # wins over YAML.
+        for env_name, value in (
+            ("OPENALEX_API_KEY", getattr(cfg, "openalex_api_key", "")),
+            ("SEMANTIC_SCHOLAR_API_KEY", getattr(cfg, "semantic_scholar_api_key", "")),
+        ):
+            if value and not os.environ.get(env_name):
+                os.environ[env_name] = value
         self.enabled = cfg.enabled and _AXON_AVAILABLE
         self._brain: Any | None = None
         self._retriever: Any | None = None
@@ -2664,6 +3046,10 @@ class Knowledge:
         external_top_k: int | None = None,
         chosen_idea: dict | None = None,
         chat_fn: Any | None = None,
+        work_scope: str = WORK_SCOPE_PAPERS,
+        sources: list[str] | None = None,
+        web: bool = True,
+        fetch_full_text: bool | None = None,
     ) -> list[RetrievedDoc]:
         """Async retrieval. Layers, merged + de-duplicated:
 
@@ -2716,14 +3102,12 @@ class Knowledge:
         # Decide the academic source list (router or YAML fallback). The
         # web layer is handled separately (always-on), so strip any
         # ``web_search`` entry the router/fallback may name.
-        fallback = self._fallback_sources()
-        if self.cfg.source_routing == "auto" and chat_fn is not None:
-            sources = await _route_sources_with_llm(
-                topic=query, chosen_idea=chosen_idea,
-                chat_fn=chat_fn, fallback_sources=fallback,
+        # A caller searching several phrasings of one topic routes once and
+        # passes the result, instead of asking the router again per phrasing.
+        if sources is None:
+            sources = await self.choose_sources(
+                query, chosen_idea=chosen_idea, chat_fn=chat_fn,
             )
-        else:
-            sources = fallback
         academic_sources = [s for s in sources if s != "web_search"]
 
         # Network layer, run concurrently:
@@ -2739,7 +3123,7 @@ class Knowledge:
         # ``web_search=False``. Gate on ``cfg.enabled`` (the config flag) NOT
         # ``self.enabled`` (which also requires Axon to be installed) — web
         # search is independent of the Axon corpus when enabled=True.
-        want_web = bool(self.cfg.enabled and self.cfg.web_search)
+        want_web = bool(self.cfg.enabled and self.cfg.web_search and web)
         if want_web:
             tasks.append(asyncio.to_thread(
                 _web_search, query, self.cfg.web_search_top_k,
@@ -2772,7 +3156,9 @@ class Knowledge:
         # the next quest's academic search.
         run_academic = self.cfg.enabled and bool(academic_sources)
         if run_academic:
-            tasks.append(_route_external(query, external_k, academic_sources))
+            tasks.append(_route_external(
+                query, external_k, academic_sources, work_scope=work_scope,
+            ))
 
         web_docs: list[RetrievedDoc] = []
         academic_docs: list[RetrievedDoc] = []
@@ -2799,7 +3185,9 @@ class Knowledge:
                     _fetch_web_page_text, headless=self.cfg.headless_fetch,
                 ),
             )
-        if self.cfg.try_fetch_full_text and academic_docs:
+        if fetch_full_text is None:
+            fetch_full_text = self.cfg.try_fetch_full_text
+        if fetch_full_text and academic_docs:
             academic_docs = await _enrich_with_full_text(
                 academic_docs,
                 timeout_s=self.cfg.full_text_fetch_timeout_s,
@@ -2844,10 +3232,10 @@ class Knowledge:
         # everything else breaks it — a corpus entry still wins when it is
         # genuinely the best answer, which is the only reason to prefer it.
         for doc in pinned:
-            key = _doc_dedup_key(doc)
-            if key in seen:
+            keys = _doc_dedup_keys(doc)
+            if any(k in seen for k in keys):
                 continue
-            seen.add(key)
+            seen.update(keys)
             merged.append(doc)
 
         # Then academic and web together, ranked by relevance to the query.
@@ -2888,10 +3276,10 @@ class Knowledge:
             for doc in _rank_by_relevance(docs, query):
                 if limit <= 0 or len(merged) >= cap:
                     return
-                key = _doc_dedup_key(doc)
-                if key in seen:
+                keys = _doc_dedup_keys(doc)
+                if any(k in seen for k in keys):
                     continue
-                seen.add(key)
+                seen.update(keys)
                 merged.append(doc)
                 limit -= 1
 
@@ -2899,8 +3287,49 @@ class Knowledge:
         # Then everything else — including any academic docs beyond the floor
         # — ranked together for whatever slots are left.
         _take([d for d in (*academic_docs, *web_docs, *axon_docs)
-               if _doc_dedup_key(d) not in seen], cap - len(merged))
+               if not any(k in seen for k in _doc_dedup_keys(d))], cap - len(merged))
         return merged
+
+    async def choose_sources(
+        self, query: str, *, chosen_idea: dict | None = None, chat_fn: Any | None = None,
+    ) -> list[str]:
+        """The academic sources to search for ``query``: the router's pick when
+        ``source_routing`` is ``auto`` and a chat function is given, otherwise
+        ``external_fallback``. With retrieval off nothing would be searched, so
+        no routing call is spent."""
+        fallback = self._fallback_sources()
+        if not self.cfg.enabled or self.cfg.source_routing != "auto" or chat_fn is None:
+            return fallback
+        return await _route_sources_with_llm(
+            topic=query, chosen_idea=chosen_idea,
+            chat_fn=chat_fn, fallback_sources=fallback,
+        )
+
+    async def fetch_full_text(self, docs: list[RetrievedDoc]) -> list[RetrievedDoc]:
+        """Fetch legal full text for the scholarly records in ``docs`` when
+        ``try_fetch_full_text`` is on. Web pages already carry their page text
+        and records already fetched are left alone; order is preserved. A
+        caller that merges several searches passes ``fetch_full_text=False`` to
+        each and calls this once on the records it kept."""
+        if not (self.cfg.enabled and self.cfg.try_fetch_full_text) or not docs:
+            return docs
+        idx = [
+            i for i, d in enumerate(docs)
+            if (d.metadata or {}).get("source") != "web_search"
+            and not (d.metadata or {}).get("fetched_full_text")
+        ]
+        if not idx:
+            return docs
+        enriched = await _enrich_with_full_text(
+            [docs[i] for i in idx],
+            timeout_s=self.cfg.full_text_fetch_timeout_s,
+            total_budget_s=self.cfg.full_text_fetch_total_s,
+            max_kb=self.cfg.full_text_max_kb,
+        )
+        out = list(docs)
+        for i, doc in zip(idx, enriched):
+            out[i] = doc
+        return out
 
     def search(self, query: str, *, top_k: int | None = None) -> list[RetrievedDoc]:
         """Synchronous wrapper for non-async callers (tests, scripts).

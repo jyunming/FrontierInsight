@@ -217,6 +217,32 @@ def _estimate_lines(text: str, width_in: float, size_pt: float,
     return max(1, -(-len(text) // per_line))  # ceil division
 
 
+# Body type sizes at full scale: paragraph, level-0 bullet, nested bullet.
+_PARA_PT, _BULLET_PT, _SUB_BULLET_PT = 17.0, 16.5, 15.0
+# Smallest body scale, about 9 pt: past this a slide is better cut than read.
+_MIN_BODY_SCALE = 0.55
+
+
+def _body_scale(s: "Slide", width_in: float, avail_h: float) -> float:
+    """The factor (at most 1) that fits a slide's paragraphs and bullets into
+    ``avail_h`` by the wrap estimate. A twelve-entry References or Further
+    reading slide at full size otherwise ran inches past the slide bottom."""
+    def height(k: float) -> float:
+        h = 0.0
+        for text in s.paras:
+            size = _PARA_PT * k
+            h += _estimate_lines(text, width_in, size) * size * 1.32 / 72 + 9 * k / 72
+        for level, text in s.bullets:
+            size = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k
+            h += _estimate_lines("•  " + text, width_in, size) * size * 1.30 / 72 + 8 * k / 72
+        return h
+
+    k = 1.0
+    while k > _MIN_BODY_SCALE and height(k) > avail_h:
+        k = round(k - 0.05, 2)
+    return max(k, _MIN_BODY_SCALE)
+
+
 def _textbox(slide, x, y, w, h):
     from pptx.util import Inches
     tb = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
@@ -365,24 +391,25 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
     avail_h = SLIDE_H_IN - body_top - 0.85
     if s.bullets or s.paras:
         tf = _textbox(slide, MARGIN_IN, body_top, text_w, avail_h)
+        k = _body_scale(s, text_w, avail_h)
         first = True
         for text in s.paras:
             p = tf.paragraphs[0] if first else tf.add_paragraph()
             first = False
             p.line_spacing = 1.32
-            p.space_after = Pt(9)
-            _inline_runs(p, text, 17, _rgb(INK))
+            p.space_after = Pt(9 * k)
+            _inline_runs(p, text, _PARA_PT * k, _rgb(INK))
         for level, text in s.bullets:
             p = tf.paragraphs[0] if first else tf.add_paragraph()
             first = False
             p.line_spacing = 1.30
-            p.space_after = Pt(8)
+            p.space_after = Pt(8 * k)
             marker = p.add_run()
             marker.text = ("    " * level) + ("•  " if level == 0 else "›  ")
-            marker.font.size = Pt(16 if level == 0 else 14)
+            marker.font.size = Pt((16 if level == 0 else 14) * k)
             marker.font.color.rgb = _rgb(ACCENT)   # fi.css li::marker
             marker.font.name = SANS
-            _inline_runs(p, text, 16.5 if level == 0 else 15, _rgb(INK))
+            _inline_runs(p, text, (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k, _rgb(INK))
 
     if s.quote:
         qy = SLIDE_H_IN - 1.9

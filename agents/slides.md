@@ -6,7 +6,7 @@ Compress the paper into a Marp slide deck of **8–12 slides**. Embed each figur
 ## This is an audience-facing presentation — present FINDINGS, not process
 - Lead with what the research **found**. Each content slide should make one substantive point about the topic (a number, a trend, a comparison), supported by the evidence.
 - **Do NOT narrate the pipeline.** Never mention "this run", "the collector", "the dataset was not recovered", "the planned analysis was not produced", "snippets", "auto-collected", or how the data was gathered. That is internal machinery, not content for an audience.
-- Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as scope ("Regional attribution beyond top-line shares is out of scope here"), not as a confession about tooling.
+- Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as this topic's own scope, not as a confession about tooling. Quoted examples in this prompt show the form only; never copy their wording or subject into the deck.
 - When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
 
 ## Style — use the project's clean theme
@@ -57,7 +57,7 @@ Slides are 16:9 (960×540). Default Marp behavior stretches images to fill, whic
 If a figure's aspect ratio is unknown, default to `![w:720](figures/<name>)` on its own slide — that scales any figure to fit within the slide's content area without distortion.
 
 # Output format
-Respond with the Marp markdown only — no JSON, no surrounding fence, no preamble. Begin with the Marp front-matter block (`---\nmarp: true\n...\n---`).
+Respond with the Marp markdown only — no JSON, no surrounding fence, no preamble. Begin with the Marp front-matter block (`---\nmarp: true\n...\n---`). Separate slides with a line containing only `---`. The examples above are fenced only for display: never write a ``` line in the deck except around real code.
 
 ---
 
