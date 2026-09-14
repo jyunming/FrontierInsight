@@ -388,6 +388,10 @@
     return q.default;
   }
 
+  // The author-line answers are one short line each; the other text
+  // questions (topic, advanced slots) get room to write.
+  const SHORT_TEXT_QUESTIONS = new Set(['author', 'affiliation', 'contact_email', 'url']);
+
   function makeInput(q, editable) {
     const id = `q-${q.id}`;
     const base = 'w-full bg-surface-low border border-white/10 rounded p-4 text-on-surface font-body-md text-body-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors placeholder:text-on-surface-variant/50';
@@ -396,7 +400,7 @@
       const el = document.createElement('textarea');
       el.id = id; el.name = q.id;
       el.className = base + ' resize-none';
-      el.rows = 4;
+      el.rows = SHORT_TEXT_QUESTIONS.has(q.id) ? 1 : 4;
       if (q.placeholder) el.placeholder = q.placeholder;
       if (seed !== null && seed !== undefined) {
         el.value = typeof seed === 'object' ? JSON.stringify(seed) : String(seed);
@@ -607,6 +611,7 @@
       budget: '',
       knowledge_external_top_k: compReview ? 30 : 20,
       max_iterations: 2,
+      poster_size: 'a1_portrait',
     };
   }
 

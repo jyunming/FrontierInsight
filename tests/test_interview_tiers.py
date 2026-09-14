@@ -31,10 +31,12 @@ from core.interview import (
 # ---- Tier-1 contract ----
 
 
-def test_tier1_cli_is_exactly_seven_questions() -> None:
-    """CLI and the web --serve interview both ask seven tier-1 questions
+def test_tier1_cli_is_exactly_eleven_questions() -> None:
+    """CLI and the web --serve interview both ask eleven tier-1 questions
     (ensemble_profile was promoted from tier-3 so the multi-model
-    cost decision lives next to provider/model)."""
+    cost decision lives next to provider/model). The last four are the
+    optional author line, asked on every frontend so a poster can carry
+    the author's name without a hidden setting."""
     ids = [q.id for q in questions_for_tier(1, "cli")]
     assert ids == [
         "topic",
@@ -44,6 +46,10 @@ def test_tier1_cli_is_exactly_seven_questions() -> None:
         "provider",
         "provider_model",
         "ensemble_profile",
+        "author",
+        "affiliation",
+        "contact_email",
+        "url",
     ]
 
 
@@ -56,7 +62,7 @@ def test_tier1_serve_matches_cli() -> None:
     assert cli_ids == serve_ids
 
 
-def test_tier1_vscode_is_five_questions_no_provider() -> None:
+def test_tier1_vscode_is_nine_questions_no_provider() -> None:
     """VSCode pins provider=vscode_extension and grabs the Copilot
     model the user picked in the chat picker — so its tier-1 set
     drops both, but still surfaces ensemble_profile because the
@@ -68,7 +74,22 @@ def test_tier1_vscode_is_five_questions_no_provider() -> None:
         "output_kinds",
         "study_depth",
         "ensemble_profile",
+        "author",
+        "affiliation",
+        "contact_email",
+        "url",
     ]
+
+
+def test_author_line_questions_are_optional_one_line_text() -> None:
+    """Every author-line question accepts a blank answer (default "") and
+    can be changed mid-quest without re-running any LLM node."""
+    from core.interview import STAGE_INVALIDATION
+
+    for qid in ("author", "affiliation", "contact_email", "url"):
+        q = next(q for q in QUESTIONS if q.id == qid)
+        assert (q.kind, q.default, q.tier, q.mid_quest_editable) == ("text", "", 1, True)
+        assert STAGE_INVALIDATION[qid] == ()
 
 
 def test_topic_is_tier1_and_not_mid_quest_editable() -> None:
@@ -179,6 +200,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "knowledge_external_top_k",
         "max_iterations",
         "paper_style",
+        "poster_size",
         "node_models",
     }
 

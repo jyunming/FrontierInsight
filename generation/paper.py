@@ -28,6 +28,7 @@ from core.citations import to_bibtex, to_csl_json
 from core.config import Config
 from core.engine import QuestArtifacts, build_further_reading, build_references
 from generation._pandoc import find_pandoc
+from generation import _cjk
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
 
@@ -411,6 +412,30 @@ def _add_title_frontmatter(body: str, title: str) -> str:
     return _add_metadata_frontmatter(body, title, abstract=None)
 
 
+def _author_line(output) -> tuple[str, ...]:
+    """The configured author, affiliation, contact email and link, in that
+    order, each collapsed to one line; unset fields are left out."""
+    fields = (output.author, output.affiliation, output.contact_email, output.url)
+    return tuple(" ".join(str(v).split()) for v in fields if str(v or "").strip())
+
+
+def _author_metadata_args(output) -> list[str]:
+    """``-M`` flags for the LaTeX templates' author block. Pandoc escapes
+    metadata values for LaTeX, while a ``-V`` variable is pasted in raw: an
+    ``&`` in an affiliation or a ``_`` in an email would stop the compile."""
+    args: list[str] = []
+    for key, value in (
+        ("fi-author", output.author),
+        ("fi-affiliation", output.affiliation),
+        ("fi-email", output.contact_email),
+        ("fi-url", output.url),
+    ):
+        value = " ".join(str(value or "").split())
+        if value:
+            args += ["-M", f"{key}={value}"]
+    return args
+
+
 def _dedupe_duplicated_references(markdown: str) -> str:
     """Collapse ``"1. Foo. Foo."`` reference lines to ``"1. Foo."``.
 
@@ -635,6 +660,7 @@ class PaperGenerator:
         pdf, detail = render_paper_html_pdf(
             paper_md, out_dir / "paper.pdf",
             pandoc_path=pandoc_exe, browser=browser, log=_log,
+            author_line=_author_line(self.config.output),
         )
         if pdf is not None:
             return pdf
@@ -705,6 +731,7 @@ class PaperGenerator:
                     paper_md, out_dir / "paper.pdf",
                     pandoc_path=pandoc_exe, browser=browser,
                     css_path=theme_css_path("briefing"), log=_log,
+                    author_line=_author_line(self.config.output),
                 )
                 if pdf is not None:
                     return pdf, None
@@ -840,6 +867,49 @@ class PaperGenerator:
             )
             pandoc_input = paper_md
 
+        # Chinese, Japanese or Korean anywhere in the paper or its author
+        # line stops pdflatex at the first character. XeLaTeX with xeCJK and
+        # an installed CJK font sets it; without both, the HTML render does.
+        # Read the writer's paper.md: the lifted title sits in the source's
+        # front matter as \u escapes, which would hide a Chinese title.
+        cjk_font: str | None = None
+        try:
+            cjk_text = paper_md.read_text(encoding="utf-8")
+        except OSError:
+            cjk_text = ""
+        cjk_text = "\n".join([cjk_text, *_author_line(self.config.output)])
+        if _cjk.has_cjk(cjk_text):
+            xelatex = _cjk.find_xelatex(engine)
+            cjk_font = _cjk.find_cjk_font(cjk_text) if xelatex is not None else None
+            if xelatex is None or cjk_font is None:
+                missing = "XeLaTeX" if xelatex is None else "a font for it"
+                why = f"paper.md has Chinese, Japanese or Korean text and {missing} was not found"
+                pdf = self._try_html_pdf_fallback(paper_md, out_dir, pandoc_exe, why=why)
+                if pdf is not None:
+                    return pdf, None
+                msg = f"{why}; paper.pdf skipped."
+                _log.warning(msg)
+                return None, _PdfSkipReason(
+                    code="cjk_no_xelatex" if xelatex is None else "cjk_no_font",
+                    summary=msg,
+                    how_to_fix=(
+                        "pdflatex cannot set Chinese, Japanese or Korean "
+                        "characters; FI switches to XeLaTeX with a CJK font "
+                        "when both are installed. XeLaTeX comes with MiKTeX "
+                        "and TeX Live. Fonts: Windows ships Microsoft "
+                        "JhengHei, YaHei, Yu Gothic and Malgun Gothic; on "
+                        "Linux install Noto CJK (`sudo apt install "
+                        "fonts-noto-cjk`). Or keep `output.html_pdf_fallback: "
+                        "true` (the default) with Edge/Chrome/Chromium "
+                        "installed, and the paper renders through the browser."
+                    ),
+                )
+            engine_name, engine_path = xelatex
+            _log.info(
+                "paper.pdf: Chinese/Japanese/Korean text; using %s at %s with font %r",
+                engine_name, engine_path, cjk_font,
+            )
+
         cmd: list[str] = [
             pandoc_exe,
             str(pandoc_input),
@@ -880,6 +950,9 @@ class PaperGenerator:
         # compiles unbranded rather than failing on a missing image.
         if _copy_brand_icon(out_dir):
             cmd.extend(["-V", "brandfoot=true"])
+        cmd.extend(_author_metadata_args(self.config.output))
+        if cjk_font:
+            cmd.extend(["-V", f"fi-cjk-font={cjk_font}"])
         if template.exists():
             cmd.extend(["--template", str(template)])
         else:

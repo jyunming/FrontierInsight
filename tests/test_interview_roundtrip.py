@@ -121,6 +121,61 @@ def test_turning_the_paper_pause_off_survives_the_round_trip(tmp_path: Path):
     assert _load(tmp_path, ans).pauses.papers is False
 
 
+def test_author_line_and_poster_size_reach_the_output_config(tmp_path: Path):
+    ans = _full_answers()
+    ans.author = "陳 Jane"
+    ans.affiliation = "R&D Lab, Example University"
+    ans.contact_email = "jane_doe@example.org"
+    ans.url = "https://example.org/project#poster"
+    ans.poster_size = "landscape_48x36"
+    cfg = _load(tmp_path, ans)
+    assert (cfg.output.author, cfg.output.affiliation) == ("陳 Jane", "R&D Lab, Example University")
+    assert (cfg.output.contact_email, cfg.output.url) == (
+        "jane_doe@example.org", "https://example.org/project#poster",
+    )
+    assert cfg.output.poster_size == "landscape_48x36"
+
+
+def test_an_unset_author_line_writes_nothing(tmp_path: Path):
+    yaml_text = answers_to_yaml(_full_answers(), frontend="cli")
+    for key in ("author:", "affiliation:", "contact_email:", "url:", "poster_size:"):
+        assert key not in yaml_text
+    cfg = _load(tmp_path, _full_answers())
+    assert (cfg.output.author, cfg.output.url, cfg.output.poster_size) == ("", "", "a1_portrait")
+
+
+def test_update_keeps_the_author_line_and_clearing_a_field_removes_it(tmp_path: Path):
+    """--update loads the author line from the quest's YAML, and a field the
+    user clears must not come back from the old YAML: the emitter leaves an
+    empty field out, so the merge has to treat these keys as managed."""
+    from dataclasses import replace
+
+    from core.interview_update import load_current_answers, rewrite_yaml_with_new_answers
+
+    quest = tmp_path / "quest"
+    quest.mkdir()
+    ans = _full_answers()
+    ans.author, ans.url, ans.poster_size = "Jane Chen", "https://example.org", "a0_portrait"
+    (quest / "config.yaml").write_text(answers_to_yaml(ans, frontend="cli"), encoding="utf-8")
+
+    current, _yaml_path, raw = load_current_answers(quest)
+    assert (current.author, current.url, current.poster_size) == (
+        "Jane Chen", "https://example.org", "a0_portrait",
+    )
+    (quest / "config.yaml").write_text(
+        rewrite_yaml_with_new_answers(raw, replace(current, url="")), encoding="utf-8",
+    )
+    cfg = Config.from_yaml(quest / "config.yaml")
+    assert (cfg.output.author, cfg.output.url, cfg.output.poster_size) == (
+        "Jane Chen", "", "a0_portrait",
+    )
+
+
+def test_output_config_keeps_each_author_field_on_one_line():
+    cfg = Config(topic="t", output={"author": "Jane\n  Chen", "affiliation": None})
+    assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "")
+
+
 def _find_question(node, qid: str):
     if isinstance(node, dict):
         if node.get("id") == qid and "default" in node:

@@ -189,6 +189,13 @@ section.lead h2 {
 section.lead h2::before { display: none; }
 section.lead strong, section.lead a { color: var(--paper); }
 section.lead a { border-bottom-color: rgba(255,255,255,0.25); }
+/* The author line the generator adds under the title (output.author,
+   affiliation, contact_email, url). */
+section.lead p {
+  font-size: 0.62em;
+  color: #9fb4b3;
+  margin-top: 1.4em;
+}
 
 /* ---- References slide ----------------------------------------------- */
 /* Auto-appended `## References` + numbered list, and the `## Further reading`

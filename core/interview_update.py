@@ -221,6 +221,11 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
         max_iterations=_coerce_int(engine.get("max_iterations", 2), 2),
+        author=str(output.get("author") or ""),
+        affiliation=str(output.get("affiliation") or ""),
+        contact_email=str(output.get("contact_email") or ""),
+        url=str(output.get("url") or ""),
+        poster_size=str(output.get("poster_size") or "a1_portrait"),
     )
     return answers, yaml_path, raw
 
@@ -298,6 +303,11 @@ def rewrite_yaml_with_new_answers(
         ("engine", "max_iterations"),
         ("output", "kinds"), ("output", "paper_format"),
         ("output", "audience"),
+        # The emitter skips an empty author field, so these must be managed:
+        # otherwise clearing a field would merge the old value back.
+        ("output", "author"), ("output", "affiliation"),
+        ("output", "contact_email"), ("output", "url"),
+        ("output", "poster_size"),
         ("knowledge", "enabled"),
         ("knowledge", "top_k"), ("knowledge", "external_top_k"),
         # Unified pauses section is fully interview-managed.
@@ -545,6 +555,11 @@ async def run_update_flow(
             "ensemble_profile", current.ensemble_profile,
         )),
         max_iterations=_coerce_int("max_iterations", current.max_iterations),
+        author=str(new_partial.get("author", current.author) or ""),
+        affiliation=str(new_partial.get("affiliation", current.affiliation) or ""),
+        contact_email=str(new_partial.get("contact_email", current.contact_email) or ""),
+        url=str(new_partial.get("url", current.url) or ""),
+        poster_size=str(new_partial.get("poster_size", current.poster_size) or "a1_portrait"),
     )
 
     changes = diff_answers(current, new)

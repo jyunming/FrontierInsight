@@ -103,22 +103,17 @@ Or explicitly:
 @fi /new
 ```
 
-The extension walks you through 12 quick questions via VSCode-native input modals:
+The extension asks a few questions in VSCode-native input modals:
 
 1. **Topic** — what do you want to study? (free text)
-2. **Title** — short identifier (auto-suggested from the topic).
-3. **Outputs** — paper only / paper + PDF / paper + slides / everything.
-4. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
-5. **Research approach** — computational (a Python script can produce the data), observational (real-world data needed), or **literature synthesis / survey** (a history / overview with no experiment and no dataset). Maps to `engine.no_simulation` (+ `engine.survey_mode` for survey) — and matches the clarify agent's `simulatability` / `topic_shape` judgment, so picking it here skips the auto-detect path. Survey mode is also auto-suggested for "history of X" / "evolution of X" topics.
-6. **Study depth** — brief preprint / journal-length / comprehensive review. Drives paper word count and citation depth. Smart-defaulted off the chosen paper format.
-7. **Comparative baseline** — what existing method / dataset to compare against (free text).
-8. **Success metric** — what number changing in what direction = headline result (free text).
-9. **Time / compute budget** — soft wall-clock cap (free text).
-10. **Clarify mode** — just run it / agent self-clarifies / ask me 7 questions.
-11. **Reviewer panel** — single reviewer / 3-persona / 4-persona panel.
-12. **Knowledge layer** — disabled (default) / Axon (if you have it set up).
+2. **Outputs** — paper only / paper + PDF / paper + slides / everything.
+3. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
+4. **Study depth** — brief preprint / journal-length / comprehensive review. Drives paper word count and citation depth. Smart-defaulted off the chosen paper format.
+5. **Author line (optional)** — four boxes for author, affiliation, contact email and a project link. Press Enter on an empty box to skip it. The paper prints them under the title, the slides on the title slide, and the poster in its header, with the link as a QR code. They go only into your own output files.
 
-The active Copilot model is captured automatically into `provider.model` so the quest stays on a consistent LLM even if you change Copilot model later. The model list is not limited to Copilot: it is every chat model VSCode exposes to the extension, so a local Ollama server or a BYOK endpoint registered by another extension appears alongside Copilot's, tagged with its vendor. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. `@fi /update <quest_id>` re-opens the interview pre-filled with the editable subset for a mid-quest tweak; the same 12-question schema is used for both new-quest setup and mid-quest update.
+Then it shows the derived defaults for review: the title (slugged from the topic), the **research approach** — computational (a Python script can produce the data), observational (real-world data needed), or **literature synthesis / survey** (a history / overview with no experiment and no dataset), mapping to `engine.no_simulation` (+ `engine.survey_mode`) and auto-suggested for "history of X" / "evolution of X" topics — the clarify mode, reviewer panel, knowledge layer, web research, paywalled-paper pause, paper audience, retrieval count and author line. **Edit a default** changes any of them; **Edit an advanced field** sets the comparative baseline, success metric, time / compute budget, per-node models, web retrieval count or poster size (A1 portrait by default, A0 portrait, or 48 × 36 in landscape).
+
+The active Copilot model is captured automatically into `provider.model` so the quest stays on a consistent LLM even if you change Copilot model later. The model list is not limited to Copilot: it is every chat model VSCode exposes to the extension, so a local Ollama server or a BYOK endpoint registered by another extension appears alongside Copilot's, tagged with its vendor. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. `@fi /update <quest_id>` re-opens the interview pre-filled with the editable subset for a mid-quest tweak; the same question schema is used for both new-quest setup and mid-quest update.
 
 ### Other chat commands
 

@@ -187,6 +187,55 @@ def test_submit_omits_audience_at_default_for_compact_yaml(tmp_path) -> None:  #
     )
 
 
+def _author_payload(**extra):  # type: ignore[no-untyped-def]
+    payload = {
+        "topic": "Author line test", "title": "authors",
+        "output_kinds": ["paper_md", "poster"],
+        "paper_format": "generic",
+        "study_depth": "journal-length",
+        "provider": "ollama", "provider_model": "qwen2.5:32b",
+        "no_simulation": False, "clarify_mode": "auto",
+        "review_panel": [], "knowledge_enabled": False,
+        "comparative_baseline": "", "success_metric": "", "budget": "",
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_submit_writes_the_author_line_and_poster_size(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The web form's author fields and poster size land on the config the
+    generators read; a multi-line answer from the textarea becomes one line."""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from core.config import Config
+    from web.server import make_app
+
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/interview/submit", json=_author_payload(
+        author="  Jane \n Chen ", affiliation="R&D Lab",
+        contact_email="jane@example.org", url="https://example.org/p",
+        poster_size="a0_portrait",
+    ))
+    assert r.status_code == 200, r.text
+    cfg = Config.from_yaml(Path(r.json()["yaml_path"]))
+    assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "R&D Lab")
+    assert (cfg.output.contact_email, cfg.output.url) == ("jane@example.org", "https://example.org/p")
+    assert cfg.output.poster_size == "a0_portrait"
+
+
+@pytest.mark.parametrize("bad", [{"poster_size": "a2_portrait"}, {"author": 5}, {"url": "x" * 301}])
+def test_submit_rejects_a_bad_author_line_or_poster_size(tmp_path, bad) -> None:  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/interview/submit", json=_author_payload(**bad))
+    assert r.status_code == 400, r.text
+
+
 def test_submit_rejects_vscode_extension_without_bridge_port(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """User-reported question: 'is it possible that i launch --serve
     but call vscode_extension?'. Yes — but only when a live bridge is

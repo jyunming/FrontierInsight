@@ -116,6 +116,7 @@ def render_paper_html_pdf(
     css_path: Path | None = None,
     log: logging.Logger | None = None,
     timeout_s: float = 180.0,
+    author_line: tuple[str, ...] = (),
 ) -> tuple[Path | None, str]:
     """Render ``paper_md`` to ``out_pdf`` via pandoc → styled HTML → headless
     browser. Returns ``(out_pdf, "")`` on success or ``(None, reason)``.
@@ -149,13 +150,21 @@ def render_paper_html_pdf(
     body_md = work / "paper_html_body.md"
     body_md.write_text(body, encoding="utf-8")
     html_path = work / "paper_html_source.html"
+    # ``author_line`` is the configured author, affiliation, email and link;
+    # each set one prints as its own byline row. None set keeps the house
+    # byline.
+    bylines = [" ".join(str(v).split()) for v in author_line if str(v or "").strip()]
+    byline_args = [
+        arg for line in (bylines or ["Frontier Insight"])
+        for arg in ("--metadata", f"author={line}")
+    ]
 
     pandoc_cmd = [
         pandoc_path, body_md.name,
         "--standalone", "--embed-resources", "--mathml",
         "--css", css_resolved.name,
         "--metadata", f"title={title or 'Untitled'}",
-        "--metadata", "author=Frontier Insight",
+        *byline_args,
         "--metadata", "pagetitle=paper",
         "-o", html_path.name,
     ]

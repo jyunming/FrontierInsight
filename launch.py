@@ -2729,8 +2729,17 @@ async def _run_new(
         knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
         web_research=bool(derived.get("web_research", True)),
         supply_papers=bool(advanced.get("supply_papers", True)),
-        ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
+        # ensemble_profile is a tier-1 question, so the pick is in
+        # ``partial``; ``advanced`` only holds tier-3 slots.
+        ensemble_profile=str(
+            partial.get("ensemble_profile") or advanced.get("ensemble_profile") or "off"
+        ),
         max_iterations=int(advanced.get("max_iterations", 2) or 2),
+        author=" ".join(str(partial.get("author") or "").split()),
+        affiliation=" ".join(str(partial.get("affiliation") or "").split()),
+        contact_email=" ".join(str(partial.get("contact_email") or "").split()),
+        url=" ".join(str(partial.get("url") or "").split()),
+        poster_size=str(advanced.get("poster_size") or "a1_portrait"),
     )
 
     yaml_text = answers_to_yaml(answers, frontend="cli")

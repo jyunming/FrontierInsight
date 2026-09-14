@@ -93,6 +93,15 @@ export interface InterviewAnswers {
     // provider.node_models at YAML emit time. Empty (default) emits
     // nothing. Must stay in sync with core/interview.py:InterviewAnswers.
     node_models?: string;
+    // Author line printed on the paper, slides and poster. All optional;
+    // each is emitted under output: only when set. Must stay in sync with
+    // core/interview.py:InterviewAnswers.
+    author?: string;
+    affiliation?: string;
+    contact_email?: string;
+    url?: string;
+    // Poster sheet; the default "a1_portrait" is not emitted.
+    poster_size?: "a1_portrait" | "a0_portrait" | "landscape_48x36";
 }
 
 
@@ -351,6 +360,17 @@ export function answersToYaml(answers: InterviewAnswers): string {
     // Emit audience only when it differs from the safer default ("external").
     if (answers.audience && answers.audience !== "external") {
         lines.push(`${indent}audience: "${yamlEscape(answers.audience)}"`);
+    }
+    // Author line: only the fields the user filled in. Mirrors
+    // core/interview.py:answers_to_yaml.
+    for (const key of ["author", "affiliation", "contact_email", "url"] as const) {
+        const value = (answers[key] ?? "").trim().replace(/\s+/g, " ");
+        if (value) {
+            lines.push(`${indent}${key}: "${yamlEscape(value)}"`);
+        }
+    }
+    if (answers.poster_size && answers.poster_size !== "a1_portrait") {
+        lines.push(`${indent}poster_size: "${yamlEscape(answers.poster_size)}"`);
     }
     lines.push(`${indent}output_dir: "./outputs"`);
     lines.push("");

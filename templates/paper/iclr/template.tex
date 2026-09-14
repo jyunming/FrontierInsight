@@ -3,10 +3,23 @@
 % for pandoc to compile paper.md with ICLR-style metadata blocks
 % (single-column 10pt, abstract env, named author block).
 \documentclass[10pt,letterpaper]{article}
-\usepackage[utf8]{inputenc}
+% pdflatex cannot set Chinese, Japanese or Korean text; generation/paper.py
+% compiles such a paper with XeLaTeX and passes fi-cjk-font.
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+$if(fi-cjk-font)$
+  \usepackage{xeCJK}
+  \setCJKmainfont{$fi-cjk-font$}
+  \setCJKsansfont{$fi-cjk-font$}
+  \setCJKmonofont{$fi-cjk-font$}
+$endif$
+\else
+  \usepackage[utf8]{inputenc}
+\fi
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
-% Required for pandoc-rendered markdown tables (pandoc emits egin{longtable}).
+% Required for pandoc-rendered markdown tables (pandoc emits \begin{longtable}).
 \usepackage{longtable}
 % Required for pandoc-rendered table column widths. Pandoc emits column
 % specs like ``p{(\linewidth - 6\tabcolsep) * \real{0.2667}}`` whose
@@ -45,10 +58,11 @@ $highlighting-macros$
 % ICLR uses bold section heads, no leading "Section" word.
 \titleformat{\section}{\normalfont\large\bfseries}{\thesection}{0.6em}{}
 
-\hypersetup{pdftitle={$title$}, pdfauthor={Frontier Insight}}
+\hypersetup{pdftitle={$title$}, pdfauthor={$if(fi-author)$$fi-author$$else$Frontier Insight$endif$}}
 
 \title{$title$}
-\author{Frontier Insight}
+% Author block from the output.author fields (see generic/template.tex).
+\author{$if(fi-author)$$fi-author$$else$Frontier Insight$endif$$if(fi-affiliation)$\\{\small $fi-affiliation$}$endif$$if(fi-email)$\\{\small $fi-email$}$endif$$if(fi-url)$\\{\small $fi-url$}$endif$}
 \date{$date$}
 
 \begin{document}

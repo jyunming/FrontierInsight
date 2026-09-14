@@ -58,7 +58,7 @@ That runs a tiny example (three numerical integrators on a damped oscillator, ~3
 
 Full setup, cost trade-offs, and the billing model per provider are in **[docs/recipes.md](docs/recipes.md)** and **[docs/PROVIDERS.md](docs/PROVIDERS.md)**.
 
-**Prefer to be walked through it?** `python launch.py --new` (CLI) or `@fi /new` (VSCode) runs an interview and builds the `config.yaml` for you.
+**Prefer to be walked through it?** `python launch.py --new` (CLI) or `@fi /new` (VSCode) runs an interview and builds the `config.yaml` for you. It ends with an optional author line (name, affiliation, email, project link) that the paper, slides and poster print.
 
 ---
 

@@ -147,6 +147,7 @@ what is present on this machine:
 |---|---|---|
 | pandoc | `paper.pdf` (markdown → LaTeX) | **Already installed** — ships as a wheel with Frontier Insight. A system copy (`winget install JohnMacFarlane.Pandoc` / `brew install pandoc` / `apt install pandoc`) takes precedence when present. |
 | pdflatex (MiKTeX or TeX Live) | `paper.pdf`, `poster.pdf` | `winget install MiKTeX.MiKTeX` / `brew install --cask mactex` |
+| xelatex + a CJK font | `paper.pdf` with Chinese, Japanese or Korean text | XeLaTeX ships with MiKTeX and TeX Live; Windows has CJK fonts built in; Linux: `sudo apt install fonts-noto-cjk` |
 | tectonic | LaTeX engine fallback (no-admin) | `fi --install-tectonic` |
 | Marp CLI | `slides.html`, `slides.pdf` — **not** needed for `slides.pptx` | `npm install -g @marp-team/marp-cli`, or `fi --install-marp` for a standalone binary on hosts without npm |
 | Node.js | The VSCode extension build | `winget install OpenJS.NodeJS` / nvm |

@@ -166,6 +166,39 @@
       "tier": 3
     },
     {
+      "id": "poster_size",
+      "label": "Poster size",
+      "prompt": "Sheet size for poster.pdf. Text meets the poster font-size standards at every size; a bigger sheet holds more words.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "a1_portrait",
+          "label": "A1 portrait — 59.4 × 84.1 cm (default)",
+          "description": "Two columns. The usual conference poster size outside North America."
+        },
+        {
+          "value": "a0_portrait",
+          "label": "A0 portrait — 84.1 × 118.9 cm",
+          "description": "Two columns on a larger sheet, so it holds more words."
+        },
+        {
+          "value": "landscape_48x36",
+          "label": "48 × 36 in landscape — 121.9 × 91.4 cm",
+          "description": "Three columns. A common size at North American conferences."
+        }
+      ],
+      "placeholder": "",
+      "default": "a1_portrait",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "study_depth",
       "label": "Study depth",
       "prompt": "How mature should the resulting paper be? Drives word count + citation depth.",
@@ -724,6 +757,74 @@
       ],
       "allow_other": false,
       "tier": 3
+    },
+    {
+      "id": "author",
+      "label": "Author (optional)",
+      "prompt": "Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. Jane Chen",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 1
+    },
+    {
+      "id": "affiliation",
+      "label": "Affiliation (optional)",
+      "prompt": "Lab, company or school to print under the author. Leave blank to omit.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. Materials Lab, Example University",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 1
+    },
+    {
+      "id": "contact_email",
+      "label": "Contact email (optional)",
+      "prompt": "Printed on the poster and under the paper title so readers can reach you. It goes only into your own output files. Leave blank to omit.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. jane@example.org",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 1
+    },
+    {
+      "id": "url",
+      "label": "Project link (optional)",
+      "prompt": "A web page for this work, such as a repository or lab page. The poster prints it as a QR code. Leave blank for no QR code.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. https://github.com/you/project",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 1
     }
   ],
   "paper_formats": [
@@ -1100,10 +1201,13 @@
     ]
   },
   "editable_fields": [
+    "affiliation",
     "audience",
+    "author",
     "budget",
     "clarify_mode",
     "comparative_baseline",
+    "contact_email",
     "ensemble_profile",
     "knowledge_enabled",
     "knowledge_external_top_k",
@@ -1114,10 +1218,12 @@
     "paper_format",
     "paper_style",
     "pause_for_user_input",
+    "poster_size",
     "review_panel",
     "study_depth",
     "success_metric",
     "supply_papers",
+    "url",
     "web_research"
   ],
   "stage_invalidation": {
@@ -1175,6 +1281,11 @@
     "knowledge_external_top_k": [
       "literature",
       "write"
-    ]
+    ],
+    "author": [],
+    "affiliation": [],
+    "contact_email": [],
+    "url": [],
+    "poster_size": []
   }
 }

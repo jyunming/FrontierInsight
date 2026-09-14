@@ -309,6 +309,11 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             supply_papers=new_answers.supply_papers,
             ensemble_profile=new_answers.ensemble_profile,
             max_iterations=new_answers.max_iterations,
+            author=new_answers.author,
+            affiliation=new_answers.affiliation,
+            contact_email=new_answers.contact_email,
+            url=new_answers.url,
+            poster_size=new_answers.poster_size,
         )
         changes = diff_answers(current, new)
         stages = compute_invalidated_stages(changes)
@@ -449,6 +454,25 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         raise TypeError(
             f"survey_mode must be bool, got {type(survey_mode).__name__}"
         )
+    # Author line (optional, one line each) and poster size. Missing keys
+    # are fine: clients from before these fields never send them.
+    author_line: dict[str, str] = {}
+    for field in ("author", "affiliation", "contact_email", "url"):
+        value = body.get(field, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise TypeError(f"{field} must be str, got {type(value).__name__}")
+        value = " ".join(value.split())
+        if len(value) > 300:
+            raise ValueError(f"{field} must be at most 300 characters")
+        author_line[field] = value
+    poster_size = body.get("poster_size", "a1_portrait")
+    if poster_size not in ("a1_portrait", "a0_portrait", "landscape_48x36"):
+        raise ValueError(
+            "poster_size must be 'a1_portrait', 'a0_portrait' or "
+            f"'landscape_48x36'; got {poster_size!r}"
+        )
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -475,4 +499,6 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         supply_papers=supply_papers,
         ensemble_profile=ensemble_profile,
         max_iterations=max_iterations,
+        **author_line,
+        poster_size=poster_size,
     )

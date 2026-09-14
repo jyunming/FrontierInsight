@@ -97,7 +97,7 @@ Then change `provider.name` to `ollama`. Slower but $0.
 
 ## Headless interactive interview — `python launch.py --new`
 
-If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same 14-question interview the VSCode `@fi /new` flow uses:
+If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same interview the VSCode `@fi /new` flow uses. Its last questions are the optional author line (author, affiliation, contact email, project link) that the paper, slides and poster print; press Enter to skip any of them.
 
 ```bash
 python launch.py --new                  # walks you through, then auto-starts the quest
@@ -351,7 +351,7 @@ output:
 
 ### Research the open web (not just academic papers)
 
-The academic sources (arXiv / OpenAlex / Crossref / …) only cover scholarly literature. For a non-academic question — a company's financials, market sizes, current events, culture, a how-to — they return irrelevant nearest-neighbour papers. FI runs a **general web search in parallel** with Axon and the academic adapters on every quest, merges and de-duplicates the results, and (by default) fetches the readable text of each result page so the writer can quote real content. Every web hit is cited by its URL in the paper, poster, and slides.
+The academic sources (arXiv / OpenAlex / Crossref / …) only cover scholarly literature. For a non-academic question — a company's financials, market sizes, current events, culture, a how-to — they return irrelevant nearest-neighbour papers. FI runs a **general web search in parallel** with Axon and the academic adapters on every quest, merges and de-duplicates the results, and (by default) fetches the readable text of each result page so the writer can quote real content. Every web hit is cited by its URL in the paper and slides, and by its site name on the poster.
 
 High-quality content is the foundation of the research, so the fetch layer works hard to get **real full text**, not a two-sentence snippet:
 

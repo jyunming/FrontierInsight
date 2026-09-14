@@ -1129,6 +1129,30 @@ class OutputConfig(BaseModel):
     # Default is "external" because that's the safer default for a
     # one-shot paper produced by an automated pipeline.
     audience: Literal["external", "internal"] = "external"
+    # Who made the outputs: printed under the paper title, on the slides'
+    # title slide and in the poster header. All optional; an empty author
+    # keeps the "Frontier Insight" byline. They go only into the quest's own
+    # files (and so into the page screenshots the visual check sends to the
+    # configured LLM provider), never to a search service.
+    author: str = ""
+    affiliation: str = ""
+    contact_email: str = ""
+    # A link for the work (repository, lab page). The poster prints it as a
+    # QR code; without it there is no QR code.
+    url: str = ""
+    # Poster sheet. The portrait sizes lay the poster out in two columns,
+    # 48 x 36 in landscape in three; font sizes meet the published poster
+    # minimums at every size.
+    poster_size: Literal["a1_portrait", "a0_portrait", "landscape_48x36"] = "a1_portrait"
+
+    @field_validator("author", "affiliation", "contact_email", "url", mode="before")
+    @classmethod
+    def _one_line(cls, v: object) -> object:
+        # YAML hands over None for an empty key, and a block scalar keeps
+        # its newlines; each field prints as one line.
+        if v is None:
+            return ""
+        return " ".join(v.split()) if isinstance(v, str) else v
 
     @field_validator("output_dir", mode="before")
     @classmethod

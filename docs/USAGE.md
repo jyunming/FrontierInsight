@@ -264,6 +264,11 @@ output:
   require_pdf: false                # strict mode for paper_pdf — see below
   html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
   paper_style: latex                # paper.pdf look: latex (Computer Modern article, default) | briefing (FI brand look, HTML-rendered)
+  author: ""                        # optional author line on the paper, slides and poster — see below
+  affiliation: ""
+  contact_email: ""
+  url: ""                           # project link; the poster prints it as a QR code
+  poster_size: a1_portrait          # a1_portrait (default) | a0_portrait | landscape_48x36
 
 # Reserved free-text steering slot — declared in ``core/config.py``
 # but NOT YET wired into any prompt template or ``Engine._chat`` path
@@ -326,6 +331,29 @@ style. Set `html_pdf_fallback: false` to force the strict LaTeX-only
 path — then a missing engine skips the PDF (or, with `require_pdf:
 true`, aborts) exactly as before.
 
+### Chinese, Japanese and Korean text
+
+pdflatex stops at the first Chinese, Japanese or Korean character,
+whether it is in the title, the body or the author line. When
+`paper.md` or the author line has such text, FI compiles the paper
+with **XeLaTeX** and the `xeCJK` package in an installed CJK font. The
+template and its layout stay the same.
+
+- **Font:** the first one installed of Noto Sans CJK / Source Han Sans,
+  then the system font for the language. That is Microsoft JhengHei
+  (Traditional Chinese), Microsoft YaHei (Simplified), Yu Gothic or
+  Meiryo (Japanese), or Malgun Gothic (Korean). FI finds fonts through
+  fontconfig (`fc-list`, which ships with MiKTeX and TeX Live) or, on
+  Windows, in the fonts folder.
+- **XeLaTeX** comes with MiKTeX and TeX Live. tectonic is XeTeX
+  underneath and works as is.
+- **Linux:** install a CJK font first, for example `sudo apt install
+  fonts-noto-cjk`.
+- **No XeLaTeX or no CJK font:** the paper goes straight to the HTML
+  fallback above, which sets the text in the browser's fonts. With
+  `html_pdf_fallback: false` it is skipped with a `cjk_no_xelatex` or
+  `cjk_no_font` diagnostic.
+
 ### `output.paper_style` — choose the paper.pdf look
 
 `latex` (default) renders `paper.pdf` with the venue LaTeX template —
@@ -340,6 +368,75 @@ both present. Because it's HTML, it's single-column regardless of
 `paper_format`. Pick it in YAML (`output.paper_style: briefing`) or
 during the interview (`--new` / `@fi /new` / web — the *Paper style*
 question).
+
+### Author line and poster size
+
+`output.author`, `output.affiliation`, `output.contact_email` and
+`output.url` put your name on the outputs. The paper prints them under
+the title (and uses the author as the PDF's Author field), the slides put
+them on the title slide, and the poster puts them in its header, with the
+link as a QR code. Every field is optional: with no author set the byline
+stays "Frontier Insight", and a field left empty is simply not printed.
+All three interviews ask for them right after the main questions; press
+Enter to skip any of them.
+
+These values are written only into the quest's own files. They are not
+sent to the literature or web search services. If the visual check of the
+outputs is on, the page screenshots it sends to your configured LLM
+provider show the author line, as they show the rest of the paper.
+
+`output.poster_size` picks the poster sheet: `a1_portrait` (59.4 × 84.1 cm,
+two columns, the default), `a0_portrait` (84.1 × 118.9 cm, two columns) or
+`landscape_48x36` (48 × 36 in, three columns). It is an advanced
+interview question.
+
+Changing any of these on a finished quest takes effect when the output is
+rendered again: `python launch.py --config <yaml> --resume <id> --emit poster`
+(or `paper_pdf`, `slides`).
+
+### The poster
+
+`poster.pdf` follows published poster guidance rather than squeezing the
+paper onto a page.
+
+- **Header:** the paper's main finding is the headline. The paper's title
+  goes under it, then the author line. A QR code to `output.url` sits on
+  the right when a link is set.
+- **Type:**
+  - body text is 26 pt on A1 and 36 pt on A0 and 48 × 36 in;
+  - headings are about 1.5 times the body, and the headline 80 pt or more;
+  - figure captions are numbered, and lines run about 60 characters.
+
+  Type is never shrunk to fit.
+- **Content:** the model writes headings, short texts, bullet lists and
+  figures with captions to a word budget for the sheet. The generator
+  writes all the LaTeX, so a slip in the model's formatting cannot break
+  the compile.
+- **References:** only the sources the poster cites, at most 8, each as
+  author, year, title, venue and DOI. A web page shows its site name,
+  never a raw URL. A poster that cites nothing lists five selected sources.
+- **Fitting:** FI plans the columns from estimated block heights, compiles
+  the poster, and measures the PDF. Each measurement corrects the plan.
+  The header and reference band are only known after the first compile, so
+  that first plan never cuts content. When a compile measures more room
+  than the plan assumed, FI plans again for the measured room. When
+  content runs off the sheet or into the reference band, FI cuts in this
+  order, stopping as soon as it fits:
+  1. Figures narrow, down to 70% width.
+  2. The longest list loses its last items.
+  3. The longest text loses its last sentences.
+  4. Text blocks, and then figures, are dropped from the middle.
+
+  The opening and closing blocks always stay. Short columns are carried
+  down with extra space before their headings. FI stops after at most six
+  compiles.
+- **Report:** `.fi/poster_fit.json` in the quest folder records the sheet,
+  the number of compiles, the figure widths, what was cut, the final
+  measurements, and any findings still open (for example, columns that end
+  a few centimetres apart). `.fi/poster_reply.txt` keeps the model's reply.
+- **Chinese, Japanese or Korean** text on the poster compiles with XeLaTeX
+  and a CJK font, as for the paper. Without either, the poster is skipped
+  with a `cjk_no_xelatex` or `cjk_no_font` diagnostic.
 
 ### `execution.sandbox: docker` — what it actually does
 

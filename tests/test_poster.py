@@ -1,17 +1,16 @@
-"""Poster generator (beamerposter wrapper) validation.
+"""Poster generator (``generation/poster.py``).
 
 Covers:
-- LLM JSON -> 3-column poster.tex substitution path with no real LLM calls.
-- LaTeX inline math (`$x^2$`) inside LLM-produced columns survives substitution
-  (would raise on `string.Template.substitute` only if the *template* itself
-  contained malformed `$`; values are passed through verbatim by both
-  substitute and safe_substitute).
-- pdflatex skip when the binary is not on PATH (no PDF asserted unless real
-  pdflatex is available; even then, beamerposter may not be installed, so we
-  do not require a successful PDF compile here).
-- Tectonic fallback: when pdflatex is absent but tectonic is on PATH, the
-  poster generator picks tectonic — same 3-tier discovery the paper
-  generator uses (audit BLOCK #5).
+- the model's reply, as blocks and in the old two-column LaTeX shape;
+- plain text to LaTeX;
+- citations and the reference band;
+- the layout planner and the measured fit loop;
+- engine choice (pdflatex, tectonic, XeLaTeX for CJK text) and the skip
+  diagnostics.
+
+Most tests fake the model, the compile and the measurements. The real
+compiles run when pdflatex (and, for CJK text, XeLaTeX plus a CJK font)
+is installed.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,11 +34,31 @@ from core.config import (
 )
 from core.engine import QuestArtifacts
 from core.provider import ResolvedEndpoint
+from generation import _cjk
 from generation import poster as poster_mod
-from generation.poster import PosterGenerator
+from generation.poster import PosterGenerator, _Block, _Layout, _SHEETS
+
+A1 = _SHEETS["a1_portrait"]
+PT_PER_CM = 72 / 2.54
+
+REFS = [
+    {
+        "n": 1, "title": "Geometric Numerical Integration", "authors": ["E. Hairer", "C. Lubich", "G. Wanner"],
+        "year": 2006, "venue": "Springer", "doi": "10.1007/3-540-30666-8",
+        "url": "https://doi.org/10.1007/3-540-30666-8",
+    },
+    {
+        "n": 2, "title": "Computer experiments on classical fluids.", "authors": ["L. Verlet"],
+        "year": 1967, "venue": "Physical Review", "doi": "", "url": "https://example.org/verlet",
+    },
+    {"n": 3, "title": "Uncited work", "authors": [], "year": 2020, "venue": "", "doi": "10.1/x"},
+]
+FURTHER = [
+    {"label": "W1", "title": "Energy of a damped oscillator", "url": "https://www.physics.stackexchange.com/q/1", "site": ""},
+]
 
 
-def _make_config(tmp_path: Path, kinds: list[str]) -> Config:
+def _make_config(tmp_path: Path, kinds: list[str], **output) -> Config:
     return Config(
         topic="poster generator unit test",
         title="poster-test",
@@ -46,22 +66,30 @@ def _make_config(tmp_path: Path, kinds: list[str]) -> Config:
         engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=10),
         knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "out", kinds=kinds),
+        output=OutputConfig(output_dir=tmp_path / "out", kinds=kinds, **output),
     )
 
 
-def _make_artifacts(tmp_path: Path) -> QuestArtifacts:
+def _make_artifacts(tmp_path: Path, *, real_figure: bool = False) -> QuestArtifacts:
     quest_root = tmp_path / "quest"
     paper_dir = quest_root / "paper"
     paper_dir.mkdir(parents=True)
     paper_md = paper_dir / "paper.md"
     paper_md.write_text(
-        "# Toy Paper\n\nMethods. Results show $y = x^2$ scaling.\n",
+        "# Toy Paper\n\nMethods. Results show $y = x^2$ scaling.\n\n"
+        "![**Figure 1.** The toy curve against its fit.](figures/result.png)\n",
         encoding="utf-8",
     )
     figures = quest_root / "figures"
     figures.mkdir()
-    (figures / "result.png").write_bytes(b"\x89PNG\r\n\x1a\n")  # not parsed, just listed
+    if real_figure:
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (1200, 750), (250, 250, 250))
+        ImageDraw.Draw(image).line([(80, 680), (1120, 80)], fill=(14, 110, 107), width=12)
+        image.save(figures / "result.png")
+    else:
+        (figures / "result.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     return QuestArtifacts(
         quest_id="qtest",
         quest_root=quest_root,
@@ -77,6 +105,52 @@ def _patch_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr("generation.poster.resolve_endpoint_async", fake_resolve)
+
+
+def _reply(**overrides) -> dict:
+    reply = {
+        "headline": "Toy scaling holds across three decades",
+        "blocks": [
+            {"type": "heading", "text": "Background"},
+            {"type": "text", "text": "We study scaling [1]."},
+            {"type": "heading", "text": "Result"},
+            {"type": "figure", "file": "figures/result.png", "caption": "The curve rises as $x^2$."},
+            {"type": "bullets", "items": ["Slope two [2]", "No outliers"]},
+            {"type": "heading", "text": "What it means"},
+            {"type": "text", "text": "Scaling holds [W1]."},
+        ],
+    }
+    reply.update(overrides)
+    return reply
+
+
+async def _generate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply, *,
+    paper: str | None = None, output: dict | None = None,
+    refs=(), further=(), real_figure: bool = False,
+):
+    cfg = _make_config(tmp_path, ["poster"], **(output or {}))
+    art = _make_artifacts(tmp_path, real_figure=real_figure)
+    if paper is not None:
+        art.paper_md.write_text(paper, encoding="utf-8")
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return reply if isinstance(reply, str) else json.dumps(reply)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr(poster_mod, "build_references", lambda lit, audience=None: list(refs))
+    monkeypatch.setattr(poster_mod, "build_further_reading", lambda lit, audience=None: list(further))
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    return result, art
+
+
+def _no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: None)
+
+
+# ---------------------------------------------------------------------------
+# The generator end to end, without a compile
 
 
 @pytest.mark.asyncio
@@ -98,65 +172,57 @@ async def test_poster_skipped_when_kind_disabled(
 
 
 @pytest.mark.asyncio
-async def test_poster_writes_tex_with_substituted_columns(
+async def test_poster_tex_carries_the_headline_title_author_line_and_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End-to-end of the LaTeX wrapper: fake LLM returns valid 3-column JSON,
-    poster.tex is written, contains the title and each column body."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {
-        "title": "On Toy Scaling",
-        "left": r"\textbf{Abstract.} We study scaling.",
-        "right": r"\textbf{Results.} Monotonic curve.",
-    }
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    # Force the pdflatex branch off so the test never depends on a TeX install
-    # (and never sees the multi-second timeout) regardless of host setup.
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-
-    assert "poster_tex" in result
+    _no_engine(monkeypatch)
+    result, _art = await _generate(
+        tmp_path, monkeypatch, _reply(),
+        output={"author": "Jane Chen", "affiliation": "R&D Lab", "url": "https://example.org/p?a=1&b=2#x_y"},
+        refs=REFS, further=FURTHER,
+    )
     tex = result["poster_tex"].read_text(encoding="utf-8")
-    # The headline is the paper's own H1, not the model's paraphrase of it.
-    assert r"\title{Toy Paper}" in tex
-    assert "On Toy Scaling" not in tex
-    assert r"\textbf{Abstract.} We study scaling." in tex
-    assert r"\textbf{Results.} Monotonic curve." in tex
-    # No leftover Python Template placeholders (portrait template: 2 columns).
-    for placeholder in ("$title", "$left", "$right", "$references"):
-        assert placeholder not in tex
-    # No PDF when pdflatex is suppressed.
+    assert "Toy scaling holds across three decades" in tex
+    assert "Toy Paper" in tex  # the paper's own title, under the headline
+    assert r"\posterhead{Background}" in tex
+    assert r"Jane Chen~\textperiodcentered~R\&D Lab" in tex
+    assert r"\qrcode[height=6.5cm]{https://example.org/p?a=1\&b=2\#x\_y}" in tex
+    assert r"\postercaption{1}{The curve rises as $x^2$.}" in tex
+    assert r"\item{} Slope two [2]" in tex
+    assert "${" not in tex
     assert "poster_pdf" not in result
+    assert "no_latex_engine" in result["poster_pdf_skipped"].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_poster_sheet_follows_output_poster_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_engine(monkeypatch)
+    result, _art = await _generate(tmp_path, monkeypatch, _reply(), output={"poster_size": "landscape_48x36"})
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert "width=121.92,height=91.44" in tex
+    assert tex.count(r"\begin{column}") == 3
+    assert r"\fontsize{36pt}{45pt}" in tex
 
 
 @pytest.mark.asyncio
 async def test_poster_honors_node_models_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``provider.node_models["poster"]`` must reach the chat call — this is
-    the per-node cheap-model routing poster generation previously bypassed
-    entirely (it built its own LLMClient and never passed `model=`)."""
+    """``provider.node_models["poster"]`` must reach the chat call."""
     cfg = _make_config(tmp_path, kinds=["poster"])
     cfg.provider.node_models = {"poster": "gpt-4o-mini"}
     art = _make_artifacts(tmp_path)
-
     seen: dict = {}
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         seen.update(kw)
-        return json.dumps({"title": "T", "left": "L", "right": "R"})
+        return json.dumps(_reply())
 
     _patch_endpoint(monkeypatch)
     monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+    _no_engine(monkeypatch)
 
     await PosterGenerator(cfg).generate(art, art.quest_root)
 
@@ -165,396 +231,192 @@ async def test_poster_honors_node_models_override(
 
 
 @pytest.mark.asyncio
-async def test_poster_handles_inline_latex_math_in_llm_output(
+async def test_the_prompt_carries_the_sheet_budget_figures_and_citable_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """LLM emits LaTeX `$math$` inside column bodies. Template substitution
-    must not raise on substituted values containing `$`, and the math must
-    appear verbatim in poster.tex."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
+    cfg = _make_config(tmp_path, kinds=["poster"], poster_size="a0_portrait")
     art = _make_artifacts(tmp_path)
-    art.paper_md.write_text("# Energy $E=mc^2$\n\nBody.\n", encoding="utf-8")
-
-    payload = {
-        "title": "Energy $E=mc^2$",
-        "left": r"Inline math: $\alpha + \beta = \gamma$ and $x^2$.",
-        "right": r"Two equations: $f(x) = \int_0^1 g(t)\,dt$, $\sum_i a_i$. Bare dollars too: cost is \$5 and value $v$.",
-    }
+    prompts: list[str] = []
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
+        prompts.append(messages[0]["content"])
+        return json.dumps(_reply())
 
     _patch_endpoint(monkeypatch)
     monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+    monkeypatch.setattr(poster_mod, "build_references", lambda lit, audience=None: list(REFS))
+    monkeypatch.setattr(poster_mod, "build_further_reading", lambda lit, audience=None: list(FURTHER))
+    _no_engine(monkeypatch)
+    await PosterGenerator(cfg).generate(art, art.quest_root)
 
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    (prompt,) = prompts
+    assert "A0 portrait" in prompt and "2 columns" in prompt and "380 words" in prompt
+    assert "- figures/result.png: The toy curve against its fit." in prompt
+    assert "[1] E. Hairer et al. (2006). Geometric Numerical Integration." in prompt
+    assert "[W1] Energy of a damped oscillator. physics.stackexchange.com." in prompt
+    assert "$E = mc^2$" in prompt  # the file's doubled dollars reach the model single
 
+
+@pytest.mark.asyncio
+async def test_the_headline_is_the_finding_with_the_paper_title_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_engine(monkeypatch)
+    result, _art = await _generate(tmp_path, monkeypatch, _reply())
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    headline = tex.index("Toy scaling holds across three decades")
+    assert headline < tex.index("Toy Paper")
+
+
+@pytest.mark.parametrize(
+    "paper, reply, headline, subtitle",
+    [
+        ("# Toy Paper\n\nBody.\n", {"blocks": []}, "Toy Paper", None),
+        ("# Toy Paper\n\nBody.\n", {"headline": " ".join(["word"] * 25), "blocks": []}, "Toy Paper", None),
+        ("Methods only, no heading.\n", {"title": "Model Title", "blocks": []}, "Model Title", None),
+        ("Methods only, no heading.\n", "not json", "Untitled", None),
+        ("---\n# generated\nauthor: x\n---\n# Real Title\n\nBody.\n", {"headline": "A finding", "blocks": []}, "A finding", "Real Title"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_headline_fallbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paper, reply, headline, subtitle,
+) -> None:
+    _no_engine(monkeypatch)
+    result, _art = await _generate(tmp_path, monkeypatch, reply, paper=paper)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    title = re.search(r"\\fontsize\{80pt\}\{86\.4pt\}\\selectfont\\color\{fiink\}(.*?)\\par", tex)
+    assert title and title.group(1) == headline
+    if subtitle:
+        assert r"\color{fimuted}" + subtitle + r"\par" in tex
+    else:
+        assert r"\color{fimuted}" not in tex.split(r"\begin{document}")[0].split("headline}{%")[1].split("footline")[0]
+
+
+@pytest.mark.asyncio
+async def test_inline_latex_math_and_currency_survive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_engine(monkeypatch)
+    reply = _reply()
+    reply["blocks"][1]["text"] = r"Inline math $\alpha + \beta = \gamma$ and $f(x) = \int_0^1 g(t)\,dt$; cost is $5 and value $v$."
+    result, _art = await _generate(tmp_path, monkeypatch, reply)
     tex = result["poster_tex"].read_text(encoding="utf-8")
     assert r"$\alpha + \beta = \gamma$" in tex
     assert r"$f(x) = \int_0^1 g(t)\,dt$" in tex
-    assert r"\$5" in tex
-    assert r"Energy $E=mc^2$" in tex
+    assert r"cost is \$5 and value $v$" in tex
 
 
 @pytest.mark.asyncio
 async def test_poster_falls_back_when_llm_returns_garbage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Malformed LLM output -> poster.tex is still written, with empty columns
-    and the paper's own title: the headline never depended on the model."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return "not json at all, no braces here"
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-
+    """A reply that is not JSON still writes poster.tex, under the paper's
+    own title, with the paper's figures."""
+    _no_engine(monkeypatch)
+    result, _art = await _generate(tmp_path, monkeypatch, "not json at all, no braces here")
     tex = result["poster_tex"].read_text(encoding="utf-8")
-    assert r"\title{Toy Paper}" in tex
+    assert "Toy Paper" in tex
+    assert r"\postercaption{1}{The toy curve against its fit.}" in tex
 
 
-async def _poster_tex(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paper: str, reply: str,
-) -> str:
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-    art.paper_md.write_text(paper, encoding="utf-8")
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return reply
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-    return result["poster_tex"].read_text(encoding="utf-8")
+# ---------------------------------------------------------------------------
+# Citations and the reference band
 
 
 @pytest.mark.asyncio
-async def test_poster_uses_the_model_title_only_when_the_paper_has_no_h1(
+async def test_the_band_lists_only_cited_sources_in_order_without_urls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tex = await _poster_tex(
-        tmp_path, monkeypatch, "Methods only, no heading.\n",
-        json.dumps({"title": "Model Title", "left": "L", "right": "R"}),
-    )
-    assert r"\title{Model Title}" in tex
-
-
-@pytest.mark.asyncio
-async def test_poster_is_untitled_only_when_nothing_names_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tex = await _poster_tex(
-        tmp_path, monkeypatch, "Methods only, no heading.\n", "not json",
-    )
-    assert r"\title{Untitled}" in tex
-
-
-@pytest.mark.asyncio
-async def test_poster_title_skips_comment_lines_in_frontmatter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A YAML ``# comment`` is not the paper's H1."""
-    tex = await _poster_tex(
-        tmp_path, monkeypatch,
-        "---\n# generated\nauthor: x\n---\n# Real Title\n\nBody.\n",
-        json.dumps({"title": "Model Title", "left": "L", "right": "R"}),
-    )
-    assert r"\title{Real Title}" in tex
-
-
-@pytest.mark.skipif(
-    shutil.which("pdflatex") is None,
-    reason="pdflatex not on PATH; skipping real compile path",
-)
-@pytest.mark.asyncio
-async def test_poster_pdflatex_invoked_when_available(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When pdflatex is available, the generator invokes it. We do not
-    require the compile to succeed (beamerposter may not be installed),
-    only that the .tex was written and the call site was reached."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-    assert "poster_tex" in result
-    assert result["poster_tex"].exists()
-
-
-# ---- Audit BLOCK #5: poster shares paper's 3-tier engine discovery ---------
-
-
-@pytest.mark.asyncio
-async def test_poster_falls_back_to_tectonic_when_pdflatex_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Audit BLOCK #5 regression: a user who followed the documented
-    no-admin install (``python launch.py --install-tectonic``) gets
-    ``paper.pdf`` but the poster used to silently skip because the
-    previous gate was a bare ``shutil.which('pdflatex')`` check. After
-    the fix, poster.py must consult the same 3-tier discovery the
-    paper generator uses (pdflatex -> system tectonic -> repo-local
-    ``tools/tectonic[.exe]``).
-
-    Mock pdflatex as absent and tectonic as present on PATH; assert
-    the engine binary the subprocess actually receives is tectonic.
-    """
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-
-    def fake_which(name):  # type: ignore[no-untyped-def]
-        if name == "pdflatex":
-            return None
-        if name == "tectonic":
-            return "/fake/tectonic.exe"
-        return None
-    # Patch the shutil module used by both poster.py and _pdf_engine.py
-    # (same module object — both ``import shutil``).
-    monkeypatch.setattr(poster_mod.shutil, "which", fake_which)
-
-    captured_cmd: list[str] = []
-
-    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        captured_cmd[:] = list(cmd)
-        # Pretend the engine produced poster.pdf so the success branch
-        # records it in the result dict and the test can assert on it.
-        cwd = Path(_kwargs.get("cwd") or ".")
-        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-
-    # The subprocess invocation used the tectonic binary, NOT pdflatex —
-    # the regression we're guarding against is the old gate passing the
-    # literal string "pdflatex" here regardless of fallback.
-    assert captured_cmd, "subprocess.run was not invoked"
-    assert captured_cmd[0] == "/fake/tectonic.exe", (
-        f"Expected poster to invoke tectonic when pdflatex is missing; "
-        f"got argv0={captured_cmd[0]!r}"
-    )
-    # Same flag contract works for both engines.
-    assert "-interaction=nonstopmode" in captured_cmd
-    assert "-halt-on-error" in captured_cmd
-    assert "poster_pdf" in result
-    # On success the diagnostic file MUST NOT be left behind.
-    assert "poster_pdf_skipped" not in result
-    assert not (art.quest_root / "poster_pdf_skipped.md").exists()
-
-
-@pytest.mark.asyncio
-async def test_poster_writes_skip_diagnostic_when_no_engine_found(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When neither pdflatex nor tectonic is reachable (and the repo-local
-    fallback at ``tools/tectonic[.exe]`` is also missing), the poster
-    generator must write ``poster_pdf_skipped.md`` next to ``poster.tex``
-    — mirroring the ``paper_pdf_skipped.md`` contract so the user
-    discovers the skip without grepping ``run.log``."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    # PATH lookup misses everything.
-    monkeypatch.setattr(poster_mod.shutil, "which", lambda _name: None)
-    # Steer the repo-local probe at a clean tmp dir so a dev box with
-    # ``tools/tectonic.exe`` already present doesn't accidentally
-    # rescue the test.
-    from generation import _pdf_engine
-    monkeypatch.setattr(_pdf_engine, "_DEFAULT_REPO_ROOT", tmp_path)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-
-    # poster.tex still produced.
-    assert "poster_tex" in result
-    # No PDF.
-    assert "poster_pdf" not in result
-    # Diagnostic file IS produced.
-    diag = art.quest_root / "poster_pdf_skipped.md"
-    assert diag.exists(), "poster_pdf_skipped.md was not written"
-    body = diag.read_text(encoding="utf-8")
-    assert "poster.pdf was requested but not produced" in body
-    assert "no_latex_engine" in body  # reason code
-    assert "--install-tectonic" in body  # how-to-fix recipe
-    # result dict surfaces the diagnostic so callers (launch.py / VSCode
-    # bridge) can include it in their "your quest is done" messages.
-    assert result.get("poster_pdf_skipped") == diag
-
-
-@pytest.mark.asyncio
-async def test_poster_writes_skip_diagnostic_when_pdf_missing_after_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The engine returned rc=0 but ``poster.pdf`` isn't on disk —
-    silent partial success. Without a diagnostic the caller sees a
-    missing ``poster_pdf`` in the result dict with no breadcrumb.
-
-    Mirrors the analogous branch in ``PaperGenerator._compile_pdf``
-    so the user gets the same skip-diagnostic shape across both
-    output kinds. Reason code is distinct
-    (``output_missing_after_success``) so the operator can tell this
-    apart from a real engine failure (rc != 0) when filtering logs.
-    """
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    # Engine is present.
-    monkeypatch.setattr(
-        poster_mod.shutil, "which",
-        lambda name: f"/fake/{name}.exe" if name == "pdflatex" else None,
-    )
-
-    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        # Subprocess "succeeds" without producing the output file.
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-
-    # No PDF.
-    assert "poster_pdf" not in result
-    # Diagnostic IS produced — the gap this test exists to plug.
-    diag = art.quest_root / "poster_pdf_skipped.md"
-    assert diag.exists()
-    body = diag.read_text(encoding="utf-8")
-    assert "output_missing_after_success" in body
-    assert result.get("poster_pdf_skipped") == diag
-
-
-@pytest.mark.asyncio
-async def test_poster_uses_same_engine_discovery_as_paper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Whatever ``generation._pdf_engine.find_pdf_engine`` returns is
-    what the poster generator MUST use — the audit fix is exactly the
-    "use the shared helper" deduplication. Verify the contract by
-    swapping the helper for a sentinel and asserting the sentinel's
-    binary path lands in the subprocess argv."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {"title": "T", "left": "L", "middle": "M", "right": "R"}
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-
-    sentinel = ("tectonic", "/sentinel/tectonic.exe")
-    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: sentinel)
-
-    captured_cmd: list[str] = []
-
-    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        # Record only the FIRST subprocess call — the LaTeX compile. The
-        # auto-fit overflow detector may make a SECOND call (pdftoppm) to
-        # rasterise the result, which must not clobber the assertion.
-        if not captured_cmd:
-            captured_cmd[:] = list(cmd)
-        cwd = Path(_kwargs.get("cwd") or ".")
-        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
-
-    await PosterGenerator(cfg).generate(art, art.quest_root)
-
-    assert captured_cmd[0] == sentinel[1], (
-        "Poster MUST invoke whichever binary find_pdf_engine returned; "
-        f"got {captured_cmd[0]!r} expected {sentinel[1]!r}"
-    )
-
-
-def test_escape_latex_text_specials() -> None:
-    """Bare &, %, # in LLM column text are escaped (a literal ampersand is a
-    fatal pdflatex 'Misplaced alignment tab' otherwise); already-escaped
-    specials and math/macros are left alone."""
-    from generation.poster import _escape_latex_text_specials as esc
-    assert esc("Microlensing & Timing") == r"Microlensing \& Timing"
-    assert esc("50% done, item #1") == r"50\% done, item \#1"
-    assert esc(r"keep \& and \% intact") == r"keep \& and \% intact"
-    assert esc(r"$x^2$ \textbf{bold}") == r"$x^2$ \textbf{bold}"
-    assert esc("") == ""
-
-
-def test_strip_column_commands_keeps_column_lengths() -> None:
-    """A bare ``\\column`` inside the template's column stops pdflatex with
-    'Missing number'; ``\\columnwidth`` and ``\\columnsep`` are real lengths."""
-    from generation.poster import _strip_column_commands as strip
-    assert strip("\\column\n\\textbf{Results}") == "\n\\textbf{Results}"
-    assert strip(r"\column{0.47\linewidth}\textbf{A}") == r"\textbf{A}"
-    assert strip(r"\includegraphics[width=\columnwidth]{f.png}") == (
-        r"\includegraphics[width=\columnwidth]{f.png}"
-    )
-    assert strip(r"\setlength{\columnsep}{1em}") == r"\setlength{\columnsep}{1em}"
-    assert strip("") == ""
-
-
-@pytest.mark.asyncio
-async def test_poster_strips_column_commands_from_llm_columns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A real gemma4 poster began both columns with ``\\column`` and failed to
-    compile; the generator removes them before substituting the template."""
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
-
-    payload = {
-        "title": "T",
-        "left": "\\column\n\\textbf{Left header}",
-        "right": "  \\column\n\\textbf{Right header}",
-    }
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return json.dumps(payload)
-
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
-
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
-
+    _no_engine(monkeypatch)
+    reply = _reply()
+    reply["blocks"][1]["text"] = "We study scaling [2, 9] and more [1]."
+    result, _art = await _generate(tmp_path, monkeypatch, reply, refs=REFS, further=FURTHER)
     tex = result["poster_tex"].read_text(encoding="utf-8")
-    assert r"\textbf{Left header}" in tex
-    assert r"\textbf{Right header}" in tex
-    assert re.search(r"\\column(?![A-Za-z])", tex) is None
+    band = tex.split(r"{\bfseries References}", 1)[1].split(r"\end{multicols}", 1)[0]
+    assert "[1] E. Hairer et al. (2006). Geometric Numerical Integration. Springer. doi:10.1007/3-540-30666-8." in band
+    assert "[2] L. Verlet (1967). Computer experiments on classical fluids. Physical Review." in band
+    assert "[W1] Energy of a damped oscillator. physics.stackexchange.com." in band
+    assert band.index("[1]") < band.index("[2]") < band.index("[W1]")
+    assert "Uncited work" not in tex
+    assert "https://" not in band and "www." not in band
+    assert "We study scaling [2] and more [1]." in tex
+
+
+@pytest.mark.asyncio
+async def test_with_nothing_cited_the_band_lists_selected_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_engine(monkeypatch)
+    reply = {"headline": "A finding", "blocks": [{"type": "text", "text": "No citations here."}]}
+    result, _art = await _generate(tmp_path, monkeypatch, reply, refs=REFS, further=FURTHER)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert r"{\bfseries Selected sources}" in tex
+    assert "Uncited work" in tex
+
+
+def test_citation_ranges_and_the_eight_source_cap() -> None:
+    blocks = [_Block("text", text="a [1–3] b [4; W2] c [5,6,7,8,9,10]")]
+    known = {str(n) for n in range(1, 11)} | {"W2"}
+    assert poster_mod._cited_labels(blocks, known) == ["1", "2", "3", "4", "5", "6", "7", "W2"]
+    assert poster_mod._keep_citations("x [2, 9]. y [11].", {"2"}) == "x [2]. y."
+
+
+def test_band_entries_name_authors_and_never_print_a_url() -> None:
+    entry = poster_mod._band_entry
+    assert entry({"authors": ["A. One", "B. Two"], "year": 2001, "title": "T", "arxiv_id": "2101.00001"}, "4") == (
+        "[4] A. One and B. Two (2001). T. arXiv:2101.00001."
+    )
+    assert entry({"title": "Page", "url": "https://www.example.org/a_b?x=1"}, "W3") == "[W3] Page. example.org."
+
+
+def test_qr_code_only_with_a_url() -> None:
+    assert poster_mod._qr_latex("", A1) == ""
+    assert r"\qrcode[height=6.5cm]{https://e.org/a\%20b\~c}" in poster_mod._qr_latex("https://e.org/a%20b~c", A1)
+
+
+# ---------------------------------------------------------------------------
+# Text and blocks
+
+
+def test_inline_latex_escapes_specials_and_keeps_math() -> None:
+    from generation.poster import _inline_latex as tex
+
+    assert tex("R&D 50% #1 a_b ~x^y {z}") == (
+        r"R\&D 50\% \#1 a\_b \textasciitilde{}x\textasciicircum{}y \{z\}"
+    )
+    assert tex("energy $E = mc^2$ costs $5 and $10") == r"energy $E = mc^2$ costs \$5 and \$10"
+    assert tex("**bold** and *italic*") == r"\textbf{bold} and \emph{italic}"
+    assert tex(r"\textbf{Rates} rise") == r"\textbf{Rates} rise"
+    assert tex(r"broken $\frac{1}{2$ math") == r"broken \$\textbackslash{}frac\{1\}\{2\$ math"
+
+
+def test_blocks_from_reply_keeps_known_figures_and_skips_empty_blocks() -> None:
+    parsed = {"blocks": [
+        {"type": "heading", "text": "  Results  "},
+        {"type": "figure", "file": "figures/missing.png", "caption": "gone"},
+        {"type": "figure", "file": "result.png", "caption": "kept"},
+        {"type": "bullets", "items": ["", "one", 3]},
+        {"type": "text", "text": ""},
+        {"type": "table", "text": "unknown"},
+        "not a block",
+    ]}
+    blocks = poster_mod._blocks_from_reply(parsed, {"result.png"})
+    assert [(b.kind, b.text or b.file, b.items) for b in blocks] == [
+        ("heading", "Results", []), ("figure", "result.png", []), ("bullets", "", ["one"]),
+    ]
+
+
+def test_paper_captions_drop_the_figure_number() -> None:
+    md = "![**Figure 2.** Energy drift over time.](figures/drift.png) ![Fig 3: Plain](./figures/p.png)"
+    assert poster_mod._paper_captions(md) == {"drift.png": "Energy drift over time.", "p.png": "Plain"}
+
+
+def test_figures_the_model_left_out_go_before_the_closing_heading() -> None:
+    blocks = [_Block("heading", text="A"), _Block("text", text="a"), _Block("heading", text="End"), _Block("text", text="e")]
+    out = poster_mod._with_every_figure(blocks, ["x.png"], {"x.png": "X"})
+    assert [b.kind for b in out] == ["heading", "text", "figure", "heading", "text"]
+    assert out[2].caption == "X"
 
 
 def test_lenient_json_keeps_latex_backslashes_the_model_left_single() -> None:
@@ -577,61 +439,429 @@ def test_lenient_json_keeps_latex_backslashes_the_model_left_single() -> None:
     assert _lenient_json(r'{"t": "$\neg x \nleq y$"}')["t"] == "$\\neg x \\nleq y$"
 
 
+# ---------------------------------------------------------------------------
+# The old two-column reply
+
+
 @pytest.mark.asyncio
-async def test_poster_keeps_single_backslash_textbf_from_the_model(
+async def test_a_two_column_latex_reply_still_renders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
+    _no_engine(monkeypatch)
+    reply = {"title": "T", "left": r"\textbf{Abstract.} We study scaling.", "right": r"\textbf{Results.} 50% up & more."}
+    result, _art = await _generate(tmp_path, monkeypatch, reply)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert r"\textbf{Abstract.} We study scaling." in tex
+    assert r"\textbf{Results.} 50\% up \& more." in tex
 
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return r'{"title": "T", "left": "\textbf{Left header}", "right": "\item R"}'
 
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+def test_escape_latex_text_specials() -> None:
+    from generation.poster import _escape_latex_text_specials as esc
+    assert esc("Microlensing & Timing") == r"Microlensing \& Timing"
+    assert esc("50% done, item #1") == r"50\% done, item \#1"
+    assert esc(r"keep \& and \% intact") == r"keep \& and \% intact"
+    assert esc("") == ""
 
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
 
+def test_strip_column_commands_keeps_column_lengths() -> None:
+    """A bare ``\\column`` inside the template's column stops pdflatex with
+    'Missing number'; ``\\columnwidth`` and ``\\columnsep`` are real lengths."""
+    from generation.poster import _strip_column_commands as strip
+    assert strip("\\column\n\\textbf{Results}") == "\n\\textbf{Results}"
+    assert strip(r"\column{0.47\linewidth}\textbf{A}") == r"\textbf{A}"
+    assert strip(r"\includegraphics[width=\columnwidth]{f.png}") == (
+        r"\includegraphics[width=\columnwidth]{f.png}"
+    )
+    assert strip("") == ""
+
+
+@pytest.mark.asyncio
+async def test_poster_strips_column_commands_from_llm_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real gemma4 poster began both columns with ``\\column`` and failed to
+    compile; the generator removes them."""
+    _no_engine(monkeypatch)
+    reply = {"title": "T", "left": "\\column\n\\textbf{Left header}", "right": "  \\column\n\\textbf{Right header}"}
+    result, _art = await _generate(tmp_path, monkeypatch, reply)
     tex = result["poster_tex"].read_text(encoding="utf-8")
     assert r"\textbf{Left header}" in tex
-    assert r"\item R" in tex
-    assert "\textbf" not in tex
+    assert r"\textbf{Right header}" in tex
+    assert re.search(r"\\column(?![A-Za-z])", tex) is None
 
 
 def test_literal_newlines_from_doubled_json_become_line_breaks() -> None:
-    """A second gemma4 poster doubled its newline escapes along with its
-    backslashes; the literal ``\\n`` stopped pdflatex as an undefined command."""
+    """A gemma4 poster doubled its newline escapes along with its backslashes;
+    the literal ``\\n`` stopped pdflatex as an undefined command."""
     from generation.poster import _literal_newlines_to_breaks as fix
 
     assert fix(r"\textbf{Rates}\nThe slope") == "\\textbf{Rates}\nThe slope"
-    assert fix(r"\textbf{A}\n\includegraphics{f.png}") == (
-        "\\textbf{A}\n\\includegraphics{f.png}"
-    )
     assert fix(r"\noindent x \nabla y") == r"\noindent x \nabla y"
     assert fix(r"$\neg x \nleq y$") == r"$\neg x \nleq y$"
     assert fix(r"line\\next") == r"line\\next"
 
 
+# ---------------------------------------------------------------------------
+# Layout
+
+
+def test_partition_keeps_order_and_fills_the_first_columns_first() -> None:
+    assert poster_mod._partition([5, 5, 5, 5], 2) == [(0, 2), (2, 4)]
+    assert poster_mod._partition([9, 1, 1, 1], 2) == [(0, 1), (1, 4)]
+    assert poster_mod._partition([3], 3) == [(0, 1), (1, 1), (1, 1)]
+
+
+def _sentences(n: int) -> str:
+    return " ".join(f"Sentence number {k} says something about the result." for k in range(n))
+
+
+def test_plan_cuts_lists_and_sentences_but_never_the_opening_or_closing_block() -> None:
+    blocks = [
+        _Block("heading", text="Background"), _Block("text", text=_sentences(12)),
+        _Block("heading", text="Findings"), _Block("bullets", items=[f"Item {k} with a few words" for k in range(30)]),
+        _Block("text", text=_sentences(30)),
+        _Block("heading", text="What it means"), _Block("text", text=_sentences(10)),
+    ]
+    layout = _Layout(A1, blocks, {}, {})
+    assert layout.trimmed == layout.dropped == 0  # never cut to fit the first guess
+    available = 40 * PT_PER_CM
+    layout.plan(available)
+    assert max(layout.column_heights()) <= available
+    assert layout.trimmed > 0
+    assert layout.blocks[0].text == "Background" and layout.blocks[-1].kind == "text"
+    assert layout.blocks[-2].text == "What it means"
+    bullets = next(b for b in layout.blocks if b.kind == "bullets")
+    assert len(bullets.items) >= 2
+
+
+def test_plan_narrows_figures_only_in_the_column_that_is_over() -> None:
+    # About 31 cm and 46 cm at full width, whether split by section or by
+    # heading-and-block; 44 cm of room narrows only the second column.
+    blocks = [
+        _Block("heading", text="One"), _Block("text", text=_sentences(10)), _Block("figure", file="a.png", caption="a"),
+        _Block("heading", text="Two"), _Block("figure", file="b.png", caption="b"),
+        _Block("figure", file="c.png", caption="c"),
+    ]
+    layout = _Layout(A1, blocks, {"a.png": 0.6, "b.png": 0.75, "c.png": 0.75}, {})
+    layout.plan(44 * PT_PER_CM)
+    assert layout.groups == [[0, 1, 2], [3, 4, 5]]
+    assert layout.widths[2] == 1.0
+    assert layout.widths[4] == layout.widths[5] < 1.0
+    assert max(layout.column_heights()) <= 44 * PT_PER_CM
+
+
+def test_plan_keeps_sections_whole_and_spaces_short_columns_with_a_cap() -> None:
+    blocks = []
+    for name in ("One", "Two", "Three", "Four"):
+        blocks += [_Block("heading", text=name), _Block("text", text=_sentences(4))]
+    layout = _Layout(A1, blocks, {}, {})
+    layout.plan(55 * PT_PER_CM)
+    assert [[layout.blocks[i].text for i in g if layout.blocks[i].kind == "heading"] for g in layout.groups] == [
+        ["One", "Two"], ["Three", "Four"],
+    ]
+    cap = 4.0 * PT_PER_CM
+    assert 0 < layout.space[2] <= cap + 1e-6  # before the second heading of column 1
+    assert layout.space[1] == 0  # never between a heading and its text
+    tex = layout.columns_latex()
+    assert r"\vspace{" in tex and tex.count(r"\begin{column}") == 2
+
+
+def test_rescale_learns_from_the_measured_column_without_its_added_space() -> None:
+    blocks = [_Block("heading", text="One"), _Block("text", text=_sentences(4)), _Block("heading", text="Two"), _Block("text", text=_sentences(4))]
+    layout = _Layout(A1, blocks, {}, {})
+    layout.plan(200 * PT_PER_CM)
+    column = layout.groups[0]
+    estimated = layout.column_height(0)
+    added = sum(layout.space[i] for i in column)
+    layout.rescale([2 * estimated + added, 0.0])
+    assert layout.column_height(0) == pytest.approx(2 * estimated)
+
+
+# ---------------------------------------------------------------------------
+# The measured fit loop
+
+
+def _fake_compile(monkeypatch: pytest.MonkeyPatch, engine=("pdflatex", "/fake/pdflatex")) -> list[dict]:
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: engine)
+    runs: list[dict] = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        # Only the compile is faked; the patch is on the shared module.
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **kwargs)
+        cwd = Path(kwargs.get("cwd") or ".")
+        runs.append({"cmd": list(cmd), "tex": (cwd / "poster.tex").read_text(encoding="utf-8")})
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+    return runs
+
+
+def _report(*checks: str) -> dict:
+    return {
+        "metrics": {"header_bottom_cm": 20.0, "band_top_cm": 74.0, "body_pt": 26, "references_pt": 16},
+        "findings": [{"check": c, "severity": "high", "problem": c} for c in checks],
+    }
+
+
 @pytest.mark.asyncio
-async def test_poster_turns_doubled_newline_escapes_into_line_breaks(
+async def test_fit_loop_replans_until_the_sheet_measures_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg = _make_config(tmp_path, kinds=["poster"])
-    art = _make_artifacts(tmp_path)
+    runs = _fake_compile(monkeypatch)
+    reports = iter([_report("band_overlap"), _report()])
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: next(reports))
+    monkeypatch.setattr(poster_mod, "_measured_columns", lambda doc, report, sheet: ([90 * PT_PER_CM, 90 * PT_PER_CM], 30 * PT_PER_CM))
+    reply = _reply()
+    reply["blocks"][1]["text"] = _sentences(20)
+    result, art = await _generate(tmp_path, monkeypatch, reply)
+    assert len(runs) == 2 and runs[0]["tex"] != runs[1]["tex"]
+    fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
+    assert fit["compiles"] == 2 and fit["findings"] == []
+    assert fit["trimmed"] + fit["dropped_blocks"] > 0
+    assert result["poster_pdf"].exists()
 
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return r'{"title": "T", "left": "\\textbf{Rates}\\nThe slope", "right": "R"}'
 
-    _patch_endpoint(monkeypatch)
-    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+@pytest.mark.asyncio
+async def test_fit_loop_stops_after_six_compiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: _report("band_overlap"))
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([80 * PT_PER_CM, 80 * PT_PER_CM], 30 * PT_PER_CM),
+    )
+    # Every re-plan looks new, so only the compile cap can end the loop.
+    monkeypatch.setattr(poster_mod._Layout, "signature", lambda self: object())
+    await _generate(tmp_path, monkeypatch, _reply())
+    assert len(runs) == 6
 
-    result = await PosterGenerator(cfg).generate(art, art.quest_root)
 
-    tex = result["poster_tex"].read_text(encoding="utf-8")
-    assert "\\textbf{Rates}\nThe slope" in tex
-    assert r"\nThe" not in tex
+@pytest.mark.asyncio
+async def test_uneven_columns_alone_recompile_only_when_replanning_helps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: _report("column_balance"))
+    # Columns measured 1 cm apart: no plan can gain the 2 cm a compile needs.
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([40 * PT_PER_CM, 39 * PT_PER_CM], 50 * PT_PER_CM),
+    )
+    await _generate(tmp_path, monkeypatch, _reply())
+    assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_poster_that_measures_clean_compiles_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: _report("empty_space"))
+    # The sheet measures about the room the first plan assumed (52 cm).
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([30 * PT_PER_CM, 30 * PT_PER_CM], 53 * PT_PER_CM),
+    )
+    await _generate(tmp_path, monkeypatch, _reply())
+    assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_more_room_than_planned_replans_without_cutting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    reports = iter([_report("empty_space"), _report()])
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: next(reports))
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([30 * PT_PER_CM, 30 * PT_PER_CM], 60 * PT_PER_CM),
+    )
+    planned: list[tuple[float, bool]] = []
+    plan = poster_mod._Layout.plan
+
+    def recording_plan(self, available, **kw):  # type: ignore[no-untyped-def]
+        planned.append((round(available / PT_PER_CM, 1), kw.get("cut", True)))
+        return plan(self, available, **kw)
+
+    monkeypatch.setattr(poster_mod._Layout, "plan", recording_plan)
+    # A plan for other room reads as a new layout, whatever the estimates.
+    monkeypatch.setattr(poster_mod._Layout, "signature", lambda self: round(self.available))
+    reply = _reply()
+    result, art = await _generate(tmp_path, monkeypatch, reply)
+    first_guess = round(poster_mod._FIRST_GUESS_ROOM * A1.height_cm, 1)
+    assert planned == [(first_guess, False), (60.0, True)]
+    assert len(runs) == 2
+    fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
+    assert fit["compiles"] == 2 and fit["trimmed"] == 0 and fit["dropped_blocks"] == 0
+    assert (art.quest_root / ".fi" / "poster_reply.txt").read_text(encoding="utf-8") == json.dumps(reply)
+
+
+def test_measured_columns_count_spilled_text_but_not_the_reference_list() -> None:
+    from generation._pdf_measure import Line, Page
+
+    page_h = 84.1 * PT_PER_CM
+    top = page_h - 20 * PT_PER_CM
+    floor = page_h - 74 * PT_PER_CM
+    left_x, right_x = 3 * PT_PER_CM, 32 * PT_PER_CM
+    lines = [
+        Line("left column text", 26, False, (left_x, top - 300, left_x + 500, top - 280)),
+        Line("right column spilled", 26, False, (right_x, floor - 40, right_x + 500, floor - 20)),
+        Line("[1] A reference in the band", 16, False, (left_x, floor - 60, left_x + 500, floor - 45)),
+        Line("Figure 3: a caption that slid into the band", 20, False, (right_x, floor - 70, right_x + 500, floor - 50)),
+    ]
+    doc = SimpleNamespace(pages=[Page(1, 59.4 * PT_PER_CM, page_h, lines, [], [])])
+    heights, room = poster_mod._measured_columns(doc, _report(), A1)
+    gap = 1.2 * PT_PER_CM
+    assert heights[0] == pytest.approx(top - gap - (top - 300))
+    assert heights[1] == pytest.approx(top - gap - (floor - 70))
+    assert room == pytest.approx(top - gap - floor)
+
+
+# ---------------------------------------------------------------------------
+# Engines and diagnostics
+
+
+@pytest.mark.asyncio
+async def test_chinese_text_compiles_with_xelatex_and_its_font(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda engine: ("xelatex", "/fake/xelatex"))
+    monkeypatch.setattr(_cjk, "find_cjk_font", lambda text: "Noto Sans CJK TC")
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    result, _art = await _generate(tmp_path, monkeypatch, _reply(), output={"author": "陳建明"})
+    (run,) = runs
+    assert run["cmd"][0] == "/fake/xelatex"
+    assert r"\setCJKmainfont{Noto Sans CJK TC}" in run["tex"] and "陳建明" in run["tex"]
+    assert "poster_pdf" in result
+
+
+@pytest.mark.asyncio
+async def test_chinese_text_without_a_font_skips_with_a_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda engine: ("xelatex", "/fake/xelatex"))
+    monkeypatch.setattr(_cjk, "find_cjk_font", lambda text: None)
+    result, _art = await _generate(tmp_path, monkeypatch, _reply(headline="能量守恆的積分器"))
+    assert runs == []
+    assert "cjk_no_font" in result["poster_pdf_skipped"].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_latin_poster_keeps_pdflatex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    await _generate(tmp_path, monkeypatch, _reply(), output={"author": "Jane Chen"})
+    (run,) = runs
+    assert run["cmd"][0] == "/fake/pdflatex"
+    assert "xeCJK" not in run["tex"]
+
+
+@pytest.mark.asyncio
+async def test_poster_falls_back_to_tectonic_when_pdflatex_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user who followed the documented no-admin install
+    (``python launch.py --install-tectonic``) gets a poster too: poster.py
+    consults the same engine discovery as the paper."""
+    def fake_which(name):  # type: ignore[no-untyped-def]
+        return "/fake/tectonic.exe" if name == "tectonic" else None
+    monkeypatch.setattr(poster_mod.shutil, "which", fake_which)
+    captured_cmd: list[str] = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        # The patch is on the shared subprocess module, so other callers
+        # (platform's ``ver`` lookup on Windows) reach it too.
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **_kwargs)
+        captured_cmd[:] = list(cmd)
+        cwd = Path(_kwargs.get("cwd") or ".")
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+
+    result, art = await _generate(tmp_path, monkeypatch, _reply())
+
+    assert captured_cmd and captured_cmd[0] == "/fake/tectonic.exe"
+    assert "-interaction=nonstopmode" in captured_cmd
+    assert "-halt-on-error" in captured_cmd
+    assert "poster_pdf" in result
+    assert "poster_pdf_skipped" not in result
+    assert not (art.quest_root / "poster_pdf_skipped.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_poster_writes_skip_diagnostic_when_no_engine_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no pdflatex and no tectonic, ``poster_pdf_skipped.md`` lands next
+    to ``poster.tex``, the same contract as ``paper_pdf_skipped.md``."""
+    monkeypatch.setattr(poster_mod.shutil, "which", lambda _name: None)
+    from generation import _pdf_engine
+    monkeypatch.setattr(_pdf_engine, "_DEFAULT_REPO_ROOT", tmp_path)
+
+    result, art = await _generate(tmp_path, monkeypatch, _reply())
+
+    assert "poster_tex" in result and "poster_pdf" not in result
+    diag = art.quest_root / "poster_pdf_skipped.md"
+    body = diag.read_text(encoding="utf-8")
+    assert "poster.pdf was requested but not produced" in body
+    assert "no_latex_engine" in body
+    assert "--install-tectonic" in body
+    assert result.get("poster_pdf_skipped") == diag
+
+
+@pytest.mark.asyncio
+async def test_poster_writes_skip_diagnostic_when_pdf_missing_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine returned rc=0 but ``poster.pdf`` isn't on disk."""
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: ("pdflatex", "/fake/pdflatex.exe"))
+    monkeypatch.setattr(
+        poster_mod.subprocess, "run",
+        lambda cmd, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    result, art = await _generate(tmp_path, monkeypatch, _reply())
+    assert "poster_pdf" not in result
+    diag = art.quest_root / "poster_pdf_skipped.md"
+    assert "output_missing_after_success" in diag.read_text(encoding="utf-8")
+    assert result.get("poster_pdf_skipped") == diag
+
+
+@pytest.mark.asyncio
+async def test_poster_uses_same_engine_discovery_as_paper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever ``find_pdf_engine`` returns is the binary the compile runs."""
+    sentinel = ("tectonic", "/sentinel/tectonic.exe")
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: sentinel)
+    captured: list[list[str]] = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **_kwargs)
+        captured.append(list(cmd))
+        (Path(_kwargs.get("cwd") or ".") / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(poster_mod.subprocess, "run", fake_run)
+
+    await _generate(tmp_path, monkeypatch, _reply())
+    assert captured[0][0] == sentinel[1]
 
 
 def test_cleanup_poster_artifacts_success_keeps_pdf_and_tex(tmp_path: Path) -> None:
@@ -652,8 +882,79 @@ def test_cleanup_poster_artifacts_failure_keeps_log(tmp_path: Path) -> None:
     (tmp_path / "poster_pdf_skipped.md").write_text("x", encoding="utf-8")
     _cleanup_poster_artifacts(tmp_path, keep_log=True)
     remaining = sorted(p.name for p in tmp_path.glob("poster*"))
-    assert "poster.tex" in remaining            # source kept
-    assert "poster.log" in remaining            # error log kept for debugging
-    assert "poster_pdf_skipped.md" in remaining  # diagnostic kept
-    assert "poster.aux" not in remaining         # scratch dropped
+    assert "poster.tex" in remaining
+    assert "poster.log" in remaining
+    assert "poster_pdf_skipped.md" in remaining
+    assert "poster.aux" not in remaining
     assert "poster.out" not in remaining
+
+
+# ---------------------------------------------------------------------------
+# Real compiles
+
+
+def _missing_tex_packages(*names: str) -> list[str]:
+    """The TeX files kpsewhich cannot find (all of them without kpsewhich)."""
+    kpsewhich = shutil.which("kpsewhich")
+    if kpsewhich is None:
+        return list(names)
+    return [
+        name for name in names
+        if not subprocess.run([kpsewhich, name], capture_output=True, text=True).stdout.strip()
+    ]
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_real_poster_meets_the_poster_standards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("pdflatex") is None or _missing_tex_packages("beamerposter.sty", "qrcode.sty", "newpxtext.sty"):
+        pytest.skip("needs pdflatex with beamerposter, qrcode and newpxtext")
+    from generation._pdf_measure import measure_pdf, poster_report, render_pages
+
+    url = "https://example.org/p?a=1&b=2#sec_3"
+    result, _art = await _generate(
+        tmp_path, monkeypatch, _reply(),
+        output={"author": "Jane Chen", "affiliation": "R&D Lab", "contact_email": "jane_c@example.org", "url": url},
+        refs=REFS, further=FURTHER, real_figure=True,
+    )
+    assert "poster_pdf" in result, result.get("poster_pdf_skipped") and result["poster_pdf_skipped"].read_text(encoding="utf-8")
+    report = poster_report(measure_pdf(result["poster_pdf"]), header_terms=("Jane Chen", "R&D Lab", "jane_c@example.org"))
+    checks = {f["check"] for f in report["findings"]}
+    assert not checks & {
+        "overflow", "band_overlap", "title_font", "body_font", "heading_font", "caption_font",
+        "references_font", "captions", "line_length", "references_count", "references_urls", "header_info",
+    }, report["findings"]
+    m = report["metrics"]
+    assert m["title_pt"] >= 72 and m["body_pt"] >= 24 and m["heading_pt"] >= 36 and m["references"] == 3
+    try:
+        import cv2
+    except ImportError:
+        return
+    shot = render_pages(result["poster_pdf"], tmp_path / "shots", dpi=60)[0]
+    decoded, _points, _raw = cv2.QRCodeDetector().detectAndDecode(cv2.imread(str(shot)))
+    assert decoded == url
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_real_poster_prints_a_chinese_author_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from generation._pdf_engine import find_pdf_engine
+    from generation._pdf_measure import measure_pdf
+
+    engine = find_pdf_engine()
+    if (
+        engine is None or _cjk.find_xelatex(engine) is None or _cjk.find_cjk_font("陳建明") is None
+        or _missing_tex_packages("beamerposter.sty", "qrcode.sty", "fontspec.sty", "xeCJK.sty")
+    ):
+        pytest.skip("needs XeLaTeX with beamerposter, qrcode, xeCJK and a CJK font")
+    result, _art = await _generate(
+        tmp_path, monkeypatch, _reply(), output={"author": "陳建明", "affiliation": "國立台灣大學"},
+        real_figure=True,
+    )
+    assert "poster_pdf" in result
+    text = " ".join(line.text for page in measure_pdf(result["poster_pdf"]).pages for line in page.lines)
+    assert "陳建明" in text and "國立台灣大學" in text
