@@ -154,3 +154,122 @@ async def test_reports_for_several_outputs_share_one_file_and_a_broken_pdf_never
     assert report["transport"] == "none" and "could not be read" in report["error"]
     saved = json.loads((tmp_path / ".fi" / "visual_check.json").read_text(encoding="utf-8"))
     assert set(saved) == {"paper", "poster"}
+
+
+# ---------------------------------------------------------------------------
+# Redo
+
+
+def _problem(check: str, severity: str = "high") -> dict:
+    return {
+        "check": check, "severity": severity, "page": 2, "region": "slide body",
+        "problem": f"{check} on the slide", "quote": "some visible words",
+    }
+
+
+def _checked(*findings: dict, measured: tuple = ()) -> dict:
+    return {"transport": "images", "measured": {"findings": list(measured)}, "findings": list(findings)}
+
+
+def _script(monkeypatch, reports: list[dict]) -> list:
+    seen = iter(reports)
+
+    async def fake_check(config, kind, pdf, quest_root, *, supervisor=None):  # noqa: ANN001
+        return next(seen)
+
+    monkeypatch.setattr(vc, "check_pdf", fake_check)
+    monkeypatch.setattr(vc, "_screenshots", lambda pdf, quest_root, kind: [])
+
+
+def _deck(root: Path, version: str) -> Path:
+    (root / "slides.pdf").write_text(f"pdf {version}", encoding="utf-8")
+    (root / "slides.md").write_text(f"md {version}", encoding="utf-8")
+    return root / "slides.pdf"
+
+
+def _limit(redos: int) -> SimpleNamespace:
+    return SimpleNamespace(output=SimpleNamespace(visual_check_max_redos=redos))
+
+
+@pytest.mark.asyncio
+async def test_slides_are_redone_with_the_findings_and_the_better_version_is_kept(tmp_path: Path, monkeypatch) -> None:
+    _script(monkeypatch, [_checked(_problem("raw_markup")), _checked()])
+    pdf = _deck(tmp_path, "first")
+    feedback: list[str] = []
+
+    async def regenerate(text: str) -> None:
+        feedback.append(text)
+        _deck(tmp_path, "second")
+
+    report = await vc.check_and_redo(_limit(2), "slides", pdf, tmp_path, regenerate)
+    assert len(feedback) == 1 and "raw_markup on the slide" in feedback[0] and "some visible words" in feedback[0]
+    assert pdf.read_text(encoding="utf-8") == "pdf second"
+    assert [(a["attempt"], a["kept"]) for a in report["attempts"]] == [(0, False), (1, True)]
+    saved = json.loads((tmp_path / ".fi" / "visual_check.json").read_text(encoding="utf-8"))
+    assert saved["slides"]["attempts"][1]["redo_for"] == ["raw_markup"]
+
+
+@pytest.mark.asyncio
+async def test_a_redo_that_checks_worse_is_put_back_file_for_file(tmp_path: Path, monkeypatch) -> None:
+    _script(monkeypatch, [_checked(_problem("crowded_slide", "medium")), _checked(_problem("overlap"), _problem("cut_off_text"))])
+    pdf = _deck(tmp_path, "first")
+
+    async def regenerate(text: str) -> None:
+        _deck(tmp_path, "worse")
+        (tmp_path / "slides.pptx").write_text("new file", encoding="utf-8")
+
+    report = await vc.check_and_redo(_limit(2), "slides", pdf, tmp_path, regenerate)
+    assert pdf.read_text(encoding="utf-8") == "pdf first"
+    assert (tmp_path / "slides.md").read_text(encoding="utf-8") == "md first"
+    assert not (tmp_path / "slides.pptx").exists()
+    assert [(a["attempt"], a["kept"]) for a in report["attempts"]] == [(0, True), (1, False)]
+    assert report["findings"][0]["check"] == "crowded_slide"
+    saved = json.loads((tmp_path / ".fi" / "visual_check.json").read_text(encoding="utf-8"))
+    assert saved["slides"]["findings"][0]["check"] == "crowded_slide"
+
+
+@pytest.mark.asyncio
+async def test_redos_stop_at_the_configured_limit(tmp_path: Path, monkeypatch) -> None:
+    _script(monkeypatch, [_checked(_problem("crowded_slide")), _checked(_problem("crowded_slide", "medium")), _checked()])
+    pdf = _deck(tmp_path, "first")
+    calls: list[str] = []
+
+    async def regenerate(text: str) -> None:
+        calls.append(text)
+
+    report = await vc.check_and_redo(_limit(1), "slides", pdf, tmp_path, regenerate)
+    assert len(calls) == 1 and len(report["attempts"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_poster_layout_findings_never_ask_for_a_new_reply(tmp_path: Path, monkeypatch) -> None:
+    layout = (_problem("empty_space"), _problem("column_balance"), _problem("overflow"))
+    _script(monkeypatch, [_checked(_problem("reading_order"), measured=layout)])
+    (tmp_path / "poster.pdf").write_text("pdf", encoding="utf-8")
+    calls: list[str] = []
+
+    async def regenerate(text: str) -> None:
+        calls.append(text)
+
+    report = await vc.check_and_redo(_limit(2), "poster", tmp_path / "poster.pdf", tmp_path, regenerate)
+    assert calls == [] and report["attempts"] == [{"attempt": 0, "score": 12, "kept": True}]
+
+
+@pytest.mark.asyncio
+async def test_a_redo_that_fails_keeps_the_first_version(tmp_path: Path, monkeypatch) -> None:
+    _script(monkeypatch, [_checked(_problem("raw_markup"))])
+    pdf = _deck(tmp_path, "first")
+
+    async def regenerate(text: str) -> None:
+        _deck(tmp_path, "half written")
+        raise RuntimeError("model timed out")
+
+    report = await vc.check_and_redo(_limit(2), "slides", pdf, tmp_path, regenerate)
+    assert pdf.read_text(encoding="utf-8") == "pdf first"
+    assert "model timed out" in report["attempts"][1]["error"] and report["attempts"][0]["kept"] is True
+
+
+def test_only_medium_and_high_findings_of_a_redo_check_count() -> None:
+    report = _checked(_problem("raw_markup", "low"), _problem("reading_order"), measured=(_problem("small_font"),))
+    assert [f["check"] for f in vc.redo_findings("slides", report)] == ["small_font"]
+    assert vc.redo_findings("paper", report) == []

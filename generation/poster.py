@@ -891,7 +891,10 @@ class PosterGenerator:
         out_dir: Path,
         *,
         supervisor: ProxySupervisor | None = None,
+        feedback: str = "",
     ) -> dict[str, Path]:
+        """Write, lay out and compile the poster. ``feedback`` is what a visual
+        check of the previous version found; it is appended to the prompt."""
         if "poster" not in self.config.output.kinds or art.paper_md is None:
             return {}
         output = self.config.output
@@ -921,6 +924,8 @@ class PosterGenerator:
             columns=str(sheet.columns),
             word_budget=str(sheet.words),
         )
+        if feedback:
+            prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"
         own_supervisor = supervisor is None
         sup = supervisor or ProxySupervisor()
         endpoint = await resolve_endpoint_async(self.config.provider, sup)

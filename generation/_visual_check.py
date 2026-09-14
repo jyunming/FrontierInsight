@@ -22,7 +22,7 @@ import logging
 import re
 import string
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from core.config import Config
 from core.provider import (
@@ -118,12 +118,10 @@ async def _check(
         "findings": [],
         "dropped": [],
     }
-    shots_dir = quest_root / ".fi" / "visual_check" / kind
-    shots = render_pages(pdf, shots_dir, dpi=_DPI, max_pages=_MAX_PAGES.get(kind))
-    if not shots:
+    images = _screenshots(pdf, quest_root, kind)
+    if not images:
         return {**result, "transport": "measurements only", "reason": "the pages could not be rendered"}
-    result["pages_checked"] = len(shots)
-    images = [_scaled_png(path) for path in shots]
+    result["pages_checked"] = len(images)
     checks = checks_for(kind)
     prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
         kind=_KIND_NAMES.get(kind, kind),
@@ -168,6 +166,16 @@ async def _ask(config: Config, messages: list[dict[str, Any]], supervisor: Proxy
             await sup.release(config.provider.name)
         if own_supervisor:
             await sup.shutdown()
+
+
+def _screenshots(pdf: Path, quest_root: Path, kind: str) -> list[bytes]:
+    """Render the pages to ``.fi/visual_check/<kind>/page-N.png``, replacing
+    the screenshots of any earlier version, and return them as PNG bytes."""
+    shots_dir = quest_root / ".fi" / "visual_check" / kind
+    for old in shots_dir.glob("page-*.png"):
+        old.unlink(missing_ok=True)
+    shots = render_pages(pdf, shots_dir, dpi=_DPI, max_pages=_MAX_PAGES.get(kind))
+    return [_scaled_png(path) for path in shots]
 
 
 def _scaled_png(path: Path) -> bytes:
@@ -283,3 +291,119 @@ def _write_report(quest_root: Path, kind: str, report: dict[str, Any]) -> None:
         path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
         _log.info("visual check: could not write %s (%r)", path, exc)
+
+
+# ---------------------------------------------------------------------------
+# Redo
+
+# Findings a new version from the model can fix. The slides' model writes the
+# whole deck, layout included. The poster's layout is the planner's, so only
+# text the model wrote counts there: a new reply would not change empty space,
+# uneven columns or overflow. The paper is never rewritten.
+REDO_CHECKS = {
+    "slides": frozenset({
+        "overflow", "small_font", "cut_off_text", "overlap", "unreadable_figure",
+        "raw_markup", "broken_math", "garbled_text", "slide_overflow", "crowded_slide",
+    }),
+    "poster": frozenset({"raw_markup", "broken_math", "garbled_text", "captions"}),
+}
+_WEIGHTS = {"high": 3, "medium": 2, "low": 1}
+# The files one version of an output consists of, copied aside before a redo
+# so a version that checks worse can be put back.
+_VERSION_FILES = {
+    "slides": ("slides.md", "slides.html", "slides.pdf", "slides.pptx"),
+    "poster": ("poster.pdf", "poster.tex", ".fi/poster_fit.json", ".fi/poster_reply.txt"),
+}
+
+
+def _open_findings(report: dict[str, Any]) -> list[dict]:
+    return list((report.get("measured") or {}).get("findings") or []) + list(report.get("findings") or [])
+
+
+def redo_findings(kind: str, report: dict[str, Any]) -> list[dict]:
+    """The medium and high findings a new version of ``kind`` could fix."""
+    checks = REDO_CHECKS.get(kind, frozenset())
+    return [
+        f for f in _open_findings(report)
+        if f.get("check") in checks and f.get("severity") in ("high", "medium")
+    ]
+
+
+def score(report: dict[str, Any]) -> int:
+    """Lower is better: every open finding, weighted by its severity."""
+    return sum(_WEIGHTS.get(f.get("severity"), 2) for f in _open_findings(report))
+
+
+def feedback_text(findings: list[dict]) -> str:
+    lines = [
+        "## Problems a check found in your previous version",
+        "",
+        "A check of the rendered pages found these. Fix them in this version and keep what was right.",
+        "",
+    ]
+    for f in findings:
+        where = f"page {f.get('page')}" + (f", {f['region']}" if f.get("region") else "")
+        near = f' Near: "{f["quote"]}".' if f.get("quote") else ""
+        lines.append(f"- {where}: {f.get('problem')}{near}")
+    return "\n".join(lines)
+
+
+def _copy_version(source: Path, target: Path, names: tuple[str, ...]) -> None:
+    """Make ``target`` hold exactly ``source``'s copy of each named file."""
+    import shutil
+
+    for name in names:
+        src, dst = source / name, target / name
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        else:
+            dst.unlink(missing_ok=True)
+
+
+async def check_and_redo(
+    config: Config,
+    kind: str,
+    pdf: Path,
+    quest_root: Path,
+    regenerate: Callable[[str], Awaitable[Any]],
+    *,
+    supervisor: ProxySupervisor | None = None,
+) -> dict[str, Any]:
+    """Check ``pdf``. While the check finds problems a new version could fix,
+    ask ``regenerate(feedback)`` for one, at most
+    ``output.visual_check_max_redos`` times, and keep the version that checks
+    best; a version that checks no better is put back. Never raises."""
+    report = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
+    attempts: list[dict[str, Any]] = [{"attempt": 0, "score": score(report), "kept": True}]
+    names = _VERSION_FILES.get(kind, ())
+    for attempt in range(1, int(getattr(config.output, "visual_check_max_redos", 0) or 0) + 1):
+        fixable = redo_findings(kind, report)
+        if not fixable or report.get("transport") == "none":
+            break
+        saved = quest_root / ".fi" / "visual_check" / kind / f"before-redo-{attempt}"
+        _copy_version(quest_root, saved, names)
+        entry: dict[str, Any] = {"attempt": attempt, "redo_for": sorted({f["check"] for f in fixable})}
+        attempts.append(entry)
+        try:
+            await regenerate(feedback_text(fixable))
+        except Exception as exc:  # noqa: BLE001 — a redo must never stop the quest
+            _log.warning("visual check: redo %d of %s failed: %r", attempt, kind, exc)
+            entry.update({"error": f"{type(exc).__name__}: {exc}"[:300], "kept": False})
+            _copy_version(saved, quest_root, names)
+            break
+        new = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
+        entry["score"] = score(new)
+        if new.get("transport") != "none" and entry["score"] < score(report):
+            for earlier in attempts[:-1]:
+                earlier["kept"] = False
+            entry["kept"] = True
+            report = new
+            continue
+        entry["kept"] = False
+        _copy_version(saved, quest_root, names)
+        _screenshots(pdf, quest_root, kind)
+        break
+    report["attempts"] = attempts
+    _write_report(quest_root, kind, report)
+    return report

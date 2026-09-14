@@ -31,7 +31,7 @@ from core.engine import Engine, QuestArtifacts
 from core.provider import ProxySupervisor
 from generation.paper import PaperGenerator
 from generation.poster import PosterGenerator
-from generation._visual_check import check_pdf
+from generation._visual_check import check_and_redo, check_pdf
 from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
@@ -1565,8 +1565,14 @@ def _visual_check_line(report: dict) -> str:
     measured = len((report.get("measured") or {}).get("findings") or [])
     seen = len(report.get("findings") or [])
     reason = report.get("reason") or report.get("error") or ""
+    redos = [a for a in report.get("attempts") or [] if a.get("attempt")]
+    if redos:
+        kept = next((a["attempt"] for a in report["attempts"] if a.get("kept")), 0)
+        redone = f"; redone {len(redos)} time(s), kept " + ("the first version" if kept == 0 else f"redo {kept}")
+    else:
+        redone = ""
     if report.get("transport") == "images":
-        return f"{seen} problem(s) seen on the pages, {measured} measured (.fi/visual_check.json)"
+        return f"{seen} problem(s) seen on the pages, {measured} measured{redone} (.fi/visual_check.json)"
     if report.get("transport") == "measurements only":
         return f"measurements only ({reason}); {measured} measured problem(s)"
     return f"not checked ({reason})"
@@ -1703,15 +1709,33 @@ async def _run_generators(
         except Exception as e:
             print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
     # 5) Screenshot + AI check of each PDF this pass produced (a PDF carried
-    # through on a resume was checked when it was made).
+    # through on a resume was checked when it was made). Slides and poster
+    # are redone with the problems a new version can fix; the paper is only
+    # checked.
     if cfg.output.visual_check:
+        async def redo_slides(feedback: str) -> None:
+            written.update(await SlideGenerator(cfg).generate(
+                art, art.quest_root, supervisor=supervisor, feedback=feedback,
+            ))
+
+        async def redo_poster(feedback: str) -> None:
+            written.update(await PosterGenerator(cfg).generate(
+                art, art.quest_root, supervisor=supervisor, feedback=feedback,
+            ))
+
+        redo = {"slides": redo_slides, "poster": redo_poster}
         for kind, key, output_kind in (
             ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),
         ):
             pdf = written.get(key)
             if pdf is None or output_kind in carried:
                 continue
-            report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
+            if kind in redo:
+                report = await check_and_redo(
+                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor,
+                )
+            else:
+                report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
             print(f"[FI] visual check {kind}: {_visual_check_line(report)}")
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")

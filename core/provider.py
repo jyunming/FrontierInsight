@@ -2667,6 +2667,10 @@ class LLMClient:
                         node=node,
                     )
         except BridgeError as exc:
+            # The extension could not hand the screenshots to the model (an
+            # older VS Code, or a model without image input).
+            if _message_images(messages) and "image" in str(exc).lower():
+                raise ImageInputUnsupported(str(exc)) from exc
             if _is_bridge_error_transient(str(exc)):
                 raise BridgeError(
                     "Copilot backend was unavailable across 6 retry "

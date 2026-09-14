@@ -438,6 +438,40 @@ paper onto a page.
   and a CJK font, as for the paper. Without either, the poster is skipped
   with a `cjk_no_xelatex` or `cjk_no_font` diagnostic.
 
+### The visual check
+
+After the outputs render, FI checks each PDF the pass produced: the paper,
+the slides and the poster.
+
+- **What runs:** the PDF is measured (font sizes, overflow, columns) and
+  screenshotted. The screenshots, the measurements and a fixed checklist go
+  to your configured provider in one call. The checklist asks only what a
+  script cannot see, such as raw LaTeX showing as text or a figure that
+  covers a caption.
+- **Privacy:** the screenshots, and so everything printed on the pages
+  (including the author line), go to that provider.
+- **Grounded findings:** each finding must quote text visible where the
+  problem is. A finding that cannot be placed on its page is dropped; the
+  report keeps it with the reason.
+- **Redo:** when the check finds problems a new version can fix, the slides
+  or the poster are generated again with those problems in the prompt. The
+  version that checks best is kept. A redo is skipped for poster layout
+  findings (empty space, uneven columns), which a new reply would not change.
+  The paper is only checked.
+- **Report:** `.fi/visual_check.json` in the quest folder, with the
+  screenshots under `.fi/visual_check/<output>/`. The run prints one line
+  per output, for example
+  `[FI] visual check slides: 0 problem(s) seen on the pages, 1 measured; redone 1 time(s), kept redo 1`.
+- **Providers without image input** (see
+  [PROVIDERS.md](PROVIDERS.md#which-providers-can-see-images)) check from the
+  measurements alone, and the line says so.
+
+```yaml
+output:
+  visual_check: true          # false turns the check off
+  visual_check_max_redos: 2   # 0 to 2 new versions of the slides or poster
+```
+
 ### `execution.sandbox: docker` — what it actually does
 
 When you set `sandbox: docker`, FI runs the generated experiment inside a Docker container instead of a fresh Python venv. The defaults:

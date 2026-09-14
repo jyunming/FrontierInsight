@@ -36,6 +36,12 @@ with 95% confidence intervals, effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. You see every node firing live in the chat panel.
 
+After the outputs render, a visual check screenshots each PDF and asks the
+chat model to check the pages. The slides and poster are redone, at most twice,
+when the check finds problems a new version can fix. A VS Code build or chat
+model that cannot take images checks from the measurements alone, and the chat
+says so.
+
 ## One-time setup
 
 1. **Install GitHub Copilot Chat in VSCode** and sign in.

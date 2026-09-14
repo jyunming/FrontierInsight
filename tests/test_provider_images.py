@@ -155,3 +155,22 @@ async def test_a_cli_that_cannot_take_images_says_so_without_running() -> None:
     finally:
         await client.aclose()
     spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_vscode_bridge_that_cannot_send_images_reports_it_as_unsupported() -> None:
+    from core.vscode_bridge import BridgeError
+
+    endpoint = dataclasses.replace(
+        ResolvedEndpoint(base_url="http://127.0.0.1:1", model="m", api_key="k"), transport="vscode_bridge",
+    )
+    client = LLMClient(endpoint)
+    client._bridge = MagicMock()
+    client._bridge.chat = AsyncMock(side_effect=BridgeError(
+        "this VS Code version cannot send images to a language model (LanguageModelDataPart.image is missing)",
+    ))
+    with pytest.raises(ImageInputUnsupported):
+        await client.chat([_message("Name the shapes.", PNG)])
+    client._bridge.chat = AsyncMock(side_effect=BridgeError("no language model is available in this VSCode window"))
+    with pytest.raises(BridgeError):
+        await client.chat([{"role": "user", "content": "text only"}])

@@ -106,7 +106,10 @@ class SlideGenerator:
         out_dir: Path,
         *,
         supervisor: ProxySupervisor | None = None,
+        feedback: str = "",
     ) -> dict[str, Path]:
+        # ``feedback`` is what a visual check of the previous deck found; it
+        # is appended to the authoring prompt.
         # Cleanup gate: if "slides" is no longer in output.kinds (user
         # removed it from their YAML between runs), remove any stale
         # ``slides_skipped.md`` left over from a prior run. Mirrors
@@ -124,7 +127,7 @@ class SlideGenerator:
         if art.paper_md is None:
             return {}
 
-        slides_md = await self._author_marp(art, out_dir, supervisor=supervisor)
+        slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
         result: dict[str, Path] = {"slides_md": slides_md}
         diag_path = out_dir / "slides_skipped.md"
         # Will be set to a (reason_code, summary, how_to_fix) triple
@@ -256,6 +259,7 @@ class SlideGenerator:
         out_dir: Path,
         *,
         supervisor: ProxySupervisor | None,
+        feedback: str = "",
     ) -> Path:
         paper_md = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
         figures = []
@@ -265,6 +269,8 @@ class SlideGenerator:
             paper_md=paper_md[:8000],
             figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
         )
+        if feedback:
+            prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"
         own_supervisor = supervisor is None
         sup = supervisor or ProxySupervisor()
         endpoint = await resolve_endpoint_async(self.config.provider, sup)
