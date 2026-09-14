@@ -598,6 +598,40 @@ async def test_poster_keeps_single_backslash_textbf_from_the_model(
     assert "\textbf" not in tex
 
 
+def test_literal_newlines_from_doubled_json_become_line_breaks() -> None:
+    """A second gemma4 poster doubled its newline escapes along with its
+    backslashes; the literal ``\\n`` stopped pdflatex as an undefined command."""
+    from generation.poster import _literal_newlines_to_breaks as fix
+
+    assert fix(r"\textbf{Rates}\nThe slope") == "\\textbf{Rates}\nThe slope"
+    assert fix(r"\textbf{A}\n\includegraphics{f.png}") == (
+        "\\textbf{A}\n\\includegraphics{f.png}"
+    )
+    assert fix(r"\noindent x \nabla y") == r"\noindent x \nabla y"
+    assert fix(r"line\\next") == r"line\\next"
+
+
+@pytest.mark.asyncio
+async def test_poster_turns_doubled_newline_escapes_into_line_breaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return r'{"title": "T", "left": "\\textbf{Rates}\\nThe slope", "right": "R"}'
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert "\\textbf{Rates}\nThe slope" in tex
+    assert r"\nThe" not in tex
+
+
 def test_cleanup_poster_artifacts_success_keeps_pdf_and_tex(tmp_path: Path) -> None:
     from generation.poster import _cleanup_poster_artifacts
     for name in ("poster.pdf", "poster.tex", "poster.aux", "poster.log",

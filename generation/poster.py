@@ -82,6 +82,27 @@ def _strip_column_commands(s: str) -> str:
     return _BARE_COLUMN_RE.sub("", s or "")
 
 
+# A model that doubles every backslash in its JSON doubles the ``\n`` it meant
+# as a line break too, and LaTeX stops on the undefined ``\n`` it receives
+# (``\textbf{Rates}\nThe slope``). LaTeX has no ``\n`` command, so a ``\n`` that
+# does not begin a real one (``\noindent``, ``\nabla``) is a line break.
+_LITERAL_NEWLINE_RE = _re.compile(r"(?<!\\)\\n([A-Za-z]*)")
+
+
+def _literal_newlines_to_breaks(s: str) -> str:
+    """Turn the literal ``\\n`` a model left in a poster column into a newline."""
+    def fix(m: "_re.Match[str]") -> str:
+        if "n" + m.group(1) in _LATEX_N_COMMANDS:
+            return m.group(0)
+        return "\n" + m.group(1)
+    return _LITERAL_NEWLINE_RE.sub(fix, s or "")
+
+
+def _clean_model_column(s: str) -> str:
+    """The model's column LaTeX with its known JSON and beamer slips undone."""
+    return _strip_column_commands(_literal_newlines_to_breaks(s))
+
+
 # LaTeX scratch pdflatex/tectonic leave next to poster.pdf — pure compile
 # byproducts. We delete them once we have the PDF so the quest dir holds the
 # deliverables (poster.pdf + poster.tex), not a pile of poster.aux/.out/…
@@ -340,8 +361,8 @@ class PosterGenerator:
         # substitute()'s strict placeholder matcher.
         body = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8")).safe_substitute(
             title=_escape_latex_text_specials(title),
-            left=_escape_latex_text_specials(_strip_column_commands(parsed.get("left") or "")),
-            right=_escape_latex_text_specials(_strip_column_commands(parsed.get("right") or "")),
+            left=_escape_latex_text_specials(_clean_model_column(parsed.get("left") or "")),
+            right=_escape_latex_text_specials(_clean_model_column(parsed.get("right") or "")),
             references=references_tex,   # already LaTeX-escaped by build step
             brandlogo=brandlogo,
         )

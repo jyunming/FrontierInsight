@@ -26,7 +26,7 @@ Do **NOT** write a References / Sources / Bibliography section — a numbered So
 - Avoid emoji and non-ASCII symbols (they break the LaTeX compile).
 
 # Output format
-Respond with a single JSON object, no prose, no markdown fence. JSON strings need every LaTeX backslash doubled: write `\\textbf{…}` and `\\item`, not `\textbf{…}` and `\item`.
+Respond with a single JSON object, no prose, no markdown fence:
 
 {
   "title": "<short paper title>",
