@@ -20,12 +20,17 @@ These templates are consumed by pandoc; every one of them must:
    (authblk's optional-affiliation form) and reports ``Missing
    \begin{document}`` because titling's redefinition shadows it.
 
+5. In a ``twocolumn`` template, redefine ``longtable`` — it stops with
+   ``longtable not in 1-column mode`` in two-column mode, at the first
+   markdown table.
+
 A real EUV-stochastics quest hit several of these failure modes in
 succession. This module is the regression guard so a future template
 edit (or a new template) doesn't silently re-introduce any of them.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -105,6 +110,70 @@ def test_template_declares_none_counter(fmt: str) -> None:
         f"{fmt}/template.tex must \\newcounter{{none}} so longtable can "
         f"resolve pandoc's \\def\\LTcaptype{{none}}"
     )
+
+
+def test_two_column_templates_redefine_longtable() -> None:
+    """longtable stops with ``longtable not in 1-column mode`` in a
+    ``twocolumn`` document, so every markdown table killed the ieee_access
+    compile. A two-column template must set pandoc's longtable in a box."""
+    two_column = [
+        fmt for fmt in EXPECTED_FORMATS
+        if re.search(
+            r"\\documentclass\[[^\]]*twocolumn",
+            (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8"),
+        )
+    ]
+    assert "ieee_access" in two_column
+    for fmt in two_column:
+        txt = (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8")
+        assert r"\RenewDocumentEnvironment{longtable}{+b}" in txt, (
+            f"{fmt}/template.tex is two-column and must redefine longtable"
+        )
+
+
+@pytest.mark.slow
+def test_a_two_column_paper_with_a_short_and_a_tall_table_compiles_whole(tmp_path: Path) -> None:
+    """A short table becomes a column float; one taller than a column gets
+    single-column pages. Nothing runs off the page and the numbering is
+    not stepped twice by the measuring pass."""
+    from core.config import Config
+    from generation._pandoc import find_pandoc
+    from generation._pdf_engine import find_pdf_engine
+    from generation._pdf_measure import measure_pdf, paper_report
+    from generation.paper import PaperGenerator
+
+    if find_pandoc(REPO_ROOT) is None or find_pdf_engine(REPO_ROOT) is None:
+        pytest.skip("needs pandoc and a LaTeX engine")
+    rows = "\n".join(f"| Step {i} | {i * 0.5:.1f} | value {i} |" for i in range(70))
+    md = tmp_path / "paper.md"
+    md.write_text(
+        "# Table Probe\n\n## Results\n\nText before the tables.\n\n"
+        ": Energy drift per integrator.\n\n| Integrator | Drift |\n|---|---|\n| Leapfrog | 3e-7 |\n\n"
+        "Text between the tables.\n\n"
+        ": Seventy steps.\n\n| Step | Time | Note |\n|---|---|---|\n" + rows + "\n\nText after the tables.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    config = Config.model_validate({
+        "topic": "t",
+        "title": "t",
+        "output": {
+            "kinds": ["paper_md", "paper_pdf"],
+            "output_dir": str(tmp_path / "outputs"),
+            "paper_format": "ieee_access",
+            "html_pdf_fallback": False,
+        },
+    })
+    pdf, skip = PaperGenerator(config)._compile_pdf(md, out)
+    assert skip is None, skip.summary if skip else ""
+    doc = measure_pdf(pdf)
+    text = " ".join(line.text for page in doc.pages for line in page.lines)
+    for expected in ("Leapfrog", "Step 0", "Step 69", "Text after the tables", "Table 1:", "Table 2:"):
+        assert expected in text
+    assert "Table 3:" not in text
+    checks = {finding["check"] for finding in paper_report(doc)["findings"]}
+    assert not checks & {"overflow", "overwide"}, checks
 
 
 @pytest.mark.parametrize("fmt", EXPECTED_FORMATS)

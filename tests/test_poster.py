@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -842,13 +843,24 @@ def test_cleanup_poster_artifacts_failure_keeps_log(tmp_path: Path) -> None:
 # Real compiles
 
 
+def _missing_tex_packages(*names: str) -> list[str]:
+    """The TeX files kpsewhich cannot find (all of them without kpsewhich)."""
+    kpsewhich = shutil.which("kpsewhich")
+    if kpsewhich is None:
+        return list(names)
+    return [
+        name for name in names
+        if not subprocess.run([kpsewhich, name], capture_output=True, text=True).stdout.strip()
+    ]
+
+
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_a_real_poster_meets_the_poster_standards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if shutil.which("pdflatex") is None:
-        pytest.skip("pdflatex not on PATH")
+    if shutil.which("pdflatex") is None or _missing_tex_packages("beamerposter.sty", "qrcode.sty", "newpxtext.sty"):
+        pytest.skip("needs pdflatex with beamerposter, qrcode and newpxtext")
     from generation._pdf_measure import measure_pdf, poster_report, render_pages
 
     url = "https://example.org/p?a=1&b=2#sec_3"
@@ -884,8 +896,11 @@ async def test_a_real_poster_prints_a_chinese_author_line(
     from generation._pdf_measure import measure_pdf
 
     engine = find_pdf_engine()
-    if engine is None or _cjk.find_xelatex(engine) is None or _cjk.find_cjk_font("陳建明") is None:
-        pytest.skip("needs XeLaTeX and a CJK font")
+    if (
+        engine is None or _cjk.find_xelatex(engine) is None or _cjk.find_cjk_font("陳建明") is None
+        or _missing_tex_packages("beamerposter.sty", "qrcode.sty", "fontspec.sty", "xeCJK.sty")
+    ):
+        pytest.skip("needs XeLaTeX with beamerposter, qrcode, xeCJK and a CJK font")
     result, _art = await _generate(
         tmp_path, monkeypatch, _reply(), output={"author": "陳建明", "affiliation": "國立台灣大學"},
         real_figure=True,

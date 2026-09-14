@@ -8,6 +8,7 @@ render instead of running a compile that cannot succeed.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,11 +158,13 @@ def test_a_real_xelatex_compile_prints_a_chinese_title_body_and_author(tmp_path)
 
     text = "# 分子動力學積分器\n\n## Introduction\n\nBody text on 能量守恆.\n"
     engine = find_pdf_engine(REPO)
+    kpsewhich = shutil.which("kpsewhich")
     if (
-        find_pandoc(REPO) is None or engine is None
+        find_pandoc(REPO) is None or engine is None or kpsewhich is None
         or _cjk.find_xelatex(engine) is None or _cjk.find_cjk_font(text) is None
+        or not subprocess.run([kpsewhich, "xeCJK.sty"], capture_output=True, text=True).stdout.strip()
     ):
-        pytest.skip("needs pandoc, XeLaTeX and a CJK font")
+        pytest.skip("needs pandoc, XeLaTeX with xeCJK, and a CJK font")
     md, out = _paper(tmp_path, text)
     cfg = _config(tmp_path, author="陳建明", affiliation="國立台灣大學", html_pdf_fallback=False)
     pdf, skip = PaperGenerator(cfg)._compile_pdf(md, out)
