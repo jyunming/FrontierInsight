@@ -272,6 +272,10 @@ def test_the_claim_check_sees_the_mean_over_the_seeds(tmp_path: Path) -> None:
     paper.write_text("# P\n\nThe outbreak probability was 0.43.\n", encoding="utf-8")
     asyncio.run(eng._node_claim_check({"topic": "t", "paper_md": str(paper), **SEEDS}))  # type: ignore[arg-type]
     s = _replicate_result_intervals(SEEDS)["p_outbreak"]  # type: ignore[arg-type]
-    line = f'"p_outbreak": "{s["mean"]:.4g} (95% CI {s["ci_lower"]:.4g} to {s["ci_upper"]:.4g}, 3 seeds)"'
-    assert line in seen["prompt"]
-    assert seen["prompt"].index('"mean_over_seeds"') < seen["prompt"].index('"result_json"')
+    means = (
+        "Mean over the 3 seeds, with its 95% CI:\n"
+        f"- p_outbreak: {s['mean']:.4g} (95% CI {s['ci_lower']:.4g} to {s['ci_upper']:.4g})"
+    )
+    assert means in seen["prompt"]
+    # After the results, which keep their own 4,000 characters.
+    assert seen["prompt"].index('"result_json"') < seen["prompt"].index(means)

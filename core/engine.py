@@ -5449,28 +5449,27 @@ class Engine:
             )
         ) or "(no references)"
         analysis = state.get("analysis") or {}
-        evidence: dict[str, Any] = {
+        evidence = {
             "key_findings": analysis.get("key_findings") or [],
             "claims_supported": analysis.get("claims_supported") or [],
+            "result_json": state.get("result_json") or {},
         }
+        evidence_block = json.dumps(evidence, indent=2)[:4000]
         # The paper reports means over the seeds with their intervals, which
-        # seed 0's RESULT_JSON holds neither of: one line each, ahead of the raw
-        # results, so the 4,000-character cut below takes the raw results first.
+        # seed 0's RESULT_JSON holds neither of. They follow the results, one
+        # line each, outside the 4,000-character cut: inside it, SIR's 19
+        # intervals pushed most of its results out.
         intervals = _replicate_result_intervals(state)
         if intervals:
             n_seeds = len(state.get("result_json_replicates") or [])
-            evidence["mean_over_seeds"] = {
-                path: (
-                    f"{s['mean']:.4g} (95% CI {s['ci_lower']:.4g} to {s['ci_upper']:.4g}, {n_seeds} seeds)"
-                    if "ci_lower" in s and "ci_upper" in s
-                    else f"{s['mean']:.4g} ({n_seeds} seeds)"
-                )
+            evidence_block += f"\n\nMean over the {n_seeds} seeds, with its 95% CI:\n" + "\n".join(
+                f"- {path}: {s['mean']:.4g}"
+                + (f" (95% CI {s['ci_lower']:.4g} to {s['ci_upper']:.4g})" if "ci_lower" in s and "ci_upper" in s else "")
                 for path, s in list(intervals.items())[:40]
-            }
-        evidence["result_json"] = state.get("result_json") or {}
+            )
         prompt = self._prompts["claim_check"].substitute(
             topic=state["topic"],
-            evidence_block=json.dumps(evidence, indent=2)[:4000],
+            evidence_block=evidence_block,
             references=refs_block,
             paper=paper_text,
         )
