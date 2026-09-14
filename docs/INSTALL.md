@@ -58,6 +58,7 @@ winget install JohnMacFarlane.Pandoc     # optional; pip already bundles one
 winget install MiKTeX.MiKTeX             # for LaTeX engine (used by pandoc)
 npm install -g @marp-team/marp-cli       # for slides.html / slides.pdf
                                          # (slides.pptx needs nothing)
+winget install TheDocumentFoundation.LibreOffice  # lets the visual check see slides.pptx
 
 # One-time MiKTeX config: silence missing-package prompts so quests
 # don't pop GUI dialogs. Substitute the actual path if different.
@@ -150,6 +151,7 @@ what is present on this machine:
 | xelatex + a CJK font | `paper.pdf` with Chinese, Japanese or Korean text | XeLaTeX ships with MiKTeX and TeX Live; Windows has CJK fonts built in; Linux: `sudo apt install fonts-noto-cjk` |
 | tectonic | LaTeX engine fallback (no-admin) | `fi --install-tectonic` |
 | Marp CLI | `slides.html`, `slides.pdf` — **not** needed for `slides.pptx` | `npm install -g @marp-team/marp-cli`, or `fi --install-marp` for a standalone binary on hosts without npm |
+| LibreOffice | The visual check of `slides.pptx`: it exports the deck to PDF so the pages can be screenshotted. Without it the pptx is not checked; making the pptx never needs it | `winget install TheDocumentFoundation.LibreOffice` / `brew install --cask libreoffice` / `apt install libreoffice-impress` |
 | Node.js | The VSCode extension build | `winget install OpenJS.NodeJS` / nvm |
 | Docker Desktop | `execution.sandbox: docker` | docker.com/products/docker-desktop |
 | Axon | Knowledge layer (literature search + cross-quest memory) | `pip install axon-rag` |

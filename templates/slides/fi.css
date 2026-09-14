@@ -125,6 +125,34 @@ section img {
   height: auto !important;
 }
 
+/* A figure takes only the room left under its slide's text. The 48vh cap
+   alone let a figure under a long text run off the bottom, taking a caption
+   below it along. So a slide with a figure paragraph lays out as a column
+   in which that paragraph, and only it, shrinks. The pipeline puts every
+   figure in its own paragraph (generation/slides.py), so a caption keeps
+   its full height. Flex items do not collapse margins; the margin rules
+   keep the text above a figure where it is on any other slide. */
+section:has(> p > img) {
+  display: flex;
+  flex-direction: column;
+}
+section:has(> p > img) > * + * { margin-top: 0; }
+section:has(> p > img) > :is(ul, ol) > li:first-child { margin-top: 0; }
+section:has(> p > img) > :is(ul, ol) > li:last-child { margin-bottom: 0; }
+section:has(> p > img) > p:has(> img) {
+  flex: 0 1 auto;
+  min-height: 0;
+  /* Its flex basis is the figure's uncapped height, since a percentage cap
+     does not count while sizing; without this cap the paragraph grows to
+     fill the slide under a short text. */
+  max-height: 48vh;
+  margin-block: 0.45em;
+}
+section:has(> p > img) > p > img {
+  max-height: min(48vh, 100%);
+  margin-block: 0;
+}
+
 /* ---- Tables ---------------------------------------------------------- */
 section table { font-size: 0.86em; border-collapse: collapse; }
 section th {

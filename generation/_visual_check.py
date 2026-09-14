@@ -12,10 +12,14 @@ that names no region, is dropped and kept in the report with the reason.
 A transport that cannot send images leaves the measurements as the whole
 check, and the report says so. The report goes to ``.fi/visual_check.json``,
 one entry per output. Nothing here raises: a quest never stops over a check.
+
+``slides.pptx`` is checked as ``slides_pptx``: LibreOffice exports it to a
+PDF, which is measured and checked like the slides.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -35,6 +39,7 @@ from core.provider import (
     resolve_endpoint_async,
 )
 from generation._cjk import has_cjk
+from generation._office_pdf import pptx_to_pdf
 from generation._pdf_measure import (
     measure_pdf,
     paper_report,
@@ -80,9 +85,15 @@ _KIND_CHECKS = {
 }
 _REPORTS = {"paper": paper_report, "slides": slides_report, "poster": poster_report}
 _SEVERITIES = ("high", "medium", "low")
+# The pptx is a slide deck: the slides' measurements, checklist and page cap
+# apply. Its report entry and screenshots keep their own name.
+PPTX_KIND = "slides_pptx"
+_BASE_KIND = {PPTX_KIND: "slides"}
+LABELS = {"paper": "paper", "slides": "slides", "poster": "poster", PPTX_KIND: "slides.pptx"}
 
 
 def checks_for(kind: str) -> dict[str, str]:
+    kind = _BASE_KIND.get(kind, kind)
     return {**_COMMON_CHECKS, **_KIND_CHECKS.get(kind, {})}
 
 
@@ -105,13 +116,35 @@ async def check_pdf(
     return report
 
 
+async def check_pptx(
+    config: Config,
+    pptx: Path,
+    quest_root: Path,
+    *,
+    supervisor: ProxySupervisor | None = None,
+) -> dict[str, Any]:
+    """Export ``pptx`` through LibreOffice and check the PDF as ``slides_pptx``.
+    Without LibreOffice the report says the pptx was not checked. Never raises."""
+    out_dir = quest_root / ".fi" / "visual_check" / PPTX_KIND
+    try:
+        pdf, reason = await asyncio.to_thread(pptx_to_pdf, pptx, out_dir)
+    except Exception as exc:  # noqa: BLE001 — a check must never stop the quest
+        pdf, reason = None, f"{type(exc).__name__}: {exc}"[:500]
+    if pdf is None:
+        report = {"kind": PPTX_KIND, "pdf": pptx.name, "transport": "none", "reason": reason}
+        _write_report(quest_root, PPTX_KIND, report)
+        return report
+    return await check_pdf(config, PPTX_KIND, pdf, quest_root, supervisor=supervisor)
+
+
 async def _check(
     config: Config, kind: str, pdf: Path, quest_root: Path, supervisor: ProxySupervisor | None,
 ) -> dict[str, Any]:
     doc = measure_pdf(pdf)
     if doc is None or not doc.pages:
         return {"transport": "none", "error": "the PDF could not be read"}
-    measured = _REPORTS[kind](doc)
+    base = _BASE_KIND.get(kind, kind)
+    measured = _REPORTS[base](doc)
     result: dict[str, Any] = {
         "pages": len(doc.pages),
         "measured": {"metrics": measured["metrics"], "findings": measured["findings"]},
@@ -145,7 +178,12 @@ async def _check(
     return result
 
 
-_KIND_NAMES = {"paper": "research paper (PDF)", "slides": "slide deck (PDF)", "poster": "research poster (PDF)"}
+_KIND_NAMES = {
+    "paper": "research paper (PDF)",
+    "slides": "slide deck (PDF)",
+    "poster": "research poster (PDF)",
+    PPTX_KIND: "slide deck (PowerPoint file, exported to PDF by LibreOffice)",
+}
 
 
 async def _ask(config: Config, messages: list[dict[str, Any]], supervisor: ProxySupervisor | None) -> str:
@@ -174,7 +212,7 @@ def _screenshots(pdf: Path, quest_root: Path, kind: str) -> list[bytes]:
     shots_dir = quest_root / ".fi" / "visual_check" / kind
     for old in shots_dir.glob("page-*.png"):
         old.unlink(missing_ok=True)
-    shots = render_pages(pdf, shots_dir, dpi=_DPI, max_pages=_MAX_PAGES.get(kind))
+    shots = render_pages(pdf, shots_dir, dpi=_DPI, max_pages=_MAX_PAGES.get(_BASE_KIND.get(kind, kind)))
     return [_scaled_png(path) for path in shots]
 
 
@@ -275,6 +313,28 @@ def grounded_findings(raw: list[Any], doc, checks: set[str]) -> tuple[list[dict]
             continue
         dropped.append({**finding, "dropped_because": reason})
     return kept, dropped
+
+
+def report_summary(quest_root: Path) -> dict[str, Any] | None:
+    """Each output's result in brief, for ``frontier_insight_summary.json``
+    and the web quest page; ``None`` when nothing was checked."""
+    try:
+        checks = json.loads((quest_root / ".fi" / REPORT_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(checks, dict):
+        return None
+    return {
+        kind: {
+            "label": LABELS.get(kind, kind),
+            "transport": report.get("transport"),
+            "problems_seen": len(report.get("findings") or []),
+            "problems_measured": len((report.get("measured") or {}).get("findings") or []),
+            "redos": sum(1 for a in report.get("attempts") or [] if a.get("attempt")),
+            "reason": report.get("reason") or report.get("error"),
+        }
+        for kind, report in checks.items() if isinstance(report, dict)
+    }
 
 
 def _write_report(quest_root: Path, kind: str, report: dict[str, Any]) -> None:

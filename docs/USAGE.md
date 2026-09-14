@@ -441,7 +441,8 @@ paper onto a page.
 ### The visual check
 
 After the outputs render, FI checks each PDF the pass produced: the paper,
-the slides and the poster.
+the slides and the poster. With [LibreOffice](INSTALL.md#system-tools-optional)
+installed, `slides.pptx` is exported to PDF and checked too.
 
 - **What runs:** the PDF is measured (font sizes, overflow, columns) and
   screenshotted. The screenshots, the measurements and a fixed checklist go
@@ -458,11 +459,15 @@ the slides and the poster.
   version that checks best is kept. A redo is skipped for poster layout
   findings (empty space, uneven columns), which a new reply would not change.
   The paper is never rewritten: when its last page holds only a line or two,
-  it is recompiled once with a text area one line taller.
+  it is recompiled once with a text area one line taller. `slides.pptx` is
+  checked once, after the slides have settled: it comes from the same
+  `slides.md`, so a slides redo already made a new one.
 - **Report:** `.fi/visual_check.json` in the quest folder, with the
   screenshots under `.fi/visual_check/<output>/`. The run prints one line
   per output, for example
-  `[FI] visual check slides: 0 problem(s) seen on the pages, 1 measured; redone 1 time(s), kept redo 1`.
+  `[FI] visual check slides: 0 problem(s) seen on the pages, 1 measured; redone 1 time(s), kept redo 1`,
+  or `[FI] visual check slides.pptx: not checked (LibreOffice was not found)`.
+  The web quest page shows the same lines.
 - **Providers without image input** (see
   [PROVIDERS.md](PROVIDERS.md#which-providers-can-see-images)) check from the
   measurements alone, and the line says so.

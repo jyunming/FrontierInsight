@@ -39,8 +39,12 @@ def _record_checks(monkeypatch) -> list[tuple[str, str]]:
     async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
         return await fake_check(cfg, kind, pdf, quest_root, supervisor=supervisor)
 
+    async def fake_check_pptx(cfg, pptx, quest_root, *, supervisor):  # noqa: ANN001
+        return await fake_check(cfg, "slides_pptx", pptx, quest_root, supervisor=supervisor)
+
     monkeypatch.setattr(fi_launch, "check_pdf", fake_check)
     monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
+    monkeypatch.setattr(fi_launch, "check_pptx", fake_check_pptx)
     return checked
 
 
@@ -133,6 +137,27 @@ async def test_a_resume_checks_only_the_outputs_it_made(tmp_path: Path, monkeypa
     (tmp_path / "slides.pdf").write_bytes(b"%PDF-1.5\n...\n%%EOF\n")
     await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock(), skip_existing=True)
     assert checked == [("poster", "poster.pdf")]
+
+
+@pytest.mark.asyncio
+async def test_the_pptx_is_checked_after_the_slides_have_settled(tmp_path: Path, monkeypatch, capsys):
+    _install_fake_generators(monkeypatch, [])
+
+    class _Slides:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        async def generate(self, art, out_dir, *, supervisor, feedback=""):  # noqa: ANN001
+            return {"slides_pdf": out_dir / "slides.pdf", "slides_pptx": out_dir / "slides.pptx"}
+
+    monkeypatch.setattr(fi_launch, "SlideGenerator", _Slides)
+    checked = _record_checks(monkeypatch)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
+    await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock())
+    assert checked == [
+        ("paper", "paper.pdf"), ("slides", "slides.pdf"), ("poster", "poster.pdf"), ("slides_pptx", "slides.pptx"),
+    ]
+    assert "[FI] visual check slides.pptx: 0 problem(s) seen on the pages, 0 measured" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio

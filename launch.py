@@ -31,7 +31,7 @@ from core.engine import Engine, QuestArtifacts
 from core.provider import ProxySupervisor
 from generation.paper import PaperGenerator
 from generation.poster import PosterGenerator
-from generation._visual_check import check_and_redo, check_pdf
+from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
 from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
@@ -1470,22 +1470,9 @@ async def run_one(
             if failures.get("total"):
                 print(f"[FI] source failures: {failures.get('summary')}")
     # The visual check's per-output result, for the web quest page.
-    visual_path = art.quest_root / ".fi" / "visual_check.json"
-    if visual_path.is_file():
-        try:
-            checks = json.loads(visual_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            checks = None
-        if isinstance(checks, dict):
-            summary["visual_check"] = {
-                kind: {
-                    "transport": report.get("transport"),
-                    "problems_seen": len(report.get("findings") or []),
-                    "problems_measured": len((report.get("measured") or {}).get("findings") or []),
-                    "reason": report.get("reason") or report.get("error"),
-                }
-                for kind, report in checks.items() if isinstance(report, dict)
-            }
+    visual_check = report_summary(art.quest_root)
+    if visual_check is not None:
+        summary["visual_check"] = visual_check
     summary_path = art.quest_root / "frontier_insight_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[FI] summary -> {summary_path}")
@@ -1574,7 +1561,7 @@ def _visual_check_line(report: dict) -> str:
     if report.get("transport") == "images":
         return f"{seen} problem(s) seen on the pages, {measured} measured{redone} (.fi/visual_check.json)"
     if report.get("transport") == "measurements only":
-        return f"measurements only ({reason}); {measured} measured problem(s)"
+        return f"measurements only ({reason}); {measured} measured problem(s){redone}"
     return f"not checked ({reason})"
 
 
@@ -1749,6 +1736,12 @@ async def _run_generators(
             else:
                 report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
             print(f"[FI] visual check {kind}: {_visual_check_line(report)}")
+        # The pptx comes from the same slides.md, so a slides redo already
+        # remade it; it is checked once, as the redo left it.
+        pptx = written.get("slides_pptx")
+        if pptx is not None and "slides" not in carried:
+            report = await check_pptx(cfg, Path(pptx), art.quest_root, supervisor=supervisor)
+            print(f"[FI] visual check {LABELS['slides_pptx']}: {_visual_check_line(report)}")
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")
     # On a resume, surface any configured output still missing after the pass
@@ -3213,6 +3206,7 @@ def _doctor() -> int:
     from generation._pandoc import find_pandoc
     from generation._pdf_engine import find_pdf_engine
     from generation._html_pdf import find_html_browser
+    from generation._office_pdf import find_libreoffice
 
     ok_mark, no_mark = "  OK  ", " MISS "
     lines: list[str] = []
@@ -3256,6 +3250,14 @@ def _doctor() -> int:
             "Marp        python launch.py --install-marp   (no admin, no Node)\n"
             "                     airgapped: --install-marp-from <archive>\n"
             "                     only needed for slides.html / slides.pdf"
+        )
+
+    libreoffice = find_libreoffice()
+    has_libreoffice = row("LibreOffice", libreoffice, libreoffice or "")
+    if not has_libreoffice:
+        fixes.append(
+            "LibreOffice https://www.libreoffice.org/download/\n"
+            "                     only needed to check slides.pptx in the visual check"
         )
 
     try:

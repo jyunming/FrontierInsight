@@ -289,7 +289,7 @@ class SlideGenerator:
             if own_supervisor:
                 await sup.shutdown()
 
-        content = _fences_as_slide_breaks(_strip_outer_fence(text))
+        content = _figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text)))
         # Append a References slide built from the quest's actual sources
         # (web pages + papers), guaranteed rather than left to the LLM —
         # the deck author only saw the first 8000 chars of paper.md and
@@ -537,6 +537,37 @@ def _strip_outer_fence(text: str) -> str:
 _FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", re.DOTALL)
 _SLIDE_BREAK_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
 _BARE_FENCE_LINE_RE = re.compile(r"^```[ \t]*$", re.MULTILINE)
+
+
+_FIGURE_LINE_RE = re.compile(r"^\s*!\[(?P<alt>[^\]]*)\]\([^)]*\)\s*$")
+
+
+def _figures_as_own_paragraphs(content: str) -> str:
+    """Put a blank line around each figure line that has text directly above
+    or below it.
+
+    Text on the next line joins the figure's paragraph, and the theme can fit
+    a figure into the room left on its slide only when the figure is a
+    paragraph of its own. gemma4 wrote its "**Figure 2:** ..." caption on the
+    line under the image, and the caption ended up below the slide's bottom
+    edge. Background figures (``![bg ...]``) are not in the text flow and are
+    left alone, as is anything inside a code fence."""
+    lines = content.split("\n")
+    out: list[str] = []
+    in_code = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            in_code = not in_code
+        match = None if in_code else _FIGURE_LINE_RE.match(line)
+        if match is None or "bg" in match.group("alt").split():
+            out.append(line)
+            continue
+        if out and out[-1].strip():
+            out.append("")
+        out.append(line)
+        if index + 1 < len(lines) and lines[index + 1].strip():
+            out.append("")
+    return "\n".join(out)
 
 
 def _fences_as_slide_breaks(content: str) -> str:
