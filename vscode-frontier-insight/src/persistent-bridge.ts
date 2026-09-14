@@ -24,12 +24,13 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as net from "net";
 import { persistentBridgePath } from "./bridge-path";
+import { BridgeMessage, ChatMessageApi, toChatMessages } from "./lm-messages";
 
 interface LmRequest {
     type: "lm_request";
     id: number;
     node: string;
-    messages: Array<{ role: string; content: string }>;
+    messages: BridgeMessage[];
     model_hint: string;
     temperature: number;
 }
@@ -359,10 +360,8 @@ export class PersistentBridge {
             // prefixes ``[SYSTEM]`` consistently); diverging here
             // would silently change quest behaviour depending on
             // which transport the user happened to be on.
-            const messages = req.messages.map((m) =>
-                m.role === "assistant"
-                    ? vscode.LanguageModelChatMessage.Assistant(m.content)
-                    : vscode.LanguageModelChatMessage.User(m.content),
+            const messages = toChatMessages<vscode.LanguageModelChatMessage>(
+                req.messages, vscode as unknown as ChatMessageApi,
             );
             const cts = new vscode.CancellationTokenSource();
             // Dispose ``cts`` on every exit path. The original code only

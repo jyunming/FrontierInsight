@@ -45,10 +45,12 @@ same proxy provider shares one proxy process.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -181,6 +183,13 @@ class _CliSpec:
     # raw text: antigravity reads one NDJSON envelope per turn and rejects a
     # bare string. ``None`` writes the prompt unchanged.
     stdin_encoder: Callable[[str], str] | None = None
+    # How this CLI takes images when a message carries image parts:
+    # ``"stream_json"`` sends them inline in a ``--input-format stream-json``
+    # user turn (claude); ``"file_flag"`` writes each to a temp file passed
+    # with ``image_flag``. ``None`` means the CLI cannot take images, and a
+    # call that carries them raises ``ImageInputUnsupported``.
+    image_input: str | None = None
+    image_flag: str | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -251,6 +260,23 @@ def _encode_antigravity_stdin(prompt: str) -> str:
         "event": "user",
         "message": {"role": "user", "content": prompt},
     }, ensure_ascii=False) + "\n"
+
+
+def _encode_claude_stream_json(prompt: str, images: list[tuple[str, bytes]]) -> str:
+    """One ``--input-format stream-json`` user turn for claude: the images as
+    base64 blocks, then the prompt. Checked against the real CLI: it named
+    the shapes and colours in a test image."""
+    content: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(data).decode("ascii")},
+        }
+        for mime, data in images
+    ]
+    content.append({"type": "text", "text": prompt})
+    return json.dumps(
+        {"type": "user", "message": {"role": "user", "content": content}}, ensure_ascii=False,
+    ) + "\n"
 
 
 def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
@@ -445,6 +471,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         output_via="stream_json",
         usage_extractor=lambda raw: _extract_claude_usage(raw),
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
+        image_input="stream_json",
     ),
     "codex_cli": _CliSpec(
         # `codex exec` runs Codex non-interactively. We pipe the prompt
@@ -870,6 +897,64 @@ def _extract_gemini_response(raw: str) -> str:
     return raw
 
 
+# Rough token cost of one image part, for the usage estimate when a transport
+# reports no usage. Vision models bill a page screenshot at around a thousand
+# tokens; the estimate only has to be the right order.
+_IMAGE_TOKENS_ESTIMATE = 1000
+_DATA_URL_RE = re.compile(r"^data:(image/[\w.+-]+);base64,(.+)$", re.DOTALL)
+_IMAGE_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+
+
+class ImageInputUnsupported(RuntimeError):
+    """This transport cannot send images to its model. A caller that attaches
+    screenshots catches it and checks from the text measurements alone."""
+
+
+def image_part(data: bytes, mime: str = "image/png") -> dict[str, Any]:
+    """An OpenAI ``image_url`` content part carrying ``data`` inline."""
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+
+
+def _content_text(content: Any) -> str:
+    """A message's text: the string itself, or the text parts of an OpenAI
+    content-part list joined by blank lines."""
+    if isinstance(content, list):
+        return "\n\n".join(
+            str(part["text"]) for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+        )
+    return "" if content is None else str(content)
+
+
+def _content_images(content: Any) -> list[tuple[str, bytes]]:
+    """``(mime type, bytes)`` for each base64 ``data:`` image part."""
+    images: list[tuple[str, bytes]] = []
+    if not isinstance(content, list):
+        return images
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "image_url":
+            continue
+        ref = part.get("image_url")
+        url = ref.get("url", "") if isinstance(ref, dict) else str(ref or "")
+        match = _DATA_URL_RE.match(url)
+        if match:
+            images.append((match.group(1), base64.b64decode(match.group(2))))
+    return images
+
+
+def _message_images(messages: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
+    return [image for m in messages for image in _content_images(m.get("content"))]
+
+
+def _with_text(content: Any, text: str) -> Any:
+    """``content`` with its text replaced and its image parts kept."""
+    if isinstance(content, list):
+        images = [p for p in content if isinstance(p, dict) and p.get("type") == "image_url"]
+        return [{"type": "text", "text": text}, *images]
+    return text
+
+
 def _messages_to_text(messages: list[dict[str, str]]) -> str:
     """Flatten OpenAI Chat-Completions messages into one text block.
 
@@ -880,7 +965,7 @@ def _messages_to_text(messages: list[dict[str, str]]) -> str:
     parts: list[str] = []
     for m in messages:
         role = m.get("role", "user")
-        content = m.get("content", "")
+        content = _content_text(m.get("content", ""))
         if role == "system":
             parts.append(f"[system]\n{content}")
         elif role == "assistant":
@@ -1188,6 +1273,7 @@ async def _run_cli(
     spec: _CliSpec,
     prompt: str,
     *,
+    images: list[tuple[str, bytes]] | None = None,
     model: str = "",
     timeout_s: float = 300.0,
     inactivity_timeout_s: float = 180.0,
@@ -1260,6 +1346,32 @@ async def _run_cli(
         tmp_out_path = Path(tmp.name)
         argv.extend(["--output-last-message", str(tmp_out_path)])
 
+    # Images: claude reads them inline from a stream-json turn; a CLI with an
+    # image flag gets one temp file per image, removed in the finally below
+    # with the answer file. The flags go before a trailing prompt flag.
+    image_paths: list[Path] = []
+    if images:
+        if spec.image_input == "stream_json":
+            argv.extend(["--input-format", "stream-json"])
+        elif spec.image_input == "file_flag" and spec.image_flag:
+            flags: list[str] = []
+            for mime, data in images:
+                tmp_image = tempfile.NamedTemporaryFile(
+                    prefix="fi_cli_image_", suffix=_IMAGE_SUFFIXES.get(mime, ".png"), delete=False,
+                )
+                image_paths.append(Path(tmp_image.name))
+                with tmp_image:
+                    tmp_image.write(data)
+                flags.extend([spec.image_flag, str(image_paths[-1])])
+            if spec.pass_prompt_via == "arg":
+                argv[-1:-1] = flags
+            else:
+                argv.extend(flags)
+        else:
+            if tmp_out_path is not None:
+                tmp_out_path.unlink(missing_ok=True)
+            raise ImageInputUnsupported(f"{spec.argv[0]} cannot send images to its model")
+
     # Cap the prompt for CLIs with a hard per-turn input limit (codex_cli),
     # trimming the middle context so the call goes through instead of the
     # CLI rejecting it with ``input_too_large`` and failing the node.
@@ -1279,7 +1391,10 @@ async def _run_cli(
         argv.append(prompt)
         stdin_bytes: bytes | None = None
     else:  # stdin
-        payload = spec.stdin_encoder(prompt) if spec.stdin_encoder else prompt
+        if images and spec.image_input == "stream_json":
+            payload = _encode_claude_stream_json(prompt, images)
+        else:
+            payload = spec.stdin_encoder(prompt) if spec.stdin_encoder else prompt
         stdin_bytes = payload.encode("utf-8")
 
     # When the real answer lands in `tmp_out_path`, the CLI's stdout is just
@@ -1352,6 +1467,8 @@ async def _run_cli(
     finally:
         if tmp_out_path is not None:
             tmp_out_path.unlink(missing_ok=True)
+        for image_path in image_paths:
+            image_path.unlink(missing_ok=True)
 
 
 # Cadence of the run.log heartbeat for the non-streaming CLIs (codex/copilot/
@@ -2240,11 +2357,14 @@ class LLMClient:
         Pathological case (the OTHER messages alone already exceed the cap):
         trimming one message can't help, so every message is hard-clamped to its
         proportional share of the cap. Loses the head+tail nicety, but still
-        guarantees the bound."""
+        guarantees the bound.
+
+        Only text counts toward the cap and only text is trimmed; the image
+        parts of a content-part list ride along untouched."""
         cap = self._max_prompt_chars
         if cap <= 0:
             return messages
-        lengths = [len(str(m.get("content", ""))) for m in messages]
+        lengths = [len(_content_text(m.get("content", ""))) for m in messages]
         total = sum(lengths)
         if total <= cap:
             return messages
@@ -2254,7 +2374,7 @@ class LLMClient:
         budget = cap - others  # chars the largest message may keep
         marker = f"\n\n... [FI: prompt trimmed to fit the {cap}-char cap] ...\n\n"
         if budget > 0:
-            content = str(trimmed[idx].get("content", ""))
+            content = _content_text(trimmed[idx].get("content", ""))
             if budget > len(marker) + 2:
                 keep = budget - len(marker)
                 head = keep // 2
@@ -2265,18 +2385,18 @@ class LLMClient:
             else:
                 # Budget too tight to fit the marker — hard-clamp to the budget.
                 new_content = content[:budget]
-            trimmed[idx]["content"] = new_content
+            trimmed[idx]["content"] = _with_text(trimmed[idx].get("content", ""), new_content)
         else:
             # Even excluding the largest message the prompt is over the cap;
             # clamp every message to its proportional share (floors sum <= cap).
             for i, m in enumerate(trimmed):
                 share = (cap * lengths[i]) // total if total else 0
-                m["content"] = str(m.get("content", ""))[:share]
+                m["content"] = _with_text(m.get("content", ""), _content_text(m.get("content", ""))[:share])
         _log.warning(
             "[prompt-trim] node=%s prompt %d chars > cap %d — trimmed to fit "
             "(%d chars now)",
             node or "?", total, cap,
-            sum(len(str(m.get("content", ""))) for m in trimmed),
+            sum(len(_content_text(m.get("content", ""))) for m in trimmed),
         )
         return trimmed
 
@@ -2442,9 +2562,12 @@ class LLMClient:
         was already captured upstream (HTTP responses with ``usage``)."""
         if self.last_usage is not None:
             return
-        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        prompt_chars = sum(len(_content_text(m.get("content", ""))) for m in messages)
         completion_chars = len(completion or "")
-        prompt_tokens = max(1, prompt_chars // self._CHARS_PER_TOKEN)
+        prompt_tokens = (
+            max(1, prompt_chars // self._CHARS_PER_TOKEN)
+            + _IMAGE_TOKENS_ESTIMATE * len(_message_images(messages))
+        )
         completion_tokens = max(0, completion_chars // self._CHARS_PER_TOKEN)
         self.last_usage = {
             "prompt_tokens": prompt_tokens,
@@ -2593,6 +2716,9 @@ class LLMClient:
         if spec is None:  # pragma: no cover — guarded by transport check
             raise RuntimeError("transport=cli but no cli_spec set")
         prompt = _messages_to_text(messages)
+        # A CLI that cannot take images raises ImageInputUnsupported from
+        # _run_cli before anything is spawned; it is not retried.
+        images = _message_images(messages)
 
         # Pick the per-call total-timeout: node-specific override wins,
         # else the client-level default.
@@ -2668,6 +2794,7 @@ class LLMClient:
                 measured: dict[str, Any] = {}
                 text = await _run_cli(
                     spec, prompt,
+                    images=images,
                     model=effective_model,
                     timeout_s=effective_total_timeout,
                     inactivity_timeout_s=effective_inactivity,

@@ -22,6 +22,7 @@
 import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
+import { BridgeMessage, ChatMessageApi, toChatMessages } from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
 // in the chat panel — strip / escape markdown that would
@@ -50,7 +51,7 @@ interface LmRequest {
     type: "lm_request";
     id: number;
     node: string;
-    messages: Array<{ role: string; content: string }>;
+    messages: BridgeMessage[];
     model_hint: string;
     temperature: number;
 }
@@ -436,11 +437,10 @@ export class Bridge {
                 return;
             }
 
-            // Translate FI's OpenAI-shaped messages into vscode.LanguageModelChatMessage.
-            const chatMessages = req.messages.map((m) =>
-                m.role === "assistant"
-                    ? vscode.LanguageModelChatMessage.Assistant(m.content)
-                    : vscode.LanguageModelChatMessage.User(m.content),
+            // Translate FI's OpenAI-shaped messages (text, or text and
+            // screenshots) into vscode.LanguageModelChatMessage.
+            const chatMessages = toChatMessages<vscode.LanguageModelChatMessage>(
+                req.messages, vscode as unknown as ChatMessageApi,
             );
 
             // Send with bounded retry. Copilot's backend occasionally
