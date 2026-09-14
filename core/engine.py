@@ -20,6 +20,7 @@ import re
 import shutil
 import string
 import time
+import unicodedata
 import uuid
 
 import yaml
@@ -5247,15 +5248,24 @@ class Engine:
             return {}
         paper_text = Path(paper_md).read_text(encoding="utf-8")[:16000]
         literature = state.get("literature") or []
-        refs = build_references(literature, audience=self.config.output.audience)
+        audience = self.config.output.audience
+        refs = build_references(literature, audience=audience)
         # Web pages are Further reading, labelled W1, W2...; a claim resting on
         # one is grounded in a source too.
-        further = build_further_reading(literature, audience=self.config.output.audience)
-        refs_block = "\n".join(
-            [f"[{r['n']}] {r['title']}" + (f" · DOI:{r['doi']}" if r.get("doi") else "")
-             for r in refs]
-            + [f"[{w['label']}] {w['title']}" + (f" · {w['url']}" if w.get("url") else "")
-               for w in further]
+        further = build_further_reading(literature, audience=audience)
+        # Each source the paper cites comes with its text, and a citation must
+        # quote it: the model checks what the source says, and the quote is
+        # then looked up in the source.
+        sources = {
+            label: (meta, _item_content(item))
+            for label, meta, item in _labelled_sources(literature, audience)
+        }
+        citing = _citing_sentences(paper_text)
+        refs_block = "\n\n".join(
+            _claim_source_block(label, meta, text, citing.get(label) or [])
+            for label, (meta, text) in sorted(
+                sources.items(), key=lambda kv: (kv[0].startswith("W"), int(kv[0].lstrip("W")))
+            )
         ) or "(no references)"
         analysis = state.get("analysis") or {}
         evidence = {
@@ -5313,13 +5323,22 @@ class Engine:
                     number = 0
                 if 1 <= number <= n_refs:
                     cite_idx = number
+            quote = " ".join(str(c.get("quote") or "").split())
+            evidence = str(c.get("evidence") or "").strip()
             if basis == "citation" and cite_idx is None:
                 basis = "unsupported"
+            elif basis == "citation" and not _quote_in_source(quote, sources[str(cite_idx)][1]):
+                # The model had the source's text; a citation it cannot quote
+                # from that text is not one the source supports.
+                basis = "unsupported"
+                why = f"no quote from [{cite_idx}] given" if not quote else f"the quote is not in the text of [{cite_idx}]"
+                evidence = f"{evidence} ({why})".strip()
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
                 "citation_index": cite_idx,
-                "evidence": str(c.get("evidence") or "").strip(),
+                "quote": quote,
+                "evidence": evidence,
             })
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         grounding = {
@@ -5668,7 +5687,8 @@ class Engine:
                 tag = (f"cite [{c['citation_index']}]"
                        if c["basis"] == "citation" else c["basis"])
                 lines.append(f"- **[{tag}]** {c['claim']}"
-                             + (f" — {c['evidence']}" if c["evidence"] else ""))
+                             + (f" — {c['evidence']}" if c["evidence"] else "")
+                             + (f" — quoted: \"{c['quote']}\"" if c.get("quote") else ""))
             (paper_dir / "CLAIMS.md").write_text(
                 "\n".join(lines) + "\n", encoding="utf-8",
             )
@@ -7455,46 +7475,136 @@ def _latex_esc(s: str) -> str:
     return s
 
 
-# A slide of sources holds about this much list text; a longer list continues
-# on a "(continued)" slide instead of running off the slide (the HTML/PDF
-# deck) or shrinking its type below a readable size (the pptx, which scaled a
-# twelve-entry References slide down to 9.4 pt). Each entry costs its wrapped
-# lines plus half a line of spacing.
+# The deck ends on one slide of sources: the ones the paper cites most, as many
+# as fit, and a pointer to the paper for the rest. The validation quest's
+# nine-slide talk ended on three References and three Further reading slides
+# that no slide cited. A slide holds about this much list text; each entry
+# costs its wrapped lines plus half a line of spacing.
 _SOURCE_SLIDE_CHARS_PER_LINE = 95
 _SOURCE_SLIDE_LINES = 12
+_SOURCE_SLIDE_MAX = 6
+# A citation in a paper's text: "[3]", "[1, 4]", "[2-5]", "[W1]" or "[2, W1]".
+_CITATION_PART = r"(?:W\d+|\d+(?:\s*[–-]\s*\d+)?)"
+_CITATION_BRACKET_RE = re.compile(rf"\[({_CITATION_PART}(?:\s*[,;]\s*{_CITATION_PART})*)\]")
+_REFERENCES_HEADING_RE = re.compile(r"^#{1,6}\s*references\s*$", re.IGNORECASE | re.MULTILINE)
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\[])")
 
 
-def _source_slides(heading: str, entries: list[str], note: str = "") -> str:
-    """Marp slides listing ``entries`` under ``heading``, split where a slide
-    would hold more than ``_SOURCE_SLIDE_LINES`` lines of text."""
-    chunks: list[list[str]] = []
-    used = 0.0
-    for entry in entries:
-        cost = -(-len(entry) // _SOURCE_SLIDE_CHARS_PER_LINE) + 0.5
-        if not chunks or (chunks[-1] and used + cost > _SOURCE_SLIDE_LINES):
-            chunks.append([])
-            used = 0.0
-        chunks[-1].append(entry)
-        used += cost
-    slides = []
-    for index, chunk in enumerate(chunks):
-        title = heading if index == 0 else f"{heading} (continued)"
-        lines = ["---", "", f"## {title}", "", *chunk]
-        if note and index == len(chunks) - 1:
-            lines.append(f"\n{note}")
-        slides.append("\n".join(lines))
-    return "\n\n".join(slides)
+def _citation_labels(inside: str) -> list[str]:
+    """The source labels one citation bracket names, ranges spelled out."""
+    labels: list[str] = []
+    for part in re.split(r"[,;]", inside):
+        part = part.strip()
+        if part.startswith("W"):
+            labels.append(part)
+            continue
+        ends = [int(x) for x in re.split(r"[–-]", part) if x.strip()]
+        labels += [str(n) for n in range(ends[0], min(ends[-1], ends[0] + 50) + 1)]
+    return labels
 
 
-def render_references_marp_slide(refs: list[dict[str, Any]], *, max_n: int = 18) -> str:
-    """Marp slides listing sources, appended after the LLM's deck so a
-    References slide always lands when sources exist. A long list continues
-    on further slides."""
+def _paper_body(paper_md: str) -> str:
+    """The paper without its own reference list and what follows it."""
+    return _REFERENCES_HEADING_RE.split(paper_md or "", maxsplit=1)[0]
+
+
+def _citation_counts(paper_md: str) -> dict[int, int]:
+    """How often the paper's text cites each numbered reference."""
+    counts: dict[int, int] = {}
+    for match in _CITATION_BRACKET_RE.finditer(_paper_body(paper_md)):
+        for label in _citation_labels(match.group(1)):
+            if label.isdigit():
+                counts[int(label)] = counts.get(int(label), 0) + 1
+    return counts
+
+
+def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
+    """Each source label the paper's text cites, with the sentences that cite it."""
+    found: dict[str, list[str]] = {}
+    for block in re.split(r"\n\s*\n", _paper_body(paper_md)):
+        for sentence in _SENTENCE_END_RE.split(" ".join(block.split())):
+            for match in _CITATION_BRACKET_RE.finditer(sentence):
+                for label in _citation_labels(match.group(1)):
+                    sentences = found.setdefault(label, [])
+                    if sentence not in sentences:
+                        sentences.append(sentence)
+    return found
+
+
+# Claim grounding shows the model this much of each cited source's text: the
+# passages most related to the sentences citing it. It saw only titles before,
+# and grounded "explicit Euler is unstable in oscillatory systems" in a paper
+# on discrete gradients whose abstract never mentions Euler.
+_CLAIM_SOURCE_CHARS = 1500
+# A quote shorter than this could be found in almost any source.
+_QUOTE_MIN_CHARS = 25
+
+
+def _item_content(item: Any) -> str:
+    content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+    return str(content or "")
+
+
+def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str]) -> str:
+    """One source for the claim check: its label and title, and, when the
+    paper cites it, the passages of its text most related to the citing
+    sentences."""
+    title = str(meta.get("title") or "").strip()
+    ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
+    head = f"[{label}] {title}" + (f" · {ident}" if ident else "")
+    if not sentences:
+        return head
+    if not text.strip():
+        return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
+    excerpt = _format_lit_excerpt(text, title, query=" ".join(sentences), budget=_CLAIM_SOURCE_CHARS)
+    return head + "\nText:\n" + excerpt.strip()
+
+
+def _normalized_text(text: str) -> str:
+    """Lower case, one space between words, straight dashes, no quote marks,
+    and words a PDF hyphenated across lines joined again."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
+    text = re.sub(r"[‘’‚‛“”„\"'`´]", "", text.lower())
+    text = re.sub(r"[‐-―−]", "-", text)
+    return " ".join(text.split())
+
+
+def _quote_in_source(quote: str, source: str) -> bool:
+    """Whether ``quote`` is words ``source`` has. Parts an ellipsis joins are
+    looked for one by one, and together they must be long enough to mean
+    something."""
+    haystack = _normalized_text(source)
+    parts = [p.strip(" .,;:[]") for p in re.split(r"\.\.\.", _normalized_text(quote))]
+    parts = [p for p in parts if p]
+    return (
+        bool(parts) and sum(len(p) for p in parts) >= _QUOTE_MIN_CHARS
+        and all(p in haystack for p in parts)
+    )
+
+
+def render_references_marp_slide(refs: list[dict[str, Any]], *, paper_md: str = "") -> str:
+    """One Marp slide listing the sources ``paper_md`` cites most, in
+    reference order and as many as fit, appended after the LLM's deck so a
+    References slide always lands when sources exist."""
     if not refs:
         return ""
-    entries = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs[:max_n]]
-    note = f"_(+{len(refs) - max_n} more sources)_" if len(refs) > max_n else ""
-    return _source_slides("References", entries, note)
+    counts = _citation_counts(paper_md)
+    ranked = sorted(refs, key=lambda r: (-counts.get(r["n"], 0), r["n"]))
+    chosen: list[tuple[int, str]] = []
+    used = 0.0
+    for ref in ranked[:_SOURCE_SLIDE_MAX]:
+        entry = f"- [{ref['n']}] {_ref_citation_text(ref)}"
+        cost = -(-len(entry) // _SOURCE_SLIDE_CHARS_PER_LINE) + 0.5
+        if chosen and used + cost > _SOURCE_SLIDE_LINES:
+            break
+        chosen.append((ref["n"], entry))
+        used += cost
+    lines = ["---", "", "## References", "", *(entry for _n, entry in sorted(chosen))]
+    rest = len(refs) - len(chosen)
+    if rest:
+        lines += ["", f"_({rest} more {'source' if rest == 1 else 'sources'} in the paper)_"]
+    return "\n".join(lines)
 
 
 # A "Further reading" heading at any level, however the writer capitalised it.
@@ -7505,18 +7615,6 @@ _FURTHER_READING_HEADING_RE = re.compile(
 
 def _further_reading_lines(further: list[dict[str, Any]]) -> list[str]:
     return [f"- [{w['label']}] {_ref_citation_text(w)}" for w in further]
-
-
-def render_further_reading_marp_slide(
-    further: list[dict[str, Any]], *, max_n: int = 18,
-) -> str:
-    """Marp slides listing the web pages the quest drew on, appended after
-    the References slides: web pages are Further reading, not References. A
-    long list continues on further slides."""
-    if not further:
-        return ""
-    note = f"_(+{len(further) - max_n} more pages)_" if len(further) > max_n else ""
-    return _source_slides("Further reading", _further_reading_lines(further[:max_n]), note)
 
 
 def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str:

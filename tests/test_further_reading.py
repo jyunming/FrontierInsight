@@ -32,7 +32,6 @@ from core.engine import (
     _format_lit_from_state,
     build_further_reading,
     build_references,
-    render_further_reading_marp_slide,
     render_references_marp_slide,
 )
 from core.provider import ResolvedEndpoint
@@ -170,11 +169,12 @@ def test_a_claim_can_rest_on_a_further_reading_source(tmp_path: Path) -> None:
         seen["prompt"] = prompt
         return json.dumps({"claims": [
             {"claim": "Figures sold in millions", "basis": "citation",
-             "citation_index": "W1", "evidence": "the collector page"},
+             "citation_index": "W1", "evidence": "the collector page",
+             "quote": "A collector's history of action figures"},
             {"claim": "Television drove toy lines", "basis": "citation",
-             "citation_index": 2, "evidence": "the paper"},
+             "citation_index": 2, "evidence": "the paper", "quote": "Toys, television and the 1980s"},
             {"claim": "Museums kept the boxes", "basis": "citation",
-             "citation_index": "[w2]", "evidence": ""},
+             "citation_index": "[w2]", "evidence": "", "quote": "Museum of Play: the 1980s page text"},
             {"claim": "A page that does not exist", "basis": "citation",
              "citation_index": "W9", "evidence": ""},
         ], "summary": ""})
@@ -232,12 +232,11 @@ def test_the_band_carries_the_brand_mark_on_its_heading_line() -> None:
     assert "fi_icon.png" in _band_latex([], "References", 2, True)
 
 
-def test_slides_get_a_separate_further_reading_slide() -> None:
-    slide = render_further_reading_marp_slide(build_further_reading(LIT))
-    assert slide.startswith("---") and "## Further reading" in slide
-    assert "- [W2] Museum of Play: the 1980s. https://museum.example/1980s" in slide
-    assert render_further_reading_marp_slide([]) == ""
-    assert "museum.example" not in render_references_marp_slide(build_references(LIT))
+def test_the_source_slide_lists_papers_but_not_web_pages() -> None:
+    slide = render_references_marp_slide(build_references(LIT))
+    assert slide.startswith("---") and "## References" in slide
+    assert "museum.example" not in slide
+    assert render_references_marp_slide([]) == ""
 
 
 def _long_refs(count: int) -> list[dict]:
@@ -251,69 +250,74 @@ def _long_refs(count: int) -> list[dict]:
     ]
 
 
-def test_a_long_reference_list_continues_on_further_slides() -> None:
+def _entries(deck: str) -> list[int]:
+    return [int(line[3:line.index("]")]) for line in deck.splitlines() if line.startswith("- [")]
+
+
+def test_the_source_slide_lists_the_most_cited_references_on_one_slide() -> None:
+    """The validation quest's nine-slide talk ended on three References and
+    three Further reading slides, and no slide cited any of them."""
     from core import engine
 
-    deck = render_references_marp_slide(_long_refs(12))
-    slides = [s for s in deck.split("---") if s.strip()]
-    headings = [s.strip().splitlines()[0] for s in slides]
-    assert len(slides) >= 2
-    assert headings[0] == "## References" and set(headings[1:]) == {"## References (continued)"}
-    for k in range(1, 13):
-        assert sum(s.count(f"\n{k}. ") for s in slides) == 1, k
-    budget = engine._SOURCE_SLIDE_LINES
-    per_line = engine._SOURCE_SLIDE_CHARS_PER_LINE
-    for slide in slides:
-        entries = [line for line in slide.splitlines() if line[:1].isdigit()]
-        assert sum(-(-len(e) // per_line) + 0.5 for e in entries) <= budget
+    paper = (
+        "Intro [4]. Method [2, 4]. Results [4], [7] and [9-11], with a page [W1].\n\n"
+        "## References\n\n1. Not counted [3] [3] [3].\n"
+    )
+    deck = render_references_marp_slide(_long_refs(12), paper_md=paper)
+    assert deck.count("---") == 1 and deck.count("## References") == 1 and "(continued)" not in deck
+    numbers = _entries(deck)
+    # Chosen by how often the paper cites them, listed in reference order.
+    assert numbers[:2] == [2, 4] and numbers == sorted(numbers) and set(numbers) <= {2, 4, 7, 9, 10, 11}
+    entries = [line for line in deck.splitlines() if line.startswith("- [")]
+    assert sum(-(-len(e) // engine._SOURCE_SLIDE_CHARS_PER_LINE) + 0.5 for e in entries) <= engine._SOURCE_SLIDE_LINES
+    assert deck.rstrip().endswith(f"_({12 - len(numbers)} more sources in the paper)_")
 
 
-def test_a_short_source_list_stays_on_one_slide_and_keeps_its_note() -> None:
-    deck = render_references_marp_slide(_long_refs(3))
-    assert deck.count("## References") == 1 and "(continued)" not in deck
-    capped = render_references_marp_slide(_long_refs(20), max_n=18)
-    assert capped.rstrip().endswith("_(+2 more sources)_")
-    assert "18. " in capped and "19. " not in capped
+def test_a_short_source_list_is_listed_whole() -> None:
+    short = [{"n": k, "title": f"Study {k}", "authors": ["A. Author"], "year": 2000 + k} for k in range(1, 9)]
+    assert _entries(render_references_marp_slide(short[:3])) == [1, 2, 3]
+    assert "in the paper" not in render_references_marp_slide(short[:3])
+    # Nothing cited: the first ones, up to the cap.
+    uncited = render_references_marp_slide(short)
+    assert _entries(uncited) == [1, 2, 3, 4, 5, 6] and uncited.rstrip().endswith("_(2 more sources in the paper)_")
 
 
-def test_a_long_further_reading_list_continues_too() -> None:
-    web = [
-        {"label": f"W{k}", "title": f"A web page with a long descriptive title, number {k}",
-         "url": f"https://example.org/questions/{k}/energy-of-a-damped-harmonic-oscillator-begins-to-increase"}
-        for k in range(1, 11)
-    ]
-    deck = render_further_reading_marp_slide(web)
-    assert "## Further reading\n" in deck and "## Further reading (continued)" in deck
-    assert all(deck.count(f"[W{k}] ") == 1 for k in range(1, 11))
-
-
-def test_the_deck_theme_styles_continuation_source_slides_like_the_first() -> None:
-    """Marp gives "Further reading (continued)" the id further-reading-continued;
-    an exact-id selector left those slides in the large body type."""
+def test_the_deck_theme_styles_the_source_slide() -> None:
     css = (Path(__file__).resolve().parent.parent / "templates" / "slides" / "fi.css").read_text(encoding="utf-8")
-    assert 'section:has(h2[id^="references"]) ol' in css
+    assert 'section:has(h2[id^="references"]) ul' in css
     assert 'section:has(h2[id^="further-reading"]) ul' in css
-    assert "h2#further-reading)" not in css
 
 
 @pytest.mark.parametrize("deck,further_slides", [
-    ("---\nmarp: true\n---\n\n# Play\n", 1),
+    ("---\nmarp: true\n---\n\n# Play\n", 0),
     ("---\nmarp: true\n---\n\n# Play\n\n---\n\n## Further reading\n\n- a page\n", 1),
 ])
 @pytest.mark.asyncio
-async def test_the_deck_ends_with_references_then_further_reading(
+async def test_the_deck_ends_on_one_references_slide(
     tmp_path: Path, monkeypatch, deck: str, further_slides: int,
 ) -> None:
     art = _artifacts(tmp_path)
     _fake_model(monkeypatch, "slides", deck)
+    import generation.slides as slides_mod
+
+    seen: dict = {}
+    render = slides_mod.render_references_marp_slide
+
+    def recording(refs, **kw):  # noqa: ANN001
+        seen.update(kw)
+        return render(refs, **kw)
+
+    monkeypatch.setattr(slides_mod, "render_references_marp_slide", recording)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     slides_md = await SlideGenerator(_config(tmp_path, ["slides"]))._author_marp(
         art, out_dir, supervisor=None)
     text = slides_md.read_text(encoding="utf-8")
-    assert text.count("## Further reading") == further_slides, "never a second copy"
-    assert "## References" in text
-    assert text.index("## References") < text.rindex("## Further reading") or "a page" in text
+    # The slide is chosen by what the whole paper cites, not the 8000 characters the deck author saw.
+    assert seen["paper_md"] == art.paper_md.read_text(encoding="utf-8")
+    assert text.count("## References") == 1
+    # Web pages stay in the paper; a Further reading slide the deck wrote itself stays too.
+    assert text.count("## Further reading") == further_slides
 
 
 def test_the_bib_export_splits_papers_and_web_pages(tmp_path: Path) -> None:
