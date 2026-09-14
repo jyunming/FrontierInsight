@@ -577,6 +577,35 @@ def test_rescale_learns_from_the_measured_column_without_its_added_space() -> No
     assert layout.column_height(0) == pytest.approx(2 * estimated)
 
 
+def test_the_text_after_a_figure_stays_with_the_figure() -> None:
+    """The validation quest's poster opened its second column on the two
+    sentences under "Energy Decay Performance"'s figure, with no heading."""
+    blocks = [
+        _Block("heading", text="Background"), _Block("text", text=_sentences(2)),
+        _Block("heading", text="Energy decay"), _Block("figure", file="b.png", caption="b"),
+        _Block("text", text=_sentences(2)),
+        _Block("figure", file="c.png", caption="c"), _Block("bullets", items=["one", "two"]),
+        _Block("heading", text="What it means"), _Block("text", text=_sentences(3)),
+    ]
+    assert poster_mod._units(blocks) == [[0, 1], [2, 3, 4], [5, 6], [7, 8]]
+
+
+def test_a_column_that_opens_inside_a_section_repeats_its_heading() -> None:
+    blocks = [
+        _Block("heading", text="Energy decay"), _Block("text", text=_sentences(6)),
+        _Block("text", text=_sentences(3)), _Block("heading", text="Drift"), _Block("text", text=_sentences(3)),
+    ]
+    layout = _Layout(A1, blocks, {}, {})
+    layout.groups = [[0, 1], [2, 3, 4]]
+    layout._spread(200 * PT_PER_CM)
+    assert layout.continued_heading(0) is None and layout.continued_heading(1) == 0
+    tex = layout.columns_latex()
+    second = tex[tex.index(r"\begin{column}", tex.index(r"\begin{column}") + 1):]
+    assert second.index(r"\posterhead{Energy decay (continued)}") < second.index("Sentence number 0")
+    heading = layout._heading_height("Energy decay (continued)")
+    assert layout.column_height(1) == pytest.approx(sum(layout.estimate(i) for i in (2, 3, 4)) + heading)
+
+
 # ---------------------------------------------------------------------------
 # The measured fit loop
 
@@ -704,6 +733,35 @@ async def test_more_room_than_planned_replans_without_cutting(
     fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
     assert fit["compiles"] == 2 and fit["trimmed"] == 0 and fit["dropped_blocks"] == 0
     assert (art.quest_root / ".fi" / "poster_reply.txt").read_text(encoding="utf-8") == json.dumps(reply)
+
+
+@pytest.mark.asyncio
+async def test_a_first_plan_over_its_own_limit_is_planned_again_for_the_measured_room(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The validation quest's first plan was 54 cm against a 50.6 cm limit and
+    fit only because the sheet had 57.5 cm. The sheet measured clean, so it
+    was never planned again, and a section stayed split."""
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: SimpleNamespace(pages=[]))
+    monkeypatch.setattr(poster_mod, "poster_report", lambda doc, **kw: _report())
+    monkeypatch.setattr(
+        poster_mod, "_measured_columns",
+        lambda doc, report, sheet: ([50 * PT_PER_CM, 45 * PT_PER_CM], 57 * PT_PER_CM),
+    )
+    planned: list[float] = []
+    plan = poster_mod._Layout.plan
+
+    def recording_plan(self, available, **kw):  # type: ignore[no-untyped-def]
+        plan(self, available, **kw)
+        planned.append(round(available / PT_PER_CM, 1))
+        if len(planned) == 1:
+            self.over_limit = True
+
+    monkeypatch.setattr(poster_mod._Layout, "plan", recording_plan)
+    monkeypatch.setattr(poster_mod._Layout, "signature", lambda self: round(self.available))
+    await _generate(tmp_path, monkeypatch, _reply())
+    assert planned[1] == 57.0 and len(runs) == 2
 
 
 def test_measured_columns_count_spilled_text_but_not_the_reference_list() -> None:
