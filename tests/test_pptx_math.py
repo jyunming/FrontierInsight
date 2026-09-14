@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as etree
+
 import pytest
-from lxml import etree
 
 from generation._pptx_math import fallback_runs, math_xml, plain_text, split_math
 
@@ -16,7 +17,7 @@ NS = {
 }
 
 
-def _one(latex: str, **kw) -> etree._Element:
+def _one(latex: str, **kw) -> etree.Element:
     parts = math_xml(latex, size_pt=kw.get("size_pt", 16.5), color=kw.get("color", "16222B"),
                      font="Segoe UI", bold=kw.get("bold", False))
     assert len(parts) == 1
