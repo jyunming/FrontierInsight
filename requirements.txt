@@ -89,6 +89,11 @@ pillow>=10.0
 # platform, no system binary.
 pypdfium2>=4.30
 
+# Turns the deck's $...$ LaTeX into MathML, which `generation/_pptx_math.py`
+# writes into slides.pptx as native PowerPoint equations. MIT, pure Python,
+# no dependencies.
+latex2mathml>=3.81
+
 # ---- Dev / test ----------------------------------------------------------
 # Used by `python -m pytest`. Not strictly required for runtime FI usage.
 

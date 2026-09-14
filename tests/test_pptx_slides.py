@@ -267,3 +267,127 @@ def test_the_exported_deck_has_no_figure_over_its_text(tmp_path: Path) -> None:
     assert pdf is not None, reason
     report = slides_report(measure_pdf(pdf))
     assert [f for f in report["findings"] if f["check"] in ("overlap", "overflow")] == []
+
+
+# The validation quest's formulas, as its deck wrote them.
+MATH_DECK = r"""---
+marp: true
+theme: fi
+---
+
+## Forward Euler is unstable at standard time steps
+
+**The damping term $c x'$ alters the trade-off.**
+
+- At $h = 0.01$, RK4 error is $5.297 \times 10^{-9}\text{m}$.
+- The decay follows $E_{analytical}(t) = E_0 \exp(-(c/m)t)$.
+- Set `$HOME` before running.
+"""
+
+
+def _math_deck(tmp_path: Path) -> Path:
+    md = tmp_path / "slides.md"
+    md.write_text(MATH_DECK, encoding="utf-8")
+    out = tmp_path / "slides.pptx"
+    assert render_marp_to_pptx(md, out) is True
+    return out
+
+
+def test_formulas_become_native_equations_in_place(tmp_path: Path) -> None:
+    import re
+    import zipfile
+
+    xml = zipfile.ZipFile(_math_deck(tmp_path)).read("ppt/slides/slide1.xml").decode("utf-8")
+    assert xml.count("<m:oMath") == 4 and xml.count("<mc:Fallback>") == 4
+    texts = re.findall(r"<a:t>([^<]*)</a:t>", xml)
+    # No LaTeX left in any text run; code stays code.
+    assert [t for t in texts if "$" in t or "\\" in t] == ["$HOME"]
+    # Text, equation, text: the formula sits where it was written.
+    at = xml.index(">At <")
+    assert at < xml.index("<mc:AlternateContent", at) < xml.index(">, RK4 error is <")
+    # The bold lead line's formula keeps the lead line's colour.
+    start = xml.index("<mc:AlternateContent", xml.index("The damping term"))
+    lead_formula = xml[start: xml.index("</mc:AlternateContent>", start)]
+    assert "<m:oMath" in lead_formula
+    assert 'val="0A4F4D"' in lead_formula and 'val="16222B"' not in lead_formula
+
+
+def test_a_formula_takes_the_room_of_its_fallback_text_not_of_its_latex() -> None:
+    """Four formulas are 120 characters of LaTeX but about 50 on the slide;
+    estimating the LaTeX would wrap the line and shrink the slide's text."""
+    from generation._pptx_slides import _body_height
+
+    formula = r"$5.297 \times 10^{-9}\text{m}$"
+    written = parse_marp("## T\n\n- " + " and ".join([formula] * 4) + "\n")[0]
+    shown = parse_marp("## T\n\n- " + " and ".join(["5.297 × 10−9 m"] * 4) + "\n")[0]
+    assert _body_height(written, 11.5, 1.0) == _body_height(shown, 11.5, 1.0)
+
+
+@pytest.mark.slow
+def test_libreoffice_shows_the_readable_fallback(tmp_path: Path) -> None:
+    from generation._office_pdf import find_libreoffice, pptx_to_pdf
+    from generation._pdf_measure import measure_pdf, slides_report
+
+    if find_libreoffice() is None:
+        pytest.skip("LibreOffice is not installed")
+    pdf, reason = pptx_to_pdf(_math_deck(tmp_path), tmp_path / "export")
+    assert pdf is not None, reason
+    doc = measure_pdf(pdf)
+    text = " ".join(line.text for page in doc.pages for line in page.lines)
+    assert "×" in text and "\\times" not in text and "$h" not in text
+    assert [f for f in slides_report(doc)["findings"] if f["check"] == "raw_markup"] == []
+
+
+def _powerpoint_free() -> str | None:
+    """Why PowerPoint cannot export in this test, or None when it can."""
+    import shutil
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        return "PowerPoint export needs Windows"
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        return "pywin32 is not installed"
+    running = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq POWERPNT.EXE", "/NH"], capture_output=True, text=True, check=False,
+    ).stdout
+    if "POWERPNT.EXE" in running.upper():
+        return "PowerPoint is open; the test never touches the user's window"
+    if shutil.which("POWERPNT") is None and not any(
+        Path(root, "Microsoft Office", "root", "Office16", "POWERPNT.EXE").is_file()
+        for root in (r"C:\Program Files", r"C:\Program Files (x86)")
+    ):
+        return "PowerPoint is not installed"
+    return None
+
+
+@pytest.mark.slow
+def test_powerpoint_draws_the_equations(tmp_path: Path) -> None:
+    reason = _powerpoint_free()
+    if reason:
+        pytest.skip(reason)
+    import win32com.client
+
+    from generation._pdf_measure import measure_pdf, slides_report
+
+    pptx = _math_deck(tmp_path)
+    pdf = tmp_path / "powerpoint.pdf"
+    # pytest's faulthandler may print "Windows fatal exception: code
+    # 0x800706be" during these COM calls; they return normally and the
+    # test's result stands.
+    app = win32com.client.Dispatch("PowerPoint.Application")
+    try:
+        deck = app.Presentations.Open(str(pptx), -1, 0, 0)   # read-only, no window
+        deck.SaveAs(str(pdf), 32)                           # ppSaveAsPDF
+        deck.Close()
+    finally:
+        app.Quit()
+    doc = measure_pdf(pdf)
+    text = " ".join(line.text for page in doc.pages for line in page.lines)
+    assert "$" not in text.replace("$HOME", "") and "\\times" not in text
+    # PowerPoint draws the equation, not the fallback: its h is the math
+    # italic ℎ (U+210E), where the fallback text has a plain h.
+    assert "ℎ = 0.01" in text and "×" in text
+    assert [f for f in slides_report(doc)["findings"] if f["check"] == "raw_markup"] == []

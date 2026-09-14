@@ -261,6 +261,21 @@ def test_slides_report_finds_a_figure_drawn_over_text(tmp_path):
     assert "Third bullet the figure covers" in findings[0]["problem"]
 
 
+def test_slides_report_finds_latex_math_shown_as_text(tmp_path):
+    title = [("text", "A slide title", 40, 60, 460, True)]
+    # The validation quest's pptx printed its formulas as LaTeX.
+    raw = title + [
+        ("text", "Diverges completely at $h = 0.5$ and $h = 0.1$.", 25, 60, 380, False),
+        ("text", "RK4 error is 5.297 \\times 10^{-9} m.", 25, 60, 340, False),
+    ]
+    # Prices by pandoc's rule are not math, and a typeset formula has no $.
+    prices = title + [("text", "Licences cost $5-$10 per seat.", 25, 60, 380, False)]
+    typeset = title + [("text", "RK4 error is 5.297 × 10−9 m.", 25, 60, 380, False)]
+    path = _pdf(tmp_path, [(*SLIDE, raw), (*SLIDE, prices), (*SLIDE, typeset)])
+    findings = [f for f in slides_report(measure_pdf(path))["findings"] if f["check"] == "raw_markup"]
+    assert [(f["page"], f["lines_with_latex"]) for f in findings] == [(1, 2)]
+
+
 def test_paper_report_finds_a_line_running_into_the_margin(tmp_path):
     justified = "x" * 70  # the same text gives every line the same right edge
     page1 = _column(72, 760, 80, 10, justified, 14)

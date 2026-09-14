@@ -40,7 +40,8 @@ After the outputs render, a visual check screenshots each PDF and asks the
 chat model to check the pages. The slides and poster are redone, at most twice,
 when the check finds problems a new version can fix, and a paper whose last
 page holds only a line or two is recompiled one line taller. With LibreOffice
-installed, `slides.pptx` is exported to PDF and checked too. A VS Code build or chat
+installed, `slides.pptx` is exported to PDF and checked too; its formulas are native
+PowerPoint equations, with a readable text form for other viewers. A VS Code build or chat
 model that cannot take images checks from the measurements alone, and the chat
 says so.
 

@@ -386,6 +386,31 @@ def _figure_over_text_findings(page: Page, *, region: str = "page") -> list[dict
     return found
 
 
+# LaTeX a slide prints instead of typesetting: a $...$ span by pandoc's rule
+# (a non-space inside each $, no digit right after the closing one, so "$5 to
+# $10" is not one) or a bare math command.
+_RAW_MATH_RE = re.compile(
+    r"(?<!\\)\$(?=\S)[^$]*?[^\s\\]\$(?!\d)"
+    r"|\\(?:times|frac|text|mathrm|sqrt|cdot|pm|leq?|geq?|approx|infty|exp|log|sum|int|partial"
+    r"|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|pi)\b"
+)
+
+
+def _raw_math_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """One finding per page whose text layer shows LaTeX math as text. The
+    pptx printed every `$h = 0.5$` of the validation deck, and only the
+    model's look at the screenshots noticed."""
+    shown = [line for line in page.lines if line.visible and _RAW_MATH_RE.search(line.text)]
+    if not shown:
+        return []
+    count = f"{len(shown)} lines show" if len(shown) > 1 else "A line shows"
+    return [_finding(
+        "raw_markup", page.number, region,
+        f"{count} LaTeX math as text instead of a formula, starting with \"{shown[0].text[:60]}\".",
+        lines_with_latex=len(shown),
+    )]
+
+
 # ---------------------------------------------------------------------------
 # Poster
 
@@ -638,6 +663,7 @@ def slides_report(doc: Document) -> dict:
         })
         findings += _overflow_findings(page, region="slide")
         findings += _figure_over_text_findings(page, region="slide")
+        findings += _raw_math_findings(page, region="slide")
         if smallest is not None and smallest < SLIDE_MIN_PT - 0.5:
             findings.append(_finding(
                 "small_font", page.number, "slide",

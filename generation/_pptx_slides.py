@@ -42,6 +42,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from generation._pptx_math import math_xml, plain_text, split_math
+
 _log = logging.getLogger("frontier_insight.slides")
 
 # ---- fi.css design tokens (keep in sync with templates/slides/fi.css) ----
@@ -172,31 +174,50 @@ def _inline_runs(p, text: str, size: float, color, font: str = SANS) -> None:
 
     fi.css renders ``strong`` in the darker teal and ``em`` in muted grey; we
     mirror that so emphasis carries the same meaning as in the HTML deck.
+    ``$...$`` math inside any of them, but not inside code, becomes a native
+    equation (``generation/_pptx_math.py``) in the same colour.
     """
     from pptx.util import Pt
     for part in re.split(r"(\*\*.+?\*\*|\*[^*]+?\*|`[^`]+?`)", text):
         if not part:
             continue
-        run = p.add_run()
-        if part.startswith("**") and part.endswith("**"):
-            run.text = part[2:-2]
-            run.font.bold = True
-            run.font.color.rgb = _rgb(ACCENT_2)
-        elif part.startswith("*") and part.endswith("*"):
-            run.text = part[1:-1]
-            run.font.italic = True
-            run.font.color.rgb = _rgb(MUTED)
-        elif part.startswith("`") and part.endswith("`"):
+        if part.startswith("`") and part.endswith("`"):
+            run = p.add_run()
             run.text = part[1:-1]
             run.font.name = MONO
             run.font.color.rgb = _rgb(ACCENT_2)
             run.font.size = Pt(size - 1)
             continue
+        bold = italic = False
+        part_color = color
+        if part.startswith("**") and part.endswith("**"):
+            part, bold, part_color = part[2:-2], True, _rgb(ACCENT_2)
+        elif part.startswith("*") and part.endswith("*"):
+            part, italic, part_color = part[1:-1], True, _rgb(MUTED)
+        for segment, is_math in split_math(part):
+            if is_math:
+                _append_math(p, segment, size, part_color, font, bold=bold)
+                continue
+            run = p.add_run()
+            run.text = segment
+            run.font.bold = True if bold else None
+            run.font.italic = True if italic else None
+            run.font.color.rgb = part_color
+            run.font.size = Pt(size)
+            run.font.name = font
+
+
+def _append_math(p, latex: str, size: float, color, font: str, *, bold: bool) -> None:
+    """Add one formula to paragraph ``p`` after its runs so far."""
+    from pptx.oxml import parse_xml
+    from pptx.oxml.ns import qn
+    end = p._p.find(qn("a:endParaRPr"))
+    for xml in math_xml(latex, size_pt=size, color=str(color), font=font, bold=bold):
+        element = parse_xml(xml)
+        if end is not None:
+            end.addprevious(element)
         else:
-            run.text = part
-            run.font.color.rgb = color
-        run.font.size = Pt(size)
-        run.font.name = font
+            p._p.append(element)
 
 
 def _estimate_lines(text: str, width_in: float, size_pt: float,
@@ -226,13 +247,15 @@ _MIN_BODY_SCALE = 0.55
 def _body_height(s: "Slide", width_in: float, k: float) -> float:
     """Estimated height (inches) of a slide's paragraphs and bullets at body
     scale ``k``, by the wrap estimate."""
+    # Formulas are estimated by their fallback text, which is about their
+    # width on the slide; the LaTeX is several times longer.
     h = 0.0
     for text in s.paras:
         size = _PARA_PT * k
-        h += _estimate_lines(text, width_in, size) * size * 1.32 / 72 + 9 * k / 72
+        h += _estimate_lines(plain_text(text), width_in, size) * size * 1.32 / 72 + 9 * k / 72
     for level, text in s.bullets:
         size = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k
-        h += _estimate_lines("•  " + text, width_in, size) * size * 1.30 / 72 + 8 * k / 72
+        h += _estimate_lines("•  " + plain_text(text), width_in, size) * size * 1.30 / 72 + 8 * k / 72
     return h
 
 
@@ -394,7 +417,7 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
         # this renderer can produce, and common, since the deck prompt asks
         # for full-sentence findings as slide titles.
         title_pt = 30 if len(title) <= 90 else 26
-        lines = _estimate_lines(title, text_w, title_pt, wide_factor=0.52)
+        lines = _estimate_lines(plain_text(title), text_w, title_pt, wide_factor=0.52)
         line_h = title_pt * 1.12 / 72.0
         title_h = lines * line_h
         tf = _textbox(slide, MARGIN_IN, y, text_w, title_h + 0.1)

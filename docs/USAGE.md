@@ -442,7 +442,9 @@ paper onto a page.
 
 After the outputs render, FI checks each PDF the pass produced: the paper,
 the slides and the poster. With [LibreOffice](INSTALL.md#system-tools-optional)
-installed, `slides.pptx` is exported to PDF and checked too.
+installed, `slides.pptx` is exported to PDF and checked too. LibreOffice shows
+the deck's equations as their readable text form, so that is what the check
+sees; PowerPoint shows them as native equations.
 
 - **What runs:** the PDF is measured (font sizes, overflow, columns) and
   screenshotted. The screenshots, the measurements and a fixed checklist go
