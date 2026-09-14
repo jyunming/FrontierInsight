@@ -109,6 +109,41 @@ def test_estimate_lines_detects_wrapping() -> None:
             > _estimate_lines(long_title, 11.5, 30, wide_factor=0.52))
 
 
+def test_a_long_source_list_shrinks_to_fit_the_slide(tmp_path: Path) -> None:
+    """A twelve-entry References slide at full size ran inches past the slide
+    bottom; the body now shrinks until the wrap estimate fits, and a short
+    slide keeps full size."""
+    entry = (
+        "Robert I. McLachlan, G. Quispel, Nicolas Robidoux (1999). Geometric "
+        "integration using discrete gradients. Philosophical Transactions of "
+        "the Royal Society A DOI: 10.1098/rsta.1999.0363"
+    )
+    deck = (
+        "---\nmarp: true\ntheme: fi\n---\n\n## Short\n\n- one point\n\n---\n\n"
+        "## References\n\n"
+        + "\n".join(f"- [{i}] {entry}" for i in range(1, 13)) + "\n"
+    )
+    md = tmp_path / "slides.md"
+    md.write_text(deck, encoding="utf-8")
+    out = tmp_path / "slides.pptx"
+    assert render_marp_to_pptx(md, out) is True
+
+    from pptx import Presentation
+    prs = Presentation(str(out))
+
+    def sizes(slide, needle: str) -> set[float]:
+        return {
+            r.font.size.pt
+            for sh in slide.shapes if sh.has_text_frame
+            for p in sh.text_frame.paragraphs if needle in p.text
+            for r in p.runs if r.font.size is not None
+        }
+
+    assert max(sizes(prs.slides[0], "one point")) == 16.5
+    long_list = sizes(prs.slides[1], "DOI")
+    assert long_list and max(long_list) < 16.5
+
+
 def test_renders_a_real_pptx(tmp_path: Path) -> None:
     md = tmp_path / "slides.md"
     md.write_text(DECK, encoding="utf-8")

@@ -191,9 +191,11 @@ section.lead strong, section.lead a { color: var(--paper); }
 section.lead a { border-bottom-color: rgba(255,255,255,0.25); }
 
 /* ---- References slide ----------------------------------------------- */
-/* Auto-appended `## References` + numbered list — keep it compact + mono so
-   many sources fit, with teal numerals. */
+/* Auto-appended `## References` + numbered list, and the `## Further reading`
+   list of web pages after it — keep both compact + mono so many sources fit,
+   with teal numerals. */
 section:has(h2#references) ol,
+section:has(h2#further-reading) ul,
 section:has(h2 + ol) ol {
   font-family: var(--mono);
   font-size: 0.6em;
@@ -203,6 +205,8 @@ section:has(h2 + ol) ol {
   column-gap: 2.4em;
 }
 section:has(h2#references) li::marker,
+section:has(h2#further-reading) li::marker,
 section:has(h2 + ol) li::marker { color: var(--accent); }
 section:has(h2#references) a,
+section:has(h2#further-reading) a,
 section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }
