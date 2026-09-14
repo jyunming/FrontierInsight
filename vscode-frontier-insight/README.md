@@ -30,8 +30,12 @@ also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON). The web pages it drew on are listed under Further reading, not
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A
 `paper/CLAIMS.md` ledger records which of the paper's claims
-trace to the experiment, a cited source, or are unsupported (unsupported claims
-force a revise). With `engine.execute_replicates > 1` the results are reported
+trace to the experiment, to words quoted from a cited source (the quote must be
+in the source), or are unsupported (unsupported claims force a revise). Each
+figure keeps a record of what it draws, and a caption that describes a line the
+figure draws flat or not at all goes back to the reviewer; the human review in
+the chat lists those captions. The deck ends on one References slide with the
+sources the paper cites most. With `engine.execute_replicates > 1` the results are reported
 with 95% confidence intervals, effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. You see every node firing live in the chat panel.

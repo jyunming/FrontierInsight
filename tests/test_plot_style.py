@@ -201,6 +201,35 @@ def test_bootstrap_records_what_each_saved_figure_draws(tmp_path) -> None:
     assert {s["label"]: s["shows"] for s in errors["series"]} == {"euler": "yes", "rk4": "yes"}
 
 
+def test_bootstrap_names_series_labelled_only_in_the_legend(tmp_path) -> None:
+    """``ax.legend(["euler", ...])`` names the series without labelling them."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([0, 1], [0, 10]); ax.plot([0, 1], [0, 0.01], '--')\n"
+        "ax.scatter([0, 1], [5, 6]); ax.plot([0, 1], [3, 4], color='k', label='kept')\n"
+        "ax.legend(['euler', 'rk4', 'points', 'kept'])\n"
+        # Drawn like "kept" but not in the legend: it stays unnamed.
+        "ax.axhline(0, color='k')\n"
+        "fig.savefig('legend.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    (axes,) = json.loads((records / "legend.json").read_text(encoding="utf-8"))["axes"]
+    assert [(s["label"], s["shows"]) for s in axes["series"]] == [
+        ("euler", "yes"), ("rk4", "flat"), ("kept", "yes"), ("points", "yes"),
+    ]
+
+
 def test_bootstrap_records_nothing_without_a_records_folder(tmp_path) -> None:
     pytest.importorskip("matplotlib")
     boot_dir = write_boot(tmp_path, "latex")

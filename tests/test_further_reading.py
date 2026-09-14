@@ -286,6 +286,8 @@ def test_the_deck_theme_styles_the_source_slide() -> None:
     css = (Path(__file__).resolve().parent.parent / "templates" / "slides" / "fi.css").read_text(encoding="utf-8")
     assert 'section:has(h2[id^="references"]) ul' in css
     assert 'section:has(h2[id^="further-reading"]) ul' in css
+    # The "(N more sources in the paper)" line under the list.
+    assert 'section:has(h2[id^="references"]) :is(ul, ol) + p' in css
 
 
 @pytest.mark.parametrize("deck,further_slides", [

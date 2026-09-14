@@ -28,7 +28,7 @@ model to emit):
 
 * ``<!-- _class: lead -->``          -- title / closing slide, inverted
 * ``# H1`` / ``## H2`` / ``### H3``  -- thesis / slide title / eyebrow
-* ``- `` bullets (one nesting level), ``**bold**``, ``*italic*``
+* ``- `` bullets (one nesting level), ``**bold**``, ``*italic*``, ``_italic_``
 * ``![bg right:40% fit](figures/x)`` -- figure right, text left
 * ``![w:900](...)`` / ``![h:420](...)`` / bare ``![](...)`` -- figure slide
 * ``> blockquote``                   -- pull quote
@@ -87,8 +87,9 @@ class Slide:
         self.h1 = ""
         self.h2 = ""
         self.h3 = ""
-        self.bullets: list[tuple[int, str]] = []   # (indent_level, text)
-        self.paras: list[str] = []
+        # Paragraphs and bullets in the slide's order: ("para", 0, text) or
+        # ("bullet", indent_level, text). A line under a list stays under it.
+        self.body: list[tuple[str, int, str]] = []
         self.quote = ""
         self.code: list[str] = []
         self.image: str = ""
@@ -96,9 +97,18 @@ class Slide:
         self.image_pct = 40
 
     @property
+    def bullets(self) -> list[tuple[int, str]]:
+        """``(indent_level, text)`` of each bullet."""
+        return [(level, text) for kind, level, text in self.body if kind == "bullet"]
+
+    @property
+    def paras(self) -> list[str]:
+        return [text for kind, _level, text in self.body if kind == "para"]
+
+    @property
     def is_empty(self) -> bool:
         return not any(
-            (self.h1, self.h2, self.h3, self.bullets, self.paras,
+            (self.h1, self.h2, self.h3, self.body,
              self.quote, self.code, self.image)
         )
 
@@ -158,9 +168,9 @@ def parse_marp(md: str) -> list[Slide]:
             cur.quote = (cur.quote + " " + stripped.lstrip("> ").strip()).strip()
         elif re.match(r"^[-*+]\s+", stripped):
             indent = (len(line) - len(line.lstrip())) // 2
-            cur.bullets.append((min(indent, 1), re.sub(r"^[-*+]\s+", "", stripped)))
+            cur.body.append(("bullet", min(indent, 1), re.sub(r"^[-*+]\s+", "", stripped)))
         elif stripped:
-            cur.paras.append(stripped)
+            cur.body.append(("para", 0, stripped))
 
     if not cur.is_empty:
         slides.append(cur)
@@ -169,8 +179,14 @@ def parse_marp(md: str) -> list[Slide]:
 
 # ---------------------------------------------------------------- drawing
 
+# **bold**, *italic*, _italic_ and `code`. As in Markdown, an underscore marks
+# emphasis only at a word's edge, so forward_euler and __init__ stay as written.
+_INLINE_MARK_RE = re.compile(r"(\*\*.+?\*\*|\*[^*]+?\*|`[^`]+?`|(?<!\w)_(?=[^_\s])[^_]+?(?<=\S)_(?!\w))")
+
+
 def _inline_runs(p, text: str, size: float, color, font: str = SANS) -> None:
-    """Write ``text`` into paragraph ``p``, honouring **bold** and *italic*.
+    """Write ``text`` into paragraph ``p``, honouring **bold**, *italic* and
+    _italic_.
 
     fi.css renders ``strong`` in the darker teal and ``em`` in muted grey; we
     mirror that so emphasis carries the same meaning as in the HTML deck.
@@ -178,10 +194,11 @@ def _inline_runs(p, text: str, size: float, color, font: str = SANS) -> None:
     equation (``generation/_pptx_math.py``) in the same colour.
     """
     from pptx.util import Pt
-    for part in re.split(r"(\*\*.+?\*\*|\*[^*]+?\*|`[^`]+?`)", text):
+    for i, part in enumerate(_INLINE_MARK_RE.split(text)):
         if not part:
             continue
-        if part.startswith("`") and part.endswith("`"):
+        marked = i % 2 == 1  # the split puts each marked span at an odd index
+        if marked and part.startswith("`"):
             run = p.add_run()
             run.text = part[1:-1]
             run.font.name = MONO
@@ -190,9 +207,9 @@ def _inline_runs(p, text: str, size: float, color, font: str = SANS) -> None:
             continue
         bold = italic = False
         part_color = color
-        if part.startswith("**") and part.endswith("**"):
+        if marked and part.startswith("**"):
             part, bold, part_color = part[2:-2], True, _rgb(ACCENT_2)
-        elif part.startswith("*") and part.endswith("*"):
+        elif marked:
             part, italic, part_color = part[1:-1], True, _rgb(MUTED)
         for segment, is_math in split_math(part):
             if is_math:
@@ -259,10 +276,11 @@ def _body_height(s: "Slide", width_in: float, k: float) -> float:
     # Formulas are estimated by their fallback text, which is about their
     # width on the slide; the LaTeX is several times longer.
     h = space = 0.0
-    for text in s.paras:
-        size, space = _PARA_PT * k, 9 * k / 72
-        h += _estimate_lines(plain_text(text), width_in, size) * size * 1.32 * _SINGLE_LINE / 72 + space
-    for level, text in s.bullets:
+    for kind, level, text in s.body:
+        if kind == "para":
+            size, space = _PARA_PT * k, 9 * k / 72
+            h += _estimate_lines(plain_text(text), width_in, size) * size * 1.32 * _SINGLE_LINE / 72 + space
+            continue
         size, space = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k, 8 * k / 72
         h += _estimate_lines("•  " + plain_text(text), width_in, size) * size * 1.30 * _SINGLE_LINE / 72 + space
     # Nothing is drawn in the space after the last paragraph.
@@ -445,22 +463,19 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
         _resolve_image(s.image, figures_dir) if s.image and s.image_mode == "block" else None
     )
     body_h = 0.0
-    if s.bullets or s.paras:
+    if s.body:
         # A figure goes under the text, so the text fits into what is left
         # above the figure's minimum height.
         k = _body_scale(s, text_w, avail_h - (_FIG_MIN_IN + _FIG_GAP_IN if block_img else 0.0))
         body_h = _body_height(s, text_w, k)
         tf = _textbox(slide, MARGIN_IN, body_top, text_w, min(body_h, avail_h) if block_img else avail_h)
-        first = True
-        for text in s.paras:
-            p = tf.paragraphs[0] if first else tf.add_paragraph()
-            first = False
-            p.line_spacing = 1.32
-            p.space_after = Pt(9 * k)
-            _inline_runs(p, text, _PARA_PT * k, _rgb(INK))
-        for level, text in s.bullets:
-            p = tf.paragraphs[0] if first else tf.add_paragraph()
-            first = False
+        for i, (kind, level, text) in enumerate(s.body):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            if kind == "para":
+                p.line_spacing = 1.32
+                p.space_after = Pt(9 * k)
+                _inline_runs(p, text, _PARA_PT * k, _rgb(INK))
+                continue
             p.line_spacing = 1.30
             p.space_after = Pt(8 * k)
             marker = p.add_run()

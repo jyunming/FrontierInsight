@@ -218,16 +218,48 @@ try:
             shows = "flat" if span > 0 and own < 0.01 * span else "yes"
             return {"label": label, "min": low, "max": high, "shows": shows}
 
+        def _fi_style(artist):
+            try:
+                if hasattr(artist, "get_marker"):
+                    return ("line", str(artist.get_color()), str(artist.get_linestyle()), str(artist.get_marker()))
+                return ("points", str([round(float(v), 3) for v in artist.get_facecolor()[0]]))
+            except Exception:
+                return None
+
+        def _fi_legend_names(ax, artists):
+            # A series named only in ax.legend(["a", "b"]) keeps its "_child" label.
+            # The legend draws each entry in its series' style, which pairs the two.
+            legend = ax.get_legend()
+            if legend is None:
+                return {}
+            handles = getattr(legend, "legend_handles", None) or getattr(legend, "legendHandles", None) or []
+            labelled = {str(a.get_label() or "") for a in artists}
+            names = {}
+            for handle, text in zip(handles, legend.get_texts()):
+                style, name = _fi_style(handle), text.get_text()
+                if style is None or not name or name in labelled:
+                    continue
+                for artist in artists:
+                    if (id(artist) not in names and str(artist.get_label() or "").startswith("_")
+                            and _fi_style(artist) == style):
+                        names[id(artist)] = name
+                        break
+            return names
+
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
             series = []
+            try:
+                names = _fi_legend_names(ax, list(ax.get_lines()) + list(ax.collections))
+            except Exception:
+                names = {}
             for line in ax.get_lines():
-                label = str(line.get_label() or "")
+                label = names.get(id(line)) or str(line.get_label() or "")
                 if label and not label.startswith("_"):
                     series.append(_fi_series(label, _fi_values(line.get_ydata()), lo, hi, log))
             for collection in ax.collections:
-                label = str(collection.get_label() or "")
+                label = names.get(id(collection)) or str(collection.get_label() or "")
                 if label and not label.startswith("_"):
                     try:
                         ys = _fi_values(point[1] for point in collection.get_offsets())

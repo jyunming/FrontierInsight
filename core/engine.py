@@ -8468,15 +8468,31 @@ def _plain_words(text: str) -> str:
     return " ".join(re.sub(r"[_\-*`]+", " ", text.lower()).split())
 
 
+# What a caption says of a series that lies flat, which is what its figure shows.
+_FLAT_WORDS_RE = re.compile(
+    r"\b(?:flat|constant|unchanged|negligible|indistinguishable|invisible|not visible|overlap\w*"
+    r"|at this scale|(?:at|near|around|close to) zero)\b"
+)
+# A caption's clauses: "Euler starts flat, while RK4 climbs" says nothing flat of RK4.
+_CAPTION_CLAUSE_RE = re.compile(r"[.;:,]\s|\s(?:while|whereas|but)\s")
+
+
 def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str]:
-    """Captions that name a series their figure draws flat or does not show."""
+    """Captions that name a series their figure does not show, or one it draws
+    flat without saying so."""
     findings: list[str] = []
     for match in _PAPER_IMAGE_RE.finditer(paper_md or ""):
         name = Path(match.group("src")).name
         caption = f" {_plain_words(match.group('alt'))} "
         for ax, s in _hidden_series(records.get(name)):
             label = _plain_words(str(s.get("label") or ""))
-            if not label or not re.search(rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])", caption):
+            named = rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])"
+            if not label or not re.search(named, caption):
+                continue
+            if s.get("shows") == "flat" and any(
+                re.search(named, clause) and _FLAT_WORDS_RE.search(clause)
+                for clause in _CAPTION_CLAUSE_RE.split(caption)
+            ):
                 continue
             how = "draws it flat at one value" if s.get("shows") == "flat" else "does not show it"
             finding = (

@@ -80,6 +80,19 @@ def test_a_caption_naming_a_flat_series_is_found() -> None:
                                     {"long_term_energy_drift.png": DRIFT}) == []
 
 
+def test_a_caption_that_says_a_series_lies_flat_is_fine() -> None:
+    records = {"long_term_energy_drift.png": DRIFT}
+    said = ("![**Figure 3.** Forward Euler drifts to 0.44 J, while RK4 and Velocity-Verlet stay flat "
+            "at this scale.](figures/long_term_energy_drift.png)")
+    assert _figure_caption_findings(said, records) == []
+    # Said of another series, in another clause, it does not count.
+    other = "![Forward Euler starts flat, while RK4 climbs.](figures/long_term_energy_drift.png)"
+    assert _figure_caption_findings(other, records) == [
+        'figure_caption: the caption of figures/long_term_energy_drift.png names "rk4", but the figure '
+        'draws it flat at one value on its axis "Energy Difference ΔE (J)"',
+    ]
+
+
 def test_the_review_prompt_carries_the_figure_check() -> None:
     state = {"figure_records": {"long_term_energy_drift.png": DRIFT}}
     block = _format_figure_check(PAPER, state)

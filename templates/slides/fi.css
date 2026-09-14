@@ -246,3 +246,6 @@ section:has(h2 + ol) li::marker { color: var(--accent); }
 section:has(h2[id^="references"]) a,
 section:has(h2[id^="further-reading"]) a,
 section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }
+/* The "(8 more sources in the paper)" line under the list, at the list's size. */
+section:has(h2[id^="references"]) :is(ul, ol) + p,
+section:has(h2[id^="further-reading"]) ul + p { font-size: 0.6em; }
