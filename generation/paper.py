@@ -670,13 +670,17 @@ class PaperGenerator:
         return None
 
     def _compile_pdf(
-        self, paper_md: Path, out_dir: Path,
+        self, paper_md: Path, out_dir: Path, *, extra_lines: int = 0,
     ) -> tuple[Path | None, _PdfSkipReason | None]:
         """Run pandoc + a LaTeX engine over ``paper_md`` to produce
         ``out_dir/paper.pdf``. Returns ``(path, None)`` on success,
         ``(None, reason)`` on any kind of skip — the reason carries
         enough info for ``_render_pdf_skip_md`` to write a useful
         ``paper_pdf_skipped.md`` for the user.
+
+        ``extra_lines`` makes the LaTeX text area that many lines taller;
+        the visual check uses it to pull a nearly empty last page back onto
+        the page before.
         """
         # Wipe any stale ``paper_pdf_source.md`` from a prior run BEFORE
         # we do anything else. The semantic this guarantees: after
@@ -953,6 +957,8 @@ class PaperGenerator:
         cmd.extend(_author_metadata_args(self.config.output))
         if cjk_font:
             cmd.extend(["-V", f"fi-cjk-font={cjk_font}"])
+        if extra_lines > 0:
+            cmd.extend(["-V", f"fi-extra-lines={int(extra_lines)}"])
         if template.exists():
             cmd.extend(["--template", str(template)])
         else:

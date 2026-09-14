@@ -263,6 +263,36 @@ def test_paper_report_accepts_a_two_column_layout(tmp_path):
     assert [f for f in report["findings"] if f["check"] == "overwide"] == []
 
 
+def _footer(number):
+    return [("text", "Frontier Insight", 8, 72, 40, False), ("text", str(number), 8, 500, 40, False)]
+
+
+def test_a_last_page_holding_one_line_is_reported(tmp_path):
+    # The validation quest's paper: page 6 held only the tail of a URL.
+    text = "x" * 70
+    page1 = _column(72, 760, 80, 10, text, 14) + _footer(1)
+    page2 = [("text", "ebooks rst/3 Ordinary Differential Equations/02 Examples", 10, 72, 760, False)] + _footer(2)
+    report = paper_report(measure_pdf(_pdf(tmp_path, [(*A4, page1), (*A4, page2)])))
+    last = [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
+    assert [(f["page"], f["severity"]) for f in last] == [(2, "medium")]
+    assert report["metrics"]["last_page_lines"] == 1
+
+
+def test_a_last_page_with_real_text_is_not_reported(tmp_path):
+    text = "x" * 70
+    page1 = _column(72, 760, 80, 10, text, 14) + _footer(1)
+    page2 = _column(72, 760, 634, 10, text, 14) + _footer(2)
+    report = paper_report(measure_pdf(_pdf(tmp_path, [(*A4, page1), (*A4, page2)])))
+    assert not [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
+    assert report["metrics"]["last_page_lines"] == 10
+
+
+def test_a_one_page_paper_is_never_reported_as_a_nearly_empty_last_page(tmp_path):
+    page = [("text", "A one-line note.", 10, 72, 760, False)] + _footer(1)
+    report = paper_report(measure_pdf(_pdf(tmp_path, [(*A4, page)])))
+    assert not [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
+
+
 def test_measure_pdf_fails_open_on_a_file_that_is_not_a_pdf(tmp_path):
     bad = tmp_path / "broken.pdf"
     bad.write_text("not a pdf", encoding="utf-8")

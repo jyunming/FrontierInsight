@@ -296,16 +296,18 @@ def _write_report(quest_root: Path, kind: str, report: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Redo
 
-# Findings a new version from the model can fix. The slides' model writes the
-# whole deck, layout included. The poster's layout is the planner's, so only
-# text the model wrote counts there: a new reply would not change empty space,
-# uneven columns or overflow. The paper is never rewritten.
+# Findings a new version can fix. The slides' model writes the whole deck,
+# layout included. The poster's layout is the planner's, so only text the
+# model wrote counts there: a new reply would not change empty space, uneven
+# columns or overflow. The paper is never rewritten; a script repairs a last
+# page that holds only a line or two by making the text area taller.
 REDO_CHECKS = {
     "slides": frozenset({
         "overflow", "small_font", "cut_off_text", "overlap", "unreadable_figure",
         "raw_markup", "broken_math", "garbled_text", "slide_overflow", "crowded_slide",
     }),
     "poster": frozenset({"raw_markup", "broken_math", "garbled_text", "captions"}),
+    "paper": frozenset({"last_page_nearly_empty"}),
 }
 _WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 # The files one version of an output consists of, copied aside before a redo
@@ -313,7 +315,13 @@ _WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 _VERSION_FILES = {
     "slides": ("slides.md", "slides.html", "slides.pdf", "slides.pptx"),
     "poster": ("poster.pdf", "poster.tex", ".fi/poster_fit.json", ".fi/poster_reply.txt"),
+    "paper": ("paper.pdf",),
 }
+# A paper is repaired at most once. The repair adds one line to the text area
+# and moves the footer up by the same amount so it stays put. Measured on all
+# nine templates, a second line would leave the footer only about 9-12 pt
+# below the text on the tighter ones (ieee_access, policy_brief).
+_REDO_LIMITS = {"paper": 1}
 
 
 def _open_findings(report: dict[str, Any]) -> list[dict]:
@@ -377,7 +385,8 @@ async def check_and_redo(
     report = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
     attempts: list[dict[str, Any]] = [{"attempt": 0, "score": score(report), "kept": True}]
     names = _VERSION_FILES.get(kind, ())
-    for attempt in range(1, int(getattr(config.output, "visual_check_max_redos", 0) or 0) + 1):
+    limit = min(int(getattr(config.output, "visual_check_max_redos", 0) or 0), _REDO_LIMITS.get(kind, 2))
+    for attempt in range(1, limit + 1):
         fixable = redo_findings(kind, report)
         if not fixable or report.get("transport") == "none":
             break

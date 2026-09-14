@@ -672,6 +672,12 @@ def paper_report(doc: Document) -> dict:
                     f"A figure runs {over:.0f} pt into the margin.",
                     object="figure", overhang_pt=round(over, 1),
                 ))
+    last_lines = _last_page_text_lines(doc)
+    if len(doc.pages) >= 2 and last_lines <= 2:
+        findings.append(_finding(
+            "last_page_nearly_empty", doc.pages[-1].number, "last page",
+            f"The last page holds only {last_lines} line(s) of text; the rest of it is empty.",
+        ))
     return {
         "kind": "paper",
         "metrics": {
@@ -679,9 +685,35 @@ def paper_report(doc: Document) -> dict:
             "body_pt": body_pt,
             "text_block_pt": list(block) if block else None,
             "words": sum(line.words for line in lines),
+            "last_page_lines": last_lines,
         },
         "findings": findings,
     }
+
+
+def _last_page_text_lines(doc: Document) -> int:
+    """Lines of text on the last page. A running header or footer (a line in
+    the top or bottom 8% of the page at a height that recurs on another page)
+    and a bare page number there are not counted."""
+    def in_margin(line: Line, page: Page) -> bool:
+        band = 0.08 * page.height
+        return line.box[3] < band or line.box[1] > page.height - band
+
+    heights: Counter[int] = Counter()
+    for page in doc.pages:
+        heights.update({round(line.box[1]) for line in page.lines if line.visible and in_margin(line, page)})
+    last = doc.pages[-1]
+    count = 0
+    for line in last.lines:
+        if not line.visible:
+            continue
+        if in_margin(line, last) and (
+            line.text.strip().isdigit()
+            or any(heights[y] >= 2 for y in range(round(line.box[1]) - 1, round(line.box[1]) + 2))
+        ):
+            continue
+        count += 1
+    return count
 
 
 def _shared_edges(lines: Sequence[Line]) -> tuple[float, float] | None:

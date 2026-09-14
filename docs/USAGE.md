@@ -457,7 +457,8 @@ the slides and the poster.
   or the poster are generated again with those problems in the prompt. The
   version that checks best is kept. A redo is skipped for poster layout
   findings (empty space, uneven columns), which a new reply would not change.
-  The paper is only checked.
+  The paper is never rewritten: when its last page holds only a line or two,
+  it is recompiled once with a text area one line taller.
 - **Report:** `.fi/visual_check.json` in the quest folder, with the
   screenshots under `.fi/visual_check/<output>/`. The run prints one line
   per output, for example

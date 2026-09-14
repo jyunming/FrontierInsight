@@ -38,7 +38,8 @@ numbers. You see every node firing live in the chat panel.
 
 After the outputs render, a visual check screenshots each PDF and asks the
 chat model to check the pages. The slides and poster are redone, at most twice,
-when the check finds problems a new version can fix. A VS Code build or chat
+when the check finds problems a new version can fix, and a paper whose last
+page holds only a line or two is recompiled one line taller. A VS Code build or chat
 model that cannot take images checks from the measurements alone, and the chat
 says so.
 

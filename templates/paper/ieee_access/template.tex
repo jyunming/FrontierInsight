@@ -100,6 +100,14 @@ $highlighting-macros$
   \FInexttable{#1}}{}
 \makeatother
 
+% A visual check that finds a last page holding only a line or two
+% recompiles with fi-extra-lines set: the text area grows that many lines and
+% the footer moves up by the same amount, so it stays where it was
+% (generation/_visual_check.py).
+$if(fi-extra-lines)$
+\AtBeginDocument{\addtolength{\textheight}{$fi-extra-lines$\baselineskip}\addtolength{\footskip}{-$fi-extra-lines$\baselineskip}}
+$endif$
+
 \begin{document}
 % Span the title across both columns — the standard IEEE layout.
 \twocolumn[\begin{@twocolumnfalse}

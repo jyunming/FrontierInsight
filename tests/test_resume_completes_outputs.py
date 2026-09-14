@@ -136,7 +136,7 @@ async def test_a_resume_checks_only_the_outputs_it_made(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_slides_and_poster_are_redone_with_the_feedback_and_the_paper_is_only_checked(
+async def test_slides_and_poster_are_redone_with_the_feedback(
     tmp_path: Path, monkeypatch, capsys,
 ):
     monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
@@ -171,8 +171,12 @@ async def test_slides_and_poster_are_redone_with_the_feedback_and_the_paper_is_o
         checked_only.append(kind)
         return {"transport": "images", "findings": [], "measured": {"findings": []}}
 
+    redone: list[str] = []
+
     async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
-        await regenerate(f"fix the {kind}")
+        redone.append(kind)
+        if kind != "paper":  # the paper's repair has its own test
+            await regenerate(f"fix the {kind}")
         return {
             "transport": "images", "findings": [], "measured": {"findings": []},
             "attempts": [{"attempt": 0, "kept": False}, {"attempt": 1, "kept": True}],
@@ -182,9 +186,47 @@ async def test_slides_and_poster_are_redone_with_the_feedback_and_the_paper_is_o
     monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
     art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
     await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock())
-    assert checked_only == ["paper"]
+    assert checked_only == [] and redone == ["paper", "slides", "poster"]
     assert ("slides", "fix the slides") in made and ("poster", "fix the poster") in made
     assert "[FI] visual check poster: 0 problem(s) seen on the pages, 0 measured; redone 1 time(s), kept redo 1" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
+    compiled: list[tuple[str, int]] = []
+
+    class _Paper:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        def generate(self, art, out_dir):  # noqa: ANN001
+            return {"paper_md": out_dir / "paper.md", "paper_pdf": out_dir / "paper.pdf"}
+
+        def _compile_pdf(self, paper_md, out_dir, *, extra_lines=0):  # noqa: ANN001
+            compiled.append((paper_md.name, extra_lines))
+            return out_dir / "paper.pdf", None
+
+    class _Nothing:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        async def generate(self, art, out_dir, *, supervisor, feedback=""):  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(fi_launch, "PaperGenerator", _Paper)
+    for name in ("SlideGenerator", "PosterGenerator", "SpeechGenerator"):
+        monkeypatch.setattr(fi_launch, name, _Nothing)
+
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+        await regenerate("the last page holds one line")
+        await regenerate("the last page holds one line")
+        return {"transport": "images", "findings": [], "measured": {"findings": []}}
+
+    monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "source.md")
+    await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock())
+    assert compiled == [("paper.md", 1), ("paper.md", 2)]
 
 
 @pytest.mark.asyncio

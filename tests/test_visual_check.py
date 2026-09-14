@@ -273,3 +273,42 @@ def test_only_medium_and_high_findings_of_a_redo_check_count() -> None:
     report = _checked(_problem("raw_markup", "low"), _problem("reading_order"), measured=(_problem("small_font"),))
     assert [f["check"] for f in vc.redo_findings("slides", report)] == ["small_font"]
     assert vc.redo_findings("paper", report) == []
+    paper = _checked(measured=(_problem("last_page_nearly_empty", "medium"), _problem("overwide")))
+    assert [f["check"] for f in vc.redo_findings("paper", paper)] == ["last_page_nearly_empty"]
+
+
+@pytest.mark.asyncio
+async def test_a_paper_repair_that_checks_worse_puts_the_first_pdf_back(tmp_path: Path, monkeypatch) -> None:
+    _script(monkeypatch, [
+        _checked(measured=(_problem("last_page_nearly_empty", "medium"),)),
+        _checked(_problem("overlap"), _problem("cut_off_text")),
+    ])
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_text("pdf first", encoding="utf-8")
+
+    async def repair(text: str) -> None:
+        pdf.write_text("pdf taller", encoding="utf-8")
+
+    report = await vc.check_and_redo(_limit(2), "paper", pdf, tmp_path, repair)
+    assert pdf.read_text(encoding="utf-8") == "pdf first"
+    assert [(a["attempt"], a["kept"]) for a in report["attempts"]] == [(0, True), (1, False)]
+
+
+@pytest.mark.asyncio
+async def test_the_paper_is_repaired_at_most_once(tmp_path: Path, monkeypatch) -> None:
+    # The first repair helps but the last page is still nearly empty: a second
+    # line would crowd the footer, so there is no second repair.
+    _script(monkeypatch, [
+        _checked(measured=(_problem("last_page_nearly_empty"), _problem("overwide"))),
+        _checked(measured=(_problem("last_page_nearly_empty", "medium"),)),
+        _checked(),
+    ])
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_text("pdf first", encoding="utf-8")
+    calls: list[str] = []
+
+    async def repair(text: str) -> None:
+        calls.append(text)
+
+    report = await vc.check_and_redo(_limit(2), "paper", pdf, tmp_path, repair)
+    assert len(calls) == 1 and [a["attempt"] for a in report["attempts"]] == [0, 1]

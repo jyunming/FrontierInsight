@@ -1710,9 +1710,21 @@ async def _run_generators(
             print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
     # 5) Screenshot + AI check of each PDF this pass produced (a PDF carried
     # through on a resume was checked when it was made). Slides and poster
-    # are redone with the problems a new version can fix; the paper is only
-    # checked.
+    # are redone with the problems a new version can fix; the paper is never
+    # rewritten, only recompiled by script.
     if cfg.output.visual_check:
+        paper_lines = 0
+
+        async def redo_paper(feedback: str) -> None:
+            # Each attempt makes the text area one more line taller, so a last
+            # page holding a line or two moves back onto the page before.
+            nonlocal paper_lines
+            paper_lines += 1
+            source = written.get("paper_md") or art.paper_md
+            pdf, skip = PaperGenerator(cfg)._compile_pdf(Path(source), art.quest_root, extra_lines=paper_lines)
+            if pdf is None:
+                raise RuntimeError(skip.summary if skip else "the paper did not recompile")
+
         async def redo_slides(feedback: str) -> None:
             written.update(await SlideGenerator(cfg).generate(
                 art, art.quest_root, supervisor=supervisor, feedback=feedback,
@@ -1723,7 +1735,7 @@ async def _run_generators(
                 art, art.quest_root, supervisor=supervisor, feedback=feedback,
             ))
 
-        redo = {"slides": redo_slides, "poster": redo_poster}
+        redo = {"paper": redo_paper, "slides": redo_slides, "poster": redo_poster}
         for kind, key, output_kind in (
             ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),
         ):

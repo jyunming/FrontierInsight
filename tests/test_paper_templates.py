@@ -131,6 +131,20 @@ def test_two_column_templates_redefine_longtable() -> None:
         )
 
 
+@pytest.mark.parametrize("fmt", EXPECTED_FORMATS)
+def test_template_can_make_its_text_area_taller(fmt: str) -> None:
+    """The visual check repairs a last page holding only a line or two by
+    recompiling with ``fi-extra-lines``; the hook must sit in the preamble,
+    before the real ``\\begin{document}`` (the first one may be in a comment)."""
+    txt = (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8")
+    hook = txt.find("$if(fi-extra-lines)$")
+    assert hook >= 0, f"{fmt}/template.tex has no fi-extra-lines hook"
+    assert hook < txt.rindex("\n\\begin{document}")
+    assert r"\addtolength{\textheight}{$fi-extra-lines$\baselineskip}" in txt
+    # The footer moves up by the same amount, so it stays on the page.
+    assert r"\addtolength{\footskip}{-$fi-extra-lines$\baselineskip}" in txt
+
+
 @pytest.mark.slow
 def test_a_two_column_paper_with_a_short_and_a_tall_table_compiles_whole(tmp_path: Path) -> None:
     """A short table becomes a column float; one taller than a column gets
