@@ -26,6 +26,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from generation._figure_captions import numbers_off_figure_captions
+
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "paper" / "_html"
 _CSS_PATH = _ASSETS_DIR / "latexlike.css"
 
@@ -138,7 +140,8 @@ def render_paper_html_pdf(
         md_text = paper_md.read_text(encoding="utf-8")
     except OSError as e:
         return None, f"could not read {paper_md}: {e}"
-    title, body = _split_title(md_text)
+    # Both themes number figures, so the writer's "**Figure 2.**" comes off.
+    title, body = _split_title(numbers_off_figure_captions(md_text))
 
     # Resolve the @FONT_DIR@ token to the assets dir's absolute file:/// URL
     # so pandoc --embed-resources can find + inline any vendored OTFs (the

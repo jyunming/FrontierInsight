@@ -1376,6 +1376,36 @@ def test_compile_pdf_writes_sanitized_md_alongside_paper(
     assert "≈" in orig, "user-facing paper.md must keep the original glyphs"
 
 
+def test_compile_pdf_takes_the_writers_figure_number_off_the_caption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LaTeX numbers figures, so "**Figure 1.**" in the caption printed as
+    "Figure 1: Figure 1. ..." in every quest's paper.pdf."""
+    monkeypatch.setattr(
+        paper_mod.shutil, "which",
+        lambda name: "/fake/pandoc" if name == "pandoc" else "/fake/pdflatex" if name == "pdflatex" else None,
+    )
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(paper_mod.subprocess, "run", fake_run)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# T\n\n## Results\n\n![**Figure 1.** Error versus time step.](figures/error.png)\n\nAs Figure 1 shows.\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    PaperGenerator(cfg).generate(art, out_dir)
+
+    source = (out_dir / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "![Error versus time step.](figures/error.png)" in source
+    assert "As Figure 1 shows." in source
+    assert "**Figure 1.**" in (out_dir / "paper.md").read_text(encoding="utf-8")
+
+
 def test_count_sanitized_glyphs_returns_source_count() -> None:
     """Honest counter: the INFO log reports source-glyph occurrences,
     not length-deltas. Deriving the count from length deltas would
