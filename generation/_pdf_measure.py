@@ -386,6 +386,41 @@ def _figure_over_text_findings(page: Page, *, region: str = "page") -> list[dict
     return found
 
 
+# A figure closer than this under a line of text reads as part of that line.
+# The Marp deck leaves 17 pt; the pptx left 0.1 pt before its text estimate
+# was corrected.
+_FIGURE_GAP_MIN_PT = 6.0
+
+
+def _figure_under_text_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """A figure that starts right under a line of text, one finding per
+    figure. Nothing is drawn over the text, so the overlap check passes, yet
+    the figure sits on the line. Low: it is the renderer's spacing, which a
+    new version of the words would not change."""
+    found = []
+    for image in page.images:
+        if image[2] - image[0] >= 0.9 * page.width or image[3] - image[1] >= 0.9 * page.height:
+            continue
+        if image[3] - image[1] < 24.0:
+            continue  # a logo or an icon, not a figure
+        close = []
+        for line in page.lines:
+            across = min(line.box[2], image[2]) - max(line.box[0], image[0])
+            # PDF y runs up: the gap from the line's bottom down to the figure's top.
+            gap = line.box[1] - image[3]
+            if line.visible and across > 2.0 and -2.0 <= gap < _FIGURE_GAP_MIN_PT:
+                close.append((gap, line))
+        if close:
+            gap, line = min(close, key=lambda item: item[0])
+            found.append(_finding(
+                "figure_gap", page.number, region,
+                f"A figure starts {max(gap, 0.0):.0f} pt under \"{line.text[:60]}\", with no room between them.",
+                "low",
+                gap_pt=round(gap, 1),
+            ))
+    return found
+
+
 # LaTeX a slide prints instead of typesetting: a $...$ span by pandoc's rule
 # (a non-space inside each $, no digit right after the closing one, so "$5 to
 # $10" is not one) or a bare math command.
@@ -663,6 +698,7 @@ def slides_report(doc: Document) -> dict:
         })
         findings += _overflow_findings(page, region="slide")
         findings += _figure_over_text_findings(page, region="slide")
+        findings += _figure_under_text_findings(page, region="slide")
         findings += _raw_math_findings(page, region="slide")
         if smallest is not None and smallest < SLIDE_MIN_PT - 0.5:
             findings.append(_finding(

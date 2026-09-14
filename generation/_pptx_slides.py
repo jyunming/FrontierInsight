@@ -244,19 +244,29 @@ _PARA_PT, _BULLET_PT, _SUB_BULLET_PT = 17.0, 16.5, 15.0
 _MIN_BODY_SCALE = 0.55
 
 
+# The deck font's single line height, as a multiple of its size. A paragraph's
+# line spacing multiplies it: LibreOffice and PowerPoint both advance a 16.5 pt
+# bullet at spacing 1.30 by 25.7 pt, where the estimate used 1.30 x 16.5, and a
+# figure under a slide's text landed 0.1 pt below its last bullet.
+_SINGLE_LINE = 1.2
+
+
 def _body_height(s: "Slide", width_in: float, k: float) -> float:
     """Estimated height (inches) of a slide's paragraphs and bullets at body
-    scale ``k``, by the wrap estimate."""
+    scale ``k``, by the wrap estimate. Measured against both renderers on
+    seven slides, it is within 3.3 pt of LibreOffice and up to 6 pt over
+    PowerPoint."""
     # Formulas are estimated by their fallback text, which is about their
     # width on the slide; the LaTeX is several times longer.
-    h = 0.0
+    h = space = 0.0
     for text in s.paras:
-        size = _PARA_PT * k
-        h += _estimate_lines(plain_text(text), width_in, size) * size * 1.32 / 72 + 9 * k / 72
+        size, space = _PARA_PT * k, 9 * k / 72
+        h += _estimate_lines(plain_text(text), width_in, size) * size * 1.32 * _SINGLE_LINE / 72 + space
     for level, text in s.bullets:
-        size = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k
-        h += _estimate_lines("•  " + plain_text(text), width_in, size) * size * 1.30 / 72 + 8 * k / 72
-    return h
+        size, space = (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k, 8 * k / 72
+        h += _estimate_lines("•  " + plain_text(text), width_in, size) * size * 1.30 * _SINGLE_LINE / 72 + space
+    # Nothing is drawn in the space after the last paragraph.
+    return h - space
 
 
 def _body_scale(s: "Slide", width_in: float, avail_h: float) -> float:

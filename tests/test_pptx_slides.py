@@ -266,7 +266,17 @@ def test_the_exported_deck_has_no_figure_over_its_text(tmp_path: Path) -> None:
     pdf, reason = pptx_to_pdf(_figure_deck(tmp_path), tmp_path / "export")
     assert pdf is not None, reason
     report = slides_report(measure_pdf(pdf))
-    assert [f for f in report["findings"] if f["check"] in ("overlap", "overflow")] == []
+    assert [f for f in report["findings"] if f["check"] in ("overlap", "overflow", "figure_gap")] == []
+
+
+def test_the_text_estimate_is_as_tall_as_the_renderers_draw_it() -> None:
+    """Five bullets at full size: LibreOffice drew them 158 pt tall and
+    PowerPoint 155 pt. The estimate had them at 147 pt, so a figure under
+    them landed on the last bullet."""
+    from generation._pptx_slides import MARGIN_IN, SLIDE_W_IN, _body_height
+
+    five = parse_marp("## T\n\n" + "".join(f"- Bullet {n} with a few words.\n" for n in range(5)))[0]
+    assert 155 <= _body_height(five, SLIDE_W_IN - 2 * MARGIN_IN, 1.0) * 72 <= 166
 
 
 # The validation quest's formulas, as its deck wrote them.
