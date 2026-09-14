@@ -283,7 +283,7 @@ class SlideGenerator:
             if own_supervisor:
                 await sup.shutdown()
 
-        content = _strip_outer_fence(text)
+        content = _fences_as_slide_breaks(_strip_outer_fence(text))
         # Append a References slide built from the quest's actual sources
         # (web pages + papers), guaranteed rather than left to the LLM —
         # the deck author only saw the first 8000 chars of paper.md and
@@ -446,6 +446,10 @@ async def _run_cli(
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
+            # Marp reads stdin until it closes, even when given a file. A
+            # quest started with an open stdin pipe (the web launcher, a
+            # background shell) left Marp waiting until the 120 s timeout.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -502,3 +506,24 @@ def _strip_outer_fence(text: str) -> str:
         if first_nl > 0:
             s = s[first_nl + 1 : -3].rstrip()
     return s
+
+
+_FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+_SLIDE_BREAK_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
+_BARE_FENCE_LINE_RE = re.compile(r"^```[ \t]*$", re.MULTILINE)
+
+
+def _fences_as_slide_breaks(content: str) -> str:
+    """Treat bare ``` lines as slide breaks when the deck has no ``---`` break.
+
+    A model copying the fenced examples in the prompt can separate its slides
+    with ``` instead of ``---``. Marp then renders the deck as a few slides
+    full of code blocks, and the pptx drops every fenced slide. A deck with at
+    least one real ``---`` break is left alone, so its code blocks survive."""
+    match = _FRONT_MATTER_RE.match(content)
+    head = content[: match.end()] if match else ""
+    body = content[len(head):]
+    if _SLIDE_BREAK_RE.search(body) or not _BARE_FENCE_LINE_RE.search(body):
+        return content
+    slides = [s.strip() for s in _BARE_FENCE_LINE_RE.split(body)]
+    return head + "\n" + "\n\n---\n\n".join(s for s in slides if s) + "\n"

@@ -122,6 +122,43 @@ def test_strip_outer_fence_handles_trailing_whitespace() -> None:
     assert _strip_outer_fence(raw) == "hello"
 
 
+# ---------- _fences_as_slide_breaks ----------
+
+
+_FENCE_SEPARATED_MARP = (
+    "---\nmarp: true\ntheme: fi\n---\n\n"
+    "<!-- _class: lead -->\n\n# Title\n```\n\n"
+    "## Finding one\n\n- a\n```\n\n"
+    "## Finding two\n\n![w:800](figures/result.png)\n```\n\n"
+    "<!-- _class: lead -->\n\n# Close\n"
+)
+
+
+def test_fences_as_slide_breaks_repairs_a_fence_separated_deck() -> None:
+    """gemma4 separated every slide with a bare ``` line: Marp rendered the
+    deck as three slides of code blocks and the pptx lost every content slide."""
+    import re
+
+    from generation.slides import _fences_as_slide_breaks
+    out = _fences_as_slide_breaks(_FENCE_SEPARATED_MARP)
+    assert out.startswith("---\nmarp: true\ntheme: fi\n---\n")
+    assert "```" not in out
+    body = out.split("---\n", 2)[2]
+    assert len(re.findall(r"^---$", body, flags=re.MULTILINE)) == 3
+    assert "## Finding two" in body and "# Close" in body
+
+
+def test_fences_as_slide_breaks_leaves_decks_with_real_breaks_alone() -> None:
+    from generation.slides import _fences_as_slide_breaks
+    with_code = (
+        "---\nmarp: true\n---\n\n# Title\n\n---\n\n"
+        "## Code\n\n```python\nprint(1)\n```\n"
+    )
+    assert _fences_as_slide_breaks(with_code) == with_code
+    single = "---\nmarp: true\n---\n\n# Only slide\n"
+    assert _fences_as_slide_breaks(single) == single
+
+
 # ---------- --allow-local-files safety gate ----------
 
 
@@ -285,6 +322,57 @@ async def test_slides_marp_renders_html_and_pdf(
     assert result["slides_html"].exists()
     assert "slides_pdf" in result
     assert result["slides_pdf"].exists()
+
+
+@pytest.mark.asyncio
+async def test_slides_md_gets_slide_breaks_when_the_model_used_fences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    art = _make_artifacts(tmp_path, with_figure=True)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    out_dir = art.quest_root
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _FENCE_SEPARATED_MARP
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+
+    await SlideGenerator(cfg).generate(art, out_dir)
+
+    body = (out_dir / "slides.md").read_text(encoding="utf-8")
+    assert "```" not in body
+    assert "\n---\n\n## Finding one" in body
+
+
+@pytest.mark.asyncio
+async def test_run_cli_gives_the_render_cli_a_closed_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marp reads stdin until it closes, even when given a file, so a quest
+    started with an open stdin pipe waited out the 120 s timeout."""
+    from generation import slides as slides_mod
+
+    seen: dict = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):  # noqa: ANN202
+            return b"", b""
+
+    async def fake_exec(*argv, **kw):  # noqa: ANN002, ANN003
+        seen.update(kw)
+        return _Proc()
+
+    monkeypatch.setattr(slides_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    ok, reason = await slides_mod._run_cli(
+        ["marp", "slides.md"], cwd=tmp_path, label="marp html",
+    )
+
+    assert ok and reason is None
+    assert seen["stdin"] == slides_mod.asyncio.subprocess.DEVNULL
 
 
 # ---------- SpeechGenerator ----------

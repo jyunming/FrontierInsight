@@ -57,7 +57,7 @@ Slides are 16:9 (960×540). Default Marp behavior stretches images to fill, whic
 If a figure's aspect ratio is unknown, default to `![w:720](figures/<name>)` on its own slide — that scales any figure to fit within the slide's content area without distortion.
 
 # Output format
-Respond with the Marp markdown only — no JSON, no surrounding fence, no preamble. Begin with the Marp front-matter block (`---\nmarp: true\n...\n---`).
+Respond with the Marp markdown only — no JSON, no surrounding fence, no preamble. Begin with the Marp front-matter block (`---\nmarp: true\n...\n---`). Separate slides with a line containing only `---`. The examples above are fenced only for display: never write a ``` line in the deck except around real code.
 
 ---
 
