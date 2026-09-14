@@ -1,100 +1,107 @@
-% Frontier Insight — A1 PORTRAIT (59.4 x 84.1 cm) premium editorial
-% research poster.
+% Frontier Insight research poster, filled in by generation/poster.py.
 %
-% Design language ("Research Briefing", shared with the slide theme):
-%   - warm cream page (#f8f7f3), ink text (#16222b), ONE accent = deep
-%     teal (#0e6e6b); structural weight carried by hairline + teal rules,
-%     never shadows or boxes.
-%   - Palatino-class serif (newpx) for the display title; a clean sans
-%     for the body; the Frontier Insight brand LOCKUP (teal glyph +
-%     wordmark) pinned top-left of the headline band, with a thin teal
-%     rule under the title.
-%   - figure-first 2-column body; a full-width Sources band at the foot
-%     carrying a second, smaller copy of the brand mark.
+% The generator writes everything that carries content (the header text,
+% the columns, the reference band) and takes the sheet size and the font
+% sizes from output.poster_size. This file holds the page setup, fonts,
+% palette and layout.
 %
-% Substitutions (Python string.Template): title, left, right,
-% references, brandlogo. In the body each placeholder appears as a
-% single-dollar ``$name`` form — that is what safe_substitute() replaces.
-% (The doubled ``$$name`` form in THIS comment is the string.Template
-% escape so the comment is not itself substituted; a bare ``$name`` here
-% could let multi-line LLM content inject raw LaTeX before
-% \documentclass.)
+% Layout, following published poster guidance:
+%   - header: brand line, the main finding as the headline, the paper's
+%     own title under it, the author line, a QR code on the right when a
+%     URL is set, closed by a full-width teal rule;
+%   - columns of fixed height filled from the top: body text at 24 pt or
+%     more, headings about 1.5 times the body, numbered figure captions;
+%   - a footer band listing only the references the poster cites.
+%
+% Placeholders are string.Template names in braces after a dollar sign;
+% a literal dollar sign in this file would have to be doubled.
 \documentclass[final,t]{beamer}
-\usepackage[size=custom,width=59.4,height=84.1,scale=1.15]{beamerposter}
+\usepackage[size=custom,width=${paperwidth},height=${paperheight},scale=1.0]{beamerposter}
+\usepackage{iftex}
+\ifXeTeX
+  % XeLaTeX: the poster holds Chinese, Japanese or Korean text, or the
+  % engine is tectonic. OpenType clones of Palatino and Helvetica.
+  \usepackage{fontspec}
+  \setmainfont{TeX Gyre Pagella}
+  \setsansfont{TeX Gyre Heros}
+${cjksetup}
+\else
+  \usepackage[utf8]{inputenc}
+  \usepackage[T1]{fontenc}
+  \usepackage{newpxtext}
+  \usepackage{helvet}
+\fi
 \usepackage{graphicx}
-\usepackage{multicol}
 \usepackage{amsmath, amssymb}
-\usepackage{newpxtext}        % Palatino-class serif for the display title
-\usepackage{helvet}           % Helvetica-class sans for the body
 \usepackage{xcolor}
+\usepackage{multicol}
+\usepackage{qrcode}
 \usepackage{hyperref}
 
 % --- Frontier Insight palette (matches templates/slides/fi.css) -------
 \definecolor{fiteal}{HTML}{0E6E6B}
-\definecolor{fitealdark}{HTML}{0A4F4D}
 \definecolor{ficream}{HTML}{F8F7F3}
 \definecolor{fiink}{HTML}{16222B}
-\definecolor{fihair}{HTML}{D9D7CE}
-\definecolor{fimuted}{HTML}{65727C}
+\definecolor{fihair}{HTML}{C9C6BA}
+\definecolor{fimuted}{HTML}{56636C}
 
-% Cream page, ink text, teal list markers.
 \setbeamercolor{background canvas}{bg=ficream}
 \setbeamercolor{normal text}{fg=fiink}
 \setbeamercolor{headline}{bg=ficream,fg=fiink}
-\setbeamercolor{itemize item}{fg=fiteal}
-\setbeamercolor{itemize subitem}{fg=fiteal}
+\setbeamercolor{footline}{bg=ficream,fg=fiink}
 \usebeamercolor[fg]{normal text}
-
-% Sans body (matches the design system's sans body); the serif Palatino
-% is reserved for the display title via \rmfamily in the headline below.
 \renewcommand{\familydefault}{\sfdefault}
-
-% Sharp teal square list markers — editorial, no rounded shapes.
-\setbeamertemplate{itemize item}{\color{fiteal}\rule[0.12ex]{0.55ex}{0.55ex}}
-\setbeamertemplate{itemize subitem}{\color{fitealdark}\textendash}
-% Drop the tiny navigation symbols — they serve no purpose on a printed
-% poster and could confuse the bottom-margin overflow detector.
 \setbeamertemplate{navigation symbols}{}
+\setbeamersize{text margin left=${margin}cm, text margin right=${margin}cm}
 
-\title{$title}
-\author{Frontier Insight}
+% Type sizes come from the sheet: never below 24 pt body, 36 pt headings,
+% 72 pt title, 18 pt captions and 14 pt references.
+\newcommand{\posterbody}{\fontsize{${bodypt}pt}{${bodylead}pt}\selectfont}
+\newcommand{\posterhead}[1]{%
+  \par\vspace{0.4em}%
+  {\fontsize{${headpt}pt}{${headlead}pt}\selectfont\bfseries\color{fiink}#1\par}%
+  \vspace{0.2em}{\color{fiteal}\rule{0.14\linewidth}{0.16em}}\par\vspace{0.5em}}
+\newcommand{\postercaption}[2]{%
+  {\fontsize{${captionpt}pt}{${captionlead}pt}\selectfont\color{fimuted}\textbf{Figure~#1:}~#2\par}}
+\newenvironment{posterlist}
+  {\begin{list}{\color{fiteal}\rule[0.2em]{0.42em}{0.42em}}%
+    {\setlength{\leftmargin}{1.3em}\setlength{\labelwidth}{0.8em}\setlength{\labelsep}{0.5em}%
+     \setlength{\itemsep}{0.3em}\setlength{\topsep}{0pt}\setlength{\parsep}{0pt}%
+     \setlength{\partopsep}{0pt}}}
+  {\end{list}}
 
-% Headline band: brand lockup + tag, hairline rule, big serif title,
-% heavy teal rule. Pinned to the top across the full width.
 \setbeamertemplate{headline}{%
-  \leavevmode%
+  \leavevmode
   \begin{beamercolorbox}[wd=\paperwidth]{headline}%
-    \vskip0.5em%
-    \begin{center}%
-    \begin{minipage}{0.93\paperwidth}%
-      \mbox{$brandlogo}\hfill{\color{fimuted}\large Research briefing}\\[0.45em]
-      {\color{fihair}\rule{\linewidth}{1.2pt}}\\[0.6em]
-      {\rmfamily\bfseries\color{fiink}\Huge \inserttitle\par}
-      \vskip0.4em
-      {\color{fiteal}\rule{\linewidth}{6pt}}
+    \vskip${margin}cm
+    \hspace*{${margin}cm}%
+    \begin{minipage}[t]{${headerwidth}cm}%
+      \raggedright
+      ${brandline}%
+      {\rmfamily\bfseries\fontsize{${titlept}pt}{${titlelead}pt}\selectfont\color{fiink}${headline}\par}%
+      ${subtitle}%
+      ${authorline}%
     \end{minipage}%
-    \end{center}%
-    \vskip0.4em%
-  \end{beamercolorbox}%
-}
+    ${qrcode}%
+    \par\vskip0.9cm
+    \hspace*{${margin}cm}{\color{fiteal}\rule{${rulewidth}cm}{0.3cm}}\par
+    \vskip1.2cm
+  \end{beamercolorbox}}
+
+\setbeamertemplate{footline}{%
+  \leavevmode
+  \begin{beamercolorbox}[wd=\paperwidth]{footline}%
+    \hspace*{${margin}cm}{\color{fihair}\rule{${rulewidth}cm}{2pt}}\par
+    \vskip0.6cm
+    \hspace*{${margin}cm}\begin{minipage}[t]{${rulewidth}cm}%
+      \fontsize{${refspt}pt}{${refslead}pt}\selectfont\color{fiink}%
+      ${references}%
+    \end{minipage}\par
+    \vskip${margin}cm
+  \end{beamercolorbox}}
 
 \begin{document}
-\begin{frame}[t]
-  \begin{columns}[t]
-    \begin{column}{0.47\linewidth}
-      $left
-    \end{column}
-    \begin{column}{0.47\linewidth}
-      $right
-    \end{column}
-  \end{columns}
-
-  % Sources band — injected by generation/poster.py from the quest's
-  % retrieved literature (web pages + papers), NOT the LLM, so every
-  % poster carries its citations even when the columns run long. The
-  % generator prepends a small teal Frontier Insight glyph to the start
-  % of the band (a second, quiet copy of the header lockup). Empty
-  % string when the quest surfaced no citable sources.
-  $references
+\begin{frame}[t]\relax
+${columns}
 \end{frame}
 \end{document}

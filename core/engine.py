@@ -7501,38 +7501,6 @@ def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str
     return markdown.rstrip() + "\n\n" + section + "\n"
 
 
-def render_poster_references_latex(
-    refs: list[dict[str, Any]],
-    further: list[dict[str, Any]] | None = None,
-    *,
-    max_n: int = 12,
-    max_further: int = 6,
-) -> str:
-    """A compact full-width Sources band for the poster footer — injected
-    by the template (not the LLM) so references always render. Web pages
-    follow on their own ``Further reading`` line, labelled [W1], [W2]…."""
-    further = list(further or [])
-    if not refs and not further:
-        return ""
-    blocks: list[str] = []
-    if refs:
-        shown = refs[:max_n]
-        parts = [f"[{r['n']}]~{_latex_esc(_ref_citation_text(r))}" for r in shown]
-        more = "" if len(refs) <= max_n else f" \\quad (+{len(refs) - max_n} more)"
-        blocks.append(
-            "{\\scriptsize\\textbf{Sources:}~ " + " \\quad ".join(parts) + more + "}\n"
-        )
-    if further:
-        shown_w = further[:max_further]
-        parts = [f"[{w['label']}]~{_latex_esc(_ref_citation_text(w))}" for w in shown_w]
-        more = ("" if len(further) <= max_further
-                else f" \\quad (+{len(further) - max_further} more)")
-        blocks.append(
-            "{\\scriptsize\\textbf{Further reading:}~ " + " \\quad ".join(parts) + more + "}\n"
-        )
-    return "\\vspace{0.4em}\\hrule\\vspace{0.3em}\n" + "\\par\\vspace{0.2em}\n".join(blocks)
-
-
 _CLARIFY_LABELS = {
     "comparative_baseline": "Comparative baseline",
     "empirical_vs_theoretical": "Empirical / theoretical",

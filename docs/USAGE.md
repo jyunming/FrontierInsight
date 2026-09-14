@@ -394,6 +394,47 @@ Changing any of these on a finished quest takes effect when the output is
 rendered again: `python launch.py --config <yaml> --resume <id> --emit poster`
 (or `paper_pdf`, `slides`).
 
+### The poster
+
+`poster.pdf` follows published poster guidance rather than squeezing the
+paper onto a page.
+
+- **Header:** the paper's main finding is the headline. The paper's title
+  goes under it, then the author line. A QR code to `output.url` sits on
+  the right when a link is set.
+- **Type:**
+  - body text is 26 pt on A1 and 36 pt on A0 and 48 × 36 in;
+  - headings are about 1.5 times the body, and the headline 80 pt or more;
+  - figure captions are numbered, and lines run about 60 characters.
+
+  Type is never shrunk to fit.
+- **Content:** the model writes headings, short texts, bullet lists and
+  figures with captions to a word budget for the sheet. The generator
+  writes all the LaTeX, so a slip in the model's formatting cannot break
+  the compile.
+- **References:** only the sources the poster cites, at most 8, each as
+  author, year, title, venue and DOI. A web page shows its site name,
+  never a raw URL. A poster that cites nothing lists five selected sources.
+- **Fitting:** FI plans the columns from estimated block heights, compiles
+  the poster, and measures the PDF. Each measurement corrects the plan.
+  When content runs off the sheet or into the reference band, FI cuts in
+  this order, stopping as soon as it fits:
+  1. Figures narrow, down to 70% width.
+  2. The longest list loses its last items.
+  3. The longest text loses its last sentences.
+  4. Text blocks, and then figures, are dropped from the middle.
+
+  The opening and closing blocks always stay. Short columns are carried
+  down with extra space before their headings. FI stops after at most six
+  compiles.
+- **Report:** `.fi/poster_fit.json` in the quest folder records the sheet,
+  the number of compiles, the figure widths, what was cut, the final
+  measurements, and any findings still open (for example, columns that end
+  a few centimetres apart).
+- **Chinese, Japanese or Korean** text on the poster compiles with XeLaTeX
+  and a CJK font, as for the paper. Without either, the poster is skipped
+  with a `cjk_no_xelatex` or `cjk_no_font` diagnostic.
+
 ### `execution.sandbox: docker` — what it actually does
 
 When you set `sandbox: docker`, FI runs the generated experiment inside a Docker container instead of a fresh Python venv. The defaults:

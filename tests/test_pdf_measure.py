@@ -192,6 +192,22 @@ def test_column_text_running_into_the_references_band_is_reported(tmp_path):
     assert report["metrics"]["references_pt"] == 16
 
 
+def test_a_caption_running_into_the_references_band_is_reported(tmp_path):
+    items = _good_poster_items() + [("text", "Figure 2: A caption that slid into the band", 20, 880, 120, False)]
+    report = poster_report(measure_pdf(_pdf(tmp_path, [(*A1, items)])))
+    assert any(f["check"] == "band_overlap" for f in report["findings"])
+    assert report["metrics"]["references_pt"] == 16
+
+
+def test_columns_a_little_uneven_are_a_low_finding(tmp_path):
+    right_column = [i for i in _good_poster_items() if i[0] == "text" and i[3] == 880 and i[2] == 26]
+    items = [i for i in _good_poster_items() if i not in right_column]
+    items += _column(880, 1960, 470, 26, BODY_50, 36)  # ends about 9 cm above the left column
+    report = poster_report(measure_pdf(_pdf(tmp_path, [(*A1, items)])))
+    balance = [f for f in report["findings"] if f["check"] == "column_balance"]
+    assert len(balance) == 1 and balance[0]["severity"] == "low"
+
+
 def test_landscape_posters_are_measured_in_three_columns(tmp_path):
     width, height = 3456.0, 2592.0  # 48 x 36 in
     items = [

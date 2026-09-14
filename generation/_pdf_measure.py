@@ -444,6 +444,12 @@ def poster_report(
         if body_pt is not None and line.size >= 0.95 * body_pt
     ]
     band = [line for line in in_band if line not in spilled]
+    # A figure caption that slid down is set larger than the reference
+    # list around it.
+    references_pt = _size_mode(band)
+    if references_pt is not None:
+        spilled += [line for line in band if line.size > 1.1 * references_pt]
+        band = [line for line in band if line.size <= 1.1 * references_pt]
     spilled_figures = [
         image for image in figures if band_top is not None and image[1] < band_top - 1
     ]
@@ -483,6 +489,10 @@ def poster_report(
         "captions": len(captions),
         "figure_share": round(figure_share, 2),
         "references": len(reference_labels),
+        # Region edges from the top of the sheet, for a layout that wants to
+        # measure how much room its columns had.
+        "header_bottom_cm": _cm(page.height - header_bottom),
+        "band_top_cm": None if band_top is None else _cm(page.height - band_top),
     }
 
     findings = _overflow_findings(page)
@@ -550,6 +560,7 @@ def poster_report(
             "column_balance", n, f"column {short}",
             f"Column {short} ends {_cm(gap)} cm above the longest column; "
             "the columns should end at about the same height.",
+            "low" if gap <= 0.20 * region_height else "medium",
         ))
     empty = max(min(bottoms) - floor, content_bottom)
     if empty > 0.06 * page.height:

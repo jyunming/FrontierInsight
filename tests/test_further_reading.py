@@ -5,7 +5,7 @@ from the scholarly sources a claim is cited to. The split runs through every
 output: the writer's prior-work block labels web pages [W1], [W2]... while
 papers keep [1], [2]...; the paper gets a ``## Further reading`` section the
 engine appends itself; claim grounding accepts a [W<k>] source; the poster's
-Sources band, the slides and the BibTeX / CSL-JSON export carry the two lists
+reference band, the slides and the BibTeX / CSL-JSON export carry the two lists
 separately. All of them number from one de-duplicated list, so [2] names the
 same source in the prompt, the paper, the claim ledger and the bib.
 """
@@ -33,7 +33,6 @@ from core.engine import (
     build_further_reading,
     build_references,
     render_further_reading_marp_slide,
-    render_poster_references_latex,
     render_references_marp_slide,
 )
 from core.provider import ResolvedEndpoint
@@ -192,34 +191,45 @@ def test_a_claim_can_rest_on_a_further_reading_source(tmp_path: Path) -> None:
 
 # --- poster, slides, bib --------------------------------------------------------
 
-def test_the_poster_band_lists_further_reading_after_the_sources() -> None:
-    band = render_poster_references_latex(build_references(LIT), build_further_reading(LIT))
-    assert band.index("\\textbf{Sources:}") < band.index("\\textbf{Further reading:}")
-    assert "[1]~" in band and "[W1]~" in band
-    web_only = render_poster_references_latex([], build_further_reading(LIT))
-    assert "Further reading:" in web_only and "Sources:" not in web_only
+def test_the_poster_band_lists_cited_papers_before_cited_web_pages() -> None:
+    from generation.poster import _Block, _band_entry, _band_latex, _cited_labels
+
+    refs, further = build_references(LIT), build_further_reading(LIT)
+    sources = {str(r["n"]): r for r in refs} | {w["label"]: w for w in further}
+    cited = _cited_labels([_Block("text", text="Play changed [W2], as shown [2] and [W1].")], set(sources))
+    assert cited == ["2", "W1", "W2"]
+    band = _band_latex([_band_entry(sources[label], label) for label in cited], "References", 2, True)
+    assert band.index("[2] A. Author (2020). Toys, television and the 1980s. J. Toys. doi:10.1/b.") < (
+        band.index("[W1] A collector's history of action figures. collectors.example.")
+    )
+    assert "museum.example" in band and "https://" not in band
 
 
 @pytest.mark.asyncio
-async def test_the_poster_carries_further_reading(tmp_path: Path, monkeypatch) -> None:
+async def test_the_poster_cites_papers_and_web_pages_from_one_list(tmp_path: Path, monkeypatch) -> None:
     art = _artifacts(tmp_path)
-    _fake_model(monkeypatch, "poster", json.dumps(
-        {"title": "x", "left": r"\textbf{Background.} Toys.", "right": r"\textbf{Findings.} Play."}))
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _name: None)
+    _fake_model(monkeypatch, "poster", json.dumps({"headline": "Action figures turned play into stories", "blocks": [
+        {"type": "heading", "text": "Background"},
+        {"type": "text", "text": "Collectors tell the story [W1]."},
+        {"type": "heading", "text": "What it means"},
+        {"type": "text", "text": "Television sold the toys [2]."},
+    ]}))
+    monkeypatch.setattr("generation.poster.find_pdf_engine", lambda: None)
     result = await PosterGenerator(_config(tmp_path, ["poster"])).generate(art, art.quest_root)
-    tex = result["poster_tex"].read_text(encoding="utf-8")
-    assert "Further reading:" in tex and "[W1]~" in tex
-    assert tex.index("Sources:") < tex.index("Further reading:")
+    band = result["poster_tex"].read_text(encoding="utf-8").split(r"{\bfseries References}", 1)[1]
+    assert band.index("[2] A. Author (2020). Toys, television and the 1980s.") < (
+        band.index("[W1] A collector's history of action figures. collectors.example.")
+    )
+    assert "Museum of Play" not in band  # listed only when cited
 
 
-def test_a_web_only_band_is_still_branded_at_its_first_line() -> None:
-    """The poster's corner mark goes at the start of the band's first line.
-    With only web pages that line is Further reading, not Sources."""
-    from generation.poster import _POSTER_ICON_TEX, _brand_references_band
+def test_the_band_carries_the_brand_mark_on_its_heading_line() -> None:
+    from generation.poster import _band_entry, _band_latex
 
-    band = _brand_references_band(
-        render_poster_references_latex([], build_further_reading(LIT)), True)
-    assert band.index("\\hrule") < band.index(_POSTER_ICON_TEX) < band.index("Further reading:")
+    further = build_further_reading(LIT)
+    band = _band_latex([_band_entry(w, w["label"]) for w in further], "References", 2, True)
+    assert band.index("References") < band.index("fi_icon.png") < band.index("[W1]")
+    assert "fi_icon.png" in _band_latex([], "References", 2, True)
 
 
 def test_slides_get_a_separate_further_reading_slide() -> None:

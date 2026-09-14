@@ -31,7 +31,6 @@ from core.engine import (
     build_further_reading,
     build_references,
     render_further_reading_marp_slide,
-    render_poster_references_latex,
     render_references_marp_slide,
 )
 from core.knowledge import RetrievedDoc
@@ -77,16 +76,17 @@ def test_references_keep_papers_further_reading_keeps_web_both_drop_internal() -
     assert [(w["label"], w["url"]) for w in further] == [("W1", "https://payloadspace.com/x")]
 
 
-def test_poster_further_reading_latex_escapes_urls() -> None:
+def test_poster_band_escapes_latex_and_prints_no_url() -> None:
+    from generation.poster import _band_entry, _band_latex
+
     further = build_further_reading([
         {"content": "", "metadata": {
             "source": "web_search", "title": "Q1 & Q2 report",
             "url": "https://e.com/a?x=1&y=2"}},
     ])
-    band = render_poster_references_latex([], further)
-    assert "\\textbf{Further reading:}" in band
-    assert "\\&" in band          # & escaped for LaTeX
-    assert "Q1 \\& Q2 report" in band
+    band = _band_latex([_band_entry(w, w["label"]) for w in further], "References", 2, False)
+    assert r"Q1 \& Q2 report" in band  # & escaped for LaTeX
+    assert "e.com" in band and "https://" not in band
 
 
 def test_marp_further_reading_slide_built() -> None:
@@ -510,7 +510,7 @@ def _gen_config(tmp_path: Path, kind: str) -> Config:
 
 
 @pytest.mark.asyncio
-async def test_poster_injects_web_sources_as_further_reading(tmp_path, monkeypatch) -> None:
+async def test_poster_lists_cited_web_sources_by_site_name(tmp_path, monkeypatch) -> None:
     from core.provider import ResolvedEndpoint
     from generation.poster import PosterGenerator
 
@@ -521,20 +521,21 @@ async def test_poster_injects_web_sources_as_further_reading(tmp_path, monkeypat
         return ResolvedEndpoint(base_url="http://127.0.0.1:1/v1", model="x", api_key="n")
 
     async def fake_chat(self, messages, **kw):
-        return json.dumps({"title": "T", "left": "L", "middle": "M", "right": "R"})
+        return json.dumps({"headline": "Launch revenue kept growing", "blocks": [
+            {"type": "text", "text": "Revenue rose in 2023 [W1]."},
+        ]})
 
     monkeypatch.setattr("generation.poster.resolve_endpoint_async", fake_resolve)
     monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr("generation.poster.shutil.which", lambda _n: None)
+    monkeypatch.setattr("generation.poster.find_pdf_engine", lambda: None)
 
     result = await PosterGenerator(cfg).generate(art, art.quest_root)
     tex = result["poster_tex"].read_text(encoding="utf-8")
-    # The band is injected by the template (not the LLM). Web pages are
-    # Further reading, so a web-only quest has no numbered Sources line.
-    assert "\\textbf{Further reading:}" in tex and "[W1]~" in tex
-    assert "\\textbf{Sources:}" not in tex
-    assert "https://payloadspace.com/spacex-2023" in tex
-    assert "$references" not in tex  # placeholder fully substituted
+    # The band lists the web page the poster cites, by site, never by URL.
+    band = tex.split(r"{\bfseries References}", 1)[1]
+    assert "[W1] " in band and "payloadspace.com" in band
+    assert "https://payloadspace.com/spacex-2023" not in tex
+    assert "${" not in tex  # every placeholder substituted
 
 
 @pytest.mark.asyncio

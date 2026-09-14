@@ -1,37 +1,36 @@
 You are the **Poster** stage of an automated research pipeline.
 
 # Your task
-Compress the paper into an **A1 PORTRAIT (23"×33") 2-column poster** that is **figure-first**: the charts are the centerpiece, with short text around them. Output a single JSON object whose two string values become the left and right columns. Each column accepts LaTeX — use `\textbf{}` headers and `itemize` lists rather than markdown. The template already opens each column, so never write `\column`, `\begin{column}` or `\begin{columns}` yourself.
+Write the content of a **$sheet research poster with $columns columns** for the paper below. Reply with JSON only. The generator lays out the page, sets the type, numbers the figures and prints the reference list; you write the words.
 
-Quoted examples below show the form only. Never copy their wording or their subject into the poster; every line must be about this paper.
+Quoted examples below show the form only. Never copy their wording or their subject; every line must be about this paper.
 
-**Figures are the centerpiece — but a poster still has to read as a complete argument, not a caption sheet.** Balance large charts with enough text that a reader who only skims the poster still gets the full story.
+## What the poster needs
+- **Headline:** the paper's main finding as one plain sentence of at most 15 words, with its key number when there is one (for example "Verlet integration keeps energy drift below 0.1% over a million steps"). It stands at the top in place of the paper title; the generator prints the paper title under it.
+- **Word budget:** about **$word_budget words** across all blocks. A poster is read from two metres away in under a minute, so use short sentences and no filler.
+- **Structure,** in reading order:
+  1. A heading and 2–3 sentences of background: the question and why it matters.
+  2. The findings: 2–3 headings, each followed by a figure, a short text or at most 4 bullets.
+  3. A closing heading (such as "What it means") with 2–3 sentences on what the results imply.
+- **Headings:** 4–6 in total, each at most 5 words.
+- **Figures:** use each figure from the list at most once, as its own block. Give each a one-sentence caption that says what it shows and the number to take from it. Do not number figures; the generator does.
+- **Citations:** cite the sources listed below as [1], [2] or [W1] straight after the claim they support. Use only labels from the list and at most 8 different ones. Do not write a reference list; the generator prints the cited sources.
+- **Lead with concrete numbers, not caveats.** Limitations get at most one short sentence, about this paper's own scope. Do not narrate the pipeline ("this run", "the collector", "snippets", "auto-collected").
 
-- **Use EVERY figure in the figure list**, large, at `\includegraphics[width=\linewidth]{figures/<name>}`, distributed across the two columns. For each figure: a bold one-line title above it, and **2–3 sentences below** that interpret it — the specific number, what it means, and why it matters (not just "this shows X").
-- Open with a real **Background / Question** block (2–3 sentences of context: why this matters, what's being measured) and close with an **Implications / What it means** block (2–3 sentences). These bookend the figures so the poster is a complete narrative.
-- Aim for **~300–400 words per column** — substantive, but every sentence earning its place. No filler, no repetition of the figure titles in prose.
-- 4–5 bold `\textbf{…}` section headers per column (e.g. "Background", "China: the scale story", "Europe: uneven maturity", "Emerging markets", "What it means").
-- Fill each column to ~90% height with a real mix of figures and interpretive text.
-
-Layout convention (portrait, 2 columns):
-- **Left**: Background/Question (context), then the headline finding(s) with their figures and interpretation.
-- **Right**: the remaining findings + figures with interpretation, a brief comparison, and an Implications close.
-
-Do **NOT** write a References / Sources / Bibliography section — a numbered Sources band is auto-generated from the quest's actual retrieved sources and placed across the bottom of the poster. Spend the column space on content instead. You may still refer to a source inline by its site/author in prose where it strengthens a claim.
-
-**Lead with concrete numbers, not caveats.** A poster must open with the strongest, most specific findings you have — real percentages, volumes, growth rates, rankings (e.g. "Norway 95%, Sweden 60%", "US 1.6M sales", "+40% to 1.3M"). Those are the headline. If the source paper dwells on what's *missing* or *unresolved*, IGNORE that framing and mine it for the positive datapoints instead. Hard limits:
-- The FIRST block of EACH column must be a concrete finding, never a limitation.
-- Limitations get **at most one short line** total, stating this paper's own scope. Never a "What Cannot Be Claimed" block, never a column of caveats.
-- Do NOT narrate the pipeline ("this run", "the collector", "not measured here", "remains unresolved", "snippets", "auto-collected").
-- Avoid emoji and non-ASCII symbols (they break the LaTeX compile).
+## Text format
+Plain text in every string. Inline math as LaTeX between dollar signs, for example $$E = mc^2$$. Use **bold** for a few words at most. No other LaTeX, no markdown headings, no emoji.
 
 # Output format
-Respond with a single JSON object, no prose, no markdown fence:
+A single JSON object, no prose, no markdown fence:
 
 {
-  "title": "<short paper title>",
-  "left":  "<LaTeX for left column>",
-  "right": "<LaTeX for right column>"
+  "headline": "<main finding, at most 15 words>",
+  "blocks": [
+    {"type": "heading", "text": "<at most 5 words>"},
+    {"type": "text", "text": "<2-3 sentences with [n] citations>"},
+    {"type": "figure", "file": "figures/<name>", "caption": "<one sentence>"},
+    {"type": "bullets", "items": ["<at most 15 words>", "<at most 15 words>"]}
+  ]
 }
 
 ---
@@ -44,3 +43,5 @@ $paper_md
 ## Figures available
 $figure_list
 
+## Sources you may cite
+$source_list
