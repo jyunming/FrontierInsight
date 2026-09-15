@@ -10,10 +10,10 @@ commands:
 
 | Command | What it does | LLM calls |
 |---|---|---|
-| `@fi` *(no command)* | Starts the interactive interview — 8 quick questions (topic, title, outputs, paper format, research approach, clarify mode, reviewer panel, knowledge layer), produces a config, runs the quest. Best first-time path. | ~8–18 (one full quest, see below) |
-| `@fi /new` | Same as bare `@fi`. | ~8–18 |
-| `@fi /start <path-to-yaml>` | Runs a quest from an existing YAML config. | ~8–18 |
-| `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~8–18 × N quests |
+| `@fi` *(no command)* | Starts the interactive interview — 8 quick questions (topic, title, outputs, paper format, research approach, clarify mode, reviewer panel, knowledge layer), produces a config, runs the quest. Best first-time path. | ~23–28 (one full quest, see below) |
+| `@fi /new` | Same as bare `@fi`. | ~23–28 |
+| `@fi /start <path-to-yaml>` | Runs a quest from an existing YAML config. | ~23–28 |
+| `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~23–28 × N quests |
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
@@ -26,7 +26,7 @@ commands:
 
 ### Per-quest LLM call breakdown
 
-A single \`/start\` or \`/new\` quest fires roughly **8–18 LLM calls** depending on which engine features are enabled:
+A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; default engine settings — `clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
 
 | Node | Calls | Notes |
 |---|---|---|
@@ -34,21 +34,27 @@ A single \`/start\` or \`/new\` quest fires roughly **8–18 LLM calls** dependi
 | `ideate` | 1 | |
 | `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. Skipped when `ideate_tournament` is on. |
 | `ideate_tournament` | 0 or C(N,2) | Off by default. When on with the default 3 ideas, fires 3 parallel pairwise comparisons (~one round-trip wall-clock) and picks the highest-win-count idea. |
-| `literature` | 1 | One synthesis call (literature *retrieval* uses Axon embeddings, not LLMs). |
-| `design` | 1–3 | Hits up to 3× if the cross-check loop sends it back. |
-| `implement` | 1–3 | Hits 2-3× if the execute-repair loop fires. |
-| `execute_reflect` | 0–3 | Only on a `rc != 0` execution; same retry cap. |
-| `analyze` | 1 | |
-| `cross_check` | 0–3 | One per finding (skipped when `cross_check_per_finding_k = 0`). |
-| `evidence_gate` | 0–1 | One sufficiency call before write (`engine.evidence_gate`, default on); a `broaden` verdict re-enters literature once. |
+| `literature_query` | 1 per literature pass | Turns the topic into keyword search queries. |
+| `literature_foundational` | 1 per literature pass | Names the foundational works a keyword search misses. |
+| `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
+| `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
+| `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
+| `design` | 1 per design pass | Runs again when the cross-check or the review sends the quest back. |
+| `design_self_critique` | 1 per design pass | Audits the drafted methodology. |
+| `implement_outline` | 1 | |
+| `implement` | 1 per design pass | |
+| `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. |
+| `analyze` | 1 per design pass | |
+| `cross_check` | 0–10 | One per key finding that found related literature, up to 10 findings (skipped when `cross_check_per_finding_k = 0`); 0–8 in the measured runs. |
+| `evidence_gate` | 0–1 | Sufficiency check before write (`engine.evidence_gate`, default on); it made no call in 7 of the 17 measured runs. A `broaden` verdict re-enters literature once. |
 | `web_plots` | 0–1 | No-simulation mode only — one LLM call to chart the collected data (`engine.web_derived_plots`). |
-| `write` | 1–2 | Possibly twice if `review` returns `revise`. |
-| `claim_check` | 0–1 | Grounds each paper claim to evidence before review (`engine.claim_grounding`, default on). |
-| `review` | 1 *or* N+1 | 1 for the single-reviewer flow; with a reviewer panel of N personas → N + 1 moderator. |
+| `write` | 1–2 | Twice when the review asks for a rewrite (14 of the 17 measured runs). |
+| `claim_check` | 1 per write | Grounds each paper claim to evidence before review (`engine.claim_grounding`, default on; no call when off). |
+| `review` | 1 per write *or* N+1 | 1 for the single-reviewer flow; with a reviewer panel of N personas → N + 1 moderator per round. |
+| `slides`, `poster` | 1 each | Only when those outputs are in `output.kinds`. |
 | `human_feedback` | 0 | No LLM call — pauses for the user's accept/reject/refine when the gate is on. |
 
-Floor (~8): clarify off, every loop hits its happy path, single reviewer.  
-Ceiling (~18): full clarify + reflect + 1 design retry + 1 implement retry + 1 execute_reflect retry + 3 cross-check findings + 3-persona reviewer panel + 1 revise loop.
+The measured spread came from the experiment repairs (0–3), the number of findings cross-checked, and whether the review asked for a rewrite. A run of the same quest in which design through review ran twice logged 33 calls, not counting slides and poster.
 
 For dollar-cost estimates against specific providers (Copilot, OpenAI, Anthropic, Gemini, Ollama), see [`PROVIDERS.md#cost-expectations`](PROVIDERS.md#cost-expectations).
 
@@ -109,8 +115,8 @@ fi --install-tectonic
 
 | Mode | Args | Notes | LLM calls |
 |---|---|---|---|
-| `--config <yaml>` | one YAML path | single-quest run | ~8–18 (see chat-command section above for the per-node breakdown) |
-| `--fleet <yaml> <yaml> ...` | one or more YAMLs | parallel quests, `--max-concurrent N` controls cap | ~8–18 × N quests |
+| `--config <yaml>` | one YAML path | single-quest run | ~23–28 (see chat-command section above for the per-node breakdown) |
+| `--fleet <yaml> <yaml> ...` | one or more YAMLs | parallel quests, `--max-concurrent N` controls cap | ~23–28 × N quests |
 | `--ingest <file> <file> ...` | one or more PDFs / MDs / TXTs | one-shot Axon ingest, no quest | **0** (embeddings only; no LLM) |
 | `--serve` | none | starts the FastAPI status GUI at 127.0.0.1:8765 | **0** (GUI is read-only over existing outputs) |
 | `--summarize <folder>` | one folder | folder summarizer, pairs with `--summarize-kind` | **1** |
@@ -532,7 +538,7 @@ After each quest, `<output_dir>/<quest_id>/` looks like:
 
 ```
 paper/paper.md                        ← the IMRAD paper
-paper/paper.pdf                       ← if pandoc + a LaTeX engine
+paper.pdf                             ← if pandoc + a LaTeX engine
 slides.md / slides.pptx / slides.pdf  ← if `slides` is in output.kinds
 poster.tex / poster.pdf               ← if `poster`
 talk.md                               ← if `speech`

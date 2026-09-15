@@ -1132,7 +1132,7 @@ def _render_pdf_skip_md(reason: _PdfSkipReason, config: Config) -> str:
         f"    bundle_manifest=None,\n"
         f")\n"
         f"# `art.quest_root` is the same target launch.py passes — the\n"
-        f"# generator drops `paper/paper.pdf` (and any other output\n"
+        f"# generator writes `paper.pdf` (and any other output\n"
         f"# kinds you've configured) under this directory.\n"
         f"PaperGenerator(cfg).generate(art, art.quest_root)\n"
         f"```\n\n"

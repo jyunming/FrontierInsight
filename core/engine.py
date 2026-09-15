@@ -55,6 +55,7 @@ from .knowledge import (
     Knowledge,
     RetrievedDoc,
     _doc_dedup_keys,
+    _is_bot_check_title,
     _normalize_title,
 )
 from .protocol import derive_protocol, route_for_topic_type
@@ -7478,6 +7479,11 @@ def _is_citable(meta: dict[str, Any]) -> bool:
     """
     title = (meta.get("title") or "").strip()
     if not title:
+        return False
+    # A bot-check page's title ("Checking your browser - reCAPTCHA") names the
+    # wall a crawler met, not a source, whatever brought the entry in (web
+    # search, a corpus hit, a checkpoint saved before web search dropped it).
+    if _is_bot_check_title(title):
         return False
     has_id = bool(
         meta.get("authors")

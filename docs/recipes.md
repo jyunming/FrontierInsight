@@ -526,7 +526,7 @@ FI ships four commands that live *outside* the per-quest loop. They turn FI from
 
 | Command | Use it when |
 |---|---|
-| `@fi /proposal <topic>` | About to run a quest. Want to sanity-check the plan first before committing 8–18 LLM calls of a full run. |
+| `@fi /proposal <topic>` | About to run a quest. Want to sanity-check the plan first before committing a full run (23–28 LLM calls in a measured default quest with slides and a poster). |
 | `@fi /critique <quest_id>` | Quest finished. Want a second opinion that didn't already write the paper — pick a different model family in the picker. |
 | `@fi /digest [days]` | End of week. Want a 1-pager "what I shipped + what's stuck", with a structured diff vs last week. |
 | `@fi /portfolio` | End of month, or scoping the next push. Want a synthesis of themes + gaps + meta-paper candidates across *every* quest. |

@@ -4,7 +4,7 @@ What this doc is: a feature index for people evaluating FI or looking
 for a specific knob to twist. README is the elevator pitch; USAGE.md
 is the YAML schema; this file is the breadth catalogue.
 
-## The 20-node DAG
+## The 21-node graph
 
 > Simplified happy path below — see ``core/engine.py:_build_graph``
 > for the authoritative edge set. Conditional branches that aren't
@@ -14,6 +14,9 @@ is the YAML schema; this file is the breadth catalogue.
 
 ```
 START → clarify → ideate → literature ←─────┐ (broaden_lit)
+                                │             │
+                                ↓             │
+                          select_skills       │
                                 │             │
                                 ↓             │
                               design ─────────┘
@@ -83,7 +86,7 @@ is the index.
 
 ### Engine + execution
 
-- **Async LangGraph engine** with 20 nodes and 4 feedback loops; see `core/engine.py:_build_graph` for the actual edges.
+- **Async LangGraph engine** with 21 nodes and 4 feedback loops; see `core/engine.py:_build_graph` for the actual edges.
 - **Per-quest venv with auto-cleanup** — agent-generated Python is installed and run in isolation in `<quest_root>/.venv/`. On successful quest finish the venv is frozen to `.fi/requirements.lock.txt` and then removed to reclaim disk (typically 150–250 MB per quest). The lock file makes the environment reproducible: `python -m venv .venv && .venv/bin/pip install -r .fi/requirements.lock.txt`. Failed or paused quests keep their `.venv/` so you can poke at it. A failed package install is retried once; a timed-out one is not.
 - **Docker sandbox** — `execution.sandbox: docker` runs the experiment subprocess with network disabled, mounted at `/work`.
 - **Provider matrix** — direct HTTP, proxy, CLI exec, and VSCode-extension transports (see provider matrix below).

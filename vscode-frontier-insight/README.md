@@ -9,7 +9,7 @@ Model API.**
 
 ## What this is
 
-The Frontier Insight Python engine drives a 20-node async research
+The Frontier Insight Python engine drives a 21-node async research
 DAG (`clarify → ideate → literature → design → implement → execute →
 execute_reflect → analyze → cross_check → write → review`, with three
 self-correction loops and an optional reviewer panel). This extension
@@ -503,17 +503,21 @@ next mismatch is self-diagnosing — no need to attach a debugger.
 
 Every LLM call counts against your **normal Copilot premium-request
 budget** — same as if you typed each prompt manually into Copilot Chat.
-Approximate per-quest burn:
+Measured per-quest burn, counted from the token log (`.fi/cost.jsonl`) of
+17 complete runs of one simulation quest (a deterministic vs stochastic SIR
+epidemic model) on gemma4 through Ollama, with the default engine settings
+(`clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3`),
+`knowledge.source_routing: manual`, and slides and a poster:
 
-- Bare quest (clarify=off, single reviewer): ~10 premium requests
-- Full panel (3 personas + moderator) + clarify-auto: ~18 premium requests
-- Worst case (panel + re_experiment + 2 revise iterations): ~30+
-- No-simulation quest (skips `implement → execute → execute_reflect`): ~6 premium requests — the saving comes from cutting the implement/execute self-correction loop entirely.
+- **23–28 premium requests per quest**: 21–26 for the research and the paper, plus one each for the slides and the poster. The spread comes from the model: 0–3 experiment repair calls, one cross-check call per key finding that found related literature (0–8), and a second write → claim check → review pass when the review asked for a rewrite (14 of the 17 runs).
+- A run of the same quest in which design through review ran twice logged 33 requests, not counting slides and poster.
+- `knowledge.source_routing: auto` (the default) adds one routing request per literature pass and one per cross-check lookup; set `manual` when requests are metered.
+- A reviewer panel of N personas replaces the single review request with N + 1 per review round (the personas plus a moderator).
+- No-simulation quests are not in that sample, so their count is not measured here.
 - Outputs add one request each for the slide deck, poster and talk script. A slides or poster redo after the visual check adds one more. With `output.visual_check_ai: true`, each checked output (paper, slides, pptx, poster) and each redo's new check add one more as well. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
 
-On Copilot Pro (~300 premium requests/month) you can run ~15–30 quests
-a month depending on configuration. On Business / Enterprise the
-ceiling is much higher.
+On Copilot Pro (~300 premium requests/month) that is about 10–13 quests
+of this size a month. On Business / Enterprise the ceiling is much higher.
 
 ## Why this path
 
