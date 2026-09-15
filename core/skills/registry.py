@@ -27,6 +27,10 @@ not claimed to be one — the same trust level as the venv executor FI
 already uses for generated experiments. What it buys is that a self-test
 which hangs, crashes the interpreter, or calls ``sys.exit`` cannot take
 the quest down with it.
+
+Loading skills for a quest (``loadable_skills``) runs the self-tests it
+needs in parallel, and skips those whose pass is already recorded for the
+same content, Python and installed packages — see ``selftest_cache``.
 """
 
 from __future__ import annotations
@@ -37,10 +41,13 @@ import shutil
 import subprocess
 import tempfile
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from core.skills import approval
+from core.skills import approval, selftest_cache
 from core.skills.base import SELFTEST_PY, Skill, SkillState, Status
+from core.skills.selftest_cache import SelftestCache
 
 _log = logging.getLogger("fi.skills")
 
@@ -211,20 +218,22 @@ def run_selftest(skill: Skill, *, timeout_s: int | None = None) -> tuple[bool, s
     return proc.returncode == 0, output.strip()[-4000:]
 
 
-def _scan_findings(skill: Skill) -> list[str]:
-    """Static findings for this skill, as rendered lines.
+def _scan_findings(skill: Skill) -> tuple[list[str], bool]:
+    """Static findings for this skill, as rendered lines, and whether the
+    scan completed.
 
     Best-effort: the scanner is a review aid, and a bug in it must never
     stop a working skill from being evaluated. A skill with no findings and
-    a skill whose scan crashed are different, so the second says so.
+    a skill whose scan crashed are different, so the second says so — and
+    is never recorded as the skill's scan.
     """
     try:
         from core.skills import scan as _scan
 
-        return [f.render() for f in _scan.scan(skill)]
+        return [f.render() for f in _scan.scan(skill)], True
     except Exception as e:  # noqa: BLE001
         _log.warning("skills: scan of %s failed: %s", skill.name, e)
-        return [f"scan did not run ({e}) — review this skill by hand"]
+        return [f"scan did not run ({e}) — review this skill by hand"], False
 
 
 def evaluate(
@@ -232,6 +241,7 @@ def evaluate(
     *,
     ledger: Path | None = None,
     run_test: bool = True,
+    cache: SelftestCache | None = None,
 ) -> SkillState:
     """Decide what state a skill is in.
 
@@ -245,17 +255,42 @@ def evaluate(
     ``run_test=False`` skips execution and reports on approval alone —
     used by listing commands that should not execute anything.
 
+    ``cache`` is for loading skills into a quest. With one, a pass recorded
+    for this content under this Python and these installed packages counts
+    as the self-test passing, and a new pass is recorded. Without one — every
+    command that checks a skill on demand — the self-test always runs.
+    Either way a failure is never recorded, and it removes the skill's
+    recorded passes: the key cannot see an external binary or a service a
+    test depends on, and a failure just observed outranks an older pass. The
+    approval check is the same on every path.
+
     The static scan runs on every path, including the ones that return
     early. This is the chokepoint every skill passes through — import,
     hand-authored, and entry-point alike — so scanning only at import would
-    leave the other two routes unreviewed. Findings never change the status:
-    they are attached for whoever is about to approve, because the rules are
-    heuristics and QUARANTINED means *FI observed a failure*, not *FI
-    guessed at intent*.
+    leave the other two routes unreviewed. The one exception is a recorded
+    pass, which carries the scan taken of the same content by the same
+    scanner, and that scan is reused rather than parsed again. Findings never
+    change the status: they are attached for whoever is about to approve,
+    because the rules are heuristics and QUARANTINED means *FI observed a
+    failure*, not *FI guessed at intent*.
     """
     content_hash = skill.content_hash()
     approved = approval.approved_hash(skill.name, ledger)
-    findings = _scan_findings(skill)
+    cached = (
+        cache.lookup(skill.name, content_hash)
+        if cache is not None and run_test and skill.has_selftest
+        else None
+    )
+    if cached is not None and cached.findings is not None:
+        findings, scanned = cached.findings, True
+    else:
+        findings, scanned = _scan_findings(skill)
+        if cached is not None and scanned and cache.scanner:
+            # Recorded under an older scanner: refresh it, or every later
+            # load would parse the skill again.
+            cache.record_pass(
+                skill.name, content_hash, output=cached.output, findings=findings,
+            )
 
     if not skill.has_selftest:
         return SkillState(
@@ -270,9 +305,17 @@ def evaluate(
         )
 
     output = ""
-    if run_test:
+    if run_test and cached is not None:
+        output = cached.output
+    elif run_test:
         passed, output = run_selftest(skill)
+        if cache is not None:
+            cache.note_ran()
         if not passed:
+            if cache is not None:
+                cache.forget(skill.name)
+            else:
+                selftest_cache.forget_skill(skill.name, ledger=ledger)
             return SkillState(
                 skill=skill,
                 status=Status.QUARANTINED,
@@ -280,6 +323,13 @@ def evaluate(
                 selftest_output=output,
                 approved_hash=approved,
                 findings=findings,
+            )
+        # Recorded only if the skill is still the content that was hashed:
+        # an edit landing while the test ran must not inherit its pass.
+        if cache is not None and skill.content_hash() == content_hash:
+            cache.record_pass(
+                skill.name, content_hash,
+                output=output, findings=findings if scanned else None,
             )
 
     if approved is None:
@@ -309,11 +359,49 @@ def evaluate(
     )
 
 
+#: Self-tests run at once while loading. Each is a subprocess waiting on its
+#: own interpreter, so threads are enough; the ceiling is about not handing
+#: the machine eight scientific imports at once more than about the GIL.
+MAX_SELFTEST_WORKERS = 8
+
+
+def default_selftest_workers() -> int:
+    return max(1, min(MAX_SELFTEST_WORKERS, os.cpu_count() or 1))
+
+
+def _evaluate_all(
+    skills: list[Skill],
+    *,
+    ledger: Path | None,
+    cache: SelftestCache | None,
+    workers: int,
+) -> list[SkillState]:
+    """``evaluate`` each skill, in parallel, returning states in input order.
+
+    Every skill keeps its own timeout, since each runs in its own subprocess
+    through ``run_selftest``.
+    """
+    if workers <= 1 or len(skills) <= 1:
+        return [evaluate(s, ledger=ledger, cache=cache) for s in skills]
+    pool = ThreadPoolExecutor(
+        max_workers=min(workers, len(skills)), thread_name_prefix="fi-selftest",
+    )
+    try:
+        futures = [pool.submit(evaluate, s, ledger=ledger, cache=cache) for s in skills]
+        return [f.result() for f in futures]
+    finally:
+        # On an exception, drop what has not started rather than running
+        # the rest of the library for a result nobody will read.
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def loadable_skills(
     names: list[str],
     *,
     skills_dir: Path | None = None,
     ledger: Path | None = None,
+    use_cache: bool = True,
+    max_workers: int | None = None,
 ) -> tuple[list[SkillState], list[SkillState]]:
     """Resolve requested skill names into (loadable, rejected).
 
@@ -321,14 +409,33 @@ def loadable_skills(
     proceeds with guided generation instead. Silently *using* an
     unapproved skill would be the error, so the rejects are returned
     rather than dropped, for the caller to log.
+
+    This is the quest-time path, so it uses the self-test cache: a skill
+    whose pass is recorded for its current content, this Python and these
+    installed packages is not tested again. The self-tests that do run, run
+    in parallel (``max_workers``, default ``default_selftest_workers()``).
+    The lists come back in the order the names were given, exactly as a
+    sequential run would return them. ``use_cache=False`` runs every test.
+
+    Blocking: an async caller runs this in a thread.
     """
+    started = time.monotonic()
     found = {s.name: s for s in discover(skills_dir)}
+    # Each skill is evaluated once, however many times it is named.
+    wanted = [n for n in dict.fromkeys(names) if n in found]
+    cache = SelftestCache.open(ledger=ledger) if use_cache and wanted else None
+    states = dict(zip(wanted, _evaluate_all(
+        [found[n] for n in wanted],
+        ledger=ledger,
+        cache=cache,
+        workers=max_workers or default_selftest_workers(),
+    )))
+
     ok: list[SkillState] = []
     rejected: list[SkillState] = []
-
     for name in names:
-        skill = found.get(name)
-        if skill is None:
+        state = states.get(name)
+        if state is None:
             rejected.append(
                 SkillState(
                     skill=Skill(name=name, path=Path(name), source="missing"),
@@ -337,6 +444,13 @@ def loadable_skills(
                 )
             )
             continue
-        state = evaluate(skill, ledger=ledger)
         (ok if state.loadable else rejected).append(state)
+
+    if cache is not None:
+        _log.info(
+            "skills: evaluated %d in %.1fs — %d self-test(s) run, %d passed "
+            "earlier for the same content and environment (%s)",
+            len(wanted), time.monotonic() - started, cache.ran, cache.hits,
+            cache.path,
+        )
     return ok, rejected

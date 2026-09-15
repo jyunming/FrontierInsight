@@ -5695,7 +5695,10 @@ class Engine:
             # An empty `skills` means "every trusted skill is a candidate" —
             # the user should not have to remember what they have taught it.
             names = requested or [s.name for s in _discover_skill_names()]
-            usable, rejected = loadable_skills(names)
+            # Self-tests are subprocesses that can take minutes on a cold
+            # cache; in a thread, so the event loop (and the web server on
+            # it) keeps answering while they run.
+            usable, rejected = await asyncio.to_thread(loadable_skills, names)
         except Exception as e:  # noqa: BLE001 - the registry must never stall a quest
             self._log.warning("[skills] registry unavailable (%s); none used", e)
             return {"selected_skills": [], "skill_selection": {"error": str(e)}}

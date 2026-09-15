@@ -106,6 +106,14 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "FI_SKILLS_APPROVALS", str(empty.parent / "approvals.json"),
     )
+    # So does the record of which skill contents passed their self-tests.
+    # Per test, not shared: two tests building the same fake skill produce
+    # the same content hash, and one test's recorded pass would answer the
+    # other's self-test.
+    monkeypatch.setenv(
+        "FI_SKILLS_SELFTEST_CACHE",
+        str(tmp_path_factory.mktemp("fi_selftest_cache") / "skill_selftest_cache.json"),
+    )
 
 
 @pytest.fixture(autouse=True)
