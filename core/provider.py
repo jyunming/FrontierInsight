@@ -521,9 +521,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # whose literature + result_json grow large (e.g. after a broaden).
         max_input_chars=900_000,
         # `-c key=value` overrides ~/.codex/config.toml for this call only;
-        # the value is parsed as TOML. codex-cli 0.149 parses every level FI
-        # accepts (minimal..max); whether the model honours a level is the
-        # model's business.
+        # the value is parsed as TOML (`codex exec --help`). The codex-cli
+        # 0.149 binary's string table lists none/minimal/low/medium/high/
+        # xhigh/max/ultra as effort values, so every level FI accepts is
+        # passed; whether the model honours a level is the model's business.
         effort_args=lambda level: ["-c", f'model_reasoning_effort="{level}"'],
     ),
     "copilot_cli": _CliSpec(

@@ -280,6 +280,30 @@ def test_submit_writes_reasoning_effort_and_rejects_an_unknown_level(tmp_path) -
     assert r.status_code == 400, r.text
 
 
+def test_update_form_answers_carry_the_saved_reasoning_effort(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """/update/<id> seeds its fields from GET /api/quests/<id>/answers; if the
+    saved level were missing there, the form would show "default" and a submit
+    would drop the key from the quest's YAML."""
+    from fastapi.testclient import TestClient
+
+    from core.interview import InterviewAnswers, answers_to_yaml
+    from web.server import make_app
+
+    quest = tmp_path / "effort-quest"
+    quest.mkdir()
+    answers = InterviewAnswers(
+        topic="t", title="effort-quest", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="", success_metric="", budget="",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="ollama", reasoning_effort="high",
+    )
+    (quest / "config.yaml").write_text(answers_to_yaml(answers, frontend="cli"), encoding="utf-8")
+    r = TestClient(make_app(tmp_path)).get("/api/quests/effort-quest/answers")
+    assert r.status_code == 200, r.text
+    assert r.json()["reasoning_effort"] == "high"
+
+
 def test_submit_rejects_vscode_extension_without_bridge_port(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """User-reported question: 'is it possible that i launch --serve
     but call vscode_extension?'. Yes — but only when a live bridge is
