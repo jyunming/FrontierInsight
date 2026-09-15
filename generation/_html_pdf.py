@@ -142,7 +142,10 @@ def render_paper_html_pdf(
     except OSError as e:
         return None, f"could not read {paper_md}: {e}"
     # Both themes number figures, so the writer's "**Figure 2.**" comes off.
-    title, body = _split_title(numbers_off_figure_captions(md_text))
+    # A table right under its caption line would print as raw pipes.
+    from generation._tables import blank_line_before_tables
+
+    title, body = _split_title(blank_line_before_tables(numbers_off_figure_captions(md_text)))
     # The keywords line under the abstract becomes a block the themes style.
     keywords, body = keywords_block(body)
 

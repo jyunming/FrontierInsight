@@ -837,6 +837,11 @@ class PaperGenerator:
             # The template numbers figures, so the writer's "**Figure 2.**"
             # would print as "Figure 2: Figure 2.".
             sanitized_md = numbers_off_figure_captions(sanitized_md)
+            # A table right under its caption line would be read as more text
+            # of the caption's paragraph and print as raw pipes.
+            from generation._tables import blank_line_before_tables
+
+            sanitized_md = blank_line_before_tables(sanitized_md)
             if glyph_count:
                 _log.info(
                     "paper.pdf: rewrote %d Unicode glyph occurrence(s) "
