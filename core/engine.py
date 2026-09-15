@@ -5306,6 +5306,7 @@ class Engine:
             ruled = _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
+                retrieval_on=self.config.knowledge.enabled,
             )
             if ruled is not None:
                 parsed, decided_by = ruled, "rule"
@@ -5395,6 +5396,10 @@ class Engine:
             ),
             evidence_note=evidence_note,
             review_feedback=_format_review_for_writer(state),
+            skills_block=(
+                self._writing_skills_block(state)
+                or "(no writing guidance selected for this quest)"
+            ),
         )
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
@@ -5669,9 +5674,10 @@ class Engine:
                 len(sel.chosen), len(catalogue.entries), ", ".join(sel.chosen),
             )
             for name in sel.chosen:
-                why = sel.reasons.get(name)
-                if why:
-                    self._log.info("[skills]   %s — %s", name, why)
+                self._log.info(
+                    "[skills]   %s (%s) — %s", name, sel.uses.get(name, "experiment"),
+                    sel.reasons.get(name) or "(no reason given)",
+                )
         else:
             self._log.info(
                 "[skills] none of %d candidate(s) selected; generating instead",
@@ -5700,7 +5706,7 @@ class Engine:
         never reaches this point, and the quest falls back to generating the
         code itself, which is the behaviour that existed before skills.
         """
-        usable, reasons = _resolve_selected_skills(state, self._log)
+        usable, reasons = _resolve_selected_skills(state, self._log, use="experiment")
         if not usable:
             return ""
 
@@ -5778,7 +5784,7 @@ class Engine:
         from :meth:`_skills_block`. On the SIR validation quest the full text
         of five skills was 98,147 of design's 146,904 prompt characters.
         """
-        usable, reasons = _resolve_selected_skills(state, self._log)
+        usable, reasons = _resolve_selected_skills(state, self._log, use="experiment")
         if not usable:
             return ""
         from core.skills.selection import describe, scope_limit
@@ -5803,6 +5809,35 @@ class Engine:
             why = reasons.get(skill.name)
             if why:
                 parts.append(f"  Selected because: {why}")
+        return "\n".join(parts).strip()
+
+    def _writing_skills_block(self, state: QuestState | None = None) -> str:
+        """The instructions of the skills selected for writing, for ``write``.
+
+        A writing skill guides how the paper is written — structure, style,
+        diagrams in the text — so it goes to the writer and nowhere else. On
+        the SIR validation quest two were selected to draft and format the
+        paper, then sent to design and the implement stages five times, where
+        no paper is written, while the writer never saw them. Only the
+        instructions go: the writer produces text and runs nothing, so an API
+        surface or bundled script is no use to it.
+        """
+        usable, reasons = _resolve_selected_skills(state, self._log, use="writing")
+        if not usable:
+            return ""
+        parts = [
+            "Guidance selected for writing this paper. Follow it where it "
+            "applies; the rules above on honesty, citations and the output "
+            "format take precedence over it."
+        ]
+        for st in usable:
+            skill = st.skill
+            self._log.info("[skills] writing guidance: %s", skill.name)
+            parts.append(f"\n## Writing skill: {skill.name}\n")
+            why = reasons.get(skill.name)
+            if why:
+                parts.append(f"*Selected because:* {why}\n")
+            parts.append(skill.instructions().strip())
         return "\n".join(parts).strip()
 
     def _skill_assertions(self, state: QuestState | None = None) -> list[dict[str, Any]]:
@@ -8616,7 +8651,7 @@ _GATE_RULE_MIN_SOURCES = 15
 
 def _evidence_gate_rule(
     topic_type: str, n_sources: int, n_supporting: int, *,
-    analyze_local_first: bool,
+    analyze_local_first: bool, retrieval_on: bool,
 ) -> dict[str, Any] | None:
     """The evidence gate's verdict where the counts already decide it, else
     ``None`` and the model is asked.
@@ -8625,11 +8660,13 @@ def _evidence_gate_rule(
     both simulation quests that had no source with text, and ``sufficient``
     for all six with at least 15 sources and a finding a source supports.
     Between those it gave different verdicts to identical counts, so the
-    rest stays with the model. Every one of those quests was a simulation,
-    so other topic types are always asked — and so is ``--analyze``, where
-    the literature step is skipped and no source is the normal case.
+    rest stays with the model. Every one of those quests was a simulation
+    with retrieval on, so everything else is always asked: other topic
+    types; ``--analyze``, where the literature step is skipped; and a quest
+    with retrieval off, where no source is the normal case and a broaden
+    would re-run the experiment for sources it cannot find.
     """
-    if analyze_local_first or topic_type != "simulation":
+    if analyze_local_first or not retrieval_on or topic_type != "simulation":
         return None
     if n_sources == 0:
         return {
@@ -9367,22 +9404,28 @@ def _discover_skill_names() -> list:
 
 
 def _resolve_selected_skills(
-    state: QuestState | None, log: Any,
+    state: QuestState | None, log: Any, *, use: str,
 ) -> tuple[list[Any], dict[str, str]]:
-    """The selected skills that are still usable, and why each was selected.
+    """The selected skills for one ``use`` that are still usable, and why
+    each was selected.
 
-    Shared by the full block the implementation stages read and the summary
-    design reads, so both describe the same skills. Never raises: a broken
-    registry leaves the quest generating its own code, as before skills.
+    ``use`` is what selection said the skill is for: ``"experiment"`` for
+    design and the implement stages, ``"writing"`` for the writer. A skill
+    with no recorded use is an experiment skill, as every skill was before
+    selection recorded one. Never raises: a broken registry leaves the quest
+    generating its own code, as before skills.
     """
-    names = list((state or {}).get("selected_skills") or [])
+    selection = (state or {}).get("skill_selection") or {}
+    uses = dict(selection.get("uses") or {})
+    names = [
+        n for n in list((state or {}).get("selected_skills") or [])
+        if uses.get(n, "experiment") == use
+    ]
     if not names:
         return [], {}
     # The selection's reasons travel with it: design sees why each skill
     # was picked and may decline one it judges inapplicable.
-    reasons = dict(
-        ((state or {}).get("skill_selection") or {}).get("reasons") or {}
-    )
+    reasons = dict(selection.get("reasons") or {})
 
     try:
         from core.skills import loadable_skills

@@ -66,6 +66,9 @@ from core.skills.base import Kind, Skill, SkillState
 MAX_DESCRIPTION = 900
 MAX_SCOPE_LIMIT = 200
 
+#: What a selected skill can be for; see :attr:`Selection.uses`.
+USES = ("experiment", "writing")
+
 _FRONTMATTER_DESC = re.compile(r"^description:\s*(.+)$", re.M)
 _NOT_SECTION = re.compile(
     r"^##+\s*When\s+NOT\s+to\s+use.*?$\n+(.*?)(?=^##|\Z)", re.M | re.S | re.I
@@ -280,11 +283,17 @@ class Selection:
     #: every candidate made both models select on the applicable topic and
     #: decline, correctly and with a stated reason, on the other.
     declined: dict[str, str] = field(default_factory=dict)
+    #: What each chosen skill is for: ``"experiment"`` goes to design and the
+    #: implement stages, ``"writing"`` only to the writer. A missing or
+    #: unrecognised answer is ``"experiment"``, where every skill went before
+    #: the field existed.
+    uses: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "chosen": self.chosen,
             "reasons": self.reasons,
+            "uses": self.uses,
             "declined": self.declined,
             "ignored_unknown": self.unknown,
         }
@@ -322,10 +331,11 @@ def parse_selection(text: str, catalogue: Catalogue) -> Selection:
     seen: set[str] = set()
     for item in raw:
         if isinstance(item, str):
-            name, why = item.strip(), ""
+            name, why, use = item.strip(), "", ""
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
             why = str(item.get("reason") or "").strip()
+            use = str(item.get("use") or "").strip().lower()
         else:
             continue
         if not name or name in seen:
@@ -335,6 +345,7 @@ def parse_selection(text: str, catalogue: Catalogue) -> Selection:
             sel.unknown.append(name)
             continue
         sel.chosen.append(name)
+        sel.uses[name] = use if use in USES else "experiment"
         if why:
             sel.reasons[name] = why
 
@@ -373,7 +384,8 @@ def render_selection_report(
         lines.append("Selected:")
         for name in sel.chosen:
             why = sel.reasons.get(name, "(no reason given)")
-            lines.append(f"  - {name}: {why}")
+            use = sel.uses.get(name, "experiment")
+            lines.append(f"  - {name} ({use}): {why}")
     else:
         lines.append("")
         lines.append("Selected: none — the quest generated its own code.")

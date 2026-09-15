@@ -143,7 +143,7 @@ The active Copilot model is captured automatically into `provider.model` so the 
 
 ### Skills
 
-A **skill** is what FI has learned about driving one piece of software — when to use it, how to call it, and an executable check that proves it still works. FI ships none; a skill is what it picks up working with you, on this machine.
+A **skill** is what FI has learned about driving one piece of software — when to use it, how to call it, and an executable check that proves it still works. FI ships none; a skill is what it picks up working with you, on this machine. A quest carries only the skills that fit its topic, and sends each where it is used: a writing skill to the writer, the rest to the experiment's design and code.
 
 Two gates stand before any skill reaches a quest, and both are visible here:
 

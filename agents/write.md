@@ -175,5 +175,8 @@ $study_mode_note
 ## Evidence note
 $evidence_note
 
+## Writing guidance (skills selected for this paper)
+$skills_block
+
 ## Review of the previous draft
 $review_feedback

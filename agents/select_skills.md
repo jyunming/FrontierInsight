@@ -24,9 +24,18 @@ it is a judgement you are making, so it carries a reason like any other.
 Saying which part of the topic the skill fails to serve is what makes a
 decline checkable later.
 
+**Say what each selected skill is for**, in `use`:
+- `experiment` — the experiment uses it: computing, simulating, analysing
+  data, drawing the figures. It goes to the design and implementation stages.
+- `writing` — it guides how the paper itself is written: structure, style,
+  citations, diagrams in the text. It goes only to the writer, which writes
+  text and runs no code.
+
+A skill that serves both is `experiment`.
+
 **Order matters.** List the strongest fit first. Everything in `skills` is
-carried into the design and implementation prompts, so a marginal extra entry
-costs context and invites misuse. When two skills fit comparably, prefer the
+carried into a prompt, so a marginal extra entry costs context and invites
+misuse. When two skills fit comparably, prefer the
 one with the stronger track record — but a better fit always outranks a better
 record.
 
@@ -43,6 +52,7 @@ Respond with a single JSON object, no prose, no markdown fence:
 {
   "skills": [
     {"name": "<exact name from the catalogue>",
+     "use": "experiment" | "writing",
      "reason": "<one sentence: what this quest needs it for>"}
   ],
   "declined": [

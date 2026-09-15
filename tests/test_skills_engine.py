@@ -202,6 +202,73 @@ def test_design_gets_a_summary_not_the_full_instructions(
     assert "SENTINEL_INSTRUCTION_BODY" in full and "sirlib.run(beta" in full
 
 
+def test_a_writing_skill_reaches_only_the_writer(patched, skill_dir) -> None:
+    """Selection marks a skill `writing` when it guides how the paper is
+    written. It then goes to the writer and to neither design nor the
+    implement stages — on a real quest two writing skills went to the code
+    prompts five times and never reached the writer."""
+    from core.skills import Skill
+
+    s = Skill(name="demo", path=skill_dir)
+    approval.approve("demo", s.content_hash(), approved_by="tester", path=patched)
+    eng = _engine(["demo"], skill_dir.parent, patched)
+    writing = {
+        "selected_skills": ["demo"],
+        "skill_selection": {"reasons": {"demo": "structures the paper"},
+                            "uses": {"demo": "writing"}},
+    }
+    assert Engine._skills_block(eng, writing) == ""  # type: ignore[arg-type]
+    assert Engine._skills_summary_block(eng, writing) == ""  # type: ignore[arg-type]
+    block = Engine._writing_skills_block(eng, writing)  # type: ignore[arg-type]
+    assert "## Writing skill: demo" in block
+    assert "widget imaging" in block
+    assert "*Selected because:* structures the paper" in block
+    assert "take precedence" in block
+    # The writer runs nothing, so the API surface is left out.
+    assert "demo.run(x: float)" not in block
+
+    # A selection with no recorded use — every one made before the field
+    # existed — is an experiment skill, as before.
+    before = _state("demo")
+    assert Engine._writing_skills_block(eng, before) == ""  # type: ignore[arg-type]
+    assert "demo.run(x: float)" in Engine._skills_block(eng, before)  # type: ignore[arg-type]
+
+
+def test_the_write_prompt_carries_the_writing_skills(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from core.config import (
+        Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
+        PausesConfig, ProviderConfig,
+    )
+
+    eng = Engine(Config(
+        topic="t", title="t", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        pauses=PausesConfig(review="off"),
+        output=OutputConfig(output_dir=tmp_path / "out", kinds=["paper_md"]),
+    ))
+    eng.quest_root = tmp_path  # type: ignore[attr-defined]
+    eng.fi_dir = tmp_path / ".fi"  # type: ignore[attr-defined]
+    (tmp_path / "paper").mkdir(parents=True, exist_ok=True)
+    seen: dict[str, str] = {}
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        seen[node] = prompt
+        return "# T\n\n## Abstract\nShort.\n"
+
+    eng._chat = chat  # type: ignore[method-assign]
+    monkeypatch.setattr(eng, "_writing_skills_block", lambda state=None: "WRITING_SENTINEL")
+    asyncio.run(eng._node_write({"topic": "t"}))  # type: ignore[arg-type]
+    assert "## Writing guidance (skills selected for this paper)\nWRITING_SENTINEL" in seen["write"]
+
+    monkeypatch.setattr(eng, "_writing_skills_block", lambda state=None: "")
+    asyncio.run(eng._node_write({"topic": "t"}))  # type: ignore[arg-type]
+    assert "(no writing guidance selected for this quest)" in seen["write"]
+
+
 def test_untrusted_skill_never_reaches_the_design_summary(patched, skill_dir) -> None:
     eng = _engine(["demo"], skill_dir.parent, patched)
     assert Engine._skills_summary_block(eng, _state("demo")) == ""  # type: ignore[arg-type]

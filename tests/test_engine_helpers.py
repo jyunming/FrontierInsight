@@ -745,31 +745,33 @@ _ONE_SUPPORTED = [{"finding": "f1", "supporting": [{"title": "A"}],
 
 
 @pytest.mark.parametrize(
-    ("state", "analyze_local_first", "asked", "verdict"),
+    ("state", "mode", "asked", "verdict"),
     [
         # A simulation with no source: broaden, without asking.
-        ({"literature": []}, False, False, "broaden"),
+        ({"literature": []}, "retrieval", False, "broaden"),
         # 15 sources and a supported finding: sufficient, without asking.
         ({"literature": _gate_sources(15), "cross_check": _ONE_SUPPORTED},
-         False, False, "sufficient"),
+         "retrieval", False, "sufficient"),
         # One source short, or nothing supported: the model decides.
         ({"literature": _gate_sources(14), "cross_check": _ONE_SUPPORTED},
-         False, True, "insufficient"),
-        ({"literature": _gate_sources(15)}, False, True, "insufficient"),
-        # The rules come from simulation quests only. User data, a survey
-        # and --analyze (no literature step) are always asked.
+         "retrieval", True, "insufficient"),
+        ({"literature": _gate_sources(15)}, "retrieval", True, "insufficient"),
+        # The rules come from simulation quests with retrieval on. User data,
+        # a survey, --analyze (no literature step) and retrieval off (a
+        # broaden could find nothing) are always asked.
         ({"literature": [], "no_simulation_resolved": True},
-         False, True, "insufficient"),
+         "retrieval", True, "insufficient"),
         ({"literature": [], "clarify_answers": {"topic_shape": "survey"}},
-         False, True, "insufficient"),
-        ({"literature": []}, True, True, "insufficient"),
+         "retrieval", True, "insufficient"),
+        ({"literature": []}, "analyze", True, "insufficient"),
+        ({"literature": []}, "no-retrieval", True, "insufficient"),
     ],
     ids=["no-source", "15-supported", "14-supported", "15-unsupported",
-         "user-data", "survey", "analyze-local-first"],
+         "user-data", "survey", "analyze-local-first", "retrieval-off"],
 )
 async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    state: dict, analyze_local_first: bool, asked: bool, verdict: str,
+    state: dict, mode: str, asked: bool, verdict: str,
 ) -> None:
     """Over 68 gate calls the model always broadened a simulation with no
     source and always passed one with 15+ sources and a supported finding;
@@ -778,8 +780,11 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     — which is also what keeps a quest with user data, where no literature
     is normal, from being sent back to search."""
     cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
-    cfg.engine.analyze_local_first = analyze_local_first
+    cfg.engine.analyze_local_first = mode == "analyze"
     engine = Engine(cfg)
+    # The helper config has retrieval off; turn it on after construction so
+    # the engine builds no knowledge layer for a unit test.
+    engine.config.knowledge.enabled = mode != "no-retrieval"
     calls: list[str] = []
 
     async def fake_chat(prompt, node=None):  # noqa: ANN001

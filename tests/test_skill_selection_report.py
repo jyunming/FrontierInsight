@@ -37,7 +37,7 @@ def test_report_names_what_was_chosen_and_why(tmp_path: Path) -> None:
     s = sel.Selection(chosen=["ambit"], reasons={"ambit": "computes the image"})
     out = sel.render_selection_report(cat, s, [])
     assert "Selected:" in out
-    assert "ambit: computes the image" in out
+    assert "ambit (experiment): computes the image" in out
 
 
 def test_report_says_plainly_when_nothing_was_selected(tmp_path: Path) -> None:
