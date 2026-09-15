@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core.execution import VenvExecutor
+from core.execution import ExecutionResult, VenvExecutor
 
 
 @pytest.fixture(scope="module")
@@ -104,6 +104,71 @@ async def test_cleanup_after_success_is_noop_when_no_venv(tmp_path: Path) -> Non
     # No .fi dir should be created speculatively when there's nothing
     # to freeze.
     assert not (quest_root / ".fi" / "requirements.lock.txt").exists()
+
+
+# --- install(): one retry for a failed pip run --------------------------------
+
+
+def _scripted_execute(exe: VenvExecutor, results: list[ExecutionResult]) -> list[list[str]]:
+    """Replace ``exe.execute`` with one that returns ``results`` in order and
+    records each command. A call past the end of ``results`` raises, so an
+    unexpected extra attempt fails the test."""
+    calls: list[list[str]] = []
+
+    async def fake_execute(cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001
+        calls.append(list(cmd))
+        return results[len(calls) - 1]
+
+    exe.execute = fake_execute  # type: ignore[method-assign]
+    return calls
+
+
+def _pip_result(rc: int, *, timed_out: bool = False) -> ExecutionResult:
+    return ExecutionResult(
+        returncode=rc,
+        stdout="",
+        stderr="" if rc == 0 else "ERROR: Could not build wheels for matplotlib",
+        duration_s=1.0,
+        timed_out=timed_out,
+    )
+
+
+@pytest.mark.asyncio
+async def test_install_retries_a_failed_pip_run_once(tmp_path: Path) -> None:
+    exe = VenvExecutor()
+    calls = _scripted_execute(exe, [_pip_result(1), _pip_result(0)])
+
+    result = await exe.install(["matplotlib"], quest_root=tmp_path)
+
+    assert result.returncode == 0
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0][-3:] == ["install", "--quiet", "matplotlib"]
+
+
+@pytest.mark.asyncio
+async def test_install_reports_the_second_failure(tmp_path: Path) -> None:
+    exe = VenvExecutor()
+    calls = _scripted_execute(exe, [_pip_result(1), _pip_result(2)])
+
+    result = await exe.install(["matplotlib"], quest_root=tmp_path)
+
+    assert result.returncode == 2
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_install_does_not_retry_a_success_or_a_timeout(tmp_path: Path) -> None:
+    exe = VenvExecutor()
+    calls = _scripted_execute(exe, [_pip_result(0)])
+    assert (await exe.install(["numpy"], quest_root=tmp_path)).returncode == 0
+    assert len(calls) == 1
+
+    exe = VenvExecutor()
+    calls = _scripted_execute(exe, [_pip_result(-1, timed_out=True)])
+    result = await exe.install(["numpy"], quest_root=tmp_path)
+    assert result.timed_out is True
+    assert len(calls) == 1
 
 
 # --- A2: setup() must not reuse a partially-built (interrupted) venv ----------
