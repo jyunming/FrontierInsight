@@ -188,3 +188,24 @@ async def test_out_of_range_prompt_names_the_bound_without_the_cap_note(
     prompt, _ = await _reflect_prompt(_engine(tmp_path), state)
     assert "rmse = 1e+06 violates rmse must be [0, 10]" in prompt
     assert "remove that cap" not in prompt
+    assert "sits exactly on a bound in several settings" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_quantity_on_its_bound_in_several_settings_gets_the_trivial_answer_note(
+    tmp_path: Path,
+) -> None:
+    """A computation that returned the trivial answer is in range, so the repair
+    has to be told what to look for, and that a real bound value stays."""
+    state = {
+        **_capped_state(),
+        # One non-zero value, or the all-zero guard answers first.
+        "result_json": {"by_h": {"0.1": {"rmse": 0.0}, "0.5": {"rmse": 0.0}, "1.0": {"rmse": 2.5}}},
+        "code": "rmse = compute(h)",
+    }
+    prompt, patch = await _reflect_prompt(_engine(tmp_path), state)
+    assert "rmse equals its bound 0 in 2 settings" in prompt
+    assert "sits exactly on a bound in several settings" in prompt
+    assert "leave the code as it is" in prompt
+    assert "remove that cap" not in prompt
+    assert patch["exec_reflect_iter"] == 1

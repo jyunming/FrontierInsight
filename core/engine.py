@@ -4342,6 +4342,7 @@ class Engine:
             # The repair has to be told that an honest null beats a plausible
             # number.
             clamped = any(getattr(v, "kind", "") == "clamped" for v in implausible)
+            at_bound = any(getattr(v, "kind", "") == "at_bound" for v in implausible)
             self._log.warning(
                 "[execute_reflect] rc=0 but %d value(s) break the design's "
                 "declared bounds%s — attempting repair (iter %d)",
@@ -4365,6 +4366,13 @@ class Engine:
                 "it would state something false."
                 + ("\n\nA value above is already capped at its bound by the "
                    "script itself; remove that cap." if clamped else "")
+                + ("\n\nA quantity above sits exactly on a bound in several "
+                   "settings. That is what a computation returning a trivial "
+                   "answer looks like: a root finder settling on the solution at "
+                   "the starting state, a sentinel, a guard branch, a threshold "
+                   "compared on the wrong scale. Check how it is computed and fix "
+                   "that if it is the cause; if the value really is the bound in "
+                   "those settings, leave the code as it is." if at_bound else "")
                 + "\n\nRESULT_JSON was:\n"
                 f"{rj_preview}\n\nOriginal stdout tail:\n"
                 + exec_result.get("stdout_tail", "")[:1000]
