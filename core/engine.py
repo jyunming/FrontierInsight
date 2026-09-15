@@ -6054,6 +6054,13 @@ class Engine:
             figure_warnings = self._figure_caption_hits(paper_md, state)
             if figure_warnings:
                 review["figure_caption_warnings"] = figure_warnings
+            # A figure the design planned and the run drew that the paper
+            # leaves out is a set difference, not a reading of prose, so it
+            # cannot misfire the way the number check can: it is forced.
+            missing_figures = _missing_planned_figures(paper_md, state)
+            for hit in missing_figures:
+                self._log.warning("[figure_check] %s", hit)
+            review["must_flag_hits"] += missing_figures
             update: QuestState = {"review": review}
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
@@ -6175,6 +6182,12 @@ class Engine:
         figure_warnings = self._figure_caption_hits(paper_md, state)
         if figure_warnings:
             review["figure_caption_warnings"] = figure_warnings
+        # Forced, as on the single-reviewer path.
+        missing_figures = _missing_planned_figures(paper_md, state)
+        for hit in missing_figures:
+            self._log.warning("[figure_check] %s", hit)
+        if missing_figures:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *missing_figures]
 
         update: QuestState = {"review": review, "review_panel": panel_results}
         # Bump iteration on EITHER verdict=revise OR a non-empty
@@ -8759,7 +8772,8 @@ def _format_claim_grounding(state: QuestState) -> str:
 
 # Must-flag hits that are problems with the paper's text, not with the study:
 # fixing one means writing the paper again, not running the experiment again.
-_TEXT_ONLY_HITS = frozenset({"unsupported_claim", "figure_caption"})
+# ``figure_missing`` is one: the figure exists, the paper left it out.
+_TEXT_ONLY_HITS = frozenset({"unsupported_claim", "figure_caption", "figure_missing"})
 # The name a hit starts with, after a panel's ``[persona] `` prefix:
 # ``unsupported_claim``, ``[methodologist] figure_caption: Figure 2 ...``.
 _HIT_NAME_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z_]+)")
@@ -9039,6 +9053,27 @@ def _figure_record_note(record: dict[str, Any] | None) -> str:
 
 
 _PAPER_IMAGE_RE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")
+
+
+def _missing_planned_figures(paper_md: str, state: QuestState) -> list[str]:
+    """Figures the design planned and the run drew that the paper leaves out.
+
+    The write prompt says to include every available figure, and nothing
+    checked it: 3 of 12 real papers left out at least one, and one of them
+    kept 1 of its 3. A planned figure the run did not produce is the writer's
+    to describe in prose, and a figure nobody planned may stay out, so
+    neither counts here.
+    """
+    planned = (state.get("design") or {}).get("figures_planned")
+    planned_names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+    produced = {Path(str(f)).name for f in (state.get("figures") or [])}
+    embedded = {Path(m.group("src")).name for m in _PAPER_IMAGE_RE.finditer(paper_md or "")}
+    return [
+        f"figure_missing: the paper leaves out figures/{name}, which the design planned and "
+        "the run drew; include it with a numbered caption and discuss it in the text"
+        for name in dict.fromkeys(planned_names)
+        if name in produced and name not in embedded
+    ]
 
 
 def _plain_words(text: str) -> str:

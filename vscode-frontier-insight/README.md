@@ -38,7 +38,9 @@ trace to the experiment, to words quoted from a cited source (the quote must be
 in the source), or are unsupported (unsupported claims force a revise). Each
 figure keeps a record of what it draws, and a caption that describes a line the
 figure draws flat or not at all goes back to the reviewer; the human review in
-the chat lists those captions. The deck ends on one References slide with the
+the chat lists those captions. A paper that leaves out a figure its design
+planned and its run drew is sent back to be rewritten, and the chat lists it
+among the must-fix items. The deck ends on one References slide with the
 sources the paper cites most. With `engine.execute_replicates > 1` the results are reported
 with 95% confidence intervals (a probability's kept within 0–1), effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
