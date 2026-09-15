@@ -107,6 +107,27 @@ async def test_no_assertions_means_no_gating(tmp_path: Path) -> None:
     assert eng.executor.execute.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_replicates_run_when_no_repair_attempt_is_left(tmp_path: Path) -> None:
+    """At the cap nothing regenerates the result: the paper is written from
+    it, so it gets its error bars. Skipping them left a real SIR quest with one
+    seed and no confidence intervals."""
+    eng = _engine(tmp_path, replicates=3)
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"rmse": 999.0}')),
+        _er(_rj('{"rmse": 998.0}')),
+        _er(_rj('{"rmse": 997.0}')),
+    ])
+    design = {"result_assertions": [
+        {"path": "rmse", "min": 0.0, "max": 10.0, "unit": "unitless"},
+    ]}
+    spent = eng.config.engine.exec_reflect_max_iterations
+    patch = await eng._node_execute({"deps": [], "design": design, "exec_reflect_iter": spent})
+    assert eng.executor.execute.await_count == 3
+    assert len(patch["result_json_replicates"]) == 3
+    assert patch["exec_patch_pending"] is False
+
+
 # --- determinism: stop once two seeds agree ----------------------------------
 
 @pytest.mark.asyncio

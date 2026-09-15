@@ -70,12 +70,18 @@ def cfg(tmp_path: Path) -> Config:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attempts", [3, 1], ids=["attempts left", "patch uses the last attempt"])
 async def test_full_dag_with_execute_repair_loop(
-    cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    cfg: Config, monkeypatch: pytest.MonkeyPatch, attempts: int,
 ) -> None:
     """Implement returns BAD code first, then GOOD code on the second
     visit (after reflect routes back). Reflect generates the patch.
-    The quest reaches paper.md despite the initial failure."""
+    The quest reaches paper.md despite the initial failure.
+
+    With one repair attempt the patch is written with the last attempt, and
+    it must still run: the router used to go straight to analyze, leaving the
+    failed run's empty result and no figure next to code that never ran."""
+    cfg.engine.exec_reflect_max_iterations = attempts
     state_flags = {"implement_calls": 0}
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
@@ -166,6 +172,7 @@ async def test_full_dag_with_execute_repair_loop(
     # was the patched one. The state's `code` reflects the fixed code.
     assert "undefined_name" not in (raw.get("code") or "")
     assert "RESULT_JSON" in (raw.get("code") or "")
+    assert raw.get("result_json") == {"score": 0.5}, "the paper was not written from the patched run"
     # Implement gates fired exactly twice (outline + body for ONE
     # design iteration). If design had looped, the count would be 4+.
     assert state_flags["implement_calls"] == 2
