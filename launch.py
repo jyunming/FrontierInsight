@@ -1677,7 +1677,7 @@ async def _run_generators(
     else:
         try:
             written.update(await asyncio.to_thread(PaperGenerator(cfg).generate, art, art.quest_root))
-        except Exception as e:  # pragma: no cover — defensive
+        except Exception as e:  # a failed paper must not cost the other outputs
             print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
             # Strict mode escape hatch: ``output.require_pdf=True`` is the
             # user's signal that a missing PDF is a hard failure for this
