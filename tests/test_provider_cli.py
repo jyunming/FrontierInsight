@@ -135,8 +135,53 @@ def test_antigravity_failure_envelope_raises_rather_than_returning_empty() -> No
         '{"event":"result","result":{"status":"ERROR","response":"",'
         '"error":"empty prompt"}}\n'
     )
-    with _pytest.raises(RuntimeError, match="empty prompt"):
+    with _pytest.raises(RuntimeError, match="empty prompt") as info:
         _extract_antigravity_response(raw)
+    from core.provider import _CliTransientError
+
+    assert not isinstance(info.value, _CliTransientError), "a bad request is not retried"
+
+
+def test_antigravity_capacity_failure_is_retried_after_a_longer_wait() -> None:
+    """The real envelope from 2026-09-15: the server had no capacity for the
+    model. Raised as a plain RuntimeError it was never retried, and it ended
+    two quests in implement."""
+    import pytest as _pytest
+
+    from core.provider import (
+        _CliCapacityError,
+        _CliTransientError,
+        _cli_retry_wait,
+        _extract_antigravity_response,
+        _retry_cli_error,
+    )
+
+    raw = (
+        '{"event":"result","result":{"status":"ERROR","response":"","error":'
+        '"API error (attempt 1): UNAVAILABLE (code 503): No capacity available '
+        'for model gemini-3.8-flash-high on the server"}}\n'
+    )
+    with _pytest.raises(_CliCapacityError) as info:
+        _extract_antigravity_response(raw)
+    assert _retry_cli_error(info.value) is True
+
+    class _Outcome:
+        def __init__(self, exc: BaseException) -> None:
+            self._exc = exc
+
+        def exception(self) -> BaseException:
+            return self._exc
+
+    class _State:
+        def __init__(self, exc: BaseException) -> None:
+            self.outcome = _Outcome(exc)
+            self.attempt_number = 1
+            self.idle_for = 0.0
+            self.upcoming_sleep = 0.0
+
+    for _ in range(20):
+        assert 30.0 <= _cli_retry_wait(_State(info.value)) <= 90.0
+        assert _cli_retry_wait(_State(_CliTransientError("connection reset"))) <= 20.0
 
 
 def test_antigravity_response_skips_the_init_event() -> None:
