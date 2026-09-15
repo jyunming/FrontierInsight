@@ -480,6 +480,50 @@ def test_a_draft_that_cannot_be_measured_is_not_forced(tmp_path: Path, monkeypat
     assert patch["review"]["must_flag_hits"] == [] and "page_limit" not in patch["review"]
 
 
+@pytest.mark.parametrize("panel", [False, True])
+@pytest.mark.parametrize("topic", [SIR_TOPIC, "Extinction times in a stochastic SIR model"])
+def test_an_over_page_limit_hit_the_reviewer_writes_is_dropped(
+    tmp_path: Path, monkeypatch, panel: bool, topic: str,
+) -> None:
+    """Only the measured page count forces the hit. A reviewer's own
+    ``over_page_limit`` never moves the shortening counter, so kept, it would
+    send the paper back to be rewritten on every review, without end."""
+    eng = _engine(tmp_path, topic=topic, panel=panel)
+    _measured(monkeypatch, 4)  # within the limit, when there is one
+
+    async def flagging(prompt, *, node=None):  # noqa: ANN001, ARG001
+        if node == "review_moderator":
+            return json.dumps({"rationale": "all accept"})
+        return json.dumps({
+            "verdict": "accept", "score": 4, "suggestions": [],
+            "must_flag_hits": ["over_page_limit: the paper looks longer than four pages"],
+        })
+
+    eng._chat = flagging  # type: ignore[assignment,method-assign]
+    patch = _review(eng, tmp_path)
+    assert patch["review"]["must_flag_hits"] == []
+    assert "page_limit_rewrites" not in patch and "iteration" not in patch
+    assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("panel", [False, True])
+def test_a_measured_overrun_replaces_the_reviewers_own_page_hit(tmp_path: Path, monkeypatch, panel: bool) -> None:
+    eng = _engine(tmp_path, panel=panel)
+    _measured(monkeypatch, 5)
+
+    async def flagging(prompt, *, node=None):  # noqa: ANN001, ARG001
+        if node == "review_moderator":
+            return json.dumps({"rationale": "all accept"})
+        return json.dumps({
+            "verdict": "accept", "score": 4, "suggestions": [], "must_flag_hits": ["over_page_limit"],
+        })
+
+    eng._chat = flagging  # type: ignore[assignment,method-assign]
+    patch = _review(eng, tmp_path)
+    assert patch["review"]["must_flag_hits"] == [_page_limit_hit(5, 4, 250)]
+    assert patch["page_limit_rewrites"] == 1
+
+
 def test_only_page_limit_hits() -> None:
     hit = _page_limit_hit(5, 4, 100)
     assert _only_page_limit_hits([hit]) and _only_page_limit_hits([hit, hit])

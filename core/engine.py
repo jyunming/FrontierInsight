@@ -6212,7 +6212,9 @@ class Engine:
             mfh = review.get("must_flag_hits") or []
             if not isinstance(mfh, list):
                 mfh = []
-            review["must_flag_hits"] = [str(h).strip() for h in mfh if str(h).strip()]
+            review["must_flag_hits"] = _without_reviewer_page_limit_hits(
+                [str(h).strip() for h in mfh if str(h).strip()], self._log,
+            )
             # Arithmetic, not judgement: compare the paper's numbers against
             # the ones the run actually produced. Every other gate here ends
             # in a model reading text, so a mis-transcription (2.14 computed,
@@ -6360,6 +6362,9 @@ class Engine:
         # always win; prose fields prefer the moderator's version when
         # present.
         review: dict[str, Any] = {**agg}
+        review["must_flag_hits"] = _without_reviewer_page_limit_hits(
+            review.get("must_flag_hits") or [], self._log,
+        )
         rationale = mod_parsed.get("rationale")
         if isinstance(rationale, str) and rationale.strip():
             review["rationale"] = rationale.strip()
@@ -9014,6 +9019,20 @@ _FIGURE_PAGE_SHARE = 0.37
 def _only_page_limit_hits(hits: list[Any]) -> bool:
     """True when every must-flag hit says the draft is over the page limit."""
     return bool(hits) and all(_hit_name(hit) == _PAGE_LIMIT_HIT for hit in hits)
+
+
+def _without_reviewer_page_limit_hits(hits: list[Any], log: Any = None) -> list[Any]:
+    """``hits`` without any the reviewer named ``over_page_limit``. Only the
+    engine's page count forces that hit: a reviewer that names it has not
+    measured the PDF, and since its hit never moves the shortening counter,
+    the rewrite it routes to could repeat without end."""
+    kept = [hit for hit in hits if _hit_name(hit) != _PAGE_LIMIT_HIT]
+    if log is not None and len(kept) != len(hits):
+        log.warning(
+            "[review] dropped %d over_page_limit hit(s) the reviewer wrote; only the "
+            "measured page count forces that hit", len(hits) - len(kept),
+        )
+    return kept
 
 
 def _words_to_cut(pages: int, limit: int, last_page_empty: float) -> int:
