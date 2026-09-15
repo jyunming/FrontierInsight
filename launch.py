@@ -2810,7 +2810,6 @@ async def _run_new(
             if new_val is None:
                 continue  # user aborted single-field edit; stay in review
             if row["id"] == "page_limit":
-                from core.interview import parse_page_limit_answer
                 try:
                     parse_page_limit_answer(new_val)
                 except ValueError as e:

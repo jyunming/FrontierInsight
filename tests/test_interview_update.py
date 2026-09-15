@@ -230,12 +230,14 @@ def test_compute_invalidated_stages_multiple_changes_union() -> None:
 
 def test_keys_to_clear_maps_stages_to_quest_state_keys() -> None:
     """When write is invalidated, we clear `paper_md` from the
-    checkpoint. When review is invalidated, we clear `review` +
-    `review_panel`."""
+    checkpoint. When review is invalidated, we clear `review`,
+    `review_panel` and the shortening-rewrite count."""
     assert keys_to_clear(["write"]) == ["paper_md"]
-    assert sorted(keys_to_clear(["review"])) == sorted(["review", "review_panel"])
+    assert sorted(keys_to_clear(["review"])) == sorted(
+        ["review", "review_panel", "page_limit_rewrites"]
+    )
     assert sorted(keys_to_clear(["write", "review"])) == sorted(
-        ["paper_md", "review", "review_panel"]
+        ["paper_md", "review", "review_panel", "page_limit_rewrites"]
     )
 
 
@@ -476,6 +478,16 @@ def test_cli_update_changes_clears_or_keeps_the_page_limit(
     ))
     assert rc == 0
     assert Config.from_yaml(quest_root / "config.yaml").output.page_limit == saved
+
+
+def test_changing_the_page_limit_clears_the_shortening_count() -> None:
+    """A quest that used both shortening rewrites at one limit would never be
+    forced again after --update sets another: the review reads the count from
+    the checkpoint. A changed limit gets a fresh count, as it re-runs write
+    and review."""
+    stages = compute_invalidated_stages({"page_limit": (4, 5)})
+    assert stages == ["write", "review"]
+    assert "page_limit_rewrites" in keys_to_clear(stages)
 
 
 def test_paper_style_round_trips(tmp_path: Path) -> None:
