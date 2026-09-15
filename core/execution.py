@@ -123,7 +123,21 @@ class VenvExecutor:
             return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
         py = self.python_path(quest_root)
         cmd = [str(py), "-m", "pip", "install", "--quiet", *pkgs]
-        return await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        # Retry a failed install once. Two quests installing matplotlib at the
+        # same moment in one process have twice left one of them with a pip
+        # that fell back to building it from source and failed ("Could not
+        # build wheels for matplotlib", Windows CI), while the other quest's
+        # identical install succeeded. The cause did not reproduce locally, so
+        # this is a second attempt, not a fix of a known race. A timeout is not
+        # retried: another 600-second wait is not a transient.
+        if result.returncode != 0 and not result.timed_out:
+            _log.warning(
+                "[install] pip install rc=%d; retrying once. stderr_tail=%s",
+                result.returncode, result.stderr[-300:],
+            )
+            result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        return result
 
     async def execute(
         self,

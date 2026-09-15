@@ -183,6 +183,13 @@ def test_flatten_drops_booleans_and_zeros() -> None:
     assert got == {"real": 4.2}
 
 
+def test_flatten_keeps_zeros_when_asked() -> None:
+    """The range checks need them: a quantity computed as exactly 0 can be the
+    bug, and the paper check still leaves zeros out."""
+    got = dict(no.flatten_numbers({"flag": True, "zero": 0.0, "real": 4.2}, keep_zero=True))
+    assert got == {"zero": 0.0, "real": 4.2}
+
+
 def test_report_serialises_for_the_audit_file() -> None:
     report = no.check("NILS of 2.41 was measured.", {"nils": 2.14})
     d = report.to_dict()

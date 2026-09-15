@@ -230,6 +230,56 @@ def test_bootstrap_names_series_labelled_only_in_the_legend(tmp_path) -> None:
     ]
 
 
+def test_bootstrap_joins_a_series_drawn_one_point_at_a_time(tmp_path) -> None:
+    """A real quest plotted its final sizes with one scatter call per R0 and
+    the label on the first call only. Recorded as that first point alone, each
+    series read as "flat", and a caption that was right got flagged."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "det = {0.9: 0.0001, 1.5: 0.58, 3.0: 0.94}\n"
+        "sto = {0.9: 0.11, 1.5: 0.58, 3.0: 0.94}\n"
+        "for r0 in det:\n"
+        # No colour, as in the quest: each call takes the next one in the cycle.
+        "    ax.scatter(r0, sto[r0], label='Stochastic' if r0 == 0.9 else '')\n"
+        "    ax.scatter(r0, det[r0], marker='x', color='red', label='Deterministic' if r0 == 0.9 else '')\n"
+        # A marker of its own is a point, not a flat series.
+        "ax.plot([2.0], [0.5], 'o', color='k', label='single')\n"
+        # A line that lies flat still does, and a reference line drawn in the
+        # same style is not part of it: only markers join a series.
+        "ax.plot([1, 3], [0.2, 0.2], color='k', label='level')\n"
+        "ax.axhline(0.94, color='k')\n"
+        "ax.legend(); fig.savefig('final_size.png')\n"
+        # Two labelled round-marker series and a third-colour round point:
+        # which series it belongs to is unknowable, so it joins neither.
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.scatter([1], [0.1], color='blue', label='a'); ax2.scatter([2], [0.2], color='green', label='b')\n"
+        "ax2.scatter([3], [0.9], color='orange', label='')\n"
+        "ax2.legend(); fig2.savefig('ambiguous.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    (axes,) = json.loads((records / "final_size.json").read_text(encoding="utf-8"))["axes"]
+    series = {s["label"]: s for s in axes["series"]}
+    assert set(series) == {"Stochastic", "Deterministic", "single", "level"}
+    assert (series["Stochastic"]["min"], series["Stochastic"]["max"]) == pytest.approx((0.11, 0.94))
+    assert (series["Deterministic"]["min"], series["Deterministic"]["max"]) == pytest.approx((0.0001, 0.94))
+    assert {label: s["shows"] for label, s in series.items()} == {
+        "Stochastic": "yes", "Deterministic": "yes", "single": "yes", "level": "flat",
+    }
+    (axes,) = json.loads((records / "ambiguous.json").read_text(encoding="utf-8"))["axes"]
+    assert [(s["label"], s["min"], s["max"]) for s in axes["series"]] == [("a", 0.1, 0.1), ("b", 0.2, 0.2)]
+
+
 def test_bootstrap_records_nothing_without_a_records_folder(tmp_path) -> None:
     pytest.importorskip("matplotlib")
     boot_dir = write_boot(tmp_path, "latex")

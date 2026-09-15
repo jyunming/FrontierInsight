@@ -62,6 +62,14 @@ right. `path` may name just the metric (`cd_nm`) — it matches at any nesting
 depth. Omit the field entirely when the topic has no such guarantees; an absent
 assertion is not checked, and that is correct.
 
+Make each range as tight as that guarantee allows. A computation that goes wrong
+often returns the trivial answer rather than a wild one — the solution at the
+starting state, a sentinel, exactly 0 or 1 — and a range that still admits it
+cannot catch it. When a quantity cannot be 0 in any setting you run, give it a
+small positive `min` instead of 0. Where the guarantee holds only in part of the
+sweep, keep the general range: the same quantity landing exactly on one bound in
+two or more settings is sent back for repair anyway.
+
 ---
 
 # Inputs

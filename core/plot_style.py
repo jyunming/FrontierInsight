@@ -218,14 +218,24 @@ try:
             pos = _fi_math.log10 if log else float
             span = abs(pos(top) - pos(bottom))
             own = abs(pos(min(high, top)) - pos(max(low, bottom)))
-            shows = "flat" if span > 0 and own < 0.01 * span else "yes"
-            return {"label": label, "min": low, "max": high, "shows": shows}
+            # One point is a marker, not a line lying flat.
+            flat = len(ys) > 1 and span > 0 and own < 0.01 * span
+            return {"label": label, "min": low, "max": high, "shows": "flat" if flat else "yes"}
 
         def _fi_style(artist):
             try:
                 if hasattr(artist, "get_marker"):
                     return ("line", str(artist.get_color()), str(artist.get_linestyle()), str(artist.get_marker()))
                 return ("points", str([round(float(v), 3) for v in artist.get_facecolor()[0]]))
+            except Exception:
+                return None
+
+        def _fi_marker(artist):
+            try:
+                if hasattr(artist, "get_marker"):
+                    return ("line", str(artist.get_marker()))
+                path = artist.get_paths()[0]
+                return ("points", tuple(round(float(v), 2) for v in path.vertices.flatten()))
             except Exception:
                 return None
 
@@ -252,23 +262,39 @@ try:
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
-            series = []
+            artists = list(ax.get_lines()) + list(ax.collections)
             try:
-                names = _fi_legend_names(ax, list(ax.get_lines()) + list(ax.collections))
+                names = _fi_legend_names(ax, artists)
             except Exception:
                 names = {}
-            for line in ax.get_lines():
-                label = names.get(id(line)) or str(line.get_label() or "")
+            # A series can be drawn by several calls: a scatter per point, with
+            # the label on the first call only. Unlabelled markers join the
+            # labelled series drawn in the same style, as the legend pairs them;
+            # failing that, the one labelled series with the same marker shape,
+            # since an uncoloured call takes the next colour in the cycle.
+            # Otherwise that series' first point alone reads as "flat".
+            groups, unlabelled = [], []
+            for artist in artists:
+                label = names.get(id(artist)) or str(artist.get_label() or "")
+                try:
+                    if hasattr(artist, "get_ydata"):
+                        ys = _fi_values(artist.get_ydata())
+                    else:
+                        ys = _fi_values(point[1] for point in artist.get_offsets())
+                except Exception:
+                    continue
+                style, marker = _fi_style(artist), _fi_marker(artist)
                 if label and not label.startswith("_"):
-                    series.append(_fi_series(label, _fi_values(line.get_ydata()), lo, hi, log))
-            for collection in ax.collections:
-                label = names.get(id(collection)) or str(collection.get_label() or "")
-                if label and not label.startswith("_"):
-                    try:
-                        ys = _fi_values(point[1] for point in collection.get_offsets())
-                    except Exception:
-                        continue
-                    series.append(_fi_series(label, ys, lo, hi, log))
+                    groups.append((label, style, marker, ys))
+                elif style is not None and (style[0] == "points" or style[3] not in ("None", "", " ")):
+                    unlabelled.append((style, marker, ys))
+            for style, marker, ys in unlabelled:
+                same_style = [g for g in groups if g[1] == style]
+                same_marker = [g for g in groups if marker is not None and g[2] == marker]
+                target = same_style[0] if same_style else same_marker[0] if len(same_marker) == 1 else None
+                if target is not None:
+                    target[3].extend(ys)
+            series = [_fi_series(label, ys, lo, hi, log) for label, _style, _marker, ys in groups]
             # The house style puts titles on the left, where get_title() alone misses them.
             title = " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t)
             return {
