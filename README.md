@@ -60,6 +60,8 @@ Full setup, cost trade-offs, and the billing model per provider are in **[docs/r
 
 How hard the model reasons is `provider.reasoning_effort` (`minimal` … `max`). Unset, FI sends nothing and each provider keeps its own default — a local Ollama model then does not think at all. How each provider takes the level is in [PROVIDERS.md](docs/PROVIDERS.md#reasoning-effort).
 
+FI's calls to a signed-in CLI are answer-only: `codex_cli` and `claude_cli` run with web search, shell and code execution, MCP servers, skills, plugins and memory turned off, and every CLI call starts in a new, empty temporary directory that is removed when the call ends. `codex_cli` does not read `~/.codex/config.toml`, so custom model providers and profiles defined there are not used — the model comes from `provider.model` and the effort from `provider.reasoning_effort`. `antigravity_cli`, `copilot_cli` and `gemini_cli` still have their tools on. Details in [PROVIDERS.md](docs/PROVIDERS.md#answer-only-cli-calls).
+
 **Prefer to be walked through it?** `python launch.py --new` (CLI) or `@fi /new` (VSCode) runs an interview and builds the `config.yaml` for you. It ends with an optional author line (name, affiliation, email, project link) that the paper, slides and poster print.
 
 ---

@@ -513,6 +513,28 @@ that has such a setting (`ollama`, `openai`, `gemini`, `vllm`, `codex_cli`,
 with `@fi /start <path>`. `docs/PROVIDERS.md` ("Reasoning effort") lists
 which levels each provider takes.
 
+## CLI providers answer, they don't act
+
+When a quest YAML names a signed-in CLI provider (for example one you start
+with `@fi /start <path>`), FI's calls to it are answer-only, the same from
+VSCode, the command line and the web UI:
+
+- `codex_cli` and `claude_cli` run with web search, shell and code execution,
+  MCP servers, skills, plugins, subagents and memory turned off, and save no
+  session.
+- Every CLI call starts in a new, empty temporary directory that is removed
+  when the call ends, so the CLI never sees your workspace folder.
+- `codex_cli` does not read `~/.codex/config.toml`: custom model providers,
+  profiles and MCP servers defined there are not used. The model comes from
+  `provider.model` and the effort from `provider.reasoning_effort`.
+- `antigravity_cli`, `copilot_cli` and `gemini_cli` still have their tools on:
+  `agy` has no option to turn them off and works in its own fixed workspace,
+  `copilot_cli` could not be checked while its quota was used up, and the
+  Gemini CLI no longer signs in individual Google accounts.
+
+`vscode_extension` is not a CLI provider and is unaffected. The flags and the
+measurements behind them are in `docs/PROVIDERS.md` ("Answer-only CLI calls").
+
 ## Cost & rate-limit reality
 
 Every LLM call counts against your **normal Copilot premium-request

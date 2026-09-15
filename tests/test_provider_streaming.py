@@ -111,16 +111,16 @@ def test_collect_via_streaming_deduplicates_result_envelope_after_deltas(
     """When the CLI emits both streamed text_deltas AND a final result
     envelope carrying the assembled text, the aggregator must NOT
     append the envelope on top of the deltas (which would double the
-    answer). The is_result flag from _parse_stream_json_line is the
-    deduplication signal."""
+    answer). The envelope's text replaces the deltas (see
+    tests/test_cli_answer_only.py for a stream where the two differ)."""
     import asyncio
     events = [
         {"type": "stream_event", "event": {"type": "content_block_delta",
             "delta": {"type": "text_delta", "text": "Hello "}}},
         {"type": "stream_event", "event": {"type": "content_block_delta",
             "delta": {"type": "text_delta", "text": "world"}}},
-        # Final envelope carrying the SAME assembled text. Must be
-        # ignored — the deltas already supplied it.
+        # Final envelope carrying the SAME assembled text: it becomes the
+        # answer in place of the deltas, not in addition to them.
         {"type": "result", "result": "Hello world"},
     ]
     _, spec = _make_fake_streaming_binary(tmp_path, events=events)

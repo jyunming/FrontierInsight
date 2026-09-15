@@ -696,9 +696,8 @@ async def test_cli_model_flag_injected_when_provider_model_set() -> None:
 
 @pytest.mark.asyncio
 async def test_cli_model_flag_omitted_when_provider_model_blank() -> None:
-    """No `provider.model` => the CLI's own default is preserved (the
-    user can set e.g. `~/.codex/config.toml` or claude `/model` and have
-    it honored)."""
+    """No `provider.model` => the CLI's own default is preserved (for
+    claude, the most recent `/model` choice is honored)."""
     ep = resolve_endpoint(ProviderConfig(name="claude_cli"))  # no model
     client = LLMClient(ep)
     try:
