@@ -117,9 +117,10 @@ class ProviderConfig(BaseModel):
     # for the rest of the run. See ``core.provider.FallbackLLMClient``.
     fallback: list[ProviderName] = Field(default_factory=list)
     # How hard the model should reason before answering. Unset (default)
-    # sends nothing, so every provider keeps its own default — for a CLI
-    # that is whatever its own config says (``~/.codex/config.toml`` for
-    # codex), for Ollama it is no thinking at all. When set:
+    # sends nothing, so every provider keeps its own default — for claude
+    # and agy their own setting, for codex its built-in default (FI's codex
+    # calls do not read ``~/.codex/config.toml``), for Ollama no thinking at
+    # all. When set:
     #
     # - HTTP providers (openai/codex/gemini/ollama/vllm): ``reasoning_effort``
     #   in the chat-completions body. Ollama accepts only low/medium/high

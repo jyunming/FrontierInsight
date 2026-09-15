@@ -166,9 +166,9 @@ class _CliSpec:
     # If set, and the user passed `provider.model` in their YAML config,
     # FI inserts `[model_flag, <provider.model>]` after argv[0] so the
     # CLI uses the user-specified model instead of its default. Leave
-    # `provider.model` empty in YAML to keep the CLI's own default
-    # (set by e.g. `~/.codex/config.toml` for codex, or the most-recent
-    # `/model` selection for claude).
+    # `provider.model` empty in YAML to keep the CLI's own default (the
+    # most-recent `/model` selection for claude; codex's built-in default,
+    # since FI's codex calls do not read `~/.codex/config.toml`).
     model_flag: str | None = None
     # Hard ceiling (characters) on the prompt this CLI will accept on a
     # single turn. ``None`` = no known limit. When set and a prompt exceeds
@@ -595,8 +595,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # own system prompt + tools schema. Hit by analyze/write on quests
         # whose literature + result_json grow large (e.g. after a broaden).
         max_input_chars=900_000,
-        # `-c key=value` overrides ~/.codex/config.toml for this call only;
-        # the value is parsed as TOML (`codex exec --help`). The codex-cli
+        # `-c key=value` sets a config value for this call only (config.toml
+        # itself is not read, see --ignore-user-config above, so this is the
+        # only effort codex gets); the value is parsed as TOML
+        # (`codex exec --help`). The codex-cli
         # 0.149 binary's string table lists none/minimal/low/medium/high/
         # xhigh/max/ultra as effort values, so every level FI accepts is
         # passed; whether the model honours a level is the model's business.

@@ -195,9 +195,11 @@ copying a model name from elsewhere.
 
 `provider.reasoning_effort` sets how hard the model reasons before it
 answers. Leave it unset (the default) and FI sends nothing, so each
-provider keeps its own default: a CLI uses its own config (for example
-`model_reasoning_effort` in `~/.codex/config.toml`), and a local Ollama
-model does not think at all. Set it in the YAML, or from the interview's
+provider keeps its own default: `claude_cli` and `antigravity_cli` use
+their own setting, `codex_cli` uses codex's built-in default (FI's calls do
+not read `~/.codex/config.toml`, so a `model_reasoning_effort` there does
+not apply; see [Answer-only CLI calls](#answer-only-cli-calls)), and a local
+Ollama model does not think at all. Set it in the YAML, or from the interview's
 "Show advanced" screen ("Reasoning effort") on the CLI, the web
 `/interview` page or `@fi /new`.
 
