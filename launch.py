@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 # Make sibling packages importable when launched as a script.
@@ -1444,9 +1445,29 @@ async def run_one(
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
     # On a resume, only (re)generate outputs that are actually missing — don't
     # re-invoke the LLM for slides/poster/speech that already rendered.
-    written = await _run_generators(
+    return await _finish_outputs(
         cfg, art, supervisor=supervisor,
         skip_existing=resume_quest_id is not None,
+    )
+
+
+async def _finish_outputs(
+    cfg: Config,
+    art: QuestArtifacts,
+    *,
+    supervisor: ProxySupervisor,
+    skip_existing: bool = False,
+    on_failure: Callable[[str, BaseException], None] | None = None,
+) -> dict[str, object]:
+    """Everything a quest gets after ``Engine.run`` returns: the output pass
+    (paper, slides, poster, talk, visual check) and
+    ``frontier_insight_summary.json``. The CLI and the web server's in-process
+    quests (``POST /api/quests/start``) both call this, so the same config
+    produces the same files either way. ``on_failure`` is passed through to
+    ``_run_generators``."""
+    written = await _run_generators(
+        cfg, art, supervisor=supervisor,
+        skip_existing=skip_existing, on_failure=on_failure,
     )
     summary = {
         "quest_id": art.quest_id,
@@ -1620,6 +1641,7 @@ async def _run_generators(
     *,
     supervisor: ProxySupervisor,
     skip_existing: bool = False,
+    on_failure: Callable[[str, BaseException], None] | None = None,
 ) -> dict[str, Path]:
     """Run each generator in turn; one failure does not abort the rest.
 
@@ -1628,7 +1650,11 @@ async def _run_generators(
     carried through untouched — so resume regenerates only the MISSING outputs
     instead of re-invoking the LLM for slides/poster/speech and clobbering good
     decks. Fresh runs (skip_existing=False) regenerate unconditionally, and
-    ``--emit`` stays a force-regenerate path."""
+    ``--emit`` stays a force-regenerate path.
+
+    ``on_failure(output, exc)`` is called for each generator that raised and
+    was skipped, after its line is printed, so a caller with no terminal (the
+    web server) can record the failure for the quest."""
     written: dict[str, Path] = {}
     carried: set[str] = set()
     _apply_paper_venue_override(cfg, art)
@@ -1642,13 +1668,15 @@ async def _run_generators(
             carried.add(kind)
         return existing
 
-    # 1) Paper (sync — pandoc shell-out is fine without async).
+    # 1) Paper. Synchronous (pandoc + LaTeX subprocesses), so it runs in a
+    # worker thread: the event loop stays free for the web server's requests
+    # and, under --fleet, for the other quests.
     existing = _already("paper_pdf")
     if existing is not None:
         written["paper_pdf"] = existing
     else:
         try:
-            written.update(PaperGenerator(cfg).generate(art, art.quest_root))
+            written.update(await asyncio.to_thread(PaperGenerator(cfg).generate, art, art.quest_root))
         except Exception as e:  # pragma: no cover — defensive
             print(f"[FI] paper generator failed: {e!r}", file=sys.stderr)
             # Strict mode escape hatch: ``output.require_pdf=True`` is the
@@ -1662,6 +1690,8 @@ async def _run_generators(
             # missing PDF".
             if cfg.output.require_pdf:
                 raise
+            if on_failure is not None:
+                on_failure("paper", e)
     # 2) Slides (LLM + Marp).
     existing = _already("slides")
     if existing is not None:
@@ -1673,6 +1703,8 @@ async def _run_generators(
             )
         except Exception as e:
             print(f"[FI] slide generator failed: {e!r}", file=sys.stderr)
+            if on_failure is not None:
+                on_failure("slides", e)
     # 3) Poster (LLM + pdflatex).
     existing = _already("poster")
     if existing is not None:
@@ -1684,6 +1716,8 @@ async def _run_generators(
             )
         except Exception as e:
             print(f"[FI] poster generator failed: {e!r}", file=sys.stderr)
+            if on_failure is not None:
+                on_failure("poster", e)
     # 4) Speech (one LLM call).
     existing = _already("speech")
     if existing is not None:
@@ -1695,6 +1729,8 @@ async def _run_generators(
             )
         except Exception as e:
             print(f"[FI] speech generator failed: {e!r}", file=sys.stderr)
+            if on_failure is not None:
+                on_failure("speech", e)
     # 5) Screenshot + AI check of each PDF this pass produced (a PDF carried
     # through on a resume was checked when it was made). Slides and poster
     # are redone with the problems a new version can fix; the paper is never
@@ -1708,7 +1744,9 @@ async def _run_generators(
             nonlocal paper_lines
             paper_lines += 1
             source = written.get("paper_md") or art.paper_md
-            pdf, skip = PaperGenerator(cfg)._compile_pdf(Path(source), art.quest_root, extra_lines=paper_lines)
+            pdf, skip = await asyncio.to_thread(
+                PaperGenerator(cfg)._compile_pdf, Path(source), art.quest_root, extra_lines=paper_lines,
+            )
             if pdf is None:
                 raise RuntimeError(skip.summary if skip else "the paper did not recompile")
 

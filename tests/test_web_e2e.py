@@ -140,10 +140,9 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
         # In-process server quest → the clarify future resolves in-process.
         assert body["in_process_resolved"] is True
 
-        # 4. Wait for the background task to finish. We watch the
-        #    paper.md to detect end-of-quest (the summary file is written
-        #    by `launch.py` outside this code path — the server-side
-        #    driver only runs `engine.run`, not the generators stage).
+        # 4. Wait for the engine run to finish. paper/paper.md marks its
+        #    end; the server-side driver then runs the CLI's output pass
+        #    and writes the summary file.
         paper_md = quest_root / "paper" / "paper.md"
         # Budget: ~300 s. First-run venv create + matplotlib install +
         # warmup is the bulk of this; ~110 s in practice on Windows.
@@ -163,19 +162,21 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
             )
 
         # 5. Assert the GUI surfaces the finished quest correctly.
-        # Wait for the driver task to actually finish (paper.md exists
-        # but `engine.run` might still be in its `finally:` block).
-        for _ in range(50):
-            await asyncio.sleep(0.1)
-            r = await client.get(f"/api/quests/{quest_id}")
-            body = r.json()
-            if not body.get("alive"):
-                break
+        # Wait for the driver task to actually finish: paper.md exists
+        # before `engine.run` leaves its `finally:` block and before the
+        # output pass runs.
+        await asyncio.wait_for(app.state.registry._tasks[quest_id], timeout=120)
+        r = await client.get(f"/api/quests/{quest_id}")
+        body = r.json()
 
         assert r.status_code == 200
+        assert body["alive"] is False
         assert body["paper_preview"] is not None
         assert "result.png" in (body.get("figures") or [])
-        # The summary file is written by launch.py's `run_one`, not by
-        # the server's quest driver — so it's None here. The paper
-        # preview being non-empty is the sufficient "done" signal.
+        # The output pass ran, as it does after a CLI run of the same
+        # config: paper.md is copied to the quest root and the summary
+        # lists it.
+        assert (quest_root / "paper.md").is_file()
+        assert body["summary"]["outputs"]["paper_md"] == str(quest_root / "paper.md")
+        assert body["errors"] is None
         assert body.get("pending_clarify") is False

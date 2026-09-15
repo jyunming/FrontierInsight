@@ -13,7 +13,10 @@ Endpoints
 * ``GET  /api/quests/{id}/clarify``       — pending questions, if any.
 * ``POST /api/quests/{id}/clarify``       — submit answers; resumes graph.
 * ``POST /api/quests/start``              — start a new quest from a posted
-  YAML body. Returns the new quest_id.
+  YAML body and run it inside this server process, followed by the same
+  output pass as the CLI (paper.pdf, slides, poster, talk per
+  ``output.kinds``, and ``frontier_insight_summary.json``). Returns the new
+  quest_id.
 
 The server is intentionally state-light: each quest's state lives on
 disk (``<quest_root>/.fi/{run.log, state.sqlite}`` + the
@@ -70,6 +73,7 @@ class _QuestRegistry:
         self._clarify_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._configs: dict[str, Config] = {}
         self._final_states: dict[str, dict[str, Any]] = {}
+        self._errors: dict[str, list[dict[str, str]]] = {}
         # Mirror of the clarify-future plumbing for the human-review
         # gate. When the in-process engine pauses at the human_feedback
         # node, the registered future is what the POST endpoint
@@ -86,6 +90,16 @@ class _QuestRegistry:
 
     def final_state(self, quest_id: str) -> dict[str, Any] | None:
         return self._final_states.get(quest_id)
+
+    def record_error(self, quest_id: str, stage: str, error: str) -> None:
+        """A failure in a quest this server runs in-process. ``stage`` is
+        ``quest`` (the engine run), the output whose generator raised
+        (``paper``, ``slides``, ``poster``, ``speech``), or ``outputs`` when
+        the output pass stopped."""
+        self._errors.setdefault(quest_id, []).append({"stage": stage, "error": error})
+
+    def errors(self, quest_id: str) -> list[dict[str, str]] | None:
+        return self._errors.get(quest_id)
 
     def register_clarify(
         self, quest_id: str, questions: dict[str, Any],
@@ -147,6 +161,49 @@ class _QuestRegistry:
     def alive(self, quest_id: str) -> bool:
         task = self._tasks.get(quest_id)
         return task is not None and not task.done()
+
+
+_serve_log = logging.getLogger("frontier_insight.serve")
+
+
+async def _run_in_process_outputs(
+    registry: _QuestRegistry,
+    quest_id: str,
+    cfg: Config,
+    art: Any,
+    *,
+    supervisor: ProxySupervisor,
+    fi_dir: Path,
+) -> None:
+    """Give a quest run in-process what the CLI gives it after ``Engine.run``
+    returns: the output pass and ``frontier_insight_summary.json``, by calling
+    the CLI's own code. The pass's problems go to the quest's run.log (the log
+    the quest page tails) and into the registry, which the quest detail
+    returns as ``errors``. Nothing here raises into the server."""
+    import launch  # the CLI's output pass itself, not a copy of it
+    from core.engine import _close_quest_logger, _quest_logger
+
+    # Engine.run closed the quest's run.log handler on its way out; open it
+    # again for the pass.
+    qlog = _quest_logger(quest_id, fi_dir)
+
+    def on_failure(output: str, exc: BaseException) -> None:
+        qlog.error("[outputs] %s generator failed: %r", output, exc)
+        registry.record_error(quest_id, output, repr(exc))
+
+    try:
+        qlog.info("[outputs] generating %s", ", ".join(cfg.output.kinds) or "(none)")
+        summary = await launch._finish_outputs(
+            cfg, art, supervisor=supervisor, on_failure=on_failure,
+        )
+        outputs = summary.get("outputs")
+        for name, path in (outputs.items() if isinstance(outputs, dict) else ()):
+            qlog.info("[outputs] wrote %s -> %s", name, path)
+    except Exception as exc:  # noqa: BLE001 — a failed pass must not reach the server
+        qlog.exception("[outputs] output pass failed: %r", exc)
+        registry.record_error(quest_id, "outputs", repr(exc))
+    finally:
+        _close_quest_logger(quest_id)
 
 
 # ---- on-disk quest scan ---------------------------------------------------
@@ -1892,6 +1949,11 @@ def make_app(
             # the UI can hide the banner. Lives in the quest root,
             # cleared by the engine on a successful resume.
             "quest_failed": quest_failed,
+            # Failures of a quest this server runs in-process
+            # (POST /api/quests/start): the engine run (stage "quest"), an
+            # output's generator ("paper", "slides", "poster", "speech"), or
+            # the output pass as a whole ("outputs"). Null when none.
+            "errors": registry.errors(quest_id),
             # Subprocess-launcher specifics for the detail page UI.
             # `pid` lets users find the process; `started_at` powers a
             # "running for X minutes" hint. Both null when the quest
@@ -2472,7 +2534,18 @@ def make_app(
                 # without re-reading the SqliteSaver checkpoint.
                 registry.record_final_state(quest_id, art.raw_state or {})
             except Exception as e:
-                engine._log.error("[server] quest %s failed: %s", quest_id, e)
+                # Engine.run has closed the quest's run.log by now (after
+                # writing quest_failed.md), so this goes to the server log.
+                _serve_log.exception("[server] quest %s failed", quest_id)
+                registry.record_error(quest_id, "quest", repr(e))
+                return
+            # Then what the CLI does after Engine.run: the output pass
+            # (paper.pdf, slides, poster, talk per output.kinds, and the
+            # visual check) and the summary file.
+            await _run_in_process_outputs(
+                registry, quest_id, cfg, art,
+                supervisor=app.state.supervisor, fi_dir=engine.fi_dir,
+            )
 
         task = asyncio.create_task(driver())
         registry.register_task(quest_id, task, cfg)
