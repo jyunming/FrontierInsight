@@ -30,7 +30,7 @@ Include all available figures this way.
 - `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** sources from References or Further reading **by content** (not just listed), and an explicit Limitations subsection. Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
 - `comprehensive review` — 10–15 pages with a Background / Context section near the start, a Comparison or Synthesis section in the middle, and a closing section that integrates every listed source by content. Aim for 4000+ words and at least 10 sources from References or Further reading actually discussed.
 
-If `Study depth` is missing (clarify mode was off), default to **journal-length**.
+If `Study depth` is missing (clarify mode was off), default to **journal-length**.$page_limit_note
 
 ## Never narrate the engine, pipeline, or run — read this first
 

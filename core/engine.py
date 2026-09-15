@@ -47,6 +47,7 @@ from .config import (
     Config,
     NON_SCIENTIFIC_PAPER_FORMATS,
     SCIENTIFIC_PAPER_FORMATS,
+    resolve_page_limit,
 )
 from .execution import ExecutionResult, make_executor
 from .knowledge import (
@@ -242,6 +243,10 @@ class QuestState(TypedDict, total=False):
     # runs). The review then forces ``citations_unchecked``: a draft whose
     # citations nobody checked cannot be accepted.
     claim_check_failed: str
+    # How many drafts the review has sent back to be shortened because the
+    # rendered PDF ran over the page limit. At most ``_PAGE_LIMIT_REWRITES``;
+    # these rewrites do not use ``engine.max_iterations``.
+    page_limit_rewrites: int
     review: dict[str, Any]
     # Human-feedback gate state. Populated by ``_node_human_feedback``
     # when ``engine.human_feedback_gate == "after_review"``. ``action``
@@ -1421,6 +1426,18 @@ class Engine:
         # 3. Otherwise fall through to the legacy verdict-driven routing.
         review = state.get("review") or {}
         must_flag = review.get("must_flag_hits") or []
+        # The draft is over the page limit and nothing else is to be fixed:
+        # write it again, shorter. These rewrites have their own cap (the
+        # review stops forcing them after ``_PAGE_LIMIT_REWRITES``), so the
+        # iteration budget neither pays for them nor stops them.
+        page_rewrites = int(state.get("page_limit_rewrites") or 0)
+        if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
+            self._log.info(
+                "[route] the draft is over the page limit — rewriting it shorter "
+                "(shortening %d of %d, outside engine.max_iterations)",
+                page_rewrites, _PAGE_LIMIT_REWRITES,
+            )
+            return "rewrite"
         if must_flag and state.get("iteration", 0) < self.config.engine.max_iterations:
             if _hits_need_only_a_rewrite(must_flag):
                 self._log.info(
@@ -5461,6 +5478,10 @@ class Engine:
                 else ""
             ),
             evidence_note=evidence_note,
+            # Empty without a page limit, so that prompt is unchanged.
+            page_limit_note=_page_limit_note(
+                resolve_page_limit(self.config), _paper_figure_count(state),
+            ),
             review_feedback=_format_review_for_writer(state),
             skills_block=(
                 self._writing_skills_block(state)
@@ -6028,6 +6049,110 @@ class Engine:
         except OSError as e:
             self._log.warning("[claim_check] ledger write failed: %r", e)
 
+    async def _measure_draft_pages(self, paper_path: Path, state: QuestState) -> dict[str, Any] | None:
+        """Render the draft the way the final ``paper.pdf`` is rendered and
+        measure it: ``{"pages", "words", "last_page_lines", "last_page_empty"}``.
+
+        The render is ``PaperGenerator._compile_pdf``, so the template, the
+        pandoc flags and the page-limit layout are the final paper's, in the
+        venue the final render uses (the clarify ``paper_venue`` when the
+        config keeps ``generic``). It runs in ``.fi/page_check/`` with the
+        quest's figures copied beside the source; nothing is written to the
+        quest folder itself. Returns ``None``, with one warning per quest, when
+        the pages cannot be counted: the paper renders through HTML
+        (``paper_style: briefing`` with a browser present), the LaTeX render
+        fails or has no engine (the HTML fallback is off for this render), or
+        the PDF cannot be read."""
+        from generation._html_pdf import find_html_browser
+        from generation._pdf_measure import _empty_share, measure_pdf, paper_report
+        from generation.paper import PaperGenerator
+
+        output = self.config.output
+        if output.paper_style == "briefing" and find_html_browser() is not None:
+            return self._page_check_skipped(
+                "paper_style is briefing, which renders through HTML, not the LaTeX templates"
+            )
+        fmt = output.paper_format
+        answers = state.get("clarify_answers")
+        venue = answers.get("paper_venue") if isinstance(answers, dict) else None
+        if fmt == "generic" and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
+            fmt = venue
+        config = self.config.model_copy(update={"output": output.model_copy(update={
+            "html_pdf_fallback": False, "paper_style": "latex", "paper_format": fmt,
+        })})
+        scratch = self.fi_dir / "page_check"
+        quest_figures = self.quest_root / "figures"
+
+        def render() -> tuple[dict[str, Any] | None, str]:
+            shutil.rmtree(scratch, ignore_errors=True)
+            scratch.mkdir(parents=True, exist_ok=True)
+            if quest_figures.is_dir():
+                shutil.copytree(quest_figures, scratch / "figures")
+            pdf, skip = PaperGenerator(config)._compile_pdf(Path(paper_path), scratch)
+            if pdf is None:
+                return None, skip.summary if skip is not None else "the render produced no PDF"
+            doc = measure_pdf(pdf)
+            if doc is None or not doc.pages:
+                return None, "the rendered PDF could not be read"
+            metrics = paper_report(doc)["metrics"]
+            return {
+                "pages": int(metrics["pages"]),
+                "words": metrics["words"],
+                "last_page_lines": metrics["last_page_lines"],
+                "last_page_empty": round(_empty_share(doc.pages[-1]), 3),
+            }, ""
+
+        try:
+            measured, why = await asyncio.to_thread(render)
+        except Exception as e:  # noqa: BLE001 — a page count never stops the review
+            measured, why = None, repr(e)
+        if measured is None:
+            return self._page_check_skipped(why)
+        return measured
+
+    def _page_check_skipped(self, why: str) -> None:
+        """Log, once per quest, that the page limit is not checked and why."""
+        if not getattr(self, "_page_check_warned", False):
+            self._page_check_warned = True
+            self._log.warning(
+                "[page_limit] the draft's pages are not counted, so the page limit is not checked: %s", why,
+            )
+        return None
+
+    async def _page_limit_review(
+        self, state: QuestState, paper_path: str | Path | None,
+    ) -> tuple[list[str], dict[str, Any] | None]:
+        """The page-limit part of the review: the forced hit (a list of at most
+        one) and the record for ``review["page_limit"]``. Without a page limit
+        nothing is rendered and both are empty, as they are when the draft
+        cannot be measured. A draft over the limit is forced while fewer than
+        ``_PAGE_LIMIT_REWRITES`` shortening rewrites have been made; after
+        that the overrun is only recorded."""
+        limit = resolve_page_limit(self.config)
+        if limit is None or not paper_path or not Path(paper_path).is_file():
+            return [], None
+        measured = await self._measure_draft_pages(Path(paper_path), state)
+        if measured is None:
+            return [], None
+        pages = int(measured["pages"])
+        done = int(state.get("page_limit_rewrites") or 0)
+        record: dict[str, Any] = {"pages": pages, "limit": limit, "rewrites": done}
+        if pages <= limit:
+            self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
+            return [], record
+        if done >= _PAGE_LIMIT_REWRITES:
+            record["exceeded_after_rewrites"] = True
+            self._log.warning(
+                "[page_limit] the draft renders to %d pages, over the limit of %d, after %d shortening "
+                "rewrites; recorded in the review, not forced again", pages, limit, done,
+            )
+            return [], record
+        words = _words_to_cut(pages, limit, float(measured.get("last_page_empty") or 0.0))
+        record["words_to_cut"] = words
+        hit = _page_limit_hit(pages, limit, words)
+        self._log.warning("[page_limit] %s (shortening %d of %d)", hit, done + 1, _PAGE_LIMIT_REWRITES)
+        return [hit], record
+
     async def _node_review(self, state: QuestState) -> QuestState:
         """Single-reviewer (default) OR panel-mode review.
 
@@ -6048,6 +6173,10 @@ class Engine:
                 paper_md = Path(paper_path).read_text(encoding="utf-8")
             except OSError:
                 paper_md = ""
+        # With a page limit, this draft is rendered the way paper.pdf will be
+        # and its pages counted, for both review paths below. Without one,
+        # nothing is rendered.
+        page_hits, page_record = await self._page_limit_review(state, paper_path)
         base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
@@ -6118,15 +6247,24 @@ class Engine:
             review["must_flag_hits"] += missing_figures
             # Forced as well: nothing checked this draft's citations.
             review["must_flag_hits"] += _citations_unchecked(state)
+            # And a draft over the page limit.
+            review["must_flag_hits"] += page_hits
+            if page_record is not None:
+                review["page_limit"] = page_record
             update: QuestState = {"review": review}
+            if page_hits:
+                update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
             # alone (even with verdict=accept) makes ``_route_after_review``'s
             # non-bypassable revise path deterministic with respect to the
             # ``max_iterations`` budget — without this, a malformed
             # ``revise`` route from must-flag wouldn't have consumed the
-            # iteration and the loop could run unbounded.
-            if review.get("verdict") == "revise" or review["must_flag_hits"]:
+            # iteration and the loop could run unbounded. A hit over the page
+            # limit consumes none: its rewrites have their own counter, capped
+            # at ``_PAGE_LIMIT_REWRITES``.
+            other_hits = [h for h in review["must_flag_hits"] if _hit_name(h) != _PAGE_LIMIT_HIT]
+            if review.get("verdict") == "revise" or other_hits:
                 update["iteration"] = state.get("iteration", 0) + 1
                 self._log.info(
                     "[review] verdict=%s must_flag_hits=%s -> iteration %d",
@@ -6248,14 +6386,26 @@ class Engine:
         unchecked = _citations_unchecked(state)
         if unchecked:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
+        # And a draft over the page limit, as on the single-reviewer path.
+        if page_hits:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *page_hits]
+        if page_record is not None:
+            review["page_limit"] = page_record
 
         update: QuestState = {"review": review, "review_panel": panel_results}
+        if page_hits:
+            update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
         # Bump iteration on EITHER verdict=revise OR a non-empty
         # must_flag_hits list. Without the must-flag clause, a malformed
         # persona response that recorded ``verdict=accept`` alongside a
         # must-flag hit would route to revise (via _route_after_review)
-        # without consuming iteration budget — the loop could spin.
-        if review.get("verdict") == "revise" or (review.get("must_flag_hits") or []):
+        # without consuming iteration budget — the loop could spin. A hit
+        # over the page limit bumps nothing: its rewrites have their own
+        # counter, capped at ``_PAGE_LIMIT_REWRITES``.
+        other_hits = [
+            h for h in (review.get("must_flag_hits") or []) if _hit_name(h) != _PAGE_LIMIT_HIT
+        ]
+        if review.get("verdict") == "revise" or other_hits:
             update["iteration"] = state.get("iteration", 0) + 1
             self._log.info(
                 "[review] panel verdict=%s must_flag_hits=%s (agreement=%s, score=%s) -> iteration %d",
@@ -8844,7 +8994,77 @@ def _format_claim_grounding(state: QuestState) -> str:
 # Must-flag hits that are problems with the paper's text, not with the study:
 # fixing one means writing the paper again, not running the experiment again.
 # ``figure_missing`` is one: the figure exists, the paper left it out.
-_TEXT_ONLY_HITS = frozenset({"unsupported_claim", "figure_caption", "figure_missing", "citations_unchecked"})
+_TEXT_ONLY_HITS = frozenset({
+    "unsupported_claim", "figure_caption", "figure_missing", "citations_unchecked", "over_page_limit",
+})
+
+# A paper with a page limit: the review renders each draft the way paper.pdf
+# is rendered and counts its pages. A draft over the limit is sent back to be
+# shortened at most this many times, and those rewrites do not use
+# ``engine.max_iterations``.
+_PAGE_LIMIT_REWRITES = 2
+_PAGE_LIMIT_HIT = "over_page_limit"
+# Words a full page holds and the share of a page one figure takes, from the
+# graded SIR papers at the 1 in layout. The page-limit layout holds more, so a
+# budget worked out from these leaves room.
+_WORDS_PER_PAGE = 450
+_FIGURE_PAGE_SHARE = 0.37
+
+
+def _only_page_limit_hits(hits: list[Any]) -> bool:
+    """True when every must-flag hit says the draft is over the page limit."""
+    return bool(hits) and all(_hit_name(hit) == _PAGE_LIMIT_HIT for hit in hits)
+
+
+def _words_to_cut(pages: int, limit: int, last_page_empty: float) -> int:
+    """About how many words take a draft of ``pages`` pages down to ``limit``:
+    a page's worth for each full page past the first one over, and the filled
+    part of the last page. At least 100, in steps of 50."""
+    filled = 1.0 - min(1.0, max(0.0, last_page_empty))
+    over = max(0.0, (pages - limit - 1) + filled)
+    return max(100, int(over * _WORDS_PER_PAGE / 50.0 + 0.5) * 50)
+
+
+def _page_limit_hit(pages: int, limit: int, words: int) -> str:
+    """The forced hit for a draft over the page limit, which is also what the
+    writer reads under "Must fix"."""
+    return (
+        f"over_page_limit: the rendered PDF is {pages} pages; the limit is {limit}. "
+        f"Cut about {words} words, keep every figure and all numbers; shorten "
+        "background and discussion first"
+    )
+
+
+def _paper_figure_count(state: QuestState) -> int:
+    """The figures the paper will carry: the ones the run drew, else the ones
+    the design planned."""
+    figures = state.get("figures") or []
+    if figures:
+        return len(figures)
+    planned = (state.get("design") or {}).get("figures_planned")
+    return len([f for f in planned if str(f).strip()]) if isinstance(planned, list) else 0
+
+
+def _page_limit_note(limit: int | None, n_figures: int) -> str:
+    """The write prompt's ``$page_limit_note``: nothing without a page limit, so
+    that prompt stays as it was; with one, the length the paper must keep to."""
+    if limit is None:
+        return ""
+    budget = limit * _WORDS_PER_PAGE - n_figures * _FIGURE_PAGE_SHARE * _WORDS_PER_PAGE
+    words = max(150, int(round(budget / 50.0)) * 50)
+    pages = f"{limit} page" + ("" if limit == 1 else "s")
+    figures = (
+        f", less about a third of a page for each of the {n_figures} figures"
+        if n_figures > 1 else ", less about a third of a page for the figure" if n_figures == 1 else ""
+    )
+    return (
+        f"\n\n**Page limit: the rendered paper must fit in {pages}.** This overrides the page "
+        f"and word counts of the `Study depth` lengths above. Write about {words} words for the "
+        f"whole paper, abstract through the last section ({limit} × {_WORDS_PER_PAGE} words a "
+        f"page{figures}). The References and Further reading lists added after your last "
+        "section take room on those pages too, so do not pad. Each draft is rendered and its "
+        "pages counted; a draft over the limit comes back to be shortened."
+    )
 
 # A node that judges the paper reads all of it; the cap only guards against a
 # runaway file. The old 16,000-character cut hid the second half of a real
@@ -8885,13 +9105,17 @@ def _citations_unchecked(state: QuestState) -> list[str]:
 _HIT_NAME_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z_]+)")
 
 
+def _hit_name(hit: Any) -> str:
+    """The identifier a must-flag hit starts with, in lower case and without a
+    plural s; empty when it starts with none."""
+    m = _HIT_NAME_RE.match(str(hit))
+    return m.group(1).lower().removesuffix("s") if m else ""
+
+
 def _hits_need_only_a_rewrite(hits: list[Any]) -> bool:
     """True when every must-flag hit names a problem with the paper's text, so
     the review sends the quest back to ``write`` instead of ``design``."""
-    names = []
-    for hit in hits:
-        m = _HIT_NAME_RE.match(str(hit))
-        names.append(m.group(1).lower().removesuffix("s") if m else "")
+    names = [_hit_name(hit) for hit in hits]
     return bool(names) and all(name in _TEXT_ONLY_HITS for name in names)
 
 
