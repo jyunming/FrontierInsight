@@ -8042,8 +8042,10 @@ def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
 # Claim grounding shows the model this much of each cited source's text: the
 # passages most related to the sentences citing it. It saw only titles before,
 # and grounded "explicit Euler is unstable in oscillatory systems" in a paper
-# on discrete gradients whose abstract never mentions Euler.
-_CLAIM_SOURCE_CHARS = 1500
+# on discrete gradients whose abstract never mentions Euler. At 1,500 only the
+# opening chunk and one 1,200-character passage fit, so a source cited by six
+# sentences showed one passage, and supported citations were rejected.
+_CLAIM_SOURCE_CHARS = 6000
 # A quote shorter than this could be found in almost any source.
 _QUOTE_MIN_CHARS = 25
 

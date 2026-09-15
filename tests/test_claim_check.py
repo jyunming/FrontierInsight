@@ -258,3 +258,79 @@ def test_claim_check_provider_failure_is_non_fatal(tmp_path: Path) -> None:
     assert "FAILED" in _format_claim_grounding(out)
     # No ledger is written when grounding never produced a result.
     assert not (tmp_path / "paper" / "claims.json").exists()
+
+
+# --- how much of each cited source the check sees -----------------------------
+
+# A quest's text of Brauer 2017, "Mathematical epidemiology: Past, present, and
+# future", as FI stored it (inline formulas already blank), trimmed to its
+# opening and its "Stochastic models" section. The paper below is that quest's
+# six sentences citing it, renumbered [1]. Its claim check saw 1,500 characters
+# of the source: the abstract and the Galton-Watson paragraph. It rejected the
+# "critical mass" sentence as "truncated", though the source says so further on.
+BRAUER_2017 = {
+    "title": "Mathematical epidemiology: Past, present, and future",
+    "doi": "10.1016/j.idm.2017.02.001",
+    "source": "openalex",
+}
+BRAUER_PAPER = (
+    "# Stochastic and deterministic SIR\n\n## Introduction\n\n"
+    "However, deterministic models assume a continuous population and homogeneous mixing, which are often "
+    "inaccurate descriptions of the early stages of an outbreak when the number of infected individuals is "
+    "very small [1]. In these regimes, transmission is a stochastic event.\n\n"
+    "For $R_0 > 1$, branching process theory suggests that the probability of a minor outbreak (extinction) "
+    "is $1/R_0$, meaning the probability of a major outbreak is $1 - 1/R_0$ [1]. Once an outbreak escapes "
+    "this initial stochastic phase and reaches a critical mass, its trajectory is expected to converge toward "
+    "the deterministic prediction [1].\n\n## Discussion\n\n"
+    "The convergence of the outbreak probability to $1 - 1/R_0$ for $R_0 > 1$ aligns with the theory of "
+    "Galton-Watson branching processes [1]. In these models, the probability of extinction for a single "
+    "infective is the smallest root of the generating function, which for the simple SIR model simplifies to "
+    "$1/R_0$ [1].\n\n"
+    "However, our results show that the deterministic prediction does not represent the *average* outcome of "
+    "all stochastic realizations, but rather the *conditional* outcome given that the disease avoids early "
+    "extinction [1].\n"
+)
+# Where the source supports the "critical mass" sentence.
+BRAUER_SUPPORT = "make a transition to a compartmental model when the epidemic has become established"
+
+
+def _brauer_text() -> str:
+    return (Path(__file__).parent / "fixtures" / "claim_check_brauer_2017.txt").read_text(encoding="utf-8")
+
+
+def test_the_source_excerpt_is_as_long_as_the_budget_allows(monkeypatch) -> None:
+    from core import engine as E
+
+    text = _brauer_text()
+    sentences = E._citing_sentences(BRAUER_PAPER)["1"]
+    lengths = {}
+    for budget in (1500, 6000):
+        monkeypatch.setattr(E, "_CLAIM_SOURCE_CHARS", budget)
+        excerpt = E._claim_source_block("1", BRAUER_2017, text, sentences).split("\nText:\n", 1)[1]
+        assert len(excerpt) <= budget
+        lengths[budget] = len(excerpt)
+    assert lengths[1500] < lengths[6000]
+
+
+def test_the_check_sees_the_passage_that_supports_a_citation(tmp_path: Path) -> None:
+    from core.engine import _normalized_text
+
+    text = _brauer_text()
+    # The passage is past the first 1,500 characters, and the excerpt of the
+    # sentences' most related passages did not reach it at that size.
+    assert _normalized_text(text).find(BRAUER_SUPPORT) > 1500
+    eng = _engine(tmp_path)
+    seen: list[str] = []
+
+    async def fake_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
+        seen.append(prompt)
+        return json.dumps({"claims": [], "summary": ""})
+
+    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
+    state = {"topic": "t", "paper_md": _paper(tmp_path, BRAUER_PAPER),
+             "literature": [{"content": text, "metadata": BRAUER_2017}]}
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    prompt = _normalized_text(seen[0])
+    assert BRAUER_SUPPORT in prompt
+    assert "we define the generating function" in prompt
+    assert "distinction between a minor outbreak and a major epidemic" in prompt
