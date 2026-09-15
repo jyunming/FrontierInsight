@@ -105,6 +105,13 @@ _NUMBER = re.compile(
 _STRIP_BLOCKS = [
     re.compile(r"^```.*?^```", re.S | re.M),      # fenced code
     re.compile(r"^\s*\|.*\|\s*$", re.M),           # table rows (kept out: see note)
+    # The References and Further reading sections, before the heading rule
+    # below removes their headings: an entry can open with a lower-case name
+    # ("van der Berg") or a year, which the entry rule misses.
+    re.compile(
+        r"^#{1,6}[ \t]*(?:references|further[ \t]+reading)[ \t]*$.*?(?=^#{1,6}[ \t]|\Z)",
+        re.S | re.M | re.I,
+    ),
     re.compile(r"!\[[^\]]*\]\([^)]*\)"),           # image embeds
     re.compile(r"^#+ .*$", re.M),                  # headings
     re.compile(r"^\s*\d+\.\s+[A-Z][^\n]*\(\d{4}\)", re.M),  # reference entries

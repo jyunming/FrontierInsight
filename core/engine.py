@@ -1209,7 +1209,14 @@ class Engine:
         g.add_conditional_edges(
             "review",
             self._route_after_review,
-            {"revise": "design", "done": END, "human_feedback": "human_feedback"},
+            {
+                "revise": "design",
+                # Every must-flag is a problem with the text: the experiment
+                # stands, so only the paper is written again.
+                "rewrite": "write",
+                "done": END,
+                "human_feedback": "human_feedback",
+            },
         )
         # human_feedback resolves to one of three outcomes after the
         # callback returns: accept / reject → END, refine → design.
@@ -1389,13 +1396,23 @@ class Engine:
         #    to done. This is the gate the methodologist persona's
         #    MUST-FLAG checks (circular evaluation, single-point
         #    evaluation, weak baseline without re-run, pseudo-units)
-        #    rely on to actually take effect.
+        #    rely on to actually take effect. When every hit is a
+        #    problem with the text (a claim nothing backs, a caption
+        #    that describes what its figure does not show), the
+        #    experiment stands and the route is ``rewrite``: back to
+        #    ``write`` only, not to ``design``.
         # 2. ``human_feedback_gate == "after_review"`` routes through
         #    the human-feedback node so the user gets a final say.
         # 3. Otherwise fall through to the legacy verdict-driven routing.
         review = state.get("review") or {}
         must_flag = review.get("must_flag_hits") or []
         if must_flag and state.get("iteration", 0) < self.config.engine.max_iterations:
+            if _hits_need_only_a_rewrite(must_flag):
+                self._log.info(
+                    "[route] must_flag_hits=%s are all about the text — rewriting the paper",
+                    must_flag,
+                )
+                return "rewrite"
             self._log.info(
                 "[route] must_flag_hits=%s — forcing revise even if review_loop=False",
                 must_flag,
@@ -4137,6 +4154,20 @@ class Engine:
                         seed, rep_result.returncode, rep_result.duration_s,
                     )
 
+        # A line figure drawn by one seed shows that run's noise. With the
+        # seeds in hand it is drawn again as their mean, shaded with its 95%
+        # confidence interval; a bar chart, a histogram or any other figure
+        # keeps the run that drew it last.
+        replotted: dict[str, int] = {}
+        if len(result_json_replicates) > 1 and not deterministic:
+            replotted = await self._replot_replicate_figures(
+                figures, records_dir, [int(r["_seed"]) for r in result_json_replicates],
+                python=py, env=exec_env, assertions=_replicate_assertions(state),
+            )
+        figure_records = _read_figure_records(records_dir, figures)
+        for name, n_seeds in replotted.items():
+            if name in figure_records:
+                figure_records[name]["replicate_mean"] = {"n": n_seeds}
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
@@ -4146,7 +4177,7 @@ class Engine:
                 "stderr_tail": result.stderr[-2000:],
             },
             "figures": figures,
-            "figure_records": _read_figure_records(records_dir, figures),
+            "figure_records": figure_records,
             "result_json": result_json or {},
         }
         # Only populate ``result_json_replicates`` when replication
@@ -4160,6 +4191,70 @@ class Engine:
             # empty aggregate, which reads like the aggregator broke.
             patch["result_json_deterministic"] = deterministic
         return patch
+
+    async def _replot_replicate_figures(
+        self, figures: list[str], records_dir: Path, seeds: list[int], *,
+        python: Any, env: dict[str, str] | None, assertions: list[Any],
+    ) -> dict[str, int]:
+        """Draw each line figure again as the mean over ``seeds``, shaded with
+        its 95% confidence interval, from the lines the plot-style recorder
+        kept at every seed. The engine computes the numbers and
+        ``code/replot_figures.py`` draws them in the quest's Python, under the
+        house style, over the same file. Returns each figure drawn, with its
+        number of seeds. A figure that holds anything but lines, or whose
+        lines differ between seeds in label or x, is left as it is, and so is
+        a figure the redraw fails on."""
+
+        def recorded(path: Path) -> Any:
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+
+        plans = []
+        for name in figures:
+            runs = [recorded(records_dir / f"{Path(name).stem}.seed{seed}.json") for seed in seeds]
+            plan = _replicate_line_figure(name, runs, assertions)
+            if plan is not None:
+                plans.append(plan)
+        if not plans:
+            return {}
+        code_dir = self.quest_root / "code"
+        script = code_dir / "replot_figures.py"
+        try:
+            code_dir.mkdir(parents=True, exist_ok=True)
+            script.write_text(
+                (Path(__file__).parent / "replot_figures.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (code_dir / "replot_figures.json").write_text(
+                json.dumps({"figures": plans}), encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[execute] could not write the figure redraw: %s", e)
+            return {}
+        result = await self.executor.execute(
+            [str(python), str(script)],
+            cwd=self.quest_root,
+            timeout_s=min(self.config.execution.timeout_s, 300),
+            env=env,
+        )
+        drawn = {
+            line.split(":", 1)[1].strip()
+            for line in (result.stdout or "").splitlines() if line.startswith("REPLOTTED:")
+        }
+        if result.returncode != 0:
+            self._log.warning(
+                "[execute] redrawing figures as the mean of the seeds rc=%d: %s",
+                result.returncode, (result.stderr or "")[-300:],
+            )
+        replotted = {plan["file"]: len(seeds) for plan in plans if plan["file"] in drawn}
+        if replotted:
+            self._log.info(
+                "[execute] drew %d figure(s) as the mean of %d seeds with 95%% CI bands: %s",
+                len(replotted), len(seeds), ", ".join(sorted(replotted)),
+            )
+        return replotted
 
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
         """Post-execute repair node.
@@ -4688,7 +4783,8 @@ class Engine:
         # sees them alongside.
         replicates = state.get("result_json_replicates") or []
         if replicates and len(replicates) > 1:
-            agg = _aggregate_result_json_replicates(replicates)
+            assertions = _replicate_assertions(state)
+            agg = _aggregate_result_json_replicates(replicates, assertions=assertions)
             # Flattening a crossed design yields one entry per numeric leaf —
             # easily hundreds on a parameter sweep, each carrying seven stats.
             # Only the ones that actually MOVED between seeds tell the reader
@@ -4713,7 +4809,7 @@ class Engine:
                 )
             # Per-stratum CIs + pairwise effect sizes + multiple-comparison
             # guard for any by_<factor> breakdowns (empty otherwise).
-            comparison_stats = _result_comparison_stats(replicates)
+            comparison_stats = _result_comparison_stats(replicates, assertions=assertions)
             if comparison_stats:
                 payload["comparison_stats"] = comparison_stats
             if all_ds:
@@ -5283,18 +5379,30 @@ class Engine:
                 else ""
             ),
             evidence_note=evidence_note,
+            review_feedback=_format_review_for_writer(state),
         )
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
-        # The web pages are listed apart from the References, by the engine,
-        # so every page is listed and none is invented.
-        markdown = _append_further_reading(
-            markdown,
-            build_further_reading(
-                state.get("literature") or [], audience=self.config.output.audience,
-            ),
+        from generation._keywords import keep_one_keywords_form
+
+        # A scientific paper shows its keywords; a persona's paper keeps them
+        # in a comment. A writer that gave both keeps the one its format uses.
+        markdown = keep_one_keywords_form(markdown, visible=not persona_block)
+        # The engine writes the source lists, so every source listed is one the
+        # text cites and none is invented: References numbers the cited papers
+        # in the order the text first cites them, and Further reading lists
+        # every web page. The literature is reordered to those numbers, so the
+        # claim check, the slides, the poster, the bib and the next write pass
+        # all use them.
+        markdown, literature, dropped = _finalize_paper_sources(
+            markdown, state.get("literature") or [], self.config.output.audience,
         )
+        if dropped:
+            self._log.warning(
+                "[write] removed citations of sources the prior-work block does not have: %s",
+                ", ".join(f"[{n}]" for n in dropped),
+            )
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -5305,7 +5413,7 @@ class Engine:
         # resume, ``user_pauses_fired`` carries "before_review" and the
         # gate falls through to review.
         self._maybe_pause_for_user_input(state, "before_review")
-        return {"paper_md": str(paper_path)}
+        return {"paper_md": str(paper_path), "literature": literature}
 
     async def _node_claim_check(self, state: QuestState) -> QuestState:
         """Ground each substantive claim in the written paper to evidence — the
@@ -5347,9 +5455,22 @@ class Engine:
             "claims_supported": analysis.get("claims_supported") or [],
             "result_json": state.get("result_json") or {},
         }
+        evidence_block = json.dumps(evidence, indent=2)[:4000]
+        # The paper reports means over the seeds with their intervals, which
+        # seed 0's RESULT_JSON holds neither of. They follow the results, one
+        # line each, outside the 4,000-character cut: inside it, SIR's 19
+        # intervals pushed most of its results out.
+        intervals = _replicate_result_intervals(state)
+        if intervals:
+            n_seeds = len(state.get("result_json_replicates") or [])
+            evidence_block += f"\n\nMean over the {n_seeds} seeds, with its 95% CI:\n" + "\n".join(
+                f"- {path}: {s['mean']:.4g}"
+                + (f" (95% CI {s['ci_lower']:.4g} to {s['ci_upper']:.4g})" if "ci_lower" in s and "ci_upper" in s else "")
+                for path, s in list(intervals.items())[:40]
+            )
         prompt = self._prompts["claim_check"].substitute(
             topic=state["topic"],
-            evidence_block=json.dumps(evidence, indent=2)[:4000],
+            evidence_block=evidence_block,
             references=refs_block,
             paper=paper_text,
         )
@@ -5701,7 +5822,13 @@ class Engine:
         try:
             from core import numeric_oracle
 
-            report = numeric_oracle.check(paper_md, state.get("result_json") or {})
+            # A paper reports the mean over the seeds and its interval, which
+            # seed 0's RESULT_JSON does not hold.
+            intervals = _replicate_result_intervals(state)
+            results = {**(state.get("result_json") or {})}
+            if intervals:
+                results["mean_over_seeds"] = intervals
+            report = numeric_oracle.check(paper_md, results)
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[numeric_oracle] check failed (%s); skipping", e)
             return []
@@ -7538,7 +7665,7 @@ def _ref_citation_text(r: dict[str, Any]) -> str:
     elif r.get("url"):
         tail.append(r["url"])
     if tail:
-        line = f"{line}. {' '.join(tail)}" if line else " ".join(tail)
+        line = f"{line}. {'. '.join(tail)}" if line else ". ".join(tail)
     return line.strip()
 
 
@@ -7709,6 +7836,150 @@ def _append_further_reading(markdown: str, further: list[dict[str, Any]]) -> str
     return markdown.rstrip() + "\n\n" + section + "\n"
 
 
+# The heading of a source list a writer put in the paper. The engine writes
+# both lists itself, so the writer's go.
+_SOURCE_LIST_HEADING_RE = re.compile(
+    r"^(#{1,6})[ \t]*(?:references|bibliography|works[ \t]+cited|literature[ \t]+cited"
+    r"|further[ \t]+reading)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ANY_HEADING_RE = re.compile(r"^(#{1,6})[ \t]", re.MULTILINE)
+# Inline code and math: a bracket in them is not a citation.
+_NOT_PROSE_RE = re.compile(r"`[^`\n]*`|\$\$.*?\$\$|\$[^$\n]+\$", re.DOTALL)
+# A bracketed number this large is a year or a count ("[1990–2020]"), not a
+# citation.
+_NOT_A_CITATION_NUMBER = 1000
+
+
+def _strip_source_lists(markdown: str) -> str:
+    """``markdown`` without the References and Further reading sections its
+    writer put in. Each runs from its heading to the next heading of the same
+    or a higher level."""
+    while m := _SOURCE_LIST_HEADING_RE.search(markdown):
+        level = len(m.group(1))
+        end = next(
+            (h.start() for h in _ANY_HEADING_RE.finditer(markdown, m.end()) if len(h.group(1)) <= level),
+            len(markdown),
+        )
+        head, tail = markdown[:m.start()].rstrip(), markdown[end:]
+        markdown = f"{head}\n\n{tail}" if tail else f"{head}\n"
+    return markdown
+
+
+def _number_list(numbers: list[int]) -> str:
+    """``[1, 2, 3, 5]`` as ``"1–3, 5"``: three or more in a row become a range."""
+    parts: list[str] = []
+    i = 0
+    while i < len(numbers):
+        j = i
+        while j + 1 < len(numbers) and numbers[j + 1] == numbers[j] + 1:
+            j += 1
+        parts += [f"{numbers[i]}–{numbers[j]}"] if j - i >= 2 else [str(n) for n in numbers[i:j + 1]]
+        i = j + 1
+    return ", ".join(parts)
+
+
+def _renumber_citations(body: str, n_papers: int) -> tuple[str, dict[int, int], list[int]]:
+    """Number the scholarly sources ``body`` cites 1, 2, 3… in the order it
+    first cites them, and rewrite its citations to match. Web-page labels
+    ([W1]) stay as they are. A number no source has (above ``n_papers``) is
+    taken out of its citation, and a citation left empty goes.
+
+    Not citations, so left alone: brackets in inline code or math, a bracket
+    followed by "(" (a link), and one holding a 0 or a year-sized number
+    ("[0, 1]", "[1990–2020]").
+
+    Returns the new text, the map from old number to new, and the numbers
+    that were taken out."""
+    spans = [(s.start(), s.end()) for s in _NOT_PROSE_RE.finditer(body)]
+    found: list[tuple[re.Match[str], list[str]]] = []
+    mapping: dict[int, int] = {}
+    for m in _CITATION_BRACKET_RE.finditer(body):
+        if body[m.end():m.end() + 1] == "(" or any(s <= m.start() < e for s, e in spans):
+            continue
+        labels = _citation_labels(m.group(1))
+        numbers = [int(label) for label in labels if label.isdigit()]
+        if any(n == 0 or n >= _NOT_A_CITATION_NUMBER for n in numbers):
+            continue
+        found.append((m, labels))
+        for n in numbers:
+            if n <= n_papers and n not in mapping:
+                mapping[n] = len(mapping) + 1
+    dropped: list[int] = []
+    pieces: list[str] = []
+    last = 0
+    for m, labels in found:
+        numbers = [int(label) for label in labels if label.isdigit()]
+        dropped += [n for n in numbers if n not in mapping and n not in dropped]
+        new = _number_list(sorted({mapping[n] for n in numbers if n in mapping}))
+        pages = list(dict.fromkeys(label for label in labels if not label.isdigit()))
+        inside = ", ".join(([new] if new else []) + pages)
+        start = m.start()
+        if not inside:
+            while start > last and body[start - 1] in " \t":
+                start -= 1
+        pieces += [body[last:start], f"[{inside}]" if inside else ""]
+        last = m.end()
+    pieces.append(body[last:])
+    return "".join(pieces), mapping, dropped
+
+
+def _literature_in_citation_order(
+    literature: list[Any], mapping: dict[int, int], audience: str,
+) -> list[Any]:
+    """``literature`` with the scholarly sources the paper cites first, in the
+    order of their new numbers, then the uncited ones; every other entry
+    (web pages, second copies of a work, internal records) keeps its order
+    after them. Numbering from this list gives each source the number the
+    paper now uses, in every output and in the writer's next prior-work
+    block."""
+    papers = [
+        (int(label), item)
+        for label, _meta, item in _labelled_sources(literature, audience)
+        if not label.startswith("W")
+    ]
+    cited = sorted(((mapping[n], item) for n, item in papers if n in mapping), key=lambda t: t[0])
+    moved = {id(item) for _n, item in papers}
+    return (
+        [item for _new, item in cited]
+        + [item for n, item in papers if n not in mapping]
+        + [item for item in literature if id(item) not in moved]
+    )
+
+
+def _finalize_paper_sources(
+    markdown: str, literature: list[Any], audience: str,
+) -> tuple[str, list[Any], list[int]]:
+    """The paper with the source lists the engine writes, and the literature
+    in the order those lists number it.
+
+    The writer's own References and Further reading are removed. The
+    scholarly sources the text cites are numbered 1, 2, 3… in the order it
+    first cites them, the citations are rewritten to those numbers, and
+    ``## References`` lists exactly those sources; ``## Further reading``
+    lists every web page. Returns the paper, the reordered literature and the
+    citation numbers that named no source."""
+    n_papers = sum(1 for label, _m, _i in _labelled_sources(literature, audience) if not label.startswith("W"))
+    body, mapping, dropped = _renumber_citations(_strip_source_lists(markdown), n_papers)
+    ordered = _literature_in_citation_order(literature, mapping, audience)
+    refs = build_references(ordered, audience=audience)[:len(mapping)]
+    if refs:
+        lines = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs]
+        body = body.rstrip() + "\n\n" + "\n".join(["## References", "", *lines]) + "\n"
+    body = _append_further_reading(body, build_further_reading(ordered, audience=audience))
+    return body, ordered, dropped
+
+
+def cited_references(
+    literature: list[Any], paper_md: str, *, audience: str = "external",
+) -> list[dict[str, Any]]:
+    """The numbered References the paper's text cites: what its References
+    section lists. The slides and the bib export use this, so none of them
+    lists a source the paper does not cite."""
+    counts = _citation_counts(paper_md)
+    return [r for r in build_references(literature, audience=audience) if r["n"] in counts]
+
+
 _CLARIFY_LABELS = {
     "comparative_baseline": "Comparative baseline",
     "empirical_vs_theoretical": "Empirical / theoretical",
@@ -7826,8 +8097,54 @@ def _load_persona_prefix(name: str, *, category: str = "review") -> str:
     return template.safe_substitute(persona_name=name).strip()
 
 
+# A metric named as a probability or a proportion. When every seed's value
+# lies in [0, 1], its interval stays there too: the validation quest reported
+# an outbreak probability of 0.007 with a 95% CI of -0.002 to 0.015.
+_PROPORTION_NAME_RE = re.compile(
+    r"(?:^|_)(?:prob|probability|fraction|frac|proportion|share|accuracy|precision|recall|auc|f1)(?:_|$)",
+    re.IGNORECASE,
+)
+
+
+def _replicate_assertions(state: QuestState) -> list[Any]:
+    """The design's and the selected skills' ``result_assertions``, parsed, to
+    bound the replicate confidence intervals. Never raises: a bound only
+    refines an interval."""
+    try:
+        from core import plausibility
+
+        design = state.get("design")
+        declared = list(design.get("result_assertions") or []) if isinstance(design, dict) else []
+        return plausibility.parse_assertions(
+            {"result_assertions": declared + list(state.get("_skill_assertions") or [])},
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _ci_bounds(path: str, vals: list[float], assertions: list[Any]) -> dict[str, float]:
+    """The values a metric's confidence interval must stay within: the range
+    the first ``result_assertions`` entry for its path declares, and [0, 1]
+    for a probability or proportion whose every seed lies there."""
+    from core.plausibility import _matches
+
+    bounds: dict[str, float] = {}
+    declared = next((a for a in assertions if _matches(a.path, path)), None)
+    if declared is not None:
+        if declared.min is not None:
+            bounds["lower"] = declared.min
+        if declared.max is not None:
+            bounds["upper"] = declared.max
+    if _PROPORTION_NAME_RE.search(path.rsplit(".", 1)[-1]) and vals and all(0.0 <= v <= 1.0 for v in vals):
+        bounds.setdefault("lower", 0.0)
+        bounds.setdefault("upper", 1.0)
+    return bounds
+
+
 def _aggregate_result_json_replicates(
     replicates: list[dict[str, Any]],
+    *,
+    assertions: list[Any] | None = None,
 ) -> dict[str, dict[str, float | int]]:
     """Compute mean ± sample-std for every numeric scalar field that
     appears in EVERY replicate's ``RESULT_JSON``.
@@ -7905,8 +8222,9 @@ def _aggregate_result_json_replicates(
             "min": min(vals),
             "max": max(vals),
             # Standard error + 95% CI of the mean (None for n<2 — a single
-            # seed has no spread to estimate, so we don't fake an interval).
-            **_stats.confidence_interval(vals),
+            # seed has no spread to estimate, so we don't fake an interval),
+            # kept within the metric's declared or proportion bounds.
+            **_stats.confidence_interval(vals, **_ci_bounds(key, vals, assertions or [])),
         }
     return out
 
@@ -7927,9 +8245,95 @@ def _series_at(
     return vals
 
 
+def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, float]]:
+    """Each result's mean and 95% CI over the seeds, by dotted path, for the
+    checks that compare the paper with the results: a paper reports the mean
+    and its interval, and seed 0's ``RESULT_JSON`` holds neither. Only the
+    results that differ between seeds; the rest are seed 0's values."""
+    replicates = state.get("result_json_replicates") or []
+    if len(replicates) < 2:
+        return {}
+    aggregate = _aggregate_result_json_replicates(replicates, assertions=_replicate_assertions(state))
+    return {
+        path: {key: stats[key] for key in ("mean", "ci_lower", "ci_upper") if stats.get(key) is not None}
+        for path, stats in aggregate.items() if stats.get("std")
+    }
+
+
+# The line style a redraw keeps (core/replot_figures.py draws with the same keys).
+_REPLOT_STYLE_KEYS = (
+    "color", "linestyle", "marker", "markersize", "markerfacecolor",
+    "linewidth", "alpha", "drawstyle",
+)
+
+
+def _replicate_line_figure(
+    name: str, runs: list[Any], assertions: list[Any],
+) -> dict[str, Any] | None:
+    """What ``code/replot_figures.py`` draws for figure ``name``, from the lines
+    the recorder kept at each seed (``runs``): every line's mean and 95% CI at
+    each x, bounded as the results are, by the panel's y label. ``None``
+    unless every panel of every run holds only lines, the panels match across
+    the runs in position and their lines in label, kind and x, and some line
+    differs between the seeds."""
+    if len(runs) < 2 or not all(isinstance(r, dict) and isinstance(r.get("axes"), list) for r in runs):
+        return None
+    first = runs[0]["axes"]
+    if not first or any(len(r["axes"]) != len(first) for r in runs):
+        return None
+    panels: list[dict[str, Any]] = []
+    varies = False
+    for i, panel in enumerate(first):
+        same = [r["axes"][i] for r in runs]
+        if not all(
+            isinstance(p, dict) and p.get("line_only") and isinstance(p.get("lines"), list)
+            and isinstance(p.get("grid"), list) and len(p["grid"]) == 6
+            and p["grid"] == panel["grid"] and len(p["lines"]) == len(panel["lines"])
+            for p in same
+        ):
+            return None
+        bound_name = re.sub(r"[^0-9a-z]+", "_", str(panel.get("ylabel") or "").lower()).strip("_")
+        lines = []
+        for j, line in enumerate(panel["lines"]):
+            at_seeds = [p["lines"][j] for p in same]
+            x = line.get("x") if isinstance(line, dict) else None
+            if not isinstance(x, list) or not all(
+                isinstance(s, dict) and s.get("label") == line.get("label")
+                and s.get("kind") == line.get("kind") and s.get("x") == x
+                and isinstance(s.get("y"), list) and len(s["y"]) == len(x)
+                for s in at_seeds
+            ):
+                return None
+            ys = [s["y"] for s in at_seeds]
+            varies = varies or any(y != ys[0] for y in ys[1:])
+            mean, lower, upper = [], [], []
+            for k in range(len(x)):
+                vals = [float(y[k]) for y in ys]
+                m = sum(vals) / len(vals)
+                ci = _stats.confidence_interval(vals, **_ci_bounds(bound_name, vals, assertions))
+                mean.append(m)
+                lower.append(m if ci["ci_lower"] is None else ci["ci_lower"])
+                upper.append(m if ci["ci_upper"] is None else ci["ci_upper"])
+            lines.append({
+                **{key: line.get(key) for key in _REPLOT_STYLE_KEYS},
+                "label": line.get("label"), "kind": line.get("kind"),
+                "x": x, "mean": mean, "lower": lower, "upper": upper,
+            })
+        panels.append({
+            **{key: panel.get(key) for key in ("grid", "title", "xlabel", "ylabel", "xscale", "yscale", "legend")},
+            "lines": lines,
+        })
+    if not varies:
+        return None
+    return {
+        "file": name, "size": runs[0].get("size"), "suptitle": runs[0].get("suptitle") or "",
+        "n": len(runs), "axes": panels,
+    }
+
+
 def _result_comparison_stats(
     replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
-    max_depth: int = 6,
+    max_depth: int = 6, assertions: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the strata
     the experiment broke results down by, plus a multiple-comparison guard.
@@ -8003,8 +8407,9 @@ def _result_comparison_stats(
                     if series is None:
                         continue
                     mean, _, n = _stats.mean_std(series)
+                    bounds = _ci_bounds(".".join((*path, s, *m)), series, assertions or [])
                     cell[".".join(m)] = {"mean": mean, "n": n,
-                                         **_stats.confidence_interval(series)}
+                                         **_stats.confidence_interval(series, **bounds)}
                 if cell:
                     per_stratum[s] = cell
             if per_stratum:
@@ -8245,6 +8650,72 @@ def _format_claim_grounding(state: QuestState) -> str:
     return "\n".join(lines)
 
 
+# Must-flag hits that are problems with the paper's text, not with the study:
+# fixing one means writing the paper again, not running the experiment again.
+_TEXT_ONLY_HITS = frozenset({"unsupported_claim", "figure_caption"})
+# The name a hit starts with, after a panel's ``[persona] `` prefix:
+# ``unsupported_claim``, ``[methodologist] figure_caption: Figure 2 ...``.
+_HIT_NAME_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z_]+)")
+
+
+def _hits_need_only_a_rewrite(hits: list[Any]) -> bool:
+    """True when every must-flag hit names a problem with the paper's text, so
+    the review sends the quest back to ``write`` instead of ``design``."""
+    names = []
+    for hit in hits:
+        m = _HIT_NAME_RE.match(str(hit))
+        names.append(m.group(1).lower().removesuffix("s") if m else "")
+    return bool(names) and all(name in _TEXT_ONLY_HITS for name in names)
+
+
+def _review_items(value: Any) -> list[str]:
+    """A review field as its non-empty strings: the model may give a list, one
+    string, or nothing."""
+    items = value if isinstance(value, list) else [value] if value else []
+    return [s for s in (str(i).strip() for i in items) if s]
+
+
+def _format_review_for_writer(state: QuestState) -> str:
+    """The write prompt's ``$review_feedback``: what the review of the previous
+    draft asks for (its must-fix hits, the captions that describe what their
+    figure does not show, its weaknesses and suggestions, and the claims the
+    claim check found unsupported), and every round of the user's feedback. A
+    first draft has none."""
+    review = state.get("review") or {}
+    lines: list[str] = []
+    if review:
+        score = review.get("score")
+        lines.append(
+            f"Verdict: {review.get('verdict', 'revise')}"
+            + (f" (score {score})" if score is not None else "")
+        )
+    for heading, key in (
+        ("Must fix", "must_flag_hits"),
+        ("Captions that describe what their figure does not show", "figure_caption_warnings"),
+        ("Weaknesses", "weaknesses"),
+        ("Suggestions", "suggestions"),
+    ):
+        items = _review_items(review.get(key))
+        if items:
+            lines += [f"{heading}:", *(f"  - {item}" for item in items)]
+    unsupported = _review_items((state.get("claim_grounding") or {}).get("unsupported"))
+    if unsupported:
+        lines += [
+            "Claims that neither this study's results nor a cited source backs:",
+            *(f"  - {claim}" for claim in unsupported),
+        ]
+    rounds = [
+        h for h in state.get("feedback_history") or []
+        if isinstance(h, dict) and str(h.get("text") or "").strip()
+    ]
+    if rounds:
+        lines += [
+            "The user's feedback (honour every round):",
+            *(f"  - (round {h.get('iteration', '?')}) {str(h['text']).strip()}" for h in rounds),
+        ]
+    return "\n".join(lines) or "(none — first draft)"
+
+
 def _format_cross_check(state: QuestState) -> str:
     """Render the per-finding cross-paper-check results as a
     bulleted block for the write prompt's `$cross_check_block`."""
@@ -8390,6 +8861,11 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             )
         else:
             lines.append(f"- figures/{f}" + _figure_record_note(records.get(f)))
+    if any((records.get(f) or {}).get("replicate_mean") for f in figs):
+        lines.append(
+            "A figure drawn as the mean of several seeds shows each line at its mean, "
+            "shaded with its 95% confidence interval, and its caption says so."
+        )
     if any(_hidden_series(records.get(f)) for f in figs):
         lines.append(
             "A series marked FLAT is drawn at one value on its axis, and one NOT SHOWN "
@@ -8448,7 +8924,11 @@ def _figure_record_note(record: dict[str, Any] | None) -> str:
             bits.append("series: " + "; ".join(series))
         if bits:
             panels.append(", ".join(bits))
-    return (" — " + " | ".join(panels)) if panels else ""
+    note = (" — " + " | ".join(panels)) if panels else ""
+    n_seeds = ((record or {}).get("replicate_mean") or {}).get("n")
+    if n_seeds:
+        note += f" — each line is the mean of {n_seeds} seeds, shaded with its 95% confidence interval"
+    return note
 
 
 _PAPER_IMAGE_RE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")

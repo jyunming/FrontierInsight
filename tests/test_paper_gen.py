@@ -166,11 +166,13 @@ def _make_artifacts(tmp_path: Path, *, with_figures: bool = False, with_manifest
 
 def test_references_bib_and_csl_json_emitted(tmp_path: Path) -> None:
     """The bundle carries machine-readable references derived from the quest's
-    literature — references.bib (BibTeX) + references.csl.json (CSL-JSON)."""
+    literature — references.bib (BibTeX) + references.csl.json (CSL-JSON) —
+    listing the sources the paper cites, as its References section does."""
     import json
 
     cfg = _make_config(tmp_path, ["paper_md"])
     art = _make_artifacts(tmp_path)
+    art.paper_md.write_text("# Title\n\nOverlay is measured [1], and EPE is predicted [2].\n", encoding="utf-8")
     art.raw_state = {
         "literature": [
             {"content": "abstract", "metadata": {
@@ -181,6 +183,9 @@ def test_references_bib_and_csl_json_emitted(tmp_path: Path) -> None:
             {"content": "abstract", "metadata": {
                 "title": "A Transformer for EPE", "authors": ["Alex Doe"],
                 "year": "2023", "arxiv_id": "2301.01234", "source": "arxiv"}},
+            {"content": "abstract", "metadata": {
+                "title": "A retrieved paper the text never cites", "authors": ["Uncited, U."],
+                "year": "2020", "doi": "10.1/uncited", "source": "crossref"}},
         ],
     }
     out_dir = tmp_path / "out"
@@ -1029,6 +1034,22 @@ def test_require_pdf_false_keeps_silent_skip_behavior(
 # ``\documentclass``) past raw LaTeX that pdflatex couldn't parse.
 
 
+def test_html_themes_cap_a_figure_at_eleven_centimetres() -> None:
+    """The HTML render's counterpart of the LaTeX cap below: an image at most
+    11 cm tall, about 45% of the text height, so a figure shares its page with
+    text instead of filling one."""
+    import re
+
+    repo = Path(__file__).resolve().parent.parent
+    for theme in ("latexlike", "briefing"):
+        css = (repo / "templates" / "paper" / "_html" / f"{theme}.css").read_text(encoding="utf-8")
+        block = re.search(r"(?m)^img\s*\{([^}]*)\}", css)
+        assert block, f"{theme}.css has no img rule"
+        body = re.sub(r"/\*.*?\*/", "", block.group(1), flags=re.S)
+        rules = {k.strip(): v.strip() for k, v in (d.split(":", 1) for d in body.split(";") if ":" in d)}
+        assert rules.get("max-height") == "11cm" and rules.get("width") == "auto", theme
+
+
 def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
     """Pins that every shipped paper template carries a complete
     ``\\providecommand{\\pandocbounded}`` definition, body included.
@@ -1040,34 +1061,51 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
     errors with ``! Undefined control sequence. l.NNN
     \\pandocbounded``.
 
-    Bot-review-strengthened: assert the FULL body
-    ``\\noindent\\resizebox{\\textwidth}{!}{#1}`` (not just the
-    command name) so a corrupted body — e.g. via shell-escape
-    collapsing ``\\noindent`` into a literal newline + ``oindent``
-    — fails the test. That's the exact regression we'd ship if
-    someone re-applied the change via a brittle ``python -c``
-    one-liner."""
+    Bot-review-strengthened: assert the FULL body, line by line (not
+    just the command name), so a corrupted body — e.g. via
+    shell-escape collapsing ``\\noindent`` into a literal newline +
+    ``oindent`` — fails the test. That's the exact regression we'd
+    ship if someone re-applied the change via a brittle ``python -c``
+    one-liner.
+
+    The body fits a figure to the line width (the column, in two
+    columns) and caps it at 45% of the text height, and the float
+    settings stop a figure being put alone on a half-blank page: the
+    validation quest's paper had two such pages, and its ieee_access
+    render drew every figure across both columns."""
     repo = Path(__file__).resolve().parent.parent
-    working = ["generic", "neurips", "essay", "report", "policy_brief", "whitepaper"]
-    expected = (
-        r"\providecommand{\pandocbounded}[1]"
-        r"{\noindent\resizebox{\textwidth}{!}{#1}}"
-    )
+    working = [
+        "generic", "neurips", "iclr", "nature_mi", "ieee_access",
+        "essay", "report", "policy_brief", "whitepaper",
+    ]
+    expected = [
+        r"\providecommand{\pandocbounded}[1]{%",
+        r"  \sbox{\FI@figbox}{#1}%",
+        r"  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%",
+        r"  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%",
+        r"  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi",
+        r"  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}",
+        r"\def\fps@figure{htbp}",
+        r"\renewcommand{\floatpagefraction}{0.8}",
+    ]
     for fmt in working:
         path = repo / "templates" / "paper" / fmt / "template.tex"
         assert path.exists(), f"working template {fmt!r} is missing"
-        body = path.read_text(encoding="utf-8")
-        non_comment = "\n".join(
-            line for line in body.splitlines() if not line.lstrip().startswith("%")
-        )
-        assert expected in non_comment, (
-            f"templates/paper/{fmt}/template.tex must contain the EXACT "
-            f"\\providecommand{{\\pandocbounded}} body — including the "
-            f"\\noindent / \\resizebox / \\textwidth control sequences. "
-            f"A name-only check would pass even when the body is "
-            f"corrupted into literal text (newline + 'oindent' etc.) "
-            f"and pdflatex would silently emit a PDF with stray text "
-            f"and unbounded images."
+        lines = [
+            line for line in path.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("%")
+        ]
+        for want in expected:
+            assert want in lines, (
+                f"templates/paper/{fmt}/template.tex must contain the EXACT "
+                f"line {want!r} of the \\pandocbounded body and float settings. "
+                f"A name-only check would pass even when the body is "
+                f"corrupted into literal text (newline + 'oindent' etc.) "
+                f"and pdflatex would silently emit a PDF with stray text "
+                f"and unbounded images."
+            )
+        assert r"\resizebox{\textwidth}" not in "\n".join(lines), (
+            f"{fmt}: \\textwidth spans both columns of a two-column page"
         )
 
 

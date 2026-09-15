@@ -2,7 +2,8 @@ You are the **Writing** stage of an automated research pipeline.
 
 Everything you need is supplied in the **Inputs** section at the end of this
 prompt: the persona block, topic, filename slug, design, analysis, prior work,
-available figures, pre-flight clarifications, and the cross-paper check. Read
+available figures, pre-flight clarifications, the cross-paper check, and the
+review of the previous draft. Read
 these instructions first, then work from those inputs.
 
 # Your task
@@ -12,7 +13,7 @@ Produce a single Markdown paper. **Structure depends on the persona block in the
 - If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats. Do not write an abstract. Put the keywords in a comment on the line right after the title, which readers never see: `<!-- Keywords: <keyword>, <keyword>, <keyword>, <keyword> -->`.
 - If the persona block is empty (scientific venues — `generic` / `neurips` / `iclr` / `ieee_access` / `nature_mi`), open with `## Abstract`: one paragraph of 150–250 words giving the question, what was done, the main result with its number, and what it means. Directly under that paragraph, on a line of its own, give the keywords: `**Keywords:** <keyword>, <keyword>, <keyword>, <keyword>`. Then use **IMRAD** (Introduction, Methods, Results, Discussion).
 
-**Keywords:** 4–6 of them, separated by commas, replacing every `<keyword>`. Take them from the paper you wrote, not from the search terms: its subject, system, method and the terms of its main result, each as the field's standard term (`symplectic integrator`, not `energy-keeping method`). They index the paper for later searches.
+Give 4–6 keywords in that one place, separated by commas, replacing every `<keyword>`. Take them from the paper you wrote, not from the search terms: its subject, system, method and the terms of its main result, each as the field's standard term (`symplectic integrator`, not `energy-keeping method`). They index the paper for later searches.
 
 **Hard rule on figures:** you may ONLY emit `![caption](figures/<filename>)` for filenames that appear in the figure list in the Inputs section. If a figure was planned but the experiment did not produce it, describe what it would have shown in prose ("The planned scatter plot of GDP vs. scores would have...") instead of emitting a broken image link. Pandoc treats a missing image as a placeholder, so a stale link both wastes space and yields a partial-success PDF.
 
@@ -95,53 +96,35 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 - **Discussion** — what the literature broadly says about the comparison, where consensus exists, where it doesn't.
 - **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question.
 
-End with `## References` in numbered-list style citing concrete **scholarly** sources from the prior-work block in the Inputs section — the entries numbered `[1]`, `[2]`, …. The entries labelled `[W1]`, `[W2]`, … are web pages: you may draw on them and cite them inline by that label, but do NOT list them under References and do NOT write a Further reading section yourself — the engine appends a `## Further reading` section listing every web page after your References. The "References — required format" section below is the binding rule for what each entry must contain; do NOT invent author names or DOIs to plug missing fields.
+## Citing sources
 
-## References — required format
+Cite a source inline, where you use it, by its label in the prior-work block in the Inputs section: `[3]` for a scholarly source, `[W2]` for a web page, `[2, 5]` for several. Cite every source you draw on, each time you draw on it, including one you name in the text ("the Kermack–McKendrick model [4]"): a source the text does not cite is not listed.
 
-Every reference MUST carry **author(s) + year + title + venue + DOI/URL** drawn from the prior-work block (each `[i]` entry there now includes author/year/venue/DOI on its second line). Do NOT emit references as bare titles — readers can't look up "Stratonovich-type integral with respect to a general stochastic measure." with no author or year.
+**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. Further reading lists every web page. Anything you write under either heading is replaced.
 
-Format examples — the `<…>` placeholders illustrate the **shape**; never copy them verbatim, and never invent stand-in author names (no Smith / Lee / Doe / Jane Doe / John Smith etc.):
+Cite only labels that appear in the prior-work block:
 
-- `1. <Author 1 lastname>, <initial> & <Author 2 lastname>, <initial> (<year>). <Title>. *<Journal>*. DOI: <doi>.`
-- `2. <Author 1 lastname>, <initial> et al. (<year>). <Title>. *<Conference>*. arXiv:<id>.`
-- `3. <Author lastname> (<year>). <Title>. *<Venue>*. <url>`
+- Never cite a source from memory, and never invent an author, year, DOI or URL.
+- An entry whose header is a placeholder label (`[4] item-4`, `[4] (no title)`, `Item-N`, `Reference N`, `Source N`) is not a usable source; do not cite it, and do not turn its label into an author or a title.
+- When the prior-work block is empty (`(no prior work surfaced from the knowledge base)`), cite nothing. Discuss earlier work in prose without naming a specific source.
 
-Every `<…>` slot must be filled from the prior-work block in the Inputs section. Do not emit a citation that contains literal angle brackets, "Smith", "Doe", or any other example token shown here.
+**Forbidden placeholder words.** When the text names an author, the name comes from the prior-work block. Never write a stand-in: `Placeholder`, `Example`, `Author unspecified`, `Date unspecified`, `Venue unspecified`, `Smith, J.`, `Doe, J.`, `Lee, M.`, or any surname the block does not give.
 
-If the prior-work block lacks one of these fields for a particular entry, omit just that field for that entry — never fabricate an author name or DOI to pad out a partial citation. Do NOT repeat the title twice; the prior-work entry's header line already gives you the title once.
-
-When the entire prior-work block is empty or unusable (the engine surfaces `"(no prior work surfaced from the knowledge base)"`), prefer to **cite no sources** rather than invent any. If the persona / venue genuinely requires at least one reference (e.g. a Discussion section that engages with prior work), cite well-known canonical sources for the field with their **real** DOIs — never fabricate a DOI or author. If you cannot recall a real DOI, omit it rather than guess.
-
-**Forbidden placeholder words.** Under NO circumstances may a citation contain any of these tokens as an author, venue, or title field:
-
-- `Placeholder`, `Placeholder, A.`, `Placeholder and Placeholder`
-- `Example`, `Example, B.`
-- `Author unspecified`, `Date unspecified`, `Venue unspecified`
-- `(unknown)`, `(unpublished)` for fabricated entries
-- `Anonymous` when used to hide that the author is invented
-- `Smith, J.`, `Smith and Lee`, `Doe, J.`, `Doe et al.`, `Jane Doe`, `John Smith`, `Lee, M.` — these are common stand-in names; if the prior-work block doesn't contain the real author, do NOT substitute one of these.
-- Any author surname you cannot trace back to a `[i]` entry in the prior-work block.
-- `Prior work`, `Item-N`, `item-N`, `Reference N`, `Source N` — these are placeholder labels emitted by the literature formatter when the source had no usable title or author. **If you see an entry whose header looks like `[i] item-4` or `[i] (no title)`, skip that entry entirely — do not turn the slug into a fake author or title.**
-
-**No URL or DOI fabrication.** A citation's URL/DOI/arXiv-id MUST appear on the prior-work entry's second line as `DOI: 10.x/x` or `arXiv:NNNN.NNNNN` or `https://example.org/...`. If the prior-work entry has no URL/DOI, the citation goes out WITHOUT one — never invent:
-
-- A `frontierinsight.internal/...`, `internal-docs.*`, or similar internal-looking URL.
-- A `10.xxxx/xxxxx`-shaped placeholder DOI.
-- An `arXiv:2401.12345`-shaped placeholder ID (that specific ID was an example in an earlier prompt; treat any arXiv ID you didn't see in the prior-work block as fabricated).
-- A `https://example.com/...` or `https://doi.org/10....` URL constructed from the title.
-
-If you find yourself needing to "make the citation look complete", that's the signal to drop the citation, not pad it.
-
-If you find yourself reaching for any of the above to fill a slot, that is a signal to **delete the entire citation** instead. A shorter, honest References section beats one padded with placeholders. The Discussion can still engage with prior work in prose ("Earlier studies on EUV stochastic LER have generally established that ...") without naming a specific fabricated source.
-
-If your References section ends up empty, that's acceptable — the post-process review will flag fabricated citations and reject the paper anyway, so honesty is the only durable option.
+**No URL or DOI fabrication.** Write a URL, DOI or arXiv id only as the prior-work block gives it. Never make one up: no `frontierinsight.internal/...` link, no `https://example.com/...` URL, no `10.xxxx/xxxxx`-shaped DOI.
 
 ## No raw code blocks in the body
 
 Reproducibility lives in the bundled `experiment.py` (and `paper_bundle_manifest.json`) shipped alongside the paper, **not** in the body. Do NOT emit fenced ` ```python ` / ` ```bash ` / ` ```r ` blocks — they render as syntax-highlighted Pandoc listings that look out of place next to a real venue's typesetting (IEEE / NeurIPS / Nature never inline raw code in the body).
 
 If a code-style fragment is genuinely necessary (e.g. a one-line command or filename), use *inline* monospace with single backticks. For pseudocode that's load-bearing for the method, write 4–8 lines of plain numbered prose ("1. Sample dose ~ U(0.7, 1.3). 2. Convolve with Gaussian PSF …"), not a fenced block.
+
+## A new draft of a reviewed paper
+
+When the review slot in the Inputs section is not `(none — first draft)`, an earlier draft of this paper was reviewed. Write the whole paper again and fix every point of that review that applies to it:
+
+- Tie each claim listed as unsupported to a result in the Analysis block or to a cited source that says it, or take the claim out.
+- Rewrite each caption listed as describing what its figure does not show, so that it describes what the figure shows.
+- Honour every round of the user's feedback.
 
 # Output format
 Respond with the markdown of the paper only — no JSON, no surrounding fence, no preamble.
@@ -191,3 +174,6 @@ $study_mode_note
 
 ## Evidence note
 $evidence_note
+
+## Review of the previous draft
+$review_feedback

@@ -347,6 +347,21 @@ def test_a_one_page_paper_is_never_reported_as_a_nearly_empty_last_page(tmp_path
     assert not [f for f in report["findings"] if f["check"] == "last_page_nearly_empty"]
 
 
+def test_a_figure_alone_on_a_half_blank_page_is_reported_but_not_a_page_with_text(tmp_path):
+    text = "x" * 70
+    full = _column(72, 780, 60, 10, text, 14)
+    # The validation quest's float page: one figure, centred, blank above and below.
+    alone = [("image", 72, 300, 520, 560), ("text", "Figure 1: Outbreak probability.", 9, 72, 285, False)]
+    with_text = [("image", 72, 450, 520, 770)] + _column(72, 430, 60, 10, text, 14)
+    short_last = _column(72, 780, 600, 10, text, 14)
+    pages = [(*A4, full), (*A4, alone), (*A4, with_text), (*A4, short_last)]
+    report = paper_report(measure_pdf(_pdf(tmp_path, pages)))
+    half = [f for f in report["findings"] if f["check"] == "half_empty_page"]
+    assert [(f["page"], f["severity"]) for f in half] == [(2, "medium")]
+    assert "the paper goes on to the next page" in half[0]["problem"]
+    assert report["metrics"]["half_empty_pages"] == 1, "the last page is judged by its own check"
+
+
 def test_measure_pdf_fails_open_on_a_file_that_is_not_a_pdf(tmp_path):
     bad = tmp_path / "broken.pdf"
     bad.write_text("not a pdf", encoding="utf-8")

@@ -890,6 +890,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     review_branch = next(iter(g.branches["review"].values()))
     assert review_branch.ends == {
         "revise": "design",
+        # Every must-flag is about the text: only the paper is rewritten.
+        "rewrite": "write",
         "done": END,
         # The human-feedback gate adds a third terminal: when
         # ``engine.human_feedback_gate: "after_review"`` the router

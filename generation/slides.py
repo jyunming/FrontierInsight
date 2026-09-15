@@ -50,7 +50,7 @@ from pathlib import Path
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
-    build_references,
+    cited_references,
     render_references_marp_slide,
 )
 from core.provider import (
@@ -297,7 +297,8 @@ class SlideGenerator:
         # Further reading. Skip if the LLM already produced one.
         literature = art.raw_state.get("literature") or []
         ref_slide = render_references_marp_slide(
-            build_references(literature, audience=self.config.output.audience), paper_md=paper_md)
+            cited_references(literature, paper_md, audience=self.config.output.audience),
+            paper_md=paper_md)
         if ref_slide and "## References" not in content:
             content = content.rstrip() + "\n\n" + ref_slide + "\n"
         content = _with_author_line(content, self.config.output)

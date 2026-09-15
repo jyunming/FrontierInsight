@@ -63,7 +63,25 @@ $endif$
 \providecommand{\tightlist}{%
   \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 \providecommand{\passthrough}[1]{#1}
-\providecommand{\pandocbounded}[1]{\noindent\resizebox{\textwidth}{!}{#1}}
+% A figure fills the line width (its column, in two columns) but is never
+% taller than 45% of the text height, so it shares a page with text rather
+% than being moved on to the next page and leaving this one half empty.
+\makeatletter
+\newsavebox{\FI@figbox}
+\providecommand{\pandocbounded}[1]{%
+  \sbox{\FI@figbox}{#1}%
+  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
+  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
+  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}
+% A figure may also stay where it is written (h), and a page of floats must
+% be 80% full, so a figure is never put alone on a page half of it blank.
+\def\fps@figure{htbp}
+\makeatother
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.6}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.8}
 $highlighting-macros$
 
 % Default \maketitle on article class sets the title at \LARGE

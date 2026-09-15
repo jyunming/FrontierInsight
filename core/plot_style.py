@@ -180,6 +180,9 @@ RECORDS_DIRNAME = "figure_records"
 # On each savefig this writes <stem>.json with every Axes' title, labels, y
 # scale and limits, and each labelled series' range and whether it shows on
 # that axis ("yes", "flat" under 1% of the axis span, or "outside the axis").
+# Beside it, <stem>.seed<k>.json keeps the run's lines themselves (points and
+# style, per panel, and whether the panel holds anything but lines), which the
+# engine uses to redraw a figure as the mean over the seeds.
 _RECORDER_SOURCE = '''\
 try:
     import os as _fi_os
@@ -273,6 +276,88 @@ try:
                 "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
             }
 
+        # Tick labels a redraw gets back by setting the same scale.
+        _FI_DEFAULT_FORMATTERS = {
+            "ScalarFormatter", "LogFormatter", "LogFormatterSciNotation", "LogFormatterMathtext",
+        }
+
+        def _fi_kind(ax, line):
+            transform = line.get_transform()
+            if transform == ax.transData:
+                return "data"
+            if transform == ax.get_yaxis_transform():
+                return "hline"
+            if transform == ax.get_xaxis_transform():
+                return "vline"
+            return "other"
+
+        def _fi_points(line):
+            # Paired, so x and y stay aligned; None when an x is not a number.
+            xs, ys = list(line.get_xdata()), list(line.get_ydata())
+            if len(xs) != len(ys) or len(xs) > 20000:
+                return None, None
+            px, py = [], []
+            for x, y in zip(xs, ys):
+                try:
+                    x, y = float(x), float(y)
+                except (TypeError, ValueError):
+                    return None, None
+                if _fi_math.isfinite(x) and _fi_math.isfinite(y):
+                    px.append(x)
+                    py.append(y)
+            return px, py
+
+        def _fi_colour(value):
+            from matplotlib.colors import to_hex
+
+            return "none" if str(value).lower() == "none" else to_hex(value)
+
+        def _fi_line(ax, line, names):
+            x, y = _fi_points(line)
+            return {
+                "label": names.get(id(line)) or str(line.get_label() or ""),
+                "kind": _fi_kind(ax, line), "x": x, "y": y,
+                "color": _fi_colour(line.get_color()), "linestyle": line.get_linestyle(),
+                "marker": str(line.get_marker()), "markersize": float(line.get_markersize()),
+                "markerfacecolor": _fi_colour(line.get_markerfacecolor()),
+                "linewidth": float(line.get_linewidth()), "alpha": line.get_alpha(),
+                "drawstyle": line.get_drawstyle(),
+            }
+
+        def _fi_panel(ax):
+            try:
+                names = _fi_legend_names(ax, list(ax.get_lines()) + list(ax.collections))
+            except Exception:
+                names = {}
+            lines = [_fi_line(ax, line, names) for line in ax.get_lines()]
+            spec = ax.get_subplotspec()
+            grid = None
+            if spec is not None:
+                rows, cols = spec.get_gridspec().get_geometry()
+                grid = [rows, cols, spec.rowspan.start, spec.rowspan.stop, spec.colspan.start, spec.colspan.stop]
+            formatters = {type(axis.get_major_formatter()).__name__ for axis in (ax.xaxis, ax.yaxis)}
+            others = (ax.patches, ax.collections, ax.images, ax.texts, ax.tables, ax.artists, ax.child_axes)
+            return {
+                "grid": grid,
+                "title": " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t),
+                "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
+                "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
+                "legend": ax.get_legend() is not None,
+                # Only lines, on default ticks: what a redraw can reproduce.
+                "line_only": bool(lines) and not any(len(group) for group in others)
+                and formatters <= _FI_DEFAULT_FORMATTERS
+                and all(line["kind"] != "other" and line["x"] is not None for line in lines),
+                "lines": lines,
+            }
+
+        def _fi_plot_data(fig, name):
+            suptitle = getattr(fig, "_suptitle", None)
+            return {
+                "file": name, "size": [float(v) for v in fig.get_size_inches()],
+                "suptitle": suptitle.get_text() if suptitle is not None else "",
+                "axes": [_fi_panel(ax) for ax in fig.get_axes()],
+            }
+
         _fi_savefig = _FiFigure.savefig
 
         def _fi_recording_savefig(self, fname, *args, **kwargs):
@@ -281,9 +366,15 @@ try:
                 name = _fi_os.path.basename(_fi_os.fspath(fname))
                 record = {"file": name, "axes": [_fi_axes(ax) for ax in self.get_axes()]}
                 _fi_os.makedirs(_fi_records, exist_ok=True)
-                path = _fi_os.path.join(_fi_records, _fi_os.path.splitext(name)[0] + ".json")
-                with open(path, "w", encoding="utf-8") as handle:
+                stem = _fi_os.path.join(_fi_records, _fi_os.path.splitext(name)[0])
+                with open(stem + ".json", "w", encoding="utf-8") as handle:
                     _fi_json.dump(record, handle)
+                # Each seed's lines, for the engine to redraw a figure as the
+                # mean over the seeds. A redrawn figure is no seed's.
+                if not _fi_os.environ.get("FI_REPLOT"):
+                    seed = "".join(c for c in _fi_os.environ.get("FI_REPLICATE_SEED", "") if c.isdigit()) or "0"
+                    with open(stem + ".seed" + seed + ".json", "w", encoding="utf-8") as handle:
+                        _fi_json.dump(_fi_plot_data(self, name), handle)
             except Exception:
                 pass
             return result

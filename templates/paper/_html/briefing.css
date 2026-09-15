@@ -113,7 +113,8 @@ blockquote {
 }
 /* ---- Figures -------------------------------------------------------- */
 img {
-  display: block; max-width: 82%; height: auto; margin: 12pt auto 4pt auto;
+  /* At most 11 cm tall (about 45% of the text height), so a figure shares its page with text. */
+  display: block; max-width: 82%; max-height: 11cm; width: auto; height: auto; margin: 12pt auto 4pt auto;
   background: #fff; border: 1px solid var(--hair); border-radius: 3px;
   box-shadow: 0 2px 14px rgba(22,34,43,0.07);
 }

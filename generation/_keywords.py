@@ -63,6 +63,21 @@ def extract_keywords(markdown: str) -> tuple[list[str], str]:
     return [], markdown
 
 
+def keep_one_keywords_form(markdown: str, *, visible: bool) -> str:
+    """``markdown`` with one keywords form when its writer gave both: the line
+    for a paper that shows its keywords (``visible``), the comment for one that
+    does not. A front with one form or none is returned unchanged."""
+    end = _front_end(markdown)
+    front = markdown[:end]
+    line, comment = _LINE_RE.search(front), _COMMENT_RE.search(front)
+    if not (line and comment):
+        return markdown
+    drop = comment if visible else line
+    cut = drop.end() + (1 if front[drop.end():drop.end() + 1] == "\n" else 0)
+    front = re.sub(r"\n{3,}", "\n\n", front[:drop.start()] + front[cut:])
+    return front + markdown[end:]
+
+
 def paper_keywords(markdown: str) -> list[str]:
     """The keywords ``markdown`` gives, in either form."""
     return extract_keywords(markdown)[0]

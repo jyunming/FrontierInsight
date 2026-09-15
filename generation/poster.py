@@ -19,8 +19,9 @@ The layout follows published poster guidance:
 The layout is planned from estimated block heights, compiled, then
 measured with ``generation/_pdf_measure.py``. Each measurement corrects
 the estimates and the plan is redone:
-- whole sections go to columns where they fit, and figure widths
-  (70–100%) fill or relieve each column and even the columns out;
+- whole sections go to columns where they fit, and figure widths fill or
+  relieve each column (70–100% to fit) and even the columns out (down to
+  50% in the longer column);
 - when the content cannot fit, the longest list loses items, then the
   longest text loses its last sentences, then text blocks and finally
   figures from the middle go. The first and last blocks always stay.
@@ -86,6 +87,10 @@ _DEFAULT_ASPECT = 0.62
 # (measured: 67 characters in a 25.4 cm column at 24 pt).
 _CHAR_EM = 0.46
 _MIN_FIGURE_WIDTH = 0.7
+# To even the columns out, a figure in the longer column may narrow further,
+# to half the column. The validation quest's poster had both figures of its
+# longer column at 70% and still ended one column 11.5 cm above the other.
+_MIN_BALANCE_WIDTH = 0.5
 _FIGURE_STEP = 0.05
 # Columns planned to end within this of each other; the measurement flags
 # 5 cm or more.
@@ -661,7 +666,8 @@ class _Layout:
         """Place the blocks for columns of ``available`` points.
 
         Both whole sections and heading-and-block units are tried, with
-        figures narrowed only in a column that is over. Whole sections win
+        figures narrowed in a column that is over, then in the longest column
+        while that brings the columns' ends closer. Whole sections win
         unless splitting them evens the columns out by a clear margin.
         Content is cut only when neither fits and ``cut`` allows it. Short
         columns are then carried down with extra space."""
@@ -676,6 +682,7 @@ class _Layout:
                 for c in range(len(self.groups)):
                     while self.column_height(c) > limit and self._narrow_figures(c):
                         pass
+                self._balance_figures(margin)
                 heights = self.column_heights() or [0.0]
                 options.append((max(heights) <= limit, max(heights) - min(heights), self.groups, self.widths))
             (sections_fit, sections_gap, *sections), (units_fit, units_gap, *units) = options
@@ -690,10 +697,34 @@ class _Layout:
         self.over_limit = max(self.column_heights() or [0.0]) > limit
         self._spread(limit)
 
-    def _narrow_figures(self, c: int) -> bool:
+    def _balance_figures(self, margin: float) -> None:
+        """Narrow the figures of the longest column while that brings the
+        columns' ends closer, until they end within ``margin`` of each other.
+        Figures narrow to ``_MIN_BALANCE_WIDTH`` here, below the width fitting
+        stops at. A figure only ever gets narrower, so a short column with
+        nothing to narrow in the long one keeps the space ``_spread`` gives
+        it. The validation quests' posters ended one column 11.5 cm above the
+        other with room to spare, because figures were narrowed only to fit."""
+        if len(self.groups) < 2:
+            return
+        heights = self.column_heights()
+        best_gap, best_widths = max(heights) - min(heights), list(self.widths)
+        # A tall figure is held to 40% of the text height, so its first few
+        # narrowings may not shorten it: keep going to the floor and keep the
+        # widths that evened the columns out best.
+        while best_gap > margin:
+            heights = self.column_heights()
+            if not self._narrow_figures(heights.index(max(heights)), floor=_MIN_BALANCE_WIDTH):
+                break
+            after = self.column_heights()
+            if max(after) - min(after) < best_gap - 1e-6:
+                best_gap, best_widths = max(after) - min(after), list(self.widths)
+        self.widths = best_widths
+
+    def _narrow_figures(self, c: int, *, floor: float = _MIN_FIGURE_WIDTH) -> bool:
         figures = [
             i for i in self.groups[c]
-            if self.blocks[i].kind == "figure" and self.widths[i] - _FIGURE_STEP >= _MIN_FIGURE_WIDTH - 1e-9
+            if self.blocks[i].kind == "figure" and self.widths[i] - _FIGURE_STEP >= floor - 1e-9
         ]
         for i in figures:
             self.widths[i] = round(self.widths[i] - _FIGURE_STEP, 2)
