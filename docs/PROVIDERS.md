@@ -65,8 +65,72 @@ The visual check's AI step (`output.visual_check_ai: true`; off by default) send
 - **HTTP providers** (`ollama`, `vllm`, `openai`, `gemini`, …) send the screenshots as image parts. The model itself must accept images; checked with `gemma4:31b-cloud` on Ollama.
 - **`claude_cli`** sends them inline in a stream-json turn. Checked with `haiku`.
 - **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input.
-- **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with the account's default model.
+- **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with `gpt-5.6-luna` under the answer-only flags below: it named the colour of a test image.
 - **`copilot_cli`, `gemini_cli`, `antigravity_cli`:** measurements only for now.
+
+## Answer-only CLI calls
+
+FI asks a CLI provider for an answer, not for work on your machine. Started
+with their defaults, `codex` and `claude` are agents: one codex call inside a
+quest node read the user's personal skills, ran shell commands and made 8 web
+searches, 1.35M tokens for a single answer. FI therefore starts both
+answer-only:
+
+| Turned off | `codex_cli` | `claude_cli` |
+|---|---|---|
+| Web search | `-c web_search=disabled` | `--tools ""` (no built-in tool at all) |
+| Shell and code execution | `--disable shell_tool`, `unified_exec`, `code_mode_host`; sandbox `-s read-only` | `--tools ""` |
+| MCP servers | not loaded (`--ignore-user-config`) | `--strict-mcp-config` |
+| Skills, plugins, apps | `--disable skill_search`, `plugins`, `apps` | `--disable-slash-commands`, `--safe-mode` |
+| Subagents, browser and computer use, image generation and viewing, tool suggestions | `--disable multi_agent`, `browser_use`, `computer_use`, `image_generation`, `view_image`, `tool_suggest` | `--tools ""` |
+| Memory and personal settings | `--disable memories`; `~/.codex/config.toml` not read | `CLAUDE.md`, auto-memory, hooks and other customisations off (`--safe-mode`) |
+| Saved sessions | `--ephemeral` | `--no-session-persistence` |
+
+Every CLI call, for every CLI provider, runs in a new, empty temporary
+directory that is removed when the call ends, also after an error or a
+timeout; codex is pointed at it with `-C`. A CLI no longer inherits FI's own
+working directory (often a repository checkout) and cannot read what is there.
+FI's own files for the call, such as codex's answer file and the visual check's
+screenshots, are passed by absolute path from outside that directory.
+
+**`codex_cli` does not read `~/.codex/config.toml`.** Custom model providers,
+profiles, MCP servers and every other setting in that file are not used by
+FI's calls; the `codex login` sign-in still is. Choose the model with
+`provider.model` — left blank, codex uses its own default model, not the
+`model` in config.toml — and the reasoning level with
+`provider.reasoning_effort`. A model you can reach only through a custom
+provider defined in config.toml cannot be used through `codex_cli`.
+
+A model can still ask for a tool: `claude_cli` answers each such call with
+"No such tool available" and nothing runs, and `codex_cli` has no tool to call.
+A model can also *describe* running a command it never ran — in one check
+Haiku wrote out an `echo hello` result while claude's event stream held no tool
+call — so a CLI answer is text, not evidence that anything was executed.
+
+Measured through FI's own client with a prompt asking the model to list the
+directory, run `echo hello` and search the web. `codex_cli`
+(`gpt-5.6-luna`, `reasoning_effort: low`): without these flags codex ran one
+command and one web search and used 81,196 input tokens; with them its event
+stream held no command, web-search, MCP or subagent item, it answered
+`NO TOOLS`, and it used 12,988 input tokens. `claude_cli` (`claude-haiku-4-5`)
+started with no tools, MCP servers or skills and no memory path, and reported
+no web search or fetch. Its start-up event still names the installed plugins
+and the built-in agents, but lists no tool, skill or MCP server from them, and
+with no tools there is no way to start an agent.
+
+Not restricted yet — these run in the empty directory, but their tools are on:
+
+- **`antigravity_cli`** has no option that turns its tools off, and it works
+  in its own fixed workspace (`~/.gemini/antigravity-cli/scratch`) wherever it
+  is started.
+- **`copilot_cli`** keeps `--allow-all-tools`. Restricting it needs a check
+  against the real CLI, which could not be made while the account's Copilot
+  premium-request quota was used up.
+- **`gemini_cli`** keeps `--yolo`. The Gemini CLI no longer signs in
+  individual Google accounts, so it could not be checked either.
+
+Not checked: whether codex still reads a global `~/.codex/AGENTS.md`; that file
+was empty on the machine these flags were checked on.
 
 ## Per-node model routing
 

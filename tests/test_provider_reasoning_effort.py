@@ -218,9 +218,11 @@ async def test_codex_cli_gets_the_config_override(level: str) -> None:
 
 @pytest.mark.asyncio
 async def test_codex_cli_unset_adds_no_override() -> None:
+    # codex always gets `-c web_search=disabled` (answer-only calls), so the
+    # check is that no effort override is among its `-c` values.
     argv = await _argv("codex_cli", "")
-    assert "-c" not in argv
     assert not any("reasoning_effort" in a for a in argv)
+    assert [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-c"] == ["web_search=disabled"]
 
 
 @pytest.mark.asyncio

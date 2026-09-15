@@ -221,6 +221,11 @@ class _CliSpec:
     # warning says so once per process (see ``_cli_effort_args``).
     effort_args: Callable[[str], list[str]] | None = None
     effort_levels: frozenset[str] | None = None
+    # Every CLI call runs with its own new, empty temporary directory as the
+    # working directory, removed when the call ends. ``cwd_flag`` is for a
+    # CLI that also takes that directory as an argument (codex ``-C``);
+    # ``None`` passes it only as the process's working directory.
+    cwd_flag: str | None = None
 
 
 def _child_env(spec: _CliSpec) -> dict[str, str] | None:
@@ -476,11 +481,34 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # hung process. With stream-json the reader sees a steady
         # stream of events and the inactivity-timer watchdog correctly
         # distinguishes "model is thinking" from "process is stuck".
+        #
+        # Answer-only: FI asks for text, never for agentic work. Run as an
+        # agent, the CLI reads the user's own setup and acts on the machine,
+        # so these turn that off (checked against Claude Code 2.1.x: the init
+        # event then lists no tools, MCP servers or skills and no memory
+        # path, and the usage reports no web search or fetch):
+        #   --tools ""                 no built-in tools (Bash, Read, WebSearch, ...);
+        #                              the empty string is its own argument
+        #   --strict-mcp-config        no MCP server from any config file
+        #   --disable-slash-commands   no skills
+        #   --safe-mode                no CLAUDE.md, auto-memory, plugins, hooks,
+        #                              agents or other customisations (a Haiku
+        #                              call went from 8,171 to 5,204 input tokens)
+        #   --no-session-persistence   nothing saved to resume later
+        # A model may still emit a tool call; with no tools each one comes
+        # back "No such tool available" and nothing runs. ``--bare`` would do
+        # much of this in one flag but accepts API-key auth only, not the
+        # subscription login FI relies on.
         argv=(
             "claude", "--print",
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",  # required by claude_cli for stream-json + --print
+            "--tools", "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--safe-mode",
+            "--no-session-persistence",
         ),
         pass_prompt_via="stdin",
         output_via="stream_json",
@@ -506,11 +534,58 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # event with the real token counts. The answer still comes from the
         # --output-last-message file, so the two coexist: verified that both
         # flags together return the answer AND the usage envelope.
-        argv=("codex", "exec", "--json"),
+        #
+        # Answer-only: FI asks for text, never for agentic work. With only
+        # `exec --json`, one real call inside an FI node read the user's
+        # personal skills, ran shell commands and did 8 web searches, 1.35M
+        # tokens in that one call. Checked against codex-cli 0.149 with a
+        # prompt asking it to list files, run `echo hello` and search the
+        # web: before, 2 command_execution + 2 web_search items; with these
+        # flags, no tool item and ~13k input tokens.
+        #   --ignore-user-config   ~/.codex/config.toml is not read: no MCP
+        #                          servers, profiles or custom model
+        #                          providers from it (auth still works).
+        #                          Effort comes from provider.reasoning_effort.
+        #   --ephemeral            no session files written
+        #   --skip-git-repo-check  the call's directory is not a git repo
+        #   -s read-only           sandbox, in case a command runs anyway
+        #   --disable <feature>    every tool surface: shell, unified exec,
+        #                          skills, apps, plugins, browser and computer
+        #                          use, memories, subagents, image generation,
+        #                          code mode (which otherwise ran `echo hello`
+        #                          through its JS REPL, or spawned a subagent),
+        #                          image viewing and tool suggestions
+        #   -c web_search=disabled web search (`-c tools.web_search=false`
+        #                          does nothing)
+        # plus `-C <the call's empty directory>` (``cwd_flag``).
+        argv=(
+            "codex", "exec", "--json",
+            "--ignore-user-config",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-s", "read-only",
+            "--disable", "shell_tool",
+            "--disable", "unified_exec",
+            "--disable", "skill_search",
+            "--disable", "apps",
+            "--disable", "plugins",
+            "--disable", "browser_use",
+            "--disable", "computer_use",
+            "--disable", "memories",
+            "--disable", "multi_agent",
+            "--disable", "image_generation",
+            "--disable", "code_mode_host",
+            "--disable", "view_image",
+            "--disable", "tool_suggest",
+            "-c", "web_search=disabled",
+        ),
+        cwd_flag="-C",
         pass_prompt_via="stdin",
         output_via="last_message_file",
         usage_extractor=lambda raw: _extract_codex_usage(raw),
-        model_flag="-m",        # provider.model = "gpt-5.5"; default reads ~/.codex/config.toml
+        # provider.model = "gpt-5.5". Left blank, codex uses its own default
+        # model: config.toml's `model` is not read (--ignore-user-config).
+        model_flag="-m",
         # `codex exec -i <file>` attaches an image to the prompt; checked with
         # a test image, which it named correctly.
         image_input="file_flag",
@@ -1122,12 +1197,54 @@ _CAPACITY_MARKERS: tuple[str, ...] = (
     "code 503",
     "resource_exhausted",
     "overloaded",
+    "at capacity",  # codex: "Selected model is at capacity. Please try a different model."
 )
 
 
 def _is_capacity_error(message: str) -> bool:
     text = message.lower()
     return any(m in text for m in _CAPACITY_MARKERS)
+
+
+def _cli_stdout_errors(stdout_b: bytes | None) -> list[str]:
+    """The failure messages a CLI reported as JSON events on its stdout.
+
+    ``codex exec --json`` says why a turn failed only on stdout, as
+    ``{"type":"error","message":...}`` and
+    ``{"type":"turn.failed","error":{"message":...}}``; its stderr holds just
+    "Reading prompt from stdin...". Without these, a failed call read
+    "codex exited rc=1: Reading prompt from stdin..." whatever the cause.
+
+    Only top-level events count. codex also emits an ``error`` *item* on
+    every call made with code mode disabled ("Code Mode is unavailable ..."),
+    which is a notice rather than the failure, and its "unavailable" would
+    read as a capacity error.
+    """
+    if not stdout_b:
+        return []
+    messages: list[str] = []
+    for line in stdout_b.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(evt, dict):
+            continue
+        if evt.get("type") == "error":
+            msg = evt.get("message")
+        elif evt.get("type") == "turn.failed":
+            err = evt.get("error")
+            msg = err.get("message") if isinstance(err, dict) else err
+        else:
+            continue
+        if isinstance(msg, str):
+            msg = msg.strip()[:500]
+            if msg and msg not in messages:
+                messages.append(msg)
+    return messages
 
 
 def _cli_retry_wait(retry_state: "Any") -> float:
@@ -1442,9 +1559,14 @@ async def _run_cli(
     * ``output_via="last_message_file"`` — final answer lands in a temp
       file; stdout is treated as an opaque agent log.
     * ``output_via="stream_json"`` — line-buffered JSON events (Claude
-      Code CLI's ``--output-format stream-json``); text deltas are
-      aggregated into the return value, thinking deltas are counted but
+      Code CLI's ``--output-format stream-json``); the final ``result``
+      envelope's text is the return value (the aggregated text deltas
+      only when no envelope arrives), thinking deltas are counted but
       discarded.
+
+    Every call runs in a new, empty temporary directory -- the child's
+    working directory, also passed as ``spec.cwd_flag`` when set -- that is
+    removed when the call ends.
 
     Two timeouts protect against stuck children:
 
@@ -1578,7 +1700,19 @@ async def _run_cli(
     # Single try/finally so the tmpfile is unlinked on every exit path —
     # spawn failure, transient error, exception during communicate(), or
     # success. Previously a `FileNotFoundError` from spawn leaked the file.
+    #
+    # The CLI runs in a new, empty directory of its own, removed in the same
+    # finally. Without one it inherited FI's working directory (a repository
+    # checkout in trend runs) and codex read the files there. FI's own files
+    # for the call (the answer file, images) live elsewhere, by absolute path,
+    # so the directory is still empty when the CLI starts.
+    call_dir: str | None = None
     try:
+        call_dir = tempfile.mkdtemp(prefix="fi_cli_call_")
+        if spec.cwd_flag:
+            # Ahead of a trailing prompt flag and its prompt, like the flags above.
+            at = len(argv) - 2 if spec.pass_prompt_via == "arg" else len(argv)
+            argv[at:at] = [spec.cwd_flag, call_dir]
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -1590,6 +1724,7 @@ async def _run_cli(
                 stdout=stdout_target,
                 stderr=asyncio.subprocess.PIPE,
                 env=_child_env(spec),
+                cwd=call_dir,
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -1630,6 +1765,24 @@ async def _run_cli(
             tmp_out_path.unlink(missing_ok=True)
         for image_path in image_paths:
             image_path.unlink(missing_ok=True)
+        if call_dir is not None:
+            _remove_call_dir(call_dir)
+
+
+def _remove_call_dir(path: str) -> None:
+    """Remove a CLI call's working directory, whatever the CLI left in it.
+
+    Never raises: the call's answer or error matters more than a leftover
+    directory. On Windows a directory cannot be removed while a process still
+    has it as its working directory (a grandchild the kill did not reach), and
+    that case is logged.
+    """
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.exists(path):
+        _log.warning(
+            "could not remove the CLI call directory %s; a process may still "
+            "be using it", path,
+        )
 
 
 # Cadence of the run.log heartbeat for the non-streaming CLIs (codex/copilot/
@@ -1710,10 +1863,22 @@ async def _collect_via_communicate(
                 + ("" if kill_clean else " (post-kill wait timed out)")
             )
         if proc.returncode != 0:
-            raise _CliTransientError(
-                f"{argv[0]} exited rc={proc.returncode}: "
-                f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
-            )
+            stderr_tail = stderr_b.decode("utf-8", "replace")[-500:]
+            # codex says why on stdout (see ``_cli_stdout_errors``); its
+            # stderr alone read "Reading prompt from stdin..." for every cause.
+            reported = _cli_stdout_errors(stdout_b)
+            if reported:
+                message = (
+                    f"{argv[0]} exited rc={proc.returncode}: {' | '.join(reported)} "
+                    f"(stderr: {stderr_tail.strip()})"
+                )
+            else:
+                message = f"{argv[0]} exited rc={proc.returncode}: {stderr_tail}"
+            # "Selected model is at capacity" clears on its own after a while,
+            # so it gets the capacity wait, not the short one.
+            if _is_capacity_error(" ".join(reported)):
+                raise _CliCapacityError(message)
+            raise _CliTransientError(message)
         raw_stdout = (stdout_b or b"").decode("utf-8", errors="replace")
         if spec.output_via == "last_message_file":
             assert tmp_out_path is not None
@@ -1829,20 +1994,23 @@ async def _collect_via_streaming(
                 text_delta, thinking_inc, err, is_result = (
                     _parse_stream_json_line(line)
                 )
-                if text_delta:
-                    # The CLI sometimes emits a final ``result`` envelope
-                    # carrying the full assembled text AFTER streaming
-                    # all the ``text_delta`` chunks. If we already
-                    # collected the chunks, the result envelope would
-                    # duplicate them. Skip the envelope's body when we
-                    # already have streamed text.
-                    if is_result and aggregated:
-                        result_envelope_seen = True
-                    else:
-                        aggregated.append(text_delta)
-                        text_chars_total += len(text_delta)
-                        if is_result:
-                            result_envelope_seen = True
+                if is_result:
+                    # The ``result`` envelope holds the answer: the final
+                    # turn's text. The streamed deltas span every turn, so
+                    # when the model narrates before tool calls they carry
+                    # that too -- a real run returned "I'll run the echo
+                    # command using the bash tool since it's available in
+                    # this environment.Let me try other tool names:CANNOT
+                    # RUN" where the envelope said "CANNOT RUN". Its text
+                    # therefore replaces the deltas; the deltas are the
+                    # answer only when no envelope (or an empty one) arrives.
+                    result_envelope_seen = True
+                    if text_delta:
+                        aggregated[:] = [text_delta]
+                        text_chars_total = len(text_delta)
+                elif text_delta and not result_envelope_seen:
+                    aggregated.append(text_delta)
+                    text_chars_total += len(text_delta)
                 thinking_token_count += thinking_inc
                 if err is not None and error_message is None:
                     error_message = err
@@ -2097,10 +2265,11 @@ def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None, bool]:
     - ``error`` is a fatal-error message extracted from
       ``{"type":"error",...}`` events, else None.
     - ``is_result_envelope`` is True when this line came from a
-      ``{"type":"result", "result":"<full text>"}`` envelope. Callers
-      use it to deduplicate: the CLI sometimes emits BOTH a stream of
-      ``text_delta`` events AND a final result envelope carrying the
-      same content; appending both would double the answer.
+      ``{"type":"result", "result":"<full text>"}`` envelope. The CLI
+      emits a stream of ``text_delta`` events AND a final result envelope;
+      the envelope holds only the final turn's text, while the deltas span
+      every turn, so the caller takes the envelope's text as the answer
+      instead of the deltas (appending both would also double it).
 
     Tolerates non-JSON lines (the CLI sometimes emits status lines
     before stream-json events fully start) by returning all-empties.

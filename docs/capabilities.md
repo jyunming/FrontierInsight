@@ -286,6 +286,8 @@ is the index.
 at engine init. Set `FI_SUPPRESS_PROXY_WARN=1` to silence (use at your
 own risk).
 
+**CLI calls are answer-only.** `codex_cli` and `claude_cli` run with web search, shell and code execution, MCP servers, skills, plugins, subagents and memory turned off, and do not save a session. Every CLI call, for every CLI provider, starts in a new, empty temporary directory that is removed when the call ends (also after an error or timeout), so a CLI never sees FI's working directory. `codex_cli` does not read `~/.codex/config.toml`: custom model providers, profiles and MCP servers defined there are not used, the model comes from `provider.model` (blank = codex's own default, not config.toml's) and the effort from `provider.reasoning_effort`. Not restricted yet: `antigravity_cli` (no option turns its tools off, and it works in its own fixed workspace), `copilot_cli` (keeps `--allow-all-tools`; not checkable while the Copilot quota was used up) and `gemini_cli` (keeps `--yolo`; the Gemini CLI no longer signs in individual Google accounts). Flags and measurements: [PROVIDERS.md](PROVIDERS.md#answer-only-cli-calls).
+
 ## Knowledge layer — three-layer retrieval
 
 ```
