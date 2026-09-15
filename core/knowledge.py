@@ -1281,7 +1281,15 @@ def _web_search(
             "web_search dropped %d low-signal SEO/market-report result(s)",
             len(docs) - len(filtered),
         )
-    return filtered
+    # A result the search engine indexed under a bot-check page's title is
+    # the wall, not the page: drop it before any fetch (see _BOT_CHECK_TITLES).
+    kept = [d for d in filtered if not _is_bot_check_title(d.metadata.get("title"))]
+    if len(kept) != len(filtered):
+        _log.info(
+            "web_search dropped %d result(s) titled as a bot-check page",
+            len(filtered) - len(kept),
+        )
+    return kept
 
 
 def _web_search_source(
@@ -1330,6 +1338,32 @@ _BOT_CHALLENGE_MARKERS = _INTERSTITIAL_MARKERS + (
     "ddos protection",
     "access denied",
 )
+
+# The whole title of a bot-check / challenge page. A search engine whose
+# crawler met the challenge instead of the article indexes the result under
+# the challenge's own title — Brave lists PMC articles as "Checking your
+# browser - reCAPTCHA" — so the hit arrives named after the wall however good
+# the text fetched for it later is, and that title is what a reference list
+# would print. The WHOLE title must be one of these: a paper about CAPTCHAs
+# ("reCAPTCHA: Human-based character recognition via web security measures")
+# names its subject, and no bare "captcha" / "recaptcha" is matched.
+_BOT_CHECK_TITLES = (
+    r"checking your browser(?: before accessing \S+| - recaptcha)?",
+    r"just a moment",
+    r"attention required! \| cloudflare",
+    r"verify(?:ing)? (?:that )?you are (?:a )?human",
+    r"performing security verification",
+)
+_BOT_CHECK_TITLE_RE = re.compile(
+    r"^(?:" + "|".join(_BOT_CHECK_TITLES) + r")[\s.…!?]*$", re.IGNORECASE,
+)
+
+
+def _is_bot_check_title(title: str | None) -> bool:
+    """True when ``title`` is the title of a bot-check / challenge page
+    rather than of the page behind it (see ``_BOT_CHECK_TITLES``)."""
+    return bool(title) and bool(_BOT_CHECK_TITLE_RE.match(" ".join(str(title).split())))
+
 
 # Extracted text shorter than this is treated as a failed fetch — a real
 # article is far longer; a sub-threshold result is a block page, a cookie

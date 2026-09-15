@@ -129,20 +129,24 @@ copying a model name from elsewhere.
 
 ## Cost expectations
 
-Rough premium-request burn per quest (each is one LLM call against
-your subscription budget):
+Measured premium-request burn per quest (each is one LLM call against
+your subscription budget), counted from the token logs (`.fi/cost.jsonl`)
+of 17 complete runs of one SIR simulation quest on gemma4 through Ollama,
+with `knowledge.source_routing: manual` and slides and a poster:
 
-| Quest shape | Approx. requests |
+| Quest shape | Requests |
 |---|---|
-| Bare quest, `clarify_mode: off`, single reviewer | ~6 |
-| Default (`clarify_mode: auto`, single reviewer, journal-length depth) | ~10 |
-| 3-persona reviewer panel + moderator | +4 per review iteration |
-| With cross-paper check (`cross_check_per_finding_k: 3`) | +1 per finding |
-| Each revise iteration | +2 (design + implement) plus reviewer cost |
+| Default engine settings (`clarify_mode: off`, single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
+| Slides, poster, talk script | +1 each |
+| Design through review running a second time | 27–33 in four runs of the same quest on older engine versions, not counting slides and poster |
+| `knowledge.source_routing: auto` (the default) | +1 per literature pass, +1 per cross-check lookup |
+| Reviewer panel of N personas | N + 1 per review round (the personas plus a moderator) instead of 1 |
 
-With Copilot Pro (~300 premium requests/month) a sensible default
-quest budget is 15–30 quests/month. Enterprise plans have higher
-ceilings.
+The spread within 21–26 comes from the model: 0–3 experiment repair
+calls, one cross-check call per key finding that found related literature,
+and a second write → claim check → review pass when the review asked for
+a rewrite. With Copilot Pro (~300 premium requests/month) that is about
+10–13 quests of this size a month. Enterprise plans have higher ceilings.
 
 ## API-key environment variables
 

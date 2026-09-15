@@ -148,6 +148,10 @@ def test_get_quest_reports_output_status(tmp_path: Path) -> None:
     assert body["available_artifacts"]["paper_pdf"] is None  # not produced yet
     assert "paper_pdf" in body["generatable_kinds"]
     assert "paper_md" not in body["generatable_kinds"]  # source, not generatable
+    # The paper generator writes paper.pdf at the quest root.
+    (q / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    body = client.get("/api/quests/qs").json()
+    assert body["available_artifacts"]["paper_pdf"] == "paper.pdf"
 
 
 # ---------------------------------------------------------------------------

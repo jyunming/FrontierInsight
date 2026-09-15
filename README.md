@@ -21,7 +21,7 @@ After one quest, `outputs/<quest_id>/` contains:
 
 ```
 paper/paper.md            the finished paper (abstract, keywords and IMRAD, or essay/report/brief/whitepaper)
-paper/paper.pdf           typeset PDF — via LaTeX, or a LaTeX-free HTML fallback
+paper.pdf                 typeset PDF — via LaTeX, or a LaTeX-free HTML fallback
 paper/references.bib      cited papers as BibTeX + CSL-JSON (drop into Zotero / a LaTeX flow)
 paper/further_reading.bib the web pages the paper drew on, listed apart from its References
 paper/CLAIMS.md           claim-grounding ledger: each claim → experiment / citation / unsupported
@@ -91,7 +91,7 @@ Full setup, cost trade-offs, and the billing model per provider are in **[docs/r
 
 - **Recipes & detailed how-to** → [`docs/recipes.md`](docs/recipes.md) — provider setup, the interview, writing your own quest, the human-in-the-loop pauses, and ~30 task recipes.
 - **YAML schema & every flag** → [`docs/USAGE.md`](docs/USAGE.md)
-- **Full capability reference** (the 20-node DAG, every field) → [`docs/capabilities.md`](docs/capabilities.md)
+- **Full capability reference** (the 21-node graph, every field) → [`docs/capabilities.md`](docs/capabilities.md)
 - **Providers, cost & ToS standing** → [`docs/PROVIDERS.md`](docs/PROVIDERS.md)
 - **Architecture & extension points** → [`docs/architecture.md`](docs/architecture.md)
 - **Install troubleshooting** (standard / no-admin / locked-down) → [`docs/INSTALL.md`](docs/INSTALL.md)

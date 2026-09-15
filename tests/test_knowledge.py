@@ -894,6 +894,57 @@ def test_web_search_drops_low_quality(monkeypatch) -> None:
     assert [d.metadata["url"] for d in out] == ["https://iea.org/x"]
 
 
+def test_bot_check_titles_are_recognised_and_the_rule_is_narrow() -> None:
+    from core.knowledge import _is_bot_check_title
+    for title in (
+        "Checking your browser - reCAPTCHA",
+        "Checking your browser before accessing pmc.ncbi.nlm.nih.gov",
+        "Just a moment...",
+        "  just   a moment… ",
+        "Attention Required! | Cloudflare",
+        "Verify you are human",
+        "Performing security verification",
+    ):
+        assert _is_bot_check_title(title), title
+    # A title about CAPTCHAs names its subject; only a whole challenge title counts.
+    for title in (
+        "reCAPTCHA: Human-based character recognition via web security measures",
+        "Breaking reCAPTCHA v2 with deep learning",
+        "Just a moment of silence: memorial practice in 1980s Britain",
+        "Checking your browser extensions for privacy leaks",
+        "A primer on stochastic epidemic models",
+        "",
+        None,
+    ):
+        assert not _is_bot_check_title(title), title
+
+
+def test_web_search_drops_results_titled_as_a_bot_check_page(monkeypatch) -> None:
+    """Brave indexed a PMC article under its reCAPTCHA wall's title, and a real
+    SIR paper listed "[W7] Checking your browser - reCAPTCHA" under Further
+    reading. Such a hit is dropped before any fetch; a real page whose text
+    merely mentions captcha is kept."""
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+    wall = RD(
+        "Checking your browser - reCAPTCHA\n\nChecking your browser before accessing "
+        "pmc.ncbi.nlm.nih.gov · Click here if you are not automatically redirected",
+        {"source": "web_search", "title": "Checking your browser - reCAPTCHA",
+         "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6002090/"},
+    )
+    real = RD(
+        "Accessible sign-up forms\n\nUsers who cannot solve a captcha abandon the "
+        "form; an audio reCAPTCHA helps some of them.",
+        {"source": "web_search", "title": "Accessible sign-up forms",
+         "url": "https://example.org/a11y"},
+    )
+    monkeypatch.setattr(
+        "core.knowledge._ddg_search", lambda q, tk, *, timeout_s=10.0: [wall, real],
+    )
+    out = kn._web_search("sir", 5, backend="duckduckgo")
+    assert [d.metadata["url"] for d in out] == ["https://example.org/a11y"]
+
+
 def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
     import core.knowledge as kn
     from core.knowledge import RetrievedDoc as RD

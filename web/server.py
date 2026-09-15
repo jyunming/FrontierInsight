@@ -165,7 +165,9 @@ def _quest_output_status(quest_root: Path) -> dict[str, object]:
     # Format → the file(s) that signal it exists (first match wins for label).
     probes: dict[str, list[str]] = {
         "paper_md": ["paper/paper.md"],
-        "paper_pdf": ["paper/paper.pdf"],
+        # The paper generator writes paper.pdf at the quest root; only some
+        # older runs left it under paper/.
+        "paper_pdf": ["paper.pdf", "paper/paper.pdf"],
         "slides": ["slides.pdf", "slides.html", "slides.pptx", "slides.md"],
         "poster": ["poster.pdf", "poster.tex"],
         "speech": ["talk.md"],

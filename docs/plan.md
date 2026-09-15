@@ -32,8 +32,9 @@ For exact YAML field semantics see [`capabilities.md`](capabilities.md);
 for the layered design see [`architecture.md`](architecture.md).
 
 ### Engine
-- ~20-node async LangGraph DAG with four feedback loops (clarify, ideate,
-  literature, design, implement_outline/implement, execute/execute_reflect
+- 21-node async LangGraph DAG with four feedback loops (clarify, ideate,
+  literature, select_skills, design, implement_outline/implement,
+  execute/execute_reflect
   or the no-simulation chain auto_collect_data → wait_for_data → data_load
   → web_plots → web_figures, analyze, cross_check, evidence_gate, write,
   claim_check, review, human_feedback). `core/engine.py:_build_graph` is
@@ -115,7 +116,7 @@ for the layered design see [`architecture.md`](architecture.md).
 
 ### Output generators
 - **Paper** — `paper/paper.md` (always when `paper_md` is in
-  `output.kinds`); `paper/paper.pdf` via pandoc + a LaTeX engine
+  `output.kinds`); `paper.pdf` at the quest root via pandoc + a LaTeX engine
   when `paper_pdf` is requested. Templates ship for `generic` and
   `neurips`; others fall back to pandoc default. LaTeX engine
   resolution: pdflatex on PATH preferred, then tectonic on PATH,

@@ -116,6 +116,23 @@ def test_papers_are_numbered_and_web_pages_are_further_reading() -> None:
     ]
 
 
+def test_a_bot_check_page_is_never_further_reading() -> None:
+    """A real SIR paper listed "[W7] Checking your browser - reCAPTCHA": a web hit
+    saved under a challenge page's title. It gets no label anywhere — not in the
+    writer's block, not in the Further reading the engine writes."""
+    from core.engine import _finalize_paper_sources
+    wall = _web("Checking your browser - reCAPTCHA",
+                "https://pmc.ncbi.nlm.nih.gov/articles/PMC6002090/")
+    lit = [LIT[0], wall, *LIT[1:]]
+    assert [w["url"] for w in build_further_reading(lit)] == [
+        "https://collectors.example/history", "https://museum.example/1980s",
+    ]
+    assert "reCAPTCHA" not in _format_lit_from_state({"literature": lit})
+    body, _ordered, _dropped = _finalize_paper_sources("# T\n\nBody [1].\n", lit, "external")
+    assert "## Further reading" in body and "[W2] Museum of Play: the 1980s" in body
+    assert "reCAPTCHA" not in body and "[W3]" not in body
+
+
 def test_the_writer_sees_the_labels_the_reference_lists_use() -> None:
     block = _format_lit_from_state({"literature": LIT})
     assert "[1] A. Author (2020). Action figures and children's play" in block

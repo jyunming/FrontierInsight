@@ -1212,6 +1212,18 @@ def test_is_citable_keeps_entries_with_one_id_field() -> None:
         assert _is_citable(meta), f"entry with {field} should be citable: {meta}"
 
 
+def test_is_citable_drops_a_bot_check_page() -> None:
+    """A source saved under a challenge page's title is the wall, not a source,
+    even when it carries a URL and a date; a title about CAPTCHAs is kept."""
+    from core.engine import _is_citable
+    assert not _is_citable({
+        "title": "Checking your browser - reCAPTCHA", "published": "2017-03-11",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6002090/",
+    })
+    assert not _is_citable({"title": "Just a moment...", "url": "https://example.org/x"})
+    assert _is_citable({"title": "Why users fail a reCAPTCHA", "url": "https://example.org/p"})
+
+
 def test_format_lit_drops_unusable_entries_entirely() -> None:
     """When the Axon pull is all weak metadata, _format_lit should
     emit the empty-knowledge-base sentinel rather than a numbered
