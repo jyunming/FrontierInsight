@@ -104,13 +104,53 @@ def test_openalex_sends_the_key_only_when_configured(monkeypatch) -> None:
     rec = _Recorder({"results": []})
     monkeypatch.setattr("core.knowledge.httpx.Client", rec)
     kn._openalex_search("q", 5)
-    assert "api_key" not in _Recorder.calls[0]["params"]
+    assert "Authorization" not in _Recorder.calls[0]["headers"]
 
     monkeypatch.setenv("OPENALEX_API_KEY", "OA-KEY")
     kn._openalex_search("q", 5)
     kn._arxiv_search("q", 5)
-    assert _Recorder.calls[1]["params"]["api_key"] == "OA-KEY"
-    assert _Recorder.calls[2]["params"]["api_key"] == "OA-KEY"
+    for call in _Recorder.calls[1:]:
+        assert call["headers"]["Authorization"] == "Bearer OA-KEY"
+        assert "api_key" not in call["params"]
+
+
+def test_the_key_never_reaches_the_request_log(monkeypatch, caplog) -> None:
+    """httpx logs every request URL at INFO, and importing Axon turns INFO on
+    for the whole process. With the key in the query string, every OpenAlex
+    request printed it to the quest's console. All five OpenAlex requests
+    (search, arXiv, title lookup, and both cited-by requests) carry it in a
+    header instead."""
+    import httpx
+
+    seen: list[httpx.Request] = []
+    cited = [{"id": f"https://openalex.org/W{i}", "referenced_works": ["https://openalex.org/W9"]}
+             for i in (1, 2)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"results": cited})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "core.knowledge.httpx.Client",
+        lambda *a, **kw: real_client(*a, transport=httpx.MockTransport(handler), **kw),
+    )
+    monkeypatch.setattr(kn, "_OPENALEX_GAP_S", 0)
+    monkeypatch.setenv("OPENALEX_API_KEY", "SECRET-OA-KEY")
+    retrieved = [kn.RetrievedDoc(content="", metadata={"url": f"https://openalex.org/W{i}"}) for i in (1, 2)]
+
+    with caplog.at_level("INFO", logger="httpx"):
+        kn._openalex_search("q", 5)
+        kn._arxiv_search("q", 5)
+        kn._openalex_title_lookup({"title": "A contribution to the mathematical theory of epidemics", "year": 1927})
+        kn._openalex_cited_by_retrieved(retrieved)
+
+    assert len(seen) == 5
+    assert all(r.headers.get("Authorization") == "Bearer SECRET-OA-KEY" for r in seen)
+    assert not any("SECRET-OA-KEY" in str(r.url) for r in seen)
+    request_lines = [r.getMessage() for r in caplog.records if "api.openalex.org" in r.getMessage()]
+    assert len(request_lines) == 5, "httpx logged each request"
+    assert "SECRET-OA-KEY" not in caplog.text
 
 
 def test_semantic_scholar_sends_its_key_as_a_header(monkeypatch) -> None:
