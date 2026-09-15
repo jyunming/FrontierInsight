@@ -74,6 +74,35 @@ def test_the_recorder_keeps_each_seeds_lines(tmp_path: Path) -> None:
     assert [line["label"] for line in bars["lines"]] == ["mean"] and bars["line_only"] is False
 
 
+EMPTY_BAND = (
+    "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+    "from matplotlib.collections import PolyCollection\n"
+    "fig, (empty, band) = plt.subplots(1, 2)\n"
+    "empty.plot([1, 2, 3], [0.2, 0.4, 0.6], marker='o', label='N = 100')\n"
+    "empty.fill_between([], [], [], alpha=0.2)\n"
+    "empty.add_collection(PolyCollection([]))\n"
+    "empty.legend()\n"
+    "band.plot([1, 2, 3], [0.2, 0.4, 0.6], label='N = 100')\n"
+    "band.fill_between([1, 2, 3], [0.1, 0.3, 0.5], [0.3, 0.5, 0.7], alpha=0.2)\n"
+    "print('PATHS', [len(c.get_paths()) for c in empty.collections], [len(c.get_paths()) for c in band.collections])\n"
+    "fig.savefig('fig.png')\n"
+)
+
+
+def test_a_band_that_draws_nothing_leaves_a_line_figure(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    records = tmp_path / "records"
+    out = subprocess.run([sys.executable, "-c", EMPTY_BAND], env=_boot_env(tmp_path, records),
+                         cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    # seaborn leaves an empty band like these per line when each x holds one observation.
+    assert "PATHS [0, 0] [1]" in out.stdout
+    empty, band = json.loads((records / "fig.seed0.json").read_text(encoding="utf-8"))["axes"]
+    assert empty["line_only"] is True
+    # A band that is drawn still makes the panel more than lines.
+    assert band["line_only"] is False
+
+
 def test_a_redrawn_figure_keeps_no_seed_lines(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     records = tmp_path / "records"
