@@ -1787,3 +1787,48 @@ def test_preprocessor_dedupes_duplicated_reference_lines(
     assert sanitized.count(
         "Stratonovich-type integral with respect to a general stochastic measure"
     ) == 1, sanitized
+
+
+_CAPTIONED_TABLE = (
+    "**Table 1.** Outbreak probability by population size.\n"
+    "| N | P(major) |\n"
+    "| :--- | ---: |\n"
+    "| 100 | 0.44 |\n"
+)
+
+
+def test_a_table_right_under_its_caption_gets_a_blank_line() -> None:
+    """A real SIR paper put its table on the line after the caption, and
+    pandoc read the table as the caption's paragraph: the PDF printed pipes."""
+    from generation._tables import blank_line_before_tables
+
+    fixed = blank_line_before_tables(_CAPTIONED_TABLE)
+    assert fixed.startswith("**Table 1.** Outbreak probability by population size.\n\n| N | P(major) |\n")
+    assert blank_line_before_tables(fixed) == fixed, "adds the line once"
+
+
+@pytest.mark.parametrize("markdown", [
+    "Text.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",  # already separated
+    "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n",  # rows inside a table stay together
+    "```\nnote\n| a | b |\n| --- | --- |\n```\n",  # a table inside a code block
+    "The ratio | x | is shown.\n| not a rule |\n",  # pipes in prose, no rule line
+])
+def test_text_that_is_not_a_captioned_table_is_left_alone(markdown: str) -> None:
+    from generation._tables import blank_line_before_tables
+
+    assert blank_line_before_tables(markdown) == markdown
+
+
+def test_preprocessor_separates_a_table_from_its_caption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _capture_pandoc_call(monkeypatch)
+    del state
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text("# Title\n\n## Results\n" + _CAPTIONED_TABLE, encoding="utf-8")
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    sanitized = (tmp_path / "out" / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "population size.\n\n| N | P(major) |" in sanitized, sanitized
+    assert "population size.\n| N |" in art.paper_md.read_text(encoding="utf-8"), "paper.md keeps the writer's text"
