@@ -45,7 +45,7 @@ sources the paper cites most. With `engine.execute_replicates > 1` the results a
 with 95% confidence intervals (a probability's kept within 0–1), effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. A line figure, error bars included, is drawn as the mean of the seeds, shaded with its 95%
-confidence interval; bar charts, histograms and scatters show the first run (seed 0), and the paper is told so. You see every node firing live in the chat panel.
+confidence interval; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. You see every node firing live in the chat panel.
 
 After the outputs render, a visual check measures and screenshots each PDF;
 with `output.visual_check_ai: true` it also asks the chat model to check the pages. The slides and poster are redone, at most twice,

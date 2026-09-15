@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -23,8 +24,8 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
 from core.engine import (
-    Engine, _figure_list_for_prompt, _format_figure_check, _replicate_line_figure,
-    _replicate_result_intervals,
+    Engine, _figure_list_for_prompt, _figure_record_note, _format_figure_check,
+    _replicate_line_figure, _replicate_result_intervals,
 )
 from core.plot_style import write_boot
 
@@ -247,21 +248,78 @@ def test_the_writer_is_told_a_figure_is_the_mean_of_the_seeds() -> None:
     assert note.endswith("and its caption says so.")
 
 
-def test_the_writer_and_the_review_are_told_a_figure_shows_seed_0() -> None:
+def _seed_0_state(replicates: int | None) -> dict[str, Any]:
+    """A histogram the seeds could not redraw, beside ``replicates`` seeds' results."""
     record = {
         "file": "sizes.png", "single_seed": 0,
         "axes": [{"title": "Final sizes", "ylabel": "Count", "yscale": "linear", "ylim": [0, 12], "series": []}],
     }
-    state = {"figures": ["sizes.png"], "figure_records": {"sizes.png": record}}
+    state: dict[str, Any] = {"figures": ["sizes.png"], "figure_records": {"sizes.png": record}}
+    if replicates is not None:
+        state["result_json_replicates"] = [{"_seed": k, "m": 0.1 * k} for k in range(replicates)]
+    return state
+
+
+def test_the_writer_and_the_review_are_told_a_figure_shows_seed_0() -> None:
+    state = _seed_0_state(None)
     first, note = _figure_list_for_prompt(state).splitlines()  # type: ignore[arg-type]
-    assert first.endswith("— shows seed 0 only, not the mean of the seeds")
-    assert note.startswith("A figure that shows seed 0 only") and "quote seed 0's values" in note
+    assert first.endswith(
+        "— shows replicate seed 0 only (every run that seed made), not the mean over the replicate seeds"
+    )
+    assert note == (
+        "A figure that shows replicate seed 0 only could not be drawn as the mean over the replicate "
+        "seeds. A replicate seed repeats the whole experiment, so the figure draws every run seed 0 "
+        "made: the text and caption about it quote seed 0's values, or say it shows a single "
+        "replicate (seed 0), not the means over the seeds."
+    )
     check = _format_figure_check("# P\n", state).splitlines()  # type: ignore[arg-type]
     assert check == [
-        "figures/sizes.png shows seed 0 only, not the mean of the seeds: its caption and the text "
-        "about it must quote seed 0's values or say it shows one run.",
+        "figures/sizes.png shows replicate seed 0 only (every run that seed made), not the mean over "
+        "the replicate seeds: its caption and the text about it must quote seed 0's values or say it "
+        "shows a single replicate (seed 0).",
         "No caption names a series its figure does not show.",
     ]
+
+
+def test_with_the_seeds_counted_a_figure_shows_seed_0_of_them() -> None:
+    state = _seed_0_state(3)
+    first, note = _figure_list_for_prompt(state).splitlines()  # type: ignore[arg-type]
+    assert first.endswith(
+        "— shows replicate seed 0 of 3 only (every run that seed made), not the mean over the 3 replicate seeds"
+    )
+    assert note.startswith("A figure that shows replicate seed 0 only could not be drawn as the mean over "
+                           "the 3 replicate seeds.")
+    assert "say it shows a single replicate (seed 0 of 3), not the means over the seeds." in note
+    assert _format_figure_check("# P\n", state).splitlines()[0] == (  # type: ignore[arg-type]
+        "figures/sizes.png shows replicate seed 0 of 3 only (every run that seed made), not the mean "
+        "over the 3 replicate seeds: its caption and the text about it must quote seed 0's values or "
+        "say it shows a single replicate (seed 0 of 3)."
+    )
+    # One seed's results say nothing about how many seeds there were.
+    assert "seed 0 of" not in _figure_list_for_prompt(_seed_0_state(1))  # type: ignore[arg-type]
+
+
+# A seed repeats the whole experiment -- one seed of an SIR study is 300
+# simulations -- so a figure of seed 0 is never one run or a single simulation.
+_ONE_RUN_RE = re.compile(r"\b(?:one|single)\s+(?:\w+\s+)?(?:run|simulation)s?\b", re.IGNORECASE)
+
+
+@pytest.mark.parametrize("replicates", [None, 3], ids=["seeds not counted", "3 seeds"])
+def test_a_figure_of_seed_0_is_never_called_one_run(replicates: int | None) -> None:
+    state = _seed_0_state(replicates)
+    record = state["figure_records"]["sizes.png"]
+    texts = {
+        "record note": _figure_record_note(record, n_seeds=replicates),
+        "record note, seeds not passed": _figure_record_note(record),
+        "writer figure list": _figure_list_for_prompt(state),  # type: ignore[arg-type]
+        "figure check": _format_figure_check("# P\n", state),  # type: ignore[arg-type]
+    }
+    for where, text in texts.items():
+        assert "replicate seed 0" in text, where
+        assert "one run" not in text.lower() and "single run" not in text.lower(), where
+        assert not _ONE_RUN_RE.search(text), (where, text)
+    counted = ("seed 0 of 3" in texts[k] for k in ("record note", "writer figure list", "figure check"))
+    assert all(counted) if replicates else not any("seed 0 of" in t for t in texts.values())
 
 
 # --- the execute node, end to end ------------------------------------------------
@@ -332,7 +390,7 @@ async def test_execute_draws_the_line_figure_as_the_mean_of_the_seeds(tmp_path: 
     assert records["errors.png"]["replicate_mean"] == {"n": 3}
     assert [s["label"] for s in records["errors.png"]["axes"][0]["series"]] == ["R0 = 3"]
     assert "single_seed" not in records["outbreak.png"] and "single_seed" not in records["errors.png"]
-    # The histogram goes back to seed 0's file and record, and says it is one run.
+    # The histogram goes back to seed 0's file and record, and says it shows seed 0 alone.
     assert histograms["png0"] != histograms["png2"] and histograms["json0"] != histograms["json2"]
     assert (eng.quest_root / "figures" / "sizes.png").read_bytes() == histograms["png0"]
     assert records["sizes.png"] == {**json.loads(histograms["json0"]), "single_seed": 0}
@@ -399,7 +457,7 @@ async def test_a_figure_the_seeds_do_not_redraw_shows_seed_0(
     assert (eng.quest_root / "figures" / "sizes.png").read_bytes() == b"histogram of seed 0"
     record = patch["figure_records"]["sizes.png"]
     assert record["seed"] == 0
-    # Only beside means over the seeds does a figure need to say it is one run.
+    # Only beside means over the seeds does a figure need to say it shows seed 0 alone.
     assert record.get("single_seed") == (0 if one_run else None)
 
 
