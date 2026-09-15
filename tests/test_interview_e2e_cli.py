@@ -160,3 +160,49 @@ async def test_run_new_writes_the_tier1_ensemble_pick_and_author_line(
     assert set(cfg.provider.node_ensemble) == {"cross_check", "ideate", "analyze"}
     assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "R&D Lab")
     assert (cfg.output.contact_email, cfg.output.url) == ("", "https://example.org/p")
+
+
+@pytest.mark.asyncio
+async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--new asks the page limit as an advanced field on the review screen. A
+    typo is refused and the field stays blank; a whole number lands on
+    output.page_limit, which the engine then reads as the limit."""
+    from core.config import resolve_page_limit
+    from core.interview import questions_for_tier
+    from core.provider import ProxySupervisor
+    from launch import _run_new
+
+    async def fake_preflight(**_kw: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
+    rows = [q.id for q in questions_for_tier(2, "cli")] + [q.id for q in questions_for_tier(3, "cli")]
+    row = str(rows.index("page_limit") + 1)
+    answers = iter([
+        "Page limit probe topic",    # topic
+        "", "", "",                  # paper_format, output_kinds, study_depth
+        "1", "1",                    # provider, provider_model
+        "", "", "", "", "",          # ensemble_profile, author line
+        "a", row, "four",            # review screen: show advanced, a typo (refused)
+        row, "4",                    # the page limit
+        "",                          # launch
+    ])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers, ""))
+
+    output_root = tmp_path / "outputs"
+    rc = await _run_new(
+        output_root=output_root,
+        draft_only=True,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=ProxySupervisor(),
+    )
+    assert rc == 0
+    assert next(answers, None) is None, "every scripted answer was read"
+    (draft,) = list((output_root / "_drafts").glob("*.yaml"))
+    text = draft.read_text(encoding="utf-8")
+    assert "  page_limit: 4" in text.splitlines()
+    cfg = Config.model_validate(yaml.safe_load(text))
+    assert cfg.output.page_limit == 4 and resolve_page_limit(cfg) == 4

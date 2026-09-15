@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.citations import to_bibtex, to_csl_json
-from core.config import Config
+from core.config import Config, resolve_page_limit
 from core.engine import QuestArtifacts, build_further_reading, cited_references
 from generation._pandoc import find_pandoc
 from generation import _cjk
@@ -806,6 +806,9 @@ class PaperGenerator:
         fmt = self.config.output.paper_format
         template = TEMPLATES_DIR / fmt / "template.tex"
         out_pdf = out_dir / "paper.pdf"
+        # A page limit (output.page_limit, or one the topic states) switches
+        # the template to its tighter layout and sets the source lists smaller.
+        page_limit = resolve_page_limit(self.config)
 
         # Pre-process: rewrite common Unicode math glyphs (≈, ≥, ×, −,
         # —, lowercase Greek, etc.) into LaTeX commands before pandoc
@@ -879,6 +882,11 @@ class PaperGenerator:
             # LLM emits when the prior-work excerpt starts with the
             # paper title.
             sanitized_md = _dedupe_duplicated_references(sanitized_md)
+            # With a page limit the References and Further reading lists are
+            # set smaller. The LaTeX for it goes into this copy only; paper.md
+            # stays as the writer and the engine left it.
+            if page_limit is not None:
+                sanitized_md = small_source_lists(sanitized_md)
             sanitized_path = out_dir / "paper_pdf_source.md"
             sanitized_path.write_text(sanitized_md, encoding="utf-8")
             pandoc_input = sanitized_path
@@ -978,6 +986,8 @@ class PaperGenerator:
             cmd.extend(["-V", f"fi-cjk-font={cjk_font}"])
         if extra_lines > 0:
             cmd.extend(["-V", f"fi-extra-lines={int(extra_lines)}"])
+        if page_limit is not None:
+            cmd.extend(["-V", "fi-tight=true"])
         if template.exists():
             cmd.extend(["--template", str(template)])
         else:
@@ -1098,6 +1108,43 @@ class PaperGenerator:
                 ),
             )
         return out_pdf, None
+
+
+# The two source lists the engine appends to every paper, at any heading level.
+_SMALL_LIST_HEADING_RE = re.compile(
+    r"^(#{1,6})[ \t]*(?:references|further[ \t]+reading)[ \t]*$", re.IGNORECASE | re.MULTILINE,
+)
+_ANY_MD_HEADING_RE = re.compile(r"^(#{1,6})[ \t]", re.MULTILINE)
+_SMALL_BEGIN = "```{=latex}\n\\begingroup\\small\n```"
+_SMALL_END = "```{=latex}\n\\endgroup\n```"
+
+
+def small_source_lists(markdown: str) -> str:
+    """``markdown`` with the body of its References and Further reading
+    sections set a size smaller: each body is wrapped in raw-LaTeX
+    ``\\begingroup\\small`` … ``\\endgroup`` blocks, which pandoc passes
+    through to LaTeX. A section runs from its heading to the next heading of
+    the same or a higher level; the heading keeps its size. For the PDF
+    source of a paper with a page limit only."""
+    out: list[str] = []
+    pos = 0
+    for m in _SMALL_LIST_HEADING_RE.finditer(markdown):
+        if m.start() < pos:
+            continue
+        level = len(m.group(1))
+        end = next(
+            (h.start() for h in _ANY_MD_HEADING_RE.finditer(markdown, m.end()) if len(h.group(1)) <= level),
+            len(markdown),
+        )
+        body = markdown[m.end():end].strip("\n")
+        out.append(markdown[pos:m.end()])
+        if body.strip():
+            out.append(f"\n\n{_SMALL_BEGIN}\n\n{body}\n\n{_SMALL_END}\n\n")
+        else:
+            out.append(markdown[m.end():end])
+        pos = end
+    out.append(markdown[pos:])
+    return "".join(out)
 
 
 def _render_pdf_skip_md(reason: _PdfSkipReason, config: Config) -> str:

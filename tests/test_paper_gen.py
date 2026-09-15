@@ -1072,16 +1072,21 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
     columns) and caps it at 45% of the text height, and the float
     settings stop a figure being put alone on a half-blank page: the
     validation quest's paper had two such pages, and its ieee_access
-    render drew every figure across both columns."""
+    render drew every figure across both columns. A paper with a page
+    limit (the ``fi-tight`` template variable) caps it at 33% instead;
+    45% stays the default."""
     repo = Path(__file__).resolve().parent.parent
     working = [
         "generic", "neurips", "iclr", "nature_mi", "ieee_access",
         "essay", "report", "policy_brief", "whitepaper",
     ]
+    default_cap = r"  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
+    tight_cap = r"  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
     expected = [
         r"\providecommand{\pandocbounded}[1]{%",
         r"  \sbox{\FI@figbox}{#1}%",
-        r"  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%",
+        default_cap,
+        tight_cap,
         r"  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%",
         r"  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi",
         r"  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}",
@@ -1104,6 +1109,10 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
                 f"and pdflatex would silently emit a PDF with stray text "
                 f"and unbounded images."
             )
+        cap = lines.index(default_cap)
+        assert lines[cap - 3:cap + 2] == ["$if(fi-tight)$", tight_cap, "$else$", default_cap, "$endif$"], (
+            f"{fmt}: the figure cap is 45% by default and 33% only with a page limit (fi-tight)"
+        )
         assert r"\resizebox{\textwidth}" not in "\n".join(lines), (
             f"{fmt}: \\textwidth spans both columns of a two-column page"
         )

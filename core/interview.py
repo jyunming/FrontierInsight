@@ -715,6 +715,16 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=True,
         tier=3,
     ),
+    Question(
+        id="page_limit",
+        label="Page limit",
+        prompt="The most pages paper.pdf may take, as a whole number. Leave blank (or type none) for no set limit; a limit the topic states, such as '≤ 4 pages', still applies. With a limit the paper gets a tighter layout and the writer a word budget, and each draft is rendered and its pages counted: a draft over the limit is written again, shorter, at most twice.",
+        kind="text",
+        default="",
+        placeholder="e.g. 4",
+        mid_quest_editable=True,
+        tier=3,
+    ),
     # ─── Author line (tier 1, every field optional) ──────────────────
     # Printed on the paper, slides and poster. Asked on every frontend so
     # nobody has to find a hidden setting to put their name on a poster.
@@ -834,6 +844,9 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # Reasoning effort applies to the calls made after the resume; nothing
     # already produced is re-run.
     "reasoning_effort": (),
+    # The page limit sets the writer's word budget and the review's page
+    # check: the paper is written and reviewed again.
+    "page_limit": ("write", "review"),
 }
 
 
@@ -1278,6 +1291,46 @@ class InterviewAnswers:
     url: str = ""
     # Poster sheet: "a1_portrait" (default) | "a0_portrait" | "landscape_48x36".
     poster_size: str = "a1_portrait"
+    # ``output.page_limit``: the most pages paper.pdf may take, or ``None``
+    # for no set limit (a limit the topic states still applies). Must stay in
+    # sync with vscode-frontier-insight/src/interview-core.ts.
+    page_limit: int | None = None
+
+
+def parse_page_limit_answer(
+    value: Any, *, on_error: Callable[[str], None] | None = None,
+) -> int | None:
+    """The ``page_limit`` answer as a page count, or ``None`` for no set limit.
+
+    Blank, ``None`` and "none" are no limit. Otherwise a whole number of at
+    least 1: ``4`` or ``"4"``, not ``4.5``, ``"four"``, ``0`` or ``True``.
+    Anything else raises ``ValueError``; given ``on_error``, the message goes
+    to it instead and the answer is ``None``."""
+    def bad(message: str) -> None:
+        if on_error is None:
+            raise ValueError(message)
+        on_error(message)
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() == "none":
+            return None
+        digits = text.removeprefix("+")
+        if not (digits.isascii() and digits.isdigit()):
+            bad(f"page_limit must be a whole number of pages, or blank for no limit; got {value!r}")
+            return None
+        number = int(digits)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        number = value
+    else:
+        bad(f"page_limit must be a whole number of pages, or blank for no limit; got {value!r}")
+        return None
+    if number < 1:
+        bad(f"page_limit must be at least 1; got {number}")
+        return None
+    return number
 
 
 def parse_node_models_answer(raw: str) -> dict[str, str]:
@@ -1519,6 +1572,11 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
             lines.append(f"{indent}{key}: {json.dumps(value, ensure_ascii=False)}")
     if getattr(answers, "poster_size", "a1_portrait") != "a1_portrait":
         lines.append(f"{indent}poster_size: {json.dumps(answers.poster_size)}")
+    # Page limit: only a whole number of pages is written; unset leaves the
+    # key out, so a limit the topic states still applies.
+    page_limit = getattr(answers, "page_limit", None)
+    if isinstance(page_limit, int) and not isinstance(page_limit, bool) and page_limit >= 1:
+        lines.append(f"{indent}page_limit: {page_limit}")
     lines.append(f"{indent}output_dir: \"./outputs\"")
     lines.append("")
 

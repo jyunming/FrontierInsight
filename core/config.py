@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -1213,6 +1214,15 @@ class OutputConfig(BaseModel):
     # How many times an output may be redone after its check finds problems
     # the redo can fix, before the findings are only reported.
     visual_check_max_redos: int = Field(2, ge=0, le=2)
+    # The most pages paper.pdf may take. Unset, a limit the topic states
+    # ("≤ 4 pages", "at most 4 pages", "a 4-page paper") applies
+    # (``resolve_page_limit``); with neither, the paper keeps its usual layout
+    # and length. With a limit, the LaTeX templates use 2 cm margins (where
+    # they had 1 in), figures at most a third of the text height and smaller
+    # source lists, the writer gets a word budget, and the review renders each
+    # draft and counts its pages: a draft over the limit is sent back to be
+    # shortened, at most twice, without using ``engine.max_iterations``.
+    page_limit: int | None = Field(None, ge=1)
 
     @field_validator("author", "affiliation", "contact_email", "url", mode="before")
     @classmethod
@@ -1327,3 +1337,64 @@ class Config(BaseModel):
         if isinstance(data, dict):
             cls._audit_unknown_keys(data)
         return cls.model_validate(data)
+
+
+# A page limit written into the topic. The number must come right before
+# "page(s)", with a bound word in front of it ("≤ 4 pages", "at most four
+# pages", "up to 4 pages") or after it ("4 pages max"), or as "a 4-page
+# paper". A range ("4–8 pages", "4 to 8 pages") is a length, not a limit.
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+_PAGE_COUNT = (
+    r"(?<![\w\-‐‑–—./])(?P<n>\d{1,3}|"
+    + "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
+    + r")(?![\w.])"
+)
+_PAGE_LIMIT_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"(?:≤|⩽|<=|=<|\bat\s+most|\bno\s+more\s+than|\bnot\s+more\s+than|\bno\s+longer\s+than"
+        r"|\bup\s+to|\b(?:a\s+)?max(?:imum)?(?:\s+of)?|\bmax\.|\bpage\s+limit\s+(?:of|is)|\blimit(?:ed)?\s+(?:of|to))"
+        r"\s*" + _PAGE_COUNT + r"\s*pages?\b",
+        _PAGE_COUNT + r"\s*pages?\s*(?:max(?:imum)?\b|at\s+most\b|or\s+(?:fewer|less)\b)",
+        r"\bpage\s+limit\s*[:=]?\s*(?:of\s+)?" + _PAGE_COUNT,
+        _PAGE_COUNT + r"\s*[-‐‑–]\s*page\b",
+    )
+]
+# What turns the number into the top of a range: "4–8", "4 to 8", "4 or 5".
+_RANGE_BEFORE = re.compile(
+    r"(?:\d|\b(?:" + "|".join(_NUMBER_WORDS) + r"))\s*(?:[-‐‑–—]|to|or)\s*$", re.IGNORECASE,
+)
+
+
+def page_limit_from_text(text: str) -> int | None:
+    """The page limit ``text`` states, or ``None``. With several, the
+    smallest. A bound said in words ("≤ 6 pages") wins over the "N-page"
+    form, which can name a part ("a 2-page appendix") rather than the
+    paper."""
+    bounds: list[int] = []
+    sized: list[int] = []
+    for index, pattern in enumerate(_PAGE_LIMIT_PATTERNS):
+        for m in pattern.finditer(text or ""):
+            if _RANGE_BEFORE.search(text[: m.start("n")]):
+                continue
+            word = m.group("n").lower()
+            n = _NUMBER_WORDS[word] if word in _NUMBER_WORDS else int(word)
+            if n >= 1:
+                (sized if index == len(_PAGE_LIMIT_PATTERNS) - 1 else bounds).append(n)
+    found = bounds or sized
+    return min(found) if found else None
+
+
+def resolve_page_limit(config: Any) -> int | None:
+    """The quest's page limit: ``output.page_limit`` when set, otherwise the
+    one its topic states, otherwise ``None`` (no limit, today's layout)."""
+    set_limit = getattr(getattr(config, "output", None), "page_limit", None)
+    if isinstance(set_limit, int) and set_limit >= 1:
+        return set_limit
+    topic = getattr(config, "topic", "")
+    return page_limit_from_text(topic) if isinstance(topic, str) else None

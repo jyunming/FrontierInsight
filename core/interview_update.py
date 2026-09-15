@@ -67,6 +67,7 @@ from core.interview import (
     answers_to_yaml,
     build_smart_defaults,
     expand_ensemble_profile,
+    parse_page_limit_answer,
 )
 
 
@@ -123,7 +124,9 @@ STAGE_STATE_KEYS: dict[str, tuple[str, ...]] = {
     "analyze": ("analysis",),
     "cross_check": ("cross_check",),
     "write": ("paper_md",),
-    "review": ("review", "review_panel"),
+    # page_limit_rewrites counts the shortening rewrites the review
+    # forced; a re-run review (say after a new page limit) starts afresh.
+    "review": ("review", "review_panel", "page_limit_rewrites"),
 }
 
 
@@ -229,6 +232,8 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         reasoning_effort=(
             str(provider.get("reasoning_effort") or "").strip().lower() or "default"
         ),
+        # A saved value Config would refuse loads as no limit.
+        page_limit=parse_page_limit_answer(output.get("page_limit"), on_error=lambda _message: None),
     )
     return answers, yaml_path, raw
 
@@ -314,6 +319,9 @@ def rewrite_yaml_with_new_answers(
         ("output", "author"), ("output", "affiliation"),
         ("output", "contact_email"), ("output", "url"),
         ("output", "poster_size"),
+        # The emitter leaves a cleared page limit out; managed, so the old
+        # limit does not merge back.
+        ("output", "page_limit"),
         ("knowledge", "enabled"),
         ("knowledge", "top_k"), ("knowledge", "external_top_k"),
         # Unified pauses section is fully interview-managed.
@@ -496,6 +504,10 @@ async def run_update_flow(
             # q.default; we override by reading from new_partial.
             # Cheapest path: temporarily swap q.default for this call.
             current_value = new_partial.get(q.id, q.default)
+            if current_value is None and q.kind == "text":
+                # An unset optional answer (no page limit) shows as blank,
+                # as the prompt prints it.
+                current_value = ""
             tmp_q = type(q)(
                 id=q.id, label=q.label, prompt=q.prompt, kind=q.kind,
                 choices=q.choices, placeholder=q.placeholder,
@@ -535,6 +547,17 @@ async def run_update_flow(
             )
             return fallback
 
+    def _page_limit(value: Any) -> int | None:
+        # Blank or "none" clears the limit; a typo keeps the current one.
+        try:
+            return parse_page_limit_answer(value)
+        except ValueError as e:
+            print(
+                f"[FI] --update: ignoring {e}; keeping the current page limit "
+                f"{current.page_limit!r}.", file=sys.stderr,
+            )
+            return current.page_limit
+
     new = InterviewAnswers(
         topic=current.topic,
         title=current.title,
@@ -569,6 +592,7 @@ async def run_update_flow(
         reasoning_effort=str(
             new_partial.get("reasoning_effort", current.reasoning_effort) or "default"
         ),
+        page_limit=_page_limit(new_partial.get("page_limit", current.page_limit)),
     )
 
     changes = diff_answers(current, new)

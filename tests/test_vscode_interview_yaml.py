@@ -89,6 +89,28 @@ def test_vscode_interview_offers_reasoning_effort_as_an_advanced_field() -> None
     assert 'which.value === "reasoning_effort"' in ts
 
 
+def test_vscode_emitter_writes_the_page_limit_only_when_set(tmp_path: Path) -> None:
+    from core.config import resolve_page_limit
+
+    yaml_text, cfg = _emit(tmp_path, page_limit=4)
+    assert "  page_limit: 4" in yaml_text.splitlines()
+    assert cfg.output.page_limit == 4 and resolve_page_limit(cfg) == 4
+    for unset in (None, 0):
+        yaml_text, cfg = _emit(tmp_path, page_limit=unset)
+        assert "page_limit:" not in yaml_text and cfg.output.page_limit is None
+    yaml_text, cfg = _emit(tmp_path)
+    assert "page_limit:" not in yaml_text and cfg.output.page_limit is None
+
+
+def test_vscode_interview_offers_the_page_limit_as_an_advanced_field() -> None:
+    """The advanced-field picker in interview.ts must list the field, with an
+    input box that takes blank or a whole number of pages."""
+    ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
+    assert '{ label: "Page limit", value: "page_limit" }' in ts
+    assert 'which.value === "page_limit"' in ts
+    assert 'validateInput: (s) => (s.trim() === "" ? null : validatePositiveInt(s))' in ts
+
+
 def test_vscode_emitter_leaves_an_unset_author_line_out(tmp_path: Path) -> None:
     yaml_text, cfg = _emit(tmp_path, author="", poster_size="a1_portrait")
     for key in ("author:", "affiliation:", "contact_email:", "url:", "poster_size:"):

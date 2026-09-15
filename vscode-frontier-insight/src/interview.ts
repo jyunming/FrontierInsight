@@ -351,6 +351,8 @@ export async function runInterview(
         supply_papers: true,
         ...authorLine,
         poster_size: "a1_portrait",
+        // Blank: no set page limit (a limit the topic states still applies).
+        page_limit: null,
     };
 
     // ─── Review block + action picker loop ──────────────────────────
@@ -445,6 +447,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         || (a.reasoning_effort !== undefined && a.reasoning_effort !== "default")
         || (ext !== undefined && ext !== 20)
         || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
+        || typeof a.page_limit === "number"
     );
     if (hasOverride) {
         lines.push("\n_Advanced overrides:_");
@@ -459,6 +462,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") {
             lines.push(`  • poster size: ${a.poster_size}`);
         }
+        if (typeof a.page_limit === "number") lines.push(`  • page limit: ${a.page_limit} pages`);
     }
     lines.push("");
     return lines.join("\n");
@@ -707,10 +711,25 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
             { label: "Poster size", value: "poster_size" },
             { label: "Reasoning effort", value: "reasoning_effort" },
+            { label: "Page limit", value: "page_limit" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "page_limit") {
+        // Written to output.page_limit. Blank is no set limit, and a limit the
+        // topic states ("≤ 4 pages") still applies.
+        const v = await vscode.window.showInputBox({
+            title: "Page limit",
+            prompt: "The most pages paper.pdf may take. Leave blank for no set limit; a limit the topic states still applies.",
+            value: typeof a.page_limit === "number" ? String(a.page_limit) : "",
+            placeHolder: "e.g. 4",
+            ignoreFocusOut: true,
+            validateInput: (s) => (s.trim() === "" ? null : validatePositiveInt(s)),
+        });
+        if (v !== undefined) a.page_limit = v.trim() === "" ? null : parsePositiveInt(v);
+        return;
+    }
     if (which.value === "reasoning_effort") {
         // Written to provider.reasoning_effort. The VS Code bridge (vscode.lm)
         // has no such setting, so the level takes effect only once this YAML's

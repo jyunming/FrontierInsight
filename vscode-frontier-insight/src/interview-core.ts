@@ -106,6 +106,10 @@ export interface InterviewAnswers {
     url?: string;
     // Poster sheet; the default "a1_portrait" is not emitted.
     poster_size?: "a1_portrait" | "a0_portrait" | "landscape_48x36";
+    // output.page_limit: the most pages paper.pdf may take. Unset (the
+    // default) writes nothing, and a limit the topic states still applies.
+    // Must stay in sync with core/interview.py:InterviewAnswers.page_limit.
+    page_limit?: number | null;
 }
 
 
@@ -380,6 +384,13 @@ export function answersToYaml(answers: InterviewAnswers): string {
     }
     if (answers.poster_size && answers.poster_size !== "a1_portrait") {
         lines.push(`${indent}poster_size: "${yamlEscape(answers.poster_size)}"`);
+    }
+    // Page limit: only a whole number of pages is written; unset leaves the
+    // key out, so a limit the topic states still applies. Mirrors
+    // core/interview.py:answers_to_yaml.
+    const pageLimit = answers.page_limit;
+    if (typeof pageLimit === "number" && Number.isSafeInteger(pageLimit) && pageLimit >= 1) {
+        lines.push(`${indent}page_limit: ${pageLimit}`);
     }
     lines.push(`${indent}output_dir: "./outputs"`);
     lines.push("");

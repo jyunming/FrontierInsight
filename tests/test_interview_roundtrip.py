@@ -203,6 +203,68 @@ def test_update_keeps_reasoning_effort_and_resetting_to_default_removes_it(tmp_p
     assert Config.from_yaml(quest / "config.yaml").provider.reasoning_effort is None
 
 
+def test_page_limit_reaches_the_output_config_and_blank_writes_nothing(tmp_path: Path):
+    from core.config import resolve_page_limit
+
+    ans = _full_answers()
+    ans.page_limit = 4
+    assert "  page_limit: 4" in answers_to_yaml(ans, frontend="cli").splitlines()
+    cfg = _load(tmp_path, ans)
+    assert cfg.output.page_limit == 4 and resolve_page_limit(cfg) == 4
+    ans.page_limit = None
+    assert "page_limit:" not in answers_to_yaml(ans, frontend="cli")
+    assert _load(tmp_path, ans).output.page_limit is None
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, None), ("", None), ("  ", None), ("none", None), ("None", None),
+    ("4", 4), (" 4 ", 4), ("+4", 4), (4, 4), (1, 1),
+])
+def test_page_limit_answers_that_are_accepted(raw, expected):  # noqa: ANN001
+    from core.interview import parse_page_limit_answer
+
+    assert parse_page_limit_answer(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["0", 0, -1, "-1", "four", "4.5", 4.5, "4 pages", True, "²", [4]])
+def test_page_limit_answers_that_are_refused(raw):  # noqa: ANN001
+    from core.interview import parse_page_limit_answer
+
+    with pytest.raises(ValueError):
+        parse_page_limit_answer(raw)
+    seen: list[str] = []
+    assert parse_page_limit_answer(raw, on_error=seen.append) is None and len(seen) == 1
+
+
+def test_update_keeps_the_page_limit_and_clearing_it_removes_it(tmp_path: Path):
+    """--update loads the limit from the quest's YAML and keeps it; clearing it
+    drops the key rather than merging the old limit back, and re-runs the
+    write and review stages."""
+    from dataclasses import replace
+
+    from core.interview_update import (
+        compute_invalidated_stages, diff_answers, load_current_answers, rewrite_yaml_with_new_answers,
+    )
+
+    quest = tmp_path / "quest"
+    quest.mkdir()
+    ans = _full_answers()
+    ans.page_limit = 4
+    (quest / "config.yaml").write_text(answers_to_yaml(ans, frontend="cli"), encoding="utf-8")
+
+    current, _yaml_path, raw = load_current_answers(quest)
+    assert current.page_limit == 4
+    (quest / "config.yaml").write_text(rewrite_yaml_with_new_answers(raw, current), encoding="utf-8")
+    assert Config.from_yaml(quest / "config.yaml").output.page_limit == 4
+
+    cleared = replace(current, page_limit=None)
+    changes = diff_answers(current, cleared)
+    assert changes == {"page_limit": (4, None)}
+    assert compute_invalidated_stages(changes) == ["write", "review"]
+    (quest / "config.yaml").write_text(rewrite_yaml_with_new_answers(raw, cleared), encoding="utf-8")
+    assert Config.from_yaml(quest / "config.yaml").output.page_limit is None
+
+
 def test_output_config_keeps_each_author_field_on_one_line():
     cfg = Config(topic="t", output={"author": "Jane\n  Chen", "affiliation": None})
     assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "")

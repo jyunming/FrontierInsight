@@ -812,6 +812,23 @@
       "tier": 3
     },
     {
+      "id": "page_limit",
+      "label": "Page limit",
+      "prompt": "The most pages paper.pdf may take, as a whole number. Leave blank (or type none) for no set limit; a limit the topic states, such as '≤ 4 pages', still applies. With a limit the paper gets a tighter layout and the writer a word budget, and each draft is rendered and its pages counted: a draft over the limit is written again, shorter, at most twice.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. 4",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "author",
       "label": "Author (optional)",
       "prompt": "Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
@@ -1268,6 +1285,7 @@
     "max_iterations",
     "node_models",
     "output_kinds",
+    "page_limit",
     "paper_format",
     "paper_style",
     "pause_for_user_input",
@@ -1341,6 +1359,10 @@
     "contact_email": [],
     "url": [],
     "poster_size": [],
-    "reasoning_effort": []
+    "reasoning_effort": [],
+    "page_limit": [
+      "write",
+      "review"
+    ]
   }
 }

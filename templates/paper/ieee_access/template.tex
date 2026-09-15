@@ -51,9 +51,15 @@ $endif$
 % than being moved on to the next page and leaving this one half empty.
 \makeatletter
 \newsavebox{\FI@figbox}
+% With a page limit (generation/paper.py sets fi-tight), a figure is at most
+% 33% of the text height, so more text shares its page.
 \providecommand{\pandocbounded}[1]{%
   \sbox{\FI@figbox}{#1}%
+$if(fi-tight)$
+  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
+$else$
   \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
+$endif$
   \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%
   \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
   \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}

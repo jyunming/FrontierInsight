@@ -56,6 +56,20 @@ PowerPoint equations, with a readable text form for other viewers. A VS Code bui
 model that cannot take images checks from the measurements alone, and the chat
 says so.
 
+A topic that states a page limit ("≤ 4 pages", "at most 4 pages", "a 4-page
+paper"), or a Page limit set in `@fi /new` under "Edit an advanced field"
+(written to `output.page_limit`; leave it blank for no set limit), keeps the
+paper to it. The paper
+gets a tighter layout (2 cm margins where its template had 1 in, figures at most
+a third of the text height, smaller References and Further reading lists), and
+the writer gets a word budget. After each draft the review renders it the way
+`paper.pdf` will be and counts its pages. A draft over the limit comes back as
+the must-flag hit `over_page_limit`, with the page count, the limit and about
+how many words to cut, and the paper is written again, shorter. There are at
+most two of these rewrites, and they do not count against
+`engine.max_iterations`; a draft still over after two is recorded in the review
+instead. Without a limit the paper keeps its usual layout and length.
+
 ## One-time setup
 
 1. **Install GitHub Copilot Chat in VSCode** and sign in.

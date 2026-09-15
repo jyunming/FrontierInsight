@@ -230,12 +230,14 @@ def test_compute_invalidated_stages_multiple_changes_union() -> None:
 
 def test_keys_to_clear_maps_stages_to_quest_state_keys() -> None:
     """When write is invalidated, we clear `paper_md` from the
-    checkpoint. When review is invalidated, we clear `review` +
-    `review_panel`."""
+    checkpoint. When review is invalidated, we clear `review`,
+    `review_panel` and the shortening-rewrite count."""
     assert keys_to_clear(["write"]) == ["paper_md"]
-    assert sorted(keys_to_clear(["review"])) == sorted(["review", "review_panel"])
+    assert sorted(keys_to_clear(["review"])) == sorted(
+        ["review", "review_panel", "page_limit_rewrites"]
+    )
     assert sorted(keys_to_clear(["write", "review"])) == sorted(
-        ["paper_md", "review", "review_panel"]
+        ["paper_md", "review", "review_panel", "page_limit_rewrites"]
     )
 
 
@@ -439,6 +441,53 @@ def test_update_no_change_does_not_reopen(
     ))
     assert rc == 0
     assert captured.get("reopen") is False, captured
+
+
+@pytest.mark.parametrize("typed, saved", [("3", 3), ("none", None), ("", None), ("four", 4)])
+def test_cli_update_changes_clears_or_keeps_the_page_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: str, saved: int | None,
+) -> None:
+    """--update asks the page limit with the saved one shown: a new number
+    replaces it, blank or "none" clears it, and a typo keeps the saved limit."""
+    import asyncio
+
+    from core.config import Config
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    quest_root = output_root / "q-limit"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(_sample(page_limit=4), frontend="cli"), encoding="utf-8",
+    )
+
+    async def fake_run_one(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(
+        "launch._cli_prompt_for", lambda q, _p, _o: typed if q.id == "page_limit" else q.default,
+    )
+    rc = asyncio.run(run_update_flow(
+        quest_id="q-limit",
+        output_root=output_root,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=None,
+        run_one=fake_run_one,
+        apply_vscode_bridge_override=lambda _c, _p: None,
+    ))
+    assert rc == 0
+    assert Config.from_yaml(quest_root / "config.yaml").output.page_limit == saved
+
+
+def test_changing_the_page_limit_clears_the_shortening_count() -> None:
+    """A quest that used both shortening rewrites at one limit would never be
+    forced again after --update sets another: the review reads the count from
+    the checkpoint. A changed limit gets a fresh count, as it re-runs write
+    and review."""
+    stages = compute_invalidated_stages({"page_limit": (4, 5)})
+    assert stages == ["write", "review"]
+    assert "page_limit_rewrites" in keys_to_clear(stages)
 
 
 def test_paper_style_round_trips(tmp_path: Path) -> None:
