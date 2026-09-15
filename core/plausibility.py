@@ -36,6 +36,19 @@ required: a perfect score of 1.0 is a real result, and ``np.clip(p, 0, 1)``
 inside a softmax is real code; only the two together are a capped number.
 Zero bounds are exempt, because real zeros and ``max(0, x)`` are both
 everywhere.
+
+Why several values on a bound fail
+==================================
+A computation that goes wrong often returns the trivial answer rather than a
+wild one: a root finder that settles on the solution at the starting state, a
+sentinel, a guard branch. That answer tends to be the edge of the legal range,
+where a range check passes it. A real quest's deterministic model reported a
+final size of 0.0 at two reproduction numbers and 1.0 at a third, every one
+inside the declared [0, 1]. One value on a bound is ordinary. The same quantity
+exactly on one bound in ``AT_BOUND_MIN_SETTINGS`` or more settings is sent back
+for repair, zero bounds included, and the repair is told to change the code
+only if the computation is what put it there. Zeros are compared for every
+kind here: a value of exactly 0 below a positive ``min`` is out of range.
 """
 
 from __future__ import annotations
@@ -82,11 +95,22 @@ class Violation:
     path: str
     value: float
     assertion: Assertion
-    # "out_of_range", or "clamped": on a bound the script caps values at.
+    # "out_of_range"; "clamped": on a bound the script caps values at;
+    # "at_bound": exactly on one bound in several settings.
     kind: str = "out_of_range"
+    # The result paths an ``at_bound`` violation covers.
+    paths: tuple[str, ...] = ()
 
     def describe(self) -> str:
         why = f" ({self.assertion.reason})" if self.assertion.reason else ""
+        if self.kind == "at_bound":
+            shown = ", ".join(self.paths[:3]) + (", …" if len(self.paths) > 3 else "")
+            return (
+                f"{self.path} equals its bound {self.value:g} in {len(self.paths)} "
+                f"settings ({shown}); {self.assertion.describe()}{why}. Several "
+                f"results exactly on a bound are what a computation returning a "
+                f"trivial answer looks like"
+            )
         if self.kind == "clamped":
             return (
                 f"{self.path} = {self.value:g} sits exactly on a bound "
@@ -245,25 +269,34 @@ def _matches(assertion_path: str, leaf_path: str) -> bool:
     return bool(m and m.group(0) == a)
 
 
+# How many settings of one quantity must sit exactly on the same bound before
+# the run is sent back (see "Why several values on a bound fail" above). One is
+# ordinary: a probability of 0 at one working point is often the answer.
+AT_BOUND_MIN_SETTINGS = 2
+
+
 def violations(
     result_json: Any, assertions: list[Assertion], *, code: str = "",
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
     With ``code``, a value exactly on a non-zero bound that the script also
-    caps at is reported as ``kind="clamped"`` (see the module docstring).
+    caps at is reported as ``kind="clamped"`` (see the module docstring). A
+    quantity exactly on one bound in ``AT_BOUND_MIN_SETTINGS`` or more settings
+    is reported once, as ``kind="at_bound"``.
     """
     if not assertions:
         return []
     from core.numeric_oracle import flatten_numbers
 
-    leaves = list(flatten_numbers(result_json))
+    leaves = list(flatten_numbers(result_json, keep_zero=True))
     if not leaves:
         return []
 
     clamps = clamp_constants(code) if code else set()
     out: list[Violation] = []
     for a in assertions:
+        on_bound: dict[float, list[str]] = {}
         for path, value in leaves:
             if not _matches(a.path, path):
                 continue
@@ -273,6 +306,17 @@ def violations(
                 out.append(Violation(path, value, a))
             elif clamps and _pinned(value, a, clamps):
                 out.append(Violation(path, value, a, kind="clamped"))
+            else:
+                bound = next(
+                    (b for b in (a.min, a.max)
+                     if b is not None and math.isclose(value, b, rel_tol=1e-9, abs_tol=1e-12)),
+                    None,
+                )
+                if bound is not None:
+                    on_bound.setdefault(bound, []).append(path)
+        for bound, paths in on_bound.items():
+            if len(paths) >= AT_BOUND_MIN_SETTINGS:
+                out.append(Violation(a.path, bound, a, kind="at_bound", paths=tuple(paths)))
     return out
 
 

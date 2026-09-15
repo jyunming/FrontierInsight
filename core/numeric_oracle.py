@@ -184,25 +184,31 @@ def _fmt(v: float) -> str:
     return f"{v:g}"
 
 
-def flatten_numbers(obj: Any, path: str = "") -> Iterator[tuple[str, float]]:
+def flatten_numbers(
+    obj: Any, path: str = "", *, keep_zero: bool = False,
+) -> Iterator[tuple[str, float]]:
     """Yield every numeric leaf of a JSON-ish structure as (path, value).
 
     Booleans are excluded: ``True`` is an ``int`` in Python and a flag is
-    not a measurement.
+    not a measurement. Values within ``MIN_MAGNITUDE`` of zero are left out
+    unless ``keep_zero``: in a paper a zero matches every other zero, but in a
+    range check a quantity computed as exactly 0 can be the bug.
     """
     if isinstance(obj, bool):
         return
     if isinstance(obj, (int, float)):
-        if math.isfinite(obj) and abs(obj) > MIN_MAGNITUDE:
+        if math.isfinite(obj) and (keep_zero or abs(obj) > MIN_MAGNITUDE):
             yield path or "<root>", float(obj)
         return
     if isinstance(obj, dict):
         for k, v in obj.items():
-            yield from flatten_numbers(v, f"{path}.{k}" if path else str(k))
+            yield from flatten_numbers(
+                v, f"{path}.{k}" if path else str(k), keep_zero=keep_zero,
+            )
         return
     if isinstance(obj, (list, tuple)):
         for i, v in enumerate(obj):
-            yield from flatten_numbers(v, f"{path}[{i}]")
+            yield from flatten_numbers(v, f"{path}[{i}]", keep_zero=keep_zero)
 
 
 def _significant_digits(token: str) -> int:
