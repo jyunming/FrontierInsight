@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import textwrap
+import threading
 import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
+from core.engine import QuestArtifacts
 from web.server import (
     _QuestRegistry, _scan_quests, _read_log_tail, _current_node_from_log,
     make_app,
@@ -617,3 +621,165 @@ def test_app_detail_endpoint_surfaces_review_panel_when_recorded(
     body = r.json()
     assert body["review"] is None
     assert body["review_panel"] is None
+
+
+# --- in-process quests: the output pass ------------------------------------
+
+
+def _start_yaml(kinds: list[str], *, require_pdf: bool = False) -> str:
+    return textwrap.dedent(f"""\
+        topic: start-route output pass
+        title: start-outputs
+        provider:
+          name: openai
+        engine:
+          max_iterations: 1
+          review_loop: false
+        execution:
+          sandbox: venv
+          timeout_s: 30
+        knowledge:
+          enabled: false
+        output:
+          kinds: [{", ".join(kinds)}]
+          require_pdf: {str(require_pdf).lower()}
+          visual_check: false
+          output_dir: ./will-be-overridden
+    """)
+
+
+def _engine_run_that_writes_a_paper():
+    """Stands in for ``Engine.run``: writes ``paper/paper.md`` the way a
+    finished quest leaves it and returns its artifacts."""
+    async def run(self, **_kw):  # noqa: ANN001
+        paper = self.quest_root / "paper" / "paper.md"
+        paper.parent.mkdir(parents=True, exist_ok=True)
+        paper.write_text("# A finished quest\n\nBody.\n", encoding="utf-8")
+        return QuestArtifacts(quest_id=self.quest_id, quest_root=self.quest_root, paper_md=paper)
+    return run
+
+
+async def _start_and_finish(app, yaml_text: str) -> tuple[str, Path, dict]:  # noqa: ANN001
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.post("/api/quests/start", json={"yaml": yaml_text})
+        assert r.status_code == 200, r.text
+        quest_id, quest_root = r.json()["quest_id"], Path(r.json()["quest_root"])
+        await asyncio.wait_for(app.state.registry._tasks[quest_id], timeout=60)
+        detail = (await client.get(f"/api/quests/{quest_id}")).json()
+    return quest_id, quest_root, detail
+
+
+@pytest.mark.asyncio
+async def test_a_quest_started_in_process_gets_the_outputs_its_config_asks_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POST /api/quests/start`` runs the quest inside the server. When the
+    engine returns, the CLI's output pass runs too: the real paper generator
+    copies paper.md to the quest root and compiles paper.pdf (the compile is
+    stubbed here), and frontier_insight_summary.json lists both, so the
+    dashboard counts the quest as complete."""
+    monkeypatch.setattr("core.engine.Engine.run", _engine_run_that_writes_a_paper())
+    compiled: list[str] = []
+
+    def fake_compile(self, paper_md, out_dir, *, extra_lines=0):  # noqa: ANN001
+        compiled.append(Path(paper_md).name)
+        pdf = out_dir / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.5\n%%EOF\n")
+        return pdf, None
+
+    monkeypatch.setattr("generation.paper.PaperGenerator._compile_pdf", fake_compile)
+    app = make_app(tmp_path)
+    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(["paper_md", "paper_pdf"]))
+
+    assert compiled == ["paper.md"]
+    assert (quest_root / "paper.md").read_text(encoding="utf-8").startswith("# A finished quest")
+    assert (quest_root / "paper.pdf").read_bytes().startswith(b"%PDF")
+    summary = json.loads((quest_root / "frontier_insight_summary.json").read_text(encoding="utf-8"))
+    assert summary["outputs"]["paper_md"] == str(quest_root / "paper.md")
+    assert summary["paper_pdf"] == str(quest_root / "paper.pdf")
+    assert detail["summary"] == summary
+    assert detail["available_artifacts"]["paper_pdf"] == "paper.pdf"
+    assert detail["errors"] is None
+    assert [q["verdict"] for q in _scan_quests(tmp_path)] == ["complete"]
+    log = (quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[outputs] wrote paper_pdf" in log
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("require_pdf", "stage"), [(False, "paper"), (True, "outputs")])
+async def test_an_output_failure_is_logged_and_recorded_for_the_quest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_pdf: bool, stage: str,
+) -> None:
+    """A generator that raises does not take the server down and is not
+    swallowed: the quest's run.log names it and the quest detail carries it.
+    With ``output.require_pdf`` the pass stops there, as it does in the CLI."""
+    monkeypatch.setattr("core.engine.Engine.run", _engine_run_that_writes_a_paper())
+
+    def broken_compile(self, paper_md, out_dir, *, extra_lines=0):  # noqa: ANN001
+        raise RuntimeError("the LaTeX engine crashed")
+
+    monkeypatch.setattr("generation.paper.PaperGenerator._compile_pdf", broken_compile)
+    app = make_app(tmp_path)
+    _quest_id, quest_root, detail = await _start_and_finish(
+        app, _start_yaml(["paper_md", "paper_pdf"], require_pdf=require_pdf),
+    )
+
+    assert detail["errors"] is not None and len(detail["errors"]) == 1
+    assert detail["errors"][0]["stage"] == stage
+    assert "the LaTeX engine crashed" in detail["errors"][0]["error"]
+    assert "the LaTeX engine crashed" in (quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    # Without require_pdf the pass carries on and still writes the summary;
+    # with it the quest ends without one, as a CLI run exits non-zero.
+    assert (quest_root / "frontier_insight_summary.json").is_file() is (not require_pdf)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_quest_is_recorded_and_gets_no_output_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_run(self, **_kw):  # noqa: ANN001
+        raise RuntimeError("the design node broke")
+
+    monkeypatch.setattr("core.engine.Engine.run", failing_run)
+    app = make_app(tmp_path)
+    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(["paper_md"]))
+
+    assert detail["errors"] == [{"stage": "quest", "error": "RuntimeError('the design node broke')"}]
+    assert not (quest_root / "frontier_insight_summary.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_server_keeps_answering_while_the_paper_compiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pandoc + LaTeX take tens of seconds; the paper generator runs in a
+    worker thread so other requests are served meanwhile."""
+    monkeypatch.setattr("core.engine.Engine.run", _engine_run_that_writes_a_paper())
+    started, release = threading.Event(), threading.Event()
+    finished: list[bool] = []
+
+    def slow_generate(self, art, out_dir):  # noqa: ANN001
+        started.set()
+        release.wait(10)
+        finished.append(True)
+        return {}
+
+    monkeypatch.setattr("generation.paper.PaperGenerator.generate", slow_generate)
+    app = make_app(tmp_path)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.post("/api/quests/start", json={"yaml": _start_yaml(["paper_md"])})
+            quest_id = r.json()["quest_id"]
+            for _ in range(200):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert started.is_set(), "the output pass never reached the paper generator"
+            listing = await client.get("/api/quests")
+            answered_mid_compile = not finished
+            release.set()
+            await asyncio.wait_for(app.state.registry._tasks[quest_id], timeout=30)
+    finally:
+        release.set()
+    assert listing.status_code == 200
+    assert answered_mid_compile, "the request waited for the paper compile to finish"
