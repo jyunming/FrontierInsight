@@ -118,6 +118,52 @@ async def test_lookups_go_one_at_a_time_and_skip_what_was_retrieved(monkeypatch)
     assert [d.metadata["title"] for d in found] == ["First", "Second"]
 
 
+@pytest.mark.asyncio
+async def test_refused_lookups_are_logged(monkeypatch, caplog) -> None:
+    """A lookup OpenAlex refuses looks like a work it does not hold: four real
+    quests logged "0 new candidate(s)" after 13-15 refusals each."""
+    import core.source_failures as sf
+
+    monkeypatch.setattr(kn, "_OPENALEX_GAP_S", 0.0)
+
+    def refused(work, **kw):  # noqa: ANN001
+        sf.record_failure("openalex", "http_429", status=429, url="https://api.openalex.org/works")
+        return None
+
+    monkeypatch.setattr(kn, "_openalex_title_lookup", refused)
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    k = kn.Knowledge(KnowledgeConfig(enabled=False))
+    token = sf.current_quest.set("q-refused")
+    try:
+        # Refusals an earlier search in the quest met are not this lookup's.
+        sf.record_failure("openalex", "http_429", status=429, count=3)
+        with caplog.at_level("WARNING"):
+            found = await k.find_foundational_works([{"title": "First work"}, {"title": "Second work"}], [])
+    finally:
+        sf.current_quest.reset(token)
+        sf.reset("q-refused")
+    assert found == []
+    assert any("refused 2 request(s) with HTTP 429" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_plain_miss_is_not_reported_as_a_refusal(monkeypatch, caplog) -> None:
+    import core.source_failures as sf
+
+    monkeypatch.setattr(kn, "_OPENALEX_GAP_S", 0.0)
+    monkeypatch.setattr(kn, "_openalex_title_lookup", lambda work, **kw: None)
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    k = kn.Knowledge(KnowledgeConfig(enabled=False))
+    token = sf.current_quest.set("q-miss")
+    try:
+        with caplog.at_level("WARNING"):
+            assert await k.find_foundational_works([{"title": "First work"}], []) == []
+    finally:
+        sf.current_quest.reset(token)
+        sf.reset("q-miss")
+    assert not any("HTTP 429" in r.getMessage() for r in caplog.records)
+
+
 def _engine(tmp_path: Path) -> Engine:
     eng = Engine(Config(
         topic="Integrators for a damped oscillator", title="t", provider=ProviderConfig(name="openai"),
