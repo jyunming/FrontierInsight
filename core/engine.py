@@ -9308,6 +9308,32 @@ def _stamp_figure_credit(path: Path, source_url: str, license_str: str) -> None:
         pass
 
 
+def _replicate_seed_count(state: QuestState) -> int | None:
+    """How many replicate seeds the results are means over, or ``None`` when
+    the state does not say (fewer than two)."""
+    n = len(state.get("result_json_replicates") or [])
+    return n if n > 1 else None
+
+
+def _seed_label(seed: Any, n_seeds: int | None) -> str:
+    """``seed 0 of 3``, or ``seed 0`` when the number of seeds is not known."""
+    return f"seed {seed} of {n_seeds}" if n_seeds else f"seed {seed}"
+
+
+def _replicate_seeds(n_seeds: int | None) -> str:
+    return f"the {n_seeds} replicate seeds" if n_seeds else "the replicate seeds"
+
+
+def _single_seed_note(seed: Any, n_seeds: int | None) -> str:
+    """What a figure the seeds could not redraw as their mean shows. A seed is
+    a replicate of the whole experiment, so the figure holds every run that
+    seed made."""
+    return (
+        f"replicate {_seed_label(seed, n_seeds)} only (every run that seed made), "
+        f"not the mean over {_replicate_seeds(n_seeds)}"
+    )
+
+
 def _figure_list_for_prompt(state: QuestState) -> str:
     """The figure list for a writer/analysis prompt. Plain charts are listed
     by path; license-clean web figures (``figure_credits``) additionally
@@ -9319,6 +9345,7 @@ def _figure_list_for_prompt(state: QuestState) -> str:
         return "(none)"
     credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
     records = state.get("figure_records") or {}
+    n_seeds = _replicate_seed_count(state)
     lines: list[str] = []
     for f in figs:
         c = credits.get(f)
@@ -9330,7 +9357,7 @@ def _figure_list_for_prompt(state: QuestState) -> str:
                 f"{c.get('license', '')}]"
             )
         else:
-            lines.append(f"- figures/{f}" + _figure_record_note(records.get(f)))
+            lines.append(f"- figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
@@ -9338,9 +9365,11 @@ def _figure_list_for_prompt(state: QuestState) -> str:
         )
     if any((records.get(f) or {}).get("single_seed") is not None for f in figs):
         lines.append(
-            "A figure that shows seed 0 only could not be drawn as the mean of the seeds: "
-            "the text and caption about it quote seed 0's values, or say it shows one run, "
-            "not the means over the seeds."
+            "A figure that shows replicate seed 0 only could not be drawn as the mean over "
+            f"{_replicate_seeds(n_seeds)}. A replicate seed repeats the whole experiment, so the "
+            "figure draws every run seed 0 made: the text and caption about it quote seed 0's "
+            f"values, or say it shows a single replicate ({_seed_label(0, n_seeds)}), not the "
+            "means over the seeds."
         )
     if any(_hidden_series(records.get(f)) for f in figs):
         lines.append(
@@ -9421,8 +9450,9 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
     ]
 
 
-def _figure_record_note(record: dict[str, Any] | None) -> str:
-    """What a figure draws, for the writer: each panel's title, y axis and series."""
+def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
+    """What a figure draws, for the writer: each panel's title, y axis and series.
+    ``n_seeds`` is how many replicate seeds ran, when known."""
     panels = []
     for ax in (record or {}).get("axes") or []:
         if not isinstance(ax, dict):
@@ -9447,12 +9477,12 @@ def _figure_record_note(record: dict[str, Any] | None) -> str:
         if bits:
             panels.append(", ".join(bits))
     note = (" — " + " | ".join(panels)) if panels else ""
-    n_seeds = ((record or {}).get("replicate_mean") or {}).get("n")
+    mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
     single_seed = (record or {}).get("single_seed")
-    if n_seeds:
-        note += f" — each line is the mean of {n_seeds} seeds, shaded with its 95% confidence interval"
+    if mean_of:
+        note += f" — each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval"
     elif single_seed is not None:
-        note += f" — shows seed {single_seed} only, not the mean of the seeds"
+        note += f" — shows {_single_seed_note(single_seed, n_seeds)}"
     return note
 
 
@@ -9525,19 +9555,20 @@ def _format_figure_check(paper_md: str, state: QuestState) -> str:
     records = state.get("figure_records") or {}
     if not records:
         return "(no record of what the figures draw)"
-    # The results are means over the seeds; these figures are one run.
-    one_run = [
-        f"figures/{name} shows seed {record['single_seed']} only, not the mean of the seeds: its "
-        f"caption and the text about it must quote seed {record['single_seed']}'s values or say "
-        "it shows one run."
+    # The results are means over the seeds; these figures hold replicate seed 0 alone.
+    n_seeds = _replicate_seed_count(state)
+    seed_only = [
+        f"figures/{name} shows {_single_seed_note(record['single_seed'], n_seeds)}: its caption "
+        f"and the text about it must quote seed {record['single_seed']}'s values or say it shows "
+        f"a single replicate ({_seed_label(record['single_seed'], n_seeds)})."
         for name, record in records.items()
         if isinstance(record, dict) and record.get("single_seed") is not None
     ]
     findings = _figure_caption_findings(paper_md, records)
     if not findings:
-        return "\n".join([*one_run, "No caption names a series its figure does not show."])
+        return "\n".join([*seed_only, "No caption names a series its figure does not show."])
     return "\n".join([
-        *one_run,
+        *seed_only,
         f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(findings)}):",
         *(f"  - {f}" for f in findings),
         "",
