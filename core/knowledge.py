@@ -3449,12 +3449,32 @@ class Knowledge:
                 pass
             return found
 
+        def refused() -> int:
+            # OpenAlex answers that were HTTP 429, as this quest has counted them.
+            qid = _sf.current_quest.get()
+            if qid is None:
+                return 0
+            return int((_sf.snapshot(qid)["by_source"].get("openalex") or {}).get("http_429", 0))
+
         seen = {
             str(value).lower()
             for d in docs for value in ((d.metadata or {}).get("url"), (d.metadata or {}).get("doi")) if value
         }
+        before = refused()
+        found = await asyncio.to_thread(lookups)
+        # A refused lookup looks exactly like a work OpenAlex does not hold, so
+        # say so: on a real day four quests got 13-15 refusals each and logged
+        # "0 new candidate(s)" with nothing to tell a spent budget from a miss.
+        n_refused = refused() - before
+        if n_refused:
+            _log.warning(
+                "foundational works: OpenAlex refused %d request(s) with HTTP 429, so works it "
+                "holds may be missing. Without a key the daily budget is about 100 searches; "
+                "OPENALEX_API_KEY raises it tenfold (docs/INSTALL.md).",
+                n_refused,
+            )
         out: list[RetrievedDoc] = []
-        for doc in await asyncio.to_thread(lookups):
+        for doc in found:
             keys = {str(v).lower() for v in (doc.metadata.get("url"), doc.metadata.get("doi")) if v}
             if keys & seen:
                 continue
