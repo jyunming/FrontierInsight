@@ -2533,10 +2533,11 @@ class Engine:
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
-            literature_block=_format_lit_from_state(state, **{
-                **self._lit_kwargs(state),
-                "budget": self.config.knowledge.design_literature_excerpt_chars,
-            }),
+            # The full excerpts, as analyze and write get. At 800 characters a
+            # source, design chose a 1% major-outbreak threshold in 6 of 10
+            # replays of a real quest (0 of 5 at the full budget): short
+            # excerpts cost it the context a sound design rests on.
+            literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             clarify_block=_format_clarify(state),

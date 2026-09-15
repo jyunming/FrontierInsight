@@ -295,10 +295,7 @@ open-access full text is recovered directly via the PMC BioC API,
 Europe PMC, the preprint server, Unpaywall, and (with a key) Semantic
 Scholar / CORE. The full text is stored uncapped on disk, and each
 node's prompt receives the passages most relevant to the question
-(`knowledge.literature_excerpt_chars` / `passage_ranking`). The design
-prompt, which needs what each source found rather than its numbers, gets
-a shorter excerpt (`knowledge.design_literature_excerpt_chars`, default
-800).
+(`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
 When a relevant paper is genuinely paywalled (SPIE / IEEE / Elsevier …)
 and only its abstract is reachable, **Supply paywalled papers** (on by
