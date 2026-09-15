@@ -54,7 +54,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `slides`, `poster` | 1 each | Only when those outputs are in `output.kinds`. |
 | `human_feedback` | 0 | No LLM call — pauses for the user's accept/reject/refine when the gate is on. |
 
-The measured spread came from the experiment repairs (0–3), the number of findings cross-checked, and whether the review asked for a rewrite. A run of the same quest in which design through review ran twice logged 33 calls, not counting slides and poster.
+The measured spread came from the experiment repairs (0–3), the number of findings cross-checked, and whether the review asked for a rewrite. Four runs of the same quest on older engine versions, in which design through review ran twice, logged 27–33 calls, not counting slides and poster.
 
 For dollar-cost estimates against specific providers (Copilot, OpenAI, Anthropic, Gemini, Ollama), see [`PROVIDERS.md#cost-expectations`](PROVIDERS.md#cost-expectations).
 

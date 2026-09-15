@@ -138,7 +138,7 @@ with `knowledge.source_routing: manual` and slides and a poster:
 |---|---|
 | Default engine settings (`clarify_mode: off`, single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
 | Slides, poster, talk script | +1 each |
-| Design through review running a second time | 33 in the one such run of the same quest, not counting slides and poster |
+| Design through review running a second time | 27–33 in four runs of the same quest on older engine versions, not counting slides and poster |
 | `knowledge.source_routing: auto` (the default) | +1 per literature pass, +1 per cross-check lookup |
 | Reviewer panel of N personas | N + 1 per review round (the personas plus a moderator) instead of 1 |
 

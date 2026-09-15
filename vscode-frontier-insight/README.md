@@ -510,7 +510,7 @@ epidemic model) on gemma4 through Ollama, with the default engine settings
 `knowledge.source_routing: manual`, and slides and a poster:
 
 - **23–28 premium requests per quest**: 21–26 for the research and the paper, plus one each for the slides and the poster. The spread comes from the model: 0–3 experiment repair calls, one cross-check call per key finding that found related literature (0–8), and a second write → claim check → review pass when the review asked for a rewrite (14 of the 17 runs).
-- A run of the same quest in which design through review ran twice logged 33 requests, not counting slides and poster.
+- Four runs of the same quest on older engine versions, in which design through review ran twice, logged 27–33 requests, not counting slides and poster.
 - `knowledge.source_routing: auto` (the default) adds one routing request per literature pass and one per cross-check lookup; set `manual` when requests are metered.
 - A reviewer panel of N personas replaces the single review request with N + 1 per review round (the personas plus a moderator).
 - No-simulation quests are not in that sample, so their count is not measured here.
