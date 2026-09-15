@@ -87,7 +87,7 @@ def _artifacts(tmp_path: Path) -> QuestArtifacts:
     quest_root = tmp_path / "quest"
     (quest_root / "paper").mkdir(parents=True)
     md = quest_root / "paper" / "paper.md"
-    md.write_text("# Play and Plastic\n\nBody.\n", encoding="utf-8")
+    md.write_text("# Play and Plastic\n\nBody [1], and more [2].\n", encoding="utf-8")
     art = QuestArtifacts(quest_id="q1", quest_root=quest_root, paper_md=md)
     art.raw_state = {"literature": LIT}
     return art
@@ -299,6 +299,8 @@ async def test_the_deck_ends_on_one_references_slide(
     tmp_path: Path, monkeypatch, deck: str, further_slides: int,
 ) -> None:
     art = _artifacts(tmp_path)
+    # Cites the second of the two papers only.
+    art.paper_md.write_text("# Play and Plastic\n\nBody [2].\n", encoding="utf-8")
     _fake_model(monkeypatch, "slides", deck)
     import generation.slides as slides_mod
 
@@ -306,7 +308,7 @@ async def test_the_deck_ends_on_one_references_slide(
     render = slides_mod.render_references_marp_slide
 
     def recording(refs, **kw):  # noqa: ANN001
-        seen.update(kw)
+        seen.update(kw, numbers=[r["n"] for r in refs])
         return render(refs, **kw)
 
     monkeypatch.setattr(slides_mod, "render_references_marp_slide", recording)
@@ -317,6 +319,8 @@ async def test_the_deck_ends_on_one_references_slide(
     text = slides_md.read_text(encoding="utf-8")
     # The slide is chosen by what the whole paper cites, not the 8000 characters the deck author saw.
     assert seen["paper_md"] == art.paper_md.read_text(encoding="utf-8")
+    # Like the paper's References, the slide offers only the papers the text cites.
+    assert seen["numbers"] == [2]
     assert text.count("## References") == 1
     # Web pages stay in the paper; a Further reading slide the deck wrote itself stays too.
     assert text.count("## Further reading") == further_slides

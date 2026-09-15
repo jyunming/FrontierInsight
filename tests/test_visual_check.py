@@ -94,8 +94,24 @@ def test_an_unknown_severity_becomes_medium_and_non_dicts_are_ignored() -> None:
     assert [f["severity"] for f in kept] == ["medium"]
 
 
-def _config(tmp_path: Path) -> Config:
-    return Config.model_validate({"topic": "t", "title": "t", "output": {"output_dir": str(tmp_path / "out")}})
+def _config(tmp_path: Path, *, ai: bool = True) -> Config:
+    return Config.model_validate({"topic": "t", "title": "t", "output": {
+        "output_dir": str(tmp_path / "out"), "visual_check_ai": ai}})
+
+
+@pytest.mark.asyncio
+async def test_by_default_no_model_is_asked_and_the_measurements_are_the_check(tmp_path: Path, monkeypatch) -> None:
+    async def model(config, messages, supervisor):  # noqa: ANN001
+        raise AssertionError("the AI check is off by default")
+
+    monkeypatch.setattr(vc, "_ask", model)
+    config = Config.model_validate({"topic": "t", "title": "t", "output": {"output_dir": str(tmp_path / "out")}})
+    assert config.output.visual_check_ai is False
+    report = await vc.check_pdf(config, "paper", _real_pdf(tmp_path), tmp_path)
+    assert report["transport"] == "measurements only"
+    assert "output.visual_check_ai" in report["reason"]
+    assert "metrics" in report["measured"] and "pages_checked" not in report
+    assert (tmp_path / ".fi" / "visual_check" / "paper" / "page-1.png").is_file(), "the screenshots are still saved"
 
 
 def _real_pdf(tmp_path: Path, text: str = "Results: the textbf command shows as text.") -> Path:

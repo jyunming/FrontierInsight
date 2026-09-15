@@ -80,7 +80,8 @@ li { margin: 1pt 0; text-align: justify; }
 
 /* ---- Figures: centered, numbered "Figure N:" ----------------------- */
 figure { margin: 11pt 0; text-align: center; break-inside: avoid; counter-increment: fig; }
-img { display: block; max-width: 78%; height: auto; margin: 6pt auto 3pt auto; }
+/* At most 11 cm tall (about 45% of the text height), so a figure shares its page with text. */
+img { display: block; max-width: 78%; max-height: 11cm; width: auto; height: auto; margin: 6pt auto 3pt auto; }
 figcaption { font-size: 9.6pt; text-align: center; margin: 2pt auto 0 auto; max-width: 86%; }
 figcaption::before { content: "Figure " counter(fig) ": "; }
 

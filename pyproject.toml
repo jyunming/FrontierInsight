@@ -109,6 +109,9 @@ dev = [
   "pytest-mock>=3.14",
   "pytest-cov>=6.0",
   "pytest-testmon>=2.2",
+  # The plot-style and figure-redraw tests draw real figures; without it
+  # they skip.
+  "matplotlib>=3.7",
 ]
 # Expanded to the concrete deps rather than a self-reference
 # (`frontier-insight[pdf,docker,knowledge]`) — some pip resolver

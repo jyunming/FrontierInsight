@@ -447,13 +447,16 @@ installed, `slides.pptx` is exported to PDF and checked too. LibreOffice shows
 the deck's equations as their readable text form, so that is what the check
 sees; PowerPoint shows them as native equations.
 
-- **What runs:** the PDF is measured (font sizes, overflow, columns) and
-  screenshotted. The screenshots, the measurements and a fixed checklist go
-  to your configured provider in one call. The checklist asks only what a
-  script cannot see, such as raw LaTeX showing as text or a figure that
-  covers a caption.
-- **Privacy:** the screenshots, and so everything printed on the pages
-  (including the author line), go to that provider.
+- **What runs:** the PDF is measured (font sizes, overflow, columns, and a
+  paper page left half empty before the paper ends) and screenshotted into
+  the report folder. No model is asked by default.
+- **AI check (`visual_check_ai: true`):** the screenshots, the measurements
+  and a fixed checklist also go to your configured provider in one call. The
+  checklist asks only what a script cannot see, such as raw LaTeX showing as
+  text or a figure that covers a caption. It is off by default because it
+  costs about 12,000 tokens a quest.
+- **Privacy:** with the AI check on, the screenshots, and so everything
+  printed on the pages (including the author line), go to that provider.
 - **Grounded findings:** each finding must quote text visible where the
   problem is. A finding that cannot be placed on its page is dropped; the
   report keeps it with the reason.
@@ -478,6 +481,7 @@ sees; PowerPoint shows them as native equations.
 ```yaml
 output:
   visual_check: true          # false turns the check off
+  visual_check_ai: false      # true also asks your provider to look at the screenshots
   visual_check_max_redos: 2   # 0 to 2 new versions of the slides or poster
 ```
 

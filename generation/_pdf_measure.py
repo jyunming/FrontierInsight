@@ -763,6 +763,15 @@ def paper_report(doc: Document) -> dict:
                     f"A figure runs {over:.0f} pt into the margin.",
                     object="figure", overhang_pt=round(over, 1),
                 ))
+    half_empty = 0
+    for page in doc.pages[:-1]:
+        empty = _empty_share(page)
+        if empty >= HALF_EMPTY_SHARE:
+            half_empty += 1
+            findings.append(_finding(
+                "half_empty_page", page.number, "page",
+                f"{empty:.0%} of the page's text area is empty, and the paper goes on to the next page.",
+            ))
     last_lines = _last_page_text_lines(doc)
     if len(doc.pages) >= 2 and last_lines <= 2:
         findings.append(_finding(
@@ -777,9 +786,37 @@ def paper_report(doc: Document) -> dict:
             "text_block_pt": list(block) if block else None,
             "words": sum(line.words for line in lines),
             "last_page_lines": last_lines,
+            "half_empty_pages": half_empty,
         },
         "findings": findings,
     }
+
+
+# A page before the last with this much of its text area empty looks
+# unfinished. The validation quest's paper had two: a figure alone on its page,
+# centred, with about a fifth of the page blank above it and a fifth below.
+HALF_EMPTY_SHARE = 0.35
+# Empty stretches shorter than this share of the text area are the space
+# between lines, paragraphs, headings and captions, not an empty page.
+_EMPTY_STRETCH_MIN = 0.05
+
+
+def _empty_share(page: Page) -> float:
+    """How much of the page's text area is empty, as a share of that area's
+    height: every empty stretch above, between and below what is on the page
+    that is at least ``_EMPTY_STRETCH_MIN`` of the area. The top and bottom 8%
+    of the page (running header, footer, page number, footer mark) are not
+    part of the area."""
+    top, bottom = 0.08 * page.height, 0.92 * page.height
+    height = bottom - top
+    boxes = [line.box for line in page.lines if line.visible] + list(page.images)
+    spans = sorted((max(b[1], top), min(b[3], bottom)) for b in boxes if b[3] > top and b[1] < bottom)
+    empty, reach = 0.0, top
+    for start, end in [*spans, (bottom, bottom)]:
+        if start - reach >= _EMPTY_STRETCH_MIN * height:
+            empty += start - reach
+        reach = max(reach, end)
+    return empty / height
 
 
 def _last_page_text_lines(doc: Document) -> int:

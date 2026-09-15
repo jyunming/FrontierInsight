@@ -13,7 +13,8 @@ from generation import _visual_check as vc
 
 
 def _config(tmp_path: Path) -> Config:
-    return Config.model_validate({"topic": "t", "title": "t", "output": {"output_dir": str(tmp_path / "out")}})
+    return Config.model_validate({"topic": "t", "title": "t", "output": {
+        "output_dir": str(tmp_path / "out"), "visual_check_ai": True}})
 
 
 def _exported_pdf(out_dir: Path) -> Path:

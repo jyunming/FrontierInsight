@@ -26,7 +26,7 @@ from pathlib import Path
 
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config
-from core.engine import QuestArtifacts, build_further_reading, build_references
+from core.engine import QuestArtifacts, build_further_reading, cited_references
 from generation._pandoc import find_pandoc
 from generation import _cjk
 from generation._figure_captions import numbers_off_figure_captions
@@ -516,8 +516,10 @@ class PaperGenerator:
         # are Further reading and get their own pair of files.
         literature = (art.raw_state or {}).get("literature") or []
         audience = self.config.output.audience
+        cited_md = art.paper_md.read_text(encoding="utf-8") if art.paper_md is not None else ""
         for stem, entries in (
-            ("references", build_references(literature, audience=audience)),
+            # The sources the paper's References list: the ones its text cites.
+            ("references", cited_references(literature, cited_md, audience=audience)),
             ("further_reading", build_further_reading(literature, audience=audience)),
         ):
             if not entries:

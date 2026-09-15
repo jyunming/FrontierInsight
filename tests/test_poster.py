@@ -550,6 +550,53 @@ def test_plan_narrows_figures_only_in_the_column_that_is_over() -> None:
     assert max(layout.column_heights()) <= 44 * PT_PER_CM
 
 
+def test_plan_narrows_the_longest_columns_figures_to_even_the_columns_out() -> None:
+    """The validation quests' posters ended one column 11.5 cm above the other
+    with room to spare: figures were narrowed only when a column was over."""
+    blocks = [
+        _Block("heading", text="One"), _Block("text", text=_sentences(10)),
+        _Block("heading", text="Two"), _Block("figure", file="b.png", caption="b"),
+        _Block("figure", file="c.png", caption="c"), _Block("text", text=_sentences(2)),
+    ]
+    aspects = {"b.png": 0.75, "c.png": 0.75}
+    layout = _Layout(A1, blocks, aspects, {})
+    layout.plan(200 * PT_PER_CM)
+    heights = layout.column_heights()
+    longest = layout.groups[heights.index(max(heights))]
+    narrowed = [i for i in longest if layout.blocks[i].kind == "figure" and layout.widths[i] < 1.0]
+    assert narrowed, "a figure in the longer column gave way"
+    assert all(layout.widths[i] == 1.0 for i, b in enumerate(layout.blocks) if b.kind == "figure" and i not in longest)
+    wide = _Layout(A1, blocks, aspects, {})
+    wide.groups, wide.widths = layout.groups, [1.0] * len(blocks)
+    assert max(heights) - min(heights) < max(wide.column_heights()) - min(wide.column_heights())
+    assert max(heights) - min(heights) <= 2 * poster_mod._BALANCE_CM * PT_PER_CM
+
+
+def test_balancing_narrows_below_the_fitting_floor_but_not_below_half() -> None:
+    # A long column of two figures against a short one: fitting would stop at
+    # 70%, balancing goes on to 50% and no further.
+    blocks = [
+        _Block("heading", text="One"), _Block("text", text=_sentences(1)),
+        _Block("heading", text="Two"), _Block("figure", file="b.png", caption="b"),
+        _Block("figure", file="c.png", caption="c"), _Block("figure", file="d.png", caption="d"),
+    ]
+    layout = _Layout(A1, blocks, {"b.png": 0.9, "c.png": 0.9, "d.png": 0.9}, {})
+    layout.plan(200 * PT_PER_CM)
+    widths = [layout.widths[i] for i, b in enumerate(layout.blocks) if b.kind == "figure"]
+    assert min(widths) >= poster_mod._MIN_BALANCE_WIDTH - 1e-9
+    assert min(widths) < poster_mod._MIN_FIGURE_WIDTH
+
+
+def test_plan_leaves_figures_full_width_when_the_columns_already_end_together() -> None:
+    blocks = [
+        _Block("heading", text="One"), _Block("figure", file="a.png", caption="a"), _Block("text", text=_sentences(3)),
+        _Block("heading", text="Two"), _Block("figure", file="b.png", caption="b"), _Block("text", text=_sentences(3)),
+    ]
+    layout = _Layout(A1, blocks, {"a.png": 0.6, "b.png": 0.6}, {})
+    layout.plan(200 * PT_PER_CM)
+    assert [layout.widths[i] for i in (1, 4)] == [1.0, 1.0]
+
+
 def test_plan_keeps_sections_whole_and_spaces_short_columns_with_a_cap() -> None:
     blocks = []
     for name in ("One", "Two", "Three", "Four"):

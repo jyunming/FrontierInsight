@@ -60,7 +60,7 @@ config YAML, and runs the quest. Every LLM call streams through the
 
 ### Which providers can see images
 
-The visual check (`output.visual_check`) sends page screenshots of the paper, slides and poster (and of `slides.pptx`, when LibreOffice is installed) to the configured provider. Where a provider cannot take images, the check runs on its measurements alone and its report says so.
+The visual check's AI step (`output.visual_check_ai: true`; off by default) sends page screenshots of the paper, slides and poster (and of `slides.pptx`, when LibreOffice is installed) to the configured provider. Where a provider cannot take images, the check runs on its measurements alone and its report says so.
 
 - **HTTP providers** (`ollama`, `vllm`, `openai`, `gemini`, …) send the screenshots as image parts. The model itself must accept images; checked with `gemma4:31b-cloud` on Ollama.
 - **`claude_cli`** sends them inline in a stream-json turn. Checked with `haiku`.

@@ -1,8 +1,10 @@
 """Screenshot and AI check of a finished output.
 
 A rendered PDF (paper, slides or poster) is measured by ``_pdf_measure`` and
-screenshotted. The model gets the screenshots, the measurements and a fixed
-checklist of what only eyes can see, and answers in JSON.
+screenshotted. With ``output.visual_check_ai`` on, the model gets the
+screenshots, the measurements and a fixed checklist of what only eyes can
+see, and answers in JSON; with it off (the default), the measurements are the
+whole check.
 
 Free-form critique invents problems, so every finding must quote text that
 is visible where the problem is. A finding whose quote is not in the text of
@@ -155,6 +157,8 @@ async def _check(
     images = _screenshots(pdf, quest_root, kind)
     if not images:
         return {**result, "transport": "measurements only", "reason": "the pages could not be rendered"}
+    if not getattr(config.output, "visual_check_ai", False):
+        return {**result, "transport": "measurements only", "reason": "the AI check is off (output.visual_check_ai)"}
     result["pages_checked"] = len(images)
     checks = checks_for(kind)
     prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(

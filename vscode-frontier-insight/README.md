@@ -28,7 +28,8 @@ The engine runs to a finished paper, slide deck, figures, and a
 machine-readable summary in `outputs/<quest_id>/`. A scientific paper opens with
 an abstract and 4–6 keywords; a report, brief, essay or whitepaper keeps its
 keywords out of sight, and an accepted paper's keywords go into its Axon index
-card. The paper's cited papers are
+card. FI writes the paper's References itself: the papers the text cites,
+numbered in the order it first cites them. They are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON). The web pages it drew on are listed under Further reading, not
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A
@@ -39,12 +40,13 @@ figure keeps a record of what it draws, and a caption that describes a line the
 figure draws flat or not at all goes back to the reviewer; the human review in
 the chat lists those captions. The deck ends on one References slide with the
 sources the paper cites most. With `engine.execute_replicates > 1` the results are reported
-with 95% confidence intervals, effect sizes (including between methods nested
+with 95% confidence intervals (a probability's kept within 0–1), effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
-numbers. You see every node firing live in the chat panel.
+numbers. A line figure is drawn as the mean of the seeds, shaded with its 95%
+confidence interval; bar charts and histograms keep one run. You see every node firing live in the chat panel.
 
-After the outputs render, a visual check screenshots each PDF and asks the
-chat model to check the pages. The slides and poster are redone, at most twice,
+After the outputs render, a visual check measures and screenshots each PDF;
+with `output.visual_check_ai: true` it also asks the chat model to check the pages. The slides and poster are redone, at most twice,
 when the check finds problems a new version can fix, and a paper whose last
 page holds only a line or two is recompiled one line taller. With LibreOffice
 installed, `slides.pptx` is exported to PDF and checked too; its formulas are native
@@ -195,7 +197,7 @@ In the chat panel you'll see progress messages:
 
 By default the engine pauses after the LLM review so you can accept, reject, or refine the paper before it's final. The chat panel renders the verdict + must-flag hits + suggestions, then surfaces a QuickPick (Accept / Reject / Refine). Numbers in the paper that the arithmetic check could not reconcile with the run's results appear on their own line as **advisory** — they are shown for you to judge and never force a rewrite, because a pattern match over prose misreads DOIs and scientific notation often enough that an automatic revise does more harm than a flagged number. Refine opens a second input box for one line of feedback that the next revise pass honours alongside every previous refinement ask.
 
-The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are non-bypassable: a flagged paper forces another revise pass even when `engine.review_loop: false` is set.
+The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are non-bypassable: a flagged paper forces another revise pass even when `engine.review_loop: false` is set. When every hit is about the text (an unsupported claim, or a caption that describes what its figure does not show), FI rewrites only the paper, with the review in hand, instead of running the experiment again.
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
@@ -508,7 +510,7 @@ Approximate per-quest burn:
 - Full panel (3 personas + moderator) + clarify-auto: ~18 premium requests
 - Worst case (panel + re_experiment + 2 revise iterations): ~30+
 - No-simulation quest (skips `implement → execute → execute_reflect`): ~6 premium requests — the saving comes from cutting the implement/execute self-correction loop entirely.
-- Outputs add one request each for the slide deck, poster and talk script. With the visual check on, each checked output (paper, slides, pptx, poster) adds one more, and a slides or poster redo adds two. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
+- Outputs add one request each for the slide deck, poster and talk script. A slides or poster redo after the visual check adds one more. With `output.visual_check_ai: true`, each checked output (paper, slides, pptx, poster) and each redo's new check add one more as well. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
 
 On Copilot Pro (~300 premium requests/month) you can run ~15–30 quests
 a month depending on configuration. On Business / Enterprise the
