@@ -615,6 +615,9 @@
       // provider.reasoning_effort — 'default' writes nothing (mirrors the
       // question default in core/interview.py).
       reasoning_effort: 'default',
+      // output.page_limit — blank writes nothing (a limit the topic states
+      // still applies); mirrors the question default in core/interview.py.
+      page_limit: '',
     };
   }
 
@@ -645,6 +648,7 @@
 
     if (isUpdate) {
       // Update flow keeps the old direct-submit behavior.
+      if (!validPageLimit(out.page_limit)) { alert(PAGE_LIMIT_MESSAGE); return false; }
       if (!out.topic) out.topic = '(unchanged)';
       if (!out.title) out.title = '(unchanged)';
       if (!out.provider) out.provider = 'vscode_extension';
@@ -792,12 +796,26 @@
     inputHost.appendChild(inputEl);
   };
 
+  // output.page_limit: blank (or "none"), or a whole number of pages of at
+  // least 1 — the answers core/interview.py:parse_page_limit_answer accepts.
+  const PAGE_LIMIT_MESSAGE = 'Page limit must be a whole number of pages (1 or more), or blank for no set limit.';
+  function validPageLimit(value) {
+    if (value === undefined || value === null) return true;
+    const text = String(value).trim();
+    if (text === '' || text.toLowerCase() === 'none') return true;
+    return /^\+?\d+$/.test(text) && parseInt(text, 10) >= 1;
+  }
+
   window.saveReviewField = function (id) {
     const inputEl = document.querySelector(`#review-edit-input-${id} *[id^="q-"]`);
     if (!inputEl) return;
     let value = inputEl.value;
     if (typeof value === 'string' && (value.startsWith('[') || value === 'true' || value === 'false')) {
       try { value = JSON.parse(value); } catch (_) {}
+    }
+    if (id === 'page_limit' && !validPageLimit(value)) {
+      alert(PAGE_LIMIT_MESSAGE);
+      return;
     }
     pendingAnswers[id] = value;
     document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value);

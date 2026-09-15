@@ -315,6 +315,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             url=new_answers.url,
             poster_size=new_answers.poster_size,
             reasoning_effort=new_answers.reasoning_effort,
+            page_limit=new_answers.page_limit,
         )
         changes = diff_answers(current, new)
         stages = compute_invalidated_stages(changes)
@@ -484,6 +485,11 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
             "reasoning_effort must be 'default' or one of "
             + ", ".join(REASONING_EFFORT_LEVELS) + f"; got {reasoning_effort!r}"
         )
+    # output.page_limit: blank or null (or missing, from an older client) is
+    # no set limit; anything else must be a whole number of pages >= 1.
+    from core.interview import parse_page_limit_answer
+
+    page_limit = parse_page_limit_answer(body.get("page_limit"))
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -513,4 +519,5 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         **author_line,
         poster_size=poster_size,
         reasoning_effort=reasoning_effort,
+        page_limit=page_limit,
     )

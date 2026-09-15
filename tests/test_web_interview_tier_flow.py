@@ -304,6 +304,107 @@ def test_update_form_answers_carry_the_saved_reasoning_effort(tmp_path) -> None:
     assert r.json()["reasoning_effort"] == "high"
 
 
+def test_the_web_form_seeds_a_blank_page_limit_and_checks_it(html: str) -> None:
+    """The review screen's advanced block starts the page limit blank, so an
+    untouched form writes nothing; saving a review field and submitting an
+    update both refuse anything but blank or a whole number of pages."""
+    assert "page_limit: ''," in html
+    assert "function validPageLimit(value)" in html
+    assert "if (id === 'page_limit' && !validPageLimit(value))" in html
+    assert "if (!validPageLimit(out.page_limit))" in html
+
+
+def test_schema_offers_the_page_limit_on_the_web_review_screen(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    schema = TestClient(make_app(tmp_path)).get("/api/interview/schema").json()
+    q = next(q for q in schema["questions"] if q["id"] == "page_limit")
+    assert {"cli", "vscode", "serve"} <= set(q["frontends"])
+    assert (q["tier"], q["kind"], q["default"], q["mid_quest_editable"]) == (3, "text", "", True)
+
+
+@pytest.mark.parametrize("sent, written", [(4, 4), ("4", 4), (" 6 ", 6), ("", None), (None, None)])
+def test_submit_writes_a_page_limit_or_none(tmp_path, sent, written) -> None:  # type: ignore[no-untyped-def]
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from core.config import Config
+    from web.server import make_app
+
+    r = TestClient(make_app(tmp_path)).post("/api/interview/submit", json=_author_payload(page_limit=sent))
+    assert r.status_code == 200, r.text
+    assert Config.from_yaml(Path(r.json()["yaml_path"])).output.page_limit == written
+
+
+@pytest.mark.parametrize("bad", [0, -2, "0", "four", "4.5", 4.5, True, [4]])
+def test_submit_rejects_a_page_limit_that_is_not_a_whole_number_of_pages(tmp_path, bad) -> None:  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    r = TestClient(make_app(tmp_path)).post("/api/interview/submit", json=_author_payload(page_limit=bad))
+    assert r.status_code == 400, r.text
+
+
+def _page_limit_quest(tmp_path, page_limit):  # type: ignore[no-untyped-def]
+    from core.interview import InterviewAnswers, answers_to_yaml
+
+    quest = tmp_path / "limit-quest"
+    quest.mkdir()
+    answers = InterviewAnswers(
+        topic="t", title="limit-quest", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="", success_metric="", budget="",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="ollama", page_limit=page_limit,
+    )
+    (quest / "config.yaml").write_text(answers_to_yaml(answers, frontend="cli"), encoding="utf-8")
+    return quest
+
+
+def test_update_form_answers_carry_the_saved_page_limit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """/update/<id> seeds its fields from GET /api/quests/<id>/answers; without
+    the saved limit there, the form would show it blank and a submit would
+    drop it from the quest's YAML."""
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    _page_limit_quest(tmp_path, 4)
+    r = TestClient(make_app(tmp_path)).get("/api/quests/limit-quest/answers")
+    assert r.status_code == 200, r.text
+    assert r.json()["page_limit"] == 4
+
+
+def test_update_submit_changes_and_clears_the_page_limit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The update route builds its answers field by field; the page limit must
+    be one of them, or a changed limit is lost and every update clears it."""
+    from fastapi.testclient import TestClient
+
+    from core.config import Config
+    from web.server import make_app
+
+    quest = _page_limit_quest(tmp_path, 4)
+    client = TestClient(make_app(tmp_path))
+    saved = client.get("/api/quests/limit-quest/answers").json()
+
+    r = client.post("/api/interview/update/limit-quest", json={**saved, "page_limit": "3"})
+    assert r.status_code == 200, r.text
+    assert r.json()["changes"] == {"page_limit": [4, 3]}
+    assert r.json()["invalidated_stages"] == ["write", "review"]
+    assert Config.from_yaml(quest / "config.yaml").output.page_limit == 3
+
+    r = client.post("/api/interview/update/limit-quest", json={**saved, "page_limit": ""})
+    assert r.status_code == 200, r.text
+    assert Config.from_yaml(quest / "config.yaml").output.page_limit is None
+
+    r = client.post("/api/interview/update/limit-quest", json={**saved, "page_limit": "four"})
+    assert r.status_code == 400, r.text
+
+
 def test_submit_rejects_vscode_extension_without_bridge_port(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """User-reported question: 'is it possible that i launch --serve
     but call vscode_extension?'. Yes — but only when a live bridge is

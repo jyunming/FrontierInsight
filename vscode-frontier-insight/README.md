@@ -57,7 +57,9 @@ model that cannot take images checks from the measurements alone, and the chat
 says so.
 
 A topic that states a page limit ("≤ 4 pages", "at most 4 pages", "a 4-page
-paper"), or `output.page_limit` in the config, keeps the paper to it. The paper
+paper"), or a Page limit set in `@fi /new` under "Edit an advanced field"
+(written to `output.page_limit`; leave it blank for no set limit), keeps the
+paper to it. The paper
 gets a tighter layout (2 cm margins where its template had 1 in, figures at most
 a third of the text height, smaller References and Further reading lists), and
 the writer gets a word budget. After each draft the review renders it the way

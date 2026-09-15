@@ -441,6 +441,43 @@ def test_update_no_change_does_not_reopen(
     assert captured.get("reopen") is False, captured
 
 
+@pytest.mark.parametrize("typed, saved", [("3", 3), ("none", None), ("", None), ("four", 4)])
+def test_cli_update_changes_clears_or_keeps_the_page_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: str, saved: int | None,
+) -> None:
+    """--update asks the page limit with the saved one shown: a new number
+    replaces it, blank or "none" clears it, and a typo keeps the saved limit."""
+    import asyncio
+
+    from core.config import Config
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    quest_root = output_root / "q-limit"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(_sample(page_limit=4), frontend="cli"), encoding="utf-8",
+    )
+
+    async def fake_run_one(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(
+        "launch._cli_prompt_for", lambda q, _p, _o: typed if q.id == "page_limit" else q.default,
+    )
+    rc = asyncio.run(run_update_flow(
+        quest_id="q-limit",
+        output_root=output_root,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=None,
+        run_one=fake_run_one,
+        apply_vscode_bridge_override=lambda _c, _p: None,
+    ))
+    assert rc == 0
+    assert Config.from_yaml(quest_root / "config.yaml").output.page_limit == saved
+
+
 def test_paper_style_round_trips(tmp_path: Path) -> None:
     """``output.paper_style`` emits to YAML and loads back on --update."""
     quest_root = tmp_path / "q-style"

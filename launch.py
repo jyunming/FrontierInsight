@@ -2709,7 +2709,7 @@ async def _run_new(
     # imports its own (smart_defaults + model_choices_for).
     from core.interview import (
         QUESTIONS, InterviewAnswers, answers_to_yaml,
-        derive_tier2, derive_tier3, preflight_clarify,
+        derive_tier2, derive_tier3, parse_page_limit_answer, preflight_clarify,
         questions_for_tier, slugify,
     )
 
@@ -2809,6 +2809,13 @@ async def _run_new(
             new_val = _cli_prompt_for(row["question"], {**partial, **derived, **advanced}, preflight_cache)
             if new_val is None:
                 continue  # user aborted single-field edit; stay in review
+            if row["id"] == "page_limit":
+                from core.interview import parse_page_limit_answer
+                try:
+                    parse_page_limit_answer(new_val)
+                except ValueError as e:
+                    print(f"    ({e}; the page limit is unchanged)")
+                    continue
             if row["tier"] == 2:
                 derived[row["id"]] = new_val
             else:
@@ -2855,6 +2862,11 @@ async def _run_new(
         url=" ".join(str(partial.get("url") or "").split()),
         poster_size=str(advanced.get("poster_size") or "a1_portrait"),
         reasoning_effort=str(advanced.get("reasoning_effort") or "default"),
+        # Checked when it was typed on the review screen; blank is no set limit.
+        page_limit=parse_page_limit_answer(
+            advanced.get("page_limit"),
+            on_error=lambda message: print(f"⚠ {message}; no page limit set."),
+        ),
     )
 
     yaml_text = answers_to_yaml(answers, frontend="cli")
