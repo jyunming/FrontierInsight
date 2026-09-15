@@ -238,6 +238,10 @@ class QuestState(TypedDict, total=False):
     # Claim grounding: which paper claims trace to evidence
     # (experiment / citation / unsupported), from the claim_check node.
     claim_grounding: dict[str, Any]
+    # Why the claim check could not run on the current draft (empty once it
+    # runs). The review then forces ``citations_unchecked``: a draft whose
+    # citations nobody checked cannot be accepted.
+    claim_check_failed: str
     review: dict[str, Any]
     # Human-feedback gate state. Populated by ``_node_human_feedback``
     # when ``engine.human_feedback_gate == "after_review"``. ``action``
@@ -5484,7 +5488,7 @@ class Engine:
         if not paper_md or not Path(paper_md).is_file():
             self._log.info("[claim_check] no paper to check; skipping")
             return {}
-        paper_text = Path(paper_md).read_text(encoding="utf-8")[:16000]
+        paper_text = _paper_for_prompt(Path(paper_md).read_text(encoding="utf-8"), "claim_check", self._log)
         literature = state.get("literature") or []
         audience = self.config.output.audience
         refs = build_references(literature, audience=audience)
@@ -5530,22 +5534,22 @@ class Engine:
             references=refs_block,
             paper=paper_text,
         )
-        # claim_check is a best-effort quality gate that runs AFTER the paper
-        # is already written: the reviewer renders "(claim grounding not run)"
-        # when grounding is absent, and the ledger write below is likewise
-        # never quest-fatal. A transient provider failure here (e.g. a Copilot
-        # bridge stall) must therefore NOT abort the quest and forfeit the
-        # already-produced paper + every downstream output (pdf/slides/poster/
-        # speech). Degrade to "not run" on any LLM failure, matching how the
-        # sibling cross_check node guards its provider calls.
+        # claim_check runs AFTER the paper is already written, so a provider
+        # failure here (a bridge stall, a server out of capacity once its
+        # retries are spent) must NOT abort the quest and forfeit the paper and
+        # every downstream output. It must not pass silently either: a rewrite
+        # whose check failed kept the previous draft's grounding, and nothing
+        # checked its new citations. The failure is recorded, the stale
+        # grounding cleared, and the review forces ``citations_unchecked``.
         try:
             text = await self._chat(prompt, node="claim_check")
         except Exception as e:
+            reason = f"{type(e).__name__}: {e}"[:300]
             self._log.warning(
-                "[claim_check] grounding call failed (%s); skipping claim "
-                "grounding and continuing to review", e,
+                "[claim_check] grounding call failed (%s); the review will mark "
+                "this draft's citations unchecked", reason,
             )
-            return {}
+            return {"claim_grounding": {}, "claim_check_failed": reason}
         parsed = _parse_json_lenient(text) or {}
         raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
         n_refs = len(refs)
@@ -5604,7 +5608,7 @@ class Engine:
             grounding["grounded"], grounding["total"], len(unsupported),
         )
         self._write_claims_ledger(grounding)
-        return {"claim_grounding": grounding}
+        return {"claim_grounding": grounding, "claim_check_failed": ""}
 
     async def _node_select_skills(self, state: QuestState) -> QuestState:
         """Pick which skills this quest carries.
@@ -6025,12 +6029,10 @@ class Engine:
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
             figure_check_block=_format_figure_check(paper_md, state),
-            # 16 KB ≈ ~4 K tokens — fits a comprehensive-review-length
-            # paper plus an abstract + references block. The 8 KB cap
-            # was truncating mid-Discussion on journal-length papers
-            # so the reviewer was grading on an incomplete read, which
-            # made the depth axis unreliable.
-            paper_md=paper_md[:16000],
+            # The whole paper. A 16 KB cut hid the second half of a real
+            # 34,910-character paper, so the review graded a draft it had not
+            # read; the cap now only guards against a runaway file.
+            paper_md=_paper_for_prompt(paper_md, "review", self._log),
         )
 
         panel_names = list(self.config.engine.review_panel or [])
@@ -6088,6 +6090,8 @@ class Engine:
             for hit in missing_figures:
                 self._log.warning("[figure_check] %s", hit)
             review["must_flag_hits"] += missing_figures
+            # Forced as well: nothing checked this draft's citations.
+            review["must_flag_hits"] += _citations_unchecked(state)
             update: QuestState = {"review": review}
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
@@ -6215,6 +6219,9 @@ class Engine:
             self._log.warning("[figure_check] %s", hit)
         if missing_figures:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *missing_figures]
+        unchecked = _citations_unchecked(state)
+        if unchecked:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
 
         update: QuestState = {"review": review, "review_panel": panel_results}
         # Bump iteration on EITHER verdict=revise OR a non-empty
@@ -8775,6 +8782,12 @@ def _format_claim_grounding(state: QuestState) -> str:
     """Render the claim-grounding result for the review prompt's
     `$claim_grounding_block`, calling out unsupported claims so the reviewer
     must-flags them."""
+    failed = str(state.get("claim_check_failed") or "").strip()
+    if failed:
+        return (
+            f"(claim grounding FAILED on this draft: {failed[:200]}. None of its "
+            "citations was checked against its source.)"
+        )
     g = state.get("claim_grounding") or {}
     if not g:
         return "(claim grounding not run)"
@@ -8805,7 +8818,42 @@ def _format_claim_grounding(state: QuestState) -> str:
 # Must-flag hits that are problems with the paper's text, not with the study:
 # fixing one means writing the paper again, not running the experiment again.
 # ``figure_missing`` is one: the figure exists, the paper left it out.
-_TEXT_ONLY_HITS = frozenset({"unsupported_claim", "figure_caption", "figure_missing"})
+_TEXT_ONLY_HITS = frozenset({"unsupported_claim", "figure_caption", "figure_missing", "citations_unchecked"})
+
+# A node that judges the paper reads all of it; the cap only guards against a
+# runaway file. The old 16,000-character cut hid the second half of a real
+# 34,910-character paper from both the claim check and the review.
+_PAPER_PROMPT_CHARS = 120_000
+
+
+def _paper_for_prompt(paper_md: str, node: str, log: Any = None) -> str:
+    """``paper_md`` whole, or its first ``_PAPER_PROMPT_CHARS`` characters with
+    a note saying so (and a warning in the log) when it is longer."""
+    if len(paper_md) <= _PAPER_PROMPT_CHARS:
+        return paper_md
+    if log is not None:
+        log.warning(
+            "[%s] the paper is %d characters; the model reads the first %d",
+            node, len(paper_md), _PAPER_PROMPT_CHARS,
+        )
+    return (
+        paper_md[:_PAPER_PROMPT_CHARS]
+        + f"\n\n[The paper continues: only its first {_PAPER_PROMPT_CHARS:,} of "
+        f"{len(paper_md):,} characters are shown.]"
+    )
+
+
+def _citations_unchecked(state: QuestState) -> list[str]:
+    """The forced hit for a draft the claim check could not run on. Text-only:
+    the rewrite runs the claim check again."""
+    reason = str(state.get("claim_check_failed") or "").strip()
+    if not reason:
+        return []
+    return [
+        f"citations_unchecked: the claim check could not run on this draft ({reason[:160]}), "
+        "so no citation was checked against its source; the paper cannot be accepted "
+        "until the check runs"
+    ]
 # The name a hit starts with, after a panel's ``[persona] `` prefix:
 # ``unsupported_claim``, ``[methodologist] figure_caption: Figure 2 ...``.
 _HIT_NAME_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[`'\"]?([A-Za-z_]+)")

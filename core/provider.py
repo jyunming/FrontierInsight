@@ -428,6 +428,12 @@ def _extract_antigravity_response(raw: str) -> str:
     failures *inside* a 0-exit-status envelope, so silently returning the
     empty ``response`` field would surface a model failure as an empty
     completion, which the pipeline would then treat as a valid answer.
+
+    A capacity failure ("UNAVAILABLE (code 503): No capacity available for
+    model ... on the server") is the server's, not the request's, and clears
+    on its own; it raises ``_CliCapacityError`` so the call is retried. As a
+    plain RuntimeError it was never retried: on 2026-09-15 it ended two quests
+    in ``implement`` and skipped a third quest's claim check.
     """
     err = ""
     for line in raw.splitlines():
@@ -445,6 +451,8 @@ def _extract_antigravity_response(raw: str) -> str:
             return str(res.get("response") or "")
         err = str(res.get("error") or "") or "antigravity reported a non-SUCCESS result"
     if err:
+        if _is_capacity_error(err):
+            raise _CliCapacityError(f"antigravity: {err}")
         raise RuntimeError(f"antigravity: {err}")
     return raw.strip()
 
@@ -993,6 +1001,43 @@ class _CliWedgeError(_CliTransientError):
     claude_cli code-gen prompt). A subclass so the retry loop can cap it
     faster than a normal transient and the message can carry switch-provider
     guidance."""
+
+
+class _CliCapacityError(_CliTransientError):
+    """The model's server has no capacity for the request right now (HTTP 503,
+    UNAVAILABLE, RESOURCE_EXHAUSTED). Not the account's quota: a call made
+    minutes later with the same account and model succeeds. Retried like any
+    transient, after a longer wait, since capacity takes longer than a
+    dropped connection to come back."""
+
+
+# Matched case-insensitively against the CLI's error text.
+_CAPACITY_MARKERS: tuple[str, ...] = (
+    "no capacity",
+    "unavailable",
+    "code 503",
+    "resource_exhausted",
+    "overloaded",
+)
+
+
+def _is_capacity_error(message: str) -> bool:
+    text = message.lower()
+    return any(m in text for m in _CAPACITY_MARKERS)
+
+
+def _cli_retry_wait(retry_state: "Any") -> float:
+    """Seconds before the next CLI attempt: 30 to 90 after a capacity error,
+    otherwise the jittered exponential wait every other transient gets. The
+    short wait (at most 20 s) spent all four attempts on a capacity outage in
+    about a minute."""
+    outcome = getattr(retry_state, "outcome", None)
+    exc = outcome.exception() if outcome is not None else None
+    if isinstance(exc, _CliCapacityError):
+        import random
+
+        return random.uniform(30.0, 90.0)
+    return wait_random_exponential(multiplier=1, max=20)(retry_state)
 
 
 def _stop_on_repeated_wedge(retry_state: "Any") -> bool:
@@ -2809,8 +2854,9 @@ class LLMClient:
             # retry the same upstream at the same instant — see
             # the HTTP path's note. wait_random_exponential picks a
             # uniform random value from [0, multiplier * 2^attempt],
-            # capped at ``max``, which spreads retries over a window.
-            wait=wait_random_exponential(multiplier=1, max=20),
+            # capped at ``max``, which spreads retries over a window. A
+            # capacity error waits longer (see ``_cli_retry_wait``).
+            wait=_cli_retry_wait,
             retry=retry_if_exception(_retry_cli_error),
             reraise=True,
             before_sleep=_retry_log,

@@ -250,10 +250,11 @@ def test_claim_check_provider_failure_is_non_fatal(tmp_path: Path) -> None:
     eng._chat = boom_chat  # type: ignore[assignment,method-assign]
 
     state = {"topic": "t", "paper_md": _paper(tmp_path), "literature": []}
-    # Does not raise — the node swallows the provider failure.
+    # Does not raise — the node records the provider failure instead.
     out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
-    assert out == {}
-    # No grounding ran → reviewer renders "(claim grounding not run)".
-    assert _format_claim_grounding(out) == "(claim grounding not run)"
+    assert out["claim_grounding"] == {}
+    assert "Copilot backend was unavailable" in out["claim_check_failed"]
+    # The reviewer is told the check failed, not that it was never meant to run.
+    assert "FAILED" in _format_claim_grounding(out)
     # No ledger is written when grounding never produced a result.
     assert not (tmp_path / "paper" / "claims.json").exists()
