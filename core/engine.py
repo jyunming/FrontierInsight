@@ -4096,6 +4096,8 @@ class Engine:
         replicates_n = max(1, int(self.config.engine.execute_replicates))
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
+        replicates_ran = False
+        primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
         if result.returncode == 0 and result_json is not None:
             # Tag seed 0 explicitly so the aggregator can attribute it.
             result_json_replicates.append({"_seed": 0, **result_json})
@@ -4141,7 +4143,13 @@ class Engine:
                 "[execute] replicating: %d additional seeds (1..%d)",
                 replicates_n - 1, replicates_n - 1,
             )
+            # Every run draws into the same figures/, so the replicates draw
+            # over the primary run's figures, a replicate that crashes halfway
+            # included. Kept here, a figure the seeds do not redraw as their
+            # mean goes back to seed 0's, with seed 0's record of what it draws.
+            primary_figures = _read_primary_figures(self.quest_root / "figures", records_dir, figures)
             for seed in range(1, replicates_n):
+                replicates_ran = True
                 # Merge with the parent's environment, not REPLACE it.
                 # ``asyncio.create_subprocess_exec(env=...)`` overrides
                 # the child's whole env when given a dict — passing
@@ -4192,18 +4200,35 @@ class Engine:
 
         # A line figure drawn by one seed shows that run's noise. With the
         # seeds in hand it is drawn again as their mean, shaded with its 95%
-        # confidence interval; a bar chart, a histogram or any other figure
-        # keeps the run that drew it last.
+        # confidence interval, and so is one of lines with error bars, whose
+        # bars the interval over the seeds replaces. A bar chart, a histogram
+        # or any other figure goes back to the primary run's (seed 0), and its
+        # record says it shows that one run, so the text can quote seed 0's
+        # values for it rather than the means.
         replotted: dict[str, int] = {}
-        if len(result_json_replicates) > 1 and not deterministic:
+        redraw = len(result_json_replicates) > 1 and not deterministic
+        if redraw:
             replotted = await self._replot_replicate_figures(
                 figures, records_dir, [int(r["_seed"]) for r in result_json_replicates],
                 python=py, env=exec_env, assertions=_replicate_assertions(state),
             )
+        if replicates_ran:
+            restored = _restore_primary_figures(
+                self.quest_root / "figures", records_dir, primary_figures, redrawn=replotted,
+            )
+            if restored:
+                self._log.info(
+                    "[execute] %d figure(s) not drawn as the mean of the seeds show seed 0: %s",
+                    len(restored), ", ".join(restored),
+                )
         figure_records = _read_figure_records(records_dir, figures)
         for name, n_seeds in replotted.items():
             if name in figure_records:
                 figure_records[name]["replicate_mean"] = {"n": n_seeds}
+        if redraw:
+            for name in figures:
+                if name not in replotted and name in figure_records:
+                    figure_records[name]["single_seed"] = 0
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
@@ -4238,9 +4263,10 @@ class Engine:
         kept at every seed. The engine computes the numbers and
         ``code/replot_figures.py`` draws them in the quest's Python, under the
         house style, over the same file. Returns each figure drawn, with its
-        number of seeds. A figure that holds anything but lines, or whose
-        lines differ between seeds in label or x, is left as it is, and so is
-        a figure the redraw fails on."""
+        number of seeds. Error bars count as lines: each series is drawn at its
+        mean without them. A figure that holds anything else, or whose lines
+        differ between seeds in label or x, is not drawn, and neither is a
+        figure the redraw fails on."""
 
         def recorded(path: Path) -> Any:
             try:
@@ -9067,6 +9093,12 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             "A figure drawn as the mean of several seeds shows each line at its mean, "
             "shaded with its 95% confidence interval, and its caption says so."
         )
+    if any((records.get(f) or {}).get("single_seed") is not None for f in figs):
+        lines.append(
+            "A figure that shows seed 0 only could not be drawn as the mean of the seeds: "
+            "the text and caption about it quote seed 0's values, or say it shows one run, "
+            "not the means over the seeds."
+        )
     if any(_hidden_series(records.get(f)) for f in figs):
         lines.append(
             "A series marked FLAT is drawn at one value on its axis, and one NOT SHOWN "
@@ -9074,6 +9106,52 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             "it cannot describe how such a series changes."
         )
     return "\n".join(lines)
+
+
+def _read_primary_figures(
+    figures_dir: Path, records_dir: Path, figures: list[str],
+) -> dict[str, tuple[bytes, bytes | None]]:
+    """Each figure file the primary run drew, with the record of what it draws
+    (``None`` when it has none), by file name, before the replicate runs draw
+    over them."""
+    kept: dict[str, tuple[bytes, bytes | None]] = {}
+    for name in figures:
+        try:
+            image = (figures_dir / name).read_bytes()
+        except OSError:
+            continue
+        try:
+            record: bytes | None = (records_dir / f"{Path(name).stem}.json").read_bytes()
+        except OSError:
+            record = None
+        kept[name] = (image, record)
+    return kept
+
+
+def _restore_primary_figures(
+    figures_dir: Path, records_dir: Path, kept: dict[str, tuple[bytes, bytes | None]],
+    *, redrawn: Any,
+) -> list[str]:
+    """Put back the primary run's file and record of every kept figure that is
+    not in ``redrawn``, so it shows seed 0 rather than the last replicate.
+    Returns the figures put back."""
+    restored: list[str] = []
+    for name, (image, record) in kept.items():
+        if name in redrawn:
+            continue
+        target = records_dir / f"{Path(name).stem}.json"
+        try:
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            (figures_dir / name).write_bytes(image)
+            if record is None:
+                # A replicate's record would describe a figure no longer on disk.
+                target.unlink(missing_ok=True)
+            else:
+                target.write_bytes(record)
+        except OSError:
+            continue
+        restored.append(name)
+    return restored
 
 
 def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
@@ -9127,8 +9205,11 @@ def _figure_record_note(record: dict[str, Any] | None) -> str:
             panels.append(", ".join(bits))
     note = (" — " + " | ".join(panels)) if panels else ""
     n_seeds = ((record or {}).get("replicate_mean") or {}).get("n")
+    single_seed = (record or {}).get("single_seed")
     if n_seeds:
         note += f" — each line is the mean of {n_seeds} seeds, shaded with its 95% confidence interval"
+    elif single_seed is not None:
+        note += f" — shows seed {single_seed} only, not the mean of the seeds"
     return note
 
 
@@ -9201,10 +9282,19 @@ def _format_figure_check(paper_md: str, state: QuestState) -> str:
     records = state.get("figure_records") or {}
     if not records:
         return "(no record of what the figures draw)"
+    # The results are means over the seeds; these figures are one run.
+    one_run = [
+        f"figures/{name} shows seed {record['single_seed']} only, not the mean of the seeds: its "
+        f"caption and the text about it must quote seed {record['single_seed']}'s values or say "
+        "it shows one run."
+        for name, record in records.items()
+        if isinstance(record, dict) and record.get("single_seed") is not None
+    ]
     findings = _figure_caption_findings(paper_md, records)
     if not findings:
-        return "No caption names a series its figure does not show."
+        return "\n".join([*one_run, "No caption names a series its figure does not show."])
     return "\n".join([
+        *one_run,
         f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(findings)}):",
         *(f"  - {f}" for f in findings),
         "",

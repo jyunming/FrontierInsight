@@ -181,8 +181,8 @@ RECORDS_DIRNAME = "figure_records"
 # scale and limits, and each labelled series' range and whether it shows on
 # that axis ("yes", "flat" under 1% of the axis span, or "outside the axis").
 # Beside it, <stem>.seed<k>.json keeps the run's lines themselves (points and
-# style, per panel, and whether the panel holds anything but lines), which the
-# engine uses to redraw a figure as the mean over the seeds.
+# style, per panel, and whether the panel holds anything but lines and error
+# bars), which the engine uses to redraw a figure as the mean over the seeds.
 _RECORDER_SOURCE = '''\
 try:
     import os as _fi_os
@@ -259,14 +259,40 @@ try:
                         break
             return names
 
+        def _fi_error_bars(ax):
+            # ax.errorbar draws a data line, its bars (line collections) and its
+            # caps (lines), all labelled "_nolegend_"; the label sits on their
+            # container. The data line is the series; the bars and caps are one
+            # run's error, which a redraw over the seeds replaces with their
+            # interval. Bars with no data line, or across x, are more than that.
+            names, pieces = {}, set()
+            try:
+                from matplotlib.container import ErrorbarContainer
+
+                for container in ax.containers:
+                    if not isinstance(container, ErrorbarContainer):
+                        continue
+                    data_line, caps, bars = container.lines
+                    if data_line is None or container.has_xerr:
+                        continue
+                    label = container.get_label()
+                    if label and not str(label).startswith("_"):
+                        names[id(data_line)] = str(label)
+                    pieces.update(id(artist) for artist in (*caps, *bars))
+            except Exception:
+                return {}, set()
+            return names, pieces
+
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
-            artists = list(ax.get_lines()) + list(ax.collections)
+            bar_names, bar_pieces = _fi_error_bars(ax)
+            artists = [a for a in list(ax.get_lines()) + list(ax.collections) if id(a) not in bar_pieces]
             try:
                 names = _fi_legend_names(ax, artists)
             except Exception:
                 names = {}
+            names.update(bar_names)
             # A series can be drawn by several calls: a scatter per point, with
             # the label on the first call only. Unlabelled markers join the
             # labelled series drawn in the same style, as the legend pairs them;
@@ -359,11 +385,13 @@ try:
                 return True
 
         def _fi_panel(ax):
+            bar_names, bar_pieces = _fi_error_bars(ax)
             try:
                 names = _fi_legend_names(ax, list(ax.get_lines()) + list(ax.collections))
             except Exception:
                 names = {}
-            lines = [_fi_line(ax, line, names) for line in ax.get_lines()]
+            names.update(bar_names)
+            lines = [_fi_line(ax, line, names) for line in ax.get_lines() if id(line) not in bar_pieces]
             spec = ax.get_subplotspec()
             grid = None
             if spec is not None:
@@ -377,8 +405,10 @@ try:
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
                 "legend": ax.get_legend() is not None,
-                # Only lines, on default ticks: what a redraw can reproduce.
-                "line_only": bool(lines) and not any(_fi_draws(artist) for group in others for artist in group)
+                # Only lines (error bars included), on default ticks: what a redraw can reproduce.
+                "line_only": bool(lines) and not any(
+                    _fi_draws(artist) for group in others for artist in group if id(artist) not in bar_pieces
+                )
                 and formatters <= _FI_DEFAULT_FORMATTERS
                 and all(line["kind"] != "other" and line["x"] is not None for line in lines),
                 "lines": lines,
