@@ -229,3 +229,54 @@ def test_route_after_execute_reflect_proceeds_on_budget_exhaustion(tmp_path: Pat
         "result_json": None,
         "exec_reflect_iter": 2,
     }) == "proceed"
+
+
+def test_route_runs_the_patch_written_with_the_last_attempt(tmp_path: Path) -> None:
+    """The reflect node spends attempt 3 of 3 on a patch; that patch still
+    runs. The router used to see the counter at the cap and go to analyze, so
+    the paper was written from the previous run next to code that never ran
+    (3 of 16 real SIR quests)."""
+    eng = Engine(_mk_cfg(tmp_path, max_iter=3))
+    assert eng._route_after_execute_reflect({
+        "exec_result": {"returncode": 1},
+        "result_json": None,
+        "exec_reflect_iter": 3,
+        "exec_patch_pending": True,
+    }) == "retry"
+    assert eng._route_after_execute_reflect({
+        "exec_result": {"returncode": 1},
+        "result_json": None,
+        "exec_reflect_iter": 3,
+        "exec_patch_pending": False,
+    }) == "proceed"
+
+
+@pytest.mark.asyncio
+async def test_every_patch_runs_and_the_repair_loop_ends(tmp_path: Path) -> None:
+    """Drive the reflect node and the router together against a script that
+    keeps failing: each of the three patches is run once, and the loop stops
+    when the attempts are spent."""
+    max_iter = 3
+    eng = Engine(_mk_cfg(tmp_path, max_iter=max_iter))
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    chat_mock = AsyncMock(return_value=json.dumps({
+        "code": "raise SystemExit(1)\n", "deps": [],
+        "patch_summary": "another attempt", "give_up_reason": "",
+    }))
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+    failed = {"returncode": 1, "stdout_tail": "", "stderr_tail": "boom"}
+    state = {"exec_result": failed, "result_json": {}, "code": "boom", "design": {}}
+
+    runs = 1  # the implemented script has already run once and failed
+    for _ in range(20):
+        state.update(await eng._node_execute_reflect(state))
+        if eng._route_after_execute_reflect(state) == "proceed":
+            break
+        # What ``execute`` leaves behind after running the patched script.
+        state.update({"exec_result": failed, "result_json": {}, "exec_patch_pending": False})
+        runs += 1
+    else:
+        pytest.fail("the repair loop never ended")
+
+    assert chat_mock.await_count == max_iter
+    assert runs == 1 + max_iter, "a patch was written but never run"

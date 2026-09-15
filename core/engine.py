@@ -207,6 +207,11 @@ class QuestState(TypedDict, total=False):
     exec_reflect_iter: int
     exec_reflect_history: list[dict[str, Any]]
     exec_give_up_reason: str
+    # True from the moment the reflect node writes a patch until ``execute``
+    # runs it. The router runs a pending patch even when it used the last
+    # repair attempt; otherwise the paper is written from the run before it,
+    # next to code that never ran.
+    exec_patch_pending: bool
     # Set by the execute-repair loop when a script exits 0 but every
     # numeric metric is ~0 (a degenerate run) and the repair attempts
     # couldn't produce real numbers. analyze/write/review read this so a
@@ -1315,6 +1320,11 @@ class Engine:
         # past the budget.
         if state.get("exec_give_up_reason"):
             return "proceed"
+        # A patch nobody has run yet is run, the one that used the last
+        # attempt included. The reflect node writes no patch once the attempts
+        # are spent, so this cannot loop.
+        if state.get("exec_patch_pending"):
+            return "retry"
         iters = state.get("exec_reflect_iter", 0)
         if iters >= self.config.engine.exec_reflect_max_iterations:
             return "proceed"
@@ -4089,24 +4099,38 @@ class Engine:
         # survive. ``execute_reflect`` judges plausibility AFTER this node, so
         # replicating first meant every futile repair iteration cost three runs
         # instead of one -- measured on a real quest, where a diverging
-        # integrator tripped the gate three times over.
+        # integrator tripped the gate three times over. With no repair attempt
+        # left, though, nothing regenerates the result: it is the one the paper
+        # is written from, so it still gets its error bars.
         gate_violations = (
             _assertion_violations({**state, "result_json": result_json})
             if result.returncode == 0 and result_json is not None
             else []
         )
-        if gate_violations and replicates_n > 1:
+        repair_left = (
+            int(state.get("exec_reflect_iter", 0) or 0)
+            < self.config.engine.exec_reflect_max_iterations
+            and not state.get("exec_give_up_reason")
+        )
+        skip_replicates = bool(gate_violations) and repair_left
+        if skip_replicates and replicates_n > 1:
             self._log.info(
                 "[execute] skipping %d replicate(s): the primary result already "
                 "violates %d assertion(s), so execute_reflect is about to "
                 "regenerate it",
                 replicates_n - 1, len(gate_violations),
             )
+        elif gate_violations and replicates_n > 1:
+            self._log.info(
+                "[execute] the result violates %d assertion(s) and no repair "
+                "attempt is left, so it is the one written up; replicating it",
+                len(gate_violations),
+            )
         if (
             replicates_n > 1
             and result.returncode == 0
             and result_json is not None
-            and not gate_violations
+            and not skip_replicates
         ):
             self._log.info(
                 "[execute] replicating: %d additional seeds (1..%d)",
@@ -4186,6 +4210,7 @@ class Engine:
             "figures": figures,
             "figure_records": figure_records,
             "result_json": result_json or {},
+            "exec_patch_pending": False,
         }
         # Only populate ``result_json_replicates`` when replication
         # actually ran AND produced more than the primary entry. This
@@ -4453,6 +4478,7 @@ class Engine:
             "code": new_code,
             "exec_reflect_iter": iters + 1,
             "exec_reflect_history": history,
+            "exec_patch_pending": True,
         }
         # If the agent declared additional deps for the fix, merge them
         # so the next `execute` pip-installs them.
