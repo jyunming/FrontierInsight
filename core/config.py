@@ -844,8 +844,9 @@ class KnowledgeConfig(BaseModel):
     # gives its full free daily budget only to keyed requests; without a key
     # a machine gets about a tenth of it — roughly 100 searches a day, and a
     # quest uses dozens, since arXiv is searched through OpenAlex too. Env
-    # fallback ``OPENALEX_API_KEY``; a set env var wins over YAML. Sent as
-    # OpenAlex's ``api_key`` parameter and redacted from FI's logs.
+    # fallback ``OPENALEX_API_KEY``; a set env var wins over YAML. Sent in the
+    # ``Authorization`` header, never in the URL: httpx logs every request URL
+    # at INFO, so a key in the query string would land in the console output.
     openalex_api_key: str = Field(
         default_factory=lambda: os.environ.get("OPENALEX_API_KEY", "").strip()
     )

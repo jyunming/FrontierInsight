@@ -242,12 +242,16 @@ _ARXIV_ID_IN_TEXT_RE = re.compile(
 )
 
 
-def _openalex_params(params: dict, api_key: str = "") -> dict:
-    """Add the OpenAlex key when one is configured. OpenAlex has required a
-    key for its full free daily budget since February 2026; without one a
-    machine gets about a tenth of it (roughly 100 searches a day)."""
+def _openalex_headers(api_key: str = "") -> dict | None:
+    """The OpenAlex key, when one is configured, as an ``Authorization``
+    header. OpenAlex has required a key for its full free daily budget since
+    February 2026; without one a machine gets about a tenth of it (roughly 100
+    searches a day). It goes in a header rather than the ``api_key`` query
+    parameter OpenAlex also accepts: httpx logs every request URL at INFO, and
+    importing Axon turns INFO on for the whole process, so a key in the URL
+    ends up in the quest's console output."""
     key = (api_key or os.environ.get("OPENALEX_API_KEY", "")).strip()
-    return {**params, "api_key": key} if key else params
+    return {"Authorization": f"Bearer {key}"} if key else None
 
 
 # Which kinds of scholarly record a search keeps. A scholarly index holds far
@@ -319,12 +323,15 @@ def _arxiv_search(
     still fetched from arxiv.org by the full-text cascade."""
     if not query.strip():
         return []
-    params = _openalex_params({
+    params = {
         "search": query.strip(),
         "filter": f"primary_location.source.id:{_OPENALEX_ARXIV_SOURCE_ID}",
         "per-page": str(max(1, min(top_k, 25))),
-    }, api_key)
-    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="arxiv")
+    }
+    data = _http_get_json(
+        "https://api.openalex.org/works", params, timeout_s, source="arxiv",
+        headers=_openalex_headers(api_key),
+    )
     if not data or "results" not in data:
         return []
     out: list[RetrievedDoc] = []
@@ -357,12 +364,15 @@ def _openalex_search(
 ) -> list[RetrievedDoc]:
     if not query.strip():
         return []
-    params = _openalex_params({
+    params = {
         "search": query.strip(),
         "filter": "type:" + "|".join(_scope_types(_WORK_TYPES_OPENALEX, scope)),
         "per-page": str(max(1, min(top_k, 25))),
-    }, api_key)
-    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
+    }
+    data = _http_get_json(
+        "https://api.openalex.org/works", params, timeout_s, source="openalex",
+        headers=_openalex_headers(api_key),
+    )
     if not data or "results" not in data:
         return []
     return [_openalex_work_doc(w) for w in data.get("results", [])]
@@ -441,12 +451,15 @@ def _openalex_title_lookup(
     title = " ".join(str(work.get("title") or "").split())
     if len(_title_words(title)) < 2:
         return None
-    params = _openalex_params({
+    params = {
         "filter": f"title.search:{_openalex_filter_text(title)},type:{'|'.join(_FOUNDATIONAL_TYPES)}",
         "sort": "cited_by_count:desc",
         "per-page": "5",
-    }, api_key)
-    data = _http_get_json("https://api.openalex.org/works", params, timeout_s, source="openalex")
+    }
+    data = _http_get_json(
+        "https://api.openalex.org/works", params, timeout_s, source="openalex",
+        headers=_openalex_headers(api_key),
+    )
     try:
         year: int | None = int(work.get("year"))  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -479,9 +492,9 @@ def _openalex_cited_by_retrieved(
     if len(ids) < min_citing:
         return []
     url = "https://api.openalex.org/works"
-    data = _http_get_json(url, _openalex_params({
+    data = _http_get_json(url, {
         "filter": "openalex:" + "|".join(ids), "select": "id,referenced_works", "per-page": "50",
-    }, api_key), timeout_s, source="openalex")
+    }, timeout_s, source="openalex", headers=_openalex_headers(api_key))
     counts: dict[str, int] = {}
     for w in (data or {}).get("results") or []:
         cited = {m.group(1) for m in map(_OPENALEX_WORK_ID_RE.search, map(str, w.get("referenced_works") or [])) if m}
@@ -491,9 +504,9 @@ def _openalex_cited_by_retrieved(
     if not top:
         return []
     time.sleep(_OPENALEX_GAP_S)
-    data = _http_get_json(url, _openalex_params({
+    data = _http_get_json(url, {
         "filter": "openalex:" + "|".join(top), "per-page": str(len(top)),
-    }, api_key), timeout_s, source="openalex")
+    }, timeout_s, source="openalex", headers=_openalex_headers(api_key))
     works: dict[str, dict] = {}
     for w in (data or {}).get("results") or []:
         m = _OPENALEX_WORK_ID_RE.search(str(w.get("id") or ""))

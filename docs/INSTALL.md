@@ -226,9 +226,10 @@ export SEMANTIC_SCHOLAR_API_KEY=...your-key...
 Or in `.env` at the repo root, or per quest in YAML
 (`knowledge.openalex_api_key`, `knowledge.semantic_scholar_api_key`). An
 environment variable wins over YAML. Prefer the environment or `.env`: a key
-written into a quest YAML is copied into that quest's `config.yaml`. FI
-redacts keys from its own logs, and a rate-limited source shows up in the
-quest's source failure report (`.fi/source_failures.json`).
+written into a quest YAML is copied into that quest's `config.yaml`. Both
+keys travel in request headers, never in a URL, so they stay out of the
+request lines a quest logs; a rate-limited source shows up in the quest's
+source failure report (`.fi/source_failures.json`).
 
 **CORE, OpenAIRE and DOAJ** — the open-access sources FI uses for humanities
 and social-science topics — need no key. A free CORE key
