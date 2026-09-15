@@ -350,6 +350,14 @@ try:
                 "drawstyle": line.get_drawstyle(),
             }
 
+        def _fi_draws(artist):
+            # A collection with no paths draws nothing: seaborn leaves an empty
+            # confidence band per line when each x holds one observation.
+            try:
+                return not hasattr(artist, "get_paths") or bool(len(artist.get_paths()))
+            except Exception:
+                return True
+
         def _fi_panel(ax):
             try:
                 names = _fi_legend_names(ax, list(ax.get_lines()) + list(ax.collections))
@@ -370,7 +378,7 @@ try:
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
                 "legend": ax.get_legend() is not None,
                 # Only lines, on default ticks: what a redraw can reproduce.
-                "line_only": bool(lines) and not any(len(group) for group in others)
+                "line_only": bool(lines) and not any(_fi_draws(artist) for group in others for artist in group)
                 and formatters <= _FI_DEFAULT_FORMATTERS
                 and all(line["kind"] != "other" and line["x"] is not None for line in lines),
                 "lines": lines,
