@@ -127,6 +127,47 @@ building this: `antigravity_cli` rejected `gemini-2.5-flash` outright
 model-list command before setting a cheap-tier override, rather than
 copying a model name from elsewhere.
 
+## Reasoning effort
+
+`provider.reasoning_effort` sets how hard the model reasons before it
+answers. Leave it unset (the default) and FI sends nothing, so each
+provider keeps its own default: a CLI uses its own config (for example
+`model_reasoning_effort` in `~/.codex/config.toml`), and a local Ollama
+model does not think at all. Set it in the YAML, or from the interview's
+"Show advanced" screen ("Reasoning effort") on the CLI, the web
+`/interview` page or `@fi /new`.
+
+```yaml
+provider:
+  name: ollama
+  model: gemma4:31b-cloud
+  reasoning_effort: high        # minimal | low | medium | high | xhigh | max
+```
+
+| `provider.name` | How the level is sent | Levels applied |
+|---|---|---|
+| `openai`, `codex`, `gemini`, `vllm` | `reasoning_effort` in the chat-completions body | all six, as-is; the model decides which it supports |
+| `ollama` | `reasoning_effort` in the chat-completions body | `low`, `medium`, `high` — Ollama answers any other level with a 400 |
+| `claude_cli` | `claude --effort <level>` | `low`, `medium`, `high`, `xhigh`, `max` |
+| `codex_cli` | `codex exec -c model_reasoning_effort="<level>"` | all six; the model decides which it supports |
+| `antigravity_cli` | `agy --effort <level>` | `low`, `medium`, `high` |
+| `copilot_cli`, `gemini_cli`, `vscode_extension`, `claude_code`, `github_copilot_cli`, `github_copilot_vscode` | not sent — no setting FI can pass | none |
+
+When a level cannot be applied — the provider has no such setting, or does
+not accept that level — FI leaves it out and the quest log says so once,
+for example `reasoning_effort=max is not applied on ollama: its server
+accepts low, medium, high ...`. The call then runs at the provider's
+default instead of failing. A value outside the six levels is rejected when
+the config loads. Fallback providers (`provider.fallback`) inherit the level
+and follow the same rules.
+
+Measured on `gemma4:31b-cloud` through a local Ollama 0.17.7, one short
+arithmetic question sent through FI's client: unset gave 6 completion
+tokens and no reasoning text; `high` gave 229 completion tokens and 453
+characters of reasoning text, with the same answer. The token log
+(`.fi/cost.jsonl`) records those completion tokens, so a higher level costs
+more tokens per call.
+
 ## Cost expectations
 
 Measured premium-request burn per quest (each is one LLM call against

@@ -72,6 +72,23 @@ def test_vscode_emitter_writes_the_author_line_and_poster_size(tmp_path: Path) -
     assert cfg.output.poster_size == "landscape_48x36"
 
 
+def test_vscode_emitter_writes_reasoning_effort_only_when_set(tmp_path: Path) -> None:
+    yaml_text, cfg = _emit(tmp_path, reasoning_effort="high")
+    assert 'reasoning_effort: "high"' in yaml_text
+    assert cfg.provider.reasoning_effort == "high"
+    yaml_text, cfg = _emit(tmp_path, reasoning_effort="default")
+    assert "reasoning_effort:" not in yaml_text
+    assert cfg.provider.reasoning_effort is None
+
+
+def test_vscode_interview_offers_reasoning_effort_as_an_advanced_field() -> None:
+    """The advanced-field picker in interview.ts must list the field; the
+    answer type alone would leave it unreachable from @fi /new."""
+    ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
+    assert '{ label: "Reasoning effort", value: "reasoning_effort" }' in ts
+    assert 'which.value === "reasoning_effort"' in ts
+
+
 def test_vscode_emitter_leaves_an_unset_author_line_out(tmp_path: Path) -> None:
     yaml_text, cfg = _emit(tmp_path, author="", poster_size="a1_portrait")
     for key in ("author:", "affiliation:", "contact_email:", "url:", "poster_size:"):

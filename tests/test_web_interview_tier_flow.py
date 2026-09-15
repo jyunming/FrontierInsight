@@ -236,6 +236,74 @@ def test_submit_rejects_a_bad_author_line_or_poster_size(tmp_path, bad) -> None:
     assert r.status_code == 400, r.text
 
 
+def test_derive_tier3_seeds_reasoning_effort_default(html: str) -> None:
+    """The review screen's advanced block starts Reasoning effort at the
+    question default, so an untouched form writes nothing."""
+    assert "reasoning_effort: 'default'" in html
+
+
+def test_schema_offers_reasoning_effort_on_the_web_review_screen(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+
+    from core.config import REASONING_EFFORT_LEVELS
+    from web.server import make_app
+
+    client = TestClient(make_app(tmp_path))
+    questions = client.get("/api/interview/schema").json()["questions"]
+    q = next(q for q in questions if q["id"] == "reasoning_effort")
+    assert "serve" in q["frontends"] and "vscode" in q["frontends"] and "cli" in q["frontends"]
+    assert (q["tier"], q["kind"], q["default"]) == (3, "single", "default")
+    assert [c["value"] for c in q["choices"]] == ["default", *REASONING_EFFORT_LEVELS]
+
+
+def test_submit_writes_reasoning_effort_and_rejects_an_unknown_level(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from core.config import Config
+    from web.server import make_app
+
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/interview/submit", json=_author_payload(reasoning_effort="high"))
+    assert r.status_code == 200, r.text
+    assert Config.from_yaml(Path(r.json()["yaml_path"])).provider.reasoning_effort == "high"
+
+    r = client.post("/api/interview/submit", json=_author_payload(
+        title="authors-default", reasoning_effort="default",
+    ))
+    assert r.status_code == 200, r.text
+    text = Path(r.json()["yaml_path"]).read_text(encoding="utf-8")
+    assert "reasoning_effort:" not in text
+
+    r = client.post("/api/interview/submit", json=_author_payload(reasoning_effort="extreme"))
+    assert r.status_code == 400, r.text
+
+
+def test_update_form_answers_carry_the_saved_reasoning_effort(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """/update/<id> seeds its fields from GET /api/quests/<id>/answers; if the
+    saved level were missing there, the form would show "default" and a submit
+    would drop the key from the quest's YAML."""
+    from fastapi.testclient import TestClient
+
+    from core.interview import InterviewAnswers, answers_to_yaml
+    from web.server import make_app
+
+    quest = tmp_path / "effort-quest"
+    quest.mkdir()
+    answers = InterviewAnswers(
+        topic="t", title="effort-quest", output_kinds=["paper_md"],
+        paper_format="generic", no_simulation=False, study_depth="journal-length",
+        comparative_baseline="", success_metric="", budget="",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False,
+        provider="ollama", reasoning_effort="high",
+    )
+    (quest / "config.yaml").write_text(answers_to_yaml(answers, frontend="cli"), encoding="utf-8")
+    r = TestClient(make_app(tmp_path)).get("/api/quests/effort-quest/answers")
+    assert r.status_code == 200, r.text
+    assert r.json()["reasoning_effort"] == "high"
+
+
 def test_submit_rejects_vscode_extension_without_bridge_port(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """User-reported question: 'is it possible that i launch --serve
     but call vscode_extension?'. Yes — but only when a live bridge is

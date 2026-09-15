@@ -499,6 +499,20 @@ path honours exact picks from the dashboard's live model dropdown
 lists every available `id|family` pair from your subscription so the
 next mismatch is self-diagnosing — no need to attach a debugger.
 
+## Reasoning effort
+
+The interview's advanced list (`@fi /new` → review screen → advanced
+fields) has a **Reasoning effort** field that writes
+`provider.reasoning_effort`: `minimal`, `low`, `medium`, `high`, `xhigh`
+or `max`; "Provider default" writes nothing. `vscode.lm` has no
+reasoning-effort setting, so on the `vscode_extension` provider the level
+is not sent and the quest log says so once — the Copilot model runs at its
+own default. The level takes effect when the quest YAML names a provider
+that has such a setting (`ollama`, `openai`, `gemini`, `vllm`, `codex_cli`,
+`claude_cli` or `antigravity_cli`), for example a YAML you edit and start
+with `@fi /start <path>`. `docs/PROVIDERS.md` ("Reasoning effort") lists
+which levels each provider takes.
+
 ## Cost & rate-limit reality
 
 Every LLM call counts against your **normal Copilot premium-request

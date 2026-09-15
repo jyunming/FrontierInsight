@@ -226,6 +226,9 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         contact_email=str(output.get("contact_email") or ""),
         url=str(output.get("url") or ""),
         poster_size=str(output.get("poster_size") or "a1_portrait"),
+        reasoning_effort=(
+            str(provider.get("reasoning_effort") or "").strip().lower() or "default"
+        ),
     )
     return answers, yaml_path, raw
 
@@ -298,6 +301,9 @@ def rewrite_yaml_with_new_answers(
         ("topic",), ("title",),
         ("provider", "name"), ("provider", "model"),
         ("provider", "node_ensemble"),
+        # The emitter leaves "default" out, so a cleared level must not merge
+        # back from the old YAML.
+        ("provider", "reasoning_effort"),
         ("engine", "no_simulation"),
         ("engine", "review_panel"), ("engine", "clarify_overrides"),
         ("engine", "max_iterations"),
@@ -560,6 +566,9 @@ async def run_update_flow(
         contact_email=str(new_partial.get("contact_email", current.contact_email) or ""),
         url=str(new_partial.get("url", current.url) or ""),
         poster_size=str(new_partial.get("poster_size", current.poster_size) or "a1_portrait"),
+        reasoning_effort=str(
+            new_partial.get("reasoning_effort", current.reasoning_effort) or "default"
+        ),
     )
 
     changes = diff_answers(current, new)

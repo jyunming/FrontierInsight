@@ -171,6 +171,38 @@ def test_update_keeps_the_author_line_and_clearing_a_field_removes_it(tmp_path: 
     )
 
 
+def test_reasoning_effort_reaches_the_provider_config_and_default_writes_nothing(tmp_path: Path):
+    ans = _full_answers()
+    ans.reasoning_effort = "high"
+    assert 'reasoning_effort: "high"' in answers_to_yaml(ans, frontend="cli")
+    assert _load(tmp_path, ans).provider.reasoning_effort == "high"
+    ans.reasoning_effort = "default"
+    assert "reasoning_effort:" not in answers_to_yaml(ans, frontend="cli")
+    assert _load(tmp_path, ans).provider.reasoning_effort is None
+
+
+def test_update_keeps_reasoning_effort_and_resetting_to_default_removes_it(tmp_path: Path):
+    """--update loads the level from the quest's YAML; setting it back to
+    "default" must drop the key rather than merge the old level back."""
+    from dataclasses import replace
+
+    from core.interview_update import load_current_answers, rewrite_yaml_with_new_answers
+
+    quest = tmp_path / "quest"
+    quest.mkdir()
+    ans = _full_answers()
+    ans.reasoning_effort = "xhigh"
+    (quest / "config.yaml").write_text(answers_to_yaml(ans, frontend="cli"), encoding="utf-8")
+
+    current, _yaml_path, raw = load_current_answers(quest)
+    assert current.reasoning_effort == "xhigh"
+    (quest / "config.yaml").write_text(
+        rewrite_yaml_with_new_answers(raw, replace(current, reasoning_effort="default")),
+        encoding="utf-8",
+    )
+    assert Config.from_yaml(quest / "config.yaml").provider.reasoning_effort is None
+
+
 def test_output_config_keeps_each_author_field_on_one_line():
     cfg = Config(topic="t", output={"author": "Jane\n  Chen", "affiliation": None})
     assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "")

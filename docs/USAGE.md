@@ -164,6 +164,7 @@ provider:
   model: gpt-5                     # global default
   base_url: null                   # only for HTTP-direct overrides (OpenAI-compatible proxies, local gateways). Honored by openai/codex/gemini/ollama/vllm transports.
   api_key_env: null                # override the standard env-var name (e.g. CORP_OPENAI_KEY). When null, the provider uses its conventional name (OPENAI_API_KEY, GEMINI_API_KEY, …).
+  reasoning_effort: null           # minimal | low | medium | high | xhigh | max. Unset (null) sends nothing, so each provider keeps its own default. Sent as `reasoning_effort` (HTTP), `--effort` (claude_cli, antigravity_cli) or `model_reasoning_effort` (codex_cli); a level a provider cannot take is left out with one warning. See PROVIDERS.md, "Reasoning effort".
   extra: {}                        # forward-compat transport bag. Currently only ``bridge_port`` is consumed (``vscode_extension`` transport, set automatically by ``launch.py``). Other keys parse fine but no transport reads them today — don't rely on stashing CLI flags or HTTP headers here.
   # Per-node override (optional). Match keys exactly to engine node
   # names. Reviewer-panel personas are routed via
@@ -725,6 +726,17 @@ provider:
   node_models:
     write:  claude-3-5-sonnet
     review: gpt-5
+```
+
+### Let a local model think
+
+Ollama models answer without reasoning unless the request asks for it:
+
+```yaml
+provider:
+  name: ollama
+  model: gemma4:31b-cloud
+  reasoning_effort: high          # Ollama takes low | medium | high
 ```
 
 ### Interactive scoping
