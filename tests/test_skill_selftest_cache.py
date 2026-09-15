@@ -216,12 +216,19 @@ def test_a_failing_selftest_is_never_cached(
 def test_a_timed_out_selftest_is_never_cached(
     tmp_path: Path, ledger: Path, cache_file: Path, runs: list[str], monkeypatch,
 ) -> None:
-    monkeypatch.setattr(registry, "SELFTEST_TIMEOUT_S", 1)
+    # run_selftest never allows less than 20 s by itself, so hand the real
+    # function a short ceiling rather than waiting that out twice.
+    counted = registry.run_selftest
+    monkeypatch.setattr(
+        registry, "run_selftest",
+        lambda skill, **kw: counted(skill, **{**kw, "timeout_s": 2}),
+    )
     root = tmp_path / "skills"
     make_skill(root, "slow", selftest="import time; time.sleep(30)", approve_in=ledger)
     for _ in range(2):
         _, rejected = loadable_skills(["slow"], skills_dir=root, ledger=ledger)
         assert rejected[0].status is Status.QUARANTINED
+        assert rejected[0].selftest_output.startswith("selftest timed out")
     assert runs == ["slow", "slow"]
     assert not cache_file.exists() or not json.loads(cache_file.read_text("utf-8"))["entries"]
 
