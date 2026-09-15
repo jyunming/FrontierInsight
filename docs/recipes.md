@@ -374,6 +374,7 @@ knowledge:
   web_search_top_k: 10
   web_fetch_pages: true          # fetch full page text, not just snippets
   literature_excerpt_chars: 4000 # relevant chars of each source put into a prompt
+  design_literature_excerpt_chars: 800 # the same, for the design prompt only
   passage_ranking: auto          # hybrid semantic+lexical when a model loads, else lexical
   relevance_guard: true          # drop confident-but-off-topic hits; pause if nothing fits
   # brave_api_key: BSA...        # or set the BRAVE_API_KEY env var instead

@@ -1016,6 +1016,10 @@ class KnowledgeConfig(BaseModel):
     # not just the abstract. The full text always lands on disk under
     # ``data/literature/`` regardless of this budget.
     literature_excerpt_chars: int = Field(default=4000, ge=500)
+    # The same budget for the ``design`` prompt only. Design needs what each
+    # source found, not the passages carrying its numbers; analyze and write,
+    # which quote those numbers, keep ``literature_excerpt_chars``.
+    design_literature_excerpt_chars: int = Field(default=800, ge=200)
     # How prompt excerpts are ranked against the quest question:
     #   "auto"    — hybrid when a sentence-transformer model loads, else
     #               lexical (default; skips the model under FI_OFFLINE),

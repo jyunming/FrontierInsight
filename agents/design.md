@@ -6,13 +6,15 @@ default experiment design described here — follow it instead.**
 Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under the wall-time limit given in the Inputs section, on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`.
 
 **If the Inputs section lists skills, design the experiment around them.** Each
-skill is marked `library` or `tool`. A **library** skill is tested code for work
-you would otherwise re-derive — prefer calling its functions, and let its range
-assertions cover the quantities it computes. A **tool** skill is external
-software FI drives: plan the invocations it records rather than reimplementing
-what it does. Either way, name the skill in `method`. Design freely when no
-skill covers the topic; a skill used outside its stated scope is worse than
-none, so read its "when NOT to use" section before reaching for one.
+skill is marked `library` or `tool`, with what it is for, where it does not
+apply, and why it was selected. A **library** skill is tested code for work
+you would otherwise re-derive — plan to call it, and let its range assertions
+cover the quantities it computes. A **tool** skill is external software FI
+drives: plan to run it rather than reimplementing what it does. Either way,
+name the skill in `method`; the implementation step receives its full
+instructions and API. Design freely when no skill covers the topic; a skill
+used outside its stated scope is worse than none, so read its `NOT for:` line
+before reaching for one.
 
 **Adapt scope to topic_shape (read from the clarifications block in the Inputs section):**
 

@@ -147,6 +147,66 @@ def test_a_tool_skill_is_not_told_to_import_itself(
     assert "import it and call its functions" not in block
 
 
+def test_design_gets_a_summary_not_the_full_instructions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Design decides which skill a method rests on; the implementation
+    stages write the calls. So design gets each selected skill's
+    description, scope limit and reason, and not its instructions or API —
+    which on a real quest were two thirds of design's prompt."""
+    import core.skills.registry as reg
+    from core.skills import Skill
+
+    root = tmp_path / "skills"
+    d = root / "sirlib"
+    d.mkdir(parents=True)
+    (d / SKILL_MD).write_text(textwrap.dedent("""\
+        ---
+        name: sirlib
+        description: Integrate SIR epidemic models and estimate outbreak size.
+        ---
+        # sirlib
+
+        ## When NOT to use
+        - Network models with heterogeneous contact structure.
+
+        ## Usage
+        SENTINEL_INSTRUCTION_BODY: call sirlib.run with beta and gamma.
+        """), encoding="utf-8")
+    (d / "api_surface.md").write_text(
+        "sirlib.run(beta: float, gamma: float) -> dict\n", encoding="utf-8")
+    (d / "selftest.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+    ledger = tmp_path / "l.json"
+    approval.approve(
+        "sirlib", Skill(name="sirlib", path=d).content_hash(),
+        approved_by="tester", path=ledger,
+    )
+    real = reg.loadable_skills
+    monkeypatch.setattr(
+        reg, "loadable_skills",
+        lambda names, **kw: real(names, skills_dir=root, ledger=ledger),
+    )
+    monkeypatch.setattr("core.skills.loadable_skills", reg.loadable_skills)
+
+    eng = _engine(["sirlib"], root, ledger)
+    state = _state("sirlib", reasons={"sirlib": "the quest integrates an SIR model"})
+    summary = Engine._skills_summary_block(eng, state)  # type: ignore[arg-type]
+    assert ("**sirlib** (library): Integrate SIR epidemic models and "
+            "estimate outbreak size.") in summary
+    assert "NOT for: Network models with heterogeneous contact structure." in summary
+    assert "Selected because: the quest integrates an SIR model" in summary
+    assert "SENTINEL_INSTRUCTION_BODY" not in summary
+    assert "sirlib.run(beta" not in summary
+    # The implementation stages still get all of it.
+    full = Engine._skills_block(eng, state)  # type: ignore[arg-type]
+    assert "SENTINEL_INSTRUCTION_BODY" in full and "sirlib.run(beta" in full
+
+
+def test_untrusted_skill_never_reaches_the_design_summary(patched, skill_dir) -> None:
+    eng = _engine(["demo"], skill_dir.parent, patched)
+    assert Engine._skills_summary_block(eng, _state("demo")) == ""  # type: ignore[arg-type]
+
+
 def test_nothing_selected_is_empty_not_an_error(patched, skill_dir) -> None:
     """An empty selection is a correct and common answer."""
     eng = _engine([], skill_dir.parent, patched)

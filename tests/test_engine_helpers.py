@@ -576,19 +576,24 @@ async def test_evidence_gate_broaden_is_bounded(
 ) -> None:
     """A 'broaden' verdict re-enters literature at most
     evidence_gate_max_broaden (default 1) times, then proceeds to write
-    even though the verdict is still 'broaden' — it can't spin."""
+    even though the verdict is still 'broaden' — it can't spin. One source,
+    so the model answers rather than the no-source rule."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
 
     async def fake_chat(prompt, node=None):  # noqa: ANN001
         return '{"verdict": "broaden", "rationale": "thin", "gaps": ["more data"]}'
 
     monkeypatch.setattr(engine, "_chat", fake_chat)
+    one = [{"content": "one source"}]
     # Budget available → broaden, bump the counter.
-    p1 = await engine._node_evidence_gate({"topic": "t", "evidence_broaden_count": 0})
+    p1 = await engine._node_evidence_gate(
+        {"topic": "t", "literature": one, "evidence_broaden_count": 0})
     assert p1["evidence_assessment"]["route"] == "broaden_lit"
+    assert p1["evidence_assessment"]["decided_by"] == "model"
     assert p1["evidence_broaden_count"] == 1
     # Budget exhausted → write despite the same verdict; counter not bumped.
-    p2 = await engine._node_evidence_gate({"topic": "t", "evidence_broaden_count": 1})
+    p2 = await engine._node_evidence_gate(
+        {"topic": "t", "literature": one, "evidence_broaden_count": 1})
     assert p2["evidence_assessment"]["route"] == "write"
     assert "evidence_broaden_count" not in p2
 
@@ -652,6 +657,8 @@ async def test_evidence_gate_counts_cross_check_buckets(
     monkeypatch.setattr(engine, "_chat", fake_chat)
     state = {
         "topic": "EUV stochastics",
+        # One source, so the model is asked rather than the no-source rule.
+        "literature": [{"content": "one source", "metadata": {"title": "S"}}],
         "analysis": {"key_findings": ["f1", "f2", "f3"]},
         "cross_check": [
             {"finding": "f1", "supporting": [{"title": "A"}],
@@ -727,6 +734,67 @@ async def test_evidence_gate_fails_open_on_malformed_state(
     # The typed protocol is always recorded (built defensively before the
     # fail-open guard), even on malformed state.
     assert "research_protocol" in patch
+
+
+def _gate_sources(n: int) -> list[dict]:
+    return [{"content": f"source {i}", "metadata": {"title": f"S{i}"}} for i in range(n)]
+
+
+_ONE_SUPPORTED = [{"finding": "f1", "supporting": [{"title": "A"}],
+                   "conflicting": [], "neutral": []}]
+
+
+@pytest.mark.parametrize(
+    ("state", "analyze_local_first", "asked", "verdict"),
+    [
+        # A simulation with no source: broaden, without asking.
+        ({"literature": []}, False, False, "broaden"),
+        # 15 sources and a supported finding: sufficient, without asking.
+        ({"literature": _gate_sources(15), "cross_check": _ONE_SUPPORTED},
+         False, False, "sufficient"),
+        # One source short, or nothing supported: the model decides.
+        ({"literature": _gate_sources(14), "cross_check": _ONE_SUPPORTED},
+         False, True, "insufficient"),
+        ({"literature": _gate_sources(15)}, False, True, "insufficient"),
+        # The rules come from simulation quests only. User data, a survey
+        # and --analyze (no literature step) are always asked.
+        ({"literature": [], "no_simulation_resolved": True},
+         False, True, "insufficient"),
+        ({"literature": [], "clarify_answers": {"topic_shape": "survey"}},
+         False, True, "insufficient"),
+        ({"literature": []}, True, True, "insufficient"),
+    ],
+    ids=["no-source", "15-supported", "14-supported", "15-unsupported",
+         "user-data", "survey", "analyze-local-first"],
+)
+async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    state: dict, analyze_local_first: bool, asked: bool, verdict: str,
+) -> None:
+    """Over 68 gate calls the model always broadened a simulation with no
+    source and always passed one with 15+ sources and a supported finding;
+    between those it gave different answers to identical counts. So the two
+    settled cases are decided by the counts, and everything else still asks
+    — which is also what keeps a quest with user data, where no literature
+    is normal, from being sent back to search."""
+    cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
+    cfg.engine.analyze_local_first = analyze_local_first
+    engine = Engine(cfg)
+    calls: list[str] = []
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        calls.append(node)
+        return '{"verdict": "insufficient", "rationale": "asked"}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    patch = await engine._node_evidence_gate({"topic": "t", **state})
+    ev = patch["evidence_assessment"]
+    assert calls == (["evidence_gate"] if asked else [])
+    assert ev["verdict"] == verdict
+    assert ev["decided_by"] == ("model" if asked else "rule")
+    if not asked:
+        # A rule-decided broaden still reaches the writer's evidence note.
+        assert ev["rationale"]
     assert patch["research_protocol"]["topic_type"]
 
 
