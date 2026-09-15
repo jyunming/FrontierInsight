@@ -759,6 +759,59 @@
       "tier": 3
     },
     {
+      "id": "reasoning_effort",
+      "label": "Reasoning effort",
+      "prompt": "How hard the model reasons before it answers. 'default' sends nothing, so each provider keeps its own default (a local Ollama model then does not think at all). A level is sent as reasoning_effort to HTTP providers (Ollama takes low/medium/high), as --effort to claude_cli and antigravity_cli, and as model_reasoning_effort to codex_cli. copilot_cli, gemini_cli, the VS Code bridge and the proxy providers have no such setting: the level is not sent and the quest log says so once.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "default",
+          "label": "Provider default (not set)",
+          "description": "Sends nothing: each provider keeps its own default. A local Ollama model then does not think at all."
+        },
+        {
+          "value": "minimal",
+          "label": "minimal",
+          "description": "Not accepted by Ollama, claude_cli or antigravity_cli; skipped there with a warning."
+        },
+        {
+          "value": "low",
+          "label": "low",
+          "description": "Accepted by every provider FI can set it on."
+        },
+        {
+          "value": "medium",
+          "label": "medium",
+          "description": "Accepted by every provider FI can set it on."
+        },
+        {
+          "value": "high",
+          "label": "high",
+          "description": "Accepted by every provider FI can set it on."
+        },
+        {
+          "value": "xhigh",
+          "label": "xhigh",
+          "description": "Not accepted by Ollama or antigravity_cli; skipped there with a warning."
+        },
+        {
+          "value": "max",
+          "label": "max",
+          "description": "Not accepted by Ollama or antigravity_cli; skipped there with a warning."
+        }
+      ],
+      "placeholder": "",
+      "default": "default",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "author",
       "label": "Author (optional)",
       "prompt": "Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
@@ -1219,6 +1272,7 @@
     "paper_style",
     "pause_for_user_input",
     "poster_size",
+    "reasoning_effort",
     "review_panel",
     "study_depth",
     "success_metric",
@@ -1286,6 +1340,7 @@
     "affiliation": [],
     "contact_email": [],
     "url": [],
-    "poster_size": []
+    "poster_size": [],
+    "reasoning_effort": []
   }
 }

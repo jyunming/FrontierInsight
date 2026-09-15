@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -37,6 +37,12 @@ ProviderName = Literal[
     # with this provider preset.
     "vscode_extension",
 ]
+# Levels ``provider.reasoning_effort`` accepts. Each transport maps the level
+# onto its own setting (a request-body field, a CLI flag) and skips, with a
+# one-time warning, the levels or providers it cannot express — see
+# ``core.provider``.
+ReasoningEffort = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
+REASONING_EFFORT_LEVELS: tuple[str, ...] = get_args(ReasoningEffort)
 EngineFramework = Literal["langgraph"]
 SandboxKind = Literal["venv", "docker"]
 # Five scientific venues + four non-scientific prose formats. The
@@ -110,6 +116,24 @@ class ProviderConfig(BaseModel):
     # after repeated failures — or one auth/quota error — it is skipped
     # for the rest of the run. See ``core.provider.FallbackLLMClient``.
     fallback: list[ProviderName] = Field(default_factory=list)
+    # How hard the model should reason before answering. Unset (default)
+    # sends nothing, so every provider keeps its own default — for a CLI
+    # that is whatever its own config says (``~/.codex/config.toml`` for
+    # codex), for Ollama it is no thinking at all. When set:
+    #
+    # - HTTP providers (openai/codex/gemini/ollama/vllm): ``reasoning_effort``
+    #   in the chat-completions body. Ollama accepts only low/medium/high
+    #   and answers anything else with a 400, so those levels are skipped
+    #   there with a warning.
+    # - claude_cli: ``--effort`` (low/medium/high/xhigh/max).
+    # - codex_cli: ``-c model_reasoning_effort="<level>"``.
+    # - antigravity_cli: ``--effort`` (low/medium/high).
+    # - copilot_cli, gemini_cli, vscode_extension and the proxy providers
+    #   have no setting FI can pass; the level is not sent and a warning
+    #   says so once.
+    #
+    # A fallback provider inherits the level and applies the same rules.
+    reasoning_effort: ReasoningEffort | None = None
     # Wall-clock budget (seconds) for a single chat call on transports
     # that lack a built-in per-request deadline. Applies to:
     #
@@ -273,6 +297,26 @@ class ProviderConfig(BaseModel):
     # call against ``model`` / ``node_models[node]`` (today's behavior
     # — no regression for quests without ensemble configured).
     node_ensemble: dict[str, "NodeEnsembleConfig"] | None = None
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalise_reasoning_effort(cls, v: object) -> object:
+        """Accept a level in any case with surrounding spaces, treat a blank
+        string as unset, and reject anything else with the list of levels —
+        a typo must fail at load, not silently run at the provider default."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            level = v.strip().lower()
+            if not level:
+                return None
+            if level in REASONING_EFFORT_LEVELS:
+                return level
+        raise ValueError(
+            "provider.reasoning_effort must be one of "
+            + ", ".join(REASONING_EFFORT_LEVELS)
+            + f", or left unset; got {v!r}"
+        )
 
     @model_validator(mode="after")
     def _check_node_ensemble_node_specific_constraints(self) -> "ProviderConfig":

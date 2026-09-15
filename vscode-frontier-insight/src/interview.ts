@@ -338,6 +338,7 @@ export async function runInterview(
         success_metric: "",
         budget: "",
         node_models: "",
+        reasoning_effort: "default",
         provider_model: "",
         max_iterations: 2,
         audience: "external",
@@ -441,6 +442,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     const ext = a.knowledge_external_top_k;
     const hasOverride = (
         a.comparative_baseline || a.success_metric || a.budget || a.node_models
+        || (a.reasoning_effort !== undefined && a.reasoning_effort !== "default")
         || (ext !== undefined && ext !== 20)
         || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
     );
@@ -450,6 +452,9 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         if (a.success_metric) lines.push(`  • metric: ${a.success_metric}`);
         if (a.budget) lines.push(`  • budget: ${a.budget}`);
         if (a.node_models) lines.push(`  • per-node models: ${a.node_models}`);
+        if (a.reasoning_effort !== undefined && a.reasoning_effort !== "default") {
+            lines.push(`  • reasoning effort: ${a.reasoning_effort}`);
+        }
         if (ext !== undefined && ext !== 20) lines.push(`  • external_top_k (web): ${ext}`);
         if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") {
             lines.push(`  • poster size: ${a.poster_size}`);
@@ -701,10 +706,30 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "Per-node model overrides", value: "node_models" },
             { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
             { label: "Poster size", value: "poster_size" },
+            { label: "Reasoning effort", value: "reasoning_effort" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "reasoning_effort") {
+        // Written to provider.reasoning_effort. The VS Code bridge (vscode.lm)
+        // has no such setting, so the level takes effect only once this YAML's
+        // provider is one that has one — say so here, not only in the log.
+        const levels = ["default", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+        const v = await vscode.window.showQuickPick(
+            levels.map((level) => ({
+                label: level === "default" ? "Provider default (not set)" : level,
+                value: level,
+            })),
+            {
+                title: "Reasoning effort",
+                placeHolder: "Applies on ollama, openai, codex_cli, claude_cli and antigravity_cli; the VS Code bridge has no such setting",
+                ignoreFocusOut: true,
+            },
+        );
+        if (v) a.reasoning_effort = v.value;
+        return;
+    }
     if (which.value === "poster_size") {
         const v = await vscode.window.showQuickPick(
             [

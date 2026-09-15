@@ -202,6 +202,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "paper_style",
         "poster_size",
         "node_models",
+        "reasoning_effort",
     }
 
 

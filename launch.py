@@ -2816,6 +2816,7 @@ async def _run_new(
         contact_email=" ".join(str(partial.get("contact_email") or "").split()),
         url=" ".join(str(partial.get("url") or "").split()),
         poster_size=str(advanced.get("poster_size") or "a1_portrait"),
+        reasoning_effort=str(advanced.get("reasoning_effort") or "default"),
     )
 
     yaml_text = answers_to_yaml(answers, frontend="cli")

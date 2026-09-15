@@ -314,6 +314,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             contact_email=new_answers.contact_email,
             url=new_answers.url,
             poster_size=new_answers.poster_size,
+            reasoning_effort=new_answers.reasoning_effort,
         )
         changes = diff_answers(current, new)
         stages = compute_invalidated_stages(changes)
@@ -473,6 +474,16 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
             "poster_size must be 'a1_portrait', 'a0_portrait' or "
             f"'landscape_48x36'; got {poster_size!r}"
         )
+    # provider.reasoning_effort: "default" (or a missing / blank value from an
+    # older client) writes nothing; anything else must be a known level.
+    from core.config import REASONING_EFFORT_LEVELS
+
+    reasoning_effort = body.get("reasoning_effort") or "default"
+    if reasoning_effort != "default" and reasoning_effort not in REASONING_EFFORT_LEVELS:
+        raise ValueError(
+            "reasoning_effort must be 'default' or one of "
+            + ", ".join(REASONING_EFFORT_LEVELS) + f"; got {reasoning_effort!r}"
+        )
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -501,4 +512,5 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         max_iterations=max_iterations,
         **author_line,
         poster_size=poster_size,
+        reasoning_effort=reasoning_effort,
     )

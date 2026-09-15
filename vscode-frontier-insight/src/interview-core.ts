@@ -93,6 +93,10 @@ export interface InterviewAnswers {
     // provider.node_models at YAML emit time. Empty (default) emits
     // nothing. Must stay in sync with core/interview.py:InterviewAnswers.
     node_models?: string;
+    // provider.reasoning_effort. "default" (the default) writes nothing; a
+    // level is emitted under provider:. Must stay in sync with
+    // core/interview.py:InterviewAnswers.reasoning_effort.
+    reasoning_effort?: "default" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     // Author line printed on the paper, slides and poster. All optional;
     // each is emitted under output: only when set. Must stay in sync with
     // core/interview.py:InterviewAnswers.
@@ -258,6 +262,11 @@ export function answersToYaml(answers: InterviewAnswers): string {
         for (const [node, model] of Object.entries(nodeModels)) {
             lines.push(`${indent}${indent}${node}: "${yamlEscape(model)}"`);
         }
+    }
+    // Reasoning effort: only a level is written; "default" leaves the key
+    // out. Mirrors core/interview.py:answers_to_yaml.
+    if (answers.reasoning_effort && answers.reasoning_effort !== "default") {
+        lines.push(`${indent}reasoning_effort: "${yamlEscape(answers.reasoning_effort)}"`);
     }
     lines.push("");
 

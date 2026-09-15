@@ -181,6 +181,23 @@ POSTER_SIZES: tuple[Choice, ...] = (
            "Three columns. A common size at North American conferences."),
 )
 
+# Reasoning effort. Mirrors ``ProviderConfig.reasoning_effort`` in
+# core/config.py; "default" is the interview's name for "unset" and writes
+# nothing to the YAML.
+REASONING_EFFORT_CHOICES: tuple[Choice, ...] = (
+    Choice("default", "Provider default (not set)",
+           "Sends nothing: each provider keeps its own default. A local Ollama model then does not think at all."),
+    Choice("minimal", "minimal",
+           "Not accepted by Ollama, claude_cli or antigravity_cli; skipped there with a warning."),
+    Choice("low", "low", "Accepted by every provider FI can set it on."),
+    Choice("medium", "medium", "Accepted by every provider FI can set it on."),
+    Choice("high", "high", "Accepted by every provider FI can set it on."),
+    Choice("xhigh", "xhigh",
+           "Not accepted by Ollama or antigravity_cli; skipped there with a warning."),
+    Choice("max", "max",
+           "Not accepted by Ollama or antigravity_cli; skipped there with a warning."),
+)
+
 
 PROSE_FORMATS: frozenset[str] = frozenset(
     {"essay", "report", "policy_brief", "whitepaper"}
@@ -688,6 +705,16 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=True,
         tier=3,
     ),
+    Question(
+        id="reasoning_effort",
+        label="Reasoning effort",
+        prompt="How hard the model reasons before it answers. 'default' sends nothing, so each provider keeps its own default (a local Ollama model then does not think at all). A level is sent as reasoning_effort to HTTP providers (Ollama takes low/medium/high), as --effort to claude_cli and antigravity_cli, and as model_reasoning_effort to codex_cli. copilot_cli, gemini_cli, the VS Code bridge and the proxy providers have no such setting: the level is not sent and the quest log says so once.",
+        kind="single",
+        choices=REASONING_EFFORT_CHOICES,
+        default="default",
+        mid_quest_editable=True,
+        tier=3,
+    ),
     # ─── Author line (tier 1, every field optional) ──────────────────
     # Printed on the paper, slides and poster. Asked on every frontend so
     # nobody has to find a hidden setting to put their name on a poster.
@@ -804,6 +831,9 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     "contact_email": (),
     "url": (),
     "poster_size": (),
+    # Reasoning effort applies to the calls made after the resume; nothing
+    # already produced is re-run.
+    "reasoning_effort": (),
 }
 
 
@@ -1236,6 +1266,10 @@ class InterviewAnswers:
     # nothing — no behavior change until the user opts in. See
     # ``parse_node_models_answer``.
     node_models: str = ""
+    # ``provider.reasoning_effort``: "default" (writes nothing) or one of
+    # ``REASONING_EFFORT_LEVELS``. Must stay in sync with
+    # vscode-frontier-insight/src/interview-core.ts.
+    reasoning_effort: str = "default"
     # Author line printed on the paper, slides and poster. All optional;
     # ``answers_to_yaml`` writes each under ``output:`` only when set.
     author: str = ""
@@ -1376,6 +1410,10 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         lines.append(f"{indent}node_models:")
         for node, model in node_models.items():
             lines.append(f"{indent}{indent}{node}: {json.dumps(model)}")
+    # Reasoning effort: only a level is written; "default" leaves the key out
+    # so every provider keeps its own default.
+    if answers.reasoning_effort and answers.reasoning_effort != "default":
+        lines.append(f"{indent}reasoning_effort: {json.dumps(answers.reasoning_effort)}")
     lines.append("")
 
     lines.append("engine:")

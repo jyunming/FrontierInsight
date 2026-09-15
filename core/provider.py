@@ -214,6 +214,13 @@ class _CliSpec:
     # Only a shim recording the child's environment showed the token.
     env_unset: tuple[str, ...] = ()
     env_unset_override: str | None = None
+    # How this CLI takes ``provider.reasoning_effort``: ``effort_args`` turns
+    # a level into the argv to add, and ``effort_levels`` lists the levels the
+    # CLI accepts (``None`` = every level FI accepts). ``effort_args=None``
+    # means the CLI has no such setting — the level is then not sent, and a
+    # warning says so once per process (see ``_cli_effort_args``).
+    effort_args: Callable[[str], list[str]] | None = None
+    effort_levels: frozenset[str] | None = None
 
 
 def _child_env(spec: _CliSpec) -> dict[str, str] | None:
@@ -480,6 +487,12 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         usage_extractor=lambda raw: _extract_claude_usage(raw),
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
         image_input="stream_json",
+        # `claude --effort <level>` (Claude Code 2.1.x). Checked against the
+        # CLI: it takes low/medium/high/xhigh/max and IGNORES anything else
+        # with a warning on stderr, so an unsupported level would silently
+        # run at the default — hence skipped here with our own warning.
+        effort_args=lambda level: ["--effort", level],
+        effort_levels=frozenset({"low", "medium", "high", "xhigh", "max"}),
     ),
     "codex_cli": _CliSpec(
         # `codex exec` runs Codex non-interactively. We pipe the prompt
@@ -507,6 +520,11 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # own system prompt + tools schema. Hit by analyze/write on quests
         # whose literature + result_json grow large (e.g. after a broaden).
         max_input_chars=900_000,
+        # `-c key=value` overrides ~/.codex/config.toml for this call only;
+        # the value is parsed as TOML. codex-cli 0.149 parses every level FI
+        # accepts (minimal..max); whether the model honours a level is the
+        # model's business.
+        effort_args=lambda level: ["-c", f'model_reasoning_effort="{level}"'],
     ),
     "copilot_cli": _CliSpec(
         # GitHub Copilot CLI (`copilot --prompt`). WARNING — this is an
@@ -595,10 +613,90 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         output_extractor=lambda raw: _extract_antigravity_response(raw),
         usage_extractor=lambda raw: _extract_antigravity_usage(raw),
         model_flag="--model",   # provider.model = e.g. "gemini-3-pro"
+        # `agy --help`: "--effort  Reasoning effort for the current CLI
+        # session (low|medium|high)".
+        effort_args=lambda level: ["--effort", level],
+        effort_levels=frozenset({"low", "medium", "high"}),
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
 _CLI_PROVIDERS = CLI_PROVIDERS  # back-compat alias
+
+# (provider, level) pairs already warned about, so a quest making ~50 calls
+# logs "this level is not applied" once rather than on every call.
+_REASONING_EFFORT_WARNED: set[tuple[str, str]] = set()
+
+# HTTP providers whose server accepts only some levels. Ollama 0.17.7's
+# OpenAI-compatible endpoint answers anything else with a 400 ("invalid
+# reasoning value: 'max' (must be "high", "medium", "low", or "none")"),
+# which would fail every call of the quest.
+_HTTP_EFFORT_LEVELS: dict[str, frozenset[str]] = {
+    "ollama": frozenset({"low", "medium", "high"}),
+}
+
+
+def _warn_reasoning_effort_once(provider: str, level: str, reason: str) -> None:
+    key = (provider, level)
+    if key in _REASONING_EFFORT_WARNED:
+        return
+    _REASONING_EFFORT_WARNED.add(key)
+    _log.warning(
+        "[provider] reasoning_effort=%s is not applied on %s: %s",
+        level, provider, reason,
+    )
+
+
+def _ordered_levels(levels: frozenset[str]) -> str:
+    from .config import REASONING_EFFORT_LEVELS
+    return ", ".join(lv for lv in REASONING_EFFORT_LEVELS if lv in levels)
+
+
+def _cli_effort_args(spec: _CliSpec, level: str) -> list[str]:
+    """The argv that sets ``level`` on this CLI, or ``[]`` (with a one-time
+    warning) when the CLI has no such setting or does not accept the level."""
+    if not level:
+        return []
+    name = next((k for k, v in _CLI_SPECS.items() if v is spec), spec.argv[0])
+    if spec.effort_args is None:
+        _warn_reasoning_effort_once(
+            name, level,
+            "this CLI has no reasoning-effort setting FI can pass, so it runs "
+            "at its own default",
+        )
+        return []
+    if spec.effort_levels is not None and level not in spec.effort_levels:
+        _warn_reasoning_effort_once(
+            name, level,
+            f"it accepts {_ordered_levels(spec.effort_levels)}, so the level is "
+            "not passed and the CLI runs at its own default",
+        )
+        return []
+    return spec.effort_args(level)
+
+
+def _http_reasoning_effort(endpoint: "ResolvedEndpoint") -> str:
+    """The ``reasoning_effort`` value to put in an OpenAI-compatible request
+    body, or ``""`` (with a one-time warning) when it must not be sent."""
+    level = endpoint.reasoning_effort
+    if not level:
+        return ""
+    name = endpoint.provider_name
+    if name in _PROXY_PROVIDERS:
+        _warn_reasoning_effort_once(
+            name, level,
+            "FI does not send it through the proxy providers, so the proxy's "
+            "model runs at its own default",
+        )
+        return ""
+    levels = _HTTP_EFFORT_LEVELS.get(name)
+    if levels is not None and level not in levels:
+        _warn_reasoning_effort_once(
+            name, level,
+            f"its server accepts {_ordered_levels(levels)} and rejects other "
+            "levels with a 400, so the level is not sent",
+        )
+        return ""
+    return level
 
 # Sentinel returned by `resolve_endpoint` when no API key env var was set
 # (or the provider is configured as keyless, e.g. ollama/vllm). The OpenAI
@@ -647,6 +745,11 @@ class ResolvedEndpoint:
     # for the Engine's startup log, and that string is NOT a valid
     # selectChatModels family filter.
     vscode_model_override: str = ""
+    # ``provider.reasoning_effort`` (empty when unset). Carried on the
+    # endpoint rather than passed to ``LLMClient`` so every client built
+    # from a resolved endpoint — the engine's, the fallback chain's, and the
+    # slides/poster/speech/visual-check generators' — applies it.
+    reasoning_effort: str = ""
 
 
 @dataclass
@@ -1330,6 +1433,7 @@ async def _run_cli(
     heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     node: str = "",
     usage_out: dict[str, Any] | None = None,
+    reasoning_effort: str = "",
 ) -> str:
     """Spawn the CLI and collect its response. Three output modes:
 
@@ -1386,6 +1490,13 @@ async def _run_cli(
     if spec.model_flag and model:
         argv.extend([spec.model_flag, model])
     argv.extend(spec.argv[1:])
+    # ``provider.reasoning_effort``: empty unless the level is set AND this
+    # CLI can express it. Kept ahead of a trailing prompt flag, like images.
+    effort_args = _cli_effort_args(spec, reasoning_effort)
+    if spec.pass_prompt_via == "arg":
+        argv[-1:-1] = effort_args
+    else:
+        argv.extend(effort_args)
     tmp_out_path: Path | None = None
     if spec.output_via == "last_message_file":
         tmp = tempfile.NamedTemporaryFile(
@@ -2104,6 +2215,7 @@ def resolve_endpoint(
             # an invalid family filter for selectChatModels. The real
             # override is empty unless the YAML pinned a model.
             vscode_model_override=provider.model or "",
+            reasoning_effort=provider.reasoning_effort or "",
         )
     if name in _CLI_PROVIDERS:
         # CLI providers exec a local binary per chat call. No URL, no key
@@ -2119,6 +2231,7 @@ def resolve_endpoint(
             provider_name=name,
             cli_spec=_CLI_SPECS[name],
             cli_model_override=provider.model or "",
+            reasoning_effort=provider.reasoning_effort or "",
         )
     defaults = _DIRECT_DEFAULTS.get(name)
     if defaults is None:
@@ -2130,6 +2243,7 @@ def resolve_endpoint(
         model=provider.model or defaults["model"],
         api_key=api_key or _NO_KEY_SENTINEL,
         provider_name=name,
+        reasoning_effort=provider.reasoning_effort or "",
     )
 
 
@@ -2146,6 +2260,7 @@ async def resolve_endpoint_async(
         model=provider.model or "default",
         api_key=api_key,
         provider_name=provider.name,
+        reasoning_effort=provider.reasoning_effort or "",
     )
 
 
@@ -2506,6 +2621,13 @@ class LLMClient:
             self._fill_usage_estimate_if_missing(messages, text)
             return text
         if self.endpoint.transport == "vscode_bridge":
+            if self.endpoint.reasoning_effort:
+                _warn_reasoning_effort_once(
+                    self.endpoint.provider_name or "vscode_extension",
+                    self.endpoint.reasoning_effort,
+                    "the vscode.lm bridge has no reasoning-effort setting FI "
+                    "can pass, so the chat model runs at its own default",
+                )
             text = await self._chat_vscode_bridge(
                 messages, model_override=model, temperature=temperature,
                 node=node,
@@ -2526,6 +2648,12 @@ class LLMClient:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        # ``provider.reasoning_effort`` — absent from the body when unset, so
+        # an unset config sends exactly what it always did. A per-call
+        # ``extra`` still wins.
+        reasoning_effort = _http_reasoning_effort(self.endpoint)
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         if extra:
             body.update(extra)
         url = self.endpoint.base_url.rstrip("/") + "/chat/completions"
@@ -2881,6 +3009,7 @@ class LLMClient:
                     heartbeat_cb=self._heartbeat_cb,
                     node=node,
                     usage_out=measured,
+                    reasoning_effort=self.endpoint.reasoning_effort,
                 )
                 # A real reading from the CLI beats the char-count estimate,
                 # and by a wide margin: these CLIs wrap our prompt in their
