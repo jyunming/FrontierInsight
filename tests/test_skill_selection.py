@@ -295,6 +295,36 @@ def test_a_response_without_declines_still_parses(tmp_path: Path) -> None:
     assert out.chosen == [] and out.declined == {}
 
 
+def test_each_selected_skill_says_what_it_is_for(tmp_path: Path) -> None:
+    """A writing skill goes only to the writer and an experiment skill to
+    design and the implement stages, so selection records which is which.
+    No use, or one FI does not know, is an experiment skill — where every
+    skill went before the field existed."""
+    cat = _catalogue(tmp_path, ["ambit", "odd", "pandoc", "style"])
+    out = sel.parse_selection(json.dumps({"skills": [
+        {"name": "ambit", "use": "experiment", "reason": "computes the image"},
+        {"name": "style", "use": "Writing", "reason": "structures the paper"},
+        {"name": "pandoc", "reason": "no use given"},
+        {"name": "odd", "use": "poster"},
+    ]}), cat)
+    assert out.uses == {"ambit": "experiment", "style": "writing",
+                        "pandoc": "experiment", "odd": "experiment"}
+    assert out.to_dict()["uses"] == out.uses
+    report = sel.render_selection_report(cat, out, [])
+    assert "  - style (writing): structures the paper" in report
+    assert "  - ambit (experiment): computes the image" in report
+
+
+def test_the_selection_prompt_asks_what_each_skill_is_for() -> None:
+    """A model answers only what the prompt asks. Without the field every
+    skill defaults to experiment, and writing guidance never reaches the
+    writer."""
+    text = (Path(__file__).resolve().parent.parent / "agents" / "select_skills.md").read_text(
+        encoding="utf-8")
+    assert '"use": "experiment" | "writing"' in text
+    assert "It goes only to the writer" in " ".join(text.split())
+
+
 def test_declines_reach_the_quest_record(tmp_path: Path) -> None:
     """The record is what makes 'why was this never used?' answerable after
     the run, so the reasons have to survive serialisation."""
