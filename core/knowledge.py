@@ -1451,6 +1451,39 @@ def _is_paywall_or_stub(html: str, text: str) -> bool:
     return False
 
 
+# One headless render at a time, process-wide.
+#
+# Every render starts its own ``sync_playwright()``, and each of those spawns
+# its own Node driver process and talks to it over a pipe. Playwright's sync
+# API is not thread-safe, and the full-text batch runs its fetches in
+# ``asyncio.to_thread`` workers — so several threads were driving several
+# driver pipes at the same time. That is the shape that produces a Node-side
+# ``Error: EPIPE: broken pipe, write`` surfaced as an unhandled ``'error'``
+# event, and an event like that ends the process rather than unwinding it: no
+# ``finally`` runs, so the quest dies without even writing its source-failure
+# report. Catching the error where it lands cannot help — by then there is
+# nothing left to catch it with. Only not overlapping the renders can.
+#
+# A ``threading.Lock``, deliberately, and not an ``asyncio.Semaphore``: the
+# contention here is between THREADS, not coroutines. These renders run inside
+# ``to_thread`` workers, where there is no running event loop — ``async with``
+# is not expressible there at all — and a semaphore built at import time binds
+# to whichever loop happened to exist at import. A lock over a
+# ``BoundedSemaphore(1)`` because "one at a time" is exactly a mutex, and a
+# lock cannot be over-released by a stray extra release.
+#
+# The alternative, one shared browser for the whole process, would ALSO be one
+# render at a time: Playwright's sync objects are affine to the thread that
+# made them, so sharing a browser means a dedicated render thread and a work
+# queue in front of it. Same throughput, much more machinery, and a
+# longer-lived browser to leak. The lock buys the same guarantee in one line.
+#
+# This serialises THE RENDER ONLY. Everything else in a full-text batch —
+# the direct HTTP fetch, the open-access API cascade (Europe PMC, PMC BioC,
+# OpenAlex, arXiv, Unpaywall), publisher PDF downloads — stays parallel.
+_HEADLESS_RENDER_LOCK = threading.Lock()
+
+
 def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
     """Render ``url`` in a headless Chromium via Playwright and return its
     HTML. This executes JavaScript and clears most anti-bot challenges
@@ -1459,7 +1492,8 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
     None (with an actionable one-time hint) when Playwright or its Chromium
     browser isn't installed. Uses the SYNC API, which is valid here because
     this runs inside an ``asyncio.to_thread`` worker (no event loop in the
-    thread)."""
+    thread). Renders take turns — one browser, and one Node driver, at a time
+    for the whole process (see ``_HEADLESS_RENDER_LOCK``)."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
     except ImportError:
@@ -1473,48 +1507,73 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
         return None
     _CF_MARKERS = _INTERSTITIAL_MARKERS
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                # Mask the most obvious automation signal (navigator.webdriver)
-                # so a JS challenge is more likely to auto-clear.
-                args=["--disable-blink-features=AutomationControlled"],
+        # Wait for this render's turn (see _HEADLESS_RENDER_LOCK), bounded by
+        # the caller's own deadline — the full-text batch's budget, carried
+        # into this worker thread by the same contextvar the arXiv queue
+        # reads. Bounded because the batch abandons a fetch that overruns the
+        # budget but cannot stop its thread: unbounded, an abandoned fetch
+        # would still queue here, take its turn minutes later and render a
+        # page nobody is waiting for — holding the browser from the NEXT
+        # batch, since web docs and academic docs are enriched one after the
+        # other. A render that misses its turn keeps the search snippet, the
+        # same outcome as a render that fails.
+        budget_until = _gate.fetch_deadline.get()
+        wait_s = (
+            -1.0 if budget_until is None
+            else max(0.0, budget_until - time.monotonic())
+        )
+        if not _HEADLESS_RENDER_LOCK.acquire(timeout=wait_s):
+            _sf.record_failure(
+                _sf.source_for_url(url, "web_page"), "render_queue_timeout",
+                url=url,
+                detail="headless render did not get its turn before the fetch budget",
             )
-            try:
-                ctx = browser.new_context(
-                    user_agent=_BROWSER_HEADERS["User-Agent"],
-                    viewport={"width": 1280, "height": 900},
-                    locale="en-US",
+            return None
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    # Mask the most obvious automation signal (navigator.webdriver)
+                    # so a JS challenge is more likely to auto-clear.
+                    args=["--disable-blink-features=AutomationControlled"],
                 )
-                page = ctx.new_page()
-                nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
-                if nav is not None and nav.status == 429 and _gate.is_arxiv_url(url):
-                    _gate.report(url, 429)
-                    _sf.record_failure("arxiv", "http_429", status=429, url=url, detail="headless render")
-                    return None
-                # Wait (best-effort) for a Cloudflare-style interstitial to
-                # resolve into the real page before grabbing content.
-                deadline = time.monotonic() + min(timeout_s, 20.0)
-                html = page.content()
-                while time.monotonic() < deadline:
-                    low = html.lower()
-                    if not any(m in low for m in _CF_MARKERS):
-                        break
-                    page.wait_for_timeout(1000)
-                    html = page.content()
-                # If a strict managed challenge (IEA-class Cloudflare) never
-                # cleared, the "Just a moment…" interstitial is NOT content —
-                # return None so the caller keeps the search snippet instead
-                # of storing the challenge page as the source text.
-                if any(m in html.lower() for m in _CF_MARKERS):
-                    _log.info(
-                        "playwright: %s stayed on a bot-challenge page; "
-                        "keeping snippet", url,
+                try:
+                    ctx = browser.new_context(
+                        user_agent=_BROWSER_HEADERS["User-Agent"],
+                        viewport={"width": 1280, "height": 900},
+                        locale="en-US",
                     )
-                    return None
-                return html
-            finally:
-                browser.close()
+                    page = ctx.new_page()
+                    nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                    if nav is not None and nav.status == 429 and _gate.is_arxiv_url(url):
+                        _gate.report(url, 429)
+                        _sf.record_failure("arxiv", "http_429", status=429, url=url, detail="headless render")
+                        return None
+                    # Wait (best-effort) for a Cloudflare-style interstitial to
+                    # resolve into the real page before grabbing content.
+                    deadline = time.monotonic() + min(timeout_s, 20.0)
+                    html = page.content()
+                    while time.monotonic() < deadline:
+                        low = html.lower()
+                        if not any(m in low for m in _CF_MARKERS):
+                            break
+                        page.wait_for_timeout(1000)
+                        html = page.content()
+                    # If a strict managed challenge (IEA-class Cloudflare) never
+                    # cleared, the "Just a moment…" interstitial is NOT content —
+                    # return None so the caller keeps the search snippet instead
+                    # of storing the challenge page as the source text.
+                    if any(m in html.lower() for m in _CF_MARKERS):
+                        _log.info(
+                            "playwright: %s stayed on a bot-challenge page; "
+                            "keeping snippet", url,
+                        )
+                        return None
+                    return html
+                finally:
+                    browser.close()
+        finally:
+            _HEADLESS_RENDER_LOCK.release()
     except (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError):
         # Genuine cancellation, not a source that failed to fetch — propagate
         # untouched so Ctrl-C / shutdown still stops the quest promptly.

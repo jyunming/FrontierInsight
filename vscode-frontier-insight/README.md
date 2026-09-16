@@ -318,8 +318,13 @@ Europe PMC, the preprint server, Unpaywall, and (with a key) Semantic
 Scholar / CORE. When a PMC article's mathematics would be lost — the
 BioC text drops formulae, leaving "either 1 or ." where the paper
 states one — FI reads that article from the Europe PMC XML instead, so
-the formula reaches the writer and the claim checker as text. The full
-text is stored uncapped on disk, and each
+the formula reaches the writer and the claim checker as text. A page kept
+behind a bot wall is retried in a headless browser when one is installed,
+and those renders **take turns** — one browser at a time, because each one
+drives its own browser process over a pipe and several at once can break it,
+ending the quest outright instead of failing one source. The rest of the
+batch still runs in parallel, so only pages that need a browser wait. The
+full text is stored uncapped on disk, and each
 node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 

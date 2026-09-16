@@ -10,6 +10,7 @@ brain object — this exercises the fallback dispatch in
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -2530,6 +2531,224 @@ def test_cancellation_is_never_swallowed_as_a_source_failure(monkeypatch) -> Non
     _fake_playwright(monkeypatch, KeyboardInterrupt())
     with pytest.raises(KeyboardInterrupt):
         kn._playwright_fetch_html("https://iea.example/blocked", timeout_s=5)
+
+
+# ---------------------------------------------------------------------------
+# One headless render at a time
+# ---------------------------------------------------------------------------
+
+
+class _RenderProbe:
+    """Watches when a render is inside the browser — and tries to force two
+    renders to be inside it at once.
+
+    ``enter`` / ``exit`` bracket the browser's lifetime. ``rendezvous`` is
+    called while the browser is open and waits for every other render to
+    reach the same point. Renders that MAY overlap meet there at once.
+    Renders that may NOT overlap cannot meet at all: the first one waits
+    alone until the barrier times out, and every later one finds the barrier
+    already broken. So ``broken`` counts proof of separation while both
+    threads were actively trying to overlap, and ``max_live`` is the overlap
+    itself — the thing the lock exists to make impossible.
+    """
+
+    def __init__(self, parties: int, rendezvous_s: float) -> None:
+        self._lock = threading.Lock()
+        self._barrier = threading.Barrier(parties)
+        self._rendezvous_s = rendezvous_s
+        self.live = 0
+        self.max_live = 0
+        self.broken = 0
+        self.log: list[str] = []
+
+    def enter(self) -> None:
+        with self._lock:
+            self.live += 1
+            self.max_live = max(self.max_live, self.live)
+            self.log.append("enter")
+
+    def rendezvous(self) -> None:
+        try:
+            self._barrier.wait(timeout=self._rendezvous_s)
+        except threading.BrokenBarrierError:
+            with self._lock:
+                self.broken += 1
+
+    def exit(self) -> None:
+        with self._lock:
+            self.live -= 1
+            self.log.append("exit")
+
+
+def _install_fake_browser(monkeypatch, html: str, probe: _RenderProbe) -> None:
+    """Install a ``playwright.sync_api`` that returns ``html`` without a real
+    browser, reporting to ``probe`` the moments these tests turn on. Like
+    ``_fake_playwright``: Playwright is an optional dependency CI does not
+    install, so the import inside the fetcher is satisfied here."""
+    import sys
+    import types
+
+    class _Page:
+        def goto(self, url, **kw):
+            return None
+
+        def content(self):
+            probe.rendezvous()          # still inside — the browser is open
+            return html
+
+        def wait_for_timeout(self, ms):
+            pass
+
+    class _Ctx:
+        def new_page(self):
+            return _Page()
+
+    class _Browser:
+        def new_context(self, **kw):
+            return _Ctx()
+
+        def close(self):
+            pass
+
+    class _Chromium:
+        def launch(self, **kw):
+            return _Browser()
+
+    class _Session:
+        chromium = _Chromium()
+
+        def __enter__(self):
+            probe.enter()
+            return self
+
+        def __exit__(self, *a):
+            probe.exit()
+            return False
+
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = _Session
+    pkg = types.ModuleType("playwright")
+    pkg.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", pkg)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+
+def test_two_headless_renders_are_never_inside_the_browser_together(monkeypatch) -> None:
+    """Each render starts its own Node driver and drives it over a pipe, and
+    Playwright's sync API is not thread-safe — so two of them running at once
+    in the batch's worker threads is the shape that kills the process rather
+    than raising. Both threads here are HELD inside the browser at a
+    rendezvous, so without the lock they would certainly overlap; the barrier
+    is what makes the overlap certain rather than merely likely."""
+    import core.knowledge as kn
+
+    probe = _RenderProbe(parties=2, rendezvous_s=0.6)
+    _install_fake_browser(
+        monkeypatch,
+        "<html><body><article><p>the real article body</p></article></body></html>",
+        probe,
+    )
+
+    got: dict[str, str | None] = {}
+
+    def render(tag: str) -> None:
+        got[tag] = kn._playwright_fetch_html(f"https://iea.example/{tag}", timeout_s=5)
+
+    threads = [threading.Thread(target=render, args=(t,)) for t in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert [t.is_alive() for t in threads] == [False, False]
+    assert probe.max_live == 1                              # never two browsers at once
+    assert probe.log == ["enter", "exit", "enter", "exit"]  # and never nested
+    assert probe.broken == 2                                # though both kept trying
+    # Taking turns loses no work: both renders still returned their page.
+    assert sorted(got) == ["a", "b"]
+    assert all(v and "the real article body" in v for v in got.values())
+
+
+def test_a_render_that_misses_its_turn_before_the_budget_keeps_the_snippet(monkeypatch) -> None:
+    """Waiting for the browser is bounded by the batch's own budget. A fetch
+    the batch has already abandoned must not take its turn later and render a
+    page nobody is waiting for — which would hold the browser from the next
+    batch. It gives up, is reported like any other source that could not be
+    fetched, and the source keeps its search snippet."""
+    import time
+
+    import core.knowledge as kn
+    from core import arxiv_gate as gate
+    from core import source_failures as sf
+
+    probe = _RenderProbe(parties=1, rendezvous_s=0.1)
+    _install_fake_browser(monkeypatch, "<html><body>never reached</body></html>", probe)
+
+    kn._HEADLESS_RENDER_LOCK.acquire()          # another render holds the browser
+    quest = sf.current_quest.set("q-render-queue")
+    budget = gate.fetch_deadline.set(time.monotonic() + 0.25)
+    try:
+        started = time.monotonic()
+        out = kn._playwright_fetch_html("https://iea.example/blocked", timeout_s=30)
+        waited = time.monotonic() - started
+        snap = sf.snapshot("q-render-queue")
+    finally:
+        gate.fetch_deadline.reset(budget)
+        sf.current_quest.reset(quest)
+        sf.reset("q-render-queue")
+        kn._HEADLESS_RENDER_LOCK.release()
+
+    assert out is None                  # snippet kept
+    assert probe.max_live == 0          # the browser was never opened
+    assert waited < 5                   # gave up at the budget, not at timeout_s=30
+    assert snap["by_source"]["web_page"]["render_queue_timeout"] == 1
+
+
+def test_only_the_render_takes_turns_the_rest_of_the_batch_runs_in_parallel() -> None:
+    """Serialising the whole batch would be a large, needless slowdown: only
+    the browser is unsafe to share. These three ordinary HTTP fetches have to
+    MEET at a barrier, which no one of them can reach alone — so this test
+    passes only while they genuinely overlap, and goes red if the fetch path
+    is ever serialised. They run through the real web-page fetcher with the
+    headless fallback enabled; their 200s mean the renderer is never needed."""
+    import asyncio
+    import functools
+
+    import core.knowledge as kn
+    from core.knowledge import RetrievedDoc as RD
+
+    article = (
+        "The page answered 200 with a real article body, long enough to beat "
+        "the snippet and reach the writer as full text. " * 12
+    )
+    page = f"<html><body><article><p>{article}</p></article></body></html>".encode()
+    barrier = threading.Barrier(3)
+    met: list[str] = []
+
+    class _Meeting:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+        def get(self, url, **_):
+            barrier.wait(timeout=10)      # unreachable unless all three are here
+            met.append(url)
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"content-type": "text/html"}
+            r.content = page
+            return r
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("core.knowledge.httpx.Client", _Meeting)
+        docs = [RD("snippet", {"url": f"https://site{i}.example/report"}) for i in range(3)]
+        out = asyncio.run(kn._enrich_with_full_text(
+            docs, timeout_s=5, total_budget_s=30, max_kb=64,
+            fetch_fn=functools.partial(kn._fetch_web_page_text, headless=True),
+        ))
+
+    assert len(met) == 3                                          # all three met at once
+    assert all(d.metadata.get("fetched_full_text") for d in out)  # and all were enriched
 
 
 # ---------------------------------------------------------------------------
