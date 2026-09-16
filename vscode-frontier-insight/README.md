@@ -315,7 +315,11 @@ walls and paywall / abstract-only stubs are rejected; and for an
 academic source (PMC, a DOI, a preprint, a major publisher) the clean
 open-access full text is recovered directly via the PMC BioC API,
 Europe PMC, the preprint server, Unpaywall, and (with a key) Semantic
-Scholar / CORE. The full text is stored uncapped on disk, and each
+Scholar / CORE. When a PMC article's mathematics would be lost — the
+BioC text drops formulae, leaving "either 1 or ." where the paper
+states one — FI reads that article from the Europe PMC XML instead, so
+the formula reaches the writer and the claim checker as text. The full
+text is stored uncapped on disk, and each
 node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
