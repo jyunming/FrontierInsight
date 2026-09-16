@@ -1024,11 +1024,14 @@ class Engine:
             # driver dies the failure does not always arrive as a
             # well-behaved Python exception — the sync API drives its pipe
             # through greenlets, so what reaches this frame can be a
-            # ``BaseException`` subclass. Under the old ``except
-            # Exception`` such a death skipped the diagnostic entirely and
-            # the user was left with an empty quest folder whose only
-            # breadcrumb was a traceback in ``.fi/launch.log``. Cancellation
-            # keeps its quiet path in the arm above.
+            # ``BaseException`` subclass. That fetch boundary CONTAINS the
+            # shape for the sources it wraps, so a dying render is one
+            # failed source and never reaches here; this arm is for the
+            # same shape arriving from anywhere else. Under the old
+            # ``except Exception`` such a failure skipped the diagnostic
+            # entirely and the user was left with an empty quest folder
+            # whose only breadcrumb was a traceback in ``.fi/launch.log``.
+            # Cancellation keeps its quiet path in the arm above.
             #
             # Re-raise unconditionally — this handler is for diagnostics
             # only, NOT for swallowing errors. The caller (launch.py)
