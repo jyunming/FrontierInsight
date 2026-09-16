@@ -1000,25 +1000,49 @@ class Engine:
                 )
             self._log.info("quest %s reached terminal state", self.quest_id)
             return artifacts
-        except Exception as exc:
+        except (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError):
+            # Someone stopped the quest on purpose — Ctrl-C, a shutdown
+            # signal, a cancelled task. That is not "the quest broke", and
+            # writing a failure report for it would tell the user their run
+            # crashed when they are the one who ended it. Propagate
+            # untouched, exactly as the literature fetch boundary in
+            # ``core/knowledge.py`` does with the same four.
+            #
+            # Listed FIRST so the deliberately wider arm below never sees
+            # one of them: order is the whole mechanism here.
+            raise
+        except BaseException as exc:  # noqa: BLE001 - deliberately wider; see below
             # Surface the failure as a quest-directory diagnostic the
             # user can discover by opening the quest folder, rather than
             # leaving an empty quest dir whose only breadcrumb is a
             # traceback buried in ``<quest_root>/.fi/launch.log``. Mirrors the
             # ``paper_pdf_skipped.md`` contract from the paper generator.
             #
+            # Wider than ``Exception`` on purpose, and for the same reason
+            # ``core/knowledge.py``'s fetch boundary is: a quest reaches
+            # out through a Playwright-driven Node process, and when that
+            # driver dies the failure does not always arrive as a
+            # well-behaved Python exception — the sync API drives its pipe
+            # through greenlets, so what reaches this frame can be a
+            # ``BaseException`` subclass. That fetch boundary CONTAINS the
+            # shape for the sources it wraps, so a dying render is one
+            # failed source and never reaches here; this arm is for the
+            # same shape arriving from anywhere else. Under the old
+            # ``except Exception`` such a failure skipped the diagnostic
+            # entirely and the user was left with an empty quest folder
+            # whose only breadcrumb was a traceback in ``.fi/launch.log``.
+            # Cancellation keeps its quiet path in the arm above.
+            #
             # Re-raise unconditionally — this handler is for diagnostics
             # only, NOT for swallowing errors. The caller (launch.py)
-            # still surfaces the exception in stderr / its own exit code.
+            # still surfaces the exception in stderr / its own exit code,
+            # and swallowing a ``BaseException`` would be worse still.
             #
             # The diagnostic-write itself is wrapped in its own
             # try/except: a failure to write the diagnostic must NEVER
             # mask the original exception (the user wants to see the
             # real error, not "could not open file for diagnostic
-            # writing"). ``CancelledError`` and ``KeyboardInterrupt``
-            # are NOT caught here (they inherit from BaseException, not
-            # Exception) so user-initiated cancellation skips the
-            # diagnostic — those are not "the quest broke" events.
+            # writing").
             try:
                 await self._write_quest_failed_diagnostic(exc, run_config)
             except Exception as diag_err:
@@ -6065,12 +6089,24 @@ class Engine:
             return []
 
         for f in report.findings:
-            self._log.warning("[numeric_oracle] %s", f.describe())
+            self._log.warning("[numeric_oracle] %s: %s", f.kind, f.describe())
         # One hit per contradicted number, each naming the value and the
         # result path, so the rewrite has something specific to act on
         # instead of "a number is wrong somewhere".
+        #
+        # Labelled by the finding's OWN kind — ``transposed``,
+        # ``near_miss``, ``trivial_reference`` — rather than one blanket
+        # ``unverified_number:`` prefix over all of them. That prefix
+        # argues with the trivial-reference finding it is pasted onto:
+        # "unverified_number: `deterministic_final_size` is exactly 0 at
+        # every one of its settings" describes a number that was in fact
+        # computed and exported correctly. What is unverified there is not
+        # the number but the bracket the root finder was handed, which is
+        # exactly what the finding's own text says. A label that
+        # contradicts the sentence under it makes the reader decide which
+        # half to believe, and the label is the half they read first.
         return [
-            f"unverified_number: {f.describe()}" for f in report.findings
+            f"{f.kind}: {f.describe()}" for f in report.findings
         ]
 
     def _statistics_claim_hits(

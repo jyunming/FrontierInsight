@@ -20,10 +20,18 @@ The contract pins:
   - A failure to write the diagnostic itself does NOT mask the
     original exception (the user wants to see the real error, not
     "could not open file for diagnostic writing").
+  - A failure that is not an ``Exception`` at all gets the same
+    breadcrumb: a Playwright driver dying through greenlets can
+    surface as a ``BaseException`` subclass, and a quest killed that
+    way used to leave an empty folder and say nothing.
+  - Stopping the quest yourself writes NOTHING. Ctrl-C, a shutdown
+    signal and a cancelled task are not "the quest broke", and they
+    still stop it immediately.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +42,18 @@ from core.config import (
     OutputConfig, ProviderConfig,
 )
 from core.engine import Engine, _close_quest_logger
+
+
+class _DriverDeath(BaseException):
+    """A failure that is NOT an ``Exception``.
+
+    Playwright's sync API drives its Node process over a pipe through
+    greenlets, so a driver that dies mid-fetch can reach the engine's frame
+    as a ``BaseException`` subclass rather than an ordinary error — which is
+    why ``core/knowledge.py``'s fetch boundary is deliberately wider than
+    ``Exception`` too. Nothing in the engine raises this class; it stands in
+    for that shape so the run path's handler can be tested for it.
+    """
 
 
 def _mk_engine(
@@ -350,6 +370,85 @@ async def test_engine_run_writes_diagnostic_when_early_stage_raises(
     # Pre-graph branch: the failing-node label must reflect that the
     # graph never opened, not surface a stale checkpoint reading.
     assert "pre-graph stage" in body
+
+
+@pytest.mark.asyncio
+async def test_engine_run_writes_diagnostic_when_a_base_exception_kills_the_quest(
+    tmp_path: Path, request: pytest.FixtureRequest,
+) -> None:
+    """A failure from outside the ``Exception`` hierarchy must leave the
+    same breadcrumb as one inside it.
+
+    The run path's outer handler used to be ``except Exception``, so a
+    ``BaseException`` subclass — the shape a dying Playwright Node driver
+    can take on its way up through greenlets — skipped the diagnostic
+    entirely: the user got an empty quest folder and a traceback buried in
+    ``.fi/launch.log``. The exception must still propagate; the diagnostic
+    is a side effect, and swallowing a ``BaseException`` would be worse
+    than swallowing an ordinary one.
+
+    Same hermetic hook as the ``Exception`` test above (``_preflight_paper_pdf``,
+    inside the try body, before any venv or provider work).
+    """
+    eng = _mk_engine(tmp_path, request)
+    sentinel = _DriverDeath("simulated driver death outside Exception")
+
+    def boom() -> None:
+        raise sentinel
+
+    with patch.object(eng, "_preflight_paper_pdf", boom):
+        with pytest.raises(_DriverDeath) as exc_info:
+            await eng.run()
+
+    # Still propagates — the handler diagnoses, it does not absorb.
+    assert exc_info.value is sentinel
+
+    diag = eng.quest_root / "quest_failed.md"
+    assert diag.is_file(), (
+        f"a BaseException must still leave quest_failed.md; only found: "
+        f"{list(eng.quest_root.iterdir())}"
+    )
+    body = diag.read_text(encoding="utf-8")
+    assert "simulated driver death outside Exception" in body
+    assert "_DriverDeath" in body
+    assert "--resume" in body
+
+
+@pytest.mark.parametrize(
+    "stopper", [KeyboardInterrupt, SystemExit, asyncio.CancelledError],
+)
+@pytest.mark.asyncio
+async def test_stopping_the_quest_yourself_writes_no_diagnostic(
+    tmp_path: Path, request: pytest.FixtureRequest,
+    stopper: type[BaseException],
+) -> None:
+    """Ctrl-C, a shutdown signal and a cancelled task are not failures.
+
+    They reach the same handler as the driver death above — all four are
+    ``BaseException`` subclasses — so the widening is only correct if
+    cancellation keeps its own quiet arm ahead of it. Someone who pressed
+    Ctrl-C does not want to be told their quest crashed, and the quest must
+    still stop at once.
+
+    ``GeneratorExit`` is in the quiet tuple too but is not exercised here:
+    raising it by hand inside a coroutine tests the interpreter rather than
+    this handler.
+    """
+    eng = _mk_engine(tmp_path, request)
+
+    def boom() -> None:
+        raise stopper("stopped on purpose")
+
+    with patch.object(eng, "_preflight_paper_pdf", boom):
+        with pytest.raises(stopper):
+            await eng.run()
+
+    diag = eng.quest_root / "quest_failed.md"
+    assert not diag.exists(), (
+        f"{stopper.__name__} is the user stopping the quest, not the quest "
+        f"breaking — no failure report should be written:\n"
+        f"{diag.read_text(encoding='utf-8')[:400]}"
+    )
 
 
 @pytest.mark.asyncio

@@ -162,7 +162,7 @@ def test_an_advisory_numeric_finding_never_forces_a_re_run(tmp_path: Path) -> No
     because a pattern match over prose misreads a DOI, so the scan must not
     read them — otherwise every flagged number would re-run the experiment."""
     review = {**CITATION_REVIEW, "numeric_oracle_warnings": [
-        "unverified_number: paper says 1 but `by_r0_3.0.by_n_5000."
+        "near_miss: paper says 1 but `by_r0_3.0.by_n_5000."
         "mean_final_size_major` = 0.9404 (off by 5.7%)",
     ]}
     assert _rerun_evidence(review, _state(review)) == ""  # type: ignore[arg-type]

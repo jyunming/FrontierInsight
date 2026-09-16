@@ -446,7 +446,12 @@ root with the failing-node name, the exception text, a log tail,
 provider context, and a `--resume` command. The chat emits a
 single `❌ Quest failed: <reason>` line at the end of the run;
 open the quest folder to read `quest_failed.md` for the full
-context and the resume hint.
+context and the resume hint. This holds even when the failure does
+not arrive as an ordinary Python error — some failures reach the
+engine from outside Python's usual error hierarchy, and one of
+those used to leave an empty quest folder with nothing in it to
+read. Stopping the quest yourself writes nothing: cancelling it,
+or shutting the machine down, is not a crash to report.
 
 ## Pre-quest proposal
 

@@ -24,6 +24,11 @@ import pytest
 
 from core.engine import Engine
 
+# Every label the oracle can put on a finding. Each finding carries its own
+# kind rather than one blanket prefix, so "did the oracle block?" is asked
+# against all three.
+_ORACLE_KINDS = ("transposed:", "near_miss:", "trivial_reference:")
+
 
 class _Recorder:
     """Minimal stand-in exposing only what the oracle helper touches."""
@@ -48,9 +53,57 @@ def test_transcription_error_becomes_a_finding(tmp_path: Path) -> None:
     rec = _Recorder(tmp_path, {"nils_dipole": 2.14})
     hits = rec.hits("Dipole illumination raised NILS to 2.41 at best focus.")
     assert len(hits) == 1
-    assert hits[0].startswith("unverified_number:")
+    # Labelled by the signal that fired, not by one blanket prefix over all
+    # of them: 2.14 and 2.41 hold the same digits, so this one is transposed.
+    assert hits[0].startswith("transposed:")
     # The hit names the value and the path, so the rewrite knows what to fix.
     assert "2.41" in hits[0] and "nils_dipole" in hits[0]
+
+
+def test_a_near_miss_is_labelled_a_near_miss(tmp_path: Path) -> None:
+    """The second signal, under its own name — a gap the paper's own rounding
+    cannot explain, which is a different claim from digits swapped."""
+    rec = _Recorder(tmp_path, {"metrics": {"contrast": {"quadrupole": 0.79}}})
+    hits = rec.hits("Contrast reached 0.812 under quadrupole illumination.")
+    assert len(hits) == 1
+    assert hits[0].startswith("near_miss:")
+
+
+# The trivial-root shape: one deterministic reference solved at nine (R0, N)
+# cells and 0.0 at every one of them, alongside a quantity that does vary.
+_TRIVIAL_ROOT_RESULTS = {
+    "by_R0_N": {
+        f"{r0}_{n}": {
+            "deterministic_final_size": 0.0,
+            "outbreak_probability": p,
+        }
+        for (r0, n), p in zip(
+            [(r, n) for r in ("0.9", "1.5", "3.0")
+             for n in ("100", "1000", "5000")],
+            [0.01, 0.05, 0.2, 0.31, 0.33, 0.45, 0.66, 0.67, 0.67],
+        )
+    }
+}
+
+
+def test_a_trivial_reference_is_not_called_an_unverified_number(
+    tmp_path: Path,
+) -> None:
+    """The label used to contradict the finding it was pasted onto.
+
+    ``deterministic_final_size`` WAS computed and exported correctly; what is
+    suspect is the bracket the root finder was handed, which is exactly what
+    the finding's own sentence says. Prefixing it "unverified_number" told
+    the reader the opposite about the one number in the sentence — and the
+    label is the half they read first.
+    """
+    rec = _Recorder(tmp_path, _TRIVIAL_ROOT_RESULTS)
+    hits = rec.hits("The deterministic limit is approached as N grows.")
+    assert len(hits) == 1
+    assert hits[0].startswith("trivial_reference:")
+    assert not hits[0].startswith("unverified_number")
+    # The finding still points at the cause rather than the value.
+    assert "check the bracket" in hits[0]
 
 
 def test_consistent_paper_produces_no_hits(tmp_path: Path) -> None:
@@ -188,12 +241,12 @@ def test_review_records_the_finding_as_advisory_not_blocking(tmp_path: Path) -> 
     review = patch["review"]
 
     warnings = review.get("numeric_oracle_warnings") or []
-    assert len(warnings) == 1 and warnings[0].startswith("unverified_number:")
+    assert len(warnings) == 1 and warnings[0].startswith("transposed:")
     # The ORACLE's own finding stays advisory, which is what this test is for:
     # it is a near-miss judgement over prose, and a wrong one once cost a full
     # re-design, so it never appears among the blocking hits.
     assert not any(
-        str(h).startswith("unverified_number") for h in review["must_flag_hits"]
+        str(h).startswith(_ORACLE_KINDS) for h in review["must_flag_hits"]
     ), "the oracle's own finding must not block"
     # 2.41 is also a number nothing in this run accounts for — the experiment
     # computed 2.14 — so the provenance check blocks on it, deliberately. That
@@ -232,12 +285,12 @@ def test_human_review_snapshot_carries_the_warnings(tmp_path: Path) -> None:
     state = {
         "iteration": 0,
         "review": {"verdict": "accept", "must_flag_hits": [],
-                   "numeric_oracle_warnings": ["unverified_number: 2.41 vs nils=2.14"]},
+                   "numeric_oracle_warnings": ["transposed: 2.41 vs nils=2.14"]},
     }
     asyncio.run(eng._node_human_feedback(state))  # type: ignore[arg-type]
 
     snap = json.loads((tmp_path / ".fi" / "human_review.json").read_text("utf-8"))
-    assert snap["numeric_oracle_warnings"] == ["unverified_number: 2.41 vs nils=2.14"]
+    assert snap["numeric_oracle_warnings"] == ["transposed: 2.41 vs nils=2.14"]
     assert snap["must_flag_hits"] == [], "kept apart so the UIs can label them"
 
 
@@ -269,10 +322,10 @@ def test_panel_review_runs_the_check_too(tmp_path: Path) -> None:
 
     assert any(n.startswith("review_panel.") for n in nodes), "panel path not taken"
     warnings = review.get("numeric_oracle_warnings") or []
-    assert len(warnings) == 1 and warnings[0].startswith("unverified_number:")
+    assert len(warnings) == 1 and warnings[0].startswith("transposed:")
     # As on the single-reviewer path: the oracle advises, and never blocks.
     assert not any(
-        str(h).startswith("unverified_number") for h in review["must_flag_hits"]
+        str(h).startswith(_ORACLE_KINDS) for h in review["must_flag_hits"]
     ), "the oracle's own finding must not block"
     # And the provenance check runs on this path too, so asking for more
     # reviewers still does not mean fewer checks on the numbers.
