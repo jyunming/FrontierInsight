@@ -183,6 +183,18 @@ It recovers most blocked pages; the very strictest managed-challenge sites
 back to the snippet, and the site's PDF / open-data version (which FI does
 extract) is the reliable path.
 
+**Renders take turns.** However many pages need a browser, FI renders one at
+a time. Each render starts its own browser driver process and talks to it
+over a pipe, and several of those running at once can break that pipe — a
+failure that ends the FI process outright rather than raising, which costs
+the whole quest rather than the one page. So a quest with several blocked
+pages spends longer in its literature step than it otherwise would, and that
+is the intended trade. Only the render waits its turn: the ordinary page
+fetches, the open-access lookups and the PDF downloads in the same batch
+still run in parallel, and a render that cannot get its turn before the
+full-text budget (`knowledge.full_text_fetch_total_s`) runs out keeps the
+search snippet and says so in the source failure report.
+
 ```bash
 # macOS / Linux
 export BRAVE_API_KEY=BSA...your-key...
