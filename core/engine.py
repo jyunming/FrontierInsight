@@ -5510,6 +5510,19 @@ class Engine:
                 "[write] removed citations of sources the prior-work block does not have: %s",
                 ", ".join(f"[{n}]" for n in dropped),
             )
+        # A figure the design planned and the run drew that this draft leaves
+        # out goes back in here, before the review reads it. The review checks
+        # for it too, but only by forcing a rewrite that spends one of
+        # ``engine.max_iterations`` — and on the last iteration it cannot spend
+        # one, so the figure is simply lost. Putting it back costs no LLM call
+        # and no iteration.
+        markdown, placed = _place_missing_figures(markdown, state)
+        if placed:
+            self._log.warning(
+                "[write] the draft left out %d figure(s) the design planned and the run "
+                "drew; placed %s in the paper before the review",
+                len(placed), ", ".join(placed),
+            )
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -9494,8 +9507,28 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
 _PAPER_IMAGE_RE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")
 
 
-def _missing_planned_figures(paper_md: str, state: QuestState) -> list[str]:
-    """Figures the design planned and the run drew that the paper leaves out.
+def _embedded_figure_names(paper_md: str) -> set[str]:
+    """The figure files ``paper_md`` embeds, by file name."""
+    return {Path(m.group("src")).name for m in _PAPER_IMAGE_RE.finditer(paper_md or "")}
+
+
+def _planned_figure_order(state: QuestState) -> list[str]:
+    """The figures the design planned and the run drew, in the order planned.
+
+    A figure a later experiment version superseded is not one of them: every
+    ``execute`` empties ``figures/`` first (``_clear_stale_figures``) and
+    ``state["figures"]`` is the scan of what the run then drew, so a plan entry
+    naming a figure this run did not draw matches nothing here.
+    """
+    planned = (state.get("design") or {}).get("figures_planned")
+    planned_names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+    produced = {Path(str(f)).name for f in (state.get("figures") or [])}
+    return [name for name in dict.fromkeys(planned_names) if name in produced]
+
+
+def _planned_figures_left_out(paper_md: str, state: QuestState) -> list[str]:
+    """Figures the design planned and the run drew that the paper leaves out,
+    by file name, in the order the design planned them.
 
     The write prompt says to include every available figure, and nothing
     checked it: 3 of 12 real papers left out at least one, and one of them
@@ -9503,16 +9536,143 @@ def _missing_planned_figures(paper_md: str, state: QuestState) -> list[str]:
     to describe in prose, and a figure nobody planned may stay out, so
     neither counts here.
     """
-    planned = (state.get("design") or {}).get("figures_planned")
-    planned_names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
-    produced = {Path(str(f)).name for f in (state.get("figures") or [])}
-    embedded = {Path(m.group("src")).name for m in _PAPER_IMAGE_RE.finditer(paper_md or "")}
+    embedded = _embedded_figure_names(paper_md)
+    return [name for name in _planned_figure_order(state) if name not in embedded]
+
+
+def _missing_planned_figures(paper_md: str, state: QuestState) -> list[str]:
+    """The review's forced hit for each figure the paper leaves out. The write
+    node puts these back before the review sees the draft, so a hit here means
+    the paper lost a figure some other way."""
     return [
         f"figure_missing: the paper leaves out figures/{name}, which the design planned and "
         "the run drew; include it with a numbered caption and discuss it in the text"
-        for name in dict.fromkeys(planned_names)
-        if name in produced and name not in embedded
+        for name in _planned_figures_left_out(paper_md, state)
     ]
+
+
+# A figure the prose names: "Figure 2 shows", "Figures 1 and 2", "Fig. 3".
+_FIGURE_MENTION_RE = re.compile(r"(?<![A-Za-z])(?:figures?|figs?\.?)\s*(\d+)", re.IGNORECASE)
+_MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _figure_caption_text(
+    name: str, record: dict[str, Any] | None, *, n_seeds: int | None,
+) -> str:
+    """The caption for a figure the engine places in the paper itself: what the
+    figure's own record says it draws.
+
+    Written from the panel titles and never from the series labels, so a
+    caption the engine wrote cannot name a series its figure draws flat or not
+    at all. That is a forced ``figure_caption`` hit at review time, which would
+    spend the very iteration this repair exists to save. The record is checked
+    all the same: the first wording it does not flag is the one used.
+    """
+    titles: list[str] = []
+    for ax in (record or {}).get("axes") or []:
+        if not isinstance(ax, dict):
+            continue
+        title = " ".join(str(ax.get("title") or "").replace("[", "").replace("]", "").split())
+        if title and title not in titles:
+            titles.append(title)
+    joined = "; ".join(titles)
+    if len(joined) > 200:
+        joined = joined[:200].rsplit(" ", 1)[0]
+    tail = ""
+    mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
+    single_seed = (record or {}).get("single_seed")
+    if mean_of:
+        tail = f" Each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval."
+    elif single_seed is not None:
+        tail = f" Shows {_single_seed_note(single_seed, n_seeds)}."
+    stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split())
+    for description in (joined, stem, ""):
+        caption = ((description.rstrip(" .;,") + "." if description else "") + tail).strip()
+        if not _figure_caption_findings(f"![{caption}](figures/{name})", {name: record}):
+            return caption
+    return ""
+
+
+def _figure_numbers_to_place(
+    paper_md: str, state: QuestState, missing: list[str],
+) -> dict[str, int]:
+    """The number each left-out figure takes: its place in the design's plan,
+    or the next free one when a figure the draft did embed already carries it."""
+    order = _planned_figure_order(state)
+    used = {
+        int(m.group(1))
+        for image in _PAPER_IMAGE_RE.finditer(paper_md or "")
+        for m in [_FIGURE_MENTION_RE.search(image.group("alt"))] if m
+    }
+    numbers: dict[str, int] = {}
+    nxt = max(used, default=0) + 1
+    for name in missing:
+        number = order.index(name) + 1 if name in order else 0
+        if number <= 0 or number in used:
+            number = nxt
+        used.add(number)
+        nxt = max(nxt, number + 1)
+        numbers[name] = number
+    return numbers
+
+
+def _figure_insertion_line(lines: list[str], number: int) -> int:
+    """Where the figure numbered ``number`` goes: after the paragraph whose
+    prose first names it, else before the paper's source lists, else at the
+    end. Code fences and the captions of figures already in the paper are not
+    prose and are skipped."""
+    fence: str | None = None
+    for i, line in enumerate(lines):
+        fence_line = _MD_FENCE_LINE_RE.match(line)
+        if fence_line:
+            fence = None if fence == fence_line.group(1) else (fence or fence_line.group(1))
+            continue
+        if fence is not None or _PAPER_IMAGE_RE.search(line):
+            continue
+        if any(int(m.group(1)) == number for m in _FIGURE_MENTION_RE.finditer(line)):
+            end = i
+            while end + 1 < len(lines) and lines[end + 1].strip():
+                end += 1
+            return end + 1
+    for i, line in enumerate(lines):
+        if _SOURCE_LIST_HEADING_RE.match(line):
+            return i
+    return len(lines)
+
+
+def _place_missing_figures(markdown: str, state: QuestState) -> tuple[str, list[str]]:
+    """``markdown`` with every figure the design planned and the run drew that
+    the draft left out put back, and the names of the ones put back.
+
+    The write prompt tells the writer to include every figure it is given, and
+    a draft that ignores it was caught only at review time — which costs one of
+    the two iterations, and catches nothing at all on the last one, so real
+    runs delivered papers that discuss "Figure 1" through "Figure 3" with no
+    figure in them while the images sat in ``figures/``. Which figures are
+    missing is a set difference rather than a reading of prose, so the engine
+    puts them back itself, the way it writes the source lists itself.
+
+    Each figure goes after the paragraph that already discusses it by number,
+    which is where the writer would have put it: the drafts that dropped every
+    figure still said "Figure 1 shows ..." of each one. A figure whose number
+    the prose never names goes before the source lists, so it is still in the
+    paper. Idempotent: a draft with every planned figure is returned unchanged.
+    """
+    missing = _planned_figures_left_out(markdown, state)
+    if not missing:
+        return markdown, []
+    records = state.get("figure_records") or {}
+    n_seeds = _replicate_seed_count(state)
+    numbers = _figure_numbers_to_place(markdown, state, missing)
+    lines = markdown.split("\n")
+    for name in missing:
+        caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds)
+        label = f"**Figure {numbers[name]}.**"
+        embed = f"![{label} {caption}](figures/{name})" if caption else f"![{label}](figures/{name})"
+        at = _figure_insertion_line(lines, numbers[name])
+        before_sources = at < len(lines) and bool(_SOURCE_LIST_HEADING_RE.match(lines[at]))
+        lines[at:at] = [embed, ""] if before_sources else ["", embed]
+    return "\n".join(lines), missing
 
 
 def _plain_words(text: str) -> str:

@@ -38,10 +38,12 @@ trace to the experiment, to words quoted from a cited source (the quote must be
 in the source), or are unsupported (unsupported claims force a revise). Each
 figure keeps a record of what it draws, and a caption that describes a line the
 figure draws flat or not at all goes back to the reviewer; the human review in
-the chat lists those captions. A paper that leaves out a figure its design
-planned and its run drew is sent back to be rewritten, and the chat lists it
-among the must-fix items. The deck ends on one References slide with the
-sources the paper cites most. With `engine.execute_replicates > 1` the results are reported
+the chat lists those captions. A figure the design planned and the run drew
+that a draft leaves out is put back into the paper as soon as the draft is
+written, captioned from that record and placed beside the paragraph that
+discusses it, so no review round is spent restoring it; if one still goes
+missing by review time the chat lists it among the must-fix items. The deck
+ends on one References slide with the sources the paper cites most. With `engine.execute_replicates > 1` the results are reported
 with 95% confidence intervals (a probability's kept within 0–1), effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. A line figure, error bars included, is drawn as the mean of the seeds, shaded with its 95%
