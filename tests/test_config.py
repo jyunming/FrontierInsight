@@ -41,6 +41,52 @@ def test_negative_numeric_config_fields_fail_fast() -> None:
     assert EngineConfig().max_iterations == 2
 
 
+def test_explicit_cli_timeout_raises_the_builtin_per_node_budgets() -> None:
+    """An explicit `cli_timeout_s` is a floor, not a fallback.
+
+    The built-in `node_cli_timeout_s` map carries entries BELOW the default
+    300 s ceiling for some nodes, and the provider resolves the per-node entry
+    first — so a quest asking for 900 s silently got 600 s on
+    `implement_outline` and lost the work when the call was killed there.
+    """
+    cfg = ProviderConfig(name="codex_cli", cli_timeout_s=900.0)
+    # Raised to the floor.
+    assert cfg.node_cli_timeout_s["implement_outline"] == 900.0
+    assert cfg.node_cli_timeout_s["web_plots"] == 900.0
+    # Already at or above it — untouched.
+    assert cfg.node_cli_timeout_s["implement"] == 1800.0
+    assert cfg.node_cli_timeout_s["execute_reflect"] == 900.0
+
+
+def test_a_user_written_per_node_map_is_honoured_verbatim() -> None:
+    """Writing both numbers is deliberate: a tighter per-node budget is a
+    legitimate way to catch a hang on one node faster, so the floor must not
+    override a map the user supplied."""
+    cfg = ProviderConfig(
+        name="codex_cli",
+        cli_timeout_s=900.0,
+        node_cli_timeout_s={"implement_outline": 120.0},
+    )
+    assert cfg.node_cli_timeout_s == {"implement_outline": 120.0}
+
+
+def test_default_cli_timeout_leaves_the_per_node_budgets_alone() -> None:
+    """No regression for quests that never set `cli_timeout_s`: the built-in
+    per-node map stays exactly as shipped."""
+    cfg = ProviderConfig(name="codex_cli")
+    assert cfg.cli_timeout_s == 300.0
+    assert cfg.node_cli_timeout_s["implement_outline"] == 600.0
+    assert cfg.node_cli_timeout_s["web_plots"] == 180.0
+
+
+def test_a_lower_explicit_cli_timeout_never_lowers_a_per_node_budget() -> None:
+    """The floor only ever raises. Asking for a short global ceiling must not
+    shrink a reasoning-heavy node's budget behind the user's back."""
+    cfg = ProviderConfig(name="codex_cli", cli_timeout_s=60.0)
+    assert cfg.node_cli_timeout_s["implement_outline"] == 600.0
+    assert cfg.node_cli_timeout_s["implement"] == 1800.0
+
+
 def write_cfg(tmp_path: Path, body: dict) -> Path:
     p = tmp_path / "config.yaml"
     p.write_text(yaml.safe_dump(body), encoding="utf-8")

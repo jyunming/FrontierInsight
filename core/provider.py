@@ -1274,6 +1274,39 @@ def _stop_on_repeated_wedge(retry_state: "Any") -> bool:
     return isinstance(exc, _CliWedgeError) and retry_state.attempt_number >= 2
 
 
+# Retrying a call that ran out of wall-clock with the SAME budget is close to
+# guaranteed to fail the same way: a codex ``implement_outline`` was killed at
+# 600 s three times in a row and cost ~40 minutes and the outline stage. So a
+# retry that follows a timeout kill gets a longer budget. Only a timeout widens
+# it — a capacity error or a wedge is not a "needed more time" failure, and
+# widening those would just lengthen a hang. Capped so a pathological node
+# cannot stretch the budget without bound.
+_TIMEOUT_RETRY_GROWTH = 1.5
+_TIMEOUT_RETRY_MAX_GROWTH = 2.25  # 1.5², reached from the third attempt on
+
+
+def _is_timeout_kill(exc: BaseException | None) -> bool:
+    """True when the child was killed for exceeding its wall-clock budget, as
+    opposed to failing for capacity, wedging, or exiting non-zero."""
+    if not isinstance(exc, _CliTransientError):
+        return False
+    if isinstance(exc, (_CliCapacityError, _CliWedgeError)):
+        return False
+    return "wall-clock" in str(exc).lower()
+
+
+def _timeout_for_attempt(retry_state: "Any", base_timeout_s: float) -> float:
+    """Wall-clock budget for the attempt about to run: the base budget, grown
+    while the previous attempt was killed for exceeding it."""
+    outcome = getattr(retry_state, "outcome", None)
+    exc = outcome.exception() if outcome is not None else None
+    if not _is_timeout_kill(exc):
+        return base_timeout_s
+    attempt = getattr(retry_state, "attempt_number", 1) or 1
+    growth = min(_TIMEOUT_RETRY_GROWTH ** (attempt - 1), _TIMEOUT_RETRY_MAX_GROWTH)
+    return base_timeout_s * growth
+
+
 # Output gates. CLI vendors sometimes deliver upstream-state messages
 # as plain ``text_delta`` events instead of structured error envelopes
 # — the message then gets aggregated into the response and the engine
@@ -3171,13 +3204,29 @@ class LLMClient:
                     if (attempt_no >= 2 and fallback_model)
                     else primary_model
                 )
+                # A retry after a timeout kill gets a longer budget; every
+                # other failure keeps the configured one.
+                attempt_timeout = _timeout_for_attempt(
+                    attempt.retry_state, effective_total_timeout,
+                )
+                if attempt_timeout > effective_total_timeout:
+                    _log.info(
+                        "[%s] previous attempt was killed at %gs; attempt %d "
+                        "gets %gs",
+                        node or spec.argv[0], effective_total_timeout,
+                        attempt_no, attempt_timeout,
+                    )
                 measured: dict[str, Any] = {}
                 text = await _run_cli(
                     spec, prompt,
                     images=images,
                     model=effective_model,
-                    timeout_s=effective_total_timeout,
-                    inactivity_timeout_s=effective_inactivity,
+                    timeout_s=attempt_timeout,
+                    inactivity_timeout_s=(
+                        effective_inactivity
+                        if self._cli_inactivity_timeout_s is not None
+                        else attempt_timeout
+                    ),
                     heartbeat_cb=self._heartbeat_cb,
                     node=node,
                     usage_out=measured,

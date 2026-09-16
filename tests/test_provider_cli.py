@@ -770,6 +770,75 @@ def test_cli_resolve_endpoint_preserves_display_model_when_unset() -> None:
     assert ep2.cli_model_override == "gpt-5"
 
 
+class _FakeOutcome:
+    def __init__(self, exc: BaseException | None) -> None:
+        self._exc = exc
+
+    def exception(self) -> BaseException | None:
+        return self._exc
+
+
+class _FakeRetryState:
+    """Minimal stand-in for tenacity's RetryCallState: the retry helpers read
+    only `outcome.exception()` and `attempt_number`."""
+
+    def __init__(self, exc: BaseException | None, attempt_number: int) -> None:
+        self.outcome = _FakeOutcome(exc)
+        self.attempt_number = attempt_number
+
+
+def test_a_retry_after_a_timeout_kill_gets_a_longer_budget() -> None:
+    """Retrying a call that ran out of wall-clock with the SAME budget
+    reproduces the timeout — a codex `implement_outline` was killed at 600 s
+    three times in a row, costing ~40 minutes and the outline stage. Each
+    retry that follows a timeout kill widens the budget, capped."""
+    from core.provider import _CliTransientError, _timeout_for_attempt
+
+    killed = _CliTransientError("codex exceeded 600s wall-clock and was killed")
+    # Attempt 1: nothing has failed yet, so the configured budget stands.
+    assert _timeout_for_attempt(_FakeRetryState(None, 1), 600.0) == 600.0
+    # Attempt 2 after a kill: 1.5x.
+    assert _timeout_for_attempt(_FakeRetryState(killed, 2), 600.0) == 900.0
+    # Attempt 3: 1.5**2, which is also the cap.
+    assert _timeout_for_attempt(_FakeRetryState(killed, 3), 600.0) == 1350.0
+    # Attempt 4: still the cap, not 1.5**3.
+    assert _timeout_for_attempt(_FakeRetryState(killed, 4), 600.0) == 1350.0
+
+
+def test_only_a_timeout_kill_widens_the_budget() -> None:
+    """A capacity error or a wedge is not a "needed more time" failure:
+    widening those would just lengthen a hang or a wait. Both keep the
+    configured budget, as does an ordinary non-zero exit."""
+    from core.provider import (
+        _CliCapacityError,
+        _CliTransientError,
+        _CliWedgeError,
+        _timeout_for_attempt,
+    )
+
+    capacity = _CliCapacityError("Selected model is at capacity")
+    wedge = _CliWedgeError("stdout closed, no output collected")
+    other = _CliTransientError("codex exited rc=1: something else")
+    for exc in (capacity, wedge, other):
+        assert _timeout_for_attempt(_FakeRetryState(exc, 2), 600.0) == 600.0
+
+
+def test_the_timeout_kill_classifier_reads_the_message_and_the_type() -> None:
+    """`_is_timeout_kill` is what gates the widening; a capacity error whose
+    text happens to mention the wall-clock must not qualify."""
+    from core.provider import (
+        _CliCapacityError,
+        _CliTransientError,
+        _is_timeout_kill,
+    )
+
+    assert _is_timeout_kill(_CliTransientError("exceeded 900s wall-clock and was killed"))
+    assert not _is_timeout_kill(_CliTransientError("rc=1: bad request"))
+    assert not _is_timeout_kill(_CliCapacityError("at capacity; wall-clock unaffected"))
+    assert not _is_timeout_kill(None)
+    assert not _is_timeout_kill(ValueError("unrelated"))
+
+
 @pytest.mark.asyncio
 async def test_cli_timeout_subsecond_value_keeps_precision_in_error() -> None:
     """When `cli_timeout_s` is below 1 second (as test timeouts often
