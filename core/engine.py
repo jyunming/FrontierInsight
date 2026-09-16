@@ -6073,6 +6073,79 @@ class Engine:
             f"unverified_number: {f.describe()}" for f in report.findings
         ]
 
+    def _statistics_claim_hits(
+        self, paper_md: str, state: QuestState,
+    ) -> list[str]:
+        """Statistics the paper describes as something the run did not compute.
+
+        The numeric oracle asks whether a number MATCHES a result. This asks
+        whether it is the QUANTITY the paper says it is — a Bonferroni
+        threshold printed as a p-value, an effect-size claim the run's own
+        comparisons contradict, a t-interval labelled "exact binomial", a
+        figure's axis limit printed as a bin count, a major-outbreak
+        probability called the chance the disease vanishes.
+
+        Forced, unlike the numeric oracle: every finding is a recomputation
+        against this run's own replicates that can NAME the contradiction,
+        rather than a regex hoping a number means what it looks like. The hit
+        is text-only (``_TEXT_ONLY_HITS``) because the experiment computed the
+        right numbers and the paper described them wrongly — so the route is
+        ``rewrite`` and a mislabel never sends the experiment back.
+
+        Writes ``paper/statistics_audit.json`` either way, so a clean run
+        leaves evidence the check ran. Best-effort throughout: a bug in the
+        checker must never block a paper.
+        """
+        try:
+            from core import stat_claims
+
+            replicates = list(state.get("result_json_replicates") or [])
+            comparison_stats: dict[str, Any] = {}
+            if len(replicates) >= stat_claims.MIN_SEEDS:
+                # Uncapped, unlike the analyze aggregate: "for ALL pairwise
+                # comparisons" is a claim about every comparison, and the
+                # cap of 24 hid 12 of the 36 one real quest made.
+                comparison_stats = _result_comparison_stats(
+                    replicates,
+                    max_effect_sizes=10**9,
+                    assertions=_replicate_assertions(state),
+                )
+            report = stat_claims.check(
+                paper_md,
+                result_json=state.get("result_json") or {},
+                intervals=_replicate_result_intervals(state),
+                comparison_stats=comparison_stats,
+                figure_records=state.get("figure_records") or {},
+                n_seeds=len(replicates),
+            )
+        except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
+            self._log.warning("[stat_claims] check failed (%s); skipping", e)
+            return []
+
+        try:
+            paper_dir = self.quest_root / "paper"
+            paper_dir.mkdir(parents=True, exist_ok=True)
+            (paper_dir / "statistics_audit.json").write_text(
+                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[stat_claims] could not write audit: %s", e)
+
+        if report.skipped:
+            self._log.info("[stat_claims] skipped — %s", report.skip_reason)
+            return []
+        if report.ok:
+            self._log.info(
+                "[stat_claims] every statistic the paper names matches what the "
+                "run computed",
+            )
+            return []
+
+        for f in report.findings:
+            self._log.warning("[stat_claims] %s", f.describe())
+        return [f"mislabelled_statistic: {f.describe()}" for f in report.findings]
+
     def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Captions naming a series their figure draws flat or not at all.
         The review prompt carries the same list; this logs it and keeps it for
@@ -6307,6 +6380,10 @@ class Engine:
             figure_warnings = self._figure_caption_hits(paper_md, state)
             if figure_warnings:
                 review["figure_caption_warnings"] = figure_warnings
+            # Forced, unlike the advisory number check above: a statistic the
+            # paper mislabels is caught by recomputing it, so the finding can
+            # name the contradiction instead of guessing at one.
+            review["must_flag_hits"] += self._statistics_claim_hits(paper_md, state)
             # A figure the design planned and the run drew that the paper
             # leaves out is a set difference, not a reading of prose, so it
             # cannot misfire the way the number check can: it is forced.
@@ -6454,6 +6531,11 @@ class Engine:
         figure_warnings = self._figure_caption_hits(paper_md, state)
         if figure_warnings:
             review["figure_caption_warnings"] = figure_warnings
+        # Forced, as on the single-reviewer path: a recomputed contradiction,
+        # not a pattern match over prose.
+        stat_hits = self._statistics_claim_hits(paper_md, state)
+        if stat_hits:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stat_hits]
         # Forced, as on the single-reviewer path.
         missing_figures = _missing_planned_figures(paper_md, state)
         for hit in missing_figures:
@@ -9180,6 +9262,10 @@ def _format_claim_grounding(state: QuestState) -> str:
 # ``figure_missing`` is one: the figure exists, the paper left it out.
 _TEXT_ONLY_HITS = frozenset({
     "unsupported_claim", "figure_caption", "figure_missing", "citations_unchecked", "over_page_limit",
+    # A statistic the paper describes as something the run did not compute:
+    # the numbers are right and the words around them are wrong, so the paper
+    # is written again and the experiment is left alone.
+    "mislabelled_statistic",
 })
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
