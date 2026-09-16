@@ -40,6 +40,36 @@ Two signals, strongest first:
 
 Both are reported with the JSON path they contradict, so the writer node
 gets told which number to fix rather than "something is wrong".
+
+A third signal does not read the paper at all
+=============================================
+``trivial_reference`` compares the results against *themselves*. A
+closed-form reference value — the deterministic limit, the theoretical
+prediction, the analytic solution — is computed by model-written code,
+and the way that code fails is remarkably consistent: a root finder is
+bracketed so the useless root sits on the bracket endpoint
+(``brentq(f, 0, 1)`` where ``f(1) == 0``, or a bracket of
+``[1e-10, 1.0]``). The solver returns the trivial root and the reference
+comes out as exactly 0 at *every* point of the sweep — after which the
+paper draws that flat line of zeros in a figure captioned "convergence to
+the deterministic limit".
+
+Nothing else catches it. The range gate only checks quantities the design
+declared a bound for, and a design that names ``final_size`` does not
+cover a leaf called ``deterministic_final_size``; a zero is inside
+``[0, 1]`` anyway. So the signal here is the one the sweep itself
+provides: **a reference quantity that does not vary at all across the
+settings that were supposed to make it vary, and whose constant value is
+zero.**
+
+Only zero, deliberately. A correctly computed deterministic final size
+does *not* depend on the population size, so a reference that is
+legitimately identical across a one-dimensional sweep over N is exactly
+what a convergence study plots. Flagging "identical" in general would
+therefore fire on correct work; flagging "identically zero" fires on the
+failure. Values the run uses as settings rather than results (tolerances,
+horizons, seeds, step counts) are excluded by name, since a tolerance of
+0.0 repeated at every point is configuration, not a computation.
 """
 
 from __future__ import annotations
@@ -65,6 +95,84 @@ MIN_MAGNITUDE = 1e-9
 # little information to distinguish a transcription error from a rounded
 # quote. "about 2" vs 2.14 is not evidence of anything.
 MIN_SIG_DIGITS = 2
+
+# How many settings a reference quantity must span before "it is zero at every
+# one of them" means anything. Two points is a coincidence; a sweep is not.
+TRIVIAL_MIN_SETTINGS = 3
+
+# Leaf names that denote a computed reference value — the number the run is
+# comparing itself against, rather than a number it measured. These are the
+# ones a trivial root destroys.
+_REFERENCE_NAME = re.compile(
+    r"(?:^|_)(?:"
+    r"deterministic|theoretical|theory|analytic|analytical|closed_form|"
+    r"exact|predicted|prediction|reference|asymptotic|ode|mean_field|limit"
+    r")(?:_|$)",
+    re.IGNORECASE,
+)
+
+# ...except when the name says it is a setting rather than a result. A
+# tolerance, a horizon or a step count is *supposed* to be identical at every
+# point of a sweep, and several of them are legitimately 0. Known weak point:
+# this is a name list, so a setting named outside it is not recognised.
+_SETTING_NAME = re.compile(
+    r"(?:^|_)(?:"
+    r"tol|rtol|atol|tolerance|seed|seeds|dpi|horizon|step|steps|dt|nfev|"
+    r"resamples|replicates|iterations|iters|maxiter|bins|timeout|version|"
+    r"residual|precision"
+    r")(?:_|$)",
+    re.IGNORECASE,
+)
+
+
+def _leaf_name(path: str) -> str:
+    """The final field name of a flattened path, without any list index."""
+    return path.rsplit(".", 1)[-1].split("[")[0]
+
+
+def trivial_reference_findings(result_json: Any) -> list["Finding"]:
+    """Reference quantities that are exactly 0 at every setting of the sweep.
+
+    See the module docstring. Returns one finding per offending leaf name.
+    Silent unless some *other* quantity in the same results varies: a result
+    set in which nothing varies at all is a different failure (the degenerate
+    run guard owns it) and flagging it here would only duplicate that.
+    """
+    leaves = list(flatten_numbers(result_json, keep_zero=True))
+    if not leaves:
+        return []
+
+    grouped: dict[str, list[tuple[str, float]]] = {}
+    for path, value in leaves:
+        grouped.setdefault(_leaf_name(path), []).append((path, value))
+
+    something_varies = any(
+        len({v for _, v in items}) > 1 for items in grouped.values()
+    )
+    if not something_varies:
+        return []
+
+    out: list[Finding] = []
+    for name, items in sorted(grouped.items()):
+        if len(items) < TRIVIAL_MIN_SETTINGS:
+            continue
+        if {v for _, v in items} != {0.0}:
+            continue
+        if not _REFERENCE_NAME.search(name) or _SETTING_NAME.search(name):
+            continue
+        paths = [p for p, _ in items]
+        shown = ", ".join(paths[:3]) + (", …" if len(paths) > 3 else "")
+        out.append(
+            Finding(
+                kind="trivial_reference",
+                paper_value=0.0,
+                result_value=0.0,
+                result_path=name,
+                context=shown,
+                rel_error=0.0,
+            )
+        )
+    return out
 
 # Contexts that are never measurements, matched against the text immediately
 # before a number. Kept narrow and literal; a regex that tries to be clever
@@ -130,6 +238,15 @@ class Finding:
     rel_error: float
 
     def describe(self) -> str:
+        if self.kind == "trivial_reference":
+            return (
+                f"`{self.result_path}` is exactly 0 at every one of its "
+                f"settings ({self.context}). A reference value that does not "
+                f"vary across the sweep meant to vary it is what a root "
+                f"finder returning the trivial root on its bracket endpoint "
+                f"looks like — check the bracket before the paper describes "
+                f"this as a limit"
+            )
         pct = self.rel_error * 100
         lead = (
             "digits transposed"
@@ -273,6 +390,11 @@ def extract_paper_numbers(text: str) -> list[tuple[float, str, str]]:
     return out
 
 
+# Report order: the self-contradiction first, then the classic copy error,
+# then the weaker distance signal.
+_KIND_RANK = {"trivial_reference": 0, "transposed": 1, "near_miss": 2}
+
+
 def check(paper_text: str, result_json: Any) -> OracleReport:
     """Compare a paper's prose numbers against the computed results."""
     report = OracleReport()
@@ -327,7 +449,11 @@ def check(paper_text: str, result_json: Any) -> OracleReport:
             )
         )
 
+    # A reference quantity that is zero everywhere contradicts the results
+    # themselves, so it is found without reading the paper at all.
+    report.findings.extend(trivial_reference_findings(result_json))
+
     # Strongest signal first, so a truncated report still leads with the
-    # finding most likely to be a real transcription error.
-    report.findings.sort(key=lambda f: (f.kind != "transposed", -f.rel_error))
+    # finding most likely to be a real error.
+    report.findings.sort(key=lambda f: (_KIND_RANK.get(f.kind, 9), -f.rel_error))
     return report
