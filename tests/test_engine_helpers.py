@@ -965,6 +965,9 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
         "revise": "design",
         # Every must-flag is about the text: only the paper is rewritten.
         "rewrite": "write",
+        # A must-flag about something the run computed: the experiment is
+        # written and run again instead.
+        "re_execute": "implement",
         "done": END,
         # The human-feedback gate adds a third terminal: when
         # ``engine.human_feedback_gate: "after_review"`` the router
