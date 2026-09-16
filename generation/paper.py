@@ -1147,9 +1147,11 @@ def small_source_lists(markdown: str) -> str:
 
 
 # Raw LaTeX calling the barrier the paper templates define. Pandoc passes a
-# ``{=latex}`` block straight through to the LaTeX writer, and the HTML
-# writer (the browser fallback) drops it — which is right, because a browser
-# lays figures out in document order and has no float to hold back.
+# ``{=latex}`` block straight through to the LaTeX writer, which is the only
+# renderer that ever sees it: the browser paths (``_try_html_pdf_fallback``
+# and ``paper_style: briefing``) render ``paper.md`` itself, not this
+# sanitized copy. They need no barrier anyway — a browser lays figures out
+# in document order, with no float to hold back.
 _FLOAT_BARRIER_LATEX = "```{=latex}\n\\FIfloatbarrier\n```"
 
 
