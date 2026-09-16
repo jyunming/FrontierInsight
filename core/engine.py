@@ -247,6 +247,10 @@ class QuestState(TypedDict, total=False):
     # rendered PDF ran over the page limit. At most ``_PAGE_LIMIT_REWRITES``;
     # these rewrites do not use ``engine.max_iterations``.
     page_limit_rewrites: int
+    # How many times the review has sent the experiment back to be written and
+    # run again because a must-flag named something this run computed. At most
+    # ``_CODE_REEXECUTES``; each one costs an iteration.
+    code_reexecutes: int
     review: dict[str, Any]
     # Human-feedback gate state. Populated by ``_node_human_feedback``
     # when ``engine.human_feedback_gate == "after_review"``. ``action``
@@ -1229,6 +1233,10 @@ class Engine:
                 # Every must-flag is a problem with the text: the experiment
                 # stands, so only the paper is written again.
                 "rewrite": "write",
+                # A must-flag named something the run computed: no rewrite of
+                # the paper can fix that, so the experiment is written and run
+                # again (implement → execute → analyze → … → write).
+                "re_execute": "implement",
                 "done": END,
                 "human_feedback": "human_feedback",
             },
@@ -1420,7 +1428,13 @@ class Engine:
         #    problem with the text (a claim nothing backs, a caption
         #    that describes what its figure does not show), the
         #    experiment stands and the route is ``rewrite``: back to
-        #    ``write`` only, not to ``design``.
+        #    ``write`` only, not to ``design``. When instead the review's
+        #    must-fix evidence names something the run computed (a key of
+        #    ``result_json``, a figure's underlying data, the experiment file),
+        #    no rewrite can fix it and the route is ``re_execute``: the
+        #    experiment is written and run again. That costs an iteration, so
+        #    it happens at most ``_CODE_REEXECUTES`` times in a quest and a
+        #    flag that survives the re-run falls back to the text routes.
         # 2. ``human_feedback_gate == "after_review"`` routes through
         #    the human-feedback node so the user gets a final say.
         # 3. Otherwise fall through to the legacy verdict-driven routing.
@@ -1439,6 +1453,24 @@ class Engine:
             )
             return "rewrite"
         if must_flag and state.get("iteration", 0) < self.config.engine.max_iterations:
+            # Before the text routes: a flag about a computed value is not a
+            # writing problem, and sending it to ``write`` is what let a paper
+            # ship a deterministic limit of 0.0 that two checks had found.
+            rerun_for = _review_sends_the_experiment_back(review, state)
+            reexecutes = int(state.get("code_reexecutes") or 0)
+            if rerun_for and reexecutes <= _CODE_REEXECUTES:
+                self._log.info(
+                    "[route] must_flag_hits=%s are about %r, which this run computed — "
+                    "running the experiment again (re-execute %d of %d)",
+                    must_flag, rerun_for, reexecutes, _CODE_REEXECUTES,
+                )
+                return "re_execute"
+            if rerun_for:
+                self._log.info(
+                    "[route] must_flag_hits=%s are about %r again, but this quest has "
+                    "already re-run its experiment — writing the paper again instead",
+                    must_flag, rerun_for,
+                )
             if _hits_need_only_a_rewrite(must_flag):
                 self._log.info(
                     "[route] must_flag_hits=%s are all about the text — rewriting the paper",
@@ -3868,6 +3900,16 @@ class Engine:
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
             )
+        # A review that named something this run computed sent the experiment
+        # back here (``re_execute``). Both prompts above carry the design and
+        # the outline but no review, so without this the model would regenerate
+        # the same code — and with it the same wrong value.
+        rerun_for = _review_sends_the_experiment_back(state.get("review") or {}, state)
+        if rerun_for:
+            self._log.info(
+                "[implement] the review sent the experiment back over %r", rerun_for,
+            )
+            prompt += _rerun_directive(state.get("review") or {}, rerun_for)
         text = await self._chat(prompt, node="implement")
         code, deps = _parse_implement_response(text)
         if not code:
@@ -6272,6 +6314,11 @@ class Engine:
             update: QuestState = {"review": review}
             if page_hits:
                 update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
+            # Counted here, like the shortening rewrites above, so the router
+            # can cap it: a must-flag about something the run computed sends
+            # the experiment back, at most ``_CODE_REEXECUTES`` times.
+            if _review_sends_the_experiment_back(review, state):
+                update["code_reexecutes"] = int(state.get("code_reexecutes") or 0) + 1
             # Iteration is consumed when EITHER the verdict says revise
             # OR the must-flag hits force one. Bumping on must_flag_hits
             # alone (even with verdict=accept) makes ``_route_after_review``'s
@@ -6416,6 +6463,10 @@ class Engine:
         update: QuestState = {"review": review, "review_panel": panel_results}
         if page_hits:
             update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
+        # As on the single-reviewer path: count a review that sends the
+        # experiment back, so the router can cap those re-executes.
+        if _review_sends_the_experiment_back(review, state):
+            update["code_reexecutes"] = int(state.get("code_reexecutes") or 0) + 1
         # Bump iteration on EITHER verdict=revise OR a non-empty
         # must_flag_hits list. Without the must-flag clause, a malformed
         # persona response that recorded ``verdict=accept`` alongside a
@@ -9154,6 +9205,109 @@ def _hits_need_only_a_rewrite(hits: list[Any]) -> bool:
     the review sends the quest back to ``write`` instead of ``design``."""
     names = [_hit_name(hit) for hit in hits]
     return bool(names) and all(name in _TEXT_ONLY_HITS for name in names)
+
+
+# How many times one quest may have its experiment written and run again
+# because the review found a problem with what it computed. A re-run costs an
+# iteration and a full implement → execute → analyze → write chain, so a flag
+# the reviewer keeps raising cannot spend the budget on re-runs: after this
+# many, the same flag takes the text routes it may also belong to.
+_CODE_REEXECUTES = 1
+
+# A results key short enough to double as an English word ("mean", "n",
+# "ci_upper") would match review prose by accident; a compound one
+# ("deterministic_final_size") is never written by chance.
+_RESULT_KEY_MIN_LEN = 8
+
+
+def _nested_key_names(value: Any) -> set[str]:
+    """Every key name in a nested results structure, at any depth."""
+    names: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            names.add(str(key))
+            names |= _nested_key_names(child)
+    elif isinstance(value, list):
+        for child in value:
+            names |= _nested_key_names(child)
+    return names
+
+
+def _rerun_evidence(review: dict[str, Any], state: QuestState) -> str:
+    """What the review's must-fix evidence names that only running the
+    experiment again can fix — ``""`` when it names nothing of the sort.
+
+    A must-flag hit is a *short identifier* (``agents/review.md`` asks for one),
+    so what it is about is spelled out in the review's own prose: its
+    ``blocking`` sentence, its ``weaknesses`` and its ``suggestions``. That
+    prose is matched against names this quest actually produced, not against a
+    list of English words — a key of ``result_json`` (a value the run computed),
+    a file name in ``figure_records`` (a figure's underlying data), or the
+    experiment file. "ensure the solver is correctly integrated so the
+    'deterministic_final_size' is not reported as 0.0" names a results key and
+    no rewrite can fix it; "remove the attribution to [2]" and "say in the
+    caption that this is one seed" name none, and stay a rewrite.
+
+    The advisory checks are deliberately not read: every
+    ``numeric_oracle_warnings`` finding quotes a result path, and those findings
+    are advisory precisely because a pattern match over prose misreads a DOI
+    often enough that a forced re-run costs more than a flagged number. Nor are
+    the hits themselves: they are short identifiers, and the ones the engine
+    forces quote the figure they checked (``figure_caption: the caption of
+    figures/x.png names …``, ``figure_missing: figures/x.png``), which would
+    read as a problem with that figure's data when it is a problem with the
+    paper's words.
+    """
+    if not state.get("code"):
+        return ""  # no experiment to run again (an analyze-only or survey quest)
+    names = {
+        name for name in _nested_key_names(state.get("result_json") or {})
+        if "_" in name and len(name) >= _RESULT_KEY_MIN_LEN
+    }
+    names |= {str(name) for name in state.get("figure_records") or {}}
+    names.add("experiment.py")
+    prose = " ".join(
+        item
+        for field in ("blocking", "weaknesses", "suggestions")
+        for item in _review_items(review.get(field))
+    ).lower()
+    return next((name for name in sorted(names) if name.lower() in prose), "")
+
+
+def _review_sends_the_experiment_back(review: dict[str, Any], state: QuestState) -> str:
+    """What a review that can only be answered by running the experiment again
+    names — ``""`` when this review is not one.
+
+    Only a review whose must-flags would otherwise be answered by rewriting the
+    paper is considered. A hit that already sends the quest back to ``design``
+    (``circular_evaluation`` and the rest) re-runs the experiment on its way
+    through ``implement`` anyway, and a flawed design is not fixed by writing
+    the same experiment again. A draft that is merely over the page limit is
+    not one either: it has its own route and its own counter.
+    """
+    hits = review.get("must_flag_hits") or []
+    if not hits or _only_page_limit_hits(hits) or not _hits_need_only_a_rewrite(hits):
+        return ""
+    return _rerun_evidence(review, state)
+
+
+def _rerun_directive(review: dict[str, Any], named: str) -> str:
+    """What the implement prompt is told when a review sent the experiment
+    back: what the review named, and the review's own must-fix prose."""
+    notes = [
+        item
+        for field in ("blocking", "weaknesses", "suggestions")
+        for item in _review_items(review.get(field))
+    ]
+    return "\n".join([
+        "",
+        "## The review sent this experiment back",
+        f"The review of the last draft found a problem with `{named}` — something "
+        "this run computed, which no rewrite of the paper can fix. Write the "
+        "experiment so that it is computed correctly and reported in RESULT_JSON, "
+        "and keep everything the design asks for.",
+        *(f"  - {note}" for note in notes),
+    ])
 
 
 def _review_items(value: Any) -> list[str]:
