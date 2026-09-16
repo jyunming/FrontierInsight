@@ -22,9 +22,13 @@ So a single spelling cannot work everywhere: PowerShell needs the call
 operator, cmd.exe rejects a leading one. The builder picks per shell.
 
 Driving the compiled JS under plain node tests the real artifact rather
-than grepping the TypeScript for a substring. The last test covers the
-only glue node cannot see — that extension.ts actually calls these
-builders instead of interpolating its own line.
+than grepping the TypeScript for a substring. Two tests go further than
+node can reach: one covers the glue node cannot see — that extension.ts
+actually calls these builders instead of interpolating its own line —
+and one runs a generated line through a REAL Git Bash and reads back the
+argv a native ``python.exe`` received. The pipe name's quoting is
+load-bearing (unquoted, bash eats the backslashes and the connect fails
+with WinError 3), and only the real shell can prove it survives.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,8 +52,15 @@ EXTENSION_TS = EXT / "src" / "extension.ts"
 WIN_PY = r"C:\Program Files\Python311\python.exe"
 WIN_PIPE = r"\\.\pipe\fi-bridge-me"
 WIN_YAML = r"C:\Users\me\My Outputs\q-1\config.yaml"
+# A custom `frontierInsight.outputDir`, spaced like a real one.
+WIN_OUT = r"C:\Users\me\My Outputs"
 POSIX_PY = "/usr/bin/python3"
 POSIX_SOCK = "/run/user/1000/fi-bridge.sock"
+POSIX_OUT = "/home/me/outputs"
+
+# The Git Bash the argv round-trip below measures against. Absent on
+# Linux/macOS CI, where that test skips.
+GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
 
 NODE_SCRIPT = """
 const tc = require(process.argv[1]);
@@ -69,6 +81,7 @@ SPEC = {
             "fn": "updateTerminalCommand",
             "opts": {
                 "pythonPath": WIN_PY, "questId": "q-1",
+                "outputRoot": WIN_OUT,
                 "bridgeSocket": WIN_PIPE, "shell": "powershell",
             },
         },
@@ -76,6 +89,7 @@ SPEC = {
             "fn": "updateTerminalCommand",
             "opts": {
                 "pythonPath": WIN_PY, "questId": "q-1",
+                "outputRoot": WIN_OUT,
                 "bridgeSocket": WIN_PIPE, "shell": "cmd",
             },
         },
@@ -83,7 +97,17 @@ SPEC = {
             "fn": "updateTerminalCommand",
             "opts": {
                 "pythonPath": POSIX_PY, "questId": "q-1",
+                "outputRoot": POSIX_OUT,
                 "bridgeSocket": POSIX_SOCK, "shell": "posix",
+            },
+        },
+        # A caller that genuinely wants launch.py's own `./outputs`
+        # default must not get a valueless `--output-root` on the line.
+        "update_no_root": {
+            "fn": "updateTerminalCommand",
+            "opts": {
+                "pythonPath": WIN_PY, "questId": "q-1",
+                "bridgeSocket": WIN_PIPE, "shell": "powershell",
             },
         },
         "ps_generate": {
@@ -176,11 +200,13 @@ def test_exact_lines_for_windows_update_and_generate() -> None:
     cmds = _build()["commands"]
     assert cmds["ps_update"] == (
         r'& "C:\Program Files\Python311\python.exe" launch.py '
-        r'--update q-1 --vscode-bridge-socket "\\.\pipe\fi-bridge-me"'
+        r'--update q-1 --output-root "C:\Users\me\My Outputs" '
+        r'--vscode-bridge-socket "\\.\pipe\fi-bridge-me"'
     )
     assert cmds["cmd_update"] == (
         r'"C:\Program Files\Python311\python.exe" launch.py '
-        r'--update q-1 --vscode-bridge-socket "\\.\pipe\fi-bridge-me"'
+        r'--update q-1 --output-root "C:\Users\me\My Outputs" '
+        r'--vscode-bridge-socket "\\.\pipe\fi-bridge-me"'
     )
     assert cmds["ps_generate"] == (
         r'& "C:\Program Files\Python311\python.exe" launch.py '
@@ -255,7 +281,106 @@ def test_extension_uses_the_builders_instead_of_its_own_string() -> None:
     assert "updateTerminalCommand(" in src
     assert "generateTerminalCommand(" in src
     assert "persistentBridgePath()" in src
+    # `/update` picks the quest by listing `frontierInsight.outputDir`,
+    # so it has to hand that same root to launch.py or the quest it
+    # just offered is not found.
+    assert "outputRoot: outputsDir," in src, (
+        "runUpdate no longer passes the resolved outputDir as "
+        "--output-root; a custom frontierInsight.outputDir breaks."
+    )
     # `paths.map(shellQuote)` passed the array INDEX as the second
     # argument once shellQuote took a shell; the call site now hands the
     # raw paths to the builder, which quotes them itself.
     assert "paths.map(shellQuote)" not in src
+
+
+def test_update_carries_the_output_root_the_quest_was_picked_from() -> None:
+    """`--update <id>` resolves the quest under `--output-root`, whose
+    argparse default is `./outputs`. The VSCode picker lists quests from
+    `frontierInsight.outputDir`, so without the flag a user with a
+    custom output directory got "no quest directory at
+    <repo>\\outputs\\<id>" for a quest FI had just offered them. Every
+    other spawn (--digest / --portfolio / --critique / --proposal /
+    --analyze) already passed the root."""
+    cmds = _build()["commands"]
+    assert r'--output-root "C:\Users\me\My Outputs"' in cmds["ps_update"]
+    assert r'--output-root "C:\Users\me\My Outputs"' in cmds["cmd_update"]
+    assert "--output-root /home/me/outputs" in cmds["posix_update"]
+    # Omitted → no flag at all, rather than a valueless one.
+    assert "--output-root" not in cmds["update_no_root"]
+
+
+def test_git_bash_hands_python_the_pipe_name_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """Git Bash was documented in terminal-command.ts as mangling
+    `\\\\.\\pipe\\...` — the reason `/update` and `/generate` were called
+    broken under a Git Bash terminal profile. Re-measured against a real
+    bash: MSYS rewrites nothing, plain bash backslash handling does.
+    Unquoted the name arrives as `\\.pipefi-bridge-me`; double-quoted as
+    `\\.\\pipe\\fi-bridge-me` (the symptom once blamed on MSYS); the
+    single-quoted form `shellQuote` emits for `posix` arrives intact and
+    connects to a live bridge. So the quoting is load-bearing, and this
+    pins it against the real shell instead of against our idea of it."""
+    if not GIT_BASH.is_file():
+        pytest.skip(f"needs a real Git Bash at {GIT_BASH}")
+    node = shutil.which("node")
+    if node is None or not TC_JS.is_file():
+        pytest.skip("needs node and a compiled out/terminal-command.js")
+
+    # buildLaunchCommand always names `launch.py`, so a stand-in of that
+    # name in cwd reports the argv the child really received.
+    (tmp_path / "launch.py").write_text(
+        "import json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    out_root = str(tmp_path / "outputs")
+    spec = {
+        "commands": {
+            "gb": {
+                "fn": "updateTerminalCommand",
+                "opts": {
+                    # Forward slashes for the interpreter only: bash has
+                    # to *exec* it, which is not what is being measured.
+                    "pythonPath": sys.executable.replace("\\", "/"),
+                    "questId": "q-1",
+                    "outputRoot": out_root,
+                    "bridgeSocket": WIN_PIPE,
+                    "shell": "posix",
+                },
+            },
+        },
+        "detect": {},
+    }
+    built = subprocess.run(
+        [node, "-e", NODE_SCRIPT, str(TC_JS), json.dumps(spec)],
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
+    )
+    assert built.returncode == 0, built.stderr
+    line = json.loads(built.stdout)["commands"]["gb"]
+
+    # Feed the line through bash's STDIN, because that is what
+    # `Terminal.sendText` does: it types a line into a shell that is
+    # already running. NOT `bash.exe -c <line>` — that hands the line to
+    # bash as one Windows command-line argument, and the Win32 argv
+    # layer in between eats a backslash level of its own, turning
+    # `\\.\pipe\x` into `\.\pipe\x` before bash ever sees it. Measuring
+    # it that way is the most likely origin of the old "MSYS rewrites
+    # the arguments" claim, and it would fail this test for a reason
+    # that never happens in VS Code.
+    ran = subprocess.run(
+        [str(GIT_BASH)],
+        input=line + "\n",
+        cwd=tmp_path, capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
+    )
+    assert ran.returncode == 0, f"{line!r}\nstderr={ran.stderr}"
+    argv = json.loads(ran.stdout.strip().splitlines()[-1])
+
+    assert "--vscode-bridge-socket" in argv, argv
+    got = argv[argv.index("--vscode-bridge-socket") + 1]
+    assert got == WIN_PIPE, (
+        f"Git Bash delivered {got!r}, not {WIN_PIPE!r}: the bridge "
+        f"address is mangled and the connect fails with WinError 3."
+    )
+    assert argv[argv.index("--output-root") + 1] == out_root
