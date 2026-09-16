@@ -189,8 +189,19 @@ def test_review_records_the_finding_as_advisory_not_blocking(tmp_path: Path) -> 
 
     warnings = review.get("numeric_oracle_warnings") or []
     assert len(warnings) == 1 and warnings[0].startswith("unverified_number:")
-    assert review["must_flag_hits"] == [], "a numeric finding must not block"
-    assert "iteration" not in patch, "an advisory finding must not spend budget"
+    # The ORACLE's own finding stays advisory, which is what this test is for:
+    # it is a near-miss judgement over prose, and a wrong one once cost a full
+    # re-design, so it never appears among the blocking hits.
+    assert not any(
+        str(h).startswith("unverified_number") for h in review["must_flag_hits"]
+    ), "the oracle's own finding must not block"
+    # 2.41 is also a number nothing in this run accounts for — the experiment
+    # computed 2.14 — so the provenance check blocks on it, deliberately. That
+    # hit is text-only: it routes back to `write` alone and never re-runs the
+    # experiment, which is why it can be forced where the oracle's cannot.
+    assert any(
+        str(h).startswith("unsourced_number") for h in review["must_flag_hits"]
+    ), "a number the run never produced is blocking"
 
 
 def test_clean_paper_leaves_no_warning_key(tmp_path: Path) -> None:
@@ -259,5 +270,12 @@ def test_panel_review_runs_the_check_too(tmp_path: Path) -> None:
     assert any(n.startswith("review_panel.") for n in nodes), "panel path not taken"
     warnings = review.get("numeric_oracle_warnings") or []
     assert len(warnings) == 1 and warnings[0].startswith("unverified_number:")
-    assert review["must_flag_hits"] == [], "a numeric finding must not block"
-    assert "iteration" not in patch, "an advisory finding must not spend budget"
+    # As on the single-reviewer path: the oracle advises, and never blocks.
+    assert not any(
+        str(h).startswith("unverified_number") for h in review["must_flag_hits"]
+    ), "the oracle's own finding must not block"
+    # And the provenance check runs on this path too, so asking for more
+    # reviewers still does not mean fewer checks on the numbers.
+    assert any(
+        str(h).startswith("unsourced_number") for h in review["must_flag_hits"]
+    ), "a number the run never produced is blocking"

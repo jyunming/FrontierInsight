@@ -6146,6 +6146,91 @@ class Engine:
             self._log.warning("[stat_claims] %s", f.describe())
         return [f"mislabelled_statistic: {f.describe()}" for f in report.findings]
 
+    def _number_provenance_hits(
+        self, paper_md: str, state: QuestState,
+    ) -> list[str]:
+        """Numbers the paper prints that nothing in this run accounts for.
+
+        The numeric oracle asks whether a number is NEAR a result and ignores
+        one that is far from every result; this asks whether the number came
+        from anywhere at all. A graded paper's Table 1 printed eight cells
+        matching no value the run computed, no replicate and none of the
+        three-seed aggregates, and every existing check passed it.
+
+        The aggregates are the reason this is possible rather than a machine
+        for flagging correct papers: a paper reports the MEAN over the seeds
+        and its interval, and seed 0's ``RESULT_JSON`` holds neither. Measured
+        on that paper, checking against ``RESULT_JSON`` alone makes all eleven
+        of its *correct* headline numbers untraceable too.
+
+        Forced, and text-only (``_TEXT_ONLY_HITS``): the experiment ran and
+        recorded its results, so the route is ``rewrite`` and an unsourced
+        number never sends the experiment back to be run again.
+
+        Writes ``paper/provenance_audit.json`` either way, so a clean run
+        leaves evidence the check ran. Best-effort throughout: a bug in the
+        checker must never block a paper.
+        """
+        try:
+            from core import number_provenance
+
+            replicates = list(state.get("result_json_replicates") or [])
+            assertions = _replicate_assertions(state)
+            comparison_stats: dict[str, Any] = {}
+            aggregate: dict[str, Any] = {}
+            if replicates:
+                aggregate = _aggregate_result_json_replicates(
+                    replicates, assertions=assertions,
+                )
+            if len(replicates) >= 2:
+                comparison_stats = _result_comparison_stats(
+                    replicates, max_effect_sizes=10**9, assertions=assertions,
+                )
+            try:
+                config_dump: Any = self.config.model_dump(mode="json")
+            except Exception:  # noqa: BLE001 - the config is a convenience here
+                config_dump = None
+            report = number_provenance.check(
+                paper_md,
+                result_json=state.get("result_json") or {},
+                replicates=replicates,
+                intervals=_replicate_result_intervals(state),
+                aggregate=aggregate,
+                figure_records=state.get("figure_records") or {},
+                comparison_stats=comparison_stats,
+                config=config_dump,
+                design=state.get("design") or {},
+                n_seeds=len(replicates),
+            )
+        except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
+            self._log.warning("[number_provenance] check failed (%s); skipping", e)
+            return []
+
+        try:
+            paper_dir = self.quest_root / "paper"
+            paper_dir.mkdir(parents=True, exist_ok=True)
+            (paper_dir / "provenance_audit.json").write_text(
+                json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[number_provenance] could not write audit: %s", e)
+
+        if report.skipped:
+            self._log.info("[number_provenance] skipped — %s", report.skip_reason)
+            return []
+        if report.ok:
+            self._log.info(
+                "[number_provenance] all %d paper numbers trace to this run "
+                "(%d values it can account for)",
+                report.paper_numbers, report.traceable_values,
+            )
+            return []
+
+        for f in report.findings:
+            self._log.warning("[number_provenance] %s", f.describe())
+        return [f"unsourced_number: {f.describe()}" for f in report.findings]
+
     def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
         """Captions naming a series their figure draws flat or not at all.
         The review prompt carries the same list; this logs it and keeps it for
@@ -6384,6 +6469,11 @@ class Engine:
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
             review["must_flag_hits"] += self._statistics_claim_hits(paper_md, state)
+            # Forced too, and for the same reason: a number that matches
+            # nothing the run computed, nothing it configured and nothing it
+            # drew is a set membership test, not a reading of prose. It goes
+            # quiet on a run that recorded no results.
+            review["must_flag_hits"] += self._number_provenance_hits(paper_md, state)
             # A figure the design planned and the run drew that the paper
             # leaves out is a set difference, not a reading of prose, so it
             # cannot misfire the way the number check can: it is forced.
@@ -6536,6 +6626,13 @@ class Engine:
         stat_hits = self._statistics_claim_hits(paper_md, state)
         if stat_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stat_hits]
+        # Forced on this path as well: panel mode once skipped the numeric
+        # oracle entirely, so asking for more reviewers meant fewer checks.
+        provenance_hits = self._number_provenance_hits(paper_md, state)
+        if provenance_hits:
+            review["must_flag_hits"] = [
+                *(review.get("must_flag_hits") or []), *provenance_hits,
+            ]
         # Forced, as on the single-reviewer path.
         missing_figures = _missing_planned_figures(paper_md, state)
         for hit in missing_figures:
@@ -9266,6 +9363,10 @@ _TEXT_ONLY_HITS = frozenset({
     # the numbers are right and the words around them are wrong, so the paper
     # is written again and the experiment is left alone.
     "mislabelled_statistic",
+    # A number the paper prints that nothing in the run accounts for. The
+    # experiment ran and recorded its results; the paper quotes a figure none
+    # of them holds, so what needs rewriting is the prose, not the experiment.
+    "unsourced_number",
 })
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
