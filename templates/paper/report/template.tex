@@ -95,6 +95,18 @@ $endif$
 \renewcommand{\bottomfraction}{0.6}
 \renewcommand{\textfraction}{0.1}
 \renewcommand{\floatpagefraction}{0.8}
+% A figure is a float, so LaTeX may hold it back to a later page. The
+% reference list ends the paper's body, and a figure held past it printed
+% among the references instead of beside the text that discusses it.
+% generation/paper.py puts \FIfloatbarrier just before that list, and any
+% figure still waiting is placed before it. With nothing waiting the
+% barrier does nothing at all, so a paper whose figures already fit keeps
+% its layout unchanged. \@deferlist is LaTeX's own list of floats held for
+% a later page; placeins is deliberately not used, because it is absent
+% from TeX installs FI otherwise supports.
+\makeatletter
+\newcommand{\FIfloatbarrier}{\par\ifx\@deferlist\@empty\else\clearpage\fi}
+\makeatother
 $highlighting-macros$
 
 \pagestyle{fancy}

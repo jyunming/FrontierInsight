@@ -112,6 +112,34 @@ def test_template_declares_none_counter(fmt: str) -> None:
     )
 
 
+@pytest.mark.parametrize("fmt", EXPECTED_FORMATS)
+def test_template_defines_the_float_barrier(fmt: str) -> None:
+    """``generation/paper.py`` writes ``\\FIfloatbarrier`` into the PDF
+    source just above the reference list, so a figure LaTeX is still
+    holding back cannot be carried past that list and printed among the
+    references. Every template must DEFINE the command — an undefined one
+    stops the compile with ``Undefined control sequence``, which would
+    turn a layout fix into a paper that does not render at all.
+
+    ``placeins``' ``\\FloatBarrier`` is deliberately NOT used: the package
+    is absent from TeX installs FI otherwise supports (a real MiKTeX here
+    has no ``placeins.sty``), so the templates test LaTeX's own
+    ``\\@deferlist`` instead."""
+    txt = (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8")
+    assert r"\newcommand{\FIfloatbarrier}" in txt, (
+        f"{fmt}/template.tex must define \\FIfloatbarrier — "
+        f"generation/paper.py emits it above the reference list"
+    )
+    assert r"\@deferlist" in txt, (
+        f"{fmt}/template.tex must test \\@deferlist so the barrier costs "
+        f"nothing when no figure is waiting"
+    )
+    assert r"\usepackage{placeins}" not in txt, (
+        f"{fmt}/template.tex must not depend on placeins — it is not "
+        f"present in every supported TeX install"
+    )
+
+
 def test_two_column_templates_redefine_longtable() -> None:
     """longtable stops with ``longtable not in 1-column mode`` in a
     ``twocolumn`` document, so every markdown table killed the ieee_access

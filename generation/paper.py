@@ -882,6 +882,12 @@ class PaperGenerator:
             # LLM emits when the prior-work excerpt starts with the
             # paper title.
             sanitized_md = _dedupe_duplicated_references(sanitized_md)
+            # A figure is a LaTeX float: the engine may hold it back to a
+            # later page. The reference list ends the paper's body, so a
+            # figure held past it printed among the references instead of
+            # beside the text discussing it. The barrier makes LaTeX place
+            # every figure still waiting before that list starts.
+            sanitized_md = float_barrier_before_references(sanitized_md)
             # With a page limit the References and Further reading lists are
             # set smaller. The LaTeX for it goes into this copy only; paper.md
             # stays as the writer and the engine left it.
@@ -1138,6 +1144,37 @@ def small_source_lists(markdown: str) -> str:
         pos = end
     out.append(markdown[pos:])
     return "".join(out)
+
+
+# Raw LaTeX calling the barrier the paper templates define. Pandoc passes a
+# ``{=latex}`` block straight through to the LaTeX writer, and the HTML
+# writer (the browser fallback) drops it — which is right, because a browser
+# lays figures out in document order and has no float to hold back.
+_FLOAT_BARRIER_LATEX = "```{=latex}\n\\FIfloatbarrier\n```"
+
+
+def float_barrier_before_references(markdown: str) -> str:
+    """``markdown`` with a float barrier immediately before the first
+    References / Further reading heading.
+
+    A figure is a LaTeX float, so the engine is free to hold it back to a
+    later page. The reference list ends the paper's body, so a figure held
+    past it printed among the references — a figure rendered after the
+    References section, which is what a reader notices first. The barrier
+    makes LaTeX place every figure still waiting before the list starts.
+
+    With no figure waiting the barrier expands to nothing, so a paper whose
+    figures already sit beside their text keeps its exact layout — this
+    pins the bad case without moving the good one.
+
+    The heading is matched at any level and either spelling, case
+    insensitively, by the same pattern :func:`small_source_lists` uses. For
+    the PDF source only; ``paper.md`` keeps the writer's text as written.
+    """
+    m = _SMALL_LIST_HEADING_RE.search(markdown)
+    if m is None:
+        return markdown
+    return markdown[:m.start()] + _FLOAT_BARRIER_LATEX + "\n\n" + markdown[m.start():]
 
 
 def _render_pdf_skip_md(reason: _PdfSkipReason, config: Config) -> str:

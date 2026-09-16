@@ -16,7 +16,11 @@ import pytest
 from core.config import Config
 from core.engine import QuestArtifacts
 from generation import paper as paper_mod
-from generation.paper import PaperGenerator, _tighten_inline_math
+from generation.paper import (
+    PaperGenerator,
+    _tighten_inline_math,
+    float_barrier_before_references,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1893,3 +1897,66 @@ def test_preprocessor_separates_a_table_from_its_caption(
     sanitized = (tmp_path / "out" / "paper_pdf_source.md").read_text(encoding="utf-8")
     assert "population size.\n\n| N | P(major) |" in sanitized, sanitized
     assert "population size.\n| N |" in art.paper_md.read_text(encoding="utf-8"), "paper.md keeps the writer's text"
+
+
+# ---------------------------------------------------------------------------
+# float_barrier_before_references — no figure prints after the reference list
+# ---------------------------------------------------------------------------
+
+
+_FIGURE_PAPER = (
+    "# Title\n\n## Results\n\n"
+    "![A plot.](figures/a.png)\n\n"
+    "Text about it.\n\n"
+    "## References\n\n1. Someone (2020). A paper.\n\n"
+    "## Further reading\n\n- [W1] A page.\n"
+)
+
+
+def test_barrier_lands_immediately_before_the_reference_list() -> None:
+    """A figure is a LaTeX float, so the engine may hold it back to a later
+    page; held past the reference list it printed among the references.
+    The barrier goes in right above that list."""
+    out = float_barrier_before_references(_FIGURE_PAPER)
+    assert "\\FIfloatbarrier\n```\n\n## References" in out, out
+    # Once only, and before the FIRST of the two source lists.
+    assert out.count("\\FIfloatbarrier") == 1
+    assert out.index("![A plot.]") < out.index("\\FIfloatbarrier")
+
+
+def test_barrier_goes_before_further_reading_when_there_is_no_references() -> None:
+    """Further reading also ends the body, so it is the barrier's anchor
+    when a paper cites nothing scholarly."""
+    md = "# T\n\n![p](f.png)\n\n## Further reading\n\n- [W1] A page.\n"
+    assert "\\FIfloatbarrier\n```\n\n## Further reading" in float_barrier_before_references(md)
+
+
+@pytest.mark.parametrize(
+    "heading", ["## REFERENCES", "#### further reading", "# References", "### Further Reading"],
+)
+def test_barrier_matches_any_heading_level_and_case(heading: str) -> None:
+    out = float_barrier_before_references(f"# T\n\ntext\n\n{heading}\n\nbody\n")
+    assert f"```\n\n{heading}" in out, out
+
+
+def test_paper_without_a_source_list_is_left_alone() -> None:
+    """No reference list, nothing to pin the figures ahead of."""
+    md = "# T\n\n## Results\n\nNo lists at all.\n"
+    assert float_barrier_before_references(md) == md
+
+
+def test_preprocessor_writes_the_barrier_into_the_pdf_source_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The barrier is raw LaTeX for the PDF render; ``paper.md`` keeps the
+    writer's text exactly as written."""
+    state = _capture_pandoc_call(monkeypatch)
+    del state
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(_FIGURE_PAPER, encoding="utf-8")
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    sanitized = (tmp_path / "out" / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "\\FIfloatbarrier" in sanitized, sanitized
+    assert "\\FIfloatbarrier" not in art.paper_md.read_text(encoding="utf-8")
