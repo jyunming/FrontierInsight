@@ -344,6 +344,44 @@ class ProviderConfig(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _cli_timeout_is_a_floor(self) -> "ProviderConfig":
+        """An explicit ``cli_timeout_s`` is a floor, not just a fallback.
+
+        ``node_cli_timeout_s`` ships defaults that are *lower* than a raised
+        ``cli_timeout_s`` for some nodes (``implement_outline`` at 600 s), and
+        the provider resolves the per-node entry first. A quest that asked for
+        900 s therefore got 600 s on that node with no warning, and a codex
+        ``implement_outline`` call was killed three times in a row, losing about
+        40 minutes and the outline stage.
+
+        So when the user sets ``cli_timeout_s`` and leaves the per-node map at
+        its defaults, every built-in entry below it is raised to it. A
+        user-supplied ``node_cli_timeout_s`` is left exactly as written: both
+        numbers were deliberate, and a deliberately tighter node budget is a
+        legitimate way to catch a hang on that node faster.
+        """
+        if "cli_timeout_s" not in self.model_fields_set:
+            return self
+        if "node_cli_timeout_s" in self.model_fields_set:
+            return self
+        raised = {
+            node: seconds
+            for node, seconds in self.node_cli_timeout_s.items()
+            if seconds < self.cli_timeout_s
+        }
+        if not raised:
+            return self
+        for node in raised:
+            self.node_cli_timeout_s[node] = self.cli_timeout_s
+        logging.getLogger("frontier_insight.config").info(
+            "provider.cli_timeout_s=%gs is a floor: raised the built-in per-node "
+            "budget for %s to match.",
+            self.cli_timeout_s,
+            ", ".join(f"{n} (was {s:g}s)" for n, s in sorted(raised.items())),
+        )
+        return self
+
 
 MergeStrategy = Literal["tournament", "synthesize", "vote"]
 
