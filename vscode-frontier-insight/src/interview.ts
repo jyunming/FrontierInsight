@@ -110,9 +110,9 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
  * cancelled at any step (Esc on a modal, or empty topic).
  *
  * Flow:
- *   1. Tier-1 — four modals (topic, paper_format, output_kinds, study_depth),
- *      then the optional author line (author, affiliation, contact email,
- *      project link), where an empty box skips the field.
+ *   1. Tier-1 — five modals (topic, paper_format, output_kinds, study_depth,
+ *      ensemble_profile), then the optional author line (author, affiliation,
+ *      contact email, project link), where an empty box skips the field.
  *      Provider + model are pinned silently by the extension (provider =
  *      vscode_extension, model = whatever the chat picker showed).
  *   2. Tier-2 — derive title / no_simulation / clarify_mode / review_panel /
@@ -126,7 +126,7 @@ export async function runInterview(
     stream: vscode.ChatResponseStream,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** Four quick questions and an optional author line, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
+        "🧪 **Let's set up a new research quest.** Five quick questions and an optional author line, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
