@@ -38,6 +38,52 @@ from pathlib import Path
 _DEFAULT_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# The markdown dialect FI reads a paper in. ONE definition, because both
+# renderers must agree on what the writer's text means: the LaTeX path
+# (``generation/paper.py``) and the HTML/browser fallback
+# (``generation/_html_pdf.py``) render the SAME ``paper.md``, and a dialect
+# difference between them shows up as a paper whose two renderings say
+# different things.
+#
+# Beyond pandoc's markdown defaults:
+#
+# * ``lists_without_preceding_blankline`` — the LLM routinely drops a bullet
+#   or numbered list straight after the introducing paragraph with no blank
+#   line. Pandoc's default reader requires that blank line and otherwise jams
+#   the whole list into the paragraph as inline text ("Foo - a - b - c.").
+# * ``autolink_bare_uris`` — a bare reference URL becomes a real ``\url{}``,
+#   which the templates' ``xurl`` can break at ANY character. Without it a
+#   long wiki-style URL runs straight into the right margin.
+# * ``tex_math_single_backslash`` — ``\(x\)`` is inline math and ``\[x\]`` is
+#   display math. Pandoc's markdown reader understands ``$x$`` but NOT
+#   ``\(x\)`` on its own: it reads ``\(`` as an escaped parenthesis and the
+#   commands between the delimiters as raw TeX. Writers use both spellings,
+#   and the ``\(...\)`` one silently changed what papers said — LaTeX got
+#   ``(R\_0\leq1)`` in text mode and stopped with "Missing $ inserted", while
+#   the HTML writer, which cannot emit raw TeX, DELETED the commands and
+#   printed "zero when (R_0)" with the relation gone, and table headers as
+#   "(R_0) (N) () () ()". Both spellings now parse as math on both paths.
+MARKDOWN_READER = (
+    "markdown"
+    "+lists_without_preceding_blankline"
+    "+autolink_bare_uris"
+    "+tex_math_single_backslash"
+)
+
+# The same dialect for a renderer that has no way to express raw TeX.
+#
+# ``-raw_tex`` is the difference. With raw TeX enabled, pandoc keeps a stray
+# ``\SI{3}{\micro}`` (anything outside math) as a raw-LaTeX inline; the LaTeX
+# writer passes it through, but the HTML writer has nowhere to put it and
+# drops it WITHOUT a word — the reader then gets a sentence whose meaning
+# changed, which is worse than one that looks wrong. Disabled, pandoc reads
+# the same text as literal characters and the HTML keeps them visible, so a
+# formula the browser path cannot typeset survives as its own source rather
+# than as a hole in the sentence. Math is unaffected: ``\(...\)``, ``\[...\]``
+# and ``$...$`` are still parsed as math and rendered as MathML.
+HTML_MARKDOWN_READER = MARKDOWN_READER + "-raw_tex"
+
+
 def _pypandoc_pandoc() -> str | None:
     """Absolute path to the pandoc binary bundled by ``pypandoc_binary``.
 

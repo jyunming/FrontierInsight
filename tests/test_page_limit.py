@@ -327,7 +327,7 @@ def test_raw_latex_passes_through_pandoc_to_the_latex(tmp_path: Path) -> None:
     md = tmp_path / "t.md"
     md.write_text(small_source_lists(PAPER), encoding="utf-8")
     latex = subprocess.run(
-        [pandoc, str(md), "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris", "-t", "latex"],
+        [pandoc, str(md), f"--from={paper_mod.MARKDOWN_READER}", "-t", "latex"],
         capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout
     assert re.search(r"\\begingroup\\small\s+\\begin\{enumerate\}", latex)

@@ -6,7 +6,9 @@ gated on pandoc + a Chromium-family browser being available, so it runs on
 a developer box but skips cleanly on a headless CI runner."""
 from __future__ import annotations
 
+import logging
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,10 @@ from generation import paper as paper_mod
 from generation._html_pdf import (
     _split_title,
     find_html_browser,
+    raw_tex_outside_math,
     render_paper_html_pdf,
 )
+from generation._pandoc import HTML_MARKDOWN_READER
 from generation.paper import PaperGenerator
 
 
@@ -271,3 +275,92 @@ def test_render_paper_html_pdf_integration(tmp_path: Path) -> None:
     )
     assert pdf is not None, detail
     assert pdf.is_file() and pdf.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# Math: what the browser path must not do to a formula
+# ---------------------------------------------------------------------------
+
+
+def _pandoc_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, md: str) -> list[str]:
+    """The pandoc command the HTML render builds for ``md`` (stops there)."""
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **_kw):  # noqa: ANN001
+        seen.append(list(cmd))
+        raise OSError("stop after pandoc")
+
+    monkeypatch.setattr(_html_pdf.subprocess, "run", fake_run)
+    pmd = tmp_path / "paper.md"
+    pmd.write_text(md, encoding="utf-8")
+    render_paper_html_pdf(
+        pmd, tmp_path / "paper.pdf", pandoc_path="pandoc", browser=("msedge", "edge"))
+    return seen[0]
+
+
+def test_the_html_render_reads_backslash_paren_as_math(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``tex_math_single_backslash`` pandoc reads ``\\(`` as an
+    escaped parenthesis and the commands between the delimiters as raw TeX —
+    which the HTML writer cannot emit and therefore DELETED. The delivered
+    paper printed "zero when (R_0)", a whole sentence whose meaning had
+    changed, and a table header as "(R_0) (N) () () ()"."""
+    cmd = _pandoc_cmd(tmp_path, monkeypatch, "# T\n\nzero when \\(R_0\\leq1\\).\n")
+    frm = [a for a in cmd if a.startswith("--from=")]
+    assert frm, cmd
+    assert "tex_math_single_backslash" in frm[0], frm
+
+
+def test_the_html_render_keeps_the_tex_it_cannot_typeset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-raw_tex`` is the safety net: LaTeX the HTML writer can't express
+    reaches the page as its own source instead of vanishing. A renderer that
+    deletes a formula changes what the paper says; one that prints the source
+    merely looks wrong, which the reader can see."""
+    cmd = _pandoc_cmd(tmp_path, monkeypatch, "# T\n\nbody \\SI{3}{\\micro}\n")
+    frm = [a for a in cmd if a.startswith("--from=")][0]
+    assert frm.endswith("-raw_tex"), frm
+
+
+def test_the_html_render_warns_about_tex_it_cannot_typeset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Preserved-but-not-typeset is still a defect, so it is named in
+    run.log rather than passing silently."""
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.paper"):
+        _pandoc_cmd(tmp_path, monkeypatch, "# T\n\nbody \\SI{3}{\\micro}\n")
+    assert "cannot typeset" in caplog.text
+    assert "\\SI" in caplog.text
+
+
+def test_raw_tex_outside_math_ignores_real_math_and_code() -> None:
+    """Commands INSIDE math are the ones that do render (as MathML), so
+    reporting them would make the warning meaningless."""
+    assert raw_tex_outside_math(r"a \(R_0\leq1\) b $\alpha$ c `\beta` d") == []
+    assert raw_tex_outside_math(r"\[\frac{a}{b}\] and $$\sum x$$") == []
+    assert raw_tex_outside_math(r"a unit \SI{3}{\micro} here") == [r"\SI", r"\micro"]
+    # A markdown escape of one punctuation char is not a lost formula.
+    assert raw_tex_outside_math(r"file\_name and AT\&T") == []
+
+
+@pytest.mark.skipif(shutil.which("pandoc") is None, reason="needs pandoc")
+def test_pandoc_really_sets_backslash_math_as_mathml_and_keeps_stray_tex(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through real pandoc, on the exact shape the codex-written
+    SIR papers used: the formula becomes MathML instead of the bare text
+    "(R_0)", and a stray command stays visible instead of being dropped."""
+    md = tmp_path / "t.md"
+    md.write_text(
+        "zero when \\(R_0\\leq1\\) and \\SI{3}{\\micro}.\n", encoding="utf-8")
+    html = subprocess.run(
+        [shutil.which("pandoc"), str(md), "-t", "html", "--mathml",
+         f"--from={HTML_MARKDOWN_READER}"],
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    ).stdout
+    assert "<math" in html, html
+    assert "(R_0)" not in html, html
+    assert "\\SI{3}{\\micro}" in html, html
