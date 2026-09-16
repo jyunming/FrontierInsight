@@ -84,6 +84,12 @@ export interface InterviewAnswers {
     // inputs/papers/ and resume. Maps to pauses.papers.
     // On by default (the engine default). Must stay in sync with core/interview.py.
     supply_papers?: boolean;
+    // Mid-quest stop so you can drop reference PDFs into inputs/papers/
+    // and datasets into inputs/data/ before the engine continues, then
+    // resume. Maps to pauses.supply via SUPPLY_TO_PAUSE; "never" (the
+    // default) emits nothing. Must stay in sync with
+    // core/interview.py:InterviewAnswers.pause_for_user_input.
+    pause_for_user_input?: "never" | "after_design" | "after_paper" | "both";
     // Multi-model ensemble preset. "off" (default) keeps single-call
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
@@ -131,6 +137,22 @@ export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
     "gemini_cli": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
     "ollama": ["llama3.3:70b", "qwen2.5:32b", "qwen2.5:7b"],
     "vscode_extension": ["gpt-5", "claude-opus-4-7", "gemini-2.5-pro"],
+};
+
+
+/**
+ * Interview answer -> the ``pauses.supply`` vocabulary the engine reads.
+ * Mirrors ``_SUPPLY_TO_PAUSE`` in core/interview.py: the interview asks
+ * the question in terms of the stage the user watches go by ("after
+ * design"), while the engine names the edge it stops on
+ * ("before_build"). Both halves must use the same table, or the same
+ * answer would mean different things on different surfaces.
+ */
+export const SUPPLY_TO_PAUSE: Record<string, string> = {
+    never: "never",
+    after_design: "before_build",
+    after_paper: "before_review",
+    both: "both",
 };
 
 
@@ -324,6 +346,14 @@ export function answersToYaml(answers: InterviewAnswers): string {
         answers.clarify_mode === "interactive" ? "ask" : answers.clarify_mode;
     lines.push("pauses:");
     lines.push(`${indent}clarify: "${clarifyPause}"`);
+    // Only a real pause is written; "never" leaves the key out so the
+    // generated YAML stays clean. Mirrors core/interview.py.
+    const supplyPause =
+        SUPPLY_TO_PAUSE[answers.pause_for_user_input ?? "never"]
+        ?? answers.pause_for_user_input;
+    if (supplyPause && supplyPause !== "never") {
+        lines.push(`${indent}supply: "${yamlEscape(supplyPause)}"`);
+    }
     // Written either way: the engine default is on, so "off" must be explicit.
     lines.push(`${indent}papers: ${answers.supply_papers === false ? "false" : "true"}`);
     lines.push("");
