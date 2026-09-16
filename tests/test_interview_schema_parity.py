@@ -70,10 +70,19 @@ def test_paper_format_choices_match_ts_literal() -> None:
 # in the TS interface (see the auto-derived parity test below).
 _TS_EXEMPT_ANSWER_FIELDS = frozenset({
     # CLI / serve only — VSCode pins the provider to ``vscode_extension``
-    # silently and routes human-in-the-loop pauses through the bridge, so
-    # neither field is part of the TS answer surface.
+    # silently, so the user is never asked to choose one.
+    #
+    # ``pause_for_user_input`` USED to be exempt here on the grounds that
+    # VSCode "routes human-in-the-loop pauses through the bridge". That
+    # conflated two different pauses: the human-REVIEW gate does go
+    # through the bridge, but this one is ``pauses.supply`` — the quest
+    # pause-exits so the user can drop PDFs into inputs/papers/ and
+    # datasets into inputs/data/, then resumes with ``@fi /resume``. That
+    # works identically on every surface, its sibling ``supply_papers``
+    # (``pauses.papers``) was already asked in VSCode, and the question's
+    # own ``frontends`` tuple lists ``vscode``. The exemption was the bug,
+    # so it is gone and the VSCode interview asks the question.
     "provider",
-    "pause_for_user_input",
 })
 
 
@@ -123,26 +132,78 @@ def test_ts_interview_answers_has_all_python_managed_fields() -> None:
     )
 
 
-def test_ts_interview_prompts_for_new_questions() -> None:
-    """The four new Phase-R questions (study_depth +
-    comparative_baseline + success_metric + budget) must have
-    prompts in interview.ts so VSCode actually asks them. If the
-    interview.ts file was updated to add the answer fields but never
-    actually prompt, the YAML emits placeholders forever."""
+def _asked_question_ids() -> set[str]:
+    """The ids listed in interview.ts's ``VSCODE_ASKED_QUESTIONS``."""
     ts_text = INTERVIEW_TS.read_text(encoding="utf-8")
-    expected_prompts = (
-        "study depth",            # showQuickPick title for study_depth
-        "comparative baseline",   # showInputBox title for comparative_baseline
-        "success metric",         # showInputBox title for success_metric
-        "compute budget",         # showInputBox title for budget ("time / compute budget")
+    m = re.search(
+        r"export const VSCODE_ASKED_QUESTIONS[^=]*=\s*\[(.*?)\];",
+        ts_text, re.DOTALL,
     )
-    lowered = ts_text.lower()
-    for prompt in expected_prompts:
-        assert prompt in lowered, (
-            f"interview.ts is missing a prompt containing {prompt!r}. "
-            f"The Python schema includes a question that's not asked "
-            f"in the VSCode interview — frontends drift here."
-        )
+    assert m, (
+        "VSCODE_ASKED_QUESTIONS registry not found in interview.ts. It is "
+        "the declared list of questions the VSCode interview asks, and this "
+        "parity test is built on it."
+    )
+    return set(re.findall(r'"([a-z_]+)"', m.group(1)))
+
+
+def test_every_question_declaring_vscode_is_actually_asked() -> None:
+    """The expected set is DERIVED from each question's own ``frontends``
+    tuple, not hardcoded.
+
+    The previous version of this test listed four prompt names by hand,
+    so it only ever checked those four. ``ensemble_profile``,
+    ``paper_style`` and ``max_iterations`` each declared ``vscode`` in
+    their ``frontends`` and were never asked anywhere in the VSCode
+    interview — ``ensemble_profile`` meant a VSCode user could not start
+    an ensemble quest at all — and CI stayed green the whole time,
+    because a hardcoded list cannot notice a question it does not name.
+
+    Deriving the set means a new question that declares ``vscode`` fails
+    here the moment it ships unasked."""
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    required = {
+        q["id"] for q in schema["questions"]
+        if "vscode" in q.get("frontends", [])
+    }
+    listed = _asked_question_ids()
+
+    unasked = sorted(required - listed)
+    assert not unasked, (
+        f"Question(s) {unasked} declare `vscode` in their `frontends` but "
+        f"are not in VSCODE_ASKED_QUESTIONS, so the VSCode interview never "
+        f"asks them and the YAML gets the schema default forever. Either "
+        f"ask them in interview.ts and add them to the registry, or drop "
+        f"'vscode' from the question's `frontends` in core/interview.py."
+    )
+    stale = sorted(listed - required)
+    assert not stale, (
+        f"VSCODE_ASKED_QUESTIONS lists {stale}, which the schema does not "
+        f"mark as a `vscode` question. Remove them, or add 'vscode' to the "
+        f"question's `frontends` in core/interview.py."
+    )
+
+
+def test_every_asked_question_is_referenced_by_the_interview_code() -> None:
+    """Guard the registry against being padded: an id can only be listed
+    if the interview code mentions it somewhere OUTSIDE the registry
+    (a quick-pick value, a field assignment, an editor case). Without
+    this, adding a name to the list would silence the test above without
+    asking the user anything."""
+    ts_text = INTERVIEW_TS.read_text(encoding="utf-8")
+    without_registry = re.sub(
+        r"export const VSCODE_ASKED_QUESTIONS[^=]*=\s*\[.*?\];",
+        "", ts_text, flags=re.DOTALL,
+    )
+    unreferenced = sorted(
+        qid for qid in _asked_question_ids()
+        if qid not in without_registry
+    )
+    assert not unreferenced, (
+        f"VSCODE_ASKED_QUESTIONS lists {unreferenced} but interview.ts "
+        f"never mentions them outside the registry — the list is claiming "
+        f"a question the code does not ask."
+    )
 
 
 def test_ts_ensemble_model_trios_match_python() -> None:

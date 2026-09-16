@@ -51,13 +51,68 @@ function looksLikeSurvey(topic: string): boolean {
 }
 
 /**
+ * Every interview question this frontend actually asks, by its id in
+ * ``core/interview_schema.json``.
+ *
+ * This is the VS Code half of the frontend contract. Each Python
+ * ``Question`` carries a ``frontends`` tuple saying which surfaces ask
+ * it; ``tests/test_interview_schema_parity.py`` derives the expected set
+ * from that tuple and requires it to equal this list exactly. So a
+ * question that declares ``vscode`` but is never asked fails CI, and so
+ * does an id listed here that the schema does not mark for VS Code.
+ *
+ * Before this existed the parity test hardcoded four prompt names, which
+ * is why ``ensemble_profile``, ``paper_style`` and ``max_iterations``
+ * could ship unreachable for months while CI stayed green.
+ *
+ * Asked inline as modals: topic, output_kinds, paper_format, study_depth,
+ * ensemble_profile, and the four author-line fields. Reachable from the
+ * review screen: everything else ("Edit a default" / "Edit an advanced
+ * field"). `title`, `no_simulation` and `survey_mode` are derived first
+ * and then editable there; `survey_mode` rides the research-approach
+ * picker.
+ */
+export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
+    "topic",
+    "title",
+    "paper_format",
+    "paper_style",
+    "output_kinds",
+    "study_depth",
+    "no_simulation",
+    "survey_mode",
+    "clarify_mode",
+    "review_panel",
+    "pause_for_user_input",
+    "knowledge_enabled",
+    "web_research",
+    "supply_papers",
+    "audience",
+    "knowledge_top_k",
+    "knowledge_external_top_k",
+    "comparative_baseline",
+    "success_metric",
+    "budget",
+    "ensemble_profile",
+    "max_iterations",
+    "node_models",
+    "reasoning_effort",
+    "poster_size",
+    "page_limit",
+    "author",
+    "affiliation",
+    "contact_email",
+    "url",
+];
+
+/**
  * Run the interview. Returns the answers, or `undefined` if the user
  * cancelled at any step (Esc on a modal, or empty topic).
  *
  * Flow:
- *   1. Tier-1 — four modals (topic, paper_format, output_kinds, study_depth),
- *      then the optional author line (author, affiliation, contact email,
- *      project link), where an empty box skips the field.
+ *   1. Tier-1 — five modals (topic, paper_format, output_kinds, study_depth,
+ *      ensemble_profile), then the optional author line (author, affiliation,
+ *      contact email, project link), where an empty box skips the field.
  *      Provider + model are pinned silently by the extension (provider =
  *      vscode_extension, model = whatever the chat picker showed).
  *   2. Tier-2 — derive title / no_simulation / clarify_mode / review_panel /
@@ -71,7 +126,7 @@ export async function runInterview(
     stream: vscode.ChatResponseStream,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** Four quick questions and an optional author line, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
+        "🧪 **Let's set up a new research quest.** Five quick questions and an optional author line, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
@@ -297,7 +352,46 @@ export async function runInterview(
     const studyDepth = studyDepthChoice.value;
     stream.markdown(`  **Study depth:** \`${studyDepth}\`\n\n`);
 
-    // 7. Author line — optional, printed on the paper, slides and poster.
+    // 7. Multi-model ensemble — tier 1 in core/interview.py, because the
+    // cost multiplier is a launch-time decision rather than a hidden
+    // tweak. Labels and descriptions are taken verbatim from
+    // ENSEMBLE_PROFILES so a VS Code user and a CLI user are choosing
+    // between the same four options with the same stated costs.
+    const ensembleChoice = await vscode.window.showQuickPick(
+        [
+            {
+                label: "$(circle-outline) Single model (default, cheapest)",
+                description: "One LLM call per node. Cost baseline = 1×.",
+                value: "off" as const,
+            },
+            {
+                label: "$(git-compare) Fan out cross_check only (~1.3× cost)",
+                description: "3 models vote per finding; catches issues the writer might miss. Minimal extra spend.",
+                value: "cross_check_only" as const,
+            },
+            {
+                label: "$(lightbulb) Fan out ideate + cross_check (~2.0× cost)",
+                description: "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding.",
+                value: "ideate_and_check" as const,
+            },
+            {
+                label: "$(organization) Fan out ideate + analyze + cross_check (~2.5× cost)",
+                description: "Multi-model on the three highest-leverage nodes. Best signal; highest cost.",
+                value: "full" as const,
+            },
+        ],
+        {
+            title: "Frontier Insight — multi-model ensemble?",
+            placeHolder:
+                "Run the same node across multiple LLMs and merge their answers. Cost multiplies; agreement signal increases.",
+            ignoreFocusOut: true,
+        },
+    );
+    if (!ensembleChoice) return undefined;
+    const ensembleProfile = ensembleChoice.value;
+    stream.markdown(`  **Ensemble:** \`${ensembleProfile}\`\n\n`);
+
+    // 8. Author line — optional, printed on the paper, slides and poster.
     // Mirrors the tier-1 author questions in core/interview.py.
     const authorLine = await askAuthorLine();
     if (!authorLine) return undefined;
@@ -340,6 +434,12 @@ export async function runInterview(
         node_models: "",
         reasoning_effort: "default",
         provider_model: "",
+        // Asked above (tier 1 in the schema). "off" keeps single-call
+        // semantics; anything else expands into provider.node_ensemble.
+        ensemble_profile: ensembleProfile,
+        // Schema defaults, editable from the review screen below.
+        paper_style: "latex",
+        pause_for_user_input: "never",
         max_iterations: 2,
         audience: "external",
         knowledge_top_k: compReview ? 12 : 8,
@@ -432,6 +532,8 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
+    lines.push(`| Pause for my papers / datasets | \`${a.pause_for_user_input ?? "never"}\` |`);
+    lines.push(`| Multi-model ensemble | \`${a.ensemble_profile ?? "off"}\` |`);
     lines.push(`| Paper audience | \`${a.audience}\` |`);
     const authorCell = formatAuthorLine(a).replace(/\|/g, "\\|");
     lines.push(`| Author line | ${authorCell || "Frontier Insight (no author set)"} |`);
@@ -447,6 +549,8 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         || (a.reasoning_effort !== undefined && a.reasoning_effort !== "default")
         || (ext !== undefined && ext !== 20)
         || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
+        || (a.paper_style !== undefined && a.paper_style !== "latex")
+        || a.max_iterations !== 2
         || typeof a.page_limit === "number"
     );
     if (hasOverride) {
@@ -462,6 +566,10 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") {
             lines.push(`  • poster size: ${a.poster_size}`);
         }
+        if (a.paper_style !== undefined && a.paper_style !== "latex") {
+            lines.push(`  • paper style: ${a.paper_style}`);
+        }
+        if (a.max_iterations !== 2) lines.push(`  • iteration budget: ${a.max_iterations}`);
         if (typeof a.page_limit === "number") lines.push(`  • page limit: ${a.page_limit} pages`);
     }
     lines.push("");
@@ -566,6 +674,7 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
             { label: "Web research (download sources)", value: "web_research" },
             { label: "Supply paywalled papers", value: "supply_papers" },
+            { label: "Pause for my papers / datasets", value: "pause_for_user_input" },
             { label: "Paper audience", value: "audience" },
             { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
             { label: "Author line (author, affiliation, email, link)", value: "author_line" },
@@ -678,6 +787,43 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             if (v) a.supply_papers = v.value;
             return;
         }
+        case "pause_for_user_input": {
+            // Maps to pauses.supply. Choices are verbatim from
+            // core/interview.py so the same answer means the same thing
+            // on every surface. The quest pause-exits and is picked up
+            // again with `@fi /resume` (or `launch.py --resume`).
+            const v = await vscode.window.showQuickPick(
+                [
+                    {
+                        label: "$(circle-slash) Never (default)",
+                        description: "Engine runs to completion without pause-drop opportunities.",
+                        value: "never" as const,
+                    },
+                    {
+                        label: "$(debug-step-over) Pause after design",
+                        description: "Drop reference papers / data BEFORE the implement → execute → analyze stages spend compute.",
+                        value: "after_design" as const,
+                    },
+                    {
+                        label: "$(debug-step-out) Pause after paper draft",
+                        description: "Drop reference papers / data AFTER the first paper.md is written; useful for revise iterations.",
+                        value: "after_paper" as const,
+                    },
+                    {
+                        label: "$(debug-pause) Both",
+                        description: "Pause after design AND after paper — most cost. Use for high-stakes manual review.",
+                        value: "both" as const,
+                    },
+                ],
+                {
+                    title: "Pause for user-supplied papers / datasets",
+                    placeHolder: "Stop mid-quest so you can drop PDFs into inputs/papers/ and data into inputs/data/, then resume.",
+                    ignoreFocusOut: true,
+                },
+            );
+            if (v) a.pause_for_user_input = v.value;
+            return;
+        }
         case "audience": {
             const v = await vscode.window.showQuickPick(
                 [
@@ -710,7 +856,9 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "Per-node model overrides", value: "node_models" },
             { label: "External (web) retrievals per quest (external_top_k)", value: "knowledge_external_top_k" },
             { label: "Poster size", value: "poster_size" },
+            { label: "Paper style", value: "paper_style" },
             { label: "Reasoning effort", value: "reasoning_effort" },
+            { label: "Design-revise iteration budget", value: "max_iterations" },
             { label: "Page limit", value: "page_limit" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
@@ -728,6 +876,43 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             validateInput: (s) => (s.trim() === "" ? null : validatePositiveInt(s)),
         });
         if (v !== undefined) a.page_limit = v.trim() === "" ? null : parsePositiveInt(v);
+        return;
+    }
+    if (which.value === "paper_style") {
+        // Written to output.paper_style. Labels verbatim from
+        // PAPER_STYLES in core/interview.py.
+        const v = await vscode.window.showQuickPick(
+            [
+                {
+                    label: "LaTeX — Computer Modern article (default)",
+                    description: "The classic typeset look via the venue LaTeX template. Best typography; needs a LaTeX engine (or the HTML fallback).",
+                    value: "latex" as const,
+                },
+                {
+                    label: "Briefing — Frontier Insight brand look",
+                    description: "Warm paper, deep-teal accents, serif display + brand mark — the same identity as the slides and poster. Rendered via pandoc + a browser (no LaTeX); single-column regardless of venue.",
+                    value: "briefing" as const,
+                },
+            ],
+            { title: "Paper style", ignoreFocusOut: true },
+        );
+        if (v) a.paper_style = v.value;
+        return;
+    }
+    if (which.value === "max_iterations") {
+        // engine.max_iterations — the design → review → revise cap.
+        const v = await vscode.window.showInputBox({
+            title: "Design-revise iteration budget",
+            prompt: "Hard cap on the design → review → revise loop. Lower = cheaper + faster; higher = more chances to fix what review caught. 2 is the default; bump to 3-4 only when you specifically want extra revise passes.",
+            value: String(a.max_iterations),
+            placeHolder: "2",
+            ignoreFocusOut: true,
+            validateInput: validatePositiveInt,
+        });
+        if (v !== undefined) {
+            const n = parsePositiveInt(v);
+            if (n !== null) a.max_iterations = n;
+        }
         return;
     }
     if (which.value === "reasoning_effort") {
