@@ -28,6 +28,7 @@ from pathlib import Path
 
 from generation._figure_captions import numbers_off_figure_captions
 from generation._keywords import keywords_block
+from generation._pandoc import HTML_MARKDOWN_READER
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "paper" / "_html"
 _CSS_PATH = _ASSETS_DIR / "latexlike.css"
@@ -96,6 +97,42 @@ def find_html_browser() -> tuple[str, str] | None:
 
 
 _FIRST_H1_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)
+
+
+# Math spans (both spellings) and code, removed before scanning for LaTeX the
+# HTML writer can't express: commands INSIDE math are exactly the ones that do
+# render (as MathML), so counting them would make the warning meaningless.
+# The dollar-math alternative follows pandoc's own rule — a non-space just
+# inside each ``$`` and no digit after the closing one — so "$5 to $10" is
+# prose, not a math span.
+_MATH_OR_CODE_RE = re.compile(
+    r"```.*?```"
+    r"|`[^`\n]+`"
+    r"|\$\$.*?\$\$"
+    r"|\\\[.*?\\\]"
+    r"|\\\(.*?\\\)"
+    r"|(?<!\\)\$(?=\S)[^$\n]*?[^\s\\]\$(?!\d)",
+    re.DOTALL,
+)
+# A LaTeX control word: two letters or more, so a markdown escape of a single
+# punctuation character (``\_``, ``\&``) isn't reported as a lost formula.
+_TEX_COMMAND_RE = re.compile(r"\\[a-zA-Z]{2,}")
+
+
+def raw_tex_outside_math(markdown: str) -> list[str]:
+    """The distinct LaTeX commands sitting OUTSIDE math and code, in order.
+
+    These are what the browser path cannot typeset. They are no longer
+    dropped (the reader disables ``raw_tex``, so they print as written), but
+    a formula reaching the page as its own source is still a defect worth
+    naming in run.log — the writer should have marked it up as math.
+    """
+    stripped = _MATH_OR_CODE_RE.sub(" ", markdown)
+    found: list[str] = []
+    for m in _TEX_COMMAND_RE.finditer(stripped):
+        if m.group(0) not in found:
+            found.append(m.group(0))
+    return found
 
 
 def _split_title(md_text: str) -> tuple[str, str]:
@@ -168,9 +205,26 @@ def render_paper_html_pdf(
         for arg in ("--metadata", f"author={line}")
     ]
 
+    # Anything the browser path can't typeset stays visible instead of
+    # vanishing (see HTML_MARKDOWN_READER), but say so: a printed ``\SI{...}``
+    # means the writer wrote a formula as prose.
+    leftover = raw_tex_outside_math(body)
+    if leftover:
+        log.warning(
+            "paper.pdf: the HTML render cannot typeset %d LaTeX command(s) "
+            "written outside math (%s); they are printed as written rather "
+            "than dropped. Mark them up as math to have them typeset.",
+            len(leftover), ", ".join(leftover[:5]),
+        )
+
     pandoc_cmd = [
         pandoc_path, body_md.name,
         "--standalone", "--embed-resources", "--mathml",
+        # Same markdown dialect as the LaTeX path, minus raw TeX: ``\(x\)``
+        # and ``\[x\]`` become MathML like ``$x$`` already did, and TeX this
+        # writer can't express is kept as visible text instead of silently
+        # deleted.
+        f"--from={HTML_MARKDOWN_READER}",
         "--css", css_resolved.name,
         "--metadata", f"title={title or 'Untitled'}",
         *byline_args,

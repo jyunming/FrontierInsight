@@ -1728,7 +1728,7 @@ def test_preprocessor_enables_list_extension_and_shifts_headings(
     PaperGenerator(cfg).generate(art, tmp_path / "out")
 
     cmd = state["cmd"]
-    assert "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris" in cmd, (
+    assert f"--from={paper_mod.MARKDOWN_READER}" in cmd, (
         "list-after-paragraph rendering depends on this extension"
     )
     assert "--shift-heading-level-by=-1" in cmd, (
@@ -1762,11 +1762,63 @@ def test_preprocessor_skips_heading_shift_when_no_title(
     PaperGenerator(cfg).generate(art, tmp_path / "out")
 
     cmd = state["cmd"]
-    assert "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris" in cmd
+    assert f"--from={paper_mod.MARKDOWN_READER}" in cmd
     assert "--shift-heading-level-by=-1" not in cmd, (
         "with no title to lift, shifting headings would mangle the "
         "author's intended hierarchy"
     )
+
+
+def test_the_reader_takes_backslash_paren_as_inline_math(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``\\(x\\)`` has to reach pandoc AS MATH.
+
+    Pandoc's markdown understands ``$x$`` but not ``\\(x\\)`` unless
+    ``tex_math_single_backslash`` is on: it reads ``\\(`` as an escaped
+    parenthesis and the commands between the delimiters as raw TeX. Papers
+    whose writer used that spelling were therefore typeset as TEXT —
+    ``(R\\_0\\leq1)`` outside math mode — and pdflatex stopped with
+    "Missing $ inserted" (rc=43). That failure is what handed those papers
+    to the HTML fallback, where the same commands were deleted outright.
+    """
+    state = _capture_pandoc_call(monkeypatch)
+
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# Title\n\n## Introduction\nzero when \\(R_0\\leq1\\).\n",
+        encoding="utf-8",
+    )
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    frm = [a for a in state["cmd"] if a.startswith("--from=")]
+    assert frm, state["cmd"]
+    assert "tex_math_single_backslash" in frm[0], (
+        "without this extension \\(x\\) is read as an escaped paren plus raw "
+        "TeX, which pdflatex rejects and the HTML writer drops"
+    )
+
+
+def test_pandoc_really_sets_backslash_math_in_math_mode(tmp_path: Path) -> None:
+    """The contract through real pandoc: the reader FI passes must put
+    ``\\(R_0\\leq1\\)`` into LaTeX math mode, not emit the escaped-text
+    ``(R\\_0\\leq1)`` that produced ``! Missing $ inserted``."""
+    import subprocess
+
+    from generation._pandoc import MARKDOWN_READER, find_pandoc
+
+    pandoc = find_pandoc(Path(paper_mod.__file__).resolve().parents[1])
+    if pandoc is None:
+        pytest.skip("needs pandoc")
+    md = tmp_path / "t.md"
+    md.write_text("zero when \\(R_0\\leq1\\).\n", encoding="utf-8")
+    latex = subprocess.run(
+        [pandoc, str(md), f"--from={MARKDOWN_READER}", "-t", "latex"],
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    ).stdout
+    assert "\\(R_0\\leq1\\)" in latex, latex
+    assert "(R\\_0" not in latex, latex
 
 
 def test_preprocessor_dedupes_duplicated_reference_lines(
