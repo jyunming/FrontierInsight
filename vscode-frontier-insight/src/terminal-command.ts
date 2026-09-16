@@ -31,20 +31,40 @@
  * from a dead session would be re-applied to every terminal the user
  * opens, including ones that have nothing to do with FI.
  *
- * **Known limitation — Git Bash as the default profile on Windows.**
- * Measured, not assumed: MSYS rewrites the arguments it hands a native
- * Windows process, collapsing the leading `\\` of
- * `\\.\pipe\fi-bridge-<user>` down to a single `\`, so the pipe name
- * arrives malformed and the connect fails. It does this to an
- * environment variable as well as to an argument, so neither transport
- * dodges it. Both shells VS Code actually defaults to on Windows
- * (PowerShell, cmd.exe) pass the name through byte-for-byte, so this
- * only affects a user who has deliberately set Git Bash as their
- * terminal profile; running `/update` / `/generate` from a PowerShell
- * terminal is the workaround. Not worked around here because every
- * candidate fix (forward slashes, pre-doubling) would need a live
- * bridge to verify, and an unverified transformation is worse than a
- * documented limit.
+ * **Git Bash on Windows — the quoting is what matters, not MSYS.**
+ * Re-measured against a real `C:\Program Files\Git\bin\bash.exe`
+ * (GNU bash 5.2.37, MINGW64) by printing the argv a native
+ * `python.exe` actually receives, and by opening a live
+ * PersistentBridge connection through it:
+ *
+ * | spelling of `\\.\pipe\fi-bridge-me`   | argv the child receives |
+ * |---------------------------------------|-------------------------|
+ * | unquoted                              | `\.pipefi-bridge-me`    |
+ * | `"..."` double-quoted                 | `\.\pipe\fi-bridge-me`  |
+ * | `'...'` single-quoted (what we emit)  | `\\.\pipe\fi-bridge-me` |
+ *
+ * MSYS rewrites nothing here — this is plain bash backslash handling.
+ * Unquoted, `\\`, `\p` and `\f` are escape sequences and the name is
+ * destroyed; double quotes eat exactly one level, which is the
+ * `\.\pipe\...` symptom previously blamed on MSYS (and an env var
+ * behaves the same way: quoted survives, unquoted does not). The
+ * single-quoted form {@link shellQuote} emits for `posix` arrives
+ * byte-for-byte intact, and a real connect through Git Bash to a
+ * listening bridge succeeds — so `/update` and `/generate` do work
+ * under a Git Bash terminal profile.
+ *
+ * The quoting is therefore load-bearing rather than cosmetic: dropping
+ * it for the socket would break Git Bash users only, silently. A
+ * regression test feeds the generated line through a real Git Bash and
+ * asserts the pipe name survives.
+ *
+ * One measurement trap, and the likely source of the retracted claim:
+ * running `bash.exe -c "<line>"` *from a native Windows process* puts a
+ * Win32 command-line layer in front of bash, and that layer eats a
+ * backslash level on its own — `\\.\pipe\x` reaches bash already
+ * `\.\pipe\x`. `Terminal.sendText` never goes through it: it types the
+ * line into a shell that is already running. So the honest measurement
+ * feeds bash over stdin, and that is what the test does.
  *
  * No `vscode` import — this module is pure so it can be exercised under
  * plain node (see tests/test_vscode_terminal_command.py).
@@ -139,12 +159,26 @@ export function buildLaunchCommand(opts: LaunchCommandOptions): string {
 export function updateTerminalCommand(opts: {
     pythonPath: string;
     questId: string;
+    /**
+     * Quest output root, i.e. the resolved `frontierInsight.outputDir`.
+     * Omitted only by callers that genuinely want launch.py's default.
+     */
+    outputRoot?: string;
     bridgeSocket?: string;
     shell: ShellKind;
 }): string {
+    const args = ["--update", opts.questId];
+    // `--update <id>` looks the quest up under `--output-root`, whose
+    // argparse default is `./outputs`. The picker that produced this id
+    // listed `frontierInsight.outputDir` instead, so without the flag a
+    // user with a custom output directory gets "no quest directory at
+    // <repo>\outputs\<id>" for a quest FI itself just offered them.
+    // Every other spawn (--digest / --portfolio / --critique /
+    // --proposal / --analyze) already passes the root; this one didn't.
+    if (opts.outputRoot) args.push("--output-root", opts.outputRoot);
     return buildLaunchCommand({
         pythonPath: opts.pythonPath,
-        args: ["--update", opts.questId],
+        args,
         bridgeSocket: opts.bridgeSocket,
         shell: opts.shell,
     });

@@ -729,6 +729,11 @@ async function runUpdate(
     term.sendText(updateTerminalCommand({
         pythonPath,
         questId,
+        // The quest was found under `outputsDir` (the resolved
+        // `frontierInsight.outputDir`), so --update has to be told to
+        // look there too; launch.py would otherwise default to
+        // ./outputs and reject a quest the picker just listed.
+        outputRoot: outputsDir,
         bridgeSocket: persistentBridgePath(),
         shell: currentShell(),
     }));

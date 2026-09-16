@@ -1515,20 +1515,75 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
                 return html
             finally:
                 browser.close()
-    except Exception as e:
-        _log.info("playwright render %s failed: %s", url, e)
+    except (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError):
+        # Genuine cancellation, not a source that failed to fetch — propagate
+        # untouched so Ctrl-C / shutdown still stops the quest promptly.
+        raise
+    except BaseException as e:  # noqa: BLE001 - deliberately wider; see below
+        # Wider than ``Exception`` on purpose. The renderer drives a Node
+        # driver process over a pipe, and when that driver dies the failure
+        # does not always arrive as a well-behaved Python exception:
+        # Playwright's sync API drives that pipe through greenlets, so what
+        # reaches this frame can be a ``BaseException`` subclass, which the
+        # old ``except Exception`` did not catch.
+        #
+        # What prompted this: a real quest died during concurrent headless
+        # fetching amid a wall of 403s and 429s, with a Node-side
+        # ``Error: EPIPE: broken pipe, write`` reported on the console as an
+        # unhandled ``'error'`` event. It produced no paper, its run.log stops
+        # mid-fetch, and it never reached the engine's exit path — which
+        # writes ``source_failures.json`` unconditionally. So that process
+        # aborted rather than unwound, and the route its failure actually took
+        # is NOT established. This boundary contains and records whatever
+        # Python-level error the driver raises; it cannot contain an
+        # interpreter-level abort.
+        #
+        # A source that cannot be fetched is an ordinary event. Record it like
+        # any other failed source and let the caller keep the search snippet.
+        # (Before this, even an ordinary render failure was logged and
+        # recorded nowhere, so the report said the source never failed.)
+        _log.info("playwright render %s failed: %r", url, e)
+        source = _sf.source_for_url(url, "web_page")
+        if isinstance(e, Exception):
+            _sf.record_exception(source, e, url=url)
+        else:
+            _sf.record_failure(source, "browser_crash", url=url, detail=e)
         return None
 
 
+# The article body, and the wrappers that are not article prose: the
+# journal/issue front matter (which flattens to id soup — "3459 idm
+# Infectious Disease Modelling … PMC6002090 29928733") and the back matter
+# (reference list, funding, competing interests).
+_JATS_BODY_RE = re.compile(r"(?is)<body\b[^>]*>(.*?)</body>")
+_JATS_DROP_RE = re.compile(r"(?is)<(front|back|ref-list)\b.*?</\1>")
+# Block-level closers: a paragraph break belongs at each one.
+_JATS_BLOCK_END_RE = re.compile(
+    r"(?i)</(p|title|sec|abstract|disp-formula|table-wrap|list-item|caption)\s*>",
+)
+
+
 def _xml_to_text(xml: str) -> str:
-    """Flatten JATS / XML full-text markup to readable plain text — strip
-    tags + decode HTML entities, collapse whitespace. Good enough to feed
-    the writer + plot steps; we don't need structural fidelity."""
-    no_tags = re.sub(r"<[^>]+>", " ", xml)
+    """Flatten JATS / XML full-text markup to readable plain text — keep the
+    article body, strip tags, decode HTML entities, and preserve paragraph
+    boundaries.
+
+    Paragraphs are kept because the next step is chunking, and chunking a
+    single unbroken line has to hard-split at a character count, landing
+    mid-word: on a real article this produced 27 mid-word chunk boundaries,
+    against 9 once the paragraphs survive. Only horizontal whitespace is
+    collapsed; a blank line stays a blank line."""
+    m = _JATS_BODY_RE.search(xml or "")
+    region = m.group(1) if m and len(m.group(1)) > 200 else (xml or "")
+    region = _JATS_DROP_RE.sub(" ", region)
+    region = _JATS_BLOCK_END_RE.sub("\n\n", region)
+    no_tags = re.sub(r"<[^>]+>", " ", region)
     # html.unescape decodes named *and* numeric entities (&#x2014;, &eacute;,
     # …) so JATS punctuation/symbols survive, unlike a hand-rolled allowlist.
     decoded = _htmlmod.unescape(no_tags)
-    return re.sub(r"\s+", " ", decoded).strip()
+    decoded = re.sub(r"[ \t\r\f\v]+", " ", decoded)
+    decoded = re.sub(r" ?\n ?", "\n", decoded)
+    return re.sub(r"\n{3,}", "\n\n", decoded).strip()
 
 
 def _normalize_pmcid(raw: str) -> str:
@@ -1631,10 +1686,10 @@ def _pmc_bioc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
     return None
 
 
-def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
-    """OA full text as JATS XML from Europe PMC — second choice after BioC
-    (the XML→text flatten loses structure). Only OA-subset articles expose
-    ``fullTextXML``; others 404.
+def _europepmc_fulltext_xml(pmcid: str, *, timeout_s: float) -> str | None:
+    """The raw JATS XML for ``pmcid`` from Europe PMC, or None. Kept separate
+    from the flattening below because the markup answers a question the text
+    cannot: whether the article states formulae (see ``_pmc_fulltext``).
 
     NOTE: the path is ``/{PMCID}/fullTextXML`` with the ``PMC``-prefixed id
     and NO ``/PMC/`` path segment — ``/PMC/{id}/fullTextXML`` 404s for every
@@ -1649,14 +1704,85 @@ def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None
         _sf.record_response("europepmc", r, url=url)
         if r.status_code != 200 or not r.content:
             return None
-        text = _xml_to_text(r.text)
-        if len(text) >= _MIN_FULL_TEXT_CHARS:
-            _log.info("europepmc: recovered %d chars for %s", len(text), pmcid)
-            return text[:cap]
+        return r.text
     except Exception as e:
         _log.info("europepmc fulltext %s failed: %s", pmcid, e)
         _sf.record_exception("europepmc", e, url=url)
     return None
+
+
+def _europepmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
+    """OA full text as JATS XML from Europe PMC — second choice after BioC.
+    Only OA-subset articles expose ``fullTextXML``; others 404."""
+    xml = _europepmc_fulltext_xml(pmcid, timeout_s=timeout_s)
+    if not xml:
+        return None
+    text = _xml_to_text(xml)
+    if len(text) >= _MIN_FULL_TEXT_CHARS:
+        _log.info("europepmc: recovered %d chars for %s", len(text), pmcid)
+        return text[:cap]
+    return None
+
+
+# JATS markup that means the article states real mathematics. Structural, so
+# it settles "does this article have formulae?" without guessing from prose.
+_JATS_FORMULA_RE = re.compile(
+    r"(?i)<(?:inline-formula|disp-formula|tex-math|[a-z]*:?math)\b",
+)
+# Greek letters, letterlike symbols (ℛ), arrows, mathematical operators and
+# sub/superscripts — what survives in a body whose mathematics is intact.
+_MATH_GLYPH_RE = re.compile(
+    r"[Ͱ-Ͽ℀-⅏←-⇿∀-⋿"
+    r"⁰-ⁿ₀-ₜ]",
+)
+# Below this many math glyphs per 1000 characters, a body has effectively no
+# mathematics left. Measured on the two real records that prompted this fix:
+# 0.32 and 0.45 per 1000, against 14.1 and 14.8 for the very same articles
+# read from the XML with their formulae intact.
+_MATH_GLYPHS_PER_1K = 0.5
+
+
+def _kept_its_mathematics(text: str) -> bool:
+    """True when ``text`` still carries mathematical symbols."""
+    if not text:
+        return False
+    return (
+        1000.0 * len(_MATH_GLYPH_RE.findall(text)) / len(text)
+        >= _MATH_GLYPHS_PER_1K
+    )
+
+
+def _pmc_fulltext(pmcid: str, *, timeout_s: float, cap: int) -> str | None:
+    """Full text for a PMC article, with its formulae intact.
+
+    BioC stays the first choice — it is the cleanest PMC route — but it
+    returns passage text with the mathematics REMOVED, leaving every sentence
+    that carried a formula truncated to its punctuation. Measured on a stored
+    record, byte-identical to this route's output: "the probability of no
+    outbreak is either 1 or ." where the article says ``1 - 1/R_0``. A claim
+    the source genuinely supports then cannot be verified against it, and a
+    true claim is rejected.
+
+    So when the BioC body comes back with no mathematics left in it, ask
+    Europe PMC for the same article's JATS XML; if that XML does carry formula
+    markup, its flattened text is the better record and replaces the BioC one.
+    An article that never had formulae, or whose XML is missing or too short,
+    keeps its BioC text — that miss costs one extra keyless GET, never
+    content."""
+    text = _pmc_bioc_fulltext(pmcid, timeout_s=timeout_s, cap=cap)
+    if not text or _kept_its_mathematics(text):
+        return text
+    xml = _europepmc_fulltext_xml(pmcid, timeout_s=timeout_s)
+    if not xml or not _JATS_FORMULA_RE.search(xml):
+        return text
+    recovered = _xml_to_text(xml)
+    if len(recovered) < _MIN_FULL_TEXT_CHARS:
+        return text
+    _log.info(
+        "pmc %s: BioC dropped the article's formulae; using the Europe PMC "
+        "XML instead (%d chars, was %d)", pmcid, len(recovered), len(text),
+    )
+    return recovered[:cap]
 
 
 def _pdf_or_html_text(resp: Any, *, cap: int) -> str | None:
@@ -1858,7 +1984,8 @@ def _fetch_via_open_apis(
     routes in descending order of text quality / reliability, stopping at
     the first that yields real full text:
 
-        PMC BioC → Europe PMC XML → preprint (arXiv/bioRxiv/medRxiv) →
+        PMC (BioC, or the Europe PMC XML when the article carries formulae
+        BioC drops) → Europe PMC XML → preprint (arXiv/bioRxiv/medRxiv) →
         Unpaywall OA copy → Semantic Scholar → CORE (last two env-gated).
 
     Returns the recovered text, or None when no OA copy is reachable."""
@@ -1866,7 +1993,7 @@ def _fetch_via_open_apis(
     pmcid, doi, arxiv_id = ids["pmcid"], ids["doi"], ids["arxiv_id"]
     routes: list[Any] = []
     if pmcid:
-        routes.append(lambda: _pmc_bioc_fulltext(pmcid, timeout_s=timeout_s, cap=cap))
+        routes.append(lambda: _pmc_fulltext(pmcid, timeout_s=timeout_s, cap=cap))
         routes.append(lambda: _europepmc_fulltext(pmcid, timeout_s=timeout_s, cap=cap))
     if arxiv_id or doi.startswith("10.1101/"):
         routes.append(lambda: _preprint_fulltext(ids, timeout_s=timeout_s, cap=cap))
@@ -2337,8 +2464,20 @@ async def _enrich_with_full_text(
             for task in done:
                 try:
                     idx, text = task.result()
-                except Exception as e:
-                    _log.info("full-text fetch task raised: %s", e)
+                except (KeyboardInterrupt, SystemExit, GeneratorExit,
+                        asyncio.CancelledError):
+                    raise
+                except BaseException as e:  # noqa: BLE001 - see below
+                    # Wider than ``Exception``, for the same reason as the
+                    # headless renderer's own boundary: this batch IS the
+                    # failure isolation for full-text fetching, so one source
+                    # whose fetch dies in its worker thread must cost the run
+                    # that one source and nothing more. Anything narrower
+                    # trusts every route below it to raise only ``Exception``,
+                    # and a browser driver dying is exactly the case that can
+                    # break that assumption.
+                    _log.info("full-text fetch task raised: %r", e)
+                    _sf.record_failure("full_text", "fetch_crashed", detail=e)
                     continue
                 if not text:
                     continue
