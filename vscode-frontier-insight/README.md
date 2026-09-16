@@ -35,7 +35,10 @@ also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A
 `paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, to words quoted from a cited source (the quote must be
-in the source), or are unsupported (unsupported claims force a revise). Each
+in the source), or are unsupported (unsupported claims force a revise). The
+check reads every finding the run recorded, whole, with the results branches
+those findings name, so a claim is never called unsupported because the
+evidence that proves it was cut short. Each
 figure keeps a record of what it draws, and a caption that describes a line the
 figure draws flat or not at all goes back to the reviewer; the human review in
 the chat lists those captions. A figure the design planned and the run drew

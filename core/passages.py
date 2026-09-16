@@ -195,6 +195,14 @@ def _hybrid_scores(chunks: list[str], query: str) -> list[float]:
     return [w * e[i] + (1.0 - w) * l[i] for i in range(len(chunks))]
 
 
+def rank_by_relevance(texts: list[str], query: str) -> list[float]:
+    """Each text's lexical relevance to ``query``, scored as the passage
+    ranking scores chunks below. For a caller that must choose WHOLE items —
+    one branch of a result set, say — rather than an excerpt of a single
+    document, and so cannot go through :func:`select_relevant_excerpt`."""
+    return _lexical_scores(list(texts), query)
+
+
 def select_relevant_excerpt(
     content: str,
     query: str,

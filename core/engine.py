@@ -5612,16 +5612,25 @@ class Engine:
             )
         ) or "(no references)"
         analysis = state.get("analysis") or {}
-        evidence = {
-            "key_findings": analysis.get("key_findings") or [],
-            "claims_supported": analysis.get("claims_supported") or [],
-            "result_json": state.get("result_json") or {},
-        }
-        evidence_block = json.dumps(evidence, indent=2)[:4000]
+        # The findings and the supported claims go in whole and first — they
+        # are what an "experiment" basis is checked against — and the run's
+        # results then fill whatever is left of the budget.
+        evidence_block, dropped = _claim_distilled_block(analysis, _CLAIM_EVIDENCE_CHARS)
+        if dropped:
+            self._log.warning(
+                "[claim_check] %d finding(s)/supported claim(s) did not fit the "
+                "%d-character evidence budget and were left out",
+                dropped, _CLAIM_EVIDENCE_CHARS,
+            )
+        evidence_block += _claim_results_block(
+            state.get("result_json") or {},
+            query=evidence_block,
+            budget=_CLAIM_EVIDENCE_CHARS - len(evidence_block),
+        )
         # The paper reports means over the seeds with their intervals, which
         # seed 0's RESULT_JSON holds neither of. They follow the results, one
-        # line each, outside the 4,000-character cut: inside it, SIR's 19
-        # intervals pushed most of its results out.
+        # line each, and outside the budget above: they are a few lines that
+        # the results must never be able to push out.
         intervals = _replicate_result_intervals(state)
         if intervals:
             n_seeds = len(state.get("result_json_replicates") or [])
@@ -8115,6 +8124,21 @@ def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
 _CLAIM_SOURCE_CHARS = 6000
 # A quote shorter than this could be found in almost any source.
 _QUOTE_MIN_CHARS = 25
+# And this much of the quest's OWN evidence. Separate from the per-source
+# budget above: this one bounds the findings, the supported claims and the
+# results the check grounds an "experiment" claim against. The block used to
+# be the first 4,000 characters of all three serialised together, and one real
+# run serialised 113,460 — so 3.5% of it reached the checker, the cut landed
+# inside the 12th of 14 key findings, and the 14th, an exact finite-state
+# validation, never appeared at all. The check called that validation
+# unsupported, the rewrite deleted the table that proved it, and the next
+# review asked for the table back.
+_CLAIM_EVIDENCE_CHARS = 14000
+# A numeric array longer than this is shown as its length and its range. A
+# probability mass function of 101 floats costs 2,000 characters and grounds
+# no claim, while the fact that it is there, and what it spans, is what
+# reading the results needs.
+_CLAIM_ARRAY_MAX_ITEMS = 10
 
 
 def _item_content(item: Any) -> str:
@@ -8135,6 +8159,92 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
         return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
     excerpt = _format_lit_excerpt(text, title, query=" ".join(sentences), budget=_CLAIM_SOURCE_CHARS)
     return head + "\nText:\n" + excerpt.strip()
+
+
+def _claim_distilled_block(analysis: dict[str, Any], budget: int) -> tuple[str, int]:
+    """The analysis's own key findings and the claims it says the run
+    supports, every item WHOLE, as much as ``budget`` holds. Returns the block
+    and how many items did not fit.
+
+    These are what an "experiment" basis is checked against — they carry the
+    run's numbers at the precision the paper writes them — so an item is
+    either shown entire or not at all. Cutting the serialised evidence at a
+    character count severed a finding mid-sentence and silently dropped the
+    ones after it."""
+    kept: dict[str, list[Any]] = {"key_findings": [], "claims_supported": []}
+    dropped = 0
+    for key in ("key_findings", "claims_supported"):
+        for item in (analysis.get(key) or []):
+            kept[key].append(item)
+            if len(json.dumps(kept, indent=2)) > budget:
+                kept[key].pop()
+                dropped += 1
+    return json.dumps(kept, indent=2), dropped
+
+
+def _summarise_long_arrays(obj: Any, *, max_items: int = _CLAIM_ARRAY_MAX_ITEMS) -> Any:
+    """``obj`` with every all-numeric array longer than ``max_items`` replaced
+    by its length and range, so the results a claim can be checked against are
+    not crowded out by the raw arrays behind them."""
+    if isinstance(obj, dict):
+        return {k: _summarise_long_arrays(v, max_items=max_items) for k, v in obj.items()}
+    if isinstance(obj, list):
+        numbers = [x for x in obj if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if len(obj) > max_items and len(numbers) == len(obj):
+            return f"[{len(obj)} values, {min(numbers):.4g} to {max(numbers):.4g}]"
+        return [_summarise_long_arrays(v, max_items=max_items) for v in obj]
+    return obj
+
+
+def _claim_results_block(result_json: Any, *, query: str, budget: int) -> str:
+    """As much of the run's results as ``budget`` holds: all of them when they
+    fit, otherwise the top-level branches most related to ``query``, each one
+    whole and in its original order.
+
+    Keeping whole branches rather than the leading slice is what reaches a
+    result the sweep buries. One real run's results opened with an
+    80,000-character sweep, so every leading slice was that sweep and the
+    validation branch the paper's claims rested on never appeared, at any
+    budget. Long numeric arrays are summarised first, which is what makes the
+    branch that matters small enough to fit."""
+    if not result_json or budget <= 0:
+        return ""
+    summarised = _summarise_long_arrays(result_json)
+    whole = json.dumps(summarised, indent=2)
+    head = "\n\nThe run's results (result_json)"
+    if len(head) + 2 + len(whole) <= budget:
+        return f"{head}:\n{whole}"
+    # Leave room for the section's own heading line, so the block as a whole
+    # stays inside the budget its caller had left over.
+    room = budget - 200
+
+    def _leading_slice() -> str:
+        # What the check saw before, so this can never show less than it did.
+        return (f"{head}, the first {max(room, 0):,} of {len(whole):,} "
+                f"characters:\n{whole[:max(room, 0)]}")[:budget]
+
+    if not isinstance(summarised, dict) or len(summarised) < 2:
+        return _leading_slice()
+    from .passages import rank_by_relevance
+    names = list(summarised)
+    blocks = {name: json.dumps({name: summarised[name]}, indent=2) for name in names}
+    scores = rank_by_relevance([blocks[name] for name in names], query)
+    kept: set[str] = set()
+    used = 0
+    for i in sorted(range(len(names)), key=lambda i: scores[i], reverse=True):
+        if used + len(blocks[names[i]]) <= room:
+            kept.add(names[i])
+            used += len(blocks[names[i]])
+    if not kept:
+        return _leading_slice()
+    body = "\n".join(blocks[name] for name in names if name in kept)
+    left_out = [name for name in names if name not in kept]
+    # Name a few of the branches that did not fit; a sweep can have hundreds,
+    # and the note must not itself crowd out the results.
+    missed = ", ".join(left_out[:3]) + (
+        f" and {len(left_out) - 3} more" if len(left_out) > 3 else "")
+    note = f", the branches most related to the findings ({missed} did not fit)" if left_out else ""
+    return f"{head}{note}:\n{body}"[:budget]
 
 
 def _normalized_text(text: str) -> str:

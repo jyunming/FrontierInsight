@@ -334,3 +334,163 @@ def test_the_check_sees_the_passage_that_supports_a_citation(tmp_path: Path) -> 
     assert BRAUER_SUPPORT in prompt
     assert "we define the generating function" in prompt
     assert "distinction between a minor outbreak and a major epidemic" in prompt
+
+
+# --- how much of the quest's OWN evidence the check sees ----------------------
+
+# A real SIR run's shape. Its analysis produced 14 key findings, the last of
+# them an exact finite-state validation, and results that open with an
+# 80,000-character parameter sweep. The findings, the supported claims and the
+# results were serialised together and cut at 4,000 characters, which showed
+# 3.5% of the 113,460 the run had: the cut fell inside the 12th finding and the
+# 14th never appeared. The check called that validation unsupported, the
+# rewrite deleted the table that proved it, and the next review asked for the
+# table back.
+VALIDATION_FINDING = (
+    "[validation:N=100] Exact CTMC threshold probabilities were 0.229, 0.131, and 0.0617 "
+    "for R0=0.9; 0.422, 0.357, and 0.313 for R0=1.5; and 0.672, 0.660, and 0.658 for R0=3 "
+    "across the three thresholds. Each fell within the corresponding Gillespie Wilson "
+    "interval; exact and Gillespie mean final-size fractions were also close."
+)
+
+
+def _sweep_findings(n: int = 16) -> list[str]:
+    """Findings shaped like the run's per-stratum ones, long enough together
+    that the old 4,000-character cut could not reach what follows them."""
+    return [
+        f"[by_R0:{i}] With branching reference 1/3, probabilities at N=100 for tau=0.05, "
+        f"0.10, and 0.20 were 0.427 (Wilson 95% CI 0.372-0.483), 0.360, and 0.313; the "
+        f"paired bootstrap comparison across thresholds stayed consistent with finite-N "
+        f"sampling in stratum {i}."
+        for i in range(n)
+    ]
+
+
+def _evidence_block(prompt: str) -> str:
+    """The evidence section of a claim-check prompt."""
+    return prompt.split("## This quest's own evidence", 1)[1].split("## The paper's sources", 1)[0]
+
+
+def _capture(eng: Engine) -> list[str]:
+    seen: list[str] = []
+
+    async def fake_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
+        seen.append(prompt)
+        return json.dumps({"claims": [], "summary": ""})
+
+    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
+    return seen
+
+
+def test_every_key_finding_reaches_the_check(tmp_path: Path) -> None:
+    """The finding that proves a claim is often the last one the analysis
+    wrote. Nothing may be dropped for its position, and no finding may be cut
+    in half."""
+    findings = [*_sweep_findings(), VALIDATION_FINDING]
+    # The state the old cut could not show: the findings alone exceed 4,000.
+    assert len(json.dumps(findings, indent=2)) > 4000
+    eng = _engine(tmp_path)
+    seen = _capture(eng)
+    state = {"topic": "t", "paper_md": _paper(tmp_path),
+             "analysis": {"key_findings": findings,
+                          "claims_supported": [{"claim": "The Gillespie implementation is "
+                                                "consistent with the exact finite-state CTMC "
+                                                "at N=100.", "evidence": "All nine exact "
+                                                "threshold probabilities were inside their "
+                                                "Wilson intervals."}]},
+             "literature": []}
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    block = _evidence_block(seen[0])
+    assert VALIDATION_FINDING in block
+    for finding in findings:
+        assert finding in block
+    # The claim the analysis says the run supports reaches it too.
+    assert "All nine exact threshold probabilities were inside" in block
+
+
+def test_the_results_branch_the_findings_name_reaches_the_check(tmp_path: Path) -> None:
+    """The results open with a sweep far larger than any budget, so every
+    leading slice of them is that sweep. The branch the findings actually talk
+    about has to be chosen, not waited for."""
+    sweep = {str(i): {"conditional_major_final_size_fraction":
+                      {"mean": 0.5 + i / 1000, "iqr": [0.1, 0.2], "n": 300}}
+             for i in range(200)}
+    validation = {"N": 100, "by_R0": {"0.9": {
+        "exact_outbreak_probability": 0.22879608811337607,
+        "exact_mean_final_size_fraction": 0.0468407125395854,
+        "exact_final_size_pmf": [i / 1000 for i in range(101)],
+    }}}
+    eng = _engine(tmp_path)
+    seen = _capture(eng)
+    state = {"topic": "t", "paper_md": _paper(tmp_path),
+             "analysis": {"key_findings": [VALIDATION_FINDING]},
+             "result_json": {"by_R0": sweep, "validation": validation},
+             "literature": []}
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    block = _evidence_block(seen[0])
+    assert "exact_outbreak_probability" in block
+    assert "0.2287960881" in block
+    # The sweep did not fit, so none of its contents crowd the block.
+    assert "conditional_major_final_size_fraction" not in block
+    # And the array behind the validation is named and bounded, not printed.
+    assert "exact_final_size_pmf" in block
+    assert "[101 values, 0 to 0.1]" in block
+
+
+def test_a_finding_is_shown_whole_or_not_at_all() -> None:
+    """Under a budget too small for everything, an item is left out rather
+    than severed — the old cut ended one finding mid-sentence."""
+    from core.engine import _claim_distilled_block
+
+    findings = _sweep_findings(6)
+    block, dropped = _claim_distilled_block({"key_findings": findings}, 1200)
+    assert dropped
+    assert len(block) <= 1200
+    kept = [f for f in findings if f in block]
+    assert kept, "at least one finding should fit"
+    assert len(kept) == len(findings) - dropped
+    # No partial item: every finding in the block is there in full.
+    for finding in findings:
+        head = finding[:60]
+        assert head not in block or finding in block
+
+
+def test_a_long_numeric_array_is_summarised_not_printed() -> None:
+    from core.engine import _summarise_long_arrays
+
+    out = _summarise_long_arrays({
+        "pmf": [i / 100 for i in range(101)],
+        "wilson95": [0.372, 0.483],
+        "labels": ["a"] * 40,
+        "nested": {"deep": list(range(50))},
+    })
+    assert out["pmf"] == "[101 values, 0 to 1]"
+    assert out["nested"]["deep"] == "[50 values, 0 to 49]"
+    # A short array, and one that isn't all numbers, are left alone.
+    assert out["wilson95"] == [0.372, 0.483]
+    assert out["labels"] == ["a"] * 40
+
+
+def test_the_results_are_shown_whole_when_they_fit() -> None:
+    from core.engine import _claim_results_block
+
+    block = _claim_results_block({"a": 1, "b": 2}, query="a b", budget=14000)
+    assert '"a": 1' in block and '"b": 2' in block
+    # Nothing to say about branches when every one of them is there.
+    assert "did not fit" not in block
+
+
+def test_the_evidence_block_stays_within_its_budget() -> None:
+    from core.engine import _claim_distilled_block, _claim_results_block
+
+    findings = _sweep_findings(40)
+    budget = 6000
+    distilled, _ = _claim_distilled_block({"key_findings": findings}, budget)
+    results = _claim_results_block(
+        {str(i): {"x": list(range(20))} for i in range(400)},
+        query=distilled, budget=budget - len(distilled),
+    )
+    # A sweep of hundreds of branches: none of them fits whole, and naming
+    # every one of them in the heading would itself overrun the budget.
+    assert len(distilled) <= budget
+    assert len(distilled) + len(results) <= budget
