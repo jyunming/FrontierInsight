@@ -112,6 +112,59 @@ def test_template_declares_none_counter(fmt: str) -> None:
     )
 
 
+@pytest.mark.parametrize("fmt", EXPECTED_FORMATS)
+def test_template_defines_the_float_barrier(fmt: str) -> None:
+    """``generation/paper.py`` writes ``\\FIfloatbarrier`` into the PDF
+    source just above the reference list, so a figure LaTeX is still
+    holding back cannot be carried past that list and printed among the
+    references. Every template must DEFINE the command — an undefined one
+    stops the compile with ``Undefined control sequence``, which would
+    turn a layout fix into a paper that does not render at all.
+
+    ``placeins``' ``\\FloatBarrier`` is deliberately NOT used: the package
+    is absent from TeX installs FI otherwise supports (a real MiKTeX here
+    has no ``placeins.sty``), so the templates test LaTeX's own
+    ``\\@deferlist`` instead."""
+    txt = (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8")
+    assert r"\newcommand{\FIfloatbarrier}" in txt, (
+        f"{fmt}/template.tex must define \\FIfloatbarrier — "
+        f"generation/paper.py emits it above the reference list"
+    )
+    assert r"\@deferlist" in txt, (
+        f"{fmt}/template.tex must test \\@deferlist so the barrier costs "
+        f"nothing when no figure is waiting"
+    )
+    assert r"\usepackage{placeins}" not in txt, (
+        f"{fmt}/template.tex must not depend on placeins — it is not "
+        f"present in every supported TeX install"
+    )
+
+
+@pytest.mark.parametrize("fmt", EXPECTED_FORMATS)
+def test_template_caps_figure_height_at_a_third(fmt: str) -> None:
+    """A figure is capped at 33% of the text height in EVERY paper, not
+    only one with a page limit.
+
+    At the old 45% cap, one figure plus its caption filled so much of a
+    page that LaTeX could not place two together under ``\\topfraction``;
+    with several figures and a few pages of body text the deferred-float
+    queue backed up until it ran past the reference list, and the last
+    figure printed among the references. At 33% two figures and their
+    captions fit (0.72 < 0.85), so the queue drains beside the text.
+
+    The cap must be UNCONDITIONAL — restoring a ``$if(fi-tight)$`` branch
+    here would put 45% back for every paper without a page limit, which is
+    the regime the defect was measured in (10 of 40 papers)."""
+    txt = (TEMPLATE_DIR / fmt / "template.tex").read_text(encoding="utf-8")
+    assert r"0.33\textheight" in txt, (
+        f"{fmt}/template.tex must cap a figure at 0.33\\textheight"
+    )
+    assert r"0.45\textheight" not in txt, (
+        f"{fmt}/template.tex still caps a figure at 0.45\\textheight — at "
+        f"that height a figure gets carried past the reference list"
+    )
+
+
 def test_two_column_templates_redefine_longtable() -> None:
     """longtable stops with ``longtable not in 1-column mode`` in a
     ``twocolumn`` document, so every markdown table killed the ieee_access

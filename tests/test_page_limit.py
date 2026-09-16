@@ -187,9 +187,26 @@ def _contains_run(lines: list[str], run: list[str]) -> bool:
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
-def test_every_template_switches_its_figure_cap_on_fi_tight(fmt: str) -> None:
+def test_every_template_caps_its_figure_height_unconditionally(fmt: str) -> None:
+    """The figure cap is 33% of the text height in every paper, with no
+    ``fi-tight`` switch around it.
+
+    It used to be 45% without a page limit and 33% with one. At 45% a
+    figure and its caption filled so much of a page that LaTeX could not
+    place two of them under ``\\topfraction``, so with several figures the
+    deferred-float queue backed up until it ran past the reference list and
+    a figure printed among the references — measured on 10 of 40 graded
+    papers rendered without a limit. ``fi-tight`` still switches the
+    margins and the source-list size; only the cap stopped depending on it.
+    """
     cap = r"  \Gscale@div\@tempa{%s\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%%"
-    assert _contains_run(_code_lines(fmt), _switch(cap % "0.33", cap % "0.45")), fmt
+    lines = _code_lines(fmt)
+    assert cap % "0.33" in lines, fmt
+    assert cap % "0.45" not in lines, fmt
+    assert not _contains_run(lines, _switch(cap % "0.33", cap % "0.45")), (
+        f"{fmt}: the figure cap must not switch on fi-tight — a paper "
+        f"without a page limit would get the 45% cap back"
+    )
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
@@ -225,7 +242,10 @@ def test_pandoc_renders_the_default_layout_without_the_flag_and_the_tight_one_wi
         ).stdout
 
     default, tight = render(), render("-V", "fi-tight=true")
-    assert r"{0.45\textheight}" in default and r"{0.33\textheight}" not in default
+    # The figure cap no longer depends on the flag — 33% of the text height
+    # either way, so a paper without a page limit cannot carry a figure past
+    # its reference list. Of the tight layout, only the margins still switch.
+    assert r"{0.33\textheight}" in default and r"{0.45\textheight}" not in default
     assert r"{0.33\textheight}" in tight and r"{0.45\textheight}" not in tight
     if fmt in ONE_INCH_MARGIN:
         assert r"\usepackage[margin=1in]{geometry}" in default and "margin=2cm" not in default

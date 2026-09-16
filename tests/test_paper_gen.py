@@ -16,7 +16,11 @@ import pytest
 from core.config import Config
 from core.engine import QuestArtifacts
 from generation import paper as paper_mod
-from generation.paper import PaperGenerator, _tighten_inline_math
+from generation.paper import (
+    PaperGenerator,
+    _tighten_inline_math,
+    float_barrier_before_references,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1069,24 +1073,26 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
     one-liner.
 
     The body fits a figure to the line width (the column, in two
-    columns) and caps it at 45% of the text height, and the float
+    columns) and caps it at 33% of the text height, and the float
     settings stop a figure being put alone on a half-blank page: the
     validation quest's paper had two such pages, and its ieee_access
-    render drew every figure across both columns. A paper with a page
-    limit (the ``fi-tight`` template variable) caps it at 33% instead;
-    45% stays the default."""
+    render drew every figure across both columns. The cap is 33% in
+    every paper, page limit or not — there is no ``fi-tight`` switch
+    around it. At the old 45% default a figure and its caption filled so
+    much of a page that LaTeX could not place two of them under
+    ``\\topfraction``, so the deferred-float queue backed up until it ran
+    past the reference list and a figure printed among the references —
+    10 of 40 graded papers, rendered without a limit."""
     repo = Path(__file__).resolve().parent.parent
     working = [
         "generic", "neurips", "iclr", "nature_mi", "ieee_access",
         "essay", "report", "policy_brief", "whitepaper",
     ]
-    default_cap = r"  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
-    tight_cap = r"  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
+    cap = r"  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
     expected = [
         r"\providecommand{\pandocbounded}[1]{%",
         r"  \sbox{\FI@figbox}{#1}%",
-        default_cap,
-        tight_cap,
+        cap,
         r"  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%",
         r"  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi",
         r"  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}",
@@ -1109,9 +1115,21 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
                 f"and pdflatex would silently emit a PDF with stray text "
                 f"and unbounded images."
             )
-        cap = lines.index(default_cap)
-        assert lines[cap - 3:cap + 2] == ["$if(fi-tight)$", tight_cap, "$else$", default_cap, "$endif$"], (
-            f"{fmt}: the figure cap is 45% by default and 33% only with a page limit (fi-tight)"
+        idx = lines.index(cap)
+        assert lines[idx - 1:idx + 2] == [
+            r"  \sbox{\FI@figbox}{#1}%",
+            cap,
+            r"  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%",
+        ], (
+            f"{fmt}: the figure cap must sit unconditionally in the "
+            f"\\pandocbounded body. It used to be wrapped in "
+            f"$if(fi-tight)$ ... $else$ 45% $endif$, which gave every paper "
+            f"without a page limit a 45% cap — at that height a figure got "
+            f"carried past the reference list and printed among the "
+            f"references (10 of 40 graded papers)."
+        )
+        assert "$if(fi-tight)$" not in lines[idx - 2:idx + 2], (
+            f"{fmt}: no fi-tight switch may wrap the figure cap"
         )
         assert r"\resizebox{\textwidth}" not in "\n".join(lines), (
             f"{fmt}: \\textwidth spans both columns of a two-column page"
@@ -1893,3 +1911,66 @@ def test_preprocessor_separates_a_table_from_its_caption(
     sanitized = (tmp_path / "out" / "paper_pdf_source.md").read_text(encoding="utf-8")
     assert "population size.\n\n| N | P(major) |" in sanitized, sanitized
     assert "population size.\n| N |" in art.paper_md.read_text(encoding="utf-8"), "paper.md keeps the writer's text"
+
+
+# ---------------------------------------------------------------------------
+# float_barrier_before_references — no figure prints after the reference list
+# ---------------------------------------------------------------------------
+
+
+_FIGURE_PAPER = (
+    "# Title\n\n## Results\n\n"
+    "![A plot.](figures/a.png)\n\n"
+    "Text about it.\n\n"
+    "## References\n\n1. Someone (2020). A paper.\n\n"
+    "## Further reading\n\n- [W1] A page.\n"
+)
+
+
+def test_barrier_lands_immediately_before_the_reference_list() -> None:
+    """A figure is a LaTeX float, so the engine may hold it back to a later
+    page; held past the reference list it printed among the references.
+    The barrier goes in right above that list."""
+    out = float_barrier_before_references(_FIGURE_PAPER)
+    assert "\\FIfloatbarrier\n```\n\n## References" in out, out
+    # Once only, and before the FIRST of the two source lists.
+    assert out.count("\\FIfloatbarrier") == 1
+    assert out.index("![A plot.]") < out.index("\\FIfloatbarrier")
+
+
+def test_barrier_goes_before_further_reading_when_there_is_no_references() -> None:
+    """Further reading also ends the body, so it is the barrier's anchor
+    when a paper cites nothing scholarly."""
+    md = "# T\n\n![p](f.png)\n\n## Further reading\n\n- [W1] A page.\n"
+    assert "\\FIfloatbarrier\n```\n\n## Further reading" in float_barrier_before_references(md)
+
+
+@pytest.mark.parametrize(
+    "heading", ["## REFERENCES", "#### further reading", "# References", "### Further Reading"],
+)
+def test_barrier_matches_any_heading_level_and_case(heading: str) -> None:
+    out = float_barrier_before_references(f"# T\n\ntext\n\n{heading}\n\nbody\n")
+    assert f"```\n\n{heading}" in out, out
+
+
+def test_paper_without_a_source_list_is_left_alone() -> None:
+    """No reference list, nothing to pin the figures ahead of."""
+    md = "# T\n\n## Results\n\nNo lists at all.\n"
+    assert float_barrier_before_references(md) == md
+
+
+def test_preprocessor_writes_the_barrier_into_the_pdf_source_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The barrier is raw LaTeX for the PDF render; ``paper.md`` keeps the
+    writer's text exactly as written."""
+    state = _capture_pandoc_call(monkeypatch)
+    del state
+    cfg = _make_config(tmp_path, ["paper_md", "paper_pdf"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(_FIGURE_PAPER, encoding="utf-8")
+    PaperGenerator(cfg).generate(art, tmp_path / "out")
+
+    sanitized = (tmp_path / "out" / "paper_pdf_source.md").read_text(encoding="utf-8")
+    assert "\\FIfloatbarrier" in sanitized, sanitized
+    assert "\\FIfloatbarrier" not in art.paper_md.read_text(encoding="utf-8")
