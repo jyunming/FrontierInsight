@@ -30,6 +30,14 @@ import {
 } from "./skills";
 import { Bridge } from "./bridge";
 import { PersistentBridge } from "./persistent-bridge";
+import { persistentBridgePath } from "./bridge-path";
+import {
+    ShellKind,
+    buildLaunchCommand,
+    detectShell,
+    generateTerminalCommand,
+    updateTerminalCommand,
+} from "./terminal-command";
 import { runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 
@@ -271,9 +279,8 @@ async function handleRequest(
             stream.markdown("Pass at least one path after `/ingest`. Example: `@fi /ingest ~/papers/foo.pdf`\n");
             return;
         }
-        const quotedArgs = paths.map(shellQuote).join(" ");
         await runTerminalCommand(
-            "ingest", `--ingest ${quotedArgs}`,
+            "ingest", ["--ingest", ...paths],
             stream, "Opening a terminal to ingest into Axon.",
         );
         return;
@@ -321,7 +328,7 @@ async function handleRequest(
     if (cmd === "install-tectonic" || cmd === "tectonic") {
         // No-admin LaTeX install for paper_pdf support.
         await runTerminalCommand(
-            "tectonic", "--install-tectonic",
+            "tectonic", ["--install-tectonic"],
             stream, "Opening a terminal to install tectonic (~70 MB) " +
             "into tools/. Self-bootstrapping; no admin needed.",
         );
@@ -572,26 +579,19 @@ function parsePathsFromPrompt(prompt: string): string[] {
     return out;
 }
 
-function shellQuote(arg: string): string {
-    // Cross-shell-safe quoting. On Windows the integrated terminal
-    // is usually PowerShell or cmd.exe; on POSIX it's bash/zsh.
-    // Wrapping in double quotes + escaping internal `"`, `$`, `` ` ``,
-    // and `\` works for all three. This is conservative but correct.
-    if (process.platform === "win32") {
-        // PowerShell: backtick + ` for embedded quotes; cmd: ""
-        // We pick PowerShell-compatible quoting which is also tolerated
-        // by cmd. Escape internal " as `".
-        return `"${arg.replace(/`/g, "``").replace(/"/g, "`\"").replace(/\$/g, "`$")}"`;
-    }
-    // POSIX: single quotes if there's no ' in arg; else fall back to
-    // double-quoted with backslash escapes.
-    if (!arg.includes("'")) return `'${arg}'`;
-    return `"${arg.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\$/g, "\\$").replace(/`/g, "\\`")}"`;
+/**
+ * How to spell a command line for the shell VSCode will start in a
+ * new terminal. PowerShell parses a line beginning with a quoted
+ * string as an expression and needs the call operator; cmd.exe
+ * rejects a leading `&`. See ./terminal-command.
+ */
+function currentShell(): ShellKind {
+    return detectShell(vscode.env.shell, process.platform);
 }
 
 async function runTerminalCommand(
     label: string,
-    pythonArgs: string,
+    args: string[],
     stream: vscode.ChatResponseStream,
     hint: string,
 ): Promise<void> {
@@ -620,10 +620,16 @@ async function runTerminalCommand(
         cwd: repoPath,
     });
     term.show();
-    // Shell-quote the Python path too — the configured value can
-    // include spaces (typical Windows install path:
-    // "C:/Program Files/Python311/python.exe").
-    term.sendText(`${shellQuote(pythonPath)} launch.py ${pythonArgs}`);
+    // Quoting AND the leading call operator depend on the shell — the
+    // previous single spelling (a quoted head, no `&`) was a parse
+    // error in PowerShell, which is the default profile on Windows.
+    // No bridge address here: neither --ingest nor --install-tectonic
+    // makes a model call.
+    term.sendText(buildLaunchCommand({
+        pythonPath,
+        args,
+        shell: currentShell(),
+    }));
 }
 
 
@@ -714,11 +720,18 @@ async function runUpdate(
         cwd: repoPath,
     });
     term.show();
-    // Quote arguments defensively in case the shell mangles the
-    // quest_id (it shouldn't — quest_ids are slugified — but be
-    // safe). The user's shell determines the quoting style; both
-    // PowerShell and bash accept double-quotes.
-    term.sendText(`${pythonPath} launch.py --update "${questId}"`);
+    // This Python is NOT a child of the extension, so it cannot inherit
+    // a per-command TCP bridge the way /start does. Hand it the address
+    // of the session-long PersistentBridge instead. Without it the
+    // resumed quest dies at endpoint resolution: the interview pins
+    // provider.name = vscode_extension, which requires one of
+    // extra['bridge_socket'] / extra['bridge_port'].
+    term.sendText(updateTerminalCommand({
+        pythonPath,
+        questId,
+        bridgeSocket: persistentBridgePath(),
+        shell: currentShell(),
+    }));
 }
 
 
@@ -822,9 +835,19 @@ async function runGenerate(
     );
     const term = vscode.window.createTerminal({ name: `FI generate: ${kind}`, cwd: repoPath });
     term.show();
-    term.sendText(
-        `${pythonPath} launch.py --config "${yamlPath}" --resume "${questId}" --emit ${kind}`,
-    );
+    // slides / poster / speech each make a model call, so this run needs
+    // the bridge address exactly as /update does. paper_pdf renders
+    // without one, but the bridge client connects lazily on the first
+    // call, so passing it always is inert for that kind rather than
+    // costly.
+    term.sendText(generateTerminalCommand({
+        pythonPath,
+        yamlPath,
+        questId,
+        kind,
+        bridgeSocket: persistentBridgePath(),
+        shell: currentShell(),
+    }));
 }
 
 
@@ -948,10 +971,13 @@ async function runQuest(
     });
     const port = await bridge.listen();
 
-    // 2. Build argv. The --vscode-bridge-port flag forces FI to use
-    // the vscode_extension provider regardless of what each YAML's
-    // `provider` block says — we route every LLM call back through
-    // this bridge.
+    // 2. Build argv. --vscode-bridge-port wires this bridge into
+    // provider.extra and selects the vscode_extension provider only
+    // when the YAML has not already named a different one: a config
+    // that explicitly picked claude_cli / openai / etc. keeps its own
+    // transport (launch.py:_apply_vscode_bridge_override). Every YAML
+    // the /new interview writes pins vscode_extension, so on the
+    // common path every LLM call does come back through this bridge.
     const argv: string[] = ["-u", launchScript, "--vscode-bridge-port", String(port)];
     if (fleet) {
         argv.push("--fleet", ...paths);

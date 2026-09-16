@@ -2402,7 +2402,8 @@ def resolve_endpoint(
             raise RuntimeError(
                 "vscode_extension provider requires either "
                 "extra['bridge_socket'] (--vscode-bridge-socket; what "
-                "--serve / --tools use) or extra['bridge_port'] "
+                "--serve / --tools and the extension's `@fi /update` / "
+                "`@fi /generate` terminals use) or extra['bridge_port'] "
                 "(--vscode-bridge-port; what the VSCode chat-spawn "
                 "path uses). Are you launching FI from outside the "
                 "extension's reach? Use copilot_cli for headless "

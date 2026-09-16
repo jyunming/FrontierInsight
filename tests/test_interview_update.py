@@ -408,6 +408,57 @@ def test_update_reopens_when_stages_invalidated(
     assert captured.get("reopen") is True, captured
 
 
+def test_update_forwards_the_bridge_socket_to_the_resumed_quest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The VSCode extension runs ``--update`` in an integrated terminal.
+    That Python is not a child of the extension, so it has no per-command
+    TCP bridge to inherit and is handed the session-long PersistentBridge
+    address instead. ``run_update_flow`` used to accept only the port and
+    drop the socket, so the resumed quest resolved a ``vscode_extension``
+    provider carrying neither ``bridge_socket`` nor ``bridge_port`` and
+    raised at the first model call (the port no-ops at 0)."""
+    import asyncio
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    quest_root = output_root / "q-sock"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(_sample(), frontend="cli"), encoding="utf-8",
+    )
+
+    socket_path = r"\\.\pipe\fi-bridge-me"
+    forwarded: list[str] = []
+
+    async def fake_run_one(*_args, **_kwargs):
+        return 0
+
+    def fake_prompt(q, _partial, _opts):
+        return q.default
+
+    monkeypatch.setattr("launch._cli_prompt_for", fake_prompt)
+
+    rc = asyncio.run(run_update_flow(
+        quest_id="q-sock",
+        output_root=output_root,
+        vscode_bridge_port=0,
+        vscode_bridge_socket=socket_path,
+        interactive=False,
+        supervisor=None,
+        run_one=fake_run_one,
+        apply_vscode_bridge_override=lambda _c, _p: None,
+        apply_vscode_bridge_socket_override=(
+            lambda _cfg, sock: forwarded.append(sock)
+        ),
+    ))
+    assert rc == 0
+    assert forwarded == [socket_path], (
+        "the --update flow dropped the persistent-bridge address; the "
+        "resumed quest would have no way to reach vscode.lm"
+    )
+
+
 def test_update_no_change_does_not_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

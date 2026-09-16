@@ -440,6 +440,8 @@ async def run_update_flow(
     supervisor: Any,
     run_one: Callable[..., Awaitable[Any]],
     apply_vscode_bridge_override: Callable[..., None],
+    vscode_bridge_socket: str = "",
+    apply_vscode_bridge_socket_override: Callable[..., None] | None = None,
 ) -> int:
     """Top-level entry from ``launch.py``. Validates the quest_id,
     runs the interview filtered to editable fields, performs soft
@@ -648,6 +650,15 @@ async def run_update_flow(
         print(f"Resuming quest {quest_id}...")
     cfg = Config.from_yaml(yaml_path)
     apply_vscode_bridge_override(cfg, vscode_bridge_port)
+    # The VSCode extension runs ``--update`` in an integrated terminal,
+    # which is NOT a child of the extension and so has no per-command TCP
+    # bridge to inherit; it passes the session-long PersistentBridge
+    # address instead. Without forwarding it here the resumed quest
+    # resolves a ``vscode_extension`` provider carrying neither
+    # ``bridge_socket`` nor ``bridge_port`` and raises at the first model
+    # call — forwarding the port alone no-ops, because it is 0.
+    if apply_vscode_bridge_socket_override is not None:
+        apply_vscode_bridge_socket_override(cfg, vscode_bridge_socket)
     try:
         await run_one(
             cfg,

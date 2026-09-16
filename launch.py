@@ -810,10 +810,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="Per-user IPC path of the FI VSCode extension's session-long "
              "PersistentBridge (Unix-domain socket on POSIX, named pipe on "
-             "Windows). When --serve / --tools runs from outside the "
-             "extension's chat-spawn path, this is how it routes LLM calls "
-             "through `vscode.lm.*`. Default: auto-resolved per OS / user "
-             "via `core.bridge_path.persistent_bridge_path()`. Pass empty "
+             "Windows). Every FI run that is not a child of the extension "
+             "routes LLM calls through `vscode.lm.*` this way: --serve / "
+             "--tools, and the integrated-terminal commands the extension "
+             "spawns (`@fi /update`, `@fi /generate`), which pass this flag "
+             "explicitly. Auto-resolved per OS / user via "
+             "`core.bridge_path.persistent_bridge_path()` under --serve "
+             "only — pass it yourself in any other mode. Pass empty "
              "string to disable.",
     )
     p.add_argument(
@@ -3080,10 +3083,12 @@ async def _run_update(
         quest_id=quest_id,
         output_root=output_root,
         vscode_bridge_port=vscode_bridge_port,
+        vscode_bridge_socket=vscode_bridge_socket,
         interactive=interactive,
         supervisor=supervisor,
         run_one=run_one,
         apply_vscode_bridge_override=_apply_vscode_bridge_override,
+        apply_vscode_bridge_socket_override=_apply_vscode_bridge_socket_override,
     )
 
 
