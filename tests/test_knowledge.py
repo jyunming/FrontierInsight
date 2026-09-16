@@ -2437,3 +2437,250 @@ def test_a_single_candidate_needs_no_ranking(monkeypatch) -> None:
     one = [RD(content="x", metadata={"title": "only"})]
     assert _rank_by_relevance(one, "anything") == one
     assert _rank_by_relevance([], "anything") == []
+
+
+# ---------------------------------------------------------------------------
+# A crashed headless render is a failed source, not a dead quest
+# ---------------------------------------------------------------------------
+
+
+class _DriverCrash(BaseException):
+    """Stands in for a driver death that does not derive from ``Exception``.
+
+    Playwright drives its Node driver over a pipe, through greenlets, so a
+    driver death can reach the fetch frame as a ``BaseException`` subclass —
+    which ``except Exception`` does not catch. A real quest died during
+    concurrent headless fetching with a Node-side
+    ``Error: EPIPE: broken pipe, write`` reported on the console; that process
+    aborted rather than unwound, so the route its failure took is not
+    established. These tests pin this boundary's behaviour, not that
+    diagnosis.
+    """
+
+
+def _fake_playwright(monkeypatch, crash: BaseException) -> None:
+    """Install a ``playwright.sync_api`` whose driver dies on first use.
+    Playwright is an optional dependency that CI does not install, so the
+    import inside the fetcher has to be satisfied here rather than skipped."""
+    import sys
+    import types
+
+    def _sync_playwright():
+        raise crash
+
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = _sync_playwright
+    pkg = types.ModuleType("playwright")
+    pkg.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", pkg)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+
+def test_headless_driver_crash_is_recorded_as_a_failed_source(monkeypatch) -> None:
+    """The crash is contained at the fetch boundary and reported like any
+    other source that could not be fetched."""
+    import core.knowledge as kn
+    from core import source_failures as sf
+
+    _fake_playwright(monkeypatch, _DriverCrash("Error: EPIPE: broken pipe, write"))
+    token = sf.current_quest.set("q-epipe")
+    try:
+        out = kn._playwright_fetch_html("https://iea.example/blocked", timeout_s=5)
+        snap = sf.snapshot("q-epipe")
+    finally:
+        sf.current_quest.reset(token)
+        sf.reset("q-epipe")
+
+    assert out is None                                    # contained, not raised
+    assert snap["total"] == 1                             # and recorded
+    assert snap["by_source"]["web_page"]["browser_crash"] == 1
+
+
+def test_a_crashed_render_costs_one_source_not_the_quest() -> None:
+    """The batch carries on: the crashed source keeps its snippet, every
+    other source still gets its full text. This is the boundary the real
+    incident blew through."""
+    import asyncio
+
+    from core.knowledge import _enrich_with_full_text, RetrievedDoc as RD
+
+    docs = [
+        RD("snippet A", {"url": "https://a.example/x"}),
+        RD("snippet B", {"url": "https://b.example/crash"}),
+        RD("snippet C", {"url": "https://c.example/z"}),
+    ]
+
+    def _fetch(doc, *, timeout_s, max_kb):
+        if "crash" in doc.metadata["url"]:
+            raise _DriverCrash("Error: EPIPE: broken pipe, write")
+        return "Recovered full text for the writer to quote. " * 12
+
+    out = asyncio.run(_enrich_with_full_text(
+        docs, timeout_s=5, total_budget_s=30, max_kb=32, fetch_fn=_fetch,
+    ))
+    assert [bool(d.metadata.get("fetched_full_text")) for d in out] == [True, False, True]
+    assert out[1].content == "snippet B"          # untouched, snippet intact
+
+
+def test_cancellation_is_never_swallowed_as_a_source_failure(monkeypatch) -> None:
+    """Widening the catch must not swallow a Ctrl-C: real cancellation still
+    stops the quest promptly."""
+    import core.knowledge as kn
+
+    _fake_playwright(monkeypatch, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        kn._playwright_fetch_html("https://iea.example/blocked", timeout_s=5)
+
+
+# ---------------------------------------------------------------------------
+# PMC full text keeps the article's formulae
+# ---------------------------------------------------------------------------
+
+# Real bytes from PMC6002090 (Allen, "A primer on stochastic epidemic
+# models") — the article whose stored quest record reads "either 1 or .".
+# The BioC text is exactly what that route returned; the JATS paragraph is
+# the same sentence as the article's own XML states it.
+_REAL_BIOC_TEXT = (
+    "It is well-known from the theory of branching processes that a fixed "
+    "point of the offspring pgf yields the asymptotic probability of "
+    "extinction. Solving for the fixed points of f in (5),  for , yields two "
+    "solutions, namely,  , and  (if ). When , the assumption of independence "
+    "of infectious individuals, implies the probability of no outbreak is "
+    "either 1 or ."
+)
+_REAL_JATS_P = (
+    '<p>It is well-known from the theory of branching processes that a fixed '
+    'point of the offspring pgf yields the asymptotic probability of '
+    'extinction. When the assumption of independence of infectious '
+    'individuals holds, the probability of no outbreak is either 1 or '
+    '<inline-formula><mml:math xmlns:mml="http://www.w3.org/1998/Math/MathML" '
+    'id="M124"><mml:mrow><mml:msup><mml:mrow><mml:mrow><mml:mo>(</mml:mo>'
+    '<mml:mrow><mml:mrow><mml:mn>1</mml:mn><mml:mo>/</mml:mo><mml:mrow>'
+    '<mml:msub><mml:mi mathvariant="script">R</mml:mi><mml:mn>0</mml:mn>'
+    '</mml:msub></mml:mrow></mml:mrow></mml:mrow><mml:mo>)</mml:mo></mml:mrow>'
+    '</mml:mrow><mml:mi>i</mml:mi></mml:msup></mml:mrow></mml:math>'
+    '</inline-formula>.</p>'
+)
+_PADDING = " The model is analysed in detail throughout the article. " * 12
+
+
+class _PmcResp:
+    """Minimal httpx-like response for the PMC / Europe PMC routes."""
+
+    def __init__(self, *, payload=None, text=""):
+        import json
+
+        self.status_code = 200
+        self._payload = payload
+        self.text = text if text else json.dumps(payload)
+        self.content = self.text.encode("utf-8")
+        self.headers = {"content-type": "application/json"}
+        self.url = "https://example.invalid/"
+
+    def json(self):
+        return self._payload
+
+
+def _bioc_of(text: str):
+    return [{"documents": [{"passages": [
+        {"infons": {"section_type": "INTRO"}, "text": text},
+    ]}]}]
+
+
+def _serve_pmc(monkeypatch, *, bioc_text: str, jats: str | None, seen: list):
+    import core.knowledge as kn
+
+    def _get(url, **kw):
+        seen.append(url)
+        if "pmcoa.cgi" in url:
+            return _PmcResp(payload=_bioc_of(bioc_text))
+        if "fullTextXML" in url:
+            if jats is None:
+                raise AssertionError("the XML must not be fetched for this case")
+            return _PmcResp(text=jats)
+        raise AssertionError(f"unexpected URL {url}")
+
+    monkeypatch.setattr(kn.httpx, "get", _get)
+
+
+def test_pmc_route_recovers_the_formulae_bioc_drops(monkeypatch) -> None:
+    """PMC BioC returns passage text with the mathematics REMOVED, so a
+    sentence that carried a formula ends at its punctuation — a stored record
+    really does read "the probability of no outbreak is either 1 or ." where
+    the article states ``(1/R_0)^i``. The claim checker then cannot verify a
+    sentence the source genuinely supports. The same article's JATS XML still
+    carries the formula, so that is the text worth keeping."""
+    import core.knowledge as kn
+
+    jats = (
+        "<article><front>3459 idm Infectious Disease Modelling PMC6002090"
+        "</front><body>" + _REAL_JATS_P + "<p>" + _PADDING + "</p></body>"
+        "<back><ref-list>Whittle P. 1955. Biometrika 42:116.</ref-list></back>"
+        "</article>"
+    )
+    seen: list[str] = []
+    _serve_pmc(monkeypatch, bioc_text=_REAL_BIOC_TEXT + _PADDING, jats=jats, seen=seen)
+
+    out = kn._pmc_fulltext("PMC6002090", timeout_s=5, cap=100000)
+    assert "either 1 or ( 1 / R 0 ) i" in out      # the formula survives, as text
+    assert "either 1 or ." not in out
+    assert "Whittle P. 1955" not in out            # back matter still dropped
+    assert "3459 idm" not in out                   # front-matter id soup dropped
+    assert any("fullTextXML" in u for u in seen)
+
+
+def test_pmc_route_keeps_bioc_when_the_article_kept_its_mathematics(monkeypatch) -> None:
+    """A body that still has its mathematics is already good, and must not
+    pay for the extra Europe PMC round trip."""
+    import core.knowledge as kn
+
+    intact = (
+        "The threshold ℛ 0 = β / γ decides the outcome: if ℛ 0 < 1 the "
+        "disease dies out, and if ℛ 0 > 1 it invades. " * 8
+    )
+    seen: list[str] = []
+    _serve_pmc(monkeypatch, bioc_text=intact, jats=None, seen=seen)
+
+    out = kn._pmc_fulltext("PMC1", timeout_s=5, cap=100000)
+    assert "ℛ 0 = β / γ" in out
+    assert not any("fullTextXML" in u for u in seen)   # no second round trip
+
+
+def test_pmc_route_keeps_bioc_when_the_article_has_no_formulae(monkeypatch) -> None:
+    """An ordinary paper with no mathematics also has no math glyphs, so the
+    guard fires — but its XML carries no formula markup, so the BioC text is
+    kept. A false trigger costs one keyless GET, never content."""
+    import core.knowledge as kn
+
+    prose = "We studied greenness and all-cause mortality in a cohort. " * 12
+    seen: list[str] = []
+    _serve_pmc(
+        monkeypatch, bioc_text=prose,
+        jats="<article><body><p>" + prose + "</p></body></article>", seen=seen,
+    )
+
+    out = kn._pmc_fulltext("PMC2", timeout_s=5, cap=100000)
+    assert out.startswith("We studied greenness")
+    assert any("fullTextXML" in u for u in seen)       # it did look
+    assert "all-cause mortality" in out                # and kept BioC
+
+
+def test_xml_to_text_keeps_paragraphs_so_chunks_do_not_split_mid_word() -> None:
+    """Flattening used to collapse the whole article onto one line, which
+    left the chunker nothing to split on but a character count — landing
+    mid-word. Paragraph boundaries survive now."""
+    import core.knowledge as kn
+    from core.passages import chunk_text
+
+    xml = "<body>" + "".join(
+        f"<p>Paragraph {i} states a result worth quoting in full. " * 6 + "</p>"
+        for i in range(12)
+    ) + "</body>"
+    text = kn._xml_to_text(xml)
+    assert "\n\n" in text
+    chunks = chunk_text(text, chunk_chars=400)
+    midword = sum(
+        1 for a, b in zip(chunks, chunks[1:])
+        if a and b and a[-1].isalnum() and b[0].isalnum()
+    )
+    assert midword == 0
