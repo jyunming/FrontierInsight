@@ -27,7 +27,7 @@ from pathlib import Path
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
 from core.engine import QuestArtifacts, build_further_reading, cited_references
-from generation._pandoc import find_pandoc
+from generation._pandoc import MARKDOWN_READER, find_pandoc
 from generation import _cjk
 from generation._figure_captions import numbers_off_figure_captions
 from generation._keywords import extract_keywords
@@ -947,21 +947,14 @@ class PaperGenerator:
             "-o", str(out_pdf),
             f"--pdf-engine={engine_path}",
             "--standalone",
-            # Tolerate the LLM's habit of dropping a bullet/numbered
-            # list immediately after the introducing paragraph with no
-            # blank line in between. Pandoc's default markdown reader
-            # requires the blank line and otherwise jams the entire
-            # list into the paragraph as inline text ("Foo - a - b -
-            # c.") — the bullets-rendered-as-prose failure mode.
-            #
-            # +autolink_bare_uris: wrap bare reference URLs in \url{} so
-            # the template's xurl can break them at ANY character. Without
-            # it, pandoc renders a bare URL as plain text with escaped
-            # underscores (\_) that never break — a wiki-style URL then
-            # runs straight into the right margin (the reference-URL
-            # overflow the FI house templates' xurl + \urlstyle{same}
-            # fix once the URL is a real \url{}).
-            "--from=markdown+lists_without_preceding_blankline+autolink_bare_uris",
+            # The markdown dialect both renderers read the paper in —
+            # lists without a preceding blank line, autolinked bare
+            # URLs, and ``\(x\)`` / ``\[x\]`` as math alongside
+            # ``$x$``. Defined once in ``generation/_pandoc.py`` so the
+            # LaTeX path and the HTML fallback cannot drift into
+            # disagreeing about what the writer's text means; the
+            # reasoning for each extension lives there.
+            f"--from={MARKDOWN_READER}",
             # The first H1 is lifted into the YAML title above, so the
             # remaining H2/H3/... headings should shift up one level —
             # otherwise an article-class document numbers them as
