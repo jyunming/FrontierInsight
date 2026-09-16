@@ -214,6 +214,35 @@ def test_an_engine_written_caption_never_names_a_series_its_figure_hides() -> No
     assert _figure_caption_findings(repaired, state["figure_records"]) == []
 
 
+def test_a_figure_whose_record_is_missing_is_captioned_from_its_file_name() -> None:
+    # A figure saved in a sandbox that could not write the record has no panel
+    # title to caption it with.
+    state = {"design": {"figures_planned": ["gap_fraction.png"]}, "figures": ["gap_fraction.png"]}
+    repaired, placed = _place_missing_figures("## Results\n\nThe gap closed.\n", state)
+
+    assert placed == ["gap_fraction.png"]
+    assert "![**Figure 1.** gap fraction.](figures/gap_fraction.png)" in repaired
+
+
+def test_a_grid_of_panels_is_captioned_by_name_and_panel_count() -> None:
+    # Nine panel titles are a list of settings, not a description of the grid.
+    record = {"axes": [
+        {"title": f"R0={r}, N={n}", "series": []}
+        for r in (0.9, 1.5, 3.0) for n in (100, 1000, 5000)
+    ]}
+    state = {
+        "design": {"figures_planned": ["final_size_histograms_grid.png"]},
+        "figures": ["final_size_histograms_grid.png"],
+        "figure_records": {"final_size_histograms_grid.png": record},
+    }
+    repaired, _ = _place_missing_figures("## Results\n\nThe distributions split.\n", state)
+
+    assert (
+        "![**Figure 1.** final size histograms grid (9 panels).]"
+        "(figures/final_size_histograms_grid.png)"
+    ) in repaired
+
+
 def test_the_write_node_restores_the_figures_without_spending_an_iteration(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     (tmp_path / "paper").mkdir(parents=True, exist_ok=True)

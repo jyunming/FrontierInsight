@@ -9575,9 +9575,16 @@ def _figure_caption_text(
         title = " ".join(str(ax.get("title") or "").replace("[", "").replace("]", "").split())
         if title and title not in titles:
             titles.append(title)
-    joined = "; ".join(titles)
-    if len(joined) > 200:
-        joined = joined[:200].rsplit(" ", 1)[0]
+    stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split())
+    if len(titles) > 3:
+        # A grid of panels: its titles are the settings each panel was drawn
+        # at, a list rather than a sentence about the figure, and the file's
+        # own name says what the grid shows.
+        joined = f"{stem} ({len(titles)} panels)"
+    else:
+        joined = "; ".join(titles)
+        if len(joined) > 200:
+            joined = joined[:200].rsplit(" ", 1)[0]
     tail = ""
     mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
     single_seed = (record or {}).get("single_seed")
@@ -9585,8 +9592,10 @@ def _figure_caption_text(
         tail = f" Each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval."
     elif single_seed is not None:
         tail = f" Shows {_single_seed_note(single_seed, n_seeds)}."
-    stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split())
-    for description in (joined, stem, ""):
+    # A figure whose record the sandbox could not write has no panel title to
+    # use, so the file's own name describes it; the bare number is the last
+    # resort, when even that would name a series the figure hides.
+    for description in (*(d for d in (joined, stem) if d), ""):
         caption = ((description.rstrip(" .;,") + "." if description else "") + tail).strip()
         if not _figure_caption_findings(f"![{caption}](figures/{name})", {name: record}):
             return caption
