@@ -60,19 +60,19 @@ $endif$
   \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 \providecommand{\passthrough}[1]{#1}
 % A figure fills the line width (its column, in two columns) but is never
-% taller than 45% of the text height, so it shares a page with text rather
+% taller than 33% of the text height, so it shares a page with text rather
 % than being moved on to the next page and leaving this one half empty.
 \makeatletter
 \newsavebox{\FI@figbox}
-% With a page limit (generation/paper.py sets fi-tight), a figure is at most
-% 33% of the text height, so more text shares its page.
+% A figure is at most 33% of the text height, page limit or not. At 45% one
+% figure and its caption filled so much of a page that LaTeX could not place
+% two of them under \topfraction; with several figures the deferred-float
+% queue then backed up until it ran past the reference list, and a figure
+% printed among the references. At 33% two fit (0.72 < 0.85), so the queue
+% drains beside the text that discusses each figure.
 \providecommand{\pandocbounded}[1]{%
   \sbox{\FI@figbox}{#1}%
-$if(fi-tight)$
   \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
-$else$
-  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%
-$endif$
   \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%
   \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
   \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}

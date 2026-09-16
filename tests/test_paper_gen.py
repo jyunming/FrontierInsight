@@ -1073,24 +1073,26 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
     one-liner.
 
     The body fits a figure to the line width (the column, in two
-    columns) and caps it at 45% of the text height, and the float
+    columns) and caps it at 33% of the text height, and the float
     settings stop a figure being put alone on a half-blank page: the
     validation quest's paper had two such pages, and its ieee_access
-    render drew every figure across both columns. A paper with a page
-    limit (the ``fi-tight`` template variable) caps it at 33% instead;
-    45% stays the default."""
+    render drew every figure across both columns. The cap is 33% in
+    every paper, page limit or not — there is no ``fi-tight`` switch
+    around it. At the old 45% default a figure and its caption filled so
+    much of a page that LaTeX could not place two of them under
+    ``\\topfraction``, so the deferred-float queue backed up until it ran
+    past the reference list and a figure printed among the references —
+    10 of 40 graded papers, rendered without a limit."""
     repo = Path(__file__).resolve().parent.parent
     working = [
         "generic", "neurips", "iclr", "nature_mi", "ieee_access",
         "essay", "report", "policy_brief", "whitepaper",
     ]
-    default_cap = r"  \Gscale@div\@tempa{0.45\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
-    tight_cap = r"  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
+    cap = r"  \Gscale@div\@tempa{0.33\textheight}{\dimexpr\ht\FI@figbox+\dp\FI@figbox\relax}%"
     expected = [
         r"\providecommand{\pandocbounded}[1]{%",
         r"  \sbox{\FI@figbox}{#1}%",
-        default_cap,
-        tight_cap,
+        cap,
         r"  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%",
         r"  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi",
         r"  \noindent\scalebox{\@tempa}{\usebox{\FI@figbox}}}",
@@ -1113,9 +1115,21 @@ def test_paper_templates_declare_pandocbounded_for_image_bounding() -> None:
                 f"and pdflatex would silently emit a PDF with stray text "
                 f"and unbounded images."
             )
-        cap = lines.index(default_cap)
-        assert lines[cap - 3:cap + 2] == ["$if(fi-tight)$", tight_cap, "$else$", default_cap, "$endif$"], (
-            f"{fmt}: the figure cap is 45% by default and 33% only with a page limit (fi-tight)"
+        idx = lines.index(cap)
+        assert lines[idx - 1:idx + 2] == [
+            r"  \sbox{\FI@figbox}{#1}%",
+            cap,
+            r"  \Gscale@div\@tempb{\linewidth}{\wd\FI@figbox}%",
+        ], (
+            f"{fmt}: the figure cap must sit unconditionally in the "
+            f"\\pandocbounded body. It used to be wrapped in "
+            f"$if(fi-tight)$ ... $else$ 45% $endif$, which gave every paper "
+            f"without a page limit a 45% cap — at that height a figure got "
+            f"carried past the reference list and printed among the "
+            f"references (10 of 40 graded papers)."
+        )
+        assert "$if(fi-tight)$" not in lines[idx - 2:idx + 2], (
+            f"{fmt}: no fi-tight switch may wrap the figure cap"
         )
         assert r"\resizebox{\textwidth}" not in "\n".join(lines), (
             f"{fmt}: \\textwidth spans both columns of a two-column page"
