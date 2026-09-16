@@ -29,6 +29,23 @@ def test_chunk_text_empty() -> None:
     assert chunk_text("   \n\n  ") == []
 
 
+def test_rank_by_relevance_orders_whole_items() -> None:
+    """A caller that must keep or drop whole items — one branch of a result
+    set, say — ranks them itself instead of excerpting one document."""
+    from core.passages import rank_by_relevance
+
+    texts = [
+        "conditional major final size fraction by stratum, bootstrap iqr",
+        "exact CTMC threshold probability and exact mean final size at N=100",
+        "figure paths",
+    ]
+    scores = rank_by_relevance(texts, "exact CTMC threshold probability validation at N=100")
+    assert scores[1] == max(scores)
+    assert len(scores) == len(texts)
+    # No query terms to match → no ranking signal, and no crash.
+    assert rank_by_relevance(texts, "") == [0.0, 0.0, 0.0]
+
+
 def test_select_relevant_surfaces_buried_passage() -> None:
     """The relevant passage sits past the first `budget` chars; selection
     must surface it where a naive first-N slice would miss it."""

@@ -516,5 +516,11 @@ def test_the_claim_check_sees_the_mean_over_the_seeds(tmp_path: Path) -> None:
         f"- p_outbreak: {s['mean']:.4g} (95% CI {s['ci_lower']:.4g} to {s['ci_upper']:.4g})"
     )
     assert means in seen["prompt"]
-    # After the results, which keep their own 4,000 characters.
-    assert seen["prompt"].index('"result_json"') < seen["prompt"].index(means)
+    # After the results, which keep their own share of the evidence budget.
+    # The results are now written under their own heading instead of as a raw
+    # ``"result_json"`` key, so locate them by that heading. What this test
+    # protects is the ORDER: the seed means read as a note on the results and
+    # must not come before them.
+    results_heading = "The run's results (result_json)"
+    assert results_heading in seen["prompt"]
+    assert seen["prompt"].index(results_heading) < seen["prompt"].index(means)
