@@ -25,15 +25,24 @@ You are the **Implementation** stage of an automated research pipeline.
   right order of magnitude?) and discards the numbers, so a pilot that
   silently measures something else defeats the point. When the var is
   unset, run at full scale.
-- **Honour `FI_REPLICATE_SEED` when present.** If the env var
-  `FI_REPLICATE_SEED` is set (the engine sets it on second-and-later
-  replicate runs of a multi-seed experiment), read it as an integer
-  and use it to seed every random generator the script uses —
-  `random.seed`, `np.random.seed`, `torch.manual_seed`, etc. When
-  unset, fall back to a deterministic default (e.g., seed 0). This
-  is what lets the engine quantify the result's variance over seeds
-  when `engine.execute_replicates > 1` is configured; without this,
-  N replicate runs collapse to a single point.
+- **Honour `FI_REPLICATE_SEED` — it is set on EVERY run.** Read the env
+  var `FI_REPLICATE_SEED` as an integer and use it to seed every random
+  generator the script uses — `random.seed`, `np.random.seed`,
+  `np.random.default_rng`, `torch.manual_seed`, etc. The engine sets it
+  on every run of a multi-seed experiment, the first one included, so do
+  NOT write a seed constant of your own; fall back to 0 only when the
+  var is genuinely absent.
+  **Prefer ONE generator for the whole run:** build a single
+  `rng = np.random.default_rng(int(os.environ.get("FI_REPLICATE_SEED", 0)))`
+  and draw every random number in the experiment from it. If instead you
+  derive a seed per trial, derive it as `base + i` — the engine spaces
+  consecutive runs' bases a million apart, so those streams cannot
+  overlap — and never reseed from a constant you chose yourself.
+  This is what lets the engine quantify the result's variance over seeds
+  when `engine.execute_replicates > 1` is configured. A script that
+  ignores the variable makes every replicate an identical copy of one
+  run; the engine detects that from your source and reports the quest as
+  a single measurement, with no error bars at all.
 
 # Output format
 Respond with EXACTLY two sections, in this order, and nothing else:

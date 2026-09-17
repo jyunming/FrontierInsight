@@ -436,7 +436,12 @@ try:
                 # Each seed's lines, for the engine to redraw a figure as the
                 # mean over the seeds. A redrawn figure is no seed's.
                 if not _fi_os.environ.get("FI_REPLOT"):
-                    seed = "".join(c for c in _fi_os.environ.get("FI_REPLICATE_SEED", "") if c.isdigit()) or "0"
+                    # Keyed on WHICH replicate this is, not on what it seeds
+                    # with. The two used to be the same small integer; the
+                    # seeds now stride far apart to keep the replicates' random
+                    # streams disjoint, while the engine still looks these
+                    # files up by ordinal (0, 1, 2 ...).
+                    seed = "".join(c for c in _fi_os.environ.get("FI_REPLICATE_INDEX", "") if c.isdigit()) or "0"
                     with open(stem + ".seed" + seed + ".json", "w", encoding="utf-8") as handle:
                         _fi_json.dump(_fi_plot_data(self, name), handle)
             except Exception:

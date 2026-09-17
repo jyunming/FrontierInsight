@@ -203,6 +203,11 @@ class QuestState(TypedDict, total=False):
     # stopped early. Distinguishes "no error bars because the experiment is
     # deterministic" from "no error bars because nothing could be aggregated".
     result_json_deterministic: bool
+    # True when the generated script never reads ``FI_REPLICATE_SEED``, so its
+    # replicate runs repeated ONE run instead of sampling. No replicate list is
+    # published in that case; this records WHY, so analyze can tell the paper it
+    # holds a single measurement rather than quietly losing its error bars.
+    result_json_replicate_seed_ignored: bool
     # Execute-repair loop counter + history. The reflect
     # node increments `exec_reflect_iter` and appends a one-line
     # record per attempt, so analyze/write/review can describe what
@@ -4229,12 +4234,19 @@ class Engine:
         # emitting nothing — and the dashboard infers a quest's status from
         # run.log recency, so a long silent run reads as "pending"/idle. The
         # heartbeat keeps that signal fresh.
+        # The first run's seed is FI's to choose too. Left unset, it fell back
+        # to whatever default the script had written down (42 in a graded
+        # quest) while the replicates were handed 1 and 2 -- three bases a few
+        # apart, which for a script deriving per-trial seeds as ``base +
+        # counter`` means three runs of almost exactly the same trials.
+        stride = max(1, int(self.config.engine.replicate_seed_stride))
+        primary_env = _replicate_env(exec_env, 0, stride)
         result: ExecutionResult = await self._await_with_heartbeat(
             self.executor.execute(
                 [str(py), str(code_path)],
                 cwd=self.quest_root,
                 timeout_s=self.config.execution.timeout_s,
-                env=exec_env,
+                env=primary_env,
             ),
             label="running experiment.py",
         )
@@ -4262,7 +4274,7 @@ class Engine:
                 [str(py), str(code_path)],
                 cwd=self.quest_root,
                 timeout_s=self.config.execution.timeout_s,
-                env=exec_env,
+                env=primary_env,
             )
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
@@ -4302,6 +4314,10 @@ class Engine:
         )
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
+        # Whether the script can respond to the seed at all, read once from the
+        # source that is about to run.
+        reads_seed = _script_reads_replicate_seed(code_path)
+        seed_ignored = False
         replicates_ran = False
         primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
         if result.returncode == 0 and result_json is not None:
@@ -4356,15 +4372,7 @@ class Engine:
             primary_figures = _read_primary_figures(self.quest_root / "figures", records_dir, figures)
             for seed in range(1, replicates_n):
                 replicates_ran = True
-                # Merge with the parent's environment, not REPLACE it.
-                # ``asyncio.create_subprocess_exec(env=...)`` overrides
-                # the child's whole env when given a dict — passing
-                # only FI_REPLICATE_SEED would strip PATH, PYTHONPATH,
-                # LANG, SystemRoot (Windows), etc., and the venv
-                # python.exe would fail at the DLL-load step. Build
-                # a merged env so the child sees the inherited values
-                # plus our replicate seed.
-                rep_env = {**(exec_env or os.environ), "FI_REPLICATE_SEED": str(seed)}
+                rep_env = _replicate_env(exec_env, seed, stride)
                 rep_result = await self.executor.execute(
                     [str(py), str(code_path)],
                     cwd=self.quest_root,
@@ -4387,14 +4395,35 @@ class Engine:
                     # identical. One extra run is the cheapest way to find out,
                     # and unlike asking the design to declare itself, it cannot
                     # be wrong about what the script actually did.
+                    #
+                    # Two seeds agreeing has two causes that are not the same
+                    # fact about the experiment, and calling both
+                    # "deterministic" is what let a hardcoded seed reach a
+                    # paper. A script that never reads FI_REPLICATE_SEED cannot
+                    # have responded to it, so its runs are ONE run repeated --
+                    # not a computation that happens to be deterministic, and
+                    # not samples anything may be averaged over. Its own source
+                    # says which case this is.
                     if seed == 1 and rep_rj == result_json:
-                        deterministic = True
-                        if replicates_n > 2:
-                            self._log.info(
-                                "[execute] seeds 0 and 1 produced identical "
-                                "results -- experiment is deterministic; "
-                                "skipping the remaining %d replicate(s)",
-                                replicates_n - 2,
+                        if reads_seed:
+                            deterministic = True
+                            if replicates_n > 2:
+                                self._log.info(
+                                    "[execute] seeds 0 and 1 produced identical "
+                                    "results -- experiment is deterministic; "
+                                    "skipping the remaining %d replicate(s)",
+                                    replicates_n - 2,
+                                )
+                        else:
+                            seed_ignored = True
+                            self._log.warning(
+                                "[execute] seeds 0 and 1 produced identical results "
+                                "and %s never reads FI_REPLICATE_SEED, so these are "
+                                "one run repeated, not %d samples. No aggregate, "
+                                "standard error or confidence interval will be "
+                                "reported over them: the quest stands on a single "
+                                "measurement. Skipping the remaining %d replicate(s).",
+                                code_path.name, replicates_n, max(0, replicates_n - 2),
                             )
                         break
                 else:
@@ -4411,8 +4440,21 @@ class Engine:
         # or any other figure goes back to the primary run's (seed 0), and its
         # record says it shows that one run, so the text can quote seed 0's
         # values for it rather than the means.
+        # The script never reads the seed yet its runs differ: it is drawing
+        # from OS entropy. Those replicates ARE independent samples, so the
+        # aggregate stands -- but nothing about the run is reproducible, and a
+        # rerun will not land on these numbers.
+        if not reads_seed and not seed_ignored and len(result_json_replicates) > 1:
+            self._log.warning(
+                "[execute] %s never reads FI_REPLICATE_SEED yet its replicates "
+                "differ -- the randomness is unseeded, so the results are "
+                "independent but not reproducible",
+                code_path.name,
+            )
         replotted: dict[str, int] = {}
-        redraw = len(result_json_replicates) > 1 and not deterministic
+        # A figure drawn as "the mean of the seeds" over replicates that are one
+        # run repeated would be a mean of one number, captioned as several.
+        redraw = len(result_json_replicates) > 1 and not deterministic and not seed_ignored
         if redraw:
             replotted = await self._replot_replicate_figures(
                 figures, records_dir, [int(r["_seed"]) for r in result_json_replicates],
@@ -4453,11 +4495,21 @@ class Engine:
         # keeps the field absent on default single-seed quests so
         # downstream code can use ``state.get("result_json_replicates")``
         # as a "did we run multi-seed" sentinel.
-        if len(result_json_replicates) > 1:
+        #
+        # Replicates a script produced without ever reading the seed are not
+        # published at all. Leaving them on the state is what let "the mean over
+        # 3 replicate seeds" and a 95% CI be written about a single run: with
+        # the field absent ``_replicate_seed_count`` returns None, and every
+        # downstream path -- the analyze aggregate, the figure captions, the
+        # writer's "seed 0 of N" language, the number and claim checks -- falls
+        # back to its honest single-run behaviour on its own.
+        if len(result_json_replicates) > 1 and not seed_ignored:
             patch["result_json_replicates"] = result_json_replicates
             # Lets ``analyze`` say "every seed agreed" instead of reporting an
             # empty aggregate, which reads like the aggregator broke.
             patch["result_json_deterministic"] = deterministic
+        if seed_ignored:
+            patch["result_json_replicate_seed_ignored"] = True
         return patch
 
     async def _replot_replicate_figures(
@@ -5130,6 +5182,18 @@ class Engine:
                 "honest failure note: state plainly that no usable measurement was "
                 "produced, hypothesize the likely cause (sampling/grid, threshold, "
                 "or normalization bug), and do NOT report the zeros as findings.\n\n"
+                + stdout_for_analyze
+            )
+        if state.get("result_json_replicate_seed_ignored"):
+            stdout_for_analyze = (
+                "[FI NOTE] Replication was configured, but the experiment script "
+                "never reads FI_REPLICATE_SEED, so every replicate repeated the "
+                "SAME run and returned the same numbers. There is ONE measurement "
+                "here, not several. Report it as a single run: do NOT report a "
+                "mean over seeds, a standard error, a confidence interval, or any "
+                "spread across replicates, and say plainly in the limitations that "
+                "the experiment was not replicated because it does not vary with "
+                "the seed it is given.\n\n"
                 + stdout_for_analyze
             )
         # Read the ACTUAL contents of any user-dropped data (the pause-drop
@@ -9167,6 +9231,60 @@ _PROPORTION_NAME_RE = re.compile(
     r"(?:^|_)(?:prob|probability|fraction|frac|proportion|share|accuracy|precision|recall|auc|f1)(?:_|$)",
     re.IGNORECASE,
 )
+
+
+def _replicate_env(
+    exec_env: dict[str, str] | None, index: int, stride: int,
+) -> dict[str, str]:
+    """The environment for replicate ``index``: the seed it draws from, and
+    which replicate it is.
+
+    ``FI_REPLICATE_SEED`` strides by ``stride``, so replicate ``i`` owns
+    ``[i*stride, (i+1)*stride)``. A script derives one seed per trial from the
+    base it is handed, and ``base + counter`` is the obvious way to write that:
+    bases one apart hand consecutive runs almost exactly the same trials, and
+    the spread between them is then not sampling error at all.
+
+    ``FI_REPLICATE_INDEX`` stays 0, 1, 2 ... It names which replicate this is,
+    which is what the per-seed figure records are keyed on; it is deliberately
+    NOT the seed, because the seeds are now far apart.
+
+    Merges with the parent environment rather than replacing it:
+    ``asyncio.create_subprocess_exec(env=...)`` overrides the child's whole env
+    when given a dict, so passing only these two would strip PATH, PYTHONPATH,
+    LANG and SystemRoot (Windows) and the venv python.exe would fail at its
+    DLL-load step.
+    """
+    return {
+        **(exec_env or os.environ),
+        "FI_REPLICATE_SEED": str(index * stride),
+        "FI_REPLICATE_INDEX": str(index),
+    }
+
+
+def _script_reads_replicate_seed(code_path: Path) -> bool:
+    """Whether the generated experiment reads ``FI_REPLICATE_SEED`` at all.
+
+    A script that never names the variable cannot have responded to it, so its
+    replicate runs are one run repeated rather than independent samples. That
+    is not hypothetical: three graded quests shipped a script with a hardcoded
+    ``RNG_SEED``, 300 stochastic trajectories per cell, and every replicate
+    identical to the last leaf but for the ordinal the engine itself injects.
+
+    Deliberately a source scan rather than a runtime probe. It is exact for the
+    case that occurs -- the name is simply absent from the file -- and costs
+    nothing. Its blind spot is a script that NAMES the variable without obeying
+    it (reads and discards it, or mentions it only in a comment): that one
+    passes here and falls through to the runtime comparison, which can only
+    call it deterministic. An unreadable file returns ``True``, because silence
+    is not evidence of a fault and the runtime check still runs.
+    """
+    try:
+        return "FI_REPLICATE_SEED" in code_path.read_text(
+            encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return True
 
 
 def _replicate_assertions(state: QuestState) -> list[Any]:

@@ -549,10 +549,12 @@ Run the experiment across several seeds and the paper reports **uncertainty** in
 
 ```yaml
 engine:
-  execute_replicates: 5     # run experiment.py with 5 seeds (FI_REPLICATE_SEED)
+  execute_replicates: 5     # run experiment.py 5 times, each with its own FI_REPLICATE_SEED
 ```
 
 The analyze node aggregates every numeric metric with mean ± std, **standard error, and a 95% confidence interval** (pure stdlib — no numpy/scipy needed), so Results reads `RMSE 0.045 (95% CI 0.041–0.049, n=5)`. When results break down by a factor (methods, classes, datasets), it also computes the **effect size** (Cohen's d) between strata and a **multiple-comparison guard** (the comparison count + a Bonferroni-corrected α), and the writer is told not to over-claim a difference that wouldn't survive correction. A single seed honestly reports "no replication → no CI."
+
+Each run is handed its own seed, the first one included, and consecutive runs' seeds are spaced a million apart (`engine.replicate_seed_stride`) so no two runs can draw the same ones — a script deriving a seed per trial as `base + i` would otherwise repeat most of its trials from run to run, and the spread across those near-identical runs is not sampling error. A script that never reads `FI_REPLICATE_SEED` cannot vary with it at all, so its replicates are one run repeated: the engine says so and reports a single measurement, rather than averaging the run with itself and printing an interval.
 
 ### Have a panel of reviewers debate the paper
 

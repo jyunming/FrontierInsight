@@ -623,10 +623,11 @@ class EngineConfig(BaseModel):
     # no non-neutral assignments, the verification call is skipped.
     cross_check_verify: bool = False
     # Multi-seed replication. When > 1, the execute node runs the
-    # generated experiment script N times with different seeds (the
-    # env var ``FI_REPLICATE_SEED`` is set to a fresh integer per
-    # run, which the implement prompt instructs the script to honour
-    # for its own rng seeding). The N ``RESULT_JSON`` outputs land
+    # generated experiment script N times, handing each run its own
+    # ``FI_REPLICATE_SEED`` -- the first run included, strided by
+    # ``replicate_seed_stride`` so no two runs can draw the same seed --
+    # which the implement prompt instructs the script to honour
+    # for its own rng seeding. The N ``RESULT_JSON`` outputs land
     # in ``state['result_json_replicates']`` as a list; the analyze
     # node aggregates numeric fields with mean ± std and surfaces
     # the spread in its summary. Cost: N executions per design pass.
@@ -644,6 +645,28 @@ class EngineConfig(BaseModel):
     # set 1 to opt out on a slow experiment, or higher when the measurement
     # is noisy.
     execute_replicates: int = Field(default=3, ge=1)
+    # How far apart consecutive replicates' seeds sit. Replicate i is handed
+    # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can
+    # derive occupy ``[i*stride, (i+1)*stride)`` and no two replicates reach
+    # the same one.
+    #
+    # The stride is the whole point. A script rarely uses the base seed
+    # directly -- it derives one seed per trial from it, and the obvious way to
+    # write that is ``base + counter``. With bases a few apart, replicate 1's
+    # trial 0 is replicate 2's trial 1: a graded quest handed bases 42, 1 and 2
+    # drew 259 of every 300 trials in common between one pair of replicates and
+    # 299 of 300 between another, then reported the spread across those three
+    # near-identical runs as a 95% confidence interval -- printed as
+    # "0.581-0.581", and read back in its own Limitations section as evidence
+    # of stability. Striding keeps the streams disjoint for any experiment
+    # drawing fewer than a stride of seeds per run, which a default of a
+    # million makes ample: the quest above drew 2,700.
+    #
+    # Raise it for an experiment drawing more than a million seeds in one run.
+    # Lower it only for a script that derives seeds by multiplying rather than
+    # adding. Either way the guarantee is the same: disjoint streams, so what
+    # varies between replicates is variation the experiment produced.
+    replicate_seed_stride: int = Field(default=1_000_000, ge=1)
     # Pilot pass: run the experiment small (``FI_PILOT=1``, which the
     # implement prompt tells the script to honour) before running it for real.
     #
@@ -661,7 +684,10 @@ class EngineConfig(BaseModel):
     #
     # OFF by default, unlike execute_replicates, because the two degrade
     # differently when the generated script ignores its env var. A script that
-    # ignores FI_REPLICATE_SEED still produces valid (if correlated) results.
+    # ignores FI_REPLICATE_SEED produces one run repeated -- correlated, not
+    # independent -- which the execute node detects from the script's own
+    # source and refuses to aggregate, rather than reporting the spread across
+    # it as sampling error.
     # A script that ignores FI_PILOT runs the experiment at FULL scale under a
     # fifth of the timeout, so it times out, wastes that compute, and emits a
     # warning that misdescribes a compliance failure as a design problem --
