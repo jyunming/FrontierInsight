@@ -49,6 +49,7 @@ exactly on one bound in ``AT_BOUND_MIN_SETTINGS`` or more settings is sent back
 for repair, zero bounds included, and the repair is told to change the code
 only if the computation is what put it there. Zeros are compared for every
 kind here: a value of exactly 0 below a positive ``min`` is out of range.
+Which bounds carry this signal at all is decided two sections below.
 
 Why a correct zero must not be sent back
 ========================================
@@ -85,6 +86,39 @@ answer this gate exists to catch, and ``numeric_oracle`` reports it too.
 What survives is reported together with the zeros that were recognised, so a
 repair is told what has already been accounted for instead of being asked to
 change it.
+
+Why a value on its bound is not outside it
+==========================================
+``1 - 1/3`` is 0.6666666666666667 and ``2/3`` is 0.6666666666666666. A design
+that declared ``max`` = 2/3 and a script that computed ``1 - 1/R0`` agreed
+about the answer and disagreed in the last bit, and an exact ``>`` called that
+a violation: "branching_probability = 0.666667 violates [0, 0.666667]", the
+same number printed on both sides of the word. The repair believed it, emitted
+``null`` for every boundary value with a flag reading
+``"exact_theoretical_boundary"`` — it knew the values were right — and the
+reference line vanished from two panels of the figure that existed to show it.
+A value equal to a bound to within ``_BOUND_REL_TOL`` IS on that bound, which
+is the comparison the at-bound and clamped rules already used, and a value on a
+bound is never also outside it. One equality, asked once: a result cannot be
+too large by an amount no measurement can resolve.
+
+Why a bound the design derived is attainable
+============================================
+"Exactly on a bound" is evidence about the computation only when the bound is a
+number a fault can return by accident. That is true of 0 and 1 — nothing and
+everything, which is what a saturating probability, a normalisation that
+divides a quantity by itself, an empty count and a guard branch all produce —
+and of any constant the script itself writes down, which is where a bracket
+endpoint, a sentinel and a cap come from. It is not true of a bound the design
+derived for this experiment: the design above got its 2/3 from the very
+formula the run evaluates ("max(0, 1 - 1/R0) ranges from 0 to 2/3 for the
+specified R0 values"), and nothing returns 0.6666666666666667 by accident. A
+result equal to such a bound is the design's own prediction, attained where the
+design said it would be, and is left alone — unless the quantity sits on that
+bound at *every* setting the assertion matched, which is a quantity that never
+varied with the sweep at all (a loop that captured one cell's value for all of
+them looks exactly like this) and is the trivial answer this gate exists to
+catch, whatever the bound happens to be.
 """
 
 from __future__ import annotations
@@ -242,6 +276,54 @@ def clamp_constants(code: str) -> set[float]:
     return out
 
 
+# A value this close to a bound is ON that bound. The at-bound and clamped
+# rules already compared this way; the range test did not, which is how a
+# result one bit above its declared maximum became a violation of it.
+_BOUND_REL_TOL = 1e-9
+_BOUND_ABS_TOL = 1e-12
+
+# The bounds a fault can return without doing any physics: nothing, and
+# everything.
+_TRIVIAL_BOUNDS = (0.0, 1.0)
+
+
+def numeric_literals(code: str) -> set[float]:
+    """Every number the script writes down.
+
+    A bound that appears here is a value the code can produce without
+    computing anything: a bracket endpoint (``brentq(f, 0.0, 1.0)``), a
+    sentinel, a cap, an initial value. A bound that appears nowhere in the
+    script had to be arrived at. Unparseable code yields nothing rather than
+    raising, which makes the rule no harsher on a script this cannot read.
+    """
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return set()
+    out: set[float] = set()
+    for node in ast.walk(tree):
+        v = _literal(node)
+        if v is not None:
+            out.add(v)
+    return out
+
+
+def _trivial_bound(bound: float, literals: set[float]) -> bool:
+    """Could a broken computation land on this bound by accident?
+
+    True for 0 and 1, and for any constant the script writes down. False for
+    a bound the design derived for this experiment, where a result equal to
+    the bound is the prediction rather than a coincidence. See "Why a bound
+    the design derived is attainable" in the module docstring.
+    """
+    if bound in _TRIVIAL_BOUNDS:
+        return True
+    return any(
+        math.isclose(bound, c, rel_tol=_BOUND_REL_TOL, abs_tol=_BOUND_ABS_TOL)
+        for c in literals
+    )
+
+
 def _pinned(value: float, a: Assertion, clamps: set[float]) -> bool:
     for bound in (a.min, a.max):
         if bound is None or bound == 0:
@@ -251,6 +333,22 @@ def _pinned(value: float, a: Assertion, clamps: set[float]) -> bool:
         ):
             return True
     return False
+
+
+def _on_bound(value: float, a: Assertion) -> float | None:
+    """The declared bound this value sits on, or None.
+
+    A bound is a number with a precision, and a value that equals it to that
+    precision is on it — never outside it. ``min`` is tried first so that an
+    assertion whose bounds coincide reports the one a reader would name. See
+    "Why a value on its bound is not outside it" in the module docstring.
+    """
+    for bound in (a.min, a.max):
+        if bound is not None and math.isclose(
+            value, bound, rel_tol=_BOUND_REL_TOL, abs_tol=_BOUND_ABS_TOL,
+        ):
+            return bound
+    return None
 
 
 def parse_assertions(design: Any) -> list[Assertion]:
@@ -332,9 +430,13 @@ CRITICAL_R0 = 1.0
 _NUMERIC_SEG = re.compile(r"^-?\d+(?:\.\d+)?$")
 
 # The reproduction number written into a path: ``by_R0.0.9``, ``by_r0_0.9``,
-# ``by_R0_N.R0_0.9_N_100``. Matched against the whole path, because splitting on
-# "." cannot tell the key "0.9" from the two keys "0" and "9".
-_R0_IN_PATH = re.compile(r"(?:^|[._\[])r_?0[._]?(\d+(?:\.\d+)?)", re.IGNORECASE)
+# ``by_R0_N.R0_0.9_N_100``, ``strata.R0=0.9,N=100``. Matched against the whole
+# path, because splitting on "." cannot tell the key "0.9" from the two keys
+# "0" and "9". A stratum label spells the coordinate with "=" and packs the
+# sweep into one key, which leaves no numeric segment for the positional rule
+# either — so without this spelling nothing at all identifies the control
+# parameter and three correct zeros below the threshold went back for repair.
+_R0_IN_PATH = re.compile(r"(?:^|[._\[])r_?0[._=]?(\d+(?:\.\d+)?)", re.IGNORECASE)
 
 # The same quantity carried as a field of an enclosing object, which is how a
 # result keyed by cell rather than by coordinate records it.
@@ -483,10 +585,12 @@ def violations(
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
-    With ``code``, a value exactly on a non-zero bound that the script also
-    caps at is reported as ``kind="clamped"`` (see the module docstring). A
-    quantity exactly on one bound in ``AT_BOUND_MIN_SETTINGS`` or more settings
-    is reported once, as ``kind="at_bound"``.
+    A value equal to a bound, to the precision a bound carries, sits on that
+    bound rather than outside it. With ``code``, a value on a non-zero bound
+    that the script also caps at is reported as ``kind="clamped"`` (see the
+    module docstring). A quantity on one bound in ``AT_BOUND_MIN_SETTINGS`` or
+    more settings is reported once, as ``kind="at_bound"``, when the bound is
+    one a fault could have returned.
     """
     if not assertions:
         return []
@@ -495,6 +599,7 @@ def violations(
         return []
 
     clamps = clamp_constants(code) if code else set()
+    literals = numeric_literals(code) if code else set()
     out: list[Violation] = []
     for a in assertions:
         matched: list[tuple[tuple, str, float]] = []
@@ -503,22 +608,18 @@ def violations(
             if not _matches(a.path, path):
                 continue
             matched.append((tokens, path, value))
-            if a.min is not None and value < a.min:
-                out.append(Violation(path, value, a))
-            elif a.max is not None and value > a.max:
-                out.append(Violation(path, value, a))
+            bound = _on_bound(value, a)
+            if bound is None:
+                if (a.min is not None and value < a.min) or (
+                    a.max is not None and value > a.max
+                ):
+                    out.append(Violation(path, value, a))
             elif clamps and _pinned(value, a, clamps):
                 out.append(Violation(path, value, a, kind="clamped"))
             else:
-                bound = next(
-                    (b for b in (a.min, a.max)
-                     if b is not None and math.isclose(value, b, rel_tol=1e-9, abs_tol=1e-12)),
-                    None,
-                )
-                if bound is not None:
-                    on_bound.setdefault(bound, []).append((tokens, path))
+                on_bound.setdefault(bound, []).append((tokens, path))
         for bound, entries in on_bound.items():
-            v = _at_bound(a, bound, entries, matched, result_json)
+            v = _at_bound(a, bound, entries, matched, result_json, literals)
             if v is not None:
                 out.append(v)
     return out
@@ -530,8 +631,9 @@ def _at_bound(
     entries: list[tuple[tuple, str]],
     matched: list[tuple[tuple, str, float]],
     root: Any,
+    literals: set[float],
 ) -> Violation | None:
-    """The ``at_bound`` signal for one quantity and one bound, after the zeros
+    """The ``at_bound`` signal for one quantity and one bound, after the values
     that are expected have been taken out of it. See the module docstring."""
     # The same cell reported under two groupings is one setting.
     by_key: dict[frozenset, tuple[tuple, str]] = {}
@@ -539,9 +641,15 @@ def _at_bound(
         by_key.setdefault(_setting_key(tokens), (tokens, path))
     settings = list(by_key.values())
     explained: list[tuple[str, str]] = []
+    all_settings: set[frozenset] = {_setting_key(t) for t, _, _ in matched}
+
+    # A bound the design derived for this experiment, reached at some of the
+    # settings and not at others, is the design's own prediction: the quantity
+    # did vary with the sweep and arrived where the design said it would.
+    if not _trivial_bound(bound, literals) and len(by_key) < len(all_settings):
+        return None
 
     if bound == 0:
-        all_settings: set[frozenset] = {_setting_key(t) for t, _, _ in matched}
         minority = len(settings) * 2 < len(all_settings)
 
         keep: list[tuple[tuple, str]] = []
