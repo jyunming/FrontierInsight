@@ -54,6 +54,27 @@ def test_bounds_are_inclusive() -> None:
     assert pl.check_design({"contrast": 0.0}, d) == []
 
 
+def test_a_value_equal_to_its_bound_to_the_last_bit_is_on_the_bound() -> None:
+    """A bound is a number with a precision. A design that worked its maximum
+    out as 2/3 declares 0.6666666666666666; a script that computes 1 - 1/3
+    produces 0.6666666666666667. An exact ``>`` called that correct answer a
+    violation of a bound the message printed as the very same number. A value
+    that is really larger still fails."""
+    d = _design({"path": "p", "min": 0.0, "max": 0.6666666666666666})
+    assert pl.check_design({"p": 0.6666666666666667}, d) == []
+    assert [v.kind for v in pl.check_design({"p": 0.67}, d)] == ["out_of_range"]
+
+
+def test_a_hair_below_a_minimum_is_on_the_minimum_not_under_it() -> None:
+    """The same equality on the other side: a drift of -1e-13 against a min of
+    0 is where a subtraction of two close numbers lands, and a model told that
+    breaks the bound writes a clamp. A real sign error still goes back."""
+    d = _design({"path": "energy_drift", "min": 0.0, "max": 1.0})
+    assert pl.check_design({"energy_drift": -1e-13}, d) == []
+    assert [v.kind for v in pl.check_design({"energy_drift": -1e-6}, d)] == [
+        "out_of_range"]
+
+
 def test_assertion_matches_at_any_nesting_depth() -> None:
     """A design names the metric; it cannot predict how the script nests it."""
     d = _design({"path": "cd_nm", "min": 0})

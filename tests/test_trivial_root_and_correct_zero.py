@@ -318,6 +318,92 @@ def test_the_violation_reports_the_zeros_it_recognised() -> None:
     assert "leave those as they are" in text
 
 
+# ---------------------------------------------------------------------------
+# T9 — a bound the design itself derived
+# ---------------------------------------------------------------------------
+
+# terra1's shape, at the precision that is the whole point of it. The design
+# derived its maximum from the sweep it had chosen — max(0, 1 - 1/R0) over
+# R0 = 0.9, 1.5, 3.0 — and declared 2/3, which as a double is
+# 0.6666666666666666. The script computed 1.0 - 1.0/3.0, which is
+# 0.6666666666666667. Both are two thirds; one is one bit larger.
+TERRA1 = {"strata": {
+    f"R0={r0},N={n}": {"branching_probability": p}
+    for r0, p in (("0.9", 0.0), ("1.5", 0.33333333333333337),
+                  ("3.0", 0.6666666666666667))
+    for n in ("100", "1000", "5000")
+}}
+TERRA1_DESIGN = _design({
+    "path": "branching_probability", "min": 0.0, "max": 0.6666666666666666,
+    "unit": "dimensionless",
+    "reason": "For the specified R0 values, max(0,1-1/R0) ranges from 0 to 2/3.",
+})
+TERRA1_CODE = "branching_probability = max(0.0, 1.0 - 1.0 / r0)\n"
+
+
+def test_the_legal_maximum_is_not_a_violation() -> None:
+    """The run this comes from was told its correct answer was wrong, in a
+    message that printed the same number on both sides of the word:
+    'branching_probability = 0.666667 violates [0, 0.666667]'. The repair then
+    nulled every boundary value — flagging them `exact_theoretical_boundary`
+    as it did, so it knew — and the figure lost the reference line it was
+    drawn to show."""
+    assert pl.check_design(TERRA1, TERRA1_DESIGN, code=TERRA1_CODE) == []
+
+
+def test_the_maximum_is_still_legal_without_the_zeros_beside_it() -> None:
+    """The three values at the maximum on their own: nothing about the rest of
+    the sweep is doing the work here."""
+    only_max = {"strata": {k: v for k, v in TERRA1["strata"].items()
+                           if "R0=3.0" in k or "R0=1.5" in k}}
+    assert pl.check_design(only_max, TERRA1_DESIGN, code=TERRA1_CODE) == []
+
+
+def test_a_zero_below_threshold_is_recognised_in_a_stratum_label() -> None:
+    """The same run's other half. `strata.R0=0.9,N=100` spells the coordinate
+    with an `=` and packs the cell into one key, so no name matched and no
+    numeric segment was left for the positional rule either — three correct
+    zeros below the epidemic threshold went back for repair."""
+    zeros = {"strata": {k: v for k, v in TERRA1["strata"].items()
+                        if "R0=0.9" in k or "R0=1.5" in k}}
+    assert pl.check_design(zeros, TERRA1_DESIGN, code=TERRA1_CODE) == []
+
+
+def test_a_derived_bound_at_every_setting_is_still_the_trivial_answer() -> None:
+    """The exemption is for a quantity that varied and arrived at the bound,
+    not for one that never left it. A loop that captured the last cell's R0
+    for all nine cells reports the maximum everywhere, and that is the shape
+    this gate exists to catch — whatever the bound happens to be."""
+    captured = {"strata": {k: {"branching_probability": 0.6666666666666667}
+                           for k in TERRA1["strata"]}}
+    v = pl.check_design(captured, TERRA1_DESIGN, code=TERRA1_CODE)
+    assert [(x.kind, len(x.paths)) for x in v] == [("at_bound", 9)]
+
+
+def test_a_result_past_a_derived_bound_is_still_out_of_range() -> None:
+    """The tolerance is for the last bit of a float, not for a wrong answer."""
+    over = {"strata": {"R0=3.0,N=100": {"branching_probability": 0.7}}}
+    v = pl.check_design(over, TERRA1_DESIGN, code=TERRA1_CODE)
+    assert [(x.kind, x.value) for x in v] == [("out_of_range", 0.7)]
+
+
+def test_a_bound_the_script_writes_down_still_carries_the_signal() -> None:
+    """Why the rule is not simply 'any bound but 0 and 1'. A root finder
+    bracketed on [0, 100] can return 100 without solving anything, and the
+    bracket is in the script — so a design that declares max = 100 is
+    declaring a number a fault can reach, and two settings on it still go
+    back. The third setting is off the bound deliberately: with every setting
+    on it, the carve-out above decides the case before the bracket does."""
+    rj = {"by_h": {"0.1": {"crossing": 100.0}, "0.2": {"crossing": 100.0},
+                   "0.4": {"crossing": 37.0}}}
+    d = _design({"path": "crossing", "min": 0, "max": 100.0})
+    code = "root = brentq(f, 0.0, 100.0)\n"
+    assert [x.kind for x in pl.check_design(rj, d, code=code)] == ["at_bound"]
+    # The same numbers with nothing in the script to explain them are the
+    # design's own extreme, and are left alone.
+    assert pl.check_design(rj, d, code="root = solve(f)\n") == []
+
+
 def test_the_walker_agrees_with_flatten_numbers_on_paths() -> None:
     """``_matches`` compares assertion paths against these strings, so the
     token walk must produce exactly the dotted form the oracle produces."""
