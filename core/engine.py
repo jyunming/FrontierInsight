@@ -8472,17 +8472,77 @@ def _normalized_text(text: str) -> str:
     return " ".join(text.split())
 
 
+# NFKC already folds the mathematical letters themselves: every character of
+# the Letterlike Symbols and Mathematical Alphanumeric Symbols blocks except
+# the turned F becomes its ASCII letter (script R to R, script l to l, bold and
+# double-struck A to A). These two it does not: the Weierstrass p folds to
+# itself, and the reduced Planck constant folds to a stroked Latin h.
+_MATH_LETTERS = str.maketrans({"℘": "p", "ħ": "h"})
+# A LaTeX font command wraps a name without changing what it names, so the
+# braced name is the name.
+_MATH_FONT_RE = re.compile(
+    r"\\(?:mathcal|mathrm|mathbf|mathbb|mathit|mathsf|boldsymbol|bm|text|operatorname)"
+    r"\s*\{([^{}]*)\}"
+)
+# ``^`` and ``_`` mark a script the source may have rendered as layout instead.
+_MATH_SCRIPT_MARK_RE = re.compile(r"[\^_]")
+# Spacing around an operator is typesetting, not content. Deliberately no ``.``
+# and no ``,``, and no digit and no letter: what a formula *says* -- its
+# numbers, its operators and their order -- has to keep mattering, or a
+# quotation that changed one of them would start matching.
+_MATH_SPACE_RE = re.compile(r"\s*([()\[\]{}+\-*/=<>|])\s*")
+# A subscript a PDF broke onto its own line comes back as ``R 0``.
+_MATH_LETTER_DIGIT_RE = re.compile(r"\b([a-z])\s+(\d)")
+# One a PDF parenthesised instead comes back as ``R(0)``, and a parenthesised
+# superscript as ``)( i )``. Braces because a paper writing the same subscript
+# in LaTeX writes ``R_{0}``, which the script marks above leave as ``R{0}``.
+_MATH_PAREN_SCRIPT_RE = re.compile(r"(?<=[a-z0-9)])[({]([a-z0-9]{1,3})[)}]")
+
+
+def _math_folded(text: str) -> str:
+    """``text`` with the ways a PDF flattens mathematics into characters folded
+    together, so a quotation of a formula matches the formula it quotes.
+
+    One source wrote its reproduction number ``ℛ(0)`` in its abstract and
+    ``R``-newline-``0`` in its full text, and the same exponent as ``( i )``
+    and as a bare ``i``; the paper quoting it wrote ``R0`` and ``^i``. Every
+    one of those is the same formula, and none is a substring of another.
+
+    Only layout is folded. The numbers, the operators and the order of the
+    tokens are left exactly as they are, so this lets a *correct* quotation
+    match without letting an incorrect one match. Expects
+    :func:`_normalized_text` output: lower case, single-spaced, and with the
+    dashes already straightened, which is what makes folding the spaces around
+    a ``-`` safe to do here."""
+    text = text.translate(_MATH_LETTERS)
+    text = _MATH_FONT_RE.sub(r"\1", text.replace("$", ""))
+    text = _MATH_SCRIPT_MARK_RE.sub("", text)
+    text = _MATH_SPACE_RE.sub(r"\1", text)
+    text = _MATH_LETTER_DIGIT_RE.sub(r"\1\2", text)
+    text = _MATH_PAREN_SCRIPT_RE.sub(r"\1", text)
+    return " ".join(text.split())
+
+
 def _quote_in_source(quote: str, source: str) -> bool:
     """Whether ``quote`` is words ``source`` has. Parts an ellipsis joins are
     looked for one by one, and together they must be long enough to mean
-    something."""
+    something.
+
+    A part that is not there as written is looked for once more with the
+    mathematics folded (:func:`_math_folded`), because a source that renders a
+    formula one way and a paper that quotes it another are still quoting it.
+    The fold is only ever a second chance: a quote found as written is accepted
+    on that alone, and the length floor is measured before any folding, so no
+    quote a source really does contain can be rejected because of it."""
     haystack = _normalized_text(source)
     parts = [p.strip(" .,;:[]") for p in re.split(r"\.\.\.", _normalized_text(quote))]
     parts = [p for p in parts if p]
-    return (
-        bool(parts) and sum(len(p) for p in parts) >= _QUOTE_MIN_CHARS
-        and all(p in haystack for p in parts)
-    )
+    if not parts or sum(len(p) for p in parts) < _QUOTE_MIN_CHARS:
+        return False
+    if all(p in haystack for p in parts):
+        return True
+    folded = _math_folded(haystack)
+    return all(p in haystack or _math_folded(p) in folded for p in parts)
 
 
 def render_references_marp_slide(refs: list[dict[str, Any]], *, paper_md: str = "") -> str:

@@ -188,6 +188,135 @@ def test_a_citation_counts_only_with_a_quote_from_the_sources_text(tmp_path: Pat
     assert 'quoted: "explicit Euler methods are unstable in oscillatory systems"' in ledger
 
 
+# --- a formula the source and the paper render differently ------------------
+
+# Allen & Lahodny 2012 as FI really stored it, trimmed to the passages that
+# matter. One source, one sentence, two renderings of the same formula: the
+# abstract writes the reproduction number "ℛ(0)" and the exponent as "( i )",
+# and the full text writes the subscript broken onto its own line ("R\n0") and
+# the exponent as a bare "i". The paper quoting it wrote "R0" and "^i". None of
+# those is a substring of another, so the check called a verbatim quotation
+# unsupported and two runs spent their whole review loop on it.
+ALLEN_2012 = {
+    "title": "Extinction thresholds in deterministic and stochastic epidemic models",
+    "doi": "10.1080/17513758.2012.665502",
+    "source": "openalex",
+}
+_ALLEN_TAIL = (
+    " and i infectious individuals are introduced into a susceptible population, "
+    "then the probability of a major outbreak is approximately "
+)
+# How four real quests quoted that sentence. Every one is a correct quotation.
+ALLEN_QUOTES = {
+    "R0, parenthesised exponent": "if R0 > 1" + _ALLEN_TAIL + "1-(1/R0)( i )",
+    "R0, caret exponent": "In the case of a single infectious group, if R0 > 1"
+                          + _ALLEN_TAIL + "1-(1/R0)^i",
+    "LaTeX font command": r"if $\mathcal{R}(0)>1$" + _ALLEN_TAIL
+                          + r"1-(1/$\mathcal{R}(0)$)( i )",
+    "minus sign, bare exponent": "In the case of a single infectious group, if R0 > 1"
+                                 + _ALLEN_TAIL + "1 − (1/R0)i.",
+    "verbatim, script R": "In the case of a single infectious group, if ℛ(0)>1"
+                          + _ALLEN_TAIL + "1-(1/ℛ(0))( i ).",
+}
+# And quotations that are NOT what the source says. Each changes exactly one
+# thing the fold must never fold away.
+ALLEN_FABRICATIONS = {
+    "the exponent is a different number": "if R0 > 1" + _ALLEN_TAIL + "1-(1/R0)( 2 )",
+    "the threshold is a different number": "if R0 > 2" + _ALLEN_TAIL + "1-(1/R0)^i",
+    "the operator is a plus": "if R0 > 1" + _ALLEN_TAIL + "1+(1/R0)( i )",
+    "the inequality is reversed": "if R0 < 1" + _ALLEN_TAIL + "1-(1/R0)^i",
+    "the same tokens in another order": "then the probability of a major outbreak is "
+        "approximately 1-(1/R0)( i ) if R0 > 1 and i infectious individuals are "
+        "introduced into a susceptible population",
+    "a word replaced by its translation": "The basic reproduction number, R0, one of the "
+        "most well-known thresholds in deterministic epidemic theory, ამიტომ a disease "
+        "outbreak if R0>1.",
+    "invented outright": "the probability of a major outbreak is exactly one minus the "
+        "reciprocal of the basic reproduction number in every stochastic epidemic model",
+}
+
+
+def _allen_text() -> str:
+    return (Path(__file__).parent / "fixtures"
+            / "claim_check_allen_lahodny_2012.txt").read_text(encoding="utf-8")
+
+
+def test_a_formula_the_source_renders_differently_is_still_quoted_from_it() -> None:
+    """Each of these is the source's own sentence, written the way the quoting
+    paper renders mathematics. All of them are in the source."""
+    from core.engine import _quote_in_source
+
+    text = _allen_text()
+    # The two renderings really are both in the one stored source, and really
+    # are different strings — otherwise this test proves nothing. Compared with
+    # the line breaks flattened, because the subscript of the second one is a
+    # line break and git hands this file to Windows with a different one.
+    flat = " ".join(text.split())
+    assert "1-(1/ℛ(0))( i )" in flat
+    assert "1 − (1/R 0)i" in flat
+    for name, quote in ALLEN_QUOTES.items():
+        assert _quote_in_source(quote, text), name
+
+
+def test_a_quotation_that_changes_the_mathematics_is_not_in_the_source() -> None:
+    """The fold must buy nothing for a quote the source does not support: a
+    changed number, a changed operator, a reordering, a translated word and an
+    invention all stay rejected. If this test ever goes green the check has
+    stopped protecting the paper from a fabricated citation."""
+    from core.engine import _quote_in_source
+
+    text = _allen_text()
+    for name, quote in ALLEN_FABRICATIONS.items():
+        assert not _quote_in_source(quote, text), name
+
+
+def test_folding_keeps_the_numbers_the_operators_and_the_order() -> None:
+    from core.engine import _math_folded
+
+    # A subscript, however the PDF flattened it, is the same symbol — and
+    # however the paper quoting it wrote the subscript in LaTeX.
+    assert _math_folded("r(0)>1") == _math_folded("r0 > 1") == _math_folded("r 0>1")
+    assert _math_folded("r_{0}") == _math_folded("r_0") == _math_folded("r0")
+    assert _math_folded("r^{i}") == _math_folded("r^i") == _math_folded("ri")
+    # An exponent, spaced, parenthesised, carried or bare.
+    assert _math_folded("(1/r0)( i )") == _math_folded("(1/r0)^i") == _math_folded("(1/r0)i")
+    # A group that is not a script keeps its parentheses: the divisor here is
+    # an expression, not a subscript, and must not collapse into the token
+    # before it.
+    assert "(1/r0)" in _math_folded("1-(1/r0)i")
+    # The two mathematical letters NFKC does not fold to an ASCII letter (it
+    # leaves the Weierstrass p alone and folds the reduced Planck constant to a
+    # stroked h, which is still not "h").
+    assert _math_folded("℘") == "p"
+    assert _math_folded("ħ") == "h"
+    # What the formula says still separates these.
+    assert _math_folded("1-(1/r0)( i )") != _math_folded("1-(1/r0)( 2 )")
+    assert _math_folded("1-(1/r0)i") != _math_folded("1+(1/r0)i")
+    assert _math_folded("r0>1") != _math_folded("r0<1")
+
+
+def test_the_grounding_accepts_the_real_quotation_and_rejects_the_fabricated_one(
+    tmp_path: Path,
+) -> None:
+    """End to end through the node, on the stored source: the quest whose
+    CLAIMS.md said "the quote is not in the text of [3]" about a formula that
+    was in the text of [3]."""
+    eng = _engine(tmp_path)
+    _set_chat(eng, json.dumps({"claims": [
+        {"claim": "The outbreak probability is 1 - (1/R0)^i [1]", "basis": "citation",
+         "citation_index": 1, "quote": ALLEN_QUOTES["R0, parenthesised exponent"]},
+        {"claim": "The same formula, quoted with a caret [1]", "basis": "citation",
+         "citation_index": 1, "quote": ALLEN_QUOTES["R0, caret exponent"]},
+        {"claim": "The outbreak probability is 1 - (1/R0)^2 [1]", "basis": "citation",
+         "citation_index": 1, "quote": ALLEN_FABRICATIONS["the exponent is a different number"]},
+    ], "summary": ""}))
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# P\n\nThe threshold [1].\n"),
+             "literature": [{"content": _allen_text(), "metadata": ALLEN_2012}]}
+    claims = asyncio.run(eng._node_claim_check(state))["claim_grounding"]["claims"]  # type: ignore[arg-type]
+    assert [c["basis"] for c in claims] == ["citation", "citation", "unsupported"]
+    assert "the quote is not in the text of [1]" in claims[2]["evidence"]
+
+
 def test_the_check_sees_the_text_of_each_source_the_paper_cites(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     seen: list[str] = []

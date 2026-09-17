@@ -1,0 +1,60 @@
+Extinction thresholds in deterministic and stochastic epidemic models
+
+The basic reproduction number, ℛ(0), one of the most well-known thresholds in deterministic epidemic theory, predicts a disease outbreak if ℛ(0)>1. In stochastic epidemic theory, there are also thresholds that predict a major outbreak. In the case of a single infectious group, if ℛ(0)>1 and i infectious individuals are introduced into a susceptible population, then the probability of a major outbreak is approximately 1-(1/ℛ(0))( i ). With multiple infectious groups from which the disease could emerge, this result no longer holds. Stochastic thresholds for multiple groups depend on the number of individuals within each group, i ( j ), j=1, …, n, and on the probability of disease extinction for each group, q ( j ). It follows from multitype branching processes that the probability of a major outbreak is approximately [Formula: see text]. In this investigation, we summarize some of the deterministic and stochastic threshold theory, illustrate how to calculate the stochastic thresholds, and derive some new relationships between the deterministic and stochastic thresholds.
+
+---FULL TEXT (fetched)---
+
+ 
+ 
+EXTINCTION THRESHOLDS IN DETERMINISTIC AND STOCHASTIC EPIDEMIC 
+MODELS 
+ 
+The Texas Tech community has made this publication openly 
+available. Please share how this access benefits you. Your 
+story matters to us. 
+ 
+ 
+ 
+Title page template design credit to Harvard DASH. 
+ 
+Citation Allen, L.J.S., & Lahodny, Jr., G.E.. 2012. Extinction thresholds in 
+deterministic and stochastic epidemic models. Journal of Biological 
+Dynamics, 6(2). https://doi.org/10.1080/17513758.2012.665502  
+Citable Link https://hdl.handle.net/2346/95282  
+Terms of Use CC BY-NC 4.0 
+
+Full Terms & Conditions of access and use can be found at
+https://www.tandfonline.com/action/journalInformation?journalCode=tjbd20
+Journal of Biological Dynamics
+ISSN: 1751-3758 (Print) 1751-3766 (Online) Journal homepage: https://www.tandfonline.com/loi/tjbd20
+Extinction thresholds in deterministic and
+stochastic epidemic models
+Linda J. S. Allen & Glenn E. Lahodny Jr
+To cite this article: Linda J. S. Allen & Glenn E. Lahodny Jr (2012) Extinction thresholds in
+deterministic and stochastic epidemic models, Journal of Biological Dynamics, 6:2, 590-611,
+DOI: 10.1080/17513758.2012.665502
+To link to this article:  https://doi.org/10.1080/17513758.2012.665502
+Copyright Taylor and Francis Group, LLC
+Published online: 07 Mar 2012.
+Submit your article to this journal 
+Article views: 4638
+View related articles 
+Citing articles: 37 View citing articles 
+
+
+Journal of Biological Dynamics
+V ol. 6, No. 2, March 2012, 590–611
+Extinction thresholds in deterministic and stochastic
+epidemic models
+Linda J. S. Allen* and Glenn E. Lahodny Jr
+Department of Mathematics and Statistics, Texas Tech University, Lubbock, TX 79409-1042, USA
+(Received 4 January 2012; ﬁnal version received 28 January 2012 )
+The basic reproduction number, R0, one of the most well-known thresholds in deterministic epidemic
+theory, predicts a disease outbreak if R0 > 1. In stochastic epidemic theory, there are also thresholds that
+predict a major outbreak. In the case of a single infectious group, if R0 > 1 and i infectious individuals
+are introduced into a susceptible population, then the probability of a major outbreak is approximately
+1 − (1/R
+0)i. With multiple infectious groups from which the disease could emerge, this result no longer
+holds. Stochastic thresholds for multiple groups depend on the number of individuals within each group,
+i
+j, j = 1, ... , n, and 
