@@ -431,6 +431,7 @@ class Engine:
             config.execution.sandbox,
             python_version=config.execution.python_version,
             docker_image=config.execution.docker_image,
+            system_site_packages=config.execution.system_site_packages,
         )
         self.knowledge = Knowledge(config.knowledge)
         self._log = _quest_logger(self.quest_id, self.fi_dir)

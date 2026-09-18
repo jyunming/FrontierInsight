@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import subprocess
 import sys
 import time
 import venv
@@ -65,8 +66,11 @@ class VenvExecutor:
     `DockerExecutor`.
     """
 
-    def __init__(self, *, python_version: str = "3.11") -> None:
+    def __init__(
+        self, *, python_version: str = "3.11", system_site_packages: bool = True,
+    ) -> None:
         self.python_version = python_version
+        self.system_site_packages = system_site_packages
 
     async def setup(self, quest_root: Path) -> None:
         quest_root.mkdir(parents=True, exist_ok=True)
@@ -103,10 +107,13 @@ class VenvExecutor:
                 "setup: reusable venv at %s failed the pip probe (rc=%s) — "
                 "rebuilding from clean", venv_dir, probe.returncode,
             )
-        # `venv.EnvBuilder` is sync; offload so we don't block the loop.
-        # clear=True wipes any partial/broken dir before recreating.
+        # `venv.EnvBuilder`/subprocess venv creation is sync; offload so we
+        # don't block the loop. clear=True wipes any partial/broken dir
+        # before recreating.
         await asyncio.to_thread(
-            _build_venv, venv_dir, with_pip=True, clear=True
+            _build_venv, venv_dir, with_pip=True, clear=True,
+            python_version=self.python_version,
+            system_site_packages=self.system_site_packages,
         )
 
     def python_path(self, quest_root: Path) -> Path:
@@ -220,8 +227,14 @@ class VenvExecutor:
                 )
                 return None
             # ``pip freeze`` produces a deterministic, pip-installable list.
+            # ``--local`` excludes globally-installed packages when the venv
+            # has global access (``system_site_packages=True``) — without
+            # it, the lock file would list everything FI's own interpreter
+            # happens to have installed alongside what this quest actually
+            # asked for, which is not what "what did this quest need"
+            # should mean. Harmless no-op when system_site_packages=False.
             freeze = await self.execute(
-                [str(py), "-m", "pip", "freeze"],
+                [str(py), "-m", "pip", "freeze", "--local"],
                 cwd=quest_root,
                 timeout_s=60,
             )
@@ -303,11 +316,113 @@ def _looks_like_dll_load_failure(stderr: str) -> bool:
     )
 
 
-def _build_venv(venv_dir: Path, *, with_pip: bool, clear: bool = False) -> None:
-    # ``clear=True`` wipes a partial/broken venv dir (e.g. left by a run killed
-    # mid-build) before recreating it, so a rebuild starts from clean.
-    builder = venv.EnvBuilder(with_pip=with_pip, clear=clear, upgrade_deps=False)
-    builder.create(str(venv_dir))
+def _resolve_python_for_version(python_version: str) -> str | None:
+    """Find an interpreter matching ``python_version`` (e.g. ``"3.11"``),
+    or ``None`` when none is found — callers fall back to ``sys.executable``.
+
+    ``sys.executable`` is checked FIRST and preferred when it already
+    matches: no subprocess needed, and it's guaranteed to have ``venv`` +
+    ``pip`` working (it's the interpreter running FI itself). Only searches
+    elsewhere when it does not match, so a single-Python-install machine
+    (the common case) never pays for the search.
+    """
+    want = tuple(int(p) for p in python_version.split(".")[:2])
+    have = sys.version_info[:2]
+    if have == want:
+        return sys.executable
+
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        # The `py` launcher (ships with every python.org Windows install)
+        # picks a specific installed version regardless of what's on PATH
+        # or which interpreter is currently running FI — the one reliable
+        # way to target a version other than sys.executable on Windows.
+        py_launcher = shutil.which("py")
+        if py_launcher:
+            probe = subprocess.run(
+                [py_launcher, f"-{python_version}", "-c", "import sys; print(sys.executable)"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if probe.returncode == 0:
+                candidates.append(probe.stdout.strip())
+    else:
+        found = shutil.which(f"python{python_version}")
+        if found:
+            candidates.append(found)
+
+    for cand in candidates:
+        if cand and Path(cand).is_file():
+            return cand
+    return None
+
+
+def _build_venv(
+    venv_dir: Path, *, with_pip: bool, clear: bool = False,
+    python_version: str = "3.11", system_site_packages: bool = True,
+) -> None:
+    """Build the quest venv from the interpreter matching ``python_version``,
+    not whichever interpreter happens to be running FI.
+
+    Before this, ``venv.EnvBuilder().create()`` unconditionally used
+    ``sys.executable`` — the CURRENTLY RUNNING interpreter — and silently
+    ignored ``execution.python_version`` entirely (it was stored on
+    ``VenvExecutor`` but never read). On a machine with more than one
+    Python install, whichever one happened to launch FI that particular
+    time decided every quest's venv, with no consistency guarantee quest
+    to quest — the same declared ``python_version`` could silently mean a
+    different interpreter, and therefore different wheels / ABI, run to
+    run. ``clear=True`` wipes a partial/broken venv dir (e.g. left by a run
+    killed mid-build) before recreating it, so a rebuild starts clean.
+
+    ``system_site_packages=True`` (default, was the ``venv.EnvBuilder``
+    default of ``False``) lets each quest's venv see whatever FI's own
+    interpreter already has installed — matplotlib, numpy, pandas are
+    near-universal across quests, so on a machine with a cold pip cache
+    every quest previously re-downloaded and re-built them from scratch.
+    A quest's own ``pip install`` still installs INTO the venv as normal
+    and takes precedence there; inheriting only fills in what a quest
+    doesn't ask for itself.
+    """
+    resolved = _resolve_python_for_version(python_version)
+    if resolved is None:
+        _log.warning(
+            "[setup] no Python %s interpreter found (checked the `py` "
+            "launcher on Windows, `python%s` on PATH elsewhere) — "
+            "building the venv from the currently-running interpreter "
+            "(%s) instead. Install python.org's Python %s or add it to "
+            "PATH for a consistent venv across runs.",
+            python_version, python_version, sys.executable, python_version,
+        )
+        resolved = sys.executable
+
+    if resolved == sys.executable:
+        # Fast, in-process path — no subprocess needed.
+        builder = venv.EnvBuilder(
+            with_pip=with_pip, clear=clear, upgrade_deps=False,
+            system_site_packages=system_site_packages,
+        )
+        builder.create(str(venv_dir))
+        return
+
+    # A different interpreter than the one running FI: venv.EnvBuilder has
+    # no way to target one, since it always builds from sys.executable.
+    # Spawn that interpreter's own `-m venv` instead — this function
+    # already runs off the event loop (asyncio.to_thread), so a blocking
+    # subprocess call here is consistent with the rest of this module.
+    if clear and venv_dir.exists():
+        shutil.rmtree(venv_dir, ignore_errors=True)
+    cmd = [resolved, "-m", "venv"]
+    if system_site_packages:
+        cmd.append("--system-site-packages")
+    if not with_pip:
+        cmd.append("--without-pip")
+    cmd.append(str(venv_dir))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"venv creation failed via {resolved} (python_version="
+            f"{python_version}): rc={result.returncode}\n{result.stderr[-2000:]}"
+        )
 
 
 class DockerExecutor:
@@ -445,9 +560,15 @@ class DockerExecutor:
                 pass
 
 
-def make_executor(sandbox: str, *, python_version: str, docker_image: str) -> Executor:
+def make_executor(
+    sandbox: str, *, python_version: str, docker_image: str,
+    system_site_packages: bool = True,
+) -> Executor:
     if sandbox == "venv":
-        return VenvExecutor(python_version=python_version)
+        return VenvExecutor(
+            python_version=python_version,
+            system_site_packages=system_site_packages,
+        )
     if sandbox == "docker":
         return DockerExecutor(image=docker_image)
     raise ValueError(f"unknown sandbox: {sandbox!r}")

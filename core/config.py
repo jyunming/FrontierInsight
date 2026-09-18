@@ -859,8 +859,24 @@ class EngineConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     sandbox: SandboxKind = "venv"
     timeout_s: int = Field(default=60 * 30, gt=0)
+    # Which interpreter builds each quest's venv. Previously declared but
+    # never read — venv.EnvBuilder().create() always used sys.executable
+    # (whichever interpreter happened to be running FI that invocation),
+    # so on a machine with more than one Python install, the same
+    # declared version could silently mean a different interpreter run
+    # to run. Now actually resolved (the Windows `py` launcher, or
+    # `python<version>` on PATH elsewhere) — see
+    # core.execution._resolve_python_for_version.
     python_version: str = "3.11"
     docker_image: str = "python:3.11-slim"
+    # Each quest's venv inherits whatever FI's own interpreter already has
+    # installed (matplotlib, numpy, pandas, ... are near-universal across
+    # quests) instead of every quest re-downloading and re-building them
+    # from an empty venv. A quest's own `pip install` still installs INTO
+    # the venv and takes precedence there — this only fills in what a
+    # quest doesn't ask for itself. Set false to restore full per-quest
+    # isolation (nothing visible but what that quest explicitly installs).
+    system_site_packages: bool = True
 
 
 class KnowledgeConfig(BaseModel):

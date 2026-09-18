@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -21,6 +22,59 @@ async def test_setup_creates_venv(venv_quest: Path) -> None:
     await exe.setup(venv_quest)
     py = exe.python_path(venv_quest)
     assert py.exists(), f"venv python missing at {py}"
+    # Default is now system_site_packages=True (was the venv.EnvBuilder
+    # default of False) — each quest's venv should see what FI's own
+    # interpreter already has installed instead of reinstalling it.
+    cfg = (venv_quest / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8")
+    assert "include-system-site-packages = true" in cfg.lower()
+
+
+@pytest.mark.asyncio
+async def test_setup_honors_system_site_packages_false(tmp_path: Path) -> None:
+    """The isolation escape hatch: system_site_packages=False must still
+    build a fully isolated venv for anyone who wants it back."""
+    exe = VenvExecutor(system_site_packages=False)
+    quest_root = tmp_path / "isolated-quest"
+    await exe.setup(quest_root)
+    cfg = (quest_root / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8")
+    assert "include-system-site-packages = false" in cfg.lower()
+
+
+def test_resolve_python_for_version_prefers_sys_executable_when_it_matches():
+    """No subprocess search needed when the running interpreter already IS
+    the requested version — the common case on a single-Python machine."""
+    from core.execution import _resolve_python_for_version
+    want = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    assert _resolve_python_for_version(want) == sys.executable
+
+
+def test_resolve_python_for_version_returns_none_for_an_unavailable_version():
+    """A version nobody has installed must not crash — _build_venv falls
+    back to sys.executable with a logged warning, not an exception."""
+    from core.execution import _resolve_python_for_version
+    assert _resolve_python_for_version("2.4") is None
+
+
+@pytest.mark.asyncio
+async def test_build_venv_falls_back_to_sys_executable_and_warns(
+    tmp_path: Path, caplog,
+) -> None:
+    """core.execution.python_version was previously declared but never
+    read — venv.EnvBuilder().create() always used sys.executable
+    regardless. This pins the NEW behavior's honest fallback: a version
+    nobody has installed still produces a working venv (from
+    sys.executable), but now says so instead of silently ignoring the
+    setting."""
+    import logging
+    from core.execution import _build_venv
+    venv_dir = tmp_path / "fallback-venv"
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.execution"):
+        await asyncio.to_thread(
+            _build_venv, venv_dir, with_pip=True, clear=True,
+            python_version="2.4",
+        )
+    assert (venv_dir / ("Scripts" if sys.platform == "win32" else "bin")).is_dir()
+    assert any("no Python 2.4 interpreter found" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
