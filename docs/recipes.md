@@ -261,7 +261,7 @@ python launch.py --skills                                   # external ones are 
 python launch.py --approve-skill deepscientist-experiment --approve-as you   # reads its scripts list first
 ```
 
-An external skill has no FI self-test, so your approval of its exact content is the only gate; edit it and the approval lapses. `--approve-all-skills` never approves them. If a name in `skills_required` cannot be used (not found, not approved), the quest stops before its first LLM call and tells you which and why.
+An external skill has no FI self-test, so your approval of its exact content is the only gate; edit it and the approval lapses. `--approve-all-skills` never approves them. If a name in `skills_required` cannot be used (not found, not approved), the quest stops before its first LLM call and tells you which and why. With `execution.sandbox: docker`, an approved skill the quest uses is mounted read-only in the container at `/fi-skills/<name>` and the prompts name that path; a skill folder that is a symbolic link is refused (see `run.log`).
 
 ### Run a simulation that takes hours or days on HPC
 
