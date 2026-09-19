@@ -42,11 +42,12 @@ import subprocess
 import tempfile
 import sys
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from core.skills import approval, selftest_cache
-from core.skills.base import SELFTEST_PY, Skill, SkillState, Status
+from core.skills.base import EXTERNAL_SOURCE, SELFTEST_PY, Skill, SkillState, Status
 from core.skills.selftest_cache import SelftestCache
 
 _log = logging.getLogger("fi.skills")
@@ -76,14 +77,58 @@ def skills_root() -> Path:
     return Path(base) / ".frontier-insight" / "skills"
 
 
-def _from_filesystem(skills_dir: Path) -> list[Skill]:
+#: Folders where other agents keep the skills they installed. Read in place —
+#: nothing is copied or converted — so a skill written for another agent is
+#: searchable and selectable here without importing it.
+_KNOWN_EXTERNAL_DIRS = ("~/.codex/skills", "~/.claude/skills", "~/.agents/skills")
+
+#: ``os.pathsep``-separated folders. Set (even empty) it is authoritative: it
+#: replaces the config and the known folders, and empty means none.
+_ENV_EXTERNAL_DIRS = "FI_EXTERNAL_SKILLS_DIRS"
+
+_extra_external_dirs: list[Path] = []
+_scan_known_external = True
+
+
+def configure_external_dirs(dirs: Iterable[str | Path] = (), *, scan_known: bool = True) -> None:
+    """Set the external folders for this process. The Engine calls it with
+    ``engine.skills_dirs``; commands that run without a config (approving a
+    skill, listing) see the known folders and the environment override."""
+    global _extra_external_dirs, _scan_known_external
+    _extra_external_dirs = [Path(d).expanduser() for d in dirs if str(d).strip()]
+    _scan_known_external = scan_known
+
+
+def external_skill_dirs() -> list[Path]:
+    """The existing external skill folders, configured ones first."""
+    env = os.environ.get(_ENV_EXTERNAL_DIRS)
+    if env is not None:
+        candidates = [Path(p).expanduser() for p in env.split(os.pathsep) if p.strip()]
+    else:
+        candidates = list(_extra_external_dirs)
+        if _scan_known_external:
+            candidates += [Path(p).expanduser() for p in _KNOWN_EXTERNAL_DIRS]
+    own = skills_root().resolve()
+    out: list[Path] = []
+    for d in candidates:
+        try:
+            resolved = d.resolve()
+        except OSError:
+            continue
+        if resolved == own or resolved in (o.resolve() for o in out) or not d.is_dir():
+            continue
+        out.append(d)
+    return out
+
+
+def _from_filesystem(skills_dir: Path, source: str = "filesystem") -> list[Skill]:
     out: list[Skill] = []
     try:
         entries = sorted(p for p in skills_dir.iterdir() if p.is_dir())
     except OSError:
         return out
     for d in entries:
-        s = Skill(name=d.name, path=d, source="filesystem")
+        s = Skill(name=d.name, path=d, source=source)
         if s.valid:
             out.append(s)
         else:
@@ -123,11 +168,31 @@ def _from_entry_points() -> list[Skill]:
     return out
 
 
-def discover(skills_dir: Path | None = None) -> list[Skill]:
-    """Every skill FI can see. Filesystem shadows entry points by name."""
+def discover(skills_dir: Path | None = None, *, external: bool | None = None) -> list[Skill]:
+    """Every skill FI can see. FI's own folder shadows entry points, and both
+    shadow an external skill of the same name.
+
+    External folders are included when discovering the machine's skills
+    (``skills_dir`` is None). Passing an explicit ``skills_dir`` looks at that
+    folder alone unless ``external=True`` asks for the rest too.
+    """
     fs = _from_filesystem(skills_dir or skills_root())
     seen = {s.name for s in fs}
-    return fs + [s for s in _from_entry_points() if s.name not in seen]
+    eps = [s for s in _from_entry_points() if s.name not in seen]
+    seen |= {s.name for s in eps}
+    ext: list[Skill] = []
+    if external if external is not None else skills_dir is None:
+        for d in external_skill_dirs():
+            for s in _from_filesystem(d, source=EXTERNAL_SOURCE):
+                if s.name in seen:
+                    _log.info(
+                        "skills: external %s (%s) is shadowed by another skill of "
+                        "the same name", s.name, d,
+                    )
+                    continue
+                seen.add(s.name)
+                ext.append(s)
+    return fs + eps + ext
 
 
 def run_selftest(skill: Skill, *, timeout_s: int | None = None) -> tuple[bool, str]:
@@ -275,7 +340,7 @@ def evaluate(
     failure*, not *FI guessed at intent*.
     """
     content_hash = skill.content_hash()
-    approved = approval.approved_hash(skill.name, ledger)
+    approved = approval.approved_hash(skill.ledger_name, ledger)
     cached = (
         cache.lookup(skill.name, content_hash)
         if cache is not None and run_test and skill.has_selftest
@@ -292,7 +357,12 @@ def evaluate(
                 skill.name, content_hash, output=cached.output, findings=findings,
             )
 
-    if not skill.has_selftest:
+    # An external skill was written for another agent and has no FI self-test.
+    # It is not refused for that: the approval of its exact content is the gate
+    # (the static scan above still runs, and its findings reach whoever
+    # approves). One that does carry a selftest.py is tested like any other.
+    untested_external = skill.external and not skill.has_selftest
+    if not skill.has_selftest and not untested_external:
         return SkillState(
             skill=skill,
             status=Status.UNTESTED,
@@ -307,7 +377,7 @@ def evaluate(
     output = ""
     if run_test and cached is not None:
         output = cached.output
-    elif run_test:
+    elif run_test and not untested_external:
         passed, output = run_selftest(skill)
         if cache is not None:
             cache.note_ran()
@@ -334,6 +404,11 @@ def evaluate(
 
     if approved is None:
         reason = "awaiting approval — no person has approved this skill"
+        if untested_external:
+            reason += (
+                f" (external skill from {skill.path.parent}, never self-tested: "
+                "read its scripts before approving)"
+            )
     elif approved != content_hash:
         reason = (
             f"content changed since approval (approved {approved}, "
@@ -343,7 +418,11 @@ def evaluate(
         return SkillState(
             skill=skill,
             status=Status.TRUSTED,
-            reason="selftest passes and this content is approved",
+            reason=(
+                "external skill, no self-test; this content is approved"
+                if untested_external
+                else "selftest passes and this content is approved"
+            ),
             selftest_output=output,
             approved_hash=approved,
             findings=findings,

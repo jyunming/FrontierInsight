@@ -437,6 +437,13 @@ class Engine:
         )
         self.knowledge = Knowledge(config.knowledge)
         self._log = _quest_logger(self.quest_id, self.fi_dir)
+        # Skills other agents installed are read where they are. The setting
+        # is per process, which is what the commands that run without a config
+        # (--skills, --approve-skill) see through the known folders instead.
+        from core.skills.registry import configure_external_dirs
+        configure_external_dirs(
+            config.engine.skills_dirs, scan_known=config.engine.skills_scan_known_dirs,
+        )
         self._prompts = _load_prompts()
         self._client: LLMClient | None = None
         # Throttle bookkeeping for ``_llm_heartbeat``. Keyed by node
@@ -542,6 +549,7 @@ class Engine:
             # silent-skip incident that motivated both this check and
             # the ``paper_pdf_skipped.md`` diagnostic.
             self._preflight_paper_pdf()
+            await self._preflight_required_skills()
             await self.executor.setup(self.quest_root)
 
             endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
@@ -5862,18 +5870,40 @@ class Engine:
         cfg = self.config.engine
         exclude = list(getattr(cfg, "skills_exclude", []) or [])
         requested = list(getattr(cfg, "skills", []) or [])
+        required = list(dict.fromkeys(getattr(cfg, "skills_required", []) or []))
+
+        def _force(
+            chosen: list[str], reasons: dict[str, str], uses: dict[str, str],
+        ) -> list[str]:
+            """The pick plus every required skill, whatever the pick said."""
+            out = list(chosen)
+            for name in required:
+                if name not in out:
+                    out.append(name)
+                reasons.setdefault(name, "required by engine.skills_required")
+                uses.setdefault(name, "experiment")
+            return out
 
         try:
             # An empty `skills` means "every trusted skill is a candidate" —
             # the user should not have to remember what they have taught it.
+            # Required skills are always looked up, so narrowing the
+            # candidates with `skills` cannot hide one.
             names = requested or [s.name for s in _discover_skill_names()]
+            names = list(dict.fromkeys([*names, *required]))
             # Self-tests are subprocesses that can take minutes on a cold
             # cache; in a thread, so the event loop (and the web server on
             # it) keeps answering while they run.
             usable, rejected = await asyncio.to_thread(loadable_skills, names)
         except Exception as e:  # noqa: BLE001 - the registry must never stall a quest
+            if required:
+                raise RuntimeError(
+                    f"engine.skills_required names {required}, but the skill "
+                    f"registry is unavailable ({e})"
+                ) from e
             self._log.warning("[skills] registry unavailable (%s); none used", e)
             return {"selected_skills": [], "skill_selection": {"error": str(e)}}
+        _raise_if_required_skills_unusable(required, usable, rejected)
 
         survey = bool(
             state.get("survey_mode_resolved") or state.get("no_simulation_resolved")
@@ -5900,6 +5930,15 @@ class Engine:
             self._log.info(
                 "[skills] no candidate skills%s", " (survey mode)" if survey else "",
             )
+            if required:
+                reasons: dict[str, str] = {}
+                uses: dict[str, str] = {}
+                forced = _force([], reasons, uses)
+                self._log.info("[skills] required: %s", ", ".join(forced))
+                return {"selected_skills": forced, "skill_selection": {
+                    "candidates": 0, "chosen": forced, "reasons": reasons,
+                    "uses": uses, "forced": required,
+                }}
             return {"selected_skills": [], "skill_selection": {"candidates": 0}}
 
         prompt = self._prompts["select_skills"].substitute(
@@ -5922,6 +5961,15 @@ class Engine:
                 )
         else:
             self._log.warning("[skills] selection unavailable; none used")
+            if required:
+                reasons = {}
+                uses = {}
+                forced = _force([], reasons, uses)
+                self._log.info("[skills] required: %s", ", ".join(forced))
+                return {"selected_skills": forced, "skill_selection": {
+                    "error": "call failed", "chosen": forced, "reasons": reasons,
+                    "uses": uses, "forced": required,
+                }}
             return {"selected_skills": [], "skill_selection": {"error": "call failed"}}
 
         sel = parse_selection(text, catalogue)
@@ -5930,6 +5978,9 @@ class Engine:
                 "[skills] selection named %r, which is not a candidate — ignored",
                 name,
             )
+        if required:
+            sel.chosen = _force(sel.chosen, sel.reasons, sel.uses)
+            self._log.info("[skills] required by engine.skills_required: %s", ", ".join(required))
         if sel.chosen:
             self._log.info(
                 "[skills] selected %d of %d candidate(s): %s",
@@ -5950,6 +6001,8 @@ class Engine:
             "candidates": len(catalogue.entries),
             "layers": layer_report,
         }
+        if required:
+            record["forced"] = required
         return {"selected_skills": sel.chosen, "skill_selection": record}
 
     def _skills_block(self, state: QuestState | None = None) -> str:
@@ -7523,6 +7576,19 @@ class Engine:
         if not node:
             return None
         return model_for_node(self.config.provider.node_models, node)
+
+    async def _preflight_required_skills(self) -> None:
+        """A skill named in ``engine.skills_required`` that cannot be used stops
+        the quest here, before any LLM call, rather than after the literature
+        has been paid for."""
+        required = list(dict.fromkeys(self.config.engine.skills_required or []))
+        if not required:
+            return
+        from core.skills import loadable_skills
+
+        usable, rejected = await asyncio.to_thread(loadable_skills, required)
+        _raise_if_required_skills_unusable(required, usable, rejected)
+        self._log.info("[skills] required skills are usable: %s", ", ".join(required))
 
     def _preflight_paper_pdf(self) -> None:
         """Verify the host can produce ``paper.pdf`` BEFORE the quest
@@ -10704,6 +10770,35 @@ def _discover_skill_names() -> list:
         return discover()
     except Exception:  # noqa: BLE001
         return []
+
+
+def _raise_if_required_skills_unusable(
+    required: list[str], usable: list[Any], rejected: list[Any],
+) -> None:
+    """Naming a skill in ``engine.skills_required`` is an instruction, so one
+    that cannot be used stops the quest with the reason, rather than being
+    skipped the way an unusable candidate is."""
+    if not required:
+        return
+    ok = {st.skill.name for st in usable}
+    by_name = {st.skill.name: st for st in rejected}
+    problems: list[str] = []
+    for name in required:
+        if name in ok:
+            continue
+        st = by_name.get(name)
+        if st is None or st.skill.source == "missing":
+            problems.append(f"{name} (no skill by that name was found)")
+        else:
+            problems.append(f"{name} ({st.status.value}: {st.reason})")
+    if problems:
+        raise RuntimeError(
+            "engine.skills_required names skill(s) that cannot be used: "
+            + "; ".join(problems)
+            + ". An external or newly written skill is approved one at a time: "
+            "python launch.py --approve-skill <name> --approve-as <you> "
+            "(--skills lists them and their status). Or remove the name."
+        )
 
 
 def _resolve_selected_skills(

@@ -101,6 +101,10 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
     """
     empty = tmp_path_factory.mktemp("fi_skills_empty")
     monkeypatch.setenv("FI_SKILLS_DIR", str(empty))
+    # Skills other agents installed (~/.codex/skills, ~/.claude/skills, ...)
+    # are read in place by default. Set-but-empty means none, so no test sees
+    # the developer's own; a test that wants some sets this itself.
+    monkeypatch.setenv("FI_EXTERNAL_SKILLS_DIRS", "")
     # The approval ledger lives outside the repo too, and an approval
     # recorded by a test must never reach the real one.
     monkeypatch.setenv(

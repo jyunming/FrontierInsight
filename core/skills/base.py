@@ -60,6 +60,10 @@ SKILL_PY = "skill.py"
 SELFTEST_PY = "selftest.py"
 PROVENANCE_JSON = "provenance.json"
 
+#: ``Skill.source`` of a skill that lives in another agent's folder
+#: (``~/.codex/skills``, ``~/.claude/skills`` ...) and is used where it is.
+EXTERNAL_SOURCE = "external"
+
 #: Agent Skills standard directories.
 SCRIPTS_DIR = "scripts"
 REFERENCES_DIR = "references"
@@ -124,7 +128,22 @@ class Skill:
 
     name: str
     path: Path
-    source: str = "filesystem"  # or an entry-point group name
+    source: str = "filesystem"  # "external", or an entry-point group name
+
+    # ---- where it came from ----
+
+    @property
+    def external(self) -> bool:
+        """Installed by another agent and read in place, never copied here."""
+        return self.source == EXTERNAL_SOURCE
+
+    @property
+    def ledger_name(self) -> str:
+        """The name approvals are recorded under. An external skill is
+        namespaced: the ledger is keyed by name, and an external skill that
+        happens to share a name with one of FI's own must not inherit, or
+        overwrite, its approval."""
+        return f"external:{self.name}" if self.external else self.name
 
     # ---- envelope ----
 

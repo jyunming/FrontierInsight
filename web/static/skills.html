@@ -98,6 +98,7 @@ function card(s) {
           <span class="font-title-md text-on-surface">${esc(s.name)}</span>
           <span class="px-2 py-0.5 rounded-full text-label-sm ${badge}">${esc(s.status)}</span>
           <span class="text-label-sm text-on-surface-variant">${esc(s.kind)} · ${esc(s.maturity)}</span>
+          ${s.source === "external" ? `<span class="px-2 py-0.5 rounded-full text-label-sm bg-surface-container-high" title="${esc(s.path)}">external</span>` : ""}
           ${(s.domains || []).map(d => `<span class="px-2 py-0.5 rounded-full bg-surface-container-high text-label-sm text-on-surface-variant">${esc(d)}</span>`).join("")}
           ${!(s.domains || []).length ? '<span class="px-2 py-0.5 rounded-full bg-surface-container-high text-label-sm text-on-surface-variant">general</span>' : ""}
         </div>
