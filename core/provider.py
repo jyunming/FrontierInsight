@@ -1321,8 +1321,8 @@ def _timeout_for_attempt(retry_state: "Any", base_timeout_s: float) -> float:
 # logs show *which* gate triggered (and a future maintainer can tune
 # the right pattern list without grepping the whole file).
 #
-# All gates produce ``_CliTransientError`` → tenacity retries (and
-# may escalate the model via the per-node fallback table). We do NOT
+# All gates produce ``_CliTransientError`` → tenacity retries (with the
+# user's per-node fallback model, if one is configured). We do NOT
 # silently swallow these into the artifact — that's the bug they exist
 # to catch.
 
@@ -2631,14 +2631,17 @@ class LLMClient:
         # Lookup misses fall back to ``self._cli_timeout_s``. Used by
         # ``_chat_cli`` when ``node`` is passed in.
         self._node_cli_timeout_s = node_cli_timeout_s or {}
-        # Per-node model escalation map. Used by ``_chat_cli`` on
-        # retry 2+ when the primary model failed transiently. The
-        # primary motivation is the empirically-observed Sonnet 4.6
-        # paralysis-thinking on long code-gen prompts: extended
-        # thinking spins forever without producing any text. Escaping
-        # to Opus 4.7 on retry consistently lands. ``node_models``
-        # (above) sets the FIRST-ATTEMPT model; this dict sets the
-        # SECOND-ATTEMPT-AND-LATER model.
+        # Per-node model escalation map — empty unless the user set
+        # ``provider.node_model_fallbacks``; FI never picks a model on
+        # the user's behalf. Used by ``_chat_cli`` on retry 2+ when the
+        # primary model failed transiently. It exists for the
+        # paralysis-thinking a smaller Claude model can fall into on
+        # long code-gen prompts (extended thinking spins forever
+        # without producing any text): retrying on a stronger model
+        # escapes it. The string is sent as-is to whichever CLI is
+        # active, so the user must name a model that CLI accepts.
+        # ``node_models`` (above) sets the FIRST-ATTEMPT model; this
+        # dict sets the SECOND-ATTEMPT-AND-LATER model.
         self._node_model_fallbacks = node_model_fallbacks or {}
         # Optional periodic progress callback (Engine wires this to its
         # run.log heartbeat logger). Receives a dict each ~1 s during
@@ -3132,13 +3135,15 @@ class LLMClient:
         so reasoning-heavy nodes (implement, execute_reflect) can get
         longer ceilings than fast ones (clarify, ideate).
 
-        Model escalation on retry: on retry attempt 2+, look up
-        ``node_model_fallbacks[node]`` and switch to that model. The
-        primary motivation is empirically-observed Sonnet 4.6 paralysis
-        on long code-gen prompts (extended-thinking spins forever
-        without producing text); reproducible escape is to escalate to
-        Opus 4.7 on retry. The escalation is per-call and per-node so
-        the user's primary model preference is honoured on first try.
+        Model escalation on retry (opt-in): when the user has set
+        ``provider.node_model_fallbacks``, retry attempt 2+ looks up
+        ``node_model_fallbacks[node]`` and switches to that model. With
+        no mapping (the default) every attempt uses the primary model.
+        The motivation is a smaller Claude model paralysing on long
+        code-gen prompts (extended-thinking spins forever without
+        producing text); escaping to a stronger model on retry works.
+        The escalation is per-call and per-node so the user's primary
+        model preference is honoured on first try.
         """
         spec = self.endpoint.cli_spec
         if spec is None:  # pragma: no cover — guarded by transport check

@@ -93,6 +93,42 @@ def write_cfg(tmp_path: Path, body: dict) -> Path:
     return p
 
 
+def test_retry_model_escalation_is_off_by_default() -> None:
+    """FI never picks the models a quest pays for. The fallback map is what
+    swaps the model on a retry, and it is sent to whichever CLI is active, so
+    it must not ship pre-filled with one vendor's model name."""
+    assert ProviderConfig().node_model_fallbacks == {}
+    for name in ("claude_cli", "codex_cli", "gemini_cli", "copilot_cli",
+                 "antigravity_cli"):
+        assert ProviderConfig(name=name).node_model_fallbacks == {}, name
+
+
+def test_retry_model_escalation_default_is_not_shared_between_configs() -> None:
+    a = ProviderConfig(name="codex_cli")
+    a.node_model_fallbacks["implement"] = "x"
+    assert ProviderConfig(name="codex_cli").node_model_fallbacks == {}
+
+
+def test_a_config_file_without_the_key_has_no_escalation(tmp_path: Path) -> None:
+    cfg = Config.from_yaml(write_cfg(tmp_path, {
+        "topic": "t", "provider": {"name": "codex_cli", "model": "gpt-5-codex"},
+    }))
+    assert cfg.provider.node_model_fallbacks == {}
+
+
+def test_a_user_written_fallback_map_is_honoured_verbatim(tmp_path: Path) -> None:
+    """Opting in is one YAML block; the user's map replaces the (empty)
+    default exactly, with no built-in entry merged in."""
+    cfg = Config.from_yaml(write_cfg(tmp_path, {
+        "topic": "t",
+        "provider": {
+            "name": "codex_cli", "model": "gpt-5-codex",
+            "node_model_fallbacks": {"write": "my-stronger-model"},
+        },
+    }))
+    assert cfg.provider.node_model_fallbacks == {"write": "my-stronger-model"}
+
+
 def test_knowledge_offline_defaults_off(tmp_path: Path) -> None:
     """Default: offline knobs are off / unset so normal machines keep
     fetching models from huggingface.co."""
