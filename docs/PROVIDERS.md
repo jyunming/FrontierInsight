@@ -205,6 +205,34 @@ building this: `antigravity_cli` rejected `gemini-2.5-flash` outright
 model-list command before setting a cheap-tier override, rather than
 copying a model name from elsewhere.
 
+## Retry model escalation (opt-in)
+
+By default a retried call uses the same model as the first attempt. FI
+never switches models on its own: which models a quest pays for is your
+choice, and a model name is only valid for its own provider.
+
+A smaller model can stall on a long code-generation prompt (the `implement`
+and `write` nodes): it spends the whole time budget in extended thinking and
+never writes an answer, and retrying the same prompt on a stronger model
+gets past it. To get that behaviour, name the stronger model for the nodes
+you want it on:
+
+```yaml
+provider:
+  name: <your CLI provider>
+  model: <your primary model>
+  node_model_fallbacks:
+    implement: <your stronger model>
+    write: <your stronger model>
+```
+
+Attempt 1 always uses your primary model (or that node's `node_models`
+entry); attempt 2 and later use the fallback for that node. It applies to
+the CLI providers (`claude_cli`, `codex_cli`, `copilot_cli`, `gemini_cli`,
+`antigravity_cli`); the string is passed straight to that provider's CLI, so
+it has to be a model that provider accepts. Providers named in
+`provider.fallback` do not inherit the map, for the same reason.
+
 ## Reasoning effort
 
 `provider.reasoning_effort` sets how hard the model reasons before it

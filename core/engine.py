@@ -443,11 +443,13 @@ class Engine:
         )
         self.knowledge = Knowledge(config.knowledge)
         self._log = _quest_logger(self.quest_id, self.fi_dir)
-        # Skills other agents installed are read where they are. The setting
-        # is per process, which is what the commands that run without a config
-        # (--skills, --approve-skill) see through the known folders instead.
-        from core.skills.registry import configure_external_dirs
-        configure_external_dirs(
+        # Skills other agents installed are read where they are. Which folders
+        # is this quest's own setting, held here and passed to every lookup, so
+        # quests sharing a process (--fleet) never see one another's. The
+        # commands that run without a config (--skills, --approve-skill) pass
+        # none and see the known folders and the environment override instead.
+        from core.skills import ExternalSkillDirs
+        self._skill_dirs = ExternalSkillDirs.of(
             config.engine.skills_dirs, scan_known=config.engine.skills_scan_known_dirs,
         )
         self._prompts = _load_prompts()
@@ -6094,12 +6096,14 @@ class Engine:
             # the user should not have to remember what they have taught it.
             # Required skills are always looked up, so narrowing the
             # candidates with `skills` cannot hide one.
-            names = requested or [s.name for s in _discover_skill_names()]
+            names = requested or [s.name for s in _discover_skill_names(self._skill_dirs)]
             names = list(dict.fromkeys([*names, *required]))
             # Self-tests are subprocesses that can take minutes on a cold
             # cache; in a thread, so the event loop (and the web server on
             # it) keeps answering while they run.
-            usable, rejected = await asyncio.to_thread(loadable_skills, names)
+            usable, rejected = await asyncio.to_thread(
+                loadable_skills, names, external_dirs=self._skill_dirs,
+            )
         except Exception as e:  # noqa: BLE001 - the registry must never stall a quest
             if required:
                 raise RuntimeError(
@@ -6242,7 +6246,9 @@ class Engine:
         never reaches this point, and the quest falls back to generating the
         code itself, which is the behaviour that existed before skills.
         """
-        usable, reasons = _resolve_selected_skills(state, self._log, use="experiment")
+        usable, reasons = _resolve_selected_skills(
+            state, self._log, use="experiment", external_dirs=self._skill_dirs,
+        )
         if not usable:
             return ""
 
@@ -6320,7 +6326,9 @@ class Engine:
         from :meth:`_skills_block`. On the SIR validation quest the full text
         of five skills was 98,147 of design's 146,904 prompt characters.
         """
-        usable, reasons = _resolve_selected_skills(state, self._log, use="experiment")
+        usable, reasons = _resolve_selected_skills(
+            state, self._log, use="experiment", external_dirs=self._skill_dirs,
+        )
         if not usable:
             return ""
         from core.skills.selection import describe, scope_limit
@@ -6358,7 +6366,9 @@ class Engine:
         instructions go: the writer produces text and runs nothing, so an API
         surface or bundled script is no use to it.
         """
-        usable, reasons = _resolve_selected_skills(state, self._log, use="writing")
+        usable, reasons = _resolve_selected_skills(
+            state, self._log, use="writing", external_dirs=self._skill_dirs,
+        )
         if not usable:
             return ""
         parts = [
@@ -6389,7 +6399,7 @@ class Engine:
         try:
             from core.skills import loadable_skills
 
-            usable, _ = loadable_skills(names)
+            usable, _ = loadable_skills(names, external_dirs=self._skill_dirs)
         except Exception:  # noqa: BLE001
             return []
         out: list[dict[str, Any]] = []
@@ -7807,7 +7817,9 @@ class Engine:
             return
         from core.skills import loadable_skills
 
-        usable, rejected = await asyncio.to_thread(loadable_skills, required)
+        usable, rejected = await asyncio.to_thread(
+            loadable_skills, required, external_dirs=self._skill_dirs,
+        )
         _raise_if_required_skills_unusable(required, usable, rejected)
         self._log.info("[skills] required skills are usable: %s", ", ".join(required))
 
@@ -8045,7 +8057,9 @@ class Engine:
         try:
             from core.skills.usage import record_quest
 
-            written = record_quest(names, self.quest_id, "accept")
+            written = record_quest(
+                names, self.quest_id, "accept", external_dirs=self._skill_dirs,
+            )
         except Exception as e:  # noqa: BLE001 - bookkeeping is never fatal
             self._log.warning("[skills] usage not recorded: %s", e)
             return
@@ -11198,8 +11212,10 @@ def _compact_result_json_block(
     return out[:budget_chars], len(full)
 
 
-def _discover_skill_names() -> list:
-    """Every skill on this machine, for the "candidates = all trusted" default.
+def _discover_skill_names(external_dirs: Any = None) -> list:
+    """Every skill this quest can see, for the "candidates = all trusted"
+    default — those on this machine plus the folders of other agents the quest
+    itself names (``external_dirs``, its own ``ExternalSkillDirs``).
 
     Returns Skill objects; the caller re-resolves them through
     ``loadable_skills`` so the promotion gate runs exactly once, in one place.
@@ -11208,7 +11224,7 @@ def _discover_skill_names() -> list:
     try:
         from core.skills import discover
 
-        return discover()
+        return discover(external_dirs=external_dirs)
     except Exception:  # noqa: BLE001
         return []
 
@@ -11243,7 +11259,7 @@ def _raise_if_required_skills_unusable(
 
 
 def _resolve_selected_skills(
-    state: QuestState | None, log: Any, *, use: str,
+    state: QuestState | None, log: Any, *, use: str, external_dirs: Any = None,
 ) -> tuple[list[Any], dict[str, str]]:
     """The selected skills for one ``use`` that are still usable, and why
     each was selected.
@@ -11251,8 +11267,10 @@ def _resolve_selected_skills(
     ``use`` is what selection said the skill is for: ``"experiment"`` for
     design and the implement stages, ``"writing"`` for the writer. A skill
     with no recorded use is an experiment skill, as every skill was before
-    selection recorded one. Never raises: a broken registry leaves the quest
-    generating its own code, as before skills.
+    selection recorded one. ``external_dirs`` is the quest's own
+    ``ExternalSkillDirs``: a selected skill is looked up where this quest looks,
+    not where another quest in the process does. Never raises: a broken
+    registry leaves the quest generating its own code, as before skills.
     """
     selection = (state or {}).get("skill_selection") or {}
     uses = dict(selection.get("uses") or {})
@@ -11273,7 +11291,7 @@ def _resolve_selected_skills(
         return [], {}
 
     try:
-        usable, rejected = loadable_skills(names)
+        usable, rejected = loadable_skills(names, external_dirs=external_dirs)
     except Exception as e:  # noqa: BLE001
         log.warning("[skills] resolution failed (%s); generating instead", e)
         return [], {}
