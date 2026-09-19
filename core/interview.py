@@ -329,6 +329,19 @@ def parse_ensemble_models(raw: Any) -> list[str]:
     return out
 
 
+# The nodes measured as safe to run on a cheaper model. Each is short-output or template
+# work: cross_check judges retrieved candidates, select_skills picks skill names,
+# literature_screen filters candidate sources, slides and poster pour a finished paper into
+# a template. Measured on one simulation topic, three runs per arm (codex terra everywhere vs
+# these five on luna, same effort): 15% fewer tokens, and no drop in paper, slide or poster
+# scores that three runs could show. Three runs cannot show a drop under about ten points, so
+# this is "not seen", not "ruled out". Every other node is untested and is left to the user.
+# FI never picks the cheaper model: it does not know which models a user has, or what they cost.
+LIGHT_NODES: tuple[str, ...] = (
+    "cross_check", "select_skills", "literature_screen", "slides", "poster",
+)
+
+
 AUDIENCE_CHOICES: tuple[Choice, ...] = (
     Choice("external", "External — journal / open web (recommended)",
            "FI's own cross-quest memory (fi_critique / fi_digest / fi_portfolio / fi_proposal / fi_summary) is dropped from References; an outside reader can't look those up. Real external sources + your own ingested papers are kept."),
@@ -702,10 +715,10 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="node_models",
         label="Per-node model overrides",
-        prompt="Route specific nodes to a different model than the primary one — a cheaper model for low-value nodes (clarify, cross_check, poster, slides, speech), a stronger one for write/review. Comma-separated node:model pairs; leave blank to use the primary model everywhere. The model name must be one your provider's current catalogue actually has — this is passed straight through, not validated.",
+        prompt="Route specific nodes to a different model than the primary one, e.g. a cheaper model for the light nodes. Measured on one simulation topic (3 runs each), moving cross_check, select_skills, literature_screen, slides and poster to a cheaper model used about 15% fewer tokens and no drop in scores was seen; three runs cannot rule out a small one, and every other node is untested. Comma-separated node:model pairs; leave blank to use the primary model everywhere. FI does not choose the model for you, and the name must be one your provider's current catalogue actually has: it is passed straight through, not validated.",
         kind="text",
         default="",
-        placeholder="poster:gpt-4o-mini, slides:gpt-4o-mini",
+        placeholder="cross_check:MODEL, select_skills:MODEL, literature_screen:MODEL, slides:MODEL, poster:MODEL",
         mid_quest_editable=True,
         tier=3,
     ),

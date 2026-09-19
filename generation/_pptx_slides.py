@@ -33,12 +33,16 @@ model to emit):
 * ``![w:900](...)`` / ``![h:420](...)`` / bare ``![](...)`` -- figure slide
 * ``> blockquote``                   -- pull quote
 * fenced code blocks
+* ``| a | b |`` tables with a ``|---|---|`` delimiter row (``:---:`` / ``---:``
+  set a column's alignment) -- a native PowerPoint table, its cells read like
+  a bullet (bold, italic, code and ``$math$``)
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +58,7 @@ FAINT = (0x8A, 0x94, 0x9B)    # --faint
 HAIR = (0xE4, 0xE2, 0xDA)     # --hair
 ACCENT = (0x0E, 0x6E, 0x6B)   # --accent   deep teal, the single accent
 ACCENT_2 = (0x0A, 0x4F, 0x4D)  # --accent-2 darker teal
+TABLE_HEAD = (0xEE, 0xF1, 0xEE)  # section th background
 
 SERIF = "Palatino Linotype"   # matches fi.css --serif first choice
 SANS = "Segoe UI"
@@ -77,6 +82,19 @@ _BG_RIGHT = re.compile(r"bg\s+right(?::(?P<pct>\d+)%)?")
 _W_ATTR = re.compile(r"\bw:(\d+)")
 _H_ATTR = re.compile(r"\bh:(\d+)")
 _LEAD = re.compile(r"<!--\s*_class:\s*lead\s*-->")
+# A table's delimiter row: ``|---|---:|`` or ``| :--- | :---: |``. It must hold
+# a pipe, so a bare ``---`` stays a slide break.
+_TABLE_DELIM = re.compile(r"^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$")
+
+
+@dataclass
+class Table:
+    """A Markdown table: its header cells, its body rows (each as wide as the
+    header) and each column's alignment, ``"l"``, ``"c"`` or ``"r"``."""
+
+    header: list[str]
+    rows: list[list[str]]
+    aligns: list[str]
 
 
 class Slide:
@@ -89,7 +107,10 @@ class Slide:
         self.h3 = ""
         # Paragraphs and bullets in the slide's order: ("para", 0, text) or
         # ("bullet", indent_level, text). A line under a list stays under it.
+        # A table keeps its place among them as ("table", index, ""), the
+        # index into ``tables``.
         self.body: list[tuple[str, int, str]] = []
+        self.tables: list[Table] = []
         self.quote = ""
         self.code: list[str] = []
         self.image: str = ""
@@ -113,6 +134,41 @@ class Slide:
         )
 
 
+def _split_row(line: str) -> list[str]:
+    """The cells of one table row: the outer pipes go, and an escaped ``\\|``
+    is a pipe inside its cell rather than a cell boundary."""
+    row = line.strip()
+    row = row[1:] if row.startswith("|") else row
+    row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
+    return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", row)]
+
+
+def _table_at(lines: list[str], start: int) -> tuple[Table, int] | None:
+    """The table that starts on ``lines[start]``, with the index of the first
+    line after it, or ``None``. A table is a ``|`` header line, then a
+    delimiter row, then any number of ``|`` rows; a pipe line without a
+    delimiter row under it stays the text it is."""
+    head = lines[start].strip()
+    if not head.startswith("|") or start + 1 >= len(lines):
+        return None
+    delim = lines[start + 1].strip()
+    if "|" not in delim or not _TABLE_DELIM.match(delim):
+        return None
+    header = _split_row(head)
+    width = len(header)
+    marks = _split_row(delim)
+    aligns = [
+        "c" if mark.startswith(":") and mark.endswith(":") else "r" if mark.endswith(":") else "l"
+        for mark in marks
+    ]
+    rows: list[list[str]] = []
+    end = start + 2
+    while end < len(lines) and lines[end].strip().startswith("|"):
+        rows.append((_split_row(lines[end]) + [""] * width)[:width])
+        end += 1
+    return Table(header, rows, (aligns + ["l"] * width)[:width]), end
+
+
 def parse_marp(md: str) -> list[Slide]:
     """Split Marp markdown into slides. Frontmatter is dropped; standalone
     ``---`` lines are slide breaks (the same rule Marp itself uses)."""
@@ -121,7 +177,11 @@ def parse_marp(md: str) -> list[Slide]:
     cur = Slide()
     in_code = False
 
-    for raw in md.splitlines():
+    lines = md.splitlines()
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        index += 1
         line = raw.rstrip()
         stripped = line.strip()
 
@@ -143,6 +203,13 @@ def parse_marp(md: str) -> list[Slide]:
             continue
         if stripped.startswith("<!--"):
             continue  # any other Marp directive: not renderable here
+
+        found = _table_at(lines, index - 1)
+        if found:
+            table, index = found
+            cur.tables.append(table)
+            cur.body.append(("table", len(cur.tables) - 1, ""))
+            continue
 
         m = _IMG.search(stripped)
         if m:
@@ -184,9 +251,9 @@ def parse_marp(md: str) -> list[Slide]:
 _INLINE_MARK_RE = re.compile(r"(\*\*.+?\*\*|\*[^*]+?\*|`[^`]+?`|(?<!\w)_(?=[^_\s])[^_]+?(?<=\S)_(?!\w))")
 
 
-def _inline_runs(p, text: str, size: float, color, font: str = SANS) -> None:
+def _inline_runs(p, text: str, size: float, color, font: str = SANS, *, bold: bool = False) -> None:
     """Write ``text`` into paragraph ``p``, honouring **bold**, *italic* and
-    _italic_.
+    _italic_; ``bold`` sets all of it bold, as a table's header row is.
 
     fi.css renders ``strong`` in the darker teal and ``em`` in muted grey; we
     mirror that so emphasis carries the same meaning as in the HTML deck.
@@ -205,19 +272,19 @@ def _inline_runs(p, text: str, size: float, color, font: str = SANS) -> None:
             run.font.color.rgb = _rgb(ACCENT_2)
             run.font.size = Pt(size - 1)
             continue
-        bold = italic = False
+        strong, italic = bold, False
         part_color = color
         if marked and part.startswith("**"):
-            part, bold, part_color = part[2:-2], True, _rgb(ACCENT_2)
+            part, strong, part_color = part[2:-2], True, _rgb(ACCENT_2)
         elif marked:
             part, italic, part_color = part[1:-1], True, _rgb(MUTED)
         for segment, is_math in split_math(part):
             if is_math:
-                _append_math(p, segment, size, part_color, font, bold=bold)
+                _append_math(p, segment, size, part_color, font, bold=strong)
                 continue
             run = p.add_run()
             run.text = segment
-            run.font.bold = True if bold else None
+            run.font.bold = True if strong else None
             run.font.italic = True if italic else None
             run.font.color.rgb = part_color
             run.font.size = Pt(size)
@@ -268,15 +335,13 @@ _MIN_BODY_SCALE = 0.55
 _SINGLE_LINE = 1.2
 
 
-def _body_height(s: "Slide", width_in: float, k: float) -> float:
-    """Estimated height (inches) of a slide's paragraphs and bullets at body
-    scale ``k``, by the wrap estimate. Measured against both renderers on
-    seven slides, it is within 3.3 pt of LibreOffice and up to 6 pt over
-    PowerPoint."""
+def _items_height(items: list[tuple[str, int, str]], width_in: float, k: float) -> float:
+    """Estimated height (inches) of paragraphs and bullets at body scale
+    ``k``, by the wrap estimate."""
     # Formulas are estimated by their fallback text, which is about their
     # width on the slide; the LaTeX is several times longer.
     h = space = 0.0
-    for kind, level, text in s.body:
+    for kind, level, text in items:
         if kind == "para":
             size, space = _PARA_PT * k, 9 * k / 72
             h += _estimate_lines(plain_text(text), width_in, size) * size * 1.32 * _SINGLE_LINE / 72 + space
@@ -287,9 +352,90 @@ def _body_height(s: "Slide", width_in: float, k: float) -> float:
     return h - space
 
 
+# A table's cells: type size at full body scale (fi.css sets a table at 0.86em
+# of the body), the size the table shrinks to with the body and no further, the
+# room a cell keeps around its text, and the gap between a table and the text
+# above or below it.
+_TABLE_PT, _TABLE_FLOOR_PT = 14.5, 10.0
+_CELL_PAD_X_IN, _CELL_PAD_Y_IN = 0.12, 0.05
+_SEGMENT_GAP_IN = 0.18
+# A table is at least this share of the body's width, so a two-column table is
+# not a narrow strip, and at most all of it.
+_TABLE_MIN_SHARE = 0.55
+# A cell's average glyph advance as a share of its size: sans, and a bold
+# header row is wider than the body's 0.50.
+_TABLE_WIDE = 0.52
+
+
+def _table_layout(t: Table, width_in: float, k: float) -> tuple[float, list[float], list[float]]:
+    """A table's type size (pt), column widths and row heights (inches) at
+    body scale ``k`` in a ``width_in`` body, header row first.
+
+    Columns are as wide as their longest cell, as a browser lays out a
+    table; when the table is wider than the body they are shared out between
+    the longest cell and the longest word of each. Each row is as tall as its
+    most-wrapped cell. The drawing and the estimate of the slide's height
+    both come from here, so they cannot disagree."""
+    size = max(_TABLE_FLOOR_PT, _TABLE_PT * k)
+    char_in = size * _TABLE_WIDE / 72.0
+    pad = 2 * _CELL_PAD_X_IN
+    grid = [[plain_text(cell) for cell in row] for row in [t.header, *t.rows]]
+    columns = range(len(t.header))
+    # A column keeps one character of slack beyond its longest cell (or word),
+    # so that cell is not counted as wrapping for want of a rounding error.
+    widest = [max(0.5, (max(len(row[c]) for row in grid) + 1) * char_in + pad) for c in columns]
+    longest_word = [
+        min(widest[c], (max((len(w) for row in grid for w in row[c].split()), default=1) + 1) * char_in + pad)
+        for c in columns
+    ]
+    total, floor = sum(widest), sum(longest_word)
+    if total <= width_in:
+        # Every cell fits on a line: keep the table compact, and give the
+        # surplus out in proportion to the columns.
+        widths = [w * min(width_in, max(total, _TABLE_MIN_SHARE * width_in)) / total for w in widest]
+    elif floor >= width_in:
+        widths = [w * width_in / floor for w in longest_word]
+    else:
+        wrapped = (width_in - floor) / (total - floor)   # how far each column may wrap
+        widths = [lo + (hi - lo) * wrapped for lo, hi in zip(longest_word, widest)]
+    heights = [
+        max(_estimate_lines(cell, w - pad, size, wide_factor=_TABLE_WIDE) for cell, w in zip(row, widths))
+        * size * _SINGLE_LINE / 72 + 2 * _CELL_PAD_Y_IN
+        for row in grid
+    ]
+    return size, widths, heights
+
+
+def _segments(s: "Slide") -> list[tuple[str, Any]]:
+    """A slide's body in order as ``("text", items)`` runs of paragraphs and
+    bullets and ``("table", Table)``."""
+    parts: list[tuple[str, Any]] = []
+    for item in s.body:
+        if item[0] == "table":
+            parts.append(("table", s.tables[item[1]]))
+        elif parts and parts[-1][0] == "text":
+            parts[-1][1].append(item)
+        else:
+            parts.append(("text", [item]))
+    return parts
+
+
+def _body_height(s: "Slide", width_in: float, k: float) -> float:
+    """Estimated height (inches) of a slide's paragraphs, bullets and tables at
+    body scale ``k``, by the wrap estimate. Measured against both renderers on
+    seven slides, the text is within 3.3 pt of LibreOffice and up to 6 pt over
+    PowerPoint."""
+    parts = _segments(s)
+    h = sum(
+        _items_height(part, width_in, k) if kind == "text" else sum(_table_layout(part, width_in, k)[2])
+        for kind, part in parts
+    )
+    return h + _SEGMENT_GAP_IN * max(0, len(parts) - 1)
+
+
 def _body_scale(s: "Slide", width_in: float, avail_h: float) -> float:
-    """The factor (at most 1) that fits a slide's paragraphs and bullets into
-    ``avail_h`` by the wrap estimate. A twelve-entry References or Further
+    """The factor (at most 1) that fits a slide's paragraphs, bullets and
+    tables into ``avail_h`` by the wrap estimate. A twelve-entry References or Further
     reading slide at full size otherwise ran inches past the slide bottom."""
     k = 1.0
     while k > _MIN_BODY_SCALE and _body_height(s, width_in, k) > avail_h:
@@ -327,6 +473,102 @@ def _rect(slide, x, y, w, h, fill):
 def _set_bg(slide, color) -> None:
     slide.background.fill.solid()
     slide.background.fill.fore_color.rgb = _rgb(color)
+
+
+# The built-in "No Style, No Grid": python-pptx's default is Office's blue
+# banded style, and the FI look is set cell by cell instead.
+_NO_TABLE_STYLE = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"
+
+
+def _cell_rule(cell, color: tuple[int, int, int], width_pt: float) -> None:
+    """Draw a rule under ``cell`` and no other border. The borders are the
+    first children of ``a:tcPr``, before its fill, in the schema's order."""
+    from pptx.oxml import parse_xml
+    ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    borders = [f'<a:{side} {ns} w="0"><a:noFill/></a:{side}>' for side in ("lnL", "lnR", "lnT")]
+    borders.append(
+        f'<a:lnB {ns} w="{round(width_pt * 12700)}" cap="flat" cmpd="sng" algn="ctr">'
+        f'<a:solidFill><a:srgbClr val="{color[0]:02X}{color[1]:02X}{color[2]:02X}"/></a:solidFill>'
+        '<a:prstDash val="solid"/></a:lnB>'
+    )
+    tc_pr = cell._tc.get_or_add_tcPr()
+    for position, xml in enumerate(borders):
+        tc_pr.insert(position, parse_xml(xml))
+
+
+_A14_M = "{http://schemas.microsoft.com/office/drawing/2010/main}m"
+_MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+_MATH_JC = {"l": "left", "c": "center", "r": "right"}
+
+
+def _align_lone_equation(p, align: str) -> None:
+    """Make an equation that is all of a paragraph honour the alignment.
+
+    PowerPoint sets a paragraph holding nothing but one inline equation
+    centred, whatever the paragraph's alignment: a table's left and right
+    aligned columns showed their formula-only cells in the middle. The
+    equation goes into an ``m:oMathPara`` whose ``m:jc`` is the alignment.
+    With text beside it, the equation is inline and the paragraph's own
+    alignment already applies."""
+    from pptx.oxml import parse_xml
+    from pptx.oxml.ns import qn
+    if p._p.findall(qn("a:r")):
+        return
+    for holder in p._p.iter(_A14_M):
+        para = parse_xml(
+            f'<m:oMathPara xmlns:m="{_MATH_NS}"><m:oMathParaPr><m:jc m:val="{_MATH_JC[align]}"/></m:oMathParaPr>'
+            "</m:oMathPara>"
+        )
+        for equation in list(holder):
+            para.append(equation)
+        holder.append(para)
+
+
+def _draw_table(slide, t: Table, x: float, y: float, width_in: float, k: float) -> float:
+    """Draw ``t`` as a native PowerPoint table at (``x``, ``y``) in a
+    ``width_in`` body at body scale ``k``, and return its height in inches.
+
+    Styled as fi.css styles a table: a tinted header row in the darker teal
+    over a 2 pt teal rule, hairlines between the rows, no fill under the body
+    so the paper shows through. A cell reads as a bullet does, so bold, italic,
+    code and ``$math$`` (a native equation) all work in it."""
+    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+    from pptx.oxml.ns import qn
+    from pptx.util import Inches
+
+    alignment = {"l": PP_ALIGN.LEFT, "c": PP_ALIGN.CENTER, "r": PP_ALIGN.RIGHT}
+    size, widths, heights = _table_layout(t, width_in, k)
+    frame = slide.shapes.add_table(
+        len(heights), len(widths), Inches(x), Inches(y), Inches(sum(widths)), Inches(sum(heights)),
+    )
+    table = frame.table
+    table.first_row, table.horz_banding = True, False
+    style = table._tbl.tblPr.find(qn("a:tableStyleId"))
+    if style is not None:
+        style.text = _NO_TABLE_STYLE
+    for c, width in enumerate(widths):
+        table.columns[c].width = Inches(width)
+    for r, height in enumerate(heights):
+        table.rows[r].height = Inches(height)
+        for c, text in enumerate(t.header if r == 0 else t.rows[r - 1]):
+            cell = table.cell(r, c)
+            cell.margin_left = cell.margin_right = Inches(_CELL_PAD_X_IN)
+            cell.margin_top = cell.margin_bottom = Inches(_CELL_PAD_Y_IN)
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            if r == 0:
+                cell.fill.solid()
+                cell.fill.fore_color.rgb = _rgb(TABLE_HEAD)
+            else:
+                cell.fill.background()
+            _cell_rule(cell, ACCENT if r == 0 else HAIR, 2.0 if r == 0 else 1.0)
+            p = cell.text_frame.paragraphs[0]
+            p.alignment = alignment[t.aligns[c]]
+            _inline_runs(p, text, size, _rgb(ACCENT_2 if r == 0 else INK), bold=r == 0)
+            _align_lone_equation(p, t.aligns[c])
+            # An empty cell still sets its row's height by its type size.
+            p._p.get_or_add_endParaRPr().set("sz", str(round(size * 100)))
+    frame.width, frame.height = sum(col.width for col in table.columns), sum(row.height for row in table.rows)
+    return sum(heights)
 
 
 def _fit_picture(slide, img: Path, x, y, w, h) -> None:
@@ -465,25 +707,37 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
     body_h = 0.0
     if s.body:
         # A figure goes under the text, so the text fits into what is left
-        # above the figure's minimum height.
+        # above the figure's minimum height. A table shrinks with the text,
+        # to its floor.
         k = _body_scale(s, text_w, avail_h - (_FIG_MIN_IN + _FIG_GAP_IN if block_img else 0.0))
         body_h = _body_height(s, text_w, k)
-        tf = _textbox(slide, MARGIN_IN, body_top, text_w, min(body_h, avail_h) if block_img else avail_h)
-        for i, (kind, level, text) in enumerate(s.body):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            if kind == "para":
-                p.line_spacing = 1.32
-                p.space_after = Pt(9 * k)
-                _inline_runs(p, text, _PARA_PT * k, _rgb(INK))
+        parts = _segments(s)
+        at = body_top
+        for kind, part in parts:
+            if kind == "table":
+                at += _draw_table(slide, part, MARGIN_IN, at, text_w, k) + _SEGMENT_GAP_IN
                 continue
-            p.line_spacing = 1.30
-            p.space_after = Pt(8 * k)
-            marker = p.add_run()
-            marker.text = ("    " * level) + ("•  " if level == 0 else "›  ")
-            marker.font.size = Pt((16 if level == 0 else 14) * k)
-            marker.font.color.rgb = _rgb(ACCENT)   # fi.css li::marker
-            marker.font.name = SANS
-            _inline_runs(p, text, (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k, _rgb(INK))
+            run_h = _items_height(part, text_w, k)
+            tf = _textbox(
+                slide, MARGIN_IN, at, text_w,
+                min(run_h, avail_h) if block_img or len(parts) > 1 else avail_h,
+            )
+            at += run_h + _SEGMENT_GAP_IN
+            for i, (item, level, text) in enumerate(part):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                if item == "para":
+                    p.line_spacing = 1.32
+                    p.space_after = Pt(9 * k)
+                    _inline_runs(p, text, _PARA_PT * k, _rgb(INK))
+                    continue
+                p.line_spacing = 1.30
+                p.space_after = Pt(8 * k)
+                marker = p.add_run()
+                marker.text = ("    " * level) + ("•  " if level == 0 else "›  ")
+                marker.font.size = Pt((16 if level == 0 else 14) * k)
+                marker.font.color.rgb = _rgb(ACCENT)   # fi.css li::marker
+                marker.font.name = SANS
+                _inline_runs(p, text, (_BULLET_PT if level == 0 else _SUB_BULLET_PT) * k, _rgb(INK))
 
     if s.quote:
         qy = SLIDE_H_IN - 1.9
@@ -569,7 +823,7 @@ def render_marp_to_pptx(
             slide = prs.slides.add_slide(blank)
             # A slide with only an H1 is a title even without the explicit
             # directive -- the model sometimes omits it on the closing slide.
-            if s.lead or (s.h1 and not s.h2 and not s.bullets and not s.paras):
+            if s.lead or (s.h1 and not s.h2 and not s.bullets and not s.paras and not s.tables):
                 _render_lead(slide, s, i)
             else:
                 _render_content(slide, s, i, figures_dir)

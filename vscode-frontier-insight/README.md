@@ -526,8 +526,19 @@ Lands in Axon as `kind=fi_digest` so future quests can retrieve "what we were wo
 
 ## Per-node model routing
 
-Each quest YAML defines which Copilot model to use per engine node.
-For example:
+Each quest YAML defines which model to use per engine node. In `@fi /new`
+you do not have to type it: under **Edit an advanced field → Per-node model
+overrides** a menu lists the models this VSCode offers (Copilot's, an Ollama
+server's, a bring-your-own-key endpoint's) and nothing is chosen for you, since
+`vscode.lm` gives FI no price or tier. It has one entry, **Light nodes → one
+cheaper model**, that sets the five nodes measured as safe on a cheaper model
+(`cross_check`, `select_skills`, `literature_screen`, `slides`, `poster`), an
+entry to set a single node (the untested ones are marked as such), one to clear
+every override, and one to type `node:model` pairs directly. On one simulation
+topic, three runs each, moving those five nodes to a cheaper model used about
+15% fewer tokens and no drop in scores was seen; three runs cannot show a drop
+under about ten points, and this was measured with codex models, not through
+this extension. For example, the YAML it writes:
 
 ```yaml
 provider:
@@ -543,13 +554,14 @@ provider:
 ```
 
 The extension passes each `model_hint` to `vscode.lm.selectChatModels`,
-trying `{id: hint}` first and falling back to `{family: hint}`. The id
-path honours exact picks from the dashboard's live model dropdown
-(e.g. `gemini-3-flash-preview`, whose family is the coarser
+trying `{id: hint}` first and falling back to `{family: hint}`, Copilot
+models first and then any other vendor VSCode lists. The id path honours
+exact picks from the menu above and from the dashboard's live model
+dropdown (e.g. `gemini-3-flash-preview`, whose family is the coarser
 `gemini-3-flash`); the family path keeps legacy fuzzy hints
-(`gpt-5`, `claude-opus-4-7`) working. If neither matches, the error
-lists every available `id|family` pair from your subscription so the
-next mismatch is self-diagnosing — no need to attach a debugger.
+(`gpt-5`, `claude-opus-4-7`) working. If neither matches, the call uses the
+model selected in your Chat picker and the chat prints a warning naming the
+hint, so a quest keeps running on a model you chose.
 
 ## Reasoning effort
 

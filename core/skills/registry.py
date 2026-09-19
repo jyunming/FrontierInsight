@@ -44,6 +44,7 @@ import sys
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.skills import approval, selftest_cache
@@ -181,7 +182,10 @@ _common_cache: tuple[tuple, float, list[Path]] | None = None
 
 def _common_skill_dirs() -> list[Path]:
     """The skill folders other agents keep in the usual places (see above).
-    Cached briefly: many callers ask, and the answer does not change mid-run."""
+    Cached briefly: many callers ask, and the answer does not change mid-run.
+    The answer depends only on where and who is searching (folder, home,
+    environment — the key), never on a caller's own setting, so sharing it
+    between quests hands none of them another's folders."""
     global _common_cache
     home = Path.home()
     key = (str(Path.cwd()), str(home), tuple(os.environ.get(v, "") for v in _TOOL_ENV_VARS))
@@ -226,27 +230,48 @@ def _common_skill_dirs() -> list[Path]:
     _common_cache = (key, now, out)
     return list(out)
 
-_extra_external_dirs: list[Path] = []
-_scan_known_external = True
+
+@dataclass(frozen=True)
+class ExternalSkillDirs:
+    """Where ONE caller looks for the skills other agents installed.
+
+    It belongs to the caller. The Engine builds one from its own
+    ``engine.skills_dirs`` / ``engine.skills_scan_known_dirs`` and hands it to
+    every lookup it makes, so quests sharing a process (``--fleet``) never see
+    one another's folders. It used to be one setting for the whole process,
+    which the last engine to start decided for all of them: an earlier quest
+    lost its own skills, or found and used a skill from a folder it never named.
+
+    Commands that run without a config (``--skills``, ``--approve-skill``, the
+    web skills page) pass none, and get the default: no folder named, the usual
+    places searched.
+    """
+
+    dirs: tuple[Path, ...] = ()
+    scan_known: bool = True
+
+    @classmethod
+    def of(
+        cls, dirs: Iterable[str | Path] = (), *, scan_known: bool = True,
+    ) -> "ExternalSkillDirs":
+        return cls(
+            tuple(Path(d).expanduser() for d in dirs if str(d).strip()), scan_known,
+        )
 
 
-def configure_external_dirs(dirs: Iterable[str | Path] = (), *, scan_known: bool = True) -> None:
-    """Set the external folders for this process. The Engine calls it with
-    ``engine.skills_dirs``; commands that run without a config (approving a
-    skill, listing) see the known folders and the environment override."""
-    global _extra_external_dirs, _scan_known_external
-    _extra_external_dirs = [Path(d).expanduser() for d in dirs if str(d).strip()]
-    _scan_known_external = scan_known
+def external_skill_dirs(external_dirs: ExternalSkillDirs | None = None) -> list[Path]:
+    """The existing external skill folders, the caller's own named ones first.
 
-
-def external_skill_dirs() -> list[Path]:
-    """The existing external skill folders, configured ones first."""
+    ``external_dirs`` is the caller's setting; None is the default (see
+    ``ExternalSkillDirs``). ``FI_EXTERNAL_SKILLS_DIRS`` outranks either."""
+    if external_dirs is None:
+        external_dirs = ExternalSkillDirs()
     env = os.environ.get(_ENV_EXTERNAL_DIRS)
     if env is not None:
         candidates = [Path(p).expanduser() for p in env.split(os.pathsep) if p.strip()]
     else:
-        candidates = list(_extra_external_dirs)
-        if _scan_known_external:
+        candidates = list(external_dirs.dirs)
+        if external_dirs.scan_known:
             candidates += _common_skill_dirs()
     own = skills_root().resolve()
     out: list[Path] = []
@@ -310,13 +335,17 @@ def _from_entry_points() -> list[Skill]:
     return out
 
 
-def discover(skills_dir: Path | None = None, *, external: bool | None = None) -> list[Skill]:
+def discover(
+    skills_dir: Path | None = None, *, external: bool | None = None,
+    external_dirs: ExternalSkillDirs | None = None,
+) -> list[Skill]:
     """Every skill FI can see. FI's own folder shadows entry points, and both
     shadow an external skill of the same name.
 
     External folders are included when discovering the machine's skills
     (``skills_dir`` is None). Passing an explicit ``skills_dir`` looks at that
-    folder alone unless ``external=True`` asks for the rest too.
+    folder alone unless ``external=True`` asks for the rest too. Which external
+    folders is the caller's own ``external_dirs`` (see ``ExternalSkillDirs``).
     """
     fs = _from_filesystem(skills_dir or skills_root())
     seen = {s.name for s in fs}
@@ -324,7 +353,7 @@ def discover(skills_dir: Path | None = None, *, external: bool | None = None) ->
     seen |= {s.name for s in eps}
     ext: list[Skill] = []
     if external if external is not None else skills_dir is None:
-        for d in external_skill_dirs():
+        for d in external_skill_dirs(external_dirs):
             for s in _from_filesystem(d, source=EXTERNAL_SOURCE):
                 if s.name in seen:
                     _log.info(
@@ -644,6 +673,7 @@ def loadable_skills(
     ledger: Path | None = None,
     use_cache: bool = True,
     max_workers: int | None = None,
+    external_dirs: ExternalSkillDirs | None = None,
 ) -> tuple[list[SkillState], list[SkillState]]:
     """Resolve requested skill names into (loadable, rejected).
 
@@ -659,10 +689,14 @@ def loadable_skills(
     The lists come back in the order the names were given, exactly as a
     sequential run would return them. ``use_cache=False`` runs every test.
 
+    ``external_dirs`` is the caller's own setting of where other agents' skills
+    are looked for; a quest passes its own, so that a name resolves in the
+    folders that quest named and not in ones only another quest did.
+
     Blocking: an async caller runs this in a thread.
     """
     started = time.monotonic()
-    found = {s.name: s for s in discover(skills_dir)}
+    found = {s.name: s for s in discover(skills_dir, external_dirs=external_dirs)}
     # Each skill is evaluated once, however many times it is named.
     wanted = [n for n in dict.fromkeys(names) if n in found]
     cache = SelftestCache.open(ledger=ledger) if use_cache and wanted else None

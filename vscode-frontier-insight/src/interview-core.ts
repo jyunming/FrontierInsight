@@ -195,6 +195,64 @@ export function parseNodeModelsAnswer(raw: string | undefined): Record<string, s
 
 
 /**
+ * The nodes measured as safe to run on a cheaper model. Mirrors
+ * core/interview.py:LIGHT_NODES (a parity test compares the two); see the
+ * comment there for what was measured and what it cannot show.
+ */
+export const LIGHT_NODES: readonly string[] = [
+    "cross_check", "select_skills", "literature_screen", "slides", "poster",
+];
+
+/**
+ * Every node a model can be named for, for the "one node" picker: the measured
+ * light nodes first, then the rest, which are untested.
+ */
+export const OTHER_NODES: readonly string[] = [
+    "clarify", "ideate", "ideate_reflect", "literature_query", "literature_foundational",
+    "design", "design_self_critique", "implement_outline", "implement", "execute_reflect",
+    "analyze", "write", "claim_check", "review", "speech",
+];
+
+/**
+ * A {node: model} map back into the interview answer's "node:model, node:model"
+ * text, in the map's own order. A model id containing a comma cannot be written
+ * in that format (the answer is split on commas), so it is refused rather than
+ * silently splitting into two entries.
+ */
+export function serializeNodeModels(map: Record<string, string>): string {
+    const pairs: string[] = [];
+    for (const [node, model] of Object.entries(map)) {
+        if (!node || !model) {
+            continue;
+        }
+        if (model.includes(",") || node.includes(",") || node.includes(":")) {
+            throw new Error(`"${node}:${model}" cannot be written as a node:model pair`);
+        }
+        pairs.push(`${node}:${model}`);
+    }
+    return pairs.join(", ");
+}
+
+/**
+ * ``map`` with ``model`` named for each of ``nodes``; an empty ``model`` removes
+ * them. Other nodes' entries are left as they were.
+ */
+export function withModelFor(
+    map: Record<string, string>, nodes: readonly string[], model: string,
+): Record<string, string> {
+    const out: Record<string, string> = { ...map };
+    for (const node of nodes) {
+        if (model) {
+            out[node] = model;
+        } else {
+            delete out[node];
+        }
+    }
+    return out;
+}
+
+
+/**
  * Expand the ensemble profile into a node_ensemble dict shape.
  * Returns null for "off" — and also for any unrecognized profile —
  * so the YAML emitter can skip the block entirely instead of writing
