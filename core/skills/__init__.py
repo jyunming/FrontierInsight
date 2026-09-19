@@ -17,6 +17,7 @@ from core.skills.base import (
     Status,
 )
 from core.skills.registry import (
+    ExternalSkillDirs,
     discover,
     evaluate,
     loadable_skills,
@@ -25,6 +26,7 @@ from core.skills.registry import (
 from core.skills import scan
 
 __all__ = [
+    "ExternalSkillDirs",
     "Kind",
     "Maturity",
     "Skill",
