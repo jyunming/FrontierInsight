@@ -236,6 +236,37 @@ async def test_run_log_says_why_the_literature_search_found_nothing(
 
 
 @pytest.mark.asyncio
+async def test_dump_state_prints_a_real_checkpoint_as_text(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """state.sqlite is a binary file; on a machine nothing can be copied off
+    it was unreadable. Reads a checkpoint a real run wrote."""
+    from core.state_dump import dump_state
+
+    engine = Engine(smoke_config)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    out = dump_state(engine.quest_root)
+    assert f"quest: {engine.quest_id}" in out
+    assert "literature" in out and "paper_md" in out
+    assert "->  select_skills" in out
+    assert out.rstrip().endswith("(end)")
+    assert dump_state(engine.quest_root / ".fi" / "state.sqlite") == out
+
+
+def test_dump_state_says_what_to_give_it_when_there_is_no_checkpoint(tmp_path: Path) -> None:
+    from core.state_dump import dump_state
+
+    with pytest.raises(FileNotFoundError, match="state.sqlite"):
+        dump_state(tmp_path / "no-such-quest")
+
+
+@pytest.mark.asyncio
 async def test_run_log_names_the_interpreter_running_fi(
     smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

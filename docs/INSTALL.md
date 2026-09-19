@@ -360,6 +360,10 @@ it to PATH and re-open your shell.
 
 ## Troubleshooting
 
+**A `pip install` did not change anything for FI** — the `pip` on your PATH may belong to a different Python than the one running FI. The first lines of every quest's `run.log` say which one ran: `[env] python=<path>`. Install into exactly that one: `<that path> -m pip install -e .`. In the VSCode extension it is `frontierInsight.pythonPath` (default `python` on PATH).
+
+**Reading a quest's `state.sqlite` on a machine nothing can be copied off** — `python launch.py --dump-state <quest dir>` prints every state key with a preview and the path the quest took, node by node. Read-only, no config needed.
+
 **"`pandoc` not on PATH"** — this should no longer happen: pandoc ships as a wheel with Frontier Insight and is found inside site-packages even when it is not on PATH. If you still see it, the install is incomplete — `pip install --force-reinstall pypandoc_binary`, then `fi --doctor` to confirm. The `.md` is produced either way.
 
 **"`pdflatex not found`"** during pandoc PDF compile — install MiKTeX or run `fi --install-tectonic`.
