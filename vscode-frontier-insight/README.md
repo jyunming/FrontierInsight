@@ -53,7 +53,8 @@ with 95% confidence intervals (a probability's kept within 0–1), effect sizes 
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. A line figure, error bars included, is drawn as the mean of the seeds, shaded with its 95%
 confidence interval; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. Every run gets its own seed, spaced far enough apart that no two runs draw the same
-ones, so what varies between them is variation the experiment produced; and when the experiment turns out not to read its seed
+ones, so what varies between them is variation the experiment produced; a script that never names its seed is sent back once,
+right after it is written, to read it (one extra model call, spent only then); and when the experiment still turns out not to read its seed
 at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical. You see every node firing live in the chat panel.
 
 After the outputs render, a visual check measures and screenshots each PDF;
