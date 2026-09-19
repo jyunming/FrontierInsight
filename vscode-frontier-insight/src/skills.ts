@@ -15,7 +15,9 @@
  * silently from a setting.
  */
 import { spawn } from "child_process";
+import * as path from "path";
 import * as vscode from "vscode";
+import { rootsFromConfig } from "./roots-config";
 
 export interface SkillRow {
     name: string;
@@ -37,34 +39,40 @@ interface RunResult {
     stderr: string;
 }
 
-/** Resolve (python, repo) or explain to the user why we cannot. */
+interface SkillsEnv {
+    python: string;
+    /** Where FI is (its launch.py). */
+    repo: string;
+    /** Where the user works: the folder commands run in. */
+    workDir: string;
+}
+
+/** Resolve (python, FI folder, work folder) or explain to the user why we cannot. */
 function resolveRepo(
     stream: vscode.ChatResponseStream,
-): { python: string; repo: string } | null {
+): SkillsEnv | null {
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const python = cfg.get<string>("pythonPath") || "python";
-    let repo = cfg.get<string>("repoPath") || "";
-    if (!repo) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "No workspace open. Open the FrontierInsight repo folder, or set `frontierInsight.repoPath` in settings.\n",
-            );
-            return null;
-        }
-        repo = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error + "\n");
+        return null;
     }
-    return { python, repo };
+    return {
+        python: cfg.get<string>("pythonPath") || "python",
+        repo: roots.repoPath,
+        workDir: roots.workDir,
+    };
 }
 
 function runLaunch(
-    python: string,
-    repo: string,
+    env: SkillsEnv,
     args: string[],
 ): Promise<RunResult> {
     return new Promise((resolve) => {
-        const child = spawn(python, ["launch.py", ...args], {
-            cwd: repo,
+        // launch.py is where FI is; the command runs in the folder the user works in,
+        // so skills kept in the project (`.claude/skills` and the like) are found too.
+        const child = spawn(env.python, [path.join(env.repo, "launch.py"), ...args], {
+            cwd: env.workDir,
             env: { ...process.env, PYTHONIOENCODING: "utf-8" },
         });
         let stdout = "";
@@ -110,7 +118,7 @@ export async function runListSkills(
     if (!env || token.isCancellationRequested) return;
 
     stream.progress("Reading the skill library…");
-    const res = await runLaunch(env.python, env.repo, [
+    const res = await runLaunch(env, [
         "--skills",
         "--json",
         "--no-run-selftests",
@@ -190,7 +198,7 @@ export async function runScanSkill(
     if (!env || token.isCancellationRequested) return;
 
     stream.progress(`Reviewing ${name}…`);
-    const res = await runLaunch(env.python, env.repo, [
+    const res = await runLaunch(env, [
         "--scan-skill",
         name,
         "--json",
@@ -252,7 +260,7 @@ export async function runApproveSkill(
     const env = resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
-    const scanRes = await runLaunch(env.python, env.repo, [
+    const scanRes = await runLaunch(env, [
         "--scan-skill",
         name,
         "--json",
@@ -306,7 +314,7 @@ export async function runApproveSkill(
 
     const args = ["--approve-skill", name, "--approve-as", who.trim()];
     if (highs.length) args.push("--despite-findings");
-    const res = await runLaunch(env.python, env.repo, args);
+    const res = await runLaunch(env, args);
     if (res.code === 0) {
         stream.markdown(
             `✅ **${name}** approved as \`${who.trim()}\`${
@@ -404,7 +412,7 @@ export async function runApproveAllSkills(
     if (despite.value) args.push("--despite-findings");
 
     stream.progress("Running each skill's self-test — this can take minutes…");
-    const res = await runLaunch(env.python, env.repo, args);
+    const res = await runLaunch(env, args);
     const body = (res.stdout || res.stderr || "").slice(-3000);
     if (res.code === 0) {
         stream.markdown(
@@ -432,7 +440,7 @@ export async function runRevokeSkill(
     const env = resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
-    const res = await runLaunch(env.python, env.repo, ["--revoke-skill", name]);
+    const res = await runLaunch(env, ["--revoke-skill", name]);
     stream.markdown(
         `\`\`\`\n${(res.stdout || res.stderr).trim().slice(-600)}\n\`\`\`\n`,
     );
@@ -478,7 +486,7 @@ export async function runImportSkill(
     stream.progress("Importing…");
     const args = ["--import-skill", source];
     if (domains.trim()) args.push("--domains", domains.trim());
-    const res = await runLaunch(env.python, env.repo, args);
+    const res = await runLaunch(env, args);
     const body = (res.stdout || res.stderr).trim();
     stream.markdown(
         res.code === 0
@@ -526,7 +534,7 @@ export async function runTeachSkill(
     }
 
     stream.progress(`Scaffolding ${name} from ${moduleName}…`);
-    const res = await runLaunch(env.python, env.repo, [
+    const res = await runLaunch(env, [
         "--teach-skill",
         name.trim(),
         "--from",

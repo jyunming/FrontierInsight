@@ -111,6 +111,20 @@ fi --install-tectonic
 
 > **First paper_pdf run takes ~30 s longer** when using tectonic (or a fresh MiKTeX install) because the LaTeX engine downloads required CTAN packages on the first compile. Subsequent runs are instant. Tectonic caches under `%LOCALAPPDATA%\TectonicProject\Tectonic\` on Windows; MiKTeX under its own package cache. No additional intervention needed — FI just waits.
 
+### Run it from your own project folder
+
+FI does not have to be run from its own checkout. Run it from your project folder, and everything relative means that folder: the quest goes to `./outputs/<quest_id>/` (the default `output.output_dir` is `./outputs`), `execution.inputs`, `knowledge.local_papers` and the other paths in your YAML are read relative to it, and nothing is written into FI's folder.
+
+```bash
+cd ~/my_project
+fi --config quest.yaml                                   # pip install: the `fi` command
+python /path/to/FrontierInsight/launch.py --config quest.yaml   # a checkout: the same thing
+fi --config quest.yaml --resume <quest_id>               # resume from the same folder (or add --output <dir>)
+fi --serve                                               # the web UI watches ./outputs and starts quests from this folder
+```
+
+`--resume` looks under the folder's `output.output_dir`; if it does not find the quest it says exactly where it looked. In VSCode, open your project folder and set `frontierInsight.repoPath` to the FrontierInsight folder; quests then run in the project (`frontierInsight.workingDir` overrides that). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
+
 ### All `fi` flags
 
 | Mode | Args | Notes | LLM calls |

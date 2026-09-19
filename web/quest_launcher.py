@@ -82,8 +82,14 @@ class QuestLauncher:
         vscode_bridge_port: int = 0,
         vscode_bridge_socket: str = "",
         output_root: Path | None = None,
+        work_dir: Path | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
+        # ``repo_root`` is where FI is (its launch.py). ``work_dir`` is where
+        # the user ran the server from, and is the folder every relative path
+        # in a quest's YAML (output_dir, execution.inputs, ...) means. They are
+        # the same folder only when FI is run from its own checkout.
+        self.work_dir = (work_dir or Path.cwd()).resolve()
         # ``output_root`` is where quest folders and per-tool-job folders
         # live. The launcher writes per-quest launch logs to
         # ``<output_root>/<quest_id>/.fi/launch.log`` and per-tool-job
@@ -120,6 +126,9 @@ class QuestLauncher:
                 self.python_path, "-u",
                 str(self.repo_root / "launch.py"),
                 "--config", str(yaml_path),
+                # The quest lands in the folder this server watches, whatever a
+                # relative output_dir in its YAML would mean from here.
+                "--output", str(self.output_root),
             ]
             if self.vscode_bridge_port > 0:
                 argv.extend(["--vscode-bridge-port", str(self.vscode_bridge_port)])
@@ -159,7 +168,7 @@ class QuestLauncher:
             log_file = open(log_path, "wb")
             proc = subprocess.Popen(
                 argv,
-                cwd=str(self.repo_root),
+                cwd=str(self.work_dir),
                 env=env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -352,6 +361,10 @@ class QuestLauncher:
                 )
             argv = [self.python_path, "-u", str(self.repo_root / "launch.py")]
             argv.extend(argv_tail)
+            # resume / watch / emit find the quest under output_dir: the folder
+            # this server watches, not whatever a relative path in the YAML means.
+            if "--config" in argv_tail and "--output" not in argv_tail:
+                argv.extend(["--output", str(self.output_root)])
             if self.vscode_bridge_port > 0 and "--vscode-bridge-port" not in argv_tail:
                 argv.extend(["--vscode-bridge-port", str(self.vscode_bridge_port)])
             if self.vscode_bridge_socket and "--vscode-bridge-socket" not in argv_tail:
@@ -370,7 +383,7 @@ class QuestLauncher:
             log_file = open(log_path, "wb")
             proc = subprocess.Popen(
                 argv,
-                cwd=str(self.repo_root),
+                cwd=str(self.work_dir),
                 env=env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,

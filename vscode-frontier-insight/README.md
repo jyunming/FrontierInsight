@@ -113,8 +113,10 @@ instead. Without a limit the paper keeps its usual layout and length.
    press **F5**. That launches an "Extension Development Host" window
    with the extension active. Every code edit + F5 picks up the
    latest source — no install/reload cycle needed.
-4. **Open the FrontierInsight repo** as your workspace, OR set the
-   `frontierInsight.repoPath` setting to the absolute path.
+4. **Open the FrontierInsight repo** as your workspace, OR — the usual case — open **your own project
+   folder** and set `frontierInsight.repoPath` to the FrontierInsight folder (the one containing
+   `launch.py`). Quests then run in your project folder: your YAML, example files and the relative
+   `outputs/` all mean that folder, and nothing is written into FI's checkout.
 
 ## Settings
 
@@ -123,8 +125,9 @@ instead. Without a limit the paper keeps its usual layout and length.
 | Setting | Default | What it does |
 |---|---|---|
 | `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine, and the one quest code runs on. Install FI's dependencies into this same interpreter (`<that python> -m pip install -e .`); a plain `pip` may belong to a different Python. `run.log` starts with `[env] python=<path>` so you can see which one ran. Use a venv path if you don't want FI cluttering your global packages. |
-| `frontierInsight.repoPath` | `""` | Absolute path to FrontierInsight repo. Defaults to the open workspace root. |
-| `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to repoPath). |
+| `frontierInsight.repoPath` | `""` | Absolute path to the FrontierInsight folder (the one containing `launch.py`). Leave empty when the open workspace IS that folder. |
+| `frontierInsight.workingDir` | `""` | The folder quests run in. Defaults to the open workspace folder (FI's own folder when that is the workspace). Relative values are resolved against the workspace. |
+| `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to the working folder, or absolute). |
 | `frontierInsight.axonStartupWaitSec` | `600` | How long to keep watching for the Axon sidecar after the editor starts, before saying none was found. Axon loads its embedding model and indexes before it serves, and you may start it well after opening VS Code — so the wait is long and silent. A sidecar that appears at any point during it produces no notification at all. `0` never shows the notice. |
 | `frontierInsight.axonUrl` | `""` | Base URL of the Axon sidecar, e.g. `http://127.0.0.1:8420`. Empty means discover it automatically. Set it only when Axon runs somewhere discovery can't see — another machine, a container. Plain HTTP only. It pins the extension to that one instance rather than acting as a first guess, since two Axon instances hold different corpora. |
 

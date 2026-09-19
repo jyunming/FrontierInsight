@@ -147,12 +147,17 @@
         "frontierInsight.repoPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to the FrontierInsight repo (containing launch.py). Defaults to the open workspace root."
+          "description": "Absolute path to the FrontierInsight folder (the one containing launch.py). Leave empty when the open workspace IS that folder; otherwise set it, and quests run in your workspace folder instead."
+        },
+        "frontierInsight.workingDir": {
+          "type": "string",
+          "default": "",
+          "description": "The folder quests run in: your YAML, example files and the relative outputs/ all mean this folder. Defaults to the open workspace folder (or the FrontierInsight folder when that is the workspace). Relative values are resolved against the workspace."
         },
         "frontierInsight.outputDir": {
           "type": "string",
           "default": "outputs",
-          "description": "Where finished quests are written (relative to repoPath or absolute)."
+          "description": "Where finished quests are written (relative to the working folder, or absolute)."
         },
         "frontierInsight.axonStartupWaitSec": {
           "type": "number",
