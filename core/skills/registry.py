@@ -77,14 +77,154 @@ def skills_root() -> Path:
     return Path(base) / ".frontier-insight" / "skills"
 
 
-#: Folders where other agents keep the skills they installed. Read in place —
-#: nothing is copied or converted — so a skill written for another agent is
+#: Skills other agents installed are found where they are, by looking in the
+#: places those tools keep them — nobody has to name a folder. Read in place:
+#: nothing is copied or converted, so a skill written for another agent is
 #: searchable and selectable here without importing it.
-_KNOWN_EXTERNAL_DIRS = ("~/.codex/skills", "~/.claude/skills", "~/.agents/skills")
+#:
+#: What is searched, on Linux, macOS and Windows alike (a folder counts only if
+#: a sub-folder of it carries a SKILL.md):
+#:   * every tool folder in the home directory (``~/.claude``, ``~/.codex``,
+#:     ``~/.agents``, ``~/.cursor``, ... any dot-folder) for ``skills`` inside it,
+#:     and its ``plugins`` tree for ``skills`` folders several levels down;
+#:   * the per-OS application folders, one level of tool folders each:
+#:     ``$XDG_CONFIG_HOME``, ``$XDG_DATA_HOME``, ``~/.config``, ``~/.local/share``,
+#:     ``~/Library/Application Support``, ``%APPDATA%``, ``%LOCALAPPDATA%``, and
+#:     the folders the tools' own variables name (``CODEX_HOME``,
+#:     ``CLAUDE_CONFIG_DIR``);
+#:   * the project: the current folder and its parents, for ``.<tool>/skills``
+#:     (project-level skills) and, in the current folder, ``./skills``.
+_TOOL_ENV_VARS = (
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA",
+    "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+)
+_SKILLS_FOLDER_NAMES = ("skills", "skill")
+_SEARCH_SKIP = frozenset({
+    "node_modules", ".git", "__pycache__", ".venv", "venv", ".cache",
+    "site-packages", ".tox", ".mypy_cache", ".pytest_cache",
+})
+_PLUGIN_SEARCH_DEPTH = 7
+_PROJECT_SEARCH_LEVELS = 8
+_COMMON_CACHE_TTL_S = 60.0
 
 #: ``os.pathsep``-separated folders. Set (even empty) it is authoritative: it
-#: replaces the config and the known folders, and empty means none.
+#: replaces the config and the common locations, and empty means none.
 _ENV_EXTERNAL_DIRS = "FI_EXTERNAL_SKILLS_DIRS"
+
+
+def _is_dir(entry: "os.DirEntry[str]") -> bool:
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
+def _holds_skills(folder: Path) -> bool:
+    """True when some sub-folder of ``folder`` carries a SKILL.md."""
+    try:
+        with os.scandir(folder) as it:
+            return any(_is_dir(e) and (Path(e.path) / "SKILL.md").is_file() for e in it)
+    except OSError:
+        return False
+
+
+def _skills_folders_under(base: Path, depth: int) -> list[Path]:
+    """Folders named ``skills``, at most ``depth`` levels below ``base``, that
+    hold skills. ``depth`` 1 is ``base/skills`` alone. Never descends into a
+    skills folder: its children are the skills."""
+    found: list[Path] = []
+
+    def walk(folder: Path, level: int) -> None:
+        try:
+            with os.scandir(folder) as it:
+                children = sorted((e for e in it if _is_dir(e)), key=lambda e: e.name)
+        except OSError:
+            return
+        for entry in children:
+            child = Path(entry.path)
+            if entry.name in _SKILLS_FOLDER_NAMES:
+                if _holds_skills(child):
+                    found.append(child)
+                continue
+            if level + 1 < depth and entry.name not in _SEARCH_SKIP:
+                walk(child, level + 1)
+
+    walk(base, 0)
+    return found
+
+
+def _hidden_folders(parent: Path) -> list[Path]:
+    try:
+        with os.scandir(parent) as it:
+            return sorted(
+                (Path(e.path) for e in it
+                 if e.name.startswith(".") and e.name not in _SEARCH_SKIP and _is_dir(e)),
+                key=lambda p: p.name,
+            )
+    except OSError:
+        return []
+
+
+def _newest_first(folders: list[Path]) -> list[Path]:
+    """A plugin cache keeps one folder per version of a plugin, and the first
+    skill of a name wins, so the most recently written folder goes first."""
+    def mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+    return sorted(folders, key=mtime, reverse=True)
+
+
+_common_cache: tuple[tuple, float, list[Path]] | None = None
+
+
+def _common_skill_dirs() -> list[Path]:
+    """The skill folders other agents keep in the usual places (see above).
+    Cached briefly: many callers ask, and the answer does not change mid-run."""
+    global _common_cache
+    home = Path.home()
+    key = (str(Path.cwd()), str(home), tuple(os.environ.get(v, "") for v in _TOOL_ENV_VARS))
+    now = time.monotonic()
+    if _common_cache and _common_cache[0] == key and now - _common_cache[1] < _COMMON_CACHE_TTL_S:
+        return list(_common_cache[2])
+
+    found: list[Path] = []
+    # 1. Tool folders in the home directory, and their plugin trees.
+    for tool in _hidden_folders(home):
+        found += _skills_folders_under(tool, 1)
+        plugins = tool / "plugins"
+        if plugins.is_dir():
+            found += _newest_first(_skills_folders_under(plugins, _PLUGIN_SEARCH_DEPTH))
+    # 2. Per-OS application folders: the folder itself (a tool's own variable
+    #    names it) and one level of tool folders inside it.
+    bases = [Path(v) for v in (os.environ.get(n) for n in _TOOL_ENV_VARS) if v]
+    bases += [home / ".config", home / ".local" / "share",
+              home / "Library" / "Application Support"]
+    for base in bases:
+        found += _skills_folders_under(base, 2)
+    # 3. The project: this folder and its parents, up to the home directory.
+    here = Path.cwd()
+    for level, folder in enumerate([here, *here.parents]):
+        if level > _PROJECT_SEARCH_LEVELS or folder == home:
+            break
+        for hidden in _hidden_folders(folder):
+            found += _skills_folders_under(hidden, 1)
+        if level == 0 and _holds_skills(folder / "skills"):
+            found.append(folder / "skills")
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for d in found:
+        try:
+            resolved = d.resolve()
+        except OSError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(d)
+    _common_cache = (key, now, out)
+    return list(out)
 
 _extra_external_dirs: list[Path] = []
 _scan_known_external = True
@@ -107,16 +247,18 @@ def external_skill_dirs() -> list[Path]:
     else:
         candidates = list(_extra_external_dirs)
         if _scan_known_external:
-            candidates += [Path(p).expanduser() for p in _KNOWN_EXTERNAL_DIRS]
+            candidates += _common_skill_dirs()
     own = skills_root().resolve()
     out: list[Path] = []
+    seen: set[Path] = {own}
     for d in candidates:
         try:
             resolved = d.resolve()
         except OSError:
             continue
-        if resolved == own or resolved in (o.resolve() for o in out) or not d.is_dir():
+        if resolved in seen or not d.is_dir():
             continue
+        seen.add(resolved)
         out.append(d)
     return out
 
@@ -307,8 +449,16 @@ def evaluate(
     ledger: Path | None = None,
     run_test: bool = True,
     cache: SelftestCache | None = None,
+    defer_scan: bool = False,
 ) -> SkillState:
     """Decide what state a skill is in.
+
+    ``defer_scan`` is for bulk use (loading skills into a quest, listing them): an
+    external skill nobody has approved is reported as awaiting approval without
+    hashing or scanning it. Other agents' folders can hold hundreds of skills, some
+    of hundreds of files, and reading all of them costs seconds on every call for
+    skills nobody asked for; the review (``--scan-skill``, the approval itself) reads
+    the one being approved.
 
     Both gates must pass before a skill is loadable, and they are checked
     in this order because a failing self-test should be reported as a
@@ -339,8 +489,18 @@ def evaluate(
     because the rules are heuristics and QUARANTINED means *FI observed a
     failure*, not *FI guessed at intent*.
     """
-    content_hash = skill.content_hash()
     approved = approval.approved_hash(skill.ledger_name, ledger)
+    if defer_scan and skill.external and approved is None:
+        return SkillState(
+            skill=skill,
+            status=Status.PROPOSED,
+            reason=(
+                f"awaiting approval — external skill from {skill.path.parent}, never "
+                "self-tested (--scan-skill reviews it; --approve-skill approves it)"
+            ),
+            approved_hash=None,
+        )
+    content_hash = skill.content_hash()
     cached = (
         cache.lookup(skill.name, content_hash)
         if cache is not None and run_test and skill.has_selftest
@@ -461,12 +621,15 @@ def _evaluate_all(
     through ``run_selftest``.
     """
     if workers <= 1 or len(skills) <= 1:
-        return [evaluate(s, ledger=ledger, cache=cache) for s in skills]
+        return [evaluate(s, ledger=ledger, cache=cache, defer_scan=True) for s in skills]
     pool = ThreadPoolExecutor(
         max_workers=min(workers, len(skills)), thread_name_prefix="fi-selftest",
     )
     try:
-        futures = [pool.submit(evaluate, s, ledger=ledger, cache=cache) for s in skills]
+        futures = [
+            pool.submit(evaluate, s, ledger=ledger, cache=cache, defer_scan=True)
+            for s in skills
+        ]
         return [f.result() for f in futures]
     finally:
         # On an exception, drop what has not started rather than running

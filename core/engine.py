@@ -5958,10 +5958,26 @@ class Engine:
         # Tell the user about skills that would have been candidates but are
         # not approved — otherwise one can sit unapproved forever while every
         # quest quietly does without it.
-        for st in near_misses(rejected, [], catalogue):
+        # Skills found in other agents' folders that nobody approved are not
+        # near misses: nobody asked for them, and there can be hundreds. One line
+        # says they exist; an approved one whose content then changed is still
+        # reported by name below.
+        never_asked = [
+            st for st in rejected
+            if st.skill.external and st.approved_hash is None
+        ]
+        for st in near_misses([s for s in rejected if s not in never_asked], [], catalogue):
             self._log.warning(
                 "[skills] note: %r is not usable (%s) — %s",
                 st.skill.name, st.status.value, st.reason,
+            )
+        if never_asked:
+            folders = {st.skill.path.parent for st in never_asked}
+            self._log.info(
+                "[skills] found %d skill(s) in %d folder(s) of other agents; none is "
+                "approved yet, so they are not candidates (`python launch.py --skills` "
+                "lists them, `--approve-skill <name>` approves one)",
+                len(never_asked), len(folders),
             )
 
         if not catalogue:

@@ -39,7 +39,7 @@ _log = logging.getLogger("fi.web.skills")
 def _states(run_tests: bool) -> list[dict[str, Any]]:
     from core.skills import discover, evaluate
 
-    return [evaluate(s, run_test=run_tests).to_dict() for s in discover()]
+    return [evaluate(s, run_test=run_tests, defer_scan=True).to_dict() for s in discover()]
 
 
 def register_skills_routes(app: FastAPI) -> None:

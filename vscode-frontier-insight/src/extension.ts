@@ -29,6 +29,7 @@ import {
     runTeachSkill,
 } from "./skills";
 import { Bridge } from "./bridge";
+import { rootsFromConfig } from "./roots-config";
 import { PersistentBridge } from "./persistent-bridge";
 import { persistentBridgePath } from "./bridge-path";
 import {
@@ -414,17 +415,12 @@ async function runResume(
     if (token.isCancellationRequested) return;
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
 
     // Resolve the outputs dir from settings. The `frontierInsight.outputDir`
     // setting may be a relative path (joined with repoPath) or absolute.
@@ -433,7 +429,7 @@ async function runResume(
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
     if (!(await fsExists(outputsDir))) {
         stream.markdown(
             `❌ No outputs directory at \`${outputsDir}\` — nothing to resume. ` +
@@ -556,7 +552,7 @@ async function runResume(
         yamlPath = picked[0].fsPath;
     }
 
-    const relYaml = path.relative(repoPath, yamlPath).split(path.sep).join("/");
+    const relYaml = path.relative(workDir, yamlPath).split(path.sep).join("/");
     stream.markdown(
         watch
             ? `👁 Watching quest \`${chosenId}\`: its experiment script is re-run on a timer and the quest resumes when the job is done.\n\n` +
@@ -616,22 +612,16 @@ async function runTerminalCommand(
     // command; the user sees the live output there.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings, then try again.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     stream.markdown(`${hint}\n\n`);
     const term = vscode.window.createTerminal({
         name: `FI ${label}`,
-        cwd: repoPath,
+        cwd: workDir,
     });
     term.show();
     // Quoting AND the leading call operator depend on the shell — the
@@ -657,22 +647,17 @@ async function runUpdate(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
 
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
 
     let questId = (promptArgs.trim().split(/\s+/)[0] || "").replace(/^["']+|["']+$/g, "");
     if (!questId) {
@@ -731,7 +716,7 @@ async function runUpdate(
     );
     const term = vscode.window.createTerminal({
         name: `FI update: ${questId}`,
-        cwd: repoPath,
+        cwd: workDir,
     });
     term.show();
     // This Python is NOT a child of the extension, so it cannot inherit
@@ -769,21 +754,16 @@ async function runGenerate(
     if (token.isCancellationRequested) return;
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
 
     const KINDS = ["paper_pdf", "slides", "poster", "speech"];
     const tokens = promptArgs.trim().split(/\s+/).filter(Boolean);
@@ -852,7 +832,7 @@ async function runGenerate(
         `📄 Generating \`${kind}\` for \`${questId}\` from its existing paper — no re-run. ` +
         `Opening a terminal so you can watch it render.\n\n`,
     );
-    const term = vscode.window.createTerminal({ name: `FI generate: ${kind}`, cwd: repoPath });
+    const term = vscode.window.createTerminal({ name: `FI generate: ${kind}`, cwd: workDir });
     term.show();
     // slides / poster / speech each make a model call, so this run needs
     // the bridge address exactly as /update does. paper_pdf renders
@@ -890,17 +870,12 @@ async function runInterviewAndQuest(
 
     // Resolve repo path the same way runQuest does.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, or set `frontierInsight.repoPath` in settings, then try again.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
 
     // `writeInterviewYaml` does sync mkdir + writeFile; both can throw
     // on EACCES, ENOSPC, or a OneDrive sync lock. Without this catch,
@@ -908,9 +883,9 @@ async function runInterviewAndQuest(
     // with no quest and no error.
     let yamlPath: string;
     try {
-        yamlPath = writeInterviewYaml(answers, repoPath);
+        yamlPath = writeInterviewYaml(answers, workDir);
     } catch (err) {
-        const draftDir = path.join(repoPath, "outputs", "_drafts");
+        const draftDir = path.join(workDir, "outputs", "_drafts");
         const rawMsg = err instanceof Error ? err.message : String(err);
         // Node FS errors often already end with punctuation
         // (e.g. ``EACCES: permission denied, open '...'``); strip a
@@ -922,7 +897,7 @@ async function runInterviewAndQuest(
         );
         return;
     }
-    const rel = path.relative(repoPath, yamlPath).split(path.sep).join("/");
+    const rel = path.relative(workDir, yamlPath).split(path.sep).join("/");
     stream.markdown(`📝 Wrote config: \`${rel}\`\n\n`);
     // Surface which model the user's calls will route through so the
     // budget impact is visible upfront.
@@ -961,17 +936,12 @@ async function runQuest(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "No workspace open. Open the FrontierInsight repo folder, or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
 
     stream.markdown(`🧪 Starting ${fleet ? "fleet" : "quest"}: \`${paths.join(", ")}\`\n\n`);
@@ -1012,7 +982,7 @@ async function runQuest(
 
     // 3. Spawn Python.
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1090,7 +1060,7 @@ async function runQuest(
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
         const outputsDir = path.isAbsolute(outDirSetting)
             ? outDirSetting
-            : path.join(repoPath, outDirSetting);
+            : path.join(workDir, outDirSetting);
         await surfaceNextStep(outputsDir, stream, resumeQuestId);
         await surfaceWantedPapers(outputsDir, stream, resumeQuestId);
     } else {
@@ -1280,18 +1250,12 @@ async function runSummarize(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
 
     // Resolve the folder argument: absolute paths are honored as-is;
@@ -1299,14 +1263,14 @@ async function runSummarize(
     // a user type `@fi /summarize ./papers` from the chat panel.
     const folderAbs = path.isAbsolute(folderArg)
         ? folderArg
-        : path.resolve(repoPath, folderArg);
+        : path.resolve(workDir, folderArg);
     let folderStat: import("fs").Stats;
     try {
         folderStat = await fsPromises.stat(folderAbs);
     } catch {
         stream.markdown(
             `❌ Path not found: \`${folderAbs}\`. ` +
-            `(Resolved from \`${folderArg}\` against \`${repoPath}\`.)\n`,
+            `(Resolved from \`${folderArg}\` against \`${workDir}\`.)\n`,
         );
         return;
     }
@@ -1339,7 +1303,7 @@ async function runSummarize(
     ];
 
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1442,23 +1406,17 @@ async function runDigest(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
 
     stream.markdown(
         `📅 Generating digest for the last **${days} days** of quests under ` +
@@ -1483,7 +1441,7 @@ async function runDigest(
     ];
 
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1554,23 +1512,17 @@ async function runPortfolio(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
 
     stream.markdown(
         `📚 Synthesizing portfolio across every quest under \`${outputsDir}\`.\n\n` +
@@ -1593,7 +1545,7 @@ async function runPortfolio(
     ];
 
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1686,23 +1638,17 @@ async function runCritique(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
 
     stream.markdown(
         `🔍 Running adversarial critique of quest \`${questId}\`.\n\n` +
@@ -1726,7 +1672,7 @@ async function runCritique(
     ];
 
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -2060,23 +2006,17 @@ async function runProposal(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
 
     stream.markdown(
         `📝 Drafting proposal for topic:\n> ${topic.split("\n").slice(0, 3).join("\n> ")}\n\n` +
@@ -2099,7 +2039,7 @@ async function runProposal(
     ];
 
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -2216,27 +2156,21 @@ async function runAnalyze(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    let repoPath = cfg.get<string>("repoPath") || "";
-    if (!repoPath) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-            stream.markdown(
-                "❌ No workspace open. Open the FrontierInsight folder, " +
-                "or set `frontierInsight.repoPath` in settings.",
-            );
-            return;
-        }
-        repoPath = ws;
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error);
+        return;
     }
+    const { repoPath, workDir } = roots;
     const launchScript = path.join(repoPath, "launch.py");
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
-        : path.join(repoPath, outputDirSetting);
+        : path.join(workDir, outputDirSetting);
     // Resolve dataPath relative to the workspace if it's relative.
     const dataAbs = path.isAbsolute(dataPath)
         ? dataPath
-        : path.join(repoPath, dataPath);
+        : path.join(workDir, dataPath);
 
     stream.markdown(
         `📊 Analyzing pre-staged data:\n` +
@@ -2262,7 +2196,7 @@ async function runAnalyze(
     ];
 
     const child = spawn(pythonPath, argv, {
-        cwd: repoPath,
+        cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
