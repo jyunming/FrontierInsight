@@ -206,34 +206,27 @@ def test_every_asked_question_is_referenced_by_the_interview_code() -> None:
     )
 
 
-def test_ts_ensemble_model_trios_match_python() -> None:
-    """``ENSEMBLE_MODEL_TRIOS`` in interview-core.ts must match
-    ``_ENSEMBLE_MODEL_TRIOS`` in core/interview.py (mirrored to the
-    schema JSON snapshot). Drift would cause one frontend to produce
-    a different node_ensemble.models list than the others for the
-    same provider, breaking the three-interface parity guarantee."""
-    from_schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))[
-        "ensemble_model_trios"
-    ]
+def test_ts_ensemble_min_models_match_python() -> None:
+    """``ENSEMBLE_MIN_MODELS`` in interview-core.ts must match the schema JSON
+    (mirrored from core/interview.py): the frontends must agree on when an
+    ensemble has too few models to configure anything."""
+    from_schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["ensemble_min_models"]
     ts_text = INTERVIEW_CORE_TS.read_text(encoding="utf-8")
-    # Match the ENSEMBLE_MODEL_TRIOS literal: capture object body.
-    m = re.search(
-        r"export const ENSEMBLE_MODEL_TRIOS[^=]*=\s*\{([^}]+)\};",
-        ts_text, re.DOTALL,
-    )
-    assert m, "ENSEMBLE_MODEL_TRIOS literal not found in interview-core.ts"
-    body = m.group(1)
-    # Each row looks like `"openai": ["gpt-4o", "gpt-4o-mini", "o1-mini"],`
-    row_re = re.compile(
-        r'"([a-z_]+)"\s*:\s*\[\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\]',
-    )
-    ts_trios = {m.group(1): [m.group(2), m.group(3), m.group(4)]
-                for m in row_re.finditer(body)}
-    assert ts_trios == from_schema, (
-        f"ENSEMBLE_MODEL_TRIOS drift between TS and Python:\n"
-        f"TS:     {sorted(ts_trios.items())}\n"
-        f"Python: {sorted(from_schema.items())}"
-    )
+    m = re.search(r"export const ENSEMBLE_MIN_MODELS\s*=\s*(\d+);", ts_text)
+    assert m, "ENSEMBLE_MIN_MODELS literal not found in interview-core.ts"
+    assert int(m.group(1)) == from_schema
+
+
+def test_no_frontend_carries_a_hard_coded_ensemble_model_list() -> None:
+    """FI used to fill an ensemble with three models per provider (opus, gemini,
+    ...). Which models are worth the money, and which the user can reach, is the
+    user's decision, so no frontend may hold such a list again."""
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert "ensemble_model_trios" not in schema
+    ts_text = INTERVIEW_CORE_TS.read_text(encoding="utf-8")
+    assert "ENSEMBLE_MODEL_TRIOS" not in ts_text
+    for name in ("claude-opus", "gemini-2.5", "gpt-5"):
+        assert name not in ts_text, f"{name} is written into interview-core.ts"
 
 
 def test_ts_emits_clarify_overrides_in_yaml() -> None:

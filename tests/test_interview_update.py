@@ -321,7 +321,9 @@ def test_rewrite_yaml_overwrites_node_ensemble_when_new_profile_is_set() -> None
                   "merge": "concat"},
     }
     # User picks "full" — three new nodes should overwrite the old "write" block.
-    new_yaml_text = rewrite_yaml_with_new_answers(raw, _sample(ensemble_profile="full"))
+    new_yaml_text = rewrite_yaml_with_new_answers(
+        raw, _sample(ensemble_profile="full", ensemble_models="m1, m2"),
+    )
     new_data = yaml.safe_load(new_yaml_text)
     ne = new_data["provider"]["node_ensemble"]
     assert set(ne.keys()) == {"ideate", "analyze", "cross_check"}, (
@@ -614,18 +616,20 @@ def test_load_current_answers_loads_ensemble_profile_full(tmp_path: Path) -> Non
     profile."""
     quest_root = tmp_path / "q-ens-full"
     quest_root.mkdir()
-    original = _sample(ensemble_profile="full")
+    original = _sample(ensemble_profile="full", ensemble_models="alpha, beta")
     (quest_root / "config.yaml").write_text(
         answers_to_yaml(original, frontend="cli"), encoding="utf-8",
     )
     loaded, _, _ = load_current_answers(quest_root)
     assert loaded.ensemble_profile == "full"
+    # The models are what the user named, read back from the YAML.
+    assert loaded.ensemble_models == "alpha, beta"
 
 
 def test_load_current_answers_loads_ensemble_profile_cross_check_only(tmp_path: Path) -> None:
     quest_root = tmp_path / "q-ens-cc"
     quest_root.mkdir()
-    original = _sample(ensemble_profile="cross_check_only")
+    original = _sample(ensemble_profile="cross_check_only", ensemble_models="m1, m2")
     (quest_root / "config.yaml").write_text(
         answers_to_yaml(original, frontend="cli"), encoding="utf-8",
     )
@@ -659,6 +663,7 @@ def test_round_trip_preserves_all_five_fields(tmp_path: Path) -> None:
         knowledge_external_top_k=30,
         max_iterations=4,
         ensemble_profile="full",
+        ensemble_models="m1, m2",
     )
     yaml_text = answers_to_yaml(original, frontend="cli")
     (quest_root / "config.yaml").write_text(yaml_text, encoding="utf-8")
@@ -668,6 +673,7 @@ def test_round_trip_preserves_all_five_fields(tmp_path: Path) -> None:
     assert loaded.knowledge_external_top_k == 30
     assert loaded.max_iterations == 4
     assert loaded.ensemble_profile == "full"
+    assert loaded.ensemble_models == "m1, m2"
 
     # Now rewrite without changes and confirm the YAML still carries
     # those values.

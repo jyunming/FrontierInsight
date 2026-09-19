@@ -82,9 +82,19 @@ _ENSEMBLE_REVERSE_PROFILES: tuple[str, ...] = (
 )
 
 
-def _derive_ensemble_profile(
-    node_ensemble_raw: Any, provider: str, provider_model: str | None,
-) -> str:
+def _derive_ensemble_models(node_ensemble_raw: Any) -> str:
+    """The models the user named, read back from ``provider.node_ensemble``: the
+    first configured node's ``models`` list, comma separated. Empty when there is
+    no ensemble."""
+    if not isinstance(node_ensemble_raw, dict):
+        return ""
+    for cfg in node_ensemble_raw.values():
+        if isinstance(cfg, dict) and cfg.get("models"):
+            return ", ".join(str(m) for m in cfg["models"])
+    return ""
+
+
+def _derive_ensemble_profile(node_ensemble_raw: Any) -> str:
     """Reverse-derive an ``ensemble_profile`` value from a YAML
     ``provider.node_ensemble`` block. Returns ``"off"`` for an empty
     or missing block, or the matching profile name. When the block
@@ -102,9 +112,9 @@ def _derive_ensemble_profile(
     # without changing the profile semantics.
     configured_nodes = {k for k, v in node_ensemble_raw.items() if isinstance(v, dict)}
     for profile in _ENSEMBLE_REVERSE_PROFILES:
-        expected = expand_ensemble_profile(
-            profile, provider=provider, provider_model=provider_model,
-        )
+        # Only the SET of nodes a profile configures is compared, so any two
+        # model names will do to expand it.
+        expected = expand_ensemble_profile(profile, models=["m1", "m2"])
         if set(expected.keys()) == configured_nodes:
             return profile
     return "off"
@@ -188,9 +198,8 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
     # the YAML so the round-trip is lossless.
     provider_name = str(provider.get("name") or "vscode_extension")
     provider_model = str(provider.get("model")) if provider.get("model") else None
-    ensemble_profile = _derive_ensemble_profile(
-        provider.get("node_ensemble"), provider_name, provider_model,
-    )
+    ensemble_profile = _derive_ensemble_profile(provider.get("node_ensemble"))
+    ensemble_models = _derive_ensemble_models(provider.get("node_ensemble"))
 
     def _coerce_int(value: Any, fallback: int) -> int:
         try:
@@ -223,6 +232,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
+        ensemble_models=ensemble_models,
         max_iterations=_coerce_int(engine.get("max_iterations", 2), 2),
         author=str(output.get("author") or ""),
         affiliation=str(output.get("affiliation") or ""),
@@ -585,6 +595,9 @@ async def run_update_flow(
         ensemble_profile=str(new_partial.get(
             "ensemble_profile", current.ensemble_profile,
         )),
+        ensemble_models=str(new_partial.get(
+            "ensemble_models", current.ensemble_models,
+        ) or ""),
         max_iterations=_coerce_int("max_iterations", current.max_iterations),
         author=str(new_partial.get("author", current.author) or ""),
         affiliation=str(new_partial.get("affiliation", current.affiliation) or ""),

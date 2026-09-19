@@ -31,8 +31,8 @@ from core.interview import (
 # ---- Tier-1 contract ----
 
 
-def test_tier1_cli_is_exactly_eleven_questions() -> None:
-    """CLI and the web --serve interview both ask eleven tier-1 questions
+def test_tier1_cli_is_exactly_twelve_questions() -> None:
+    """CLI and the web --serve interview both ask twelve tier-1 questions
     (ensemble_profile was promoted from tier-3 so the multi-model
     cost decision lives next to provider/model). The last four are the
     optional author line, asked on every frontend so a poster can carry
@@ -46,6 +46,7 @@ def test_tier1_cli_is_exactly_eleven_questions() -> None:
         "provider",
         "provider_model",
         "ensemble_profile",
+        "ensemble_models",
         "author",
         "affiliation",
         "contact_email",
@@ -62,11 +63,11 @@ def test_tier1_serve_matches_cli() -> None:
     assert cli_ids == serve_ids
 
 
-def test_tier1_vscode_is_nine_questions_no_provider() -> None:
+def test_tier1_vscode_is_ten_questions_no_provider() -> None:
     """VSCode pins provider=vscode_extension and grabs the Copilot
     model the user picked in the chat picker — so its tier-1 set
-    drops both, but still surfaces ensemble_profile because the
-    profile expansion uses the pinned provider's model trio."""
+    drops both, but still surfaces ensemble_profile and asks which
+    models it fans out over: FI does not choose them."""
     ids = [q.id for q in questions_for_tier(1, "vscode")]
     assert ids == [
         "topic",
@@ -74,6 +75,7 @@ def test_tier1_vscode_is_nine_questions_no_provider() -> None:
         "output_kinds",
         "study_depth",
         "ensemble_profile",
+        "ensemble_models",
         "author",
         "affiliation",
         "contact_email",

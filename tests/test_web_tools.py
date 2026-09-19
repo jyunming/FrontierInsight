@@ -325,17 +325,12 @@ def test_tools_schema_reports_no_bridge_by_default(tmp_path: Path) -> None:
     res = _client(tmp_path).get("/api/tools/schema")
     body = res.json()
     assert body["vscode_bridge_available"] is False
-    # The vscode_extension model list is always included so the UI
-    # can render it the moment a bridge becomes available without
-    # re-fetching schema.
-    assert isinstance(body.get("vscode_extension_models"), list)
-    # Source-of-truth for these labels is the canonical ensemble trio
-    # in core/interview.py — pin against that helper rather than a
-    # hardcoded value so refreshing the trio doesn't drift this test.
-    from core.interview import ensemble_model_trio
-    expected_trio = set(ensemble_model_trio("vscode_extension"))
-    actual = {m["value"] for m in body["vscode_extension_models"]}
-    assert actual == expected_trio, (actual, expected_trio)
+    # The vscode_extension model list is always included so the UI can render
+    # it the moment a bridge becomes available. It is EMPTY: FI used to offer
+    # three models it had chosen (gpt-5, claude-opus-4-7, gemini-2.5-pro) as if
+    # they were the options. Empty means the model picked in the VSCode Chat
+    # picker is used, and a model id can be typed to name another.
+    assert body.get("vscode_extension_models") == []
 
 
 def test_tools_schema_reports_bridge_when_port_set(
@@ -452,41 +447,54 @@ def test_build_argv_proposal_off_profile_emits_no_ensemble(tmp_path: Path) -> No
     assert "--proposal-ensemble" not in argv
 
 
-def test_build_argv_proposal_full_profile_expands_to_trio(tmp_path: Path) -> None:
-    """Picking 'full' must expand the picked provider's curated trio
-    into the --proposal-ensemble CSV the CLI expects."""
+def test_build_argv_proposal_full_profile_uses_the_models_the_user_named(tmp_path: Path) -> None:
+    """Picking 'full' fans out over the models the user named, as the
+    --proposal-ensemble CSV the CLI expects."""
     spec = TOOLS_BY_NAME["proposal"]
     argv = _build_argv(
         spec,
-        {"topic": "t", "provider": "openai", "ensemble_profile": "full"},
+        {"topic": "t", "provider": "openai", "ensemble_profile": "full",
+         "ensemble_models": "typed-a, typed-b, typed-c"},
         [], tmp_path,
     )
     assert "--proposal-ensemble" in argv
     idx = argv.index("--proposal-ensemble")
     csv = argv[idx + 1]
-    # The 3-model openai trio (see ensemble_model_trios) — exact
-    # values are pinned in the interview schema test, not here.
-    parts = csv.split(",")
-    assert len(parts) == 3
+    # The models are what the user typed, in their order: FI picks none.
+    assert csv == "typed-a,typed-b,typed-c"
     # Proposal-side merge defaults to tournament (the launch.py CLI
     # default for --proposal-ensemble-merge) — must be in the tail.
     assert "--proposal-ensemble-merge" in argv
     assert "tournament" in argv
 
 
-def test_build_argv_critique_full_profile_expands_to_trio_with_synthesize(tmp_path: Path) -> None:
+def test_build_argv_critique_full_profile_uses_named_models_with_synthesize(tmp_path: Path) -> None:
     """Critique's documented merge default is `synthesize` (different
     from proposal's `tournament`). The web mapping must preserve that
     parity so behaviour doesn't drift between CLI and serve users."""
     spec = TOOLS_BY_NAME["critique"]
     argv = _build_argv(
         spec,
-        {"quest_id": "abc", "provider": "claude_cli", "ensemble_profile": "full"},
+        {"quest_id": "abc", "provider": "claude_cli", "ensemble_profile": "full",
+         "ensemble_models": "typed-a, typed-b"},
         [], tmp_path,
     )
     assert "--critique-ensemble" in argv
     assert "--critique-ensemble-merge" in argv
     assert "synthesize" in argv
+
+
+def test_build_argv_never_invents_models_when_none_are_named(tmp_path: Path) -> None:
+    """FI used to fan out over three models it had chosen per provider. With
+    fewer than two named there is nothing to fan out over: no flag, not a
+    guessed trio."""
+    spec = TOOLS_BY_NAME["proposal"]
+    for named in (None, "", "only-one"):
+        payload = {"topic": "t", "provider": "openai", "ensemble_profile": "full"}
+        if named is not None:
+            payload["ensemble_models"] = named
+        argv = _build_argv(spec, payload, [], tmp_path)
+        assert "--proposal-ensemble" not in argv, named
 
 
 def test_build_argv_unknown_profile_treated_as_off(tmp_path: Path) -> None:
@@ -517,6 +525,7 @@ def test_build_argv_ensemble_wired_for_every_llm_tool(tmp_path: Path) -> None:
         spec = TOOLS_BY_NAME[name]
         payload = {
             "provider": "openai", "ensemble_profile": "full",
+            "ensemble_models": "typed-a, typed-b",
             # Tool-specific required fields
             "days": 7, "folder": str(tmp_path), "path": str(tmp_path),
             "topic": "t", "quest_id": "abc", "kind": "auto",

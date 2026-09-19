@@ -82,9 +82,9 @@ def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(
 ) -> None:
     """When a bridge transport is configured AND a probe confirms a
     listener, the interview's provider list must offer vscode_extension
-    AND populate its model list, so the user picking it gets the same
-    UX as any other provider. The probe-confirmation step is new — a
-    configured-but-dead bridge no longer lights up the picker."""
+    (with an empty model list: the user's Chat-picker choice is used).
+    The probe-confirmation step is new — a configured-but-dead bridge no
+    longer lights up the picker."""
     output_root = tmp_path / "outputs"
     output_root.mkdir()
     app = make_app(output_root, vscode_bridge_port=37001)
@@ -100,13 +100,12 @@ def test_interview_schema_surfaces_vscode_extension_when_bridge_wired(
     # first thing a user sees in the picker.
     assert providers[0] == "vscode_extension"
     assert payload["vscode_bridge_available"] is True
-    models = payload["provider_models"].get("vscode_extension", [])
-    # The trio-as-source-of-truth contract: the picker list must equal
-    # what the `full` ensemble profile would fan out across.
-    from core.interview import ensemble_model_trio
-    expected_trio = set(ensemble_model_trio("vscode_extension"))
-    actual = {m["value"] for m in models}
-    assert actual == expected_trio, (actual, expected_trio)
+    # FI offers no model list of its own for this provider: it used to be three
+    # models FI had chosen, shown as if they were the user's options. Empty
+    # means "the model picked in the Chat picker", and an id can be typed.
+    assert payload["provider_models"].get("vscode_extension") == []
+    import core.interview as interview
+    assert not hasattr(interview, "ensemble_model_trio")
 
 
 def test_interview_schema_hides_vscode_extension_when_port_dead(tmp_path: Path) -> None:
@@ -155,6 +154,73 @@ def test_submit_missing_required_field_400(tmp_path: Path) -> None:
     del bad["topic"]
     res = client.post("/api/interview/submit", json=bad)
     assert res.status_code == 400
+
+
+def test_submit_ensemble_fans_out_over_the_models_the_user_named(tmp_path: Path) -> None:
+    """The ensemble runs on the models the submitter typed, in that order. FI
+    contributes none of its own."""
+    from core.config import Config
+
+    client = _client(tmp_path)
+    body = _ok_answers_payload()
+    body["ensemble_profile"] = "full"
+    body["ensemble_models"] = "model-a, model-b; model-c\nmodel-a"  # dupes dropped
+    res = client.post("/api/interview/submit", json=body)
+    assert res.status_code == 200, res.text
+    yaml_path = Path(res.json()["yaml_path"])
+    cfg = Config.from_yaml(yaml_path)
+    assert list(cfg.provider.node_ensemble["cross_check"].models) == [
+        "model-a", "model-b", "model-c",
+    ]
+    text = yaml_path.read_text(encoding="utf-8")
+    assert "opus" not in text and "gemini" not in text
+
+
+def test_submit_ensemble_accepts_the_models_as_a_list(tmp_path: Path) -> None:
+    from core.config import Config
+
+    body = _ok_answers_payload()
+    body["ensemble_profile"] = "cross_check_only"
+    body["ensemble_models"] = ["model-x", "model-y"]
+    res = _client(tmp_path).post("/api/interview/submit", json=body)
+    assert res.status_code == 200, res.text
+    cfg = Config.from_yaml(Path(res.json()["yaml_path"]))
+    assert list(cfg.provider.node_ensemble["cross_check"].models) == ["model-x", "model-y"]
+
+
+@pytest.mark.parametrize("named", [None, "", "only-one", " , ", ["solo"]])
+def test_submit_ensemble_without_two_models_is_refused_not_filled_in(
+    tmp_path: Path, named: object,
+) -> None:
+    """A fan-out profile with fewer than two named models is a 400 that says
+    what to do, and writes no quest: FI must not pick models to make up the
+    number, and must not silently run single-model either."""
+    client = _client(tmp_path)
+    body = _ok_answers_payload()
+    body["ensemble_profile"] = "full"
+    if named is not None:
+        body["ensemble_models"] = named
+    res = client.post("/api/interview/submit", json=body)
+    assert res.status_code == 400, res.text
+    assert "ensemble_models" in res.text and "at least 2" in res.text
+    assert "does not choose" in res.text
+
+
+def test_submit_ensemble_off_needs_no_models(tmp_path: Path) -> None:
+    body = _ok_answers_payload()
+    body["ensemble_profile"] = "off"
+    res = _client(tmp_path).post("/api/interview/submit", json=body)
+    assert res.status_code == 200, res.text
+    assert "node_ensemble:" not in Path(res.json()["yaml_path"]).read_text(encoding="utf-8")
+
+
+def test_submit_ensemble_models_of_the_wrong_type_is_a_400(tmp_path: Path) -> None:
+    body = _ok_answers_payload()
+    body["ensemble_profile"] = "full"
+    body["ensemble_models"] = 3
+    res = _client(tmp_path).post("/api/interview/submit", json=body)
+    assert res.status_code == 400, res.text
+    assert "ensemble_models" in res.text
 
 
 def test_update_endpoint_writes_back_yaml(tmp_path: Path) -> None:
@@ -256,6 +322,7 @@ def test_get_quest_answers_returns_loaded_yaml(tmp_path: Path) -> None:
         knowledge_top_k=12,
         knowledge_external_top_k=30,
         ensemble_profile="full",
+        ensemble_models="model-a, model-b, model-c",
         max_iterations=4,
     )
     (quest_root / "config.yaml").write_text(
@@ -274,6 +341,9 @@ def test_get_quest_answers_returns_loaded_yaml(tmp_path: Path) -> None:
     assert body["knowledge_top_k"] == 12
     assert body["knowledge_external_top_k"] == 30
     assert body["ensemble_profile"] == "full"
+    # The user's models come back in the order they gave them: the form
+    # reloads exactly what was chosen, not a list FI would pick.
+    assert body["ensemble_models"] == "model-a, model-b, model-c"
     assert body["max_iterations"] == 4
 
 
@@ -325,6 +395,7 @@ def test_update_endpoint_noop_when_payload_matches_yaml(tmp_path: Path) -> None:
         knowledge_top_k=15,
         knowledge_external_top_k=30,
         ensemble_profile="full",
+        ensemble_models="model-a, model-b, model-c",
         max_iterations=3,
     )
     yaml_text = answers_to_yaml(initial, frontend="cli")

@@ -409,49 +409,36 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
         })
 
 
-# Per-profile fan-out scope. The interview's
-# ``core.interview.expand_ensemble_profile`` plus
-# ``ensemble_model_trios`` already define the canonical mapping; this
-# is the same mapping spelled out for the standalone-tool case where
-# the engine isn't running and we just need an explicit CSV for the
-# ``--{tool}-ensemble`` flag.
-_ENSEMBLE_PROFILE_TO_TRIO_KEY: dict[str, str] = {
-    "off": "",  # no fan-out
-    "cross_check_only": "trio",
-    "ideate_and_check": "trio",
-    "full": "trio",
-}
+# The profiles a standalone tool understands. For a tool the engine isn't running,
+# so all a profile means is "fan out": the models are what the user typed, joined
+# into the CSV the ``--{tool}-ensemble`` flag takes. FI does not pick them.
+_ENSEMBLE_PROFILES = frozenset({"cross_check_only", "ideate_and_check", "full"})
 
 
 def _ensemble_argv_tail(
     tool: str, provider: str, payload: dict[str, Any],
 ) -> list[str]:
     """Build the ``--{tool}-ensemble M1,M2,M3 --{tool}-ensemble-merge X``
-    tail for the spawned subprocess based on the picked profile +
-    provider. Returns ``[]`` for ``off`` / missing / unknown profile.
-
-    Cross-references the canonical trios at
-    ``core.interview._ENSEMBLE_MODEL_TRIOS`` so the standalone tool
-    fan-out matches the engine's node-ensemble fan-out for the same
-    provider + profile.
+    tail for the spawned subprocess from the profile and the models the user
+    named (``ensemble_models``). Returns ``[]`` for ``off`` / missing / unknown
+    profile, and when fewer than two models were named: FI does not choose
+    models to make up the number.
     """
     profile = (payload.get("ensemble_profile") or "off").strip()
-    if profile == "off" or profile not in _ENSEMBLE_PROFILE_TO_TRIO_KEY:
+    if profile not in _ENSEMBLE_PROFILES:
         return []
     if not provider:
         # No provider picked — fan-out has nowhere to fall back to.
         # Caller will surface this as a UI prompt rather than silently
         # dropping the profile.
         return []
-    try:
-        from core.interview import ensemble_model_trio
-    except Exception:
-        return []
-    trio = ensemble_model_trio(provider, payload.get("provider_model"))
-    if not trio:
+    from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
+
+    named = parse_ensemble_models(payload.get("ensemble_models"))
+    if len(named) < ENSEMBLE_MIN_MODELS:
         return []
     # The CLI flag accepts the same CSV the engine YAML accepts.
-    csv = ",".join(trio)
+    csv = ",".join(named)
     # Per-tool default merge mirrors the launch.py argparse defaults
     # exactly so behaviour doesn't drift between CLI and serve users:
     #   proposal: tournament — one canonical plan.
@@ -485,26 +472,12 @@ def _provider_models_cache_clear() -> None:
     _provider_models_cache.clear()
 
 
-# Per-call rather than module-constant so reloading the schema (e.g.
-# a test that bumps the trio) picks up changes without reimporting
-# the routes module.
 def _vscode_extension_model_choices() -> list[dict[str, str]]:
-    """Render the picker's vscode_extension model list from the
-    canonical ensemble trio in ``core.interview``. Keeps the
-    single-model dropdown values in lock-step with what the `full`
-    ensemble profile would fan out across, so a user who pre-picks
-    one model and then enables ensemble doesn't get silently routed
-    through a different three."""
-    try:
-        from core.interview import ensemble_model_trio
-        trio = ensemble_model_trio("vscode_extension") or []
-    except Exception:
-        trio = []
-    return [
-        {"value": m, "label": m,
-         "description": "From the vscode_extension ensemble trio."}
-        for m in trio
-    ]
+    """The picker's vscode_extension model list: empty. It used to be three
+    models FI had chosen, which showed them as the options. Empty means the
+    model picked in the VSCode Chat picker is used, and a model id can be typed
+    to name another."""
+    return []
 
 
 async def _provider_models_cached(app: FastAPI, provider: str) -> JSONResponse:

@@ -730,6 +730,23 @@
       "tier": 1
     },
     {
+      "id": "ensemble_models",
+      "label": "Models for the ensemble",
+      "prompt": "Only when you picked a fan-out profile above: the models to fan out over, one id per model, comma separated (at least 2). FI does not choose them for you — which models are worth the cost, and which you have access to, is your call. Leave empty and no ensemble is configured.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "e.g. model-a, model-b, model-c",
+      "default": "",
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 1
+    },
+    {
       "id": "max_iterations",
       "label": "Design-revise iteration budget",
       "prompt": "Hard cap on the design → review → revise loop (and the cross_check redirects to design / literature). Lower = cheaper + faster; higher = more chances to fix issues review caught. 2 default — bump to 3-4 only when you specifically want extra revise passes.",
@@ -1055,48 +1072,7 @@
     "ideate_and_check": 2.0,
     "full": 2.5
   },
-  "ensemble_model_trios": {
-    "openai": [
-      "gpt-5",
-      "gpt-5-mini",
-      "o3-mini"
-    ],
-    "codex": [
-      "gpt-5",
-      "gpt-5-mini",
-      "gpt-4o"
-    ],
-    "claude_cli": [
-      "claude-opus-4-7",
-      "claude-sonnet-4-6",
-      "claude-haiku-4-5-20251001"
-    ],
-    "codex_cli": [
-      "gpt-5",
-      "gpt-5-mini",
-      "gpt-4o"
-    ],
-    "copilot_cli": [
-      "gpt-5",
-      "claude-opus-4-7",
-      "gemini-2.5-pro"
-    ],
-    "gemini_cli": [
-      "gemini-2.5-pro",
-      "gemini-2.5-flash",
-      "gemini-2.0-flash"
-    ],
-    "ollama": [
-      "llama3.3:70b",
-      "qwen2.5:32b",
-      "qwen2.5:7b"
-    ],
-    "vscode_extension": [
-      "gpt-5",
-      "claude-opus-4-7",
-      "gemini-2.5-pro"
-    ]
-  },
+  "ensemble_min_models": 2,
   "providers": [
     {
       "value": "openai",
@@ -1283,6 +1259,7 @@
     "clarify_mode",
     "comparative_baseline",
     "contact_email",
+    "ensemble_models",
     "ensemble_profile",
     "knowledge_enabled",
     "knowledge_external_top_k",
@@ -1347,6 +1324,11 @@
       "write"
     ],
     "ensemble_profile": [
+      "ideate",
+      "analyze",
+      "cross_check"
+    ],
+    "ensemble_models": [
       "ideate",
       "analyze",
       "cross_check"

@@ -113,23 +113,13 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                     ),
                 })
             schema["providers"] = providers
-            # Mirror the model list /api/tools/schema advertises so
-            # the existing populateProviderModel() in interview.html
-            # finds entries when the user picks vscode_extension.
-            # Source from the canonical ensemble trio so the picker
-            # and the `full` ensemble fan-out target the same three
-            # models — a single hardcoded list here used to drift
-            # from _ENSEMBLE_MODEL_TRIOS and silently switched models
-            # under the user when they opted into ensemble.
+            # No model list for vscode_extension. It used to be three models FI
+            # had picked (gpt-5, claude-opus-4-7, gemini-2.5-pro), which put
+            # them in front of the user as if they were the choices. Empty means
+            # the model picked in the VSCode Chat picker is used, and a model id
+            # can be typed to name another.
             provider_models = dict(schema.get("provider_models", {}))
-            if "vscode_extension" not in provider_models:
-                from core.interview import ensemble_model_trio
-                trio = ensemble_model_trio("vscode_extension") or []
-                provider_models["vscode_extension"] = [
-                    {"value": m, "label": m,
-                     "description": "From the vscode_extension ensemble trio."}
-                    for m in trio
-                ]
+            provider_models.setdefault("vscode_extension", [])
             schema["provider_models"] = provider_models
         return JSONResponse(schema)
 
@@ -308,6 +298,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             web_research=new_answers.web_research,
             supply_papers=new_answers.supply_papers,
             ensemble_profile=new_answers.ensemble_profile,
+            ensemble_models=new_answers.ensemble_models,
             max_iterations=new_answers.max_iterations,
             author=new_answers.author,
             affiliation=new_answers.affiliation,
@@ -428,6 +419,20 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
             f"'off' / 'cross_check_only' / 'ideate_and_check' / 'full'; "
             f"got {ensemble_profile!r}"
         )
+    ensemble_models = body.get("ensemble_models", "")
+    if not isinstance(ensemble_models, (str, list)):
+        raise TypeError(
+            f"ensemble_models must be a string or a list, got {type(ensemble_models).__name__}"
+        )
+    from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
+    named_models = parse_ensemble_models(ensemble_models)
+    if ensemble_profile != "off" and len(named_models) < ENSEMBLE_MIN_MODELS:
+        # FI does not pick models to make up the number.
+        raise ValueError(
+            f"ensemble_models: name at least {ENSEMBLE_MIN_MODELS} models to fan out over "
+            f"(you chose the {ensemble_profile!r} ensemble), or set the ensemble to 'off'. "
+            f"FI does not choose them for you."
+        )
     max_iterations = body.get("max_iterations", 2)
     try:
         max_iterations = int(max_iterations)
@@ -515,6 +520,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         web_research=web_research,
         supply_papers=supply_papers,
         ensemble_profile=ensemble_profile,
+        ensemble_models=", ".join(named_models),
         max_iterations=max_iterations,
         **author_line,
         poster_size=poster_size,

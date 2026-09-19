@@ -138,6 +138,7 @@ async def test_run_new_writes_the_tier1_ensemble_pick_and_author_line(
         "1",                         # provider
         "1",                         # provider_model
         "4",                         # ensemble_profile: full
+        "model-a, model-b, model-c",  # ensemble_models: the user's own pick
         "  Jane   Chen ",            # author
         "R&D Lab",                   # affiliation
         "",                          # contact_email (skipped)
@@ -158,8 +159,46 @@ async def test_run_new_writes_the_tier1_ensemble_pick_and_author_line(
     (draft,) = list((output_root / "_drafts").glob("*.yaml"))
     cfg = Config.model_validate(yaml.safe_load(draft.read_text(encoding="utf-8")))
     assert set(cfg.provider.node_ensemble) == {"cross_check", "ideate", "analyze"}
+    # Exactly the models the user typed, in their order; FI added none.
+    assert list(cfg.provider.node_ensemble["cross_check"].models) == [
+        "model-a", "model-b", "model-c",
+    ]
     assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "R&D Lab")
     assert (cfg.output.contact_email, cfg.output.url) == ("", "https://example.org/p")
+
+
+@pytest.mark.asyncio
+async def test_run_new_configures_no_ensemble_when_the_user_names_no_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Picking a fan-out profile but naming no models must not fall back to
+    models FI likes: the quest runs single-model and the draft says why."""
+    from launch import _run_new
+    from core.provider import ProxySupervisor
+
+    async def fake_preflight(**_kw: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
+    answers = iter([
+        "Ensemble without models probe", "", "", "", "1", "1",
+        "4",                         # ensemble_profile: full
+        "",                          # ensemble_models: none named
+    ])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers, ""))
+
+    output_root = tmp_path / "outputs"
+    rc = await _run_new(
+        output_root=output_root, draft_only=True, vscode_bridge_port=0,
+        interactive=False, supervisor=ProxySupervisor(),
+    )
+    assert rc == 0
+    (draft,) = list((output_root / "_drafts").glob("*.yaml"))
+    text = draft.read_text(encoding="utf-8")
+    cfg = Config.model_validate(yaml.safe_load(text))
+    assert not cfg.provider.node_ensemble
+    assert "no ensemble is configured" in text
+    assert "opus" not in text and "gemini" not in text
 
 
 @pytest.mark.asyncio

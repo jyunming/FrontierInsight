@@ -131,18 +131,35 @@ def test_vscode_emitter_leaves_an_unset_author_line_out(tmp_path: Path) -> None:
 def test_vscode_emitter_expands_the_ensemble_profile(tmp_path: Path) -> None:
     """The one that made something impossible: with no way to answer it,
     a VSCode user could not start an ensemble quest at all."""
-    yaml_text, cfg = _emit(tmp_path, ensemble_profile="full")
+    yaml_text, cfg = _emit(
+        tmp_path, ensemble_profile="full", ensemble_models="picked-a, picked-b, picked-c",
+    )
     assert "node_ensemble:" in yaml_text
     ensemble = cfg.provider.node_ensemble
     assert set(ensemble) == {"ideate", "analyze", "cross_check"}
-    # The trio for vscode_extension, mirrored from core/interview.py.
-    assert list(ensemble["cross_check"].models) == [
-        "gpt-5", "claude-opus-4-7", "gemini-2.5-pro",
-    ]
+    # The models are the ones the user ticked, in their order: FI picks none.
+    assert list(ensemble["cross_check"].models) == ["picked-a", "picked-b", "picked-c"]
+    assert ensemble["ideate"].moderator == "picked-a"
     # analyze MUST be tournament — the ProviderConfig validator rejects
     # synthesize there, so a wrong merge would fail Config construction.
     assert ensemble["analyze"].merge == "tournament"
     assert ensemble["cross_check"].merge == "vote"
+
+
+def test_vscode_emitter_configures_no_ensemble_when_the_user_named_too_few_models(
+    tmp_path: Path,
+) -> None:
+    """A profile without two models configures nothing, and says so, rather than
+    FI filling in models of its own choosing. Same as core/interview.py."""
+    for named in (None, "", "only-one"):
+        answers = {"ensemble_profile": "full"}
+        if named is not None:
+            answers["ensemble_models"] = named
+        yaml_text, cfg = _emit(tmp_path, **answers)
+        assert "node_ensemble:" not in yaml_text
+        assert "no ensemble is configured" in yaml_text
+        assert not cfg.provider.node_ensemble
+        assert "opus" not in yaml_text and "gemini" not in yaml_text
 
 
 def test_vscode_emitter_writes_no_ensemble_block_when_off(tmp_path: Path) -> None:
