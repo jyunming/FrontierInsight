@@ -339,6 +339,8 @@ PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
 ingested as real full text. You can also pre-load a folder of papers via
 `knowledge.local_papers` (a directory is scanned recursively).
 
+Example files for the experiment itself (a simulation setup, an input deck, a config — any type) go in `execution.inputs`, or into `<quest>/inputs/examples/` while the quest is paused; the design and the code are written from them and the experiment finds the folder in `FI_INPUT_DIR`.
+
 Open-access sources never trigger that pause. An arXiv / PMC / preprint
 paper that came back abstract-only means FI's *download* failed — the
 host is usually unreachable behind a proxy or firewall — not that the

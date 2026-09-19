@@ -220,6 +220,7 @@ engine:
 execution:
   sandbox: venv                     # venv (default) | docker
   timeout_s: 600
+  inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)
   system_site_packages: true        # only when shared_interpreter: false; venv sees FI's packages

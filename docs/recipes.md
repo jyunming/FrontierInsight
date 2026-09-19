@@ -263,6 +263,17 @@ python launch.py --approve-skill deepscientist-experiment --approve-as you   # r
 
 An external skill has no FI self-test, so your approval of its exact content is the only gate; edit it and the approval lapses. `--approve-all-skills` never approves them. If a name in `skills_required` cannot be used (not found, not approved), the quest stops before its first LLM call and tells you which and why.
 
+### Start the experiment from your own example files
+
+```yaml
+execution:
+  inputs: ["D:/hpc/example_run"]      # a folder or files: a setup, an input deck, a config, a script
+pauses:
+  supply: after_literature            # optional: read the literature first, add or edit files, then resume
+```
+
+The design and the code are written from what the files show, combined with the skills the quest selects, to make a new simulation rather than re-run yours. The experiment reads them from the folder in the `FI_INPUT_DIR` environment variable. Drop more files into `<quest>/inputs/examples/` while the quest is paused (or use the *Example files* control on the quest page) and `--resume`.
+
 ### Bootstrap a starter set of scientist skills
 
 FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of 69 scientist-workflow skills from 11 real upstream repositories — geoscience (obspy, landlab, lasio, simpeg, ...), bioinformatics and genomics, structural and control engineering, neuroscience, numerical methods and simulation, reliability engineering, Bayesian statistics, cheminformatics and materials science, causal inference, and template-driven chart/report generation — and imports them, reproducing on a fresh machine the same sourcing step done once by hand.

@@ -46,3 +46,6 @@ $timeout_s
 
 ## Skills available (library = importable code; tool = external software)
 $skills_block
+
+## Example files supplied by the user (empty when none)
+$inputs_block

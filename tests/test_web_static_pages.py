@@ -1026,6 +1026,23 @@ def test_generalized_upload_targets(tmp_path: Path) -> None:
     assert r2.json()["saved"] == ["d.json"]
     assert (output_root / qid / "data" / "d.json").is_file()
 
+    # examples → inputs/examples, any file type (a simulation setup is not a
+    # tabular data file), while data/papers keep refusing what they do not take.
+    r3 = client.post(
+        f"/api/quests/{qid}/upload", data={"target": "examples"},
+        files=[
+            ("files", ("setup.in", io.BytesIO(b"temperature 300\n"), "text/plain")),
+            ("files", ("run.yaml", io.BytesIO(b"solver: fast\n"), "text/yaml")),
+            ("files", ("mesh.bin", io.BytesIO(b"\x00\x01"), "application/octet-stream")),
+        ],
+    )
+    assert r3.status_code == 200
+    assert sorted(r3.json()["saved"]) == ["mesh.bin", "run.yaml", "setup.in"]
+    assert (output_root / qid / "inputs" / "examples" / "setup.in").read_text() == "temperature 300\n"
+    r4 = client.post(f"/api/quests/{qid}/upload", data={"target": "data"},
+                     files=[("files", ("setup.in", io.BytesIO(b"x"), "text/plain"))])
+    assert r4.json()["saved"] == [], "the data target still takes tabular files only"
+
     # Unknown target → 400.
     assert client.post(f"/api/quests/{qid}/upload", data={"target": "nope"},
                        files=[("files", ("x.csv", io.BytesIO(b"x"), "text/csv"))]).status_code == 400

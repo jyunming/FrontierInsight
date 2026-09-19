@@ -550,6 +550,7 @@ class Engine:
             # the ``paper_pdf_skipped.md`` diagnostic.
             self._preflight_paper_pdf()
             await self._preflight_required_skills()
+            await asyncio.to_thread(self._stage_example_inputs)
             await self.executor.setup(self.quest_root)
 
             endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
@@ -2679,6 +2680,7 @@ class Engine:
                 self._skills_summary_block(state)
                 or "(no skills selected for this quest)"
             ),
+            inputs_block=self._inputs_block(),
             study_mode_directive=(
                 _SURVEY_DESIGN_DIRECTIVE
                 if state.get("survey_mode_resolved")
@@ -2987,6 +2989,13 @@ class Engine:
             "Drop datasets (CSV / JSON / TSV / Parquet) into `inputs/data/` "
             "— the analyze node reasons over them.",
         ]
+        if stage in ("after_literature", "before_build"):
+            steps.append(
+                "Drop example files for the experiment (simulation settings, "
+                "input decks, configs, scripts, documents — any type) into "
+                "`inputs/examples/` — the design and the experiment code are "
+                "written from them, combined with the selected skills."
+            )
         if stage == "after_literature":
             steps.insert(
                 1, "The literature is saved: resuming continues with it and "
@@ -3935,6 +3944,7 @@ class Engine:
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
+                inputs_block=self._inputs_block(),
             )
         except KeyError:
             # Prompt not loaded (e.g. running a build that doesn't ship
@@ -3986,6 +3996,7 @@ class Engine:
                 outline_block=json.dumps(outline, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
+                inputs_block=self._inputs_block(),
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
@@ -4008,6 +4019,7 @@ class Engine:
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
+                inputs_block=self._inputs_block(),
             )
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
@@ -4093,6 +4105,11 @@ class Engine:
             }
         except Exception as exc:  # styling must never break execution
             self._log.warning("[execute] plot-style bootstrap skipped: %s", exc)
+
+        from core.example_inputs import ENV_VAR as _INPUT_ENV, examples_dir, list_inputs
+
+        if list_inputs(self.quest_root):
+            exec_env = {**(exec_env or os.environ), _INPUT_ENV: str(examples_dir(self.quest_root))}
 
         # Venv warmup: invoke the freshly-installed Python and import the
         # declared deps before the real experiment. This consumes the
@@ -7589,6 +7606,24 @@ class Engine:
         usable, rejected = await asyncio.to_thread(loadable_skills, required)
         _raise_if_required_skills_unusable(required, usable, rejected)
         self._log.info("[skills] required skills are usable: %s", ", ".join(required))
+
+    def _stage_example_inputs(self) -> None:
+        """Copy ``execution.inputs`` into the quest. A path that is missing or
+        far too large stops the quest here, before any LLM call."""
+        sources = list(self.config.execution.inputs or [])
+        if not sources:
+            return
+        from core.example_inputs import stage_inputs
+
+        stage_inputs(sources, self.quest_root, self._log)
+
+    def _inputs_block(self) -> str:
+        """What the design and code-writing prompts say about the user's example
+        files. Read from disk each time, so files dropped in during a pause
+        count."""
+        from core.example_inputs import render_block
+
+        return render_block(self.quest_root) or "(none supplied)"
 
     def _preflight_paper_pdf(self) -> None:
         """Verify the host can produce ``paper.pdf`` BEFORE the quest
