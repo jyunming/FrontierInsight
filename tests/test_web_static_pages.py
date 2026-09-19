@@ -98,6 +98,45 @@ def test_resume_happy_path_spawns_subprocess(
     assert "q3" in argv2
 
 
+def test_watch_needs_a_quest_that_is_waiting_on_a_job(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    quest_dir = output_root / "w1"
+    (quest_dir / ".fi").mkdir(parents=True)
+    res = client.post("/api/quests/w1/watch")
+    assert res.status_code == 400 and "config.yaml" in res.text.lower()
+    (quest_dir / "config.yaml").write_text("topic: x", encoding="utf-8")
+    res = client.post("/api/quests/w1/watch")
+    assert res.status_code == 400 and "pending.json" in res.text
+
+
+def test_watch_happy_path_spawns_launch_watch(
+    tmp_path: Path, mock_subprocess: list[list[str]],
+) -> None:
+    client = _client(tmp_path)
+    output_root = client.app.state.output_root  # type: ignore[attr-defined]
+    quest_dir = output_root / "w2"
+    (quest_dir / ".fi").mkdir(parents=True)
+    (quest_dir / ".fi" / "pending.json").write_text("{}", encoding="utf-8")
+    (quest_dir / "config.yaml").write_text("topic: x", encoding="utf-8")
+
+    res = client.post("/api/quests/w2/watch?every_s=120&max_hours=6")
+
+    assert res.status_code == 200, res.text
+    assert res.json()["watching"] is True
+    argv = mock_subprocess[0]
+    assert "--watch" in argv and "w2" in argv and "--config" in argv
+    assert argv[argv.index("--watch-every") + 1] == "120"
+    assert argv[argv.index("--watch-max-hours") + 1] == "6.0"
+    assert "--resume" not in argv, "--watch resumes the quest itself"
+
+
+def test_watch_rejects_path_traversal(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    for hostile in ("../somewhere", "a/b"):
+        assert client.post(f"/api/quests/{hostile}/watch").status_code in (400, 404, 422)
+
+
 def test_resume_rejects_path_traversal(tmp_path: Path) -> None:
     client = _client(tmp_path)
     for hostile in ("../somewhere", "a/b"):

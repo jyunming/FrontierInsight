@@ -894,6 +894,16 @@ class ExecutionConfig(BaseModel):
     # the folder in the FI_INPUT_DIR environment variable. A path that does not
     # exist stops the quest before its first LLM call.
     inputs: list[str] = Field(default_factory=list)
+    # The real simulation runs as a background job (HPC, a cluster, anything
+    # longer than timeout_s). experiment.py is then written as an idempotent
+    # driver rather than something that waits: the first run submits the job and
+    # prints a pending line, later runs check it and, once it is finished, collect
+    # the results. The quest pauses and exits cleanly while the job runs;
+    # `--resume` checks once, and `--watch <quest>` checks on a timer and resumes
+    # by itself. The selected skill supplies the simulator-specific part (how to
+    # submit, how to tell finished from failed, how to read the results). The
+    # contract is in core/job_watch.py.
+    background_jobs: bool = False
     # Run quest code with the interpreter that runs FI itself — no per-quest
     # venv. One Python for everything: a package installed once (pip install
     # -e ., or an earlier quest) is just there for the next quest, and nothing

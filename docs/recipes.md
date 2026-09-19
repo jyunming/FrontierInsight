@@ -263,6 +263,23 @@ python launch.py --approve-skill deepscientist-experiment --approve-as you   # r
 
 An external skill has no FI self-test, so your approval of its exact content is the only gate; edit it and the approval lapses. `--approve-all-skills` never approves them. If a name in `skills_required` cannot be used (not found, not approved), the quest stops before its first LLM call and tells you which and why.
 
+### Run a simulation that takes hours or days on HPC
+
+```yaml
+execution:
+  background_jobs: true
+  inputs: ["D:/hpc/example_run"]   # your setup and a job script to base the new run on
+engine:
+  skills_required: [my-simulator]  # the skill that knows how to submit, tell "done" and read results
+```
+
+```bash
+python launch.py --config quest.yaml            # designs and writes the driver, submits the job, pauses (exit 0)
+python launch.py --config quest.yaml --watch <quest_id>   # re-checks on a timer; resumes the quest when the job is done
+```
+
+`--watch` prints and logs every check (`[watch] 14:02:11 check 7: pending - running`). Ctrl-C only stops watching: the quest stays paused, and `--resume <quest_id>` (or a new `--watch`) picks the same job up without submitting it again. On the web quest page use *Watch automatically*; in VSCode `@fi /watch`.
+
 ### Start the experiment from your own example files
 
 ```yaml

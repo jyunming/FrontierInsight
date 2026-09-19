@@ -100,3 +100,5 @@ $skills_block
 
 ## Example files supplied by the user (empty when none)
 $inputs_block
+
+$job_block

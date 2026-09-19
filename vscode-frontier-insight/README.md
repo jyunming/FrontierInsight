@@ -262,6 +262,15 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
+A quest waiting on a background job (HPC / cluster, `execution.background_jobs`) pauses cleanly and can be woken automatically:
+
+```
+@fi /watch
+@fi /watch 1778650105-mammal-evolution-69ef80
+```
+
+It re-runs the quest's experiment script on a timer, shows every check in the chat, and resumes the quest when the job is done (`launch.py --watch`).
+
 A resume regenerates only the outputs actually missing on disk — a `paper.pdf` /
 slides / poster / talk that already rendered is left untouched — so re-running to
 finish an interrupted quest never re-invokes the LLM for work that's already done.

@@ -1455,7 +1455,7 @@ def test_no_sim_directive_renders_into_design_prompt() -> None:
     kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
               review_feedback="r", timeout_s="60", clarify_block="c",
               skills_block="(no simulation skills enabled)",
-              inputs_block="(none supplied)")
+              inputs_block="(none supplied)", job_block="")
     on = tmpl.substitute(study_mode_directive=_NO_SIM_DESIGN_DIRECTIVE, **kw)
     off = tmpl.substitute(study_mode_directive="", **kw)
     assert "NO-SIMULATION" in on

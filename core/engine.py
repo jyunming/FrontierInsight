@@ -2681,6 +2681,7 @@ class Engine:
                 or "(no skills selected for this quest)"
             ),
             inputs_block=self._inputs_block(),
+            job_block=self._job_block(),
             study_mode_directive=(
                 _SURVEY_DESIGN_DIRECTIVE
                 if state.get("survey_mode_resolved")
@@ -3945,6 +3946,7 @@ class Engine:
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
+                job_block=self._job_block(),
             )
         except KeyError:
             # Prompt not loaded (e.g. running a build that doesn't ship
@@ -3997,6 +3999,7 @@ class Engine:
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
+                job_block=self._job_block(),
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
@@ -4020,6 +4023,7 @@ class Engine:
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
+                job_block=self._job_block(),
             )
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
@@ -4166,7 +4170,8 @@ class Engine:
         # this needs no separate code path in the experiment itself. The
         # pilot's numbers are DISCARDED -- it is a smoke test of the design,
         # not a measurement.
-        if self.config.engine.pilot_run:
+        # No pilot for a background job: the script would submit it.
+        if self.config.engine.pilot_run and not self.config.execution.background_jobs:
             pilot_timeout = max(
                 30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)
             )
@@ -4269,6 +4274,18 @@ class Engine:
             result.returncode, result.duration_s, len(figures), bool(result_json),
         )
 
+        # A background job (HPC, a cluster): the script submitted it, or checked
+        # it, and says the job has not finished. That is not a failure and there
+        # is nothing to repair. The quest pauses, exits cleanly, and a resume (or
+        # `--watch`) runs this node again, which runs the same idempotent script.
+        from core import job_watch
+
+        job = job_watch.job_of(result_json)
+        if job is not None and job["status"] == job_watch.PENDING and result.returncode == 0:
+            self._wait_for_job(job, code_path)
+        elif job_watch.clear_pending(self.fi_dir):
+            self._log.info("[execute] the background job has finished; using its results")
+
         # Multi-seed replication. Only fires when (a) the primary run
         # succeeded — we don't want to spend N×cost re-running a script
         # that's already broken — and (b) ``execute_replicates > 1``.
@@ -4278,7 +4295,11 @@ class Engine:
         # rest — better to have N-1 good replicates than zero. The
         # primary ``result_json`` carries seed 0 so downstream
         # single-seed code paths are unchanged.
-        replicates_n = max(1, int(self.config.engine.execute_replicates))
+        # Replicates would submit the job again, once per seed.
+        replicates_n = (
+            1 if self.config.execution.background_jobs
+            else max(1, int(self.config.engine.execute_replicates))
+        )
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
         replicates_ran = False
@@ -7617,6 +7638,70 @@ class Engine:
 
         stage_inputs(sources, self.quest_root, self._log)
 
+    def _job_block(self) -> str:
+        """The background-job contract for the design and code-writing prompts,
+        or nothing when ``execution.background_jobs`` is off."""
+        return _JOB_PROTOCOL if self.config.execution.background_jobs else ""
+
+    def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
+        """The experiment reported its job as pending. Record what is being
+        waited for and pause; a resume runs the experiment node again, which
+        re-runs the (idempotent) script. Never returns: ``interrupt()`` raises."""
+        from core import job_watch
+
+        info = job_watch.write_pending(
+            self.fi_dir, job, code_path.relative_to(self.quest_root).as_posix(),
+        )
+        detail = job_watch.describe(info)
+        self._log.info("[execute] the job is pending (%s)", detail)
+        self._pause_for_human(
+            kind="results",
+            interaction="supply",
+            headline="waiting for the background job",
+            steps=[
+                f"The experiment submitted a background job and is waiting for it ({detail}).",
+                "Nothing to do while it runs; FI stops here and keeps everything so far.",
+                f"To be woken automatically: `fi --watch {self.quest_id} --config <the quest's yaml>` "
+                "(or `@fi /watch`, or the Watch button on the quest page). Every check is printed "
+                "and written to run.log.",
+                f"Or check once yourself when it should be done: `fi --resume {self.quest_id}`. "
+                "That re-runs `code/experiment.py`, which reports the job pending again or "
+                "collects its results.",
+            ],
+            payload={"job_pending": True, "quest_id": self.quest_id, "job": job},
+            upload_targets=[],
+        )
+
+    async def poll_job(self) -> tuple[str, dict[str, Any]]:
+        """Run the experiment script once, as a resume would, and say whether the
+        job it submitted is still pending: ``("pending" | "done" | "failed", info)``.
+        No LLM call; this is what ``--watch`` does on a timer."""
+        from core import job_watch
+        from core.example_inputs import ENV_VAR, examples_dir, list_inputs
+
+        await self.executor.setup(self.quest_root)
+        py = self.executor.python_path(self.quest_root)
+        code_path = self.quest_root / "code" / "experiment.py"
+        env = (
+            {**os.environ, ENV_VAR: str(examples_dir(self.quest_root))}
+            if list_inputs(self.quest_root) else None
+        )
+        result = await self.executor.execute(
+            [str(py), str(code_path)], cwd=self.quest_root,
+            timeout_s=self.config.execution.timeout_s, env=env,
+        )
+        result_json = _extract_result_json(result.stdout)
+        job = job_watch.job_of(result_json)
+        if job is not None and job["status"] == job_watch.PENDING and result.returncode == 0:
+            return job_watch.PENDING, job_watch.write_pending(
+                self.fi_dir, job, code_path.relative_to(self.quest_root).as_posix(),
+            )
+        if result.returncode == 0 and result_json is not None:
+            return job_watch.DONE, {"note": "the results are ready"}
+        return job_watch.FAILED, {
+            "note": f"the script exited {result.returncode}: {(result.stderr or '')[-200:].strip()}",
+        }
+
     def _inputs_block(self) -> str:
         """What the design and code-writing prompts say about the user's example
         files. Read from disk each time, so files dropped in during a pause
@@ -8529,6 +8614,20 @@ _QUOTE_MIN_CHARS = 25
 # arrived as content; three Sonnet quests ended rc=0 with a review "accept" on
 # exactly that.
 _MIN_PAPER_CHARS = 300
+
+# What the design and code-writing prompts say when execution.background_jobs is
+# on. The contract itself, and how FI acts on it, is core/job_watch.py.
+_JOB_PROTOCOL = """\
+## The experiment is a background job (execution.background_jobs is on)
+
+The real simulation runs on a cluster or takes longer than the wall-time limit, so `experiment.py` must NOT wait for it. Write it as an idempotent driver that FI runs again and again, following the selected skill and the user's example files for how to submit, how to tell that the job finished, failed or is still running, and how to read its results:
+1. Keep the job's state in `job/state.json` (relative to the working directory) so every run finds what the last one did.
+2. First run: prepare the inputs, submit the job, save its id in `job/state.json`, print exactly one line `RESULT_JSON: {"fi_job": {"status": "pending", "id": "<job id>", "note": "<short state, e.g. queued>", "poll_s": <seconds worth waiting before the next check>}}` and exit 0.
+3. Every later run: read `job/state.json` and check the job. Still running: print the same pending line with an updated `note` and exit 0. Never submit a second job.
+4. Job finished: read its outputs, draw the figures into `figures/` as usual, and print the real `RESULT_JSON: {...}` (no `fi_job` key) in the format this prompt asks for results.
+5. Job failed: print the reason on stderr and exit non-zero.
+Never sleep-wait for the job. Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate run is made for a background job.
+"""
 
 
 def _is_not_a_paper(text: str) -> bool:
