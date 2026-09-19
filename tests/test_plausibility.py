@@ -215,6 +215,69 @@ def test_the_upper_bound_counts_too() -> None:
     assert [(x.kind, x.value) for x in v] == [("at_bound", 1.0)]
 
 
+# A real quest's design declared a residual in [0, 1e-06]; the script solved the
+# final-size equation and got exactly 0.0 at six settings. That is a perfect solve.
+_TOLERANCE = _design({"path": "final_size_relation_residual", "min": 0, "max": 1e-06})
+
+
+def _residuals(**values: float) -> dict:
+    return {"by_R0": {n: {"final_size_relation_residual": v} for n, v in values.items()}}
+
+
+def test_zeros_on_a_tolerance_range_are_the_best_answer_not_a_trivial_one() -> None:
+    assert pl.check_design(_residuals(a=0.0, b=0.0, c=0.0, d=0.0, e=0.0, f=0.0), _TOLERANCE) == []
+
+
+def test_a_tolerance_range_still_catches_a_value_outside_it() -> None:
+    v = pl.check_design(_residuals(a=0.0, b=0.0, c=0.02), _TOLERANCE)
+    assert [(x.kind, x.value) for x in v] == [("out_of_range", 0.02)]
+
+
+def test_the_same_zeros_on_a_unit_range_are_still_flagged() -> None:
+    """The control: the tolerance rule is about the range's scale, not about zero."""
+    v = pl.check_design(_sweep(a=0.0, b=0.0, c=0.5), _UNIT)
+    assert [x.kind for x in v] == ["at_bound"]
+    wide = _design({"path": "final_size", "min": 0, "max": 0.01})
+    assert [x.kind for x in pl.check_design(_sweep(a=0.0, b=0.0, c=0.005), wide)] == ["at_bound"]
+
+
+# A real quest's design declared the branching-process probability in [0, 2/3]
+# (max(0, 1 - 1/R0) over R0 in {0.9, 1.5, 3}). The result reached 2/3 at R0 = 3 for
+# three population sizes, as designed. The script had copied the bound in as an assert.
+_BRANCHING = _design({"path": "branching_process_major_probability", "min": 0, "max": 0.6666666667})
+_STRATA = {"strata": [
+    {"R0": r0, "N": n, "branching_process_major_probability": max(0.0, 1 - 1 / r0)}
+    for r0 in (0.9, 1.5, 3.0) for n in (100, 1000, 5000)
+]}
+_STRATA["strata"][6:9] = [
+    {**s, "branching_process_major_probability": 0.6666666667} for s in _STRATA["strata"][6:9]
+]
+_CHECKED = "def run():\n    branching = 1 - 1 / 3.0\n    assert 0.0 <= branching <= 0.6666666667\n"
+_CAPPED = "def run():\n    return min(1 - 1 / 3.0, 0.6666666667)\n"
+
+
+def test_a_bound_the_script_only_asserts_is_still_a_bound_the_design_derived() -> None:
+    """The implement step copies the declared bounds into the script as asserts. That
+    made the derived maximum 'a number the code writes down', and reaching it in three
+    settings was sent back for repair."""
+    assert pl.check_design(_STRATA, _BRANCHING, code=_CHECKED) == []
+    assert pl.check_design(_STRATA, _BRANCHING) == []
+
+
+def test_a_bound_the_script_uses_as_a_value_is_still_a_number_it_writes_down() -> None:
+    """The control: the same number as a cap the code applies is one it can return
+    without computing anything, so it is still reported."""
+    v = pl.check_design(_STRATA, _BRANCHING, code=_CAPPED)
+    assert v and {x.kind for x in v} <= {"at_bound", "clamped"}
+
+
+def test_numeric_literals_skip_a_number_that_only_an_assert_names() -> None:
+    assert 0.6666666667 not in pl.numeric_literals(_CHECKED)
+    assert 0.6666666667 in pl.numeric_literals(_CAPPED)
+    both = "cap = 0.6666666667\nassert x <= 0.6666666667\n"
+    assert 0.6666666667 in pl.numeric_literals(both)
+
+
 def test_settings_on_different_bounds_do_not_add_up() -> None:
     """One 0 and one 1 are two ordinary values, not a quantity stuck on a bound."""
     assert pl.check_design(_sweep(a=0.0, b=1.0), _UNIT) == []
