@@ -212,6 +212,7 @@ def _engine(quest_id: str = "q1"):
     logs: list = []
     return SimpleNamespace(
         quest_id=quest_id,
+        _skill_dirs=None,
         _log=SimpleNamespace(
             info=lambda *a, **k: logs.append(("info", a)),
             warning=lambda *a, **k: logs.append(("warn", a)),

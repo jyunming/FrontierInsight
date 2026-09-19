@@ -521,6 +521,7 @@ def test_select_skills_keeps_the_event_loop_responsive(
     )
     eng = SimpleNamespace(
         config=SimpleNamespace(engine=SimpleNamespace(skills=[], skills_exclude=[])),
+        _skill_dirs=None,
         _log=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
     )
 

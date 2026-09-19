@@ -30,9 +30,12 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.skills.base import PROVENANCE_JSON
+
+if TYPE_CHECKING:
+    from core.skills.registry import ExternalSkillDirs
 
 _log = logging.getLogger("fi.skills.usage")
 
@@ -187,19 +190,24 @@ def record_quest(
     outcome: str,
     *,
     skills_dir: Path | None = None,
+    external_dirs: ExternalSkillDirs | None = None,
 ) -> list[str]:
     """Record a finished quest against every skill it used.
 
     Returns the names actually written. Never raises: a quest that produced an
     accepted paper has already succeeded, and losing its bookkeeping is a far
     smaller harm than turning that success into an error.
+
+    ``external_dirs`` is the quest's own setting of where other agents' skills
+    are looked for, so a skill it took from there is found (and left alone)
+    rather than reported as vanished.
     """
     if not skill_names:
         return []
     try:
         from core.skills.registry import discover
 
-        found = {s.name: s for s in discover(skills_dir)}
+        found = {s.name: s for s in discover(skills_dir, external_dirs=external_dirs)}
     except Exception as e:  # noqa: BLE001
         _log.warning("skills unavailable; usage not recorded: %s", e)
         return []

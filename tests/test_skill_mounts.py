@@ -380,19 +380,29 @@ def test_a_mount_that_stopped_being_safe_after_planning_is_left_out(env, tmp_pat
 # --- the engine: which skills, and the paths the prompt carries -------------
 
 
-def _engine(tmp_path: Path, sandbox: str, *, replicates: int = 1, pilot: bool = False) -> Engine:
+def _engine(
+    tmp_path: Path, sandbox: str, *, replicates: int = 1, pilot: bool = False,
+    skills_dirs: list[Path] | None = None, resume_quest_id: str | None = None,
+) -> Engine:
+    """``skills_dirs`` are the folders of other agents' skills this quest names
+    itself (``engine.skills_dirs``); naming any also turns the search of the usual
+    places off, so nothing of the developer's machine is read."""
     cfg = Config(
         topic="skill mounts", title="skill-mounts",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=1, review_loop=False, execute_replicates=replicates,
             pilot_run=pilot,
+            **(
+                {"skills_dirs": [str(d) for d in skills_dirs], "skills_scan_known_dirs": False}
+                if skills_dirs is not None else {}
+            ),
         ),
         execution=ExecutionConfig(sandbox=sandbox, timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
     )
-    eng = Engine(cfg)
+    eng = Engine(cfg, resume_quest_id=resume_quest_id)
     for sub in ("code", "figures"):
         (eng.quest_root / sub).mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code" / "experiment.py").write_text("print('hi')", encoding="utf-8")
@@ -536,3 +546,76 @@ async def test_a_watch_mounts_the_skills_the_quest_mounted(env, tmp_path) -> Non
 
     volumes = _volumes(client)
     assert volumes[str(folder.resolve())] == {"bind": "/fi-skills/ext-one", "mode": "ro"}
+
+
+# --- each quest looks only in the folders it named ---------------------------
+#
+# Which folders hold other agents' skills is one quest's own setting
+# (Engine._skill_dirs), not the process's. FI_EXTERNAL_SKILLS_DIRS outranks it and
+# the suite sets it, so these tests remove it; the mount must find, and re-find on
+# a --watch, exactly the skill its own quest named the folder of.
+
+
+@pytest.fixture()
+def named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    monkeypatch.delenv("FI_EXTERNAL_SKILLS_DIRS", raising=False)
+    own = tmp_path / "fi_skills"
+    own.mkdir()
+    monkeypatch.setenv("FI_SKILLS_DIR", str(own))
+    monkeypatch.setenv("FI_SKILLS_APPROVALS", str(tmp_path / "approvals.json"))
+    theirs = tmp_path / "agent_a" / "skills"
+    other = tmp_path / "agent_b" / "skills"
+    theirs.mkdir(parents=True)
+    other.mkdir(parents=True)
+    skill = Skill(name="ext-one", path=_skill(theirs, "ext-one"), source="external")
+    approval.approve(skill.ledger_name, skill.content_hash(), approved_by="me", note="t")
+    return {"named": theirs, "other": other, "skill": skill.path}
+
+
+def test_the_mount_finds_a_skill_in_the_folder_its_own_quest_named(named, tmp_path) -> None:
+    quest = _engine(tmp_path, "docker", skills_dirs=[named["named"]])
+    # built after it, naming another folder: it must not decide for the first
+    _engine(tmp_path / "second", "docker", skills_dirs=[named["other"]])
+
+    quest._mount_selected_skills(_state("ext-one"))
+    block = quest._skills_block(_state("ext-one"))
+
+    assert [m.name for m in quest.executor.skill_mounts] == ["ext-one"]
+    assert quest.executor.skill_mounts[0].host == named["skill"].resolve()
+    assert "at paths relative to `/fi-skills/ext-one`" in block
+
+
+def test_the_mount_never_reaches_into_a_folder_its_quest_did_not_name(named, tmp_path) -> None:
+    other = _engine(tmp_path, "docker", skills_dirs=[named["other"]])
+    _engine(tmp_path / "second", "docker", skills_dirs=[named["named"]])
+
+    other._mount_selected_skills(_state("ext-one"))
+
+    assert other.executor.skill_mounts == ()
+    assert "/fi-skills" not in other._skills_block(_state("ext-one"))
+
+
+@pytest.mark.asyncio
+async def test_a_watch_looks_in_its_own_engines_folders(named, tmp_path) -> None:
+    first = _engine(tmp_path, "docker", skills_dirs=[named["named"]])
+    first.executor._client = _client()
+    await first._node_execute(_state("ext-one"))
+    assert [m.name for m in first.executor.skill_mounts] == ["ext-one"]
+
+    async def watch(folders: list[Path]) -> MagicMock:
+        watcher = _engine(
+            tmp_path, "docker", skills_dirs=folders, resume_quest_id=first.quest_id,
+        )
+        client = _client()
+        watcher.executor._client = client
+        watcher.executor.setup = AsyncMock()  # type: ignore[method-assign]
+        await watcher.poll_job()
+        return client
+
+    same = await watch([named["named"]])
+    elsewhere = await watch([named["other"]])
+
+    assert _volumes(same)[str(named["skill"].resolve())] == {
+        "bind": "/fi-skills/ext-one", "mode": "ro",
+    }
+    assert list(_volumes(elsewhere)) == [str(first.quest_root)], "not named by this engine"
