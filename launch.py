@@ -4270,7 +4270,7 @@ def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
     if as_json:
         print(_json.dumps({
             "skills": [
-                evaluate(s, run_test=run_tests).to_dict() for s in skills
+                evaluate(s, run_test=run_tests, defer_scan=True).to_dict() for s in skills
             ],
             "selftests_run": run_tests,
         }, indent=1))
@@ -4287,7 +4287,7 @@ def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
     print(f"{'SKILL':<{w}}{'STATUS':<13}{'MATURITY':<10}WHY")
     print("-" * (w + 72))
     for skill in skills:
-        st = evaluate(skill, run_test=run_tests)
+        st = evaluate(skill, run_test=run_tests, defer_scan=True)
         mark = "*" if st.loadable else " "
         print(f"{mark}{skill.name:<{w - 1}}{st.status.value:<13}"
               f"{skill.maturity.value:<10}{st.reason}")

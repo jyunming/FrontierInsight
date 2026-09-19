@@ -165,24 +165,177 @@ def test_recording_a_quest_never_writes_into_an_external_skill(env) -> None:
     assert not (skill_dir / "provenance.json").exists()
 
 
-def test_configured_folders_are_added_to_the_known_ones(monkeypatch, tmp_path) -> None:
+def _mk(root: Path, *parts: str, skill: str = "s") -> Path:
+    """<root>/<parts...>/<skill>/SKILL.md, returning the skills folder."""
+    folder = root.joinpath(*parts)
+    (folder / skill).mkdir(parents=True)
+    (folder / skill / "SKILL.md").write_text(f"---\nname: {skill}\n---\nx\n", encoding="utf-8")
+    return folder
+
+
+@pytest.fixture()
+def machine(tmp_path: Path, monkeypatch) -> dict[str, Path]:
+    """A fake home directory and project, with the per-OS variables pointed into
+    it: the common locations are searched, not named."""
+    from core.skills import registry
+
+    home = tmp_path / "home"
+    project = tmp_path / "work" / "proj" / "sub"
+    home.mkdir()
+    project.mkdir(parents=True)
     monkeypatch.delenv("FI_EXTERNAL_SKILLS_DIRS", raising=False)
     monkeypatch.setenv("FI_SKILLS_DIR", str(tmp_path / "own"))
-    mine = tmp_path / "mine"
-    mine.mkdir()
-    fake_home = tmp_path / "home"
-    (fake_home / ".codex" / "skills").mkdir(parents=True)
-    monkeypatch.setattr(Path, "expanduser", lambda self: (
-        fake_home / str(self)[2:] if str(self).startswith("~") else self
-    ))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA",
+                "CODEX_HOME", "CLAUDE_CONFIG_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(project)
+    registry._common_cache = None
+    yield {"home": home, "project": project}
+    registry._common_cache = None
+    configure_external_dirs([], scan_known=True)
+
+
+def _names(dirs: list[Path], root: Path) -> set[str]:
+    return {d.relative_to(root).as_posix() for d in dirs}
+
+
+def test_common_locations_are_searched_with_nothing_named(machine) -> None:
+    """Linux, macOS and Windows locations, the tools' plugin trees, unknown
+    tools, and the project, all found without a path being given."""
+    home, project = machine["home"], machine["project"]
+    _mk(home, ".codex", "skills")                                  # a known tool
+    _mk(home, ".claude", "skills")
+    _mk(home, ".someothertool", "skills")                          # a tool nobody listed
+    _mk(home, ".claude", "plugins", "cache", "mkt", "plug", "abc123", "skills")   # a plugin
+    _mk(home, ".config", "linuxtool", "skills")                    # XDG default
+    _mk(home, ".local", "share", "sharetool", "skills")
+    _mk(home, "Library", "Application Support", "mactool", "skills")  # macOS
+    _mk(home, "AppData", "Roaming", "wintool", "skills")           # Windows
+    _mk(home, "AppData", "Local", "winlocal", "skills")
+    _mk(project.parent, ".agents", "skills")                       # project-level, in a parent
+    _mk(project, "skills")                                         # ./skills
+    # noise that must not count
+    (home / ".emptytool" / "skills" / "not-a-skill").mkdir(parents=True)
+    _mk(home, ".claude", "plugins", "node_modules", "deep", "skills")
+    import os
+    os.environ["APPDATA"] = str(home / "AppData" / "Roaming")
+    os.environ["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+    from core.skills import registry
+    registry._common_cache = None
+
     try:
-        configure_external_dirs([str(mine)], scan_known=True)
-        dirs = external_skill_dirs()
-        assert mine in dirs and fake_home / ".codex" / "skills" in dirs
-        configure_external_dirs([str(mine)], scan_known=False)
-        assert external_skill_dirs() == [mine]
+        found = _names(external_skill_dirs(), machine["home"].parent)
     finally:
-        configure_external_dirs([], scan_known=True)
+        os.environ.pop("APPDATA"); os.environ.pop("LOCALAPPDATA")
+
+    expected = {
+        "home/.codex/skills", "home/.claude/skills", "home/.someothertool/skills",
+        "home/.claude/plugins/cache/mkt/plug/abc123/skills", "home/.config/linuxtool/skills",
+        "home/.local/share/sharetool/skills", "home/Library/Application Support/mactool/skills",
+        "home/AppData/Roaming/wintool/skills", "home/AppData/Local/winlocal/skills",
+        "work/proj/.agents/skills", "work/proj/sub/skills",
+    }
+    assert expected <= found, sorted(expected - found)
+    assert not any("emptytool" in f or "node_modules" in f for f in found)
+
+
+def test_the_tools_own_variables_are_followed(machine, monkeypatch) -> None:
+    other = machine["home"].parent / "elsewhere"
+    _mk(other, "codex_home", "skills")
+    _mk(other, "claude_cfg", "skills")
+    monkeypatch.setenv("CODEX_HOME", str(other / "codex_home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other / "claude_cfg"))
+    found = _names(external_skill_dirs(), other)
+    assert {"codex_home/skills", "claude_cfg/skills"} <= found
+
+
+def test_the_newest_plugin_version_wins_a_name_clash(machine) -> None:
+    import os
+    home = machine["home"]
+    # The newer version is created FIRST and sorts LAST by name, so neither
+    # creation order nor alphabetical order can make this pass by accident.
+    new = _mk(home, ".claude", "plugins", "cache", "m", "p", "zzz999", "skills", skill="same")
+    old = _mk(home, ".claude", "plugins", "cache", "m", "p", "aaa111", "skills", skill="same")
+    (new / "same" / "SKILL.md").write_text("newer", encoding="utf-8")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    os.utime(new, (1_900_000_000, 1_900_000_000))
+    from core.skills import registry
+    registry._common_cache = None
+
+    (skill,) = [s for s in discover() if s.name == "same"]
+
+    assert skill.path == new / "same"
+
+
+def test_configured_folders_come_first_and_the_search_can_be_turned_off(machine) -> None:
+    home = machine["home"]
+    _mk(home, ".codex", "skills")
+    mine = _mk(machine["home"].parent, "mine")
+    configure_external_dirs([str(mine)], scan_known=True)
+    dirs = external_skill_dirs()
+    assert dirs[0] == mine and home / ".codex" / "skills" in dirs
+    configure_external_dirs([str(mine)], scan_known=False)
+    assert external_skill_dirs() == [mine]
+
+
+def test_the_environment_override_still_replaces_everything(machine, monkeypatch) -> None:
+    _mk(machine["home"], ".codex", "skills")
+    monkeypatch.setenv("FI_EXTERNAL_SKILLS_DIRS", "")
+    assert external_skill_dirs() == []
+
+
+def test_an_unapproved_external_skill_is_not_hashed_or_scanned_in_bulk(env, monkeypatch) -> None:
+    """Other agents' folders hold hundreds of skills, some of hundreds of files;
+    reading all of them for every quest cost 25 seconds."""
+    from core.skills import registry
+
+    _skill(env["ext"], "ext-unasked", script=True)
+    _skill(env["ext"], "ext-approved", script=True)
+    approved = next(s for s in discover() if s.name == "ext-approved")
+    approval.approve(approved.ledger_name, approved.content_hash(), approved_by="me", note="t")
+    scanned: list[str] = []
+    monkeypatch.setattr(registry, "_scan_findings", lambda s: (scanned.append(s.name) or [], True))
+
+    usable, rejected = loadable_skills(["ext-unasked", "ext-approved"], use_cache=False)
+
+    assert [s.skill.name for s in usable] == ["ext-approved"]
+    assert [s.skill.name for s in rejected] == ["ext-unasked"]
+    assert scanned == ["ext-approved"], "only the skill somebody approved is read"
+    assert "awaiting approval" in rejected[0].reason and "--scan-skill" in rejected[0].reason
+
+
+@pytest.mark.asyncio
+async def test_the_run_log_says_once_that_other_agents_skills_were_found(
+    env, tmp_path, monkeypatch,
+) -> None:
+    from core.config import (
+        Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
+        ProviderConfig,
+    )
+    from core.engine import Engine
+    from tests.test_engine_smoke import _fake_response_for
+
+    for n in range(6):
+        _skill(env["ext"], f"ext-{n}")
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(Config(
+        topic="skills log probe", title="skills-log",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    ))
+    await engine.run()
+
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "found 6 skill(s) in 1 folder(s) of other agents" in log
+    assert "note: 'ext-" not in log, "six unasked-for skills must not be six warnings"
 
 
 # --- engine.skills_required -------------------------------------------------

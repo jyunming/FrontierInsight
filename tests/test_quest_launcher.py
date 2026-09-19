@@ -300,3 +300,60 @@ def test_status_for_known_quest_returns_metadata(launcher: QuestLauncher, tmp_pa
 
 def test_status_for_unknown_quest_returns_none(launcher: QuestLauncher) -> None:
     assert launcher.status_for("never-launched") is None
+
+
+# ---------------------------------------------------------------------------
+# FI is not always run from its own folder
+# ---------------------------------------------------------------------------
+
+
+def test_quests_are_spawned_from_the_folder_the_server_runs_in_not_from_fi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative output_dir or execution.inputs in a quest's YAML means the
+    folder the user works in. FI's checkout only supplies launch.py."""
+    fi = tmp_path / "FrontierInsight"
+    project = tmp_path / "my_project"
+    fi.mkdir()
+    project.mkdir()
+    seen: list[dict[str, Any]] = []
+
+    def fake_popen(argv, **kwargs):
+        seen.append({"argv": argv, "cwd": kwargs.get("cwd")})
+        return _FakePopen()
+
+    monkeypatch.setattr("web.quest_launcher.subprocess.Popen", fake_popen)
+    launcher = QuestLauncher(
+        repo_root=fi, output_root=project / "outputs", work_dir=project, python_path="python",
+    )
+    yaml = project / "q.yaml"
+    yaml.write_text("topic: x", encoding="utf-8")
+
+    launcher.launch(quest_id="q1", yaml_path=yaml)
+    launcher.launch_command(argv_tail=["--config", str(yaml), "--resume", "q1"], job_id="j1")
+
+    for spawn in seen:
+        assert spawn["cwd"] == str(project.resolve())
+        assert str(fi.resolve() / "launch.py") in spawn["argv"]
+
+
+def test_a_quest_is_told_to_write_where_the_server_looks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argvs: list[list[str]] = []
+    monkeypatch.setattr(
+        "web.quest_launcher.subprocess.Popen",
+        lambda argv, **kw: argvs.append(argv) or _FakePopen(),
+    )
+    out = tmp_path / "elsewhere" / "outputs"
+    launcher = QuestLauncher(repo_root=tmp_path, output_root=out, python_path="python")
+    yaml = tmp_path / "q.yaml"
+    yaml.write_text("topic: x", encoding="utf-8")
+
+    launcher.launch(quest_id="q1", yaml_path=yaml)
+    launcher.launch_command(argv_tail=["--config", str(yaml), "--watch", "q1"], job_id="j1")
+    launcher.launch_command(argv_tail=["--digest"], job_id="j2")
+
+    assert argvs[0][argvs[0].index("--output") + 1] == str(out.resolve())
+    assert argvs[1][argvs[1].index("--output") + 1] == str(out.resolve())
+    assert "--output" not in argvs[2], "a tool job without a config is left alone"

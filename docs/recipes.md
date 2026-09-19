@@ -252,7 +252,7 @@ Skills that other agents installed (Codex, Claude Code, ...) are read where they
 
 ```yaml
 engine:
-  skills_dirs: ["D:/my-agent-skills"]   # in addition to ~/.codex/skills, ~/.claude/skills, ~/.agents/skills
+  skills_dirs: ["D:/my-agent-skills"]   # only for a folder FI would not look in itself: it searches the usual places by itself
   skills_required: [deepscientist-experiment]   # use these whatever selection says (folder names)
 ```
 

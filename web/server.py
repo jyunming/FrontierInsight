@@ -680,6 +680,10 @@ def make_app(
         vscode_bridge_port=vscode_bridge_port,
         vscode_bridge_socket=vscode_bridge_socket,
         output_root=output_root,
+        # Quests are spawned from the folder the server was started in, so a
+        # relative output_dir in their YAML means the same place as the
+        # --output-root this server watches.
+        work_dir=Path.cwd(),
     )
 
     static_dir = Path(__file__).resolve().parent / "static"

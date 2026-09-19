@@ -829,11 +829,15 @@ class EngineConfig(BaseModel):
     skills_required: list[str] = Field(default_factory=list)
     # Extra folders of skills installed by other agents, read IN PLACE (nothing
     # is copied or converted), searchable and selectable like FI's own. Each is
-    # a folder whose sub-folders hold a SKILL.md. Added to the well-known ones
-    # below. An external skill has no FI self-test, so it is loadable only after
-    # a person approves its exact content (edit it and the approval lapses).
+    # a folder whose sub-folders hold a SKILL.md. You only need this for a folder
+    # FI would not look in itself. An external skill has no FI self-test, so it is
+    # loadable only after a person approves its exact content (edit it and the
+    # approval lapses).
     skills_dirs: list[str] = Field(default_factory=list)
-    # Also read ~/.codex/skills, ~/.claude/skills and ~/.agents/skills.
+    # FI looks for other agents' skills by itself, in the usual places on Linux,
+    # macOS and Windows (tool folders in the home directory and their plugin
+    # trees, the per-OS application folders, and the project folder and its
+    # parents). False turns that search off. See core/skills/registry.py.
     skills_scan_known_dirs: bool = True
     # Per-adapter top_k. The Axon top_k stays at ``auto_collect_top_k``
     # above; this separate knob is for the dataset adapters because
