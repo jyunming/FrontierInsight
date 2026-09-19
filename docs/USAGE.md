@@ -220,7 +220,9 @@ engine:
 execution:
   sandbox: venv                     # venv (default) | docker
   timeout_s: 600
-  python_version: "3.11"            # used when creating per-quest venv
+  shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
+  python_version: "3.11"            # only when shared_interpreter: false (venv per quest)
+  system_site_packages: true        # only when shared_interpreter: false; venv sees FI's packages
   docker_image: python:3.11-slim    # for sandbox=docker
 
 knowledge:

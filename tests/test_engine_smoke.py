@@ -193,6 +193,27 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_run_log_names_the_interpreter_running_fi(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `pip install` into a different Python than the one running FI changes
+    nothing, and nothing in run.log said which one that was. The user cannot
+    send files off the machine, so the log itself must carry it."""
+    import sys
+
+    engine = Engine(smoke_config)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert f"[env] python={sys.executable}" in log
+
+
+@pytest.mark.asyncio
 async def test_run_clears_stale_quest_failed_at_start(
     smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

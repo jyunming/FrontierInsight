@@ -146,6 +146,81 @@ async def test_cleanup_after_success_freezes_and_removes_venv(
 
 
 @pytest.mark.asyncio
+async def test_lock_pins_a_requested_package_the_venv_inherited(
+    tmp_path: Path,
+) -> None:
+    """With system_site_packages a satisfied request installs nothing into
+    the venv, so ``pip freeze --local`` alone would drop it — and the venv is
+    deleted right after, taking the only record of the version the experiment
+    ran against. pytest is satisfied purely by inheritance here (no network)."""
+    quest_root = tmp_path / "quest-inherit"
+    quest_root.mkdir()
+    exe = VenvExecutor()
+    await exe.setup(quest_root)
+    result = await exe.install(["pytest>=1"], quest_root=quest_root)
+    assert result.returncode == 0, result.stderr
+
+    lock_path = await exe.cleanup_after_success(quest_root)
+
+    assert lock_path is not None
+    body = lock_path.read_text(encoding="utf-8")
+    assert f"pytest=={pytest.__version__}" in body
+    assert "provided by FI's own interpreter" in body
+
+
+def test_make_executor_defaults_to_the_shared_interpreter() -> None:
+    from core.execution import SharedInterpreterExecutor, make_executor
+    exe = make_executor("venv", python_version="3.11", docker_image="x")
+    assert isinstance(exe, SharedInterpreterExecutor)
+    isolated = make_executor(
+        "venv", python_version="3.11", docker_image="x", shared_interpreter=False,
+    )
+    assert type(isolated) is VenvExecutor
+
+
+@pytest.mark.asyncio
+async def test_shared_interpreter_builds_no_venv_and_runs_on_fi_python(
+    tmp_path: Path,
+) -> None:
+    """The point of 'one Python': no venv is built under the quest's path, and
+    quest code runs on the very interpreter that runs FI."""
+    from core.execution import SharedInterpreterExecutor
+    exe = SharedInterpreterExecutor()
+    quest_root = tmp_path / "shared-quest"
+    await exe.setup(quest_root)
+    assert not (quest_root / ".venv").exists()
+    py = exe.python_path(quest_root)
+    assert py == Path(sys.executable)
+    res = await exe.execute(
+        [str(py), "-c", "import sys; print(sys.executable)"],
+        cwd=quest_root, timeout_s=60,
+    )
+    assert res.returncode == 0
+    assert res.stdout.strip() == sys.executable
+
+
+@pytest.mark.asyncio
+async def test_shared_interpreter_records_what_the_quest_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.execution import SharedInterpreterExecutor
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    exe = SharedInterpreterExecutor()
+    quest_root = tmp_path / "shared-quest"
+    await exe.setup(quest_root)
+    # pytest is already installed in this interpreter: nothing to download.
+    res = await exe.install(["pytest>=1"], quest_root=quest_root)
+    assert res.returncode == 0, res.stderr
+
+    lock_path = await exe.cleanup_after_success(quest_root)
+
+    assert lock_path == quest_root / ".fi" / "requirements.lock.txt"
+    body = lock_path.read_text(encoding="utf-8")
+    assert f"pytest=={pytest.__version__}" in body
+    assert not (quest_root / ".venv").exists()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_after_success_is_noop_when_no_venv(tmp_path: Path) -> None:
     """When the quest never created a venv (no_simulation mode, or
     cleanup already ran on a prior resume), cleanup_after_success is a

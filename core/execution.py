@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -144,7 +145,49 @@ class VenvExecutor:
                 result.returncode, result.stderr[-300:],
             )
             result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        if result.returncode == 0:
+            self._record_requested(pkgs, quest_root)
         return result
+
+    @staticmethod
+    def _record_requested(pkgs: list[str], quest_root: Path) -> None:
+        """Remember what the quest asked pip for. With system_site_packages a
+        satisfied request installs nothing into the venv, so ``pip freeze
+        --local`` cannot see it; this file is how cleanup finds those."""
+        try:
+            fi_dir = quest_root / ".fi"
+            fi_dir.mkdir(parents=True, exist_ok=True)
+            with (fi_dir / "pip_requested.txt").open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(pkgs) + "\n")
+        except OSError as exc:
+            _log.debug("[install] could not record requested packages: %s", exc)
+
+    async def _inherited_pins(
+        self, py: Path, quest_root: Path, local_freeze: str
+    ) -> str:
+        """``name==version`` lines for packages the quest requested that the
+        venv got from FI's own interpreter rather than installing itself."""
+        try:
+            requested = (quest_root / ".fi" / "pip_requested.txt").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except OSError:
+            return ""
+        local = {
+            _norm_dist(line.split("==")[0])
+            for line in local_freeze.splitlines() if "==" in line
+        }
+        wanted: list[str] = []
+        for spec in requested:
+            m = _REQ_NAME.match(spec.strip())
+            if m and _norm_dist(m.group(0)) not in local and m.group(0) not in wanted:
+                wanted.append(m.group(0))
+        if not wanted:
+            return ""
+        probe = await self.execute(
+            [str(py), "-c", _PIN_SCRIPT, *wanted], cwd=quest_root, timeout_s=60,
+        )
+        return probe.stdout if probe.returncode == 0 else ""
 
     async def execute(
         self,
@@ -260,7 +303,15 @@ class VenvExecutor:
                 "#   python -m venv .venv && "
                 ".venv\\Scripts\\pip install -r .fi\\requirements.lock.txt\n"
             )
-            lock_path.write_text(header + freeze.stdout, encoding="utf-8")
+            inherited = await self._inherited_pins(py, quest_root, freeze.stdout)
+            if inherited.strip():
+                inherited = (
+                    "\n# Requested by the quest but provided by FI's own "
+                    "interpreter, so not installed into the venv.\n"
+                    "# Pinned to the versions this quest ran against; their "
+                    "dependencies resolve fresh on reinstall.\n" + inherited
+                )
+            lock_path.write_text(header + freeze.stdout + inherited, encoding="utf-8")
             # Delete the venv. ``ignore_errors`` rather than ``onerror=``
             # so a stuck file handle on Windows doesn't propagate — the
             # lock file is the durable artifact; a stray .venv/ is
@@ -314,6 +365,24 @@ def _looks_like_dll_load_failure(stderr: str) -> bool:
         "dll load failed" in low
         or "the filename or extension is too long" in low
     )
+
+
+_REQ_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+# One line on purpose: passed as a `-c` argument, and a multi-line argument is
+# fragile across Windows argv quoting.
+_PIN_SCRIPT = (
+    "import re,sys,importlib.metadata as m;"
+    "n=lambda s:re.sub('[-_.]+','-',s).lower();"
+    "w={n(x) for x in sys.argv[1:]};"
+    "[print(x) for x in sorted({d.metadata['Name']+'=='+d.version "
+    "for d in m.distributions() "
+    "if d.metadata['Name'] and n(d.metadata['Name']) in w})]"
+)
+
+
+def _norm_dist(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def _resolve_python_for_version(python_version: str) -> str | None:
@@ -560,10 +629,80 @@ class DockerExecutor:
                 pass
 
 
+class SharedInterpreterExecutor(VenvExecutor):
+    """Runs quest code with the interpreter that runs FI itself — no venv.
+
+    One Python for everything. What ``pip install -e .`` (or an earlier quest)
+    put there is simply there; nothing is built under the quest's own output
+    path, which is where Windows' 260-character limit stopped pip installing
+    ``torch`` into a per-quest venv. No isolation: what a quest installs stays
+    in FI's environment.
+    """
+
+    async def setup(self, quest_root: Path) -> None:
+        quest_root.mkdir(parents=True, exist_ok=True)
+        want = tuple(int(p) for p in self.python_version.split(".")[:2] if p.isdigit())
+        if want and want != tuple(sys.version_info[:2]):
+            _log.info(
+                "[setup] execution.python_version=%s is not used: quests run on "
+                "FI's own Python %d.%d (%s).",
+                self.python_version, sys.version_info[0], sys.version_info[1],
+                sys.executable,
+            )
+
+    def python_path(self, quest_root: Path) -> Path:
+        return Path(sys.executable)
+
+    async def install(
+        self, packages: Iterable[str], *, quest_root: Path
+    ) -> ExecutionResult:
+        pkgs = list(packages)
+        if not pkgs:
+            return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
+        # Every quest now installs into the same site-packages, and two pip
+        # processes writing it at once corrupt it — the fleet runner runs
+        # quests concurrently, so serialise across processes.
+        from filelock import FileLock
+        lock_dir = Path.home() / ".frontier-insight"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(lock_dir / "pip-install.lock"), timeout=1800)
+        await asyncio.to_thread(lock.acquire)
+        try:
+            return await super().install(pkgs, quest_root=quest_root)
+        finally:
+            lock.release()
+
+    async def cleanup_after_success(self, quest_root: Path) -> Path | None:
+        """Nothing to delete. Record what the quest asked for, pinned to the
+        versions it ran against, as ``.fi/requirements.lock.txt``."""
+        try:
+            pins = await self._inherited_pins(Path(sys.executable), quest_root, "")
+            if not pins.strip():
+                return None
+            fi_dir = quest_root / ".fi"
+            fi_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = fi_dir / "requirements.lock.txt"
+            lock_path.write_text(
+                "# Frozen by FrontierInsight on quest success.\n"
+                f"# This quest ran in FI's own Python {sys.version.split()[0]} "
+                f"({sys.executable}), not a per-quest venv.\n"
+                "# These are the packages it asked for, pinned to the versions "
+                "it ran against; their dependencies resolve fresh.\n"
+                "# Reproduce: pip install -r .fi/requirements.lock.txt\n" + pins,
+                encoding="utf-8",
+            )
+            return lock_path
+        except OSError as exc:
+            _log.warning("cleanup_after_success: could not write lock file: %s", exc)
+            return None
+
+
 def make_executor(
     sandbox: str, *, python_version: str, docker_image: str,
-    system_site_packages: bool = True,
+    system_site_packages: bool = True, shared_interpreter: bool = True,
 ) -> Executor:
+    if sandbox == "venv" and shared_interpreter:
+        return SharedInterpreterExecutor(python_version=python_version)
     if sandbox == "venv":
         return VenvExecutor(
             python_version=python_version,

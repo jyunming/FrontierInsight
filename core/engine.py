@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import string
+import sys
 import time
 import unicodedata
 import uuid
@@ -432,6 +433,7 @@ class Engine:
             python_version=config.execution.python_version,
             docker_image=config.execution.docker_image,
             system_site_packages=config.execution.system_site_packages,
+            shared_interpreter=config.execution.shared_interpreter,
         )
         self.knowledge = Knowledge(config.knowledge)
         self._log = _quest_logger(self.quest_id, self.fi_dir)
@@ -526,6 +528,12 @@ class Engine:
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
+            # Which interpreter is running FI decides which packages it can
+            # see; a `pip install` into a different one changes nothing here.
+            self._log.info(
+                "[env] python=%s (%s) sandbox=%s",
+                sys.executable, sys.version.split()[0], self.config.execution.sandbox,
+            )
             # Pre-flight: if the user asked for paper_pdf, verify the
             # host can produce one BEFORE spending 15 minutes on LLM
             # calls only to discover at the end that pandoc / LaTeX are
