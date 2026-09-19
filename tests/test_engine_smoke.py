@@ -193,6 +193,30 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_a_provider_message_written_as_the_paper_fails_the_quest(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three Sonnet quests ended rc=0 with a review "accept" while paper.md held
+    only "You've hit your weekly limit ...". A paper that short is never a paper;
+    the quest must fail and say what the writer returned."""
+    engine = Engine(smoke_config)
+    weekly = "You've hit your weekly limit · resets Sep 18, 10pm (Europe/Brussels)"
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "Writing":
+            return weekly
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    with pytest.raises(Exception) as exc:
+        await engine.run()
+    assert "cannot be a paper" in str(exc.value)
+    assert "weekly limit" in str(exc.value)
+
+
+@pytest.mark.asyncio
 async def test_run_log_names_the_interpreter_running_fi(
     smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

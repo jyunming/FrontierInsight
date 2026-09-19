@@ -1329,10 +1329,18 @@ def _timeout_for_attempt(retry_state: "Any", base_timeout_s: float) -> float:
 _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "you've hit your session limit",
     "you have hit your session limit",
+    "you've hit your weekly limit",
+    "you have hit your weekly limit",
+    "you've hit your opus limit",
+    "you have hit your opus limit",
     "rate limit exceeded · resets",
     "rate limit exceeded - resets",
     "out of credits - upgrade your plan",
     "claude usage limit reached",
+    # The CLI names the limit differently per plan and window (session,
+    # weekly, Opus...); every one ends "<name> limit · resets <when>", so a
+    # wording not listed above is still caught here.
+    "limit · resets",
 )
 
 # Long-duration / non-recoverable CLI failures: an hours-away session or usage
@@ -1344,6 +1352,7 @@ _CLI_RATE_LIMIT_MARKERS: tuple[str, ...] = (
 # "rate limit exceeded · resets <soon>" case, which IS worth a retry.
 _CLI_FATAL_MARKERS: tuple[str, ...] = (
     "session limit",
+    "weekly limit",
     "usage limit reached",
     "out of credits",
     "token may be invalid",
@@ -2259,7 +2268,7 @@ def _finalise_stream_content(
         gate_name, marker = gate_hit
         raise _CliTransientError(
             f"{spec.argv[0]} tripped output gate {gate_name!r} (matched: "
-            f"{marker!r}). This would have been written to disk as the "
+            f"{marker!r}; output: {final[:200]!r}). This would have been written to disk as the "
             f"artifact; treating as transient so tenacity retries (and "
             f"may escalate the model)."
         )

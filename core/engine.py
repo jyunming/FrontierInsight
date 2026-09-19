@@ -5566,6 +5566,13 @@ class Engine:
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
+        if _is_not_a_paper(markdown):
+            raise RuntimeError(
+                f"the writer returned {len(markdown.strip())} characters, which "
+                f"cannot be a paper: {markdown.strip()[:200]!r}. If that reads "
+                f"like a provider message (a usage limit, an expired login), fix "
+                f"the provider and resume the quest."
+            )
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -8348,6 +8355,16 @@ def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
 _CLAIM_SOURCE_CHARS = 6000
 # A quote shorter than this could be found in almost any source.
 _QUOTE_MIN_CHARS = 25
+# A paper has a title and sections. Text this short with no heading at all is
+# the provider's error message ("You've hit your weekly limit ...") that
+# arrived as content; three Sonnet quests ended rc=0 with a review "accept" on
+# exactly that.
+_MIN_PAPER_CHARS = 300
+
+
+def _is_not_a_paper(text: str) -> bool:
+    body = text.strip()
+    return len(body) < _MIN_PAPER_CHARS and not re.search(r"(?m)^#{1,6}\s", body)
 # And this much of the quest's OWN evidence. Separate from the per-source
 # budget above: this one bounds the findings, the supported claims and the
 # results the check grounds an "experiment" claim against. The block used to

@@ -379,6 +379,37 @@ def test_rate_limit_marker_matcher_catches_session_limit() -> None:
     assert _looks_like_rate_limit_message(real) is not None
 
 
+def test_rate_limit_marker_matcher_catches_weekly_and_unlisted_wordings() -> None:
+    """Three Sonnet quests ended rc=0 with a review "accept" because the CLI's
+    weekly-limit message was not in the marker list and was accepted as the
+    model's answer."""
+    from core.provider import _looks_like_rate_limit_message
+    weekly = "You've hit your weekly limit · resets Sep 18, 10pm (Europe/Brussels)"
+    assert _looks_like_rate_limit_message(weekly) is not None
+    # A wording nobody listed still ends "<name> limit · resets <when>".
+    assert _looks_like_rate_limit_message(
+        "You've hit your team limit · resets 3am"
+    ) is not None
+
+
+def test_a_weekly_limit_reply_fails_the_call_and_is_not_retried() -> None:
+    """The gate names what the model said, and a weekly limit cannot clear
+    inside the retry window, so it must abort instead of burning retries."""
+    import pytest
+
+    from core.provider import (
+        _CliSpec, _CliTransientError, _finalise_stream_content, _retry_cli_error,
+    )
+    weekly = "You've hit your weekly limit · resets Sep 18, 10pm (Europe/Brussels)"
+    spec = _CliSpec(
+        argv=("claude",), pass_prompt_via="stdin", output_via="stream_json",
+    )
+    with pytest.raises(_CliTransientError) as exc:
+        _finalise_stream_content([weekly], spec)
+    assert "weekly limit" in str(exc.value)
+    assert _retry_cli_error(exc.value) is False
+
+
 def test_rate_limit_marker_matcher_ignores_long_real_response() -> None:
     """A 5KB legitimate paper that happens to mention 'rate limit'
     in its body must NOT trigger the heuristic — length guard."""
