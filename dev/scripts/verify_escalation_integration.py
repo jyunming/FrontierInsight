@@ -5,8 +5,9 @@ Directly exercises the production code path against the real
 ``claude`` binary on PATH:
 
   1. Build a claude_cli endpoint with provider.model="claude-sonnet-4-6"
-  2. Construct LLMClient with the default node_model_fallbacks
-     ({implement: claude-opus-4-7, write: claude-opus-4-7})
+  2. Construct LLMClient with an explicit node_model_fallbacks
+     ({implement: claude-opus-4-7, write: claude-opus-4-7}) — escalation
+     is opt-in, so this script sets the mapping itself
   3. Call .chat() with the OPC body prompt and node="implement"
   4. Observe: attempt 1 should fail (Sonnet runaway / rate-limit
      message guard / something), tenacity should catch, before_sleep
@@ -62,7 +63,8 @@ async def main() -> int:
     )
     print(f"endpoint resolved: provider=claude_cli, primary model=claude-sonnet-4-6")
 
-    # The escalation default that the production engine uses.
+    # An explicit escalation mapping, as a user would set it in
+    # ``provider.node_model_fallbacks`` (the production default is empty).
     client = LLMClient(
         ep,
         cli_timeout_s=300.0,
