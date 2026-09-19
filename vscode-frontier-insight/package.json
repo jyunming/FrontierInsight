@@ -50,6 +50,10 @@
             "description": "Resume a previously-crashed quest from its checkpoint. With no arg, shows a picker. With a quest_id, resumes that quest."
           },
           {
+            "name": "watch",
+            "description": "Wake a quest that is waiting on a background job (HPC / cluster; execution.background_jobs). Re-runs its experiment script on a timer, shows every check, and resumes the quest when the job is done. With no arg, shows a picker. Mirrors `launch.py --watch` and the web Watch button."
+          },
+          {
             "name": "generate",
             "description": "Generate one more output format (PDF / slides / poster / talk script) for an already-finished quest WITHOUT re-running the research. Pick the quest + format, or pass them: @fi /generate <quest_id> paper_pdf. Mirrors `launch.py --emit` and the web Outputs panel."
           },
