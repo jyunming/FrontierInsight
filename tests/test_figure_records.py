@@ -80,6 +80,55 @@ def test_a_caption_naming_a_flat_series_is_found() -> None:
                                     {"long_term_energy_drift.png": DRIFT}) == []
 
 
+# A measured quest's figure: the deterministic reference varies with N in the first two
+# panels (0.002 to 0.073, 0.583 to 0.594) and is flat only in the third (0.9405 to 0.9412
+# on an axis of 0 to 1). The y axis is labelled on the first panel only.
+THREE_PANELS = {
+    "file": "conditional_final_size_vs_deterministic.png",
+    "axes": [
+        {"title": "R0=0.9", "ylabel": "Conditional final infected fraction", "ylim": [0.0, 1.0],
+         "series": [{"label": "deterministic", "min": 0.00198, "max": 0.0727, "shows": "yes"}]},
+        {"title": "R0=1.5", "ylabel": "", "ylim": [0.0, 1.0],
+         "series": [{"label": "deterministic", "min": 0.583, "max": 0.594, "shows": "yes"}]},
+        {"title": "R0=3", "ylabel": "", "ylim": [0.0, 1.0],
+         "series": [{"label": "deterministic", "min": 0.9405, "max": 0.9412, "shows": "flat"}]},
+    ],
+}
+THREE_PANEL_PAPER = (
+    "![**Figure 3.** Conditional final sizes against the deterministic prediction.]"
+    "(figures/conditional_final_size_vs_deterministic.png)\n"
+)
+
+
+def test_a_series_flat_in_one_panel_only_is_flagged_with_that_panel_named() -> None:
+    """The finding used to read 'draws it flat at one value on its axis "y"' with no
+    panel, and the caption was then rewritten to call the reference flat "within each
+    R0 panel" -- true of one panel and false of the other two."""
+    records = {"conditional_final_size_vs_deterministic.png": THREE_PANELS}
+    (finding,) = _figure_caption_findings(THREE_PANEL_PAPER, records)
+    assert finding == (
+        'figure_caption: the caption of figures/conditional_final_size_vs_deterministic.png names '
+        '"deterministic", but the figure draws it flat at one value on its axis '
+        '"Conditional final infected fraction" in only some panels: flat in "R0=3" (0.941), but '
+        'varying in "R0=0.9" (0.00198 to 0.0727), "R0=1.5" (0.583 to 0.594). '
+        "Describe it as flat only where it is flat"
+    )
+
+
+def test_a_series_flat_in_every_panel_keeps_the_plain_finding() -> None:
+    """'Flat' is true of the whole figure, so there is nothing to tell the panels apart by."""
+    every = {"file": "f.png", "axes": [
+        {"title": t, "ylabel": "p", "ylim": [0, 1],
+         "series": [{"label": "limit", "min": v, "max": v, "shows": "flat"}]}
+        for t, v in (("R0=0.9", 0.0), ("R0=1.5", 0.333), ("R0=3", 0.667))
+    ]}
+    (finding,) = _figure_caption_findings("![The limit line.](figures/f.png)", {"f.png": every})
+    assert finding == (
+        'figure_caption: the caption of figures/f.png names "limit", but the figure draws it '
+        'flat at one value on its axis "p"'
+    )
+
+
 def test_a_caption_that_says_a_series_lies_flat_is_fine() -> None:
     records = {"long_term_energy_drift.png": DRIFT}
     said = ("![**Figure 3.** Forward Euler drifts to 0.44 J, while RK4 and Velocity-Verlet stay flat "

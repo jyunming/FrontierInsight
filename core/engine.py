@@ -10686,14 +10686,46 @@ _FLAT_WORDS_RE = re.compile(
 _CAPTION_CLAUSE_RE = re.compile(r"[.;:,]\s|\s(?:while|whereas|but)\s")
 
 
+def _panels_where_flat_and_where_not(
+    record: dict[str, Any] | None, label: str,
+) -> tuple[list[str], list[str]]:
+    """For one series label: the panels of a multi-panel figure that draw it flat
+    (with its value) and the panels that draw it varying (with its range).
+
+    Both are empty for a one-panel figure, and for a series every panel draws flat,
+    because then "flat" is true of the whole figure and there is nothing to tell
+    the panels apart by."""
+    axes = [ax for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)]
+    if len(axes) < 2:
+        return [], []
+    flat: list[str] = []
+    varies: list[str] = []
+    for index, ax in enumerate(axes, start=1):
+        title = str(ax.get("title") or f"panel {index}")
+        for s in ax.get("series") or []:
+            if not isinstance(s, dict) or s.get("label") != label or "min" not in s:
+                continue
+            if s.get("shows") == "flat":
+                flat.append(f'"{title}" ({s["min"]:.3g})')
+            elif s.get("shows") == "yes":
+                varies.append(f'"{title}" ({s["min"]:.3g} to {s["max"]:.3g})')
+    return (flat, varies) if flat and varies else ([], [])
+
+
 def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str]:
     """Captions that name a series their figure does not show, or one it draws
-    flat without saying so."""
+    flat without saying so.
+
+    A series a multi-panel figure draws flat in only some panels is flagged with
+    those panels named, and the panels where it varies listed. A finding that named
+    no panel got the caption rewritten to call the series flat in EVERY panel, and
+    the paper then said of the other panels what its figure does not show."""
     findings: list[str] = []
     for match in _PAPER_IMAGE_RE.finditer(paper_md or ""):
         name = Path(match.group("src")).name
+        record = records.get(name)
         caption = f" {_plain_words(match.group('alt'))} "
-        for ax, s in _hidden_series(records.get(name)):
+        for ax, s in _hidden_series(record):
             label = _plain_words(str(s.get("label") or ""))
             named = rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])"
             if not label or not re.search(named, caption):
@@ -10704,10 +10736,23 @@ def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str
             ):
                 continue
             how = "draws it flat at one value" if s.get("shows") == "flat" else "does not show it"
+            # A shared y axis is labelled on one panel only: take the first label there is.
+            ylabel = next(
+                (str(a.get("ylabel")) for a in [ax, *((record or {}).get("axes") or [])]
+                 if isinstance(a, dict) and a.get("ylabel")),
+                "y",
+            )
             finding = (
                 f'figure_caption: the caption of figures/{name} names "{s.get("label")}", but the '
-                f'figure {how} on its axis "{ax.get("ylabel") or "y"}"'
+                f'figure {how} on its axis "{ylabel}"'
             )
+            if s.get("shows") == "flat":
+                flat, varies = _panels_where_flat_and_where_not(record, str(s.get("label")))
+                if flat:
+                    finding += (
+                        f" in only some panels: flat in {', '.join(flat)}, but varying in "
+                        f"{', '.join(varies)}. Describe it as flat only where it is flat"
+                    )
             if finding not in findings:
                 findings.append(finding)
     return findings
