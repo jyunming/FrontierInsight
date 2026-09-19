@@ -226,7 +226,7 @@ is the index.
 
 ### Cost + observability
 
-- **Engine cost instrumentation** — `core/provider.py:MODEL_PRICING` + `estimate_cost_usd(...)`. Every model call appends `{ts, node, model, usage, cost_usd}` to `<quest_root>/.fi/cost.jsonl` through `core/provider.py:append_cost_row`: the engine's nodes and the output generators (`slides`, `poster`, `speech`, `visual_check`). Char-based token estimate (~4 chars/token) when the transport returns no `usage`; row carries `usage.estimated: true`. Quest finalization writes `<quest_root>/.fi/cost.summary.json` with totals + per-node + per-model breakdowns, and the output pass writes it again so the generators' calls are in it.
+- **Engine cost instrumentation** — `core/provider.py:MODEL_PRICING` + `estimate_cost_usd(...)`. Every model call appends `{ts, node, model, usage, cost_usd}` to `<quest_root>/.fi/cost.jsonl` through `core/provider.py:append_cost_row`: the engine's nodes and the output generators (`slides`, `poster`, `speech`, `visual_check`). `cost_usd` is an estimate from the table's rates, and it is `null` for a model the table does not list: a newer model that merely contains a listed name (`gpt-5.6-luna` contains `gpt-5`) is a different model with its own price, so it does not borrow that row, and its token counts are still logged. Char-based token estimate (~4 chars/token) when the transport returns no `usage`; row carries `usage.estimated: true`. Quest finalization writes `<quest_root>/.fi/cost.summary.json` with totals + per-node + per-model breakdowns, and the output pass writes it again so the generators' calls are in it.
 
 ### Interviews + frontends
 

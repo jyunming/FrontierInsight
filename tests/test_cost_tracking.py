@@ -61,6 +61,46 @@ def test_estimate_cost_usd_unknown_returns_none() -> None:
     assert estimate_cost_usd("totally-made-up-llm", 100, 50) is None
 
 
+@pytest.mark.parametrize("model", [
+    "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-50",
+    "claude-opus-4-70", "gpt-4o.1",
+])
+def test_estimate_cost_usd_a_newer_model_does_not_borrow_an_older_rate(model: str) -> None:
+    """``gpt-5`` is a row; ``gpt-5.6-luna`` merely CONTAINS it. Pricing the newer
+    model at the older one's rate put a made-up dollar figure in every cost log and
+    made three different models look like they cost the same per token."""
+    assert estimate_cost_usd(model, 1000, 1000) is None
+
+
+@pytest.mark.parametrize("model, key", [
+    ("gpt-5", "gpt-5"),
+    ("gpt-5-2025-08-07", "gpt-5"),          # a dated snapshot of the same model
+    ("openai/gpt-5", "gpt-5"),              # a provider prefix
+    ("gpt-5-mini", "gpt-5-mini"),           # its own row, not gpt-5's
+    ("claude-opus-4-7-20251201", "claude-opus-4-7"),
+    ("gemini-2.5-pro", "gemini-2.5-pro"),   # a "." INSIDE the key still matches
+])
+def test_estimate_cost_usd_still_prices_the_models_the_table_names(model: str, key: str) -> None:
+    rates = MODEL_PRICING[key]
+    assert estimate_cost_usd(model, 1000, 1000) == pytest.approx(
+        rates["prompt_per_1k"] + rates["completion_per_1k"])
+
+
+def test_a_call_to_an_unpriced_model_logs_a_null_cost(tmp_path: Path) -> None:
+    """The row the cost log gets, and so every total built from it: usage is kept,
+    the dollar field is empty."""
+    from core.provider import append_cost_row
+
+    append_cost_row(
+        tmp_path, node="cross_check", model="gpt-5.6-luna",
+        usage={"prompt_tokens": 900, "completion_tokens": 100, "total_tokens": 1000},
+    )
+    row = json.loads((tmp_path / "cost.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["model"] == "gpt-5.6-luna"
+    assert row["usage"]["total_tokens"] == 1000
+    assert row["cost_usd"] is None
+
+
 def test_estimate_cost_usd_empty_model_returns_none() -> None:
     """CLI / vscode_bridge transports may set last_model="" — must
     not crash and must not match any pricing row."""
