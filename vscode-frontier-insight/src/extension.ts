@@ -233,6 +233,10 @@ async function handleRequest(
         await runResume(prompt, stream, token, userPickedModel);
         return;
     }
+    if (cmd === "watch") {
+        await runResume(prompt, stream, token, userPickedModel, /*watch*/ true);
+        return;
+    }
     if (cmd === "generate") {
         await runGenerate(prompt, stream, token);
         return;
@@ -353,6 +357,7 @@ function helpText(): string {
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly.",
+        "- `@fi /watch [<quest_id>]` — for a quest waiting on a background job (HPC): re-check it on a timer and resume it when the job is done.",
         "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
         "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
@@ -404,6 +409,7 @@ async function runResume(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
     userPickedModel: vscode.LanguageModelChat,
+    watch = false,
 ): Promise<void> {
     if (token.isCancellationRequested) return;
 
@@ -448,6 +454,8 @@ async function runResume(
         try {
             const stat = await fsPromises.stat(checkpoint);
             if (!stat.isFile()) return;
+            // /watch is for quests waiting on a background job only.
+            if (watch) await fsPromises.stat(path.join(questDir, ".fi", "pending.json"));
             candidates.push({
                 questId: entry.name, questDir, mtimeMs: stat.mtimeMs,
             });
@@ -457,7 +465,9 @@ async function runResume(
     }));
     if (candidates.length === 0) {
         stream.markdown(
-            `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Run \`@fi /new\` to start one.`,
+            watch
+                ? `❌ No quest under \`${outputsDir}\` is waiting on a background job (none has \`.fi/pending.json\`).`
+                : `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Run \`@fi /new\` to start one.`,
         );
         return;
     }
@@ -548,10 +558,13 @@ async function runResume(
 
     const relYaml = path.relative(repoPath, yamlPath).split(path.sep).join("/");
     stream.markdown(
-        `🔁 Resuming quest \`${chosenId}\`\n\n` +
-        `📝 Using config: \`${relYaml}\`\n\n` +
-        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
-        `▶️ Re-entering the LangGraph from the last checkpointed node…\n\n`,
+        watch
+            ? `👁 Watching quest \`${chosenId}\`: its experiment script is re-run on a timer and the quest resumes when the job is done.\n\n` +
+              `📝 Using config: \`${relYaml}\`\n\n`
+            : `🔁 Resuming quest \`${chosenId}\`\n\n` +
+              `📝 Using config: \`${relYaml}\`\n\n` +
+              `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+              `▶️ Re-entering the LangGraph from the last checkpointed node…\n\n`,
     );
     await runQuest(
         relYaml,
@@ -560,6 +573,7 @@ async function runResume(
         token,
         userPickedModel,
         /*resumeQuestId*/ chosenId,
+        /*watch*/ watch,
     );
 }
 
@@ -929,6 +943,7 @@ async function runQuest(
     token: vscode.CancellationToken,
     userPickedModel: vscode.LanguageModelChat,
     resumeQuestId?: string,
+    watch = false,
 ): Promise<void> {
     const paths = promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
@@ -989,7 +1004,9 @@ async function runQuest(
     } else {
         argv.push("--config", paths[0]);
         if (resumeQuestId) {
-            argv.push("--resume", resumeQuestId);
+            // --watch re-checks the background job on a timer and resumes the
+            // quest itself when it is done; --resume resumes right away.
+            argv.push(watch ? "--watch" : "--resume", resumeQuestId);
         }
     }
 
@@ -1048,6 +1065,12 @@ async function runQuest(
             const failures = line.match(/^\[FI\] source failures: (.+)$/);
             if (failures) {
                 stream.markdown(`  ⚠️ source failures: \`${failures[1]}\`\n\n`);
+                continue;
+            }
+            // Each check of a watched background job: the only monitor there is.
+            const checked = line.match(/^\[watch\] (.+)$/);
+            if (checked) {
+                stream.markdown(`  👁 ${checked[1]}\n\n`);
                 continue;
             }
             // Drop other [FI] lines (start/resume quest_id=, paths the

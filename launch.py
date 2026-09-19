@@ -761,6 +761,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "long Copilot outage exhausts the bridge retry budget mid-quest.",
     )
     p.add_argument(
+        "--watch",
+        type=str,
+        default=None,
+        metavar="QUEST_ID",
+        help="Wake a quest that is waiting on a background job "
+             "(execution.background_jobs). Re-runs the quest's experiment script "
+             "on a timer; each check is printed and logged. When the script stops "
+             "reporting the job as pending, the quest is resumed here, as "
+             "--resume would. Needs --config. Ctrl-C stops watching; the quest "
+             "stays paused and --resume still checks once.",
+    )
+    p.add_argument(
+        "--watch-every",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help="With --watch: seconds between checks. 0 (default) uses the "
+             "job's own suggestion, else 300.",
+    )
+    p.add_argument(
+        "--watch-max-hours",
+        type=float,
+        default=0.0,
+        metavar="HOURS",
+        help="With --watch: stop watching after this long (0 = no limit).",
+    )
+    p.add_argument(
         "--rerun",
         type=str,
         default=None,
@@ -911,6 +938,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--output is irrelevant in --ingest mode.")
     if args.resume and not args.config:
         p.error("--resume requires --config (the YAML for the original quest).")
+    if args.watch and not args.config:
+        p.error("--watch requires --config (the YAML for the original quest).")
+    if args.watch and (args.resume or args.rerun):
+        p.error("--watch already resumes the quest when its job finishes; "
+                "drop --resume / --rerun.")
     if args.analyze and not args.analyze_topic:
         p.error(
             "--analyze requires --analyze-topic to describe what the "
@@ -1390,6 +1422,46 @@ def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:
         )
     except OSError:
         return
+
+
+async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxySupervisor) -> int:
+    """``--watch``: re-run the paused quest's experiment script on a timer until
+    the job it submitted is no longer pending, then resume the quest.
+
+    Every check goes to the terminal AND the quest's run.log, because on a machine
+    nothing can be copied off, what is printed is the only monitor there is."""
+    from core.job_watch import describe, read_pending, watch
+
+    quest_id = args.watch
+    engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
+    pending = read_pending(engine.fi_dir)
+    if pending is None:
+        print(
+            f"[FI] quest {quest_id} is not waiting on a job (no {engine.fi_dir / 'pending.json'}). "
+            f"`--resume {quest_id}` continues it.", file=sys.stderr,
+        )
+        return 1
+
+    def out(line: str) -> None:
+        print(line, flush=True)
+        engine._log.info(line)
+
+    every_text = f"{args.watch_every} s" if args.watch_every else "the job's own suggestion (else 300 s)"
+    out(f"[watch] quest {quest_id} is waiting on its job ({describe(pending)}); "
+        f"checking every {every_text}")
+    outcome = await watch(
+        engine.poll_job, fi_dir=engine.fi_dir,
+        every_s=args.watch_every, max_wait_s=int(args.watch_max_hours * 3600), out=out,
+    )
+    if outcome == "timeout":
+        return 3
+    out(f"[watch] the job is {outcome}; resuming quest {quest_id}")
+    await run_one(
+        cfg, supervisor=supervisor, resume_quest_id=quest_id,
+        source_yaml_path=args.config.resolve(),
+        auto_accept_on_pass=args.auto_accept_on_pass,
+    )
+    return 0
 
 
 async def run_one(
@@ -2236,6 +2308,15 @@ async def main_async(args: argparse.Namespace) -> int:
                     print(f"[FI] {resume_err}", file=sys.stderr)
                     return 1
                 _apply_review_decision(args, cfg.output.output_dir)
+            if args.watch:
+                watch_err = _validate_resume_quest_id(
+                    args.watch, cfg.output.output_dir,
+                )
+                if watch_err is not None:
+                    print(f"[FI] {watch_err}".replace("--resume", "--watch"),
+                          file=sys.stderr)
+                    return 1
+                return await _watch_quest(cfg, args, supervisor)
             if args.emit:
                 if not args.resume:
                     print("[FI] --emit requires --resume <quest_id>",

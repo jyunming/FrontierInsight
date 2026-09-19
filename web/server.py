@@ -1079,6 +1079,49 @@ def make_app(
             "resumed": True,
         })
 
+    @app.post("/api/quests/{quest_id}/watch")
+    async def watch_quest(
+        quest_id: str, every_s: int = 0, max_hours: float = 0.0,
+    ) -> JSONResponse:
+        """Wake a quest that is waiting on a background job
+        (``execution.background_jobs``): spawns ``launch.py --watch <id>``, which
+        re-runs the quest's experiment script on a timer, logs every check to the
+        quest's run.log, and resumes the quest when the job is no longer pending.
+        The web surface of the CLI's ``--watch``."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        yaml_path = quest_root / "config.yaml"
+        if not yaml_path.is_file():
+            raise HTTPException(
+                400, f"no config.yaml at {yaml_path}. Watching resumes the quest, "
+                "which needs the YAML that started it.",
+            )
+        if not (quest_root / ".fi" / "pending.json").is_file():
+            raise HTTPException(
+                400, "this quest is not waiting on a background job "
+                "(no .fi/pending.json).",
+            )
+        from web.quest_launcher import QuestLauncherFull
+        argv = ["--config", str(yaml_path), "--watch", quest_id]
+        if every_s > 0:
+            argv += ["--watch-every", str(every_s)]
+        if max_hours > 0:
+            argv += ["--watch-max-hours", str(max_hours)]
+        try:
+            launched = app.state.launcher.launch_command(
+                argv_tail=argv, job_id=f"{quest_id}-watch",
+            )
+        except QuestLauncherFull as e:
+            return JSONResponse(
+                {"error": "launcher at capacity", "detail": str(e),
+                 "retry_after_seconds": 30},
+                status_code=503, headers={"Retry-After": "30"},
+            )
+        return JSONResponse({
+            "quest_id": quest_id, "pid": launched.pid, "watching": True,
+        })
+
     @app.post("/api/quests/{quest_id}/generate")
     async def generate_artifact(quest_id: str, kind: str) -> JSONResponse:
         """Generate ONE additional output format (paper_pdf / slides / poster

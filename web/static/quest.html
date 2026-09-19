@@ -87,6 +87,12 @@
       <div id="next-step-answer" class="hidden">
         <button id="next-step-answer-btn" onclick="jumpToAnswerForm()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Answer now ↓</button>
       </div>
+      <!-- RESULTS pause: the experiment submitted a background job and the quest is waiting for it. -->
+      <div id="next-step-results" class="hidden flex flex-wrap items-center gap-3">
+        <button onclick="resumeQuest()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Check now</button>
+        <button onclick="watchQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Watch automatically</button>
+        <span id="next-step-results-status" class="text-on-surface-variant text-body-sm"></span>
+      </div>
       <!-- SUPPLY pauses: drop files straight into the named folder(s) + Resume. -->
       <div id="next-step-supply" class="hidden flex flex-wrap items-center gap-3">
         <input id="next-step-file" type="file" multiple class="text-on-surface text-body-sm"/>
@@ -422,6 +428,8 @@
         : escapeHtml(body);
       // Wire the affordance: ANSWER → jump to the form; SUPPLY → inline upload.
       nextStepTargets = data.upload_targets || [];
+      const resultsEl = document.getElementById('next-step-results');
+      if (resultsEl) resultsEl.classList.toggle('hidden', data.kind !== 'results');
       if (data.interaction === 'answer') {
         answerEl.classList.remove('hidden');
         supplyEl.classList.add('hidden');
@@ -1049,6 +1057,16 @@
       + (questFinishedForRerun ? '?rerun=true' : '');
     const res = await fetch(url, { method: 'POST' });
     if (!res.ok) { alert('Resume failed: ' + await res.text()); return; }
+    if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+    refresh();
+  }
+  // A quest waiting on a background job: re-check it on a timer and resume it
+  // when the job is done (the same as `launch.py --watch`).
+  async function watchQuest() {
+    const statusEl = document.getElementById('next-step-results-status');
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/watch`, { method: 'POST' });
+    if (!res.ok) { if (statusEl) statusEl.textContent = 'Could not start watching: ' + await res.text(); return; }
+    if (statusEl) statusEl.textContent = 'Watching: each check is written to the quest log. The quest resumes by itself when the job is done.';
     if (!pollHandle) pollHandle = setInterval(refresh, 3000);
     refresh();
   }
