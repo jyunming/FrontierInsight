@@ -246,6 +246,23 @@ pip install sentence-transformers       # relevance filter
 
 Both installers drop a standalone binary into the gitignored `tools/`, which the generators probe after PATH — so nothing needs admin rights or a PATH edit. Airgapped hosts use the `--install-tectonic-from <archive>` / `--install-marp-from <archive>` variants, installing from a file copied over by hand. The Marp binaries bundle Node, so Node is not required; note that `slides.html` needs no browser, but PDF export does (point marp at an existing one with `--browser-path` if it can't find Chromium/Edge itself).
 
+### Use skills another agent installed, and require some
+
+Skills that other agents installed (Codex, Claude Code, ...) are read where they are — no import, no copy:
+
+```yaml
+engine:
+  skills_dirs: ["D:/my-agent-skills"]   # in addition to ~/.codex/skills, ~/.claude/skills, ~/.agents/skills
+  skills_required: [deepscientist-experiment]   # use these whatever selection says (folder names)
+```
+
+```bash
+python launch.py --skills                                   # external ones are marked, status "proposed"
+python launch.py --approve-skill deepscientist-experiment --approve-as you   # reads its scripts list first
+```
+
+An external skill has no FI self-test, so your approval of its exact content is the only gate; edit it and the approval lapses. `--approve-all-skills` never approves them. If a name in `skills_required` cannot be used (not found, not approved), the quest stops before its first LLM call and tells you which and why.
+
 ### Bootstrap a starter set of scientist skills
 
 FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of 69 scientist-workflow skills from 11 real upstream repositories — geoscience (obspy, landlab, lasio, simpeg, ...), bioinformatics and genomics, structural and control engineering, neuroscience, numerical methods and simulation, reliability engineering, Bayesian statistics, cheminformatics and materials science, causal inference, and template-driven chart/report generation — and imports them, reproducing on a fresh machine the same sourcing step done once by hand.

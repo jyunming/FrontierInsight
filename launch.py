@@ -4199,6 +4199,8 @@ def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
         mark = "*" if st.loadable else " "
         print(f"{mark}{skill.name:<{w - 1}}{st.status.value:<13}"
               f"{skill.maturity.value:<10}{st.reason}")
+        if skill.external:
+            print(f"      ^ external: read in place from {skill.path.parent}")
         if st.status.value == "quarantined" and st.selftest_output:
             for line in st.selftest_output.splitlines()[-4:]:
                 print(f"      | {line}")
@@ -4355,7 +4357,9 @@ def _approve_one(skill: "Any", who: str, despite: bool, *, quiet: bool = False):
         note += f" DESPITE {len(highs)} high-severity scan finding(s)"
     if generated:
         note += " [generated selftest]"
-    approval.approve(skill.name, skill.content_hash(), approved_by=who, note=note)
+    if skill.external:
+        note += f" [external skill from {skill.path.parent}, no self-test]"
+    approval.approve(skill.ledger_name, skill.content_hash(), approved_by=who, note=note)
     detail = ""
     if highs:
         detail = f"despite {len(highs)} high finding(s)"
@@ -4399,7 +4403,19 @@ def _approve_all_skills(
         return 2
 
     skipped_names = {s.strip() for s in (skip or "").split(",") if s.strip()}
-    skills = [s for s in discover() if s.name not in skipped_names]
+    everything = [s for s in discover() if s.name not in skipped_names]
+    # Other agents' skills are never approved in bulk. They have no FI
+    # self-test, so approval is the only check they get, and bulk approval
+    # would grant it to every script in every agent folder at once. Name one
+    # to approve it: --approve-skill <name>.
+    left_out = [s for s in everything if s.external]
+    skills = [s for s in everything if not s.external]
+    if left_out:
+        print(
+            f"Leaving {len(left_out)} external skill(s) out (read in place from other "
+            f"agents' folders; they are approved one at a time, "
+            f"--approve-skill <name>).\n"
+        )
     if not skills:
         print("No skills found. Run --skills to see what is available.")
         return 0
@@ -4552,22 +4568,35 @@ def _approve_skill(name: str, approved_by: str, despite: bool = False) -> int:
               "covers. Replacing the test with real checks clears this note.")
         print()
 
+    if skill.external:
+        scripts = skill.bundled_scripts()
+        print(f"{name} is an external skill, read in place from {skill.path.parent}. "
+              "It has no FI self-test: your approval of this exact content is the "
+              "only check it gets, and its scripts run with your permissions when "
+              "a quest uses them.")
+        print(f"  Scripts it carries: {', '.join(scripts) if scripts else '(none)'}")
+        print(f"  Read it first: {skill.path}")
+        print()
+
     h = skill.content_hash()
     note = "approved via launch.py"
     if highs:
         note += f" DESPITE {len(highs)} high-severity scan finding(s)"
     if generated:
         note += " [generated selftest]"
-    approval.approve(name, h, approved_by=who, note=note)
+    if skill.external:
+        note += f" [external skill from {skill.path.parent}, no self-test]"
+    approval.approve(skill.ledger_name, h, approved_by=who, note=note)
     print(f"Approved {name} (content {h}) as {who}.")
     print("Editing the skill lapses this approval and requires approving again.")
     return 0
 
 
 def _revoke_skill(name: str) -> int:
-    from core.skills import approval
+    from core.skills import approval, discover
 
-    if approval.revoke(name):
+    skill = next((s for s in discover() if s.name == name), None)
+    if approval.revoke(skill.ledger_name if skill else name):
         print(f"Revoked approval for {name}; it returns to 'proposed'.")
         return 0
     print(f"No approval on record for {name!r}.")

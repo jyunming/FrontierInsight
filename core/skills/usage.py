@@ -210,6 +210,11 @@ def record_quest(
         if skill is None:
             _log.warning("skill %r vanished before its usage could be recorded", name)
             continue
+        if skill.external:
+            # Another agent's folder is read in place and never written to:
+            # a provenance.json appearing there is an edit to a directory
+            # this quest does not own, and a fleet would make it every run.
+            continue
         if record_use(skill.path, quest_id, outcome):
             written.append(name)
     return written

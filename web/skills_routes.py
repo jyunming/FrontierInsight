@@ -153,6 +153,8 @@ def register_skills_routes(app: FastAPI) -> None:
         note = "approved via web dashboard"
         if highs:
             note += f" DESPITE {len(highs)} high-severity scan finding(s)"
+        if skill.external:
+            note += f" [external skill from {skill.path.parent}, no self-test]"
         try:
             from core.skills.scaffold import selftest_is_generated
 
@@ -163,7 +165,7 @@ def register_skills_routes(app: FastAPI) -> None:
 
         h = skill.content_hash()
         await asyncio.to_thread(
-            approval.approve, name, h, approved_by=who, note=note,
+            approval.approve, skill.ledger_name, h, approved_by=who, note=note,
         )
         return JSONResponse({
             "approved": True, "name": name, "content_hash": h,
@@ -229,7 +231,10 @@ def register_skills_routes(app: FastAPI) -> None:
 
     @app.post("/api/skills/{name}/revoke")
     async def revoke_skill(name: str) -> JSONResponse:
-        from core.skills import approval
+        from core.skills import approval, discover
 
-        removed = await asyncio.to_thread(approval.revoke, name)
+        skill = next((s for s in await asyncio.to_thread(discover) if s.name == name), None)
+        removed = await asyncio.to_thread(
+            approval.revoke, skill.ledger_name if skill else name,
+        )
         return JSONResponse({"revoked": bool(removed), "name": name})

@@ -28,6 +28,7 @@ export interface SkillRow {
     selftest_generated: boolean;
     domains: string[];
     path: string;
+    source?: string;
 }
 
 interface RunResult {
@@ -139,8 +140,9 @@ export async function runListSkills(
     for (const s of rows) {
         const mark = s.loadable ? "✅" : "⛔";
         const dom = s.domains?.length ? ` <sub>${s.domains.join(", ")}</sub>` : "";
+        const ext = s.source === "external" ? " <sub>external</sub>" : "";
         stream.markdown(
-            `| ${mark} | \`${s.name}\`${dom} | ${s.status} | ${s.kind} | ${s.reason} |\n`,
+            `| ${mark} | \`${s.name}\`${dom}${ext} | ${s.status} | ${s.kind} | ${s.reason} |\n`,
         );
     }
     stream.markdown("\n");

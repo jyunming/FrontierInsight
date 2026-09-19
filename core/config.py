@@ -821,6 +821,20 @@ class EngineConfig(BaseModel):
     # exclude anything added later. Also the A/B handle: run one topic with a
     # skill and once without.
     skills_exclude: list[str] = Field(default_factory=list)
+    # Skills this quest MUST use, by folder name. Selection still picks what it
+    # judges useful; these are added to the pick whatever it says, and a name
+    # that cannot be loaded (not found, not approved) stops the quest with the
+    # reason instead of being skipped: naming a skill is an instruction, not a
+    # suggestion. Independent of ``skills`` (which only narrows the candidates).
+    skills_required: list[str] = Field(default_factory=list)
+    # Extra folders of skills installed by other agents, read IN PLACE (nothing
+    # is copied or converted), searchable and selectable like FI's own. Each is
+    # a folder whose sub-folders hold a SKILL.md. Added to the well-known ones
+    # below. An external skill has no FI self-test, so it is loadable only after
+    # a person approves its exact content (edit it and the approval lapses).
+    skills_dirs: list[str] = Field(default_factory=list)
+    # Also read ~/.codex/skills, ~/.claude/skills and ~/.agents/skills.
+    skills_scan_known_dirs: bool = True
     # Per-adapter top_k. The Axon top_k stays at ``auto_collect_top_k``
     # above; this separate knob is for the dataset adapters because
     # they tend to hit external APIs and a smaller default is the
