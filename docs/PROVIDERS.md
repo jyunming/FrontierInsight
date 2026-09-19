@@ -134,14 +134,15 @@ was empty on the machine these flags were checked on.
 
 ## Per-node model routing
 
-Different nodes of the research DAG can use different models. Cheap
-model for clarify/cross_check, strong model for write/review. Set it
+Different nodes of the research DAG can use different models. Set it
 by hand-editing the YAML below, or from the interview's "Show advanced"
 screen (`python launch.py --new`, `@fi /new`, or the web `/interview`
 page) — the "Per-node model overrides" field takes the same
 comma-separated `node:model` pairs (`poster:gpt-4o-mini,
-slides:gpt-4o-mini`) and writes this exact block for you. Either way
-gets you the same YAML:
+slides:gpt-4o-mini`) and writes this exact block for you. In VSCode the
+field is a menu rather than a text box: it lists the models your VSCode
+offers, has one entry for the five light nodes below, and can set a
+single node. Either way gets you the same YAML:
 
 ```yaml
 provider:
@@ -157,16 +158,29 @@ provider:
     review_moderator: gpt-4o-mini
 ```
 
-For the VSCode-extension transport, each `model_hint` is passed to
-`vscode.lm.selectChatModels` as a family filter; the extension picks
-the closest match in your Copilot subscription. If the hint matches
-nothing your subscription exposes, that one call errors with a clear
-"no Copilot model available for hint" message — VSCode handles the gate.
+For the VSCode-extension transport, each `model_hint` is resolved through
+`vscode.lm.selectChatModels`: by id first, then by family, Copilot models
+first and then any other vendor VSCode lists (an Ollama server, a
+bring-your-own-key endpoint). If the hint matches nothing, the call uses the
+model selected in your Chat picker and the chat says so in one line, so the
+quest keeps running on a model you chose rather than one FI guessed.
 
-`poster` / `slides` / `speech` are valid `node_models` keys too. Those
-three generators pour an already-written paper into a fixed template
-rather than doing open-ended reasoning, so a cheaper model than the
-quest's primary is usually just as good there:
+**Which nodes.** Five nodes have been measured on a cheaper model:
+`cross_check`, `select_skills`, `literature_screen`, `slides` and
+`poster`. On one simulation topic, three runs each (codex, `terra` on
+every node against the same with these five on `luna`, effort pinned),
+the cheaper arm used about 15% fewer tokens in every one of the three
+pairs, and the paper, slide and poster scores did not drop (paper mean
+90.5 against 86.4, slides 85.8 against 85.9, poster 86.8 against 87.4).
+Three runs per arm cannot show a drop under about ten points, so that is
+"not seen", not "ruled out". Every other node is untested on a cheaper
+model. Nothing is set for you, and what a cheaper model saves in money
+depends on your provider's prices, which FI does not know.
+
+`poster` / `slides` / `speech` are valid `node_models` keys too. `poster`
+and `slides` pour an already-written paper into a fixed template and are
+two of the measured five; `speech` does the same kind of work but was not
+measured:
 
 ```yaml
 provider:

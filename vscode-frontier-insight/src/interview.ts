@@ -14,8 +14,13 @@ import { execSync } from "child_process";
 import {
     ENSEMBLE_MIN_MODELS,
     InterviewAnswers,
+    LIGHT_NODES,
+    OTHER_NODES,
     PaperFormat,
     answersToYaml,
+    parseNodeModelsAnswer,
+    serializeNodeModels,
+    withModelFor,
     writeInterviewYaml,
     truncate,
     slugify,
@@ -51,6 +56,106 @@ async function pickEnsembleModels(): Promise<string[] | undefined> {
         ignoreFocusOut: true,
     });
     return picked ? picked.map((p) => p.id) : undefined;
+}
+
+/**
+ * Let the user pick ONE of the models this VSCode offers through `vscode.lm`. Nothing
+ * is chosen for them: FI has no way to know which of these is cheap, so the list is
+ * just what is there. `removeLabel` adds a first entry that clears the choice.
+ * Returns the model id, "" for the remove entry, or undefined when the user pressed Esc.
+ */
+async function pickOneModel(title: string, removeLabel?: string): Promise<string | undefined> {
+    const models = await vscode.lm.selectChatModels();
+    if (models.length === 0) {
+        vscode.window.showWarningMessage(
+            "Frontier Insight: this VSCode lists no language models. Sign in to Copilot Chat or add a " +
+            "model provider, or type node:model pairs instead.",
+        );
+        return undefined;
+    }
+    const items: { label: string; description?: string; detail?: string; id: string }[] = models
+        .map((m) => ({ label: m.name || m.id, description: `${m.vendor} · ${m.family}`, detail: m.id, id: m.id }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    if (removeLabel) {
+        items.unshift({ label: removeLabel, id: "" });
+    }
+    const picked = await vscode.window.showQuickPick(items, {
+        title,
+        placeHolder: "Nothing is chosen for you: the names show the tier (mini, haiku, flash, ...), FI does not know the price.",
+        matchOnDescription: true,
+        matchOnDetail: true,
+        ignoreFocusOut: true,
+    });
+    return picked ? picked.id : undefined;
+}
+
+/**
+ * The editor behind "Per-node model overrides": pick models from the list VSCode
+ * offers instead of typing node:model pairs. The five nodes measured as safe to
+ * move to a cheaper model are one entry ("Light nodes"); any single node can also be
+ * set, with the untested ones marked. The result is the same "node:model, ..." answer
+ * the typed field produced, so the YAML and every other surface are unchanged.
+ */
+export async function editNodeModels(a: InterviewAnswers): Promise<void> {
+    for (;;) {
+        const current = parseNodeModelsAnswer(a.node_models);
+        const summary = Object.keys(current).length
+            ? Object.entries(current).map(([n, m]) => `${n} → ${m}`).join(", ")
+            : "every node uses your Chat-picker model";
+        const action = await vscode.window.showQuickPick(
+            [
+                {
+                    label: "Light nodes → one cheaper model",
+                    description: `${LIGHT_NODES.join(", ")} (measured: ~15% fewer tokens, no score drop seen in 3 runs)`,
+                    value: "light",
+                },
+                { label: "One node…", description: "pick a node, then a model", value: "one" },
+                { label: "Clear all overrides", description: "every node uses your Chat-picker model", value: "clear" },
+                { label: "Type node:model pairs", description: "advanced: edit the text directly", value: "type" },
+                { label: "Done", value: "done" },
+            ],
+            { title: `Per-node models — ${summary}`, ignoreFocusOut: true },
+        );
+        if (!action || action.value === "done") {
+            return;
+        }
+        try {
+            if (action.value === "clear") {
+                a.node_models = "";
+            } else if (action.value === "light") {
+                const id = await pickOneModel("Frontier Insight — which model should the light nodes use?", "Use my Chat-picker model (remove)");
+                if (id !== undefined) {
+                    a.node_models = serializeNodeModels(withModelFor(current, LIGHT_NODES, id));
+                }
+            } else if (action.value === "one") {
+                const node = await vscode.window.showQuickPick(
+                    [
+                        ...LIGHT_NODES.map((n) => ({ label: n, description: "measured: safe on a cheaper model" })),
+                        ...OTHER_NODES.map((n) => ({ label: n, description: "not tested on a cheaper model" })),
+                    ],
+                    { title: "Which node?", ignoreFocusOut: true },
+                );
+                if (node) {
+                    const id = await pickOneModel(`Frontier Insight — which model for ${node.label}?`, "Use my Chat-picker model (remove)");
+                    if (id !== undefined) {
+                        a.node_models = serializeNodeModels(withModelFor(current, [node.label], id));
+                    }
+                }
+            } else {
+                const v = await vscode.window.showInputBox({
+                    title: "Per-node model overrides",
+                    value: a.node_models || "",
+                    placeHolder: "cross_check:MODEL, poster:MODEL",
+                    ignoreFocusOut: true,
+                });
+                if (v !== undefined) {
+                    a.node_models = v.trim();
+                }
+            }
+        } catch (e) {
+            vscode.window.showWarningMessage(`Frontier Insight: ${(e as Error).message}`);
+        }
+    }
 }
 
 /** Return true iff `where`/`which` finds the given binary on PATH. */
@@ -1019,17 +1124,17 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
         }
         return;
     }
+    if (which.value === "node_models") {
+        // Not a text box: the models are the ones this VSCode offers, picked from a list.
+        await editNodeModels(a);
+        return;
+    }
     const aBag = a as unknown as Record<string, unknown>;
     const v = await vscode.window.showInputBox({
         title: which.label,
         value: (aBag[which.value] as string) || "",
-        // node_models' format isn't self-explanatory the way "success
-        // metric" is — give it a concrete example. Every other field
-        // here (comparative_baseline, success_metric, budget) is plain
-        // free text with no format to hint.
-        placeHolder: which.value === "node_models"
-            ? "poster:gpt-4o-mini, slides:gpt-4o-mini"
-            : undefined,
+        // comparative_baseline, success_metric and budget are plain free text
+        // with no format to hint.
         ignoreFocusOut: true,
     });
     if (v === undefined) return;
