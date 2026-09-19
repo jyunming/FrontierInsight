@@ -122,7 +122,7 @@ instead. Without a limit the paper keeps its usual layout and length.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine. Use a venv path if you don't want FI cluttering your global packages. |
+| `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine, and the one quest code runs on. Install FI's dependencies into this same interpreter (`<that python> -m pip install -e .`); a plain `pip` may belong to a different Python. `run.log` starts with `[env] python=<path>` so you can see which one ran. Use a venv path if you don't want FI cluttering your global packages. |
 | `frontierInsight.repoPath` | `""` | Absolute path to FrontierInsight repo. Defaults to the open workspace root. |
 | `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to repoPath). |
 | `frontierInsight.axonStartupWaitSec` | `600` | How long to keep watching for the Axon sidecar after the editor starts, before saying none was found. Axon loads its embedding model and indexes before it serves, and you may start it well after opening VS Code — so the wait is long and silent. A sidecar that appears at any point during it produces no notification at all. `0` never shows the notice. |

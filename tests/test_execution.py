@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -21,6 +22,59 @@ async def test_setup_creates_venv(venv_quest: Path) -> None:
     await exe.setup(venv_quest)
     py = exe.python_path(venv_quest)
     assert py.exists(), f"venv python missing at {py}"
+    # Default is now system_site_packages=True (was the venv.EnvBuilder
+    # default of False) — each quest's venv should see what FI's own
+    # interpreter already has installed instead of reinstalling it.
+    cfg = (venv_quest / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8")
+    assert "include-system-site-packages = true" in cfg.lower()
+
+
+@pytest.mark.asyncio
+async def test_setup_honors_system_site_packages_false(tmp_path: Path) -> None:
+    """The isolation escape hatch: system_site_packages=False must still
+    build a fully isolated venv for anyone who wants it back."""
+    exe = VenvExecutor(system_site_packages=False)
+    quest_root = tmp_path / "isolated-quest"
+    await exe.setup(quest_root)
+    cfg = (quest_root / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8")
+    assert "include-system-site-packages = false" in cfg.lower()
+
+
+def test_resolve_python_for_version_prefers_sys_executable_when_it_matches():
+    """No subprocess search needed when the running interpreter already IS
+    the requested version — the common case on a single-Python machine."""
+    from core.execution import _resolve_python_for_version
+    want = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    assert _resolve_python_for_version(want) == sys.executable
+
+
+def test_resolve_python_for_version_returns_none_for_an_unavailable_version():
+    """A version nobody has installed must not crash — _build_venv falls
+    back to sys.executable with a logged warning, not an exception."""
+    from core.execution import _resolve_python_for_version
+    assert _resolve_python_for_version("2.4") is None
+
+
+@pytest.mark.asyncio
+async def test_build_venv_falls_back_to_sys_executable_and_warns(
+    tmp_path: Path, caplog,
+) -> None:
+    """core.execution.python_version was previously declared but never
+    read — venv.EnvBuilder().create() always used sys.executable
+    regardless. This pins the NEW behavior's honest fallback: a version
+    nobody has installed still produces a working venv (from
+    sys.executable), but now says so instead of silently ignoring the
+    setting."""
+    import logging
+    from core.execution import _build_venv
+    venv_dir = tmp_path / "fallback-venv"
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.execution"):
+        await asyncio.to_thread(
+            _build_venv, venv_dir, with_pip=True, clear=True,
+            python_version="2.4",
+        )
+    assert (venv_dir / ("Scripts" if sys.platform == "win32" else "bin")).is_dir()
+    assert any("no Python 2.4 interpreter found" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -89,6 +143,139 @@ async def test_cleanup_after_success_freezes_and_removes_venv(
     # reliable.
     if sys.platform != "win32":
         assert not venv_dir.exists(), "venv dir should be removed after cleanup"
+
+
+@pytest.mark.asyncio
+async def test_lock_pins_a_requested_package_the_venv_inherited(
+    tmp_path: Path,
+) -> None:
+    """With system_site_packages a satisfied request installs nothing into
+    the venv, so ``pip freeze --local`` alone would drop it — and the venv is
+    deleted right after, taking the only record of the version the experiment
+    ran against. pytest is satisfied purely by inheritance here (no network)."""
+    quest_root = tmp_path / "quest-inherit"
+    quest_root.mkdir()
+    exe = VenvExecutor()
+    await exe.setup(quest_root)
+    result = await exe.install(["pytest>=1"], quest_root=quest_root)
+    assert result.returncode == 0, result.stderr
+
+    lock_path = await exe.cleanup_after_success(quest_root)
+
+    assert lock_path is not None
+    body = lock_path.read_text(encoding="utf-8")
+    assert f"pytest=={pytest.__version__}" in body
+    assert "provided by FI's own interpreter" in body
+
+
+_PIP_LONG_PATH_STDERR = (
+    "Collecting torch\n"
+    "  Downloading torch-2.4.0-cp311-cp311-win_amd64.whl (197.9 MB)\n"
+    "ERROR: Could not install packages due to an OSError: [Errno 2] No such file "
+    r"or directory: 'C:\Users\x\OneDrive\venv\Lib\site-packages\torch\include\ATen\native\a.h'"
+    "\n"
+    "HINT: This error might have been caused by the fact that Windows Long Path "
+    "support is not enabled. You can find information on how to enable this at "
+    "https://pip.pypa.io/warnings/enable-long-paths\n"
+    "\n[notice] A new release of pip is available: 24.0 -> 26.2.1\n"
+)
+
+
+def test_pip_failure_summary_keeps_the_real_error_and_names_the_long_path_cause() -> None:
+    """The log used to keep the last 400 characters of pip's stderr, which on a
+    long-path failure is the generic HINT and pip's upgrade notice — never the
+    package or path that failed."""
+    from core.execution import pip_failure_summary
+    out = pip_failure_summary(_PIP_LONG_PATH_STDERR)
+    assert r"torch\include\ATen\native\a.h" in out
+    assert "260-character" in out
+    assert "notice" not in out
+
+
+def test_pip_failure_summary_adds_no_hint_to_an_unrelated_failure() -> None:
+    from core.execution import pip_failure_summary
+    out = pip_failure_summary(
+        "ERROR: No matching distribution found for nosuchpkg\n"
+        "[notice] A new release of pip is available\n"
+    )
+    assert out == "ERROR: No matching distribution found for nosuchpkg"
+
+
+def test_pip_failure_summary_falls_back_to_the_tail_without_error_lines() -> None:
+    from core.execution import pip_failure_summary
+    assert "boom" in pip_failure_summary("a\nb\nboom")
+
+
+def test_make_executor_defaults_to_the_shared_interpreter() -> None:
+    from core.execution import SharedInterpreterExecutor, make_executor
+    exe = make_executor("venv", python_version="3.11", docker_image="x")
+    assert isinstance(exe, SharedInterpreterExecutor)
+    isolated = make_executor(
+        "venv", python_version="3.11", docker_image="x", shared_interpreter=False,
+    )
+    assert type(isolated) is VenvExecutor
+
+
+@pytest.mark.asyncio
+async def test_shared_interpreter_builds_no_venv_and_runs_on_fi_python(
+    tmp_path: Path,
+) -> None:
+    """The point of 'one Python': no venv is built under the quest's path, and
+    quest code runs on the very interpreter that runs FI."""
+    from core.execution import SharedInterpreterExecutor
+    exe = SharedInterpreterExecutor()
+    quest_root = tmp_path / "shared-quest"
+    await exe.setup(quest_root)
+    assert not (quest_root / ".venv").exists()
+    py = exe.python_path(quest_root)
+    assert py == Path(sys.executable)
+    res = await exe.execute(
+        [str(py), "-c", "import sys; print(sys.executable)"],
+        cwd=quest_root, timeout_s=60,
+    )
+    assert res.returncode == 0
+    assert res.stdout.strip() == sys.executable
+
+
+@pytest.mark.asyncio
+async def test_shared_interpreter_records_what_the_quest_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.execution import SharedInterpreterExecutor
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    exe = SharedInterpreterExecutor()
+    quest_root = tmp_path / "shared-quest"
+    await exe.setup(quest_root)
+    # pytest is already installed in this interpreter: nothing to download.
+    res = await exe.install(["pytest>=1"], quest_root=quest_root)
+    assert res.returncode == 0, res.stderr
+
+    lock_path = await exe.cleanup_after_success(quest_root)
+
+    assert lock_path == quest_root / ".fi" / "requirements.lock.txt"
+    body = lock_path.read_text(encoding="utf-8")
+    assert f"pytest=={pytest.__version__}" in body
+    assert not (quest_root / ".venv").exists()
+
+
+@pytest.mark.asyncio
+async def test_shared_interpreter_can_install_twice_in_one_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pip lock is taken in a worker thread and released on the event-loop
+    thread. With filelock's default thread-local state that release does
+    nothing, so the second install in the same process waits out the whole
+    timeout — a quest hung for 30 minutes. A short timeout makes a regression
+    fail in seconds."""
+    from core.execution import SharedInterpreterExecutor
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    exe = SharedInterpreterExecutor()
+    exe._pip_lock_timeout_s = 20
+    quest_root = tmp_path / "shared-quest"
+    await exe.setup(quest_root)
+    for _ in range(2):
+        res = await exe.install(["pytest>=1"], quest_root=quest_root)
+        assert res.returncode == 0, res.stderr
 
 
 @pytest.mark.asyncio

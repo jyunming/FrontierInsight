@@ -193,6 +193,101 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_a_provider_message_written_as_the_paper_fails_the_quest(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three Sonnet quests ended rc=0 with a review "accept" while paper.md held
+    only "You've hit your weekly limit ...". A paper that short is never a paper;
+    the quest must fail and say what the writer returned."""
+    engine = Engine(smoke_config)
+    weekly = "You've hit your weekly limit · resets Sep 18, 10pm (Europe/Brussels)"
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "Writing":
+            return weekly
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    with pytest.raises(Exception) as exc:
+        await engine.run()
+    assert "cannot be a paper" in str(exc.value)
+    assert "weekly limit" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_run_log_says_why_the_literature_search_found_nothing(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quest that "did not look for literature" left only "retrieved 0 docs"
+    in its log — no way to tell a disabled search from a failed one."""
+    engine = Engine(smoke_config)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[literature] searching sources=" in log
+    assert "knowledge.enabled is false, so nothing was searched" in log
+
+
+@pytest.mark.asyncio
+async def test_dump_state_prints_a_real_checkpoint_as_text(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """state.sqlite is a binary file; on a machine nothing can be copied off
+    it was unreadable. Reads a checkpoint a real run wrote."""
+    from core.state_dump import dump_state
+
+    engine = Engine(smoke_config)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    out = dump_state(engine.quest_root)
+    assert f"quest: {engine.quest_id}" in out
+    assert "literature" in out and "paper_md" in out
+    assert "->  select_skills" in out
+    assert out.rstrip().endswith("(end)")
+    assert dump_state(engine.quest_root / ".fi" / "state.sqlite") == out
+
+
+def test_dump_state_says_what_to_give_it_when_there_is_no_checkpoint(tmp_path: Path) -> None:
+    from core.state_dump import dump_state
+
+    with pytest.raises(FileNotFoundError, match="state.sqlite"):
+        dump_state(tmp_path / "no-such-quest")
+
+
+@pytest.mark.asyncio
+async def test_run_log_names_the_interpreter_running_fi(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `pip install` into a different Python than the one running FI changes
+    nothing, and nothing in run.log said which one that was. The user cannot
+    send files off the machine, so the log itself must carry it."""
+    import sys
+
+    engine = Engine(smoke_config)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert f"[env] python={sys.executable}" in log
+
+
+@pytest.mark.asyncio
 async def test_run_clears_stale_quest_failed_at_start(
     smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

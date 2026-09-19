@@ -731,6 +731,7 @@ def test_retry_cli_error_aborts_fast_on_fatal_markers() -> None:
     # Long-duration limits / auth failures abort immediately (no doomed retries).
     fatal = [
         "You've hit your session limit · resets 2:30am (Europe/Brussels)",
+        "You've hit your weekly limit · resets Sep 18, 10pm (Europe/Brussels)",
         "claude usage limit reached",
         "out of credits - upgrade your plan",
         "copilot.EXE exited rc=1: Your GitHub token may be invalid, expired",

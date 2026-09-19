@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import string
+import sys
 import time
 import unicodedata
 import uuid
@@ -49,7 +50,7 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
     resolve_page_limit,
 )
-from .execution import ExecutionResult, make_executor
+from .execution import ExecutionResult, make_executor, pip_failure_summary
 from .knowledge import (
     WORK_SCOPE_PAPERS,
     WORK_SCOPE_PAPERS_AND_BOOKS,
@@ -431,6 +432,8 @@ class Engine:
             config.execution.sandbox,
             python_version=config.execution.python_version,
             docker_image=config.execution.docker_image,
+            system_site_packages=config.execution.system_site_packages,
+            shared_interpreter=config.execution.shared_interpreter,
         )
         self.knowledge = Knowledge(config.knowledge)
         self._log = _quest_logger(self.quest_id, self.fi_dir)
@@ -525,6 +528,12 @@ class Engine:
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
+            # Which interpreter is running FI decides which packages it can
+            # see; a `pip install` into a different one changes nothing here.
+            self._log.info(
+                "[env] python=%s (%s) sandbox=%s",
+                sys.executable, sys.version.split()[0], self.config.execution.sandbox,
+            )
             # Pre-flight: if the user asked for paper_pdf, verify the
             # host can produce one BEFORE spending 15 minutes on LLM
             # calls only to discover at the end that pandoc / LaTeX are
@@ -2304,6 +2313,12 @@ class Engine:
         sources = await self.knowledge.choose_sources(
             query, chosen_idea=chosen, chat_fn=chat_fn,
         )
+        self._log.info(
+            "[literature] searching sources=%s (knowledge.enabled=%s, "
+            "source_routing=%s)",
+            sources or "none", self.config.knowledge.enabled,
+            self.config.knowledge.source_routing,
+        )
 
         async def _retrieve(q: str, *, web: bool = True) -> list:
             return await self.knowledge.asearch(
@@ -2331,6 +2346,19 @@ class Engine:
             _retrieve(q, web=(i == 0)) for i, q in enumerate(queries)
         ))
         docs = _merge_round_robin(list(per_facet))
+        if docs:
+            why_none = ""
+        elif not self.config.knowledge.enabled:
+            why_none = " — knowledge.enabled is false, so nothing was searched"
+        else:
+            why_none = (
+                " — no source returned anything; look for [source-failures] at "
+                "the end of this log, and check network access"
+            )
+        self._log.info(
+            "[literature] hits per query=%s, %d after merging%s",
+            [len(x) for x in per_facet], len(docs), why_none,
+        )
         # Relevance floor: drop off-topic sources the retriever returned before
         # they reach the corpus. This is the ONLY relevance filter on the
         # literature path — the LLM guard runs only under auto_collect, which
@@ -2392,7 +2420,12 @@ class Engine:
         docs = docs + await self._foundational_works(rel_topic, docs, work_scope=scope)
         # The floor scores word overlap; the screen asks whether the paper
         # could cite each source for a claim (see _screen_literature).
+        n_before_screen = len(docs)
         docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
+        self._log.info(
+            "[literature] kept %d of %d after the relevance floor and the screen",
+            len(docs), n_before_screen,
+        )
         # Legal full text for the scholarly sources that were kept (web pages
         # already carry their page text). Once here rather than per facet.
         docs = await self.knowledge.fetch_full_text(docs)
@@ -3967,8 +4000,8 @@ class Engine:
             install = await self.executor.install(deps, quest_root=self.quest_root)
             if install.returncode != 0:
                 self._log.warning(
-                    "[execute] pip install rc=%d stderr_tail=%s",
-                    install.returncode, install.stderr[-400:],
+                    "[execute] pip install rc=%d: %s",
+                    install.returncode, pip_failure_summary(install.stderr),
                 )
 
         py = self.executor.python_path(self.quest_root)
@@ -5557,6 +5590,13 @@ class Engine:
         markdown = await self._chat(prompt, node="write")
         # The model may wrap with a fence; strip it.
         markdown = _strip_outer_fence(markdown)
+        if _is_not_a_paper(markdown):
+            raise RuntimeError(
+                f"the writer returned {len(markdown.strip())} characters, which "
+                f"cannot be a paper: {markdown.strip()[:200]!r}. If that reads "
+                f"like a provider message (a usage limit, an expired login), fix "
+                f"the provider and resume the quest."
+            )
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -8339,6 +8379,16 @@ def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
 _CLAIM_SOURCE_CHARS = 6000
 # A quote shorter than this could be found in almost any source.
 _QUOTE_MIN_CHARS = 25
+# A paper has a title and sections. Text this short with no heading at all is
+# the provider's error message ("You've hit your weekly limit ...") that
+# arrived as content; three Sonnet quests ended rc=0 with a review "accept" on
+# exactly that.
+_MIN_PAPER_CHARS = 300
+
+
+def _is_not_a_paper(text: str) -> bool:
+    body = text.strip()
+    return len(body) < _MIN_PAPER_CHARS and not re.search(r"(?m)^#{1,6}\s", body)
 # And this much of the quest's OWN evidence. Separate from the per-source
 # budget above: this one bounds the findings, the supported claims and the
 # results the check grounds an "experiment" claim against. The block used to

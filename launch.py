@@ -152,6 +152,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "after paying for the whole pipeline.",
     )
     mode.add_argument(
+        "--dump-state",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="Print a quest's .fi/state.sqlite as text: every state key with its "
+             "size and a preview, and the path the quest took node by node. "
+             "PATH is the quest directory or the state.sqlite file. Read-only; "
+             "for a machine where the file itself cannot be copied off.",
+    )
+    mode.add_argument(
         "--install-marp",
         action="store_true",
         help="Download the Marp CLI standalone binary for this OS into "
@@ -2030,6 +2040,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.doctor:
             return _doctor()
+
+        if args.dump_state is not None:
+            from core.state_dump import dump_state
+            try:
+                print(dump_state(args.dump_state))
+            except FileNotFoundError as exc:
+                print(exc, file=sys.stderr)
+                return 1
+            return 0
 
         if args.install_marp:
             return _install_marp()

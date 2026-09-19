@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
+import subprocess
 import sys
 import time
 import venv
@@ -65,8 +67,11 @@ class VenvExecutor:
     `DockerExecutor`.
     """
 
-    def __init__(self, *, python_version: str = "3.11") -> None:
+    def __init__(
+        self, *, python_version: str = "3.11", system_site_packages: bool = True,
+    ) -> None:
         self.python_version = python_version
+        self.system_site_packages = system_site_packages
 
     async def setup(self, quest_root: Path) -> None:
         quest_root.mkdir(parents=True, exist_ok=True)
@@ -103,10 +108,13 @@ class VenvExecutor:
                 "setup: reusable venv at %s failed the pip probe (rc=%s) — "
                 "rebuilding from clean", venv_dir, probe.returncode,
             )
-        # `venv.EnvBuilder` is sync; offload so we don't block the loop.
-        # clear=True wipes any partial/broken dir before recreating.
+        # `venv.EnvBuilder`/subprocess venv creation is sync; offload so we
+        # don't block the loop. clear=True wipes any partial/broken dir
+        # before recreating.
         await asyncio.to_thread(
-            _build_venv, venv_dir, with_pip=True, clear=True
+            _build_venv, venv_dir, with_pip=True, clear=True,
+            python_version=self.python_version,
+            system_site_packages=self.system_site_packages,
         )
 
     def python_path(self, quest_root: Path) -> Path:
@@ -133,11 +141,53 @@ class VenvExecutor:
         # retried: another 600-second wait is not a transient.
         if result.returncode != 0 and not result.timed_out:
             _log.warning(
-                "[install] pip install rc=%d; retrying once. stderr_tail=%s",
-                result.returncode, result.stderr[-300:],
+                "[install] pip install rc=%d; retrying once. %s",
+                result.returncode, pip_failure_summary(result.stderr),
             )
             result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        if result.returncode == 0:
+            self._record_requested(pkgs, quest_root)
         return result
+
+    @staticmethod
+    def _record_requested(pkgs: list[str], quest_root: Path) -> None:
+        """Remember what the quest asked pip for. With system_site_packages a
+        satisfied request installs nothing into the venv, so ``pip freeze
+        --local`` cannot see it; this file is how cleanup finds those."""
+        try:
+            fi_dir = quest_root / ".fi"
+            fi_dir.mkdir(parents=True, exist_ok=True)
+            with (fi_dir / "pip_requested.txt").open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(pkgs) + "\n")
+        except OSError as exc:
+            _log.debug("[install] could not record requested packages: %s", exc)
+
+    async def _inherited_pins(
+        self, py: Path, quest_root: Path, local_freeze: str
+    ) -> str:
+        """``name==version`` lines for packages the quest requested that the
+        venv got from FI's own interpreter rather than installing itself."""
+        try:
+            requested = (quest_root / ".fi" / "pip_requested.txt").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except OSError:
+            return ""
+        local = {
+            _norm_dist(line.split("==")[0])
+            for line in local_freeze.splitlines() if "==" in line
+        }
+        wanted: list[str] = []
+        for spec in requested:
+            m = _REQ_NAME.match(spec.strip())
+            if m and _norm_dist(m.group(0)) not in local and m.group(0) not in wanted:
+                wanted.append(m.group(0))
+        if not wanted:
+            return ""
+        probe = await self.execute(
+            [str(py), "-c", _PIN_SCRIPT, *wanted], cwd=quest_root, timeout_s=60,
+        )
+        return probe.stdout if probe.returncode == 0 else ""
 
     async def execute(
         self,
@@ -220,8 +270,14 @@ class VenvExecutor:
                 )
                 return None
             # ``pip freeze`` produces a deterministic, pip-installable list.
+            # ``--local`` excludes globally-installed packages when the venv
+            # has global access (``system_site_packages=True``) — without
+            # it, the lock file would list everything FI's own interpreter
+            # happens to have installed alongside what this quest actually
+            # asked for, which is not what "what did this quest need"
+            # should mean. Harmless no-op when system_site_packages=False.
             freeze = await self.execute(
-                [str(py), "-m", "pip", "freeze"],
+                [str(py), "-m", "pip", "freeze", "--local"],
                 cwd=quest_root,
                 timeout_s=60,
             )
@@ -247,7 +303,15 @@ class VenvExecutor:
                 "#   python -m venv .venv && "
                 ".venv\\Scripts\\pip install -r .fi\\requirements.lock.txt\n"
             )
-            lock_path.write_text(header + freeze.stdout, encoding="utf-8")
+            inherited = await self._inherited_pins(py, quest_root, freeze.stdout)
+            if inherited.strip():
+                inherited = (
+                    "\n# Requested by the quest but provided by FI's own "
+                    "interpreter, so not installed into the venv.\n"
+                    "# Pinned to the versions this quest ran against; their "
+                    "dependencies resolve fresh on reinstall.\n" + inherited
+                )
+            lock_path.write_text(header + freeze.stdout + inherited, encoding="utf-8")
             # Delete the venv. ``ignore_errors`` rather than ``onerror=``
             # so a stuck file handle on Windows doesn't propagate — the
             # lock file is the durable artifact; a stray .venv/ is
@@ -293,6 +357,34 @@ _DLL_LOAD_HINT = (
 )
 
 
+_LONG_PATH_HINT = (
+    "cause: a file in this install has a path over Windows' 260-character "
+    "limit, so pip installed nothing. Fix: enable LongPathsEnabled (needs "
+    "admin), or run FI on a Python installed at a short path (e.g. "
+    "C:\\Python311); with execution.shared_interpreter: false, set "
+    "output.output_dir to a short path such as C:\\fi."
+)
+
+
+def pip_failure_summary(stderr: str) -> str:
+    """What to log when ``pip install`` fails. pip prints the real cause on its
+    ``ERROR:`` lines and follows them with generic hints, so the last few
+    hundred characters (what used to be logged) were only the hint — never the
+    package or the path that failed."""
+    errors = [
+        ln.strip() for ln in stderr.splitlines() if ln.strip().startswith("ERROR:")
+    ]
+    summary = " | ".join(errors) if errors else stderr.strip()[-400:]
+    summary = summary[:800]
+    low = stderr.lower()
+    if (
+        "enable-long-paths" in low or "winerror 206" in low
+        or "filename or extension is too long" in low
+    ):
+        summary += " || " + _LONG_PATH_HINT
+    return summary
+
+
 def _looks_like_dll_load_failure(stderr: str) -> bool:
     """True when stderr carries the native-extension load-failure signature.
     Specific enough not to false-positive on ordinary experiment errors."""
@@ -303,11 +395,131 @@ def _looks_like_dll_load_failure(stderr: str) -> bool:
     )
 
 
-def _build_venv(venv_dir: Path, *, with_pip: bool, clear: bool = False) -> None:
-    # ``clear=True`` wipes a partial/broken venv dir (e.g. left by a run killed
-    # mid-build) before recreating it, so a rebuild starts from clean.
-    builder = venv.EnvBuilder(with_pip=with_pip, clear=clear, upgrade_deps=False)
-    builder.create(str(venv_dir))
+_REQ_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+# One line on purpose: passed as a `-c` argument, and a multi-line argument is
+# fragile across Windows argv quoting.
+_PIN_SCRIPT = (
+    "import re,sys,importlib.metadata as m;"
+    "n=lambda s:re.sub('[-_.]+','-',s).lower();"
+    "w={n(x) for x in sys.argv[1:]};"
+    "[print(x) for x in sorted({d.metadata['Name']+'=='+d.version "
+    "for d in m.distributions() "
+    "if d.metadata['Name'] and n(d.metadata['Name']) in w})]"
+)
+
+
+def _norm_dist(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _resolve_python_for_version(python_version: str) -> str | None:
+    """Find an interpreter matching ``python_version`` (e.g. ``"3.11"``),
+    or ``None`` when none is found — callers fall back to ``sys.executable``.
+
+    ``sys.executable`` is checked FIRST and preferred when it already
+    matches: no subprocess needed, and it's guaranteed to have ``venv`` +
+    ``pip`` working (it's the interpreter running FI itself). Only searches
+    elsewhere when it does not match, so a single-Python-install machine
+    (the common case) never pays for the search.
+    """
+    want = tuple(int(p) for p in python_version.split(".")[:2])
+    have = sys.version_info[:2]
+    if have == want:
+        return sys.executable
+
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        # The `py` launcher (ships with every python.org Windows install)
+        # picks a specific installed version regardless of what's on PATH
+        # or which interpreter is currently running FI — the one reliable
+        # way to target a version other than sys.executable on Windows.
+        py_launcher = shutil.which("py")
+        if py_launcher:
+            probe = subprocess.run(
+                [py_launcher, f"-{python_version}", "-c", "import sys; print(sys.executable)"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if probe.returncode == 0:
+                candidates.append(probe.stdout.strip())
+    else:
+        found = shutil.which(f"python{python_version}")
+        if found:
+            candidates.append(found)
+
+    for cand in candidates:
+        if cand and Path(cand).is_file():
+            return cand
+    return None
+
+
+def _build_venv(
+    venv_dir: Path, *, with_pip: bool, clear: bool = False,
+    python_version: str = "3.11", system_site_packages: bool = True,
+) -> None:
+    """Build the quest venv from the interpreter matching ``python_version``,
+    not whichever interpreter happens to be running FI.
+
+    Before this, ``venv.EnvBuilder().create()`` unconditionally used
+    ``sys.executable`` — the CURRENTLY RUNNING interpreter — and silently
+    ignored ``execution.python_version`` entirely (it was stored on
+    ``VenvExecutor`` but never read). On a machine with more than one
+    Python install, whichever one happened to launch FI that particular
+    time decided every quest's venv, with no consistency guarantee quest
+    to quest — the same declared ``python_version`` could silently mean a
+    different interpreter, and therefore different wheels / ABI, run to
+    run. ``clear=True`` wipes a partial/broken venv dir (e.g. left by a run
+    killed mid-build) before recreating it, so a rebuild starts clean.
+
+    ``system_site_packages=True`` (default, was the ``venv.EnvBuilder``
+    default of ``False``) lets each quest's venv see whatever FI's own
+    interpreter already has installed — matplotlib, numpy, pandas are
+    near-universal across quests, so on a machine with a cold pip cache
+    every quest previously re-downloaded and re-built them from scratch.
+    A quest's own ``pip install`` still installs INTO the venv as normal
+    and takes precedence there; inheriting only fills in what a quest
+    doesn't ask for itself.
+    """
+    resolved = _resolve_python_for_version(python_version)
+    if resolved is None:
+        _log.warning(
+            "[setup] no Python %s interpreter found (checked the `py` "
+            "launcher on Windows, `python%s` on PATH elsewhere) — "
+            "building the venv from the currently-running interpreter "
+            "(%s) instead. Install python.org's Python %s or add it to "
+            "PATH for a consistent venv across runs.",
+            python_version, python_version, sys.executable, python_version,
+        )
+        resolved = sys.executable
+
+    if resolved == sys.executable:
+        # Fast, in-process path — no subprocess needed.
+        builder = venv.EnvBuilder(
+            with_pip=with_pip, clear=clear, upgrade_deps=False,
+            system_site_packages=system_site_packages,
+        )
+        builder.create(str(venv_dir))
+        return
+
+    # A different interpreter than the one running FI: venv.EnvBuilder has
+    # no way to target one, since it always builds from sys.executable.
+    # Spawn that interpreter's own `-m venv` instead — this function
+    # already runs off the event loop (asyncio.to_thread), so a blocking
+    # subprocess call here is consistent with the rest of this module.
+    if clear and venv_dir.exists():
+        shutil.rmtree(venv_dir, ignore_errors=True)
+    cmd = [resolved, "-m", "venv"]
+    if system_site_packages:
+        cmd.append("--system-site-packages")
+    if not with_pip:
+        cmd.append("--without-pip")
+    cmd.append(str(venv_dir))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"venv creation failed via {resolved} (python_version="
+            f"{python_version}): rc={result.returncode}\n{result.stderr[-2000:]}"
+        )
 
 
 class DockerExecutor:
@@ -445,9 +657,95 @@ class DockerExecutor:
                 pass
 
 
-def make_executor(sandbox: str, *, python_version: str, docker_image: str) -> Executor:
+class SharedInterpreterExecutor(VenvExecutor):
+    """Runs quest code with the interpreter that runs FI itself — no venv.
+
+    One Python for everything. What ``pip install -e .`` (or an earlier quest)
+    put there is simply there; nothing is built under the quest's own output
+    path, which is where Windows' 260-character limit stopped pip installing
+    ``torch`` into a per-quest venv. No isolation: what a quest installs stays
+    in FI's environment.
+    """
+
+    _pip_lock_timeout_s: float = 1800
+
+    async def setup(self, quest_root: Path) -> None:
+        quest_root.mkdir(parents=True, exist_ok=True)
+        want =tuple(int(p) for p in self.python_version.split(".")[:2] if p.isdigit())
+        if want and want != tuple(sys.version_info[:2]):
+            _log.info(
+                "[setup] execution.python_version=%s is not used: quests run on "
+                "FI's own Python %d.%d (%s).",
+                self.python_version, sys.version_info[0], sys.version_info[1],
+                sys.executable,
+            )
+
+    def python_path(self, quest_root: Path) -> Path:
+        return Path(sys.executable)
+
+    async def install(
+        self, packages: Iterable[str], *, quest_root: Path
+    ) -> ExecutionResult:
+        pkgs = list(packages)
+        if not pkgs:
+            return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
+        # Every quest now installs into the same site-packages, and two pip
+        # processes writing it at once corrupt it — the fleet runner runs
+        # quests concurrently, so serialise across processes.
+        from filelock import FileLock
+        lock_dir = Path.home() / ".frontier-insight"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        # thread_local=False is load-bearing: acquire runs in a worker thread
+        # and release on the event-loop thread, and with the default a release
+        # from a different thread is a silent no-op — the lock stays held and
+        # the NEXT install in this process blocks for the whole timeout.
+        lock = FileLock(
+            str(lock_dir / "pip-install.lock"),
+            timeout=self._pip_lock_timeout_s, thread_local=False,
+        )
+        _log.info("[install] waiting for the shared pip lock (%s)", lock.lock_file)
+        await asyncio.to_thread(lock.acquire)
+        try:
+            return await super().install(pkgs, quest_root=quest_root)
+        finally:
+            lock.release()
+
+    async def cleanup_after_success(self, quest_root: Path) -> Path | None:
+        """Nothing to delete. Record what the quest asked for, pinned to the
+        versions it ran against, as ``.fi/requirements.lock.txt``."""
+        try:
+            pins = await self._inherited_pins(Path(sys.executable), quest_root, "")
+            if not pins.strip():
+                return None
+            fi_dir = quest_root / ".fi"
+            fi_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = fi_dir / "requirements.lock.txt"
+            lock_path.write_text(
+                "# Frozen by FrontierInsight on quest success.\n"
+                f"# This quest ran in FI's own Python {sys.version.split()[0]} "
+                f"({sys.executable}), not a per-quest venv.\n"
+                "# These are the packages it asked for, pinned to the versions "
+                "it ran against; their dependencies resolve fresh.\n"
+                "# Reproduce: pip install -r .fi/requirements.lock.txt\n" + pins,
+                encoding="utf-8",
+            )
+            return lock_path
+        except OSError as exc:
+            _log.warning("cleanup_after_success: could not write lock file: %s", exc)
+            return None
+
+
+def make_executor(
+    sandbox: str, *, python_version: str, docker_image: str,
+    system_site_packages: bool = True, shared_interpreter: bool = True,
+) -> Executor:
+    if sandbox == "venv" and shared_interpreter:
+        return SharedInterpreterExecutor(python_version=python_version)
     if sandbox == "venv":
-        return VenvExecutor(python_version=python_version)
+        return VenvExecutor(
+            python_version=python_version,
+            system_site_packages=system_site_packages,
+        )
     if sandbox == "docker":
         return DockerExecutor(image=docker_image)
     raise ValueError(f"unknown sandbox: {sandbox!r}")
