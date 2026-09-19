@@ -270,3 +270,97 @@ async def test_the_screen_is_told_which_candidates_are_foundational(tmp_path: Pa
     assert ("[1] (foundational paper) Computer experiments on classical fluids — 1967, article, "
             "suggested as a foundational work ::") in prompts[0]
     assert "Verlet's 1967 paper" in prompts[0]
+
+
+# ---- up to eight are suggested and looked up, and the run log says what happened --
+
+def _works(n: int) -> list[dict]:
+    # Titles long enough that eight of them together pass 600 characters.
+    return [
+        {"title": f"An original paper on a method the research topic relies on, number {i}, in full",
+         "authors": f"Author{i}", "year": 1900 + i}
+        for i in range(1, n + 1)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [kn.WORK_SCOPE_PAPERS, kn.WORK_SCOPE_PAPERS_AND_BOOKS])
+async def test_the_model_is_asked_for_eight_works_and_a_ninth_is_ignored(tmp_path: Path, scope: str) -> None:
+    eng = _engine(tmp_path)
+    prompts: list[str] = []
+
+    async def chat(prompt, node=""):  # noqa: ANN001
+        prompts.append(prompt)
+        return json.dumps({"works": _works(9)})
+
+    eng._chat = chat  # type: ignore[method-assign]
+    suggested = await eng._suggest_foundational_works("Some research topic", work_scope=scope)
+    assert "List up to EIGHT foundational works" in prompts[0] and "FIVE" not in prompts[0]
+    assert [w["title"] for w in suggested] == [w["title"] for w in _works(8)]
+
+
+@pytest.mark.asyncio
+async def test_eight_suggested_works_are_looked_up_and_a_ninth_is_not(monkeypatch) -> None:
+    monkeypatch.setattr(kn, "_OPENALEX_GAP_S", 0.0)
+    looked_up: list[str] = []
+
+    def lookup(work, **kw):  # noqa: ANN001
+        looked_up.append(work["title"])
+        return None
+
+    monkeypatch.setattr(kn, "_openalex_title_lookup", lookup)
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works(_works(9), [])
+    assert kn.FOUNDATIONAL_MAX_SUGGESTED == 8
+    assert looked_up == [w["title"] for w in _works(8)]
+
+
+@pytest.mark.asyncio
+async def test_the_run_log_lists_every_suggestion_and_what_became_of_each(tmp_path: Path) -> None:
+    """A work the model never named looked exactly like one OpenAlex does not hold:
+    the run log recorded only how many were suggested."""
+    eng = _engine(tmp_path)
+    suggestions = _works(6) + [
+        {"title": "The outcome of a stochastic epidemic: a note on Bailey's paper", "authors": "Whittle", "year": 1955},
+        {"title": "Stochastic epidemic models and their statistical analysis", "authors": ["Andersson", "Britton"], "year": 2000},
+        {"title": "A ninth work the prompt never asked for", "authors": "Extra", "year": 1999},
+    ]
+
+    async def chat(prompt, node=""):  # noqa: ANN001
+        return json.dumps({"works": suggestions})
+
+    eng._chat = chat  # type: ignore[method-assign]
+    whittle = RetrievedDoc(content="w", metadata={
+        "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC - A NOTE ON BAILEY'S PAPER", "year": 1955,
+        "foundational": kn.FOUNDATIONAL_SUGGESTED})
+    cited = RetrievedDoc(content="c", metadata={
+        "title": "Infectious diseases of humans", "year": 1991, "foundational": "cited by 7 of the retrieved papers"})
+    already = RetrievedDoc(content="a", metadata={
+        "title": "Stochastic epidemic models and their statistical analysis", "year": 2000, "doi": "10.1/andersson"})
+    seen: dict = {}
+
+    async def fake_find(suggested, docs):  # noqa: ANN001
+        seen["suggested"] = suggested
+        # The lookup dropped the work the search already returned.
+        return [whittle, cited]
+
+    eng.knowledge.find_foundational_works = fake_find  # type: ignore[method-assign]
+    new = await eng._foundational_works("Some research topic", [already])
+
+    assert [d.metadata["year"] for d in new] == [1955, 1991]
+    assert len(seen["suggested"]) == 8, "the ninth is never looked up"
+    log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    suggested_line = next(ln for ln in log.splitlines() if "foundational works suggested (8):" in ln)
+    # Every suggestion, untruncated, as "title (year, authors)".
+    assert len(suggested_line) > 700
+    for w in suggestions[:8]:
+        who = ", ".join(w["authors"]) if isinstance(w["authors"], list) else w["authors"]
+        assert f"{w['title']} ({w['year']}, {who})" in suggested_line
+    assert "A ninth work" not in log
+    outcome = next(ln for ln in log.splitlines() if "found in OpenAlex and added" in ln)
+    whittle_text = "The outcome of a stochastic epidemic: a note on Bailey's paper (1955, Whittle)"
+    assert f"found in OpenAlex and added (1): {whittle_text} |" in outcome
+    assert ("already among the search results (1): "
+            "Stochastic epidemic models and their statistical analysis (2000, Andersson, Britton) |") in outcome
+    assert "dropped, not found in OpenAlex (6): " + f"{_works(6)[0]['title']} (1901, Author1); " in outcome
+    assert whittle_text not in outcome.split("dropped")[1]

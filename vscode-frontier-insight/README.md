@@ -29,7 +29,11 @@ machine-readable summary in `outputs/<quest_id>/`. A scientific paper opens with
 an abstract and 4–6 keywords; a report, brief, essay or whitepaper keeps its
 keywords out of sight, and an accepted paper's keywords go into its Axon index
 card. FI writes the paper's References itself: the papers the text cites,
-numbered in the order it first cites them. They are
+numbered in the order it first cites them. The foundational papers and textbooks
+the literature search adds (up to eight the model names, plus the works several
+retrieved papers cite) are put to the writer with a request to cite the ones that
+bear on the paper, and the reviewer sees, as advice, the ones the paper leaves
+out. The References are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON). The web pages it drew on are listed under Further reading, not
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A

@@ -60,7 +60,7 @@ $analysis_block
 $claim_grounding_block
 
 ## Figures (what each figure draws, recorded when the experiment saved it)
-$figure_check_block
+$figure_check_block$foundational_check_block
 
 ## Paper draft
 $paper_md
