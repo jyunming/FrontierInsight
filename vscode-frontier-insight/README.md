@@ -52,7 +52,9 @@ ends on one References slide with the sources the paper cites most. With `engine
 with 95% confidence intervals (a probability's kept within 0–1), effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. A line figure, error bars included, is drawn as the mean of the seeds, shaded with its 95%
-confidence interval; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. You see every node firing live in the chat panel.
+confidence interval; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. Every run gets its own seed, spaced far enough apart that no two runs draw the same
+ones, so what varies between them is variation the experiment produced; and when the experiment turns out not to read its seed
+at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical. You see every node firing live in the chat panel.
 
 After the outputs render, a visual check measures and screenshots each PDF;
 with `output.visual_check_ai: true` it also asks the chat model to check the pages. The slides and poster are redone, at most twice,

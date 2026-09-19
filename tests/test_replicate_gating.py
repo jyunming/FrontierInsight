@@ -16,6 +16,7 @@ flat-JSON fixtures could not:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -25,7 +26,23 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
     ProviderConfig,
 )
-from core.engine import Engine, _aggregate_result_json_replicates
+from core.engine import (
+    Engine, _aggregate_result_json_replicates, _replicate_env,
+    _replicate_seed_count, _script_reads_replicate_seed,
+)
+
+# The fixtures' scripts are never executed (the executor is mocked); they are
+# only ever SCANNED, for whether they can respond to the seed at all.
+FAKE_SEEDED_SCRIPT = 'import os\nseed = int(os.environ.get("FI_REPLICATE_SEED", 0))\n'
+# The shape three graded quests actually shipped: an RNG seeded from a constant
+# the script wrote down, with the engine's variable nowhere in the file.
+TERRA_SHAPED_SCRIPT = (
+    "import numpy as np\n"
+    "RNG_SEED = 20260917\n"
+    "def main() -> None:\n"
+    "    rng = np.random.default_rng(RNG_SEED)\n"
+    "    print(rng.random())\n"
+)
 
 
 def _er(stdout: str, returncode: int = 0):
@@ -56,7 +73,8 @@ def _engine(tmp_path: Path, *, replicates: int) -> Engine:
         return_value=type("IR", (), {"returncode": 0, "stderr": ""})())
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    (eng.quest_root / "code" / "experiment.py").write_text("# fake\n", encoding="utf-8")
+    (eng.quest_root / "code" / "experiment.py").write_text(
+        FAKE_SEEDED_SCRIPT, encoding="utf-8")
     return eng
 
 
@@ -222,3 +240,219 @@ def test_seed_key_is_not_aggregated_but_a_nested_seed_is_kept() -> None:
     agg = _aggregate_result_json_replicates(reps)
     assert "_seed" not in agg
     assert "cfg._seed" in agg
+
+
+# --- disjoint seed streams ---------------------------------------------------
+
+def test_every_run_including_the_first_is_handed_its_own_seed() -> None:
+    """Leaving the primary run unseeded let the script fall back to whatever
+    base it had written down (42 in the graded quest) while the replicates were
+    handed 1 and 2 — three bases a few integers apart."""
+    envs = [_replicate_env({}, i, 1_000_000) for i in range(3)]
+    assert [e["FI_REPLICATE_SEED"] for e in envs] == ["0", "1000000", "2000000"]
+    # The ordinal is NOT the seed: the figure records are keyed on this.
+    assert [e["FI_REPLICATE_INDEX"] for e in envs] == ["0", "1", "2"]
+
+
+def test_the_seed_streams_are_disjoint_at_this_benchmark_s_trial_count() -> None:
+    """The defect on its real numbers, then the fix.
+
+    The graded quest swept 3 reproduction numbers x 3 population sizes and drew
+    300 trajectories in each cell, seeding every trajectory ``base + counter``
+    off one base per run. Three bases a few apart therefore repeat almost every
+    trajectory, and the spread across those runs is not sampling error.
+    """
+    trials = 3 * 3 * 300  # 2,700 draws per run
+
+    def stream(base: int) -> set[int]:
+        return {base + i for i in range(trials)}
+
+    # What shipped: bases 42 (the script's own default) and 1 and 2.
+    shipped = [stream(b) for b in (42, 1, 2)]
+    assert len(shipped[0] & shipped[1]) == 2659
+    assert len(shipped[0] & shipped[2]) == 2660
+    assert len(shipped[1] & shipped[2]) == 2699
+
+    # With the stride, no two runs share a single draw. The bases are taken
+    # from the engine's OWN env builder rather than recomputed here, so this
+    # goes red if the striding is ever dropped from the code that ships.
+    stride = EngineConfig().replicate_seed_stride
+    bases = [int(_replicate_env({}, i, stride)["FI_REPLICATE_SEED"]) for i in range(3)]
+    strided = [stream(b) for b in bases]
+    assert all(
+        not (strided[i] & strided[j])
+        for i in range(3) for j in range(i + 1, 3)
+    )
+    # And that is a guarantee, not an accident of 2,700: it holds for any run
+    # drawing fewer than a stride of seeds.
+    assert trials < stride
+
+
+# --- a script that cannot respond to its seed --------------------------------
+
+def test_a_script_that_reads_the_seed_is_recognised(tmp_path: Path) -> None:
+    script = tmp_path / "experiment.py"
+    script.write_text(FAKE_SEEDED_SCRIPT, encoding="utf-8")
+    assert _script_reads_replicate_seed(script) is True
+
+
+def test_a_script_that_hardcodes_its_seed_is_recognised(tmp_path: Path) -> None:
+    script = tmp_path / "experiment.py"
+    script.write_text(TERRA_SHAPED_SCRIPT, encoding="utf-8")
+    assert _script_reads_replicate_seed(script) is False
+
+
+def test_an_unreadable_script_gets_the_benefit_of_the_doubt(tmp_path: Path) -> None:
+    """Silence is not evidence of a fault, and the runtime check still runs."""
+    assert _script_reads_replicate_seed(tmp_path / "does_not_exist.py") is True
+
+
+@pytest.mark.asyncio
+async def test_identical_runs_of_a_seed_ignoring_script_are_not_replicates(
+    tmp_path: Path,
+) -> None:
+    """The case that reached production. The runs are identical because the
+    script cannot see the seed, so they are ONE run repeated. Publishing no
+    replicate list is what stops every downstream path from describing a single
+    run as "the mean over N seeds" with a confidence interval."""
+    eng = _engine(tmp_path, replicates=3)
+    (eng.quest_root / "code" / "experiment.py").write_text(
+        TERRA_SHAPED_SCRIPT, encoding="utf-8")
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"major_outbreak_probability": 0.667}')))
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 2, "one extra run settles it"
+    assert not patch.get("result_json_replicates"), "a repeated run is not replicates"
+    assert patch["result_json_deterministic"] is False, "unreplicated, not deterministic"
+    assert patch["result_json_replicate_seed_ignored"] is True
+    # The downstream consequence that matters: nothing can say "seed 0 of N".
+    assert _replicate_seed_count(patch) is None
+
+
+@pytest.mark.asyncio
+async def test_a_seeded_script_whose_runs_agree_is_still_deterministic(
+    tmp_path: Path,
+) -> None:
+    """Do not weaken the honest case. A script that DOES read the seed and
+    still computes the same answer every time (integrating an ODE, say) keeps
+    exactly its previous behaviour."""
+    eng = _engine(tmp_path, replicates=5)
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"rmse": 0.25}')))
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 2
+    assert patch["result_json_deterministic"] is True
+    assert len(patch["result_json_replicates"]) == 2
+    assert patch["result_json_replicate_seed_ignored"] is False
+
+
+@pytest.mark.asyncio
+async def test_runs_that_legitimately_agree_to_many_digits_still_report(
+    tmp_path: Path,
+) -> None:
+    """The guard is about runs that COULD NOT have differed, never about runs
+    that merely happened not to differ much. These three agree to three decimal
+    places and must still get their full aggregate."""
+    eng = _engine(tmp_path, replicates=3)
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"final_size": 0.5812670}')),
+        _er(_rj('{"final_size": 0.5810260}')),
+        _er(_rj('{"final_size": 0.5810780}')),
+    ])
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 3
+    assert len(patch["result_json_replicates"]) == 3
+    assert patch["result_json_deterministic"] is False
+    assert patch["result_json_replicate_seed_ignored"] is False
+    assert _replicate_seed_count(patch) == 3
+    agg = _aggregate_result_json_replicates(patch["result_json_replicates"])
+    assert agg["final_size"]["n"] == 3
+    assert agg["final_size"]["ci_lower"] < agg["final_size"]["ci_upper"]
+
+
+# --- and analyze is told why there are no error bars -------------------------
+
+async def _analyze_prompt(eng: Engine, state: dict) -> str:
+    prompts: list[str] = []
+
+    async def fake_chat(prompt: str, *, node: str | None = None) -> str:
+        prompts.append(prompt)
+        return json.dumps({"summary": "s", "key_findings": [], "next_step": "publish"})
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    await eng._node_analyze(state)  # type: ignore[arg-type]
+    return "\n".join(prompts)
+
+
+@pytest.mark.asyncio
+async def test_analyze_is_told_the_run_was_never_replicated(tmp_path: Path) -> None:
+    """Withholding the replicate list is not enough by itself: without a reason
+    analyze sees an ordinary single-seed run and never mentions that replication
+    was asked for and could not happen."""
+    eng = _engine(tmp_path, replicates=3)
+    eng.quest_root = tmp_path  # type: ignore[attr-defined]
+    prompt = await _analyze_prompt(eng, {
+        "result_json": {"major_outbreak_probability": 0.667},
+        "result_json_replicate_seed_ignored": True,
+        "exec_result": {"returncode": 0}, "figures": [], "design": {},
+    })
+    assert "never reads FI_REPLICATE_SEED" in prompt
+    assert "ONE measurement here, not several" in prompt
+    assert "do NOT report a mean over seeds" in prompt
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_run_gets_no_such_note(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, replicates=3)
+    eng.quest_root = tmp_path  # type: ignore[attr-defined]
+    prompt = await _analyze_prompt(eng, {
+        "result_json": {"major_outbreak_probability": 0.667},
+        "exec_result": {"returncode": 0}, "figures": [], "design": {},
+    })
+    assert "never reads FI_REPLICATE_SEED" not in prompt
+
+
+# --- and the verdict does not outlive the script it was about ----------------
+
+@pytest.mark.asyncio
+async def test_a_repaired_seed_ignoring_script_clears_the_earlier_replicates(
+    tmp_path: Path,
+) -> None:
+    """``_node_execute`` runs again on a repair and on a re_experiment, and the
+    state's fields are last-value channels. A pass that merely WITHHELD the
+    replicate list would leave the previous script's seeds sitting on the
+    state, and analyze would aggregate those against this script's result."""
+    eng = _engine(tmp_path, replicates=3)
+    (eng.quest_root / "code" / "experiment.py").write_text(
+        TERRA_SHAPED_SCRIPT, encoding="utf-8")
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"p": 0.667}')))
+    patch = await eng._node_execute({  # the state an earlier, seeded pass left
+        "deps": [],
+        "result_json_replicates": [{"_seed": k, "p": 0.1 * k} for k in range(3)],
+        "result_json_deterministic": False,
+    })
+    assert patch["result_json_replicates"] == [], "the earlier seeds must not survive"
+    assert patch["result_json_replicate_seed_ignored"] is True
+    assert _replicate_seed_count(patch) is None
+
+
+@pytest.mark.asyncio
+async def test_a_repaired_seeded_script_clears_the_earlier_verdict(
+    tmp_path: Path,
+) -> None:
+    """The other direction: a quest whose earlier script ignored the seed must
+    not carry "there is one measurement here" into a pass that replicated
+    properly, or analyze gets the aggregate and the banner together."""
+    eng = _engine(tmp_path, replicates=3)
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"p": 0.10}')), _er(_rj('{"p": 0.20}')), _er(_rj('{"p": 0.30}')),
+    ])
+    patch = await eng._node_execute({
+        "deps": [], "result_json_replicate_seed_ignored": True,
+    })
+    assert len(patch["result_json_replicates"]) == 3
+    assert patch["result_json_replicate_seed_ignored"] is False

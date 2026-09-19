@@ -33,7 +33,8 @@ from core.plot_style import write_boot
 def _boot_env(tmp_path: Path, records: Path, **extra: str) -> dict[str, str]:
     boot_dir = write_boot(tmp_path / ".boot", "latex")
     return {
-        **{k: v for k, v in os.environ.items() if k not in ("FI_REPLICATE_SEED", "FI_REPLOT")},
+        **{k: v for k, v in os.environ.items()
+           if k not in ("FI_REPLICATE_SEED", "FI_REPLICATE_INDEX", "FI_REPLOT")},
         "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
         "FI_FIGURE_RECORDS": str(records),
         **extra,
@@ -57,7 +58,7 @@ PLOT = (
 def test_the_recorder_keeps_each_seeds_lines(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     records = tmp_path / "records"
-    out = subprocess.run([sys.executable, "-c", PLOT], env=_boot_env(tmp_path, records, FI_REPLICATE_SEED="2"),
+    out = subprocess.run([sys.executable, "-c", PLOT], env=_boot_env(tmp_path, records, FI_REPLICATE_INDEX="2"),
                          cwd=tmp_path, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert sorted(p.name for p in records.iterdir()) == ["fig.json", "fig.seed2.json"]
@@ -134,7 +135,8 @@ def _errorbar_records(tmp_path: Path, seeds: tuple[int, ...]) -> Path:
     records = tmp_path / "records"
     for seed in seeds:
         out = subprocess.run([sys.executable, "-c", ERRORBARS],
-                             env=_boot_env(tmp_path, records, FI_REPLICATE_SEED=str(seed)),
+                             env=_boot_env(tmp_path, records, FI_REPLICATE_SEED=str(seed),
+                                           FI_REPLICATE_INDEX=str(seed)),
                              cwd=tmp_path, capture_output=True, text=True, timeout=120)
         assert out.returncode == 0, out.stderr
     return records
@@ -368,7 +370,7 @@ async def test_execute_draws_the_line_figure_as_the_mean_of_the_seeds(tmp_path: 
         done = subprocess.run([sys.executable, cmd[-1]], cwd=cwd, env=env,
                               capture_output=True, text=True, timeout=timeout_s)
         if scripts[-1] == "experiment.py":
-            seed = (env or {}).get("FI_REPLICATE_SEED", "0")
+            seed = (env or {}).get("FI_REPLICATE_INDEX", "0")
             histograms[f"png{seed}"] = (cwd / "figures" / "sizes.png").read_bytes()
             histograms[f"json{seed}"] = (eng.fi_dir / "figure_records" / "sizes.json").read_bytes()
         return SimpleNamespace(returncode=done.returncode, stdout=done.stdout, stderr=done.stderr,
@@ -433,7 +435,9 @@ async def test_a_figure_the_seeds_do_not_redraw_shows_seed_0(
     seeds: list[int] = []
 
     async def run(cmd: list[str], *, cwd: Path, timeout_s: float, env: dict[str, str] | None = None) -> Any:
-        seed = int((env or {}).get("FI_REPLICATE_SEED", 0))
+        # The ORDINAL of this replicate, not the seed it draws from: the seeds
+        # now stride far apart so no two runs can share a draw.
+        seed = int((env or {}).get("FI_REPLICATE_INDEX", 0))
         seeds.append(seed)
         (cwd / "figures").mkdir(exist_ok=True)
         (cwd / "figures" / "sizes.png").write_bytes(f"histogram of seed {seed}".encode())
@@ -449,7 +453,10 @@ async def test_a_figure_the_seeds_do_not_redraw_shows_seed_0(
     eng.executor.execute = run  # type: ignore[method-assign]
     eng.executor.install = AsyncMock(return_value=SimpleNamespace(returncode=0, stderr=""))  # type: ignore[method-assign]
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    (eng.quest_root / "code" / "experiment.py").write_text("# fake\n", encoding="utf-8")
+    # Reads the seed, so "every seed agrees" means the experiment is
+    # deterministic rather than unable to see the seed at all.
+    (eng.quest_root / "code" / "experiment.py").write_text(
+        'import os\nseed = int(os.environ.get("FI_REPLICATE_SEED", 0))\n', encoding="utf-8")
 
     patch = await eng._node_execute({"deps": []})  # type: ignore[arg-type]
 

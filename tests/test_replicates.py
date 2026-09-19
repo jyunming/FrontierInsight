@@ -33,6 +33,10 @@ from core.config import (
 )
 from core.engine import Engine, _aggregate_result_json_replicates
 
+# Never executed (the executor is mocked) — only scanned, for whether the
+# script can respond to ``FI_REPLICATE_SEED`` at all.
+FAKE_SEEDED_SCRIPT = 'import os\nseed = int(os.environ.get("FI_REPLICATE_SEED", 0))\n'
+
 
 # ---------------------------------------------------------------------------
 # _aggregate_result_json_replicates — pure function
@@ -138,7 +142,7 @@ async def test_execute_runs_once_when_replicates_is_one(tmp_path: Path) -> None:
         "IR", (), {"returncode": 0, "stderr": ""})())
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    (eng.quest_root / "code" / "experiment.py").write_text("# fake\n", encoding="utf-8")
+    (eng.quest_root / "code" / "experiment.py").write_text(FAKE_SEEDED_SCRIPT, encoding="utf-8")
 
     patch = await eng._node_execute({"deps": []})
     assert "result_json_replicates" not in patch
@@ -150,9 +154,10 @@ async def test_execute_runs_once_when_replicates_is_one(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_execute_runs_n_times_with_replicate_env_var(tmp_path: Path) -> None:
-    """When replicates=3, the engine runs the script once for the
-    primary run THEN twice more with FI_REPLICATE_SEED=1, =2. Each
-    seed's RESULT_JSON lands in result_json_replicates."""
+    """When replicates=3, the engine runs the script three times, each with
+    its own FI_REPLICATE_SEED — the primary run included — strided so that no
+    two runs can derive the same seeds. Each run's RESULT_JSON lands in
+    result_json_replicates."""
     eng = _make_engine_with_replicates(tmp_path, 3)
     # Make each call return a seed-tagged RESULT_JSON. Cycle through
     # three responses; track env vars so we can assert seed plumbing.
@@ -177,19 +182,22 @@ async def test_execute_runs_n_times_with_replicate_env_var(tmp_path: Path) -> No
         "IR", (), {"returncode": 0, "stderr": ""})())
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    (eng.quest_root / "code" / "experiment.py").write_text("# fake\n", encoding="utf-8")
+    (eng.quest_root / "code" / "experiment.py").write_text(FAKE_SEEDED_SCRIPT, encoding="utf-8")
 
     patch = await eng._node_execute({"deps": []})
 
     # 3 execute calls total (primary + 2 replicates). Warmup is skipped
     # because deps is empty.
     assert idx["n"] == 3
-    # Primary call (seed 0) now carries the house-plot-style env — the
+    # Primary call (replicate 0) carries the house-plot-style env — the
     # execute node injects a PYTHONPATH pointing at the sitecustomize
-    # bootstrap so every figure gets the FrontierInsight look — but it
-    # must NOT carry a replicate seed (that's seed 0's defining trait).
+    # bootstrap so every figure gets the FrontierInsight look — AND its own
+    # seed. Leaving it unset let the script fall back to whatever seed
+    # constant it had written down, a few integers from the replicates'
+    # bases, which is how three runs came to share their draws.
     assert call_envs[0] is not None
-    assert "FI_REPLICATE_SEED" not in call_envs[0]
+    assert call_envs[0]["FI_REPLICATE_SEED"] == "0"
+    assert call_envs[0]["FI_REPLICATE_INDEX"] == "0"
     assert "PYTHONPATH" in call_envs[0]
     # The same bootstrap records what each figure draws into .fi/figure_records.
     assert Path(call_envs[0]["FI_FIGURE_RECORDS"]) == eng.fi_dir / "figure_records"
@@ -199,11 +207,14 @@ async def test_execute_runs_n_times_with_replicate_env_var(tmp_path: Path) -> No
     # os.environ rather than replacing it so the venv python.exe can
     # still find its DLLs/site-packages on Windows. Assert just the
     # seed value without pinning the whole merged dict.
+    stride = eng.config.engine.replicate_seed_stride
     assert call_envs[1] is not None
-    assert call_envs[1]["FI_REPLICATE_SEED"] == "1"
+    assert call_envs[1]["FI_REPLICATE_SEED"] == str(stride)
+    assert call_envs[1]["FI_REPLICATE_INDEX"] == "1"
     assert "PATH" in call_envs[1]  # parent env propagated through
     assert call_envs[2] is not None
-    assert call_envs[2]["FI_REPLICATE_SEED"] == "2"
+    assert call_envs[2]["FI_REPLICATE_SEED"] == str(2 * stride)
+    assert call_envs[2]["FI_REPLICATE_INDEX"] == "2"
     # All three RESULT_JSONs aggregated, tagged by seed.
     assert "result_json_replicates" in patch
     reps = patch["result_json_replicates"]
@@ -231,7 +242,7 @@ async def test_execute_skips_replicates_when_primary_run_fails(
         "IR", (), {"returncode": 0, "stderr": ""})())
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    (eng.quest_root / "code" / "experiment.py").write_text("# fake\n", encoding="utf-8")
+    (eng.quest_root / "code" / "experiment.py").write_text(FAKE_SEEDED_SCRIPT, encoding="utf-8")
 
     patch = await eng._node_execute({"deps": []})
     # Just the primary execute (no replicates fired). Duration > 0.5s
@@ -276,7 +287,7 @@ async def test_execute_replicate_failure_doesnt_block_remaining_seeds(
         "IR", (), {"returncode": 0, "stderr": ""})())
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    (eng.quest_root / "code" / "experiment.py").write_text("# fake\n", encoding="utf-8")
+    (eng.quest_root / "code" / "experiment.py").write_text(FAKE_SEEDED_SCRIPT, encoding="utf-8")
 
     patch = await eng._node_execute({"deps": []})
     # All 3 ran (primary + 2 replicates).
