@@ -22,8 +22,9 @@ defaults. The tasks below are config, guard-rails, and nice-to-haves.
     base_url: http://localhost:8080/v1
     model: gemma4-26b           # or qwen3-coder-30b for implement-heavy quests
     api_key_env: ""             # keyless — llama-server ignores auth
-    node_model_fallbacks: {}    # CRITICAL: default escalates implement/write
-                                # to claude-opus-4-7 (core/config.py:182-187)
+    node_model_fallbacks: {}    # already the default: retry escalation is
+                                # opt-in, so no model name is ever chosen for
+                                # you (core/config.py, ProviderConfig)
   ```
   Optionally use `node_models` to route `implement → qwen3-coder-30b` and
   `write → gemma4-26b` — the router hot-swaps per request, but each swap costs
@@ -57,8 +58,8 @@ defaults. The tasks below are config, guard-rails, and nice-to-haves.
   when the engine is up (or when `las status` would say UP).
 - [ ] **Docs**: add a "Local stack (llama.cpp router)" row to
   `docs/PROVIDERS.md` (next to the ollama/vllm rows, :51-52) and a recipe in
-  `docs/recipes.md` (:89-96 pattern) — note the keyless auth, hot-swap latency,
-  and the `node_model_fallbacks: {}` requirement.
+  `docs/recipes.md` (:89-96 pattern) — note the keyless auth and hot-swap
+  latency.
 
 ## P2 — offline research stack (separate from FI code)
 
