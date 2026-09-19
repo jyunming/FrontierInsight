@@ -297,7 +297,9 @@
         </select>
         <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-outline pointer-events-none">expand_more</span>
       </div>
-      <p class="font-body-md text-body-md text-outline italic">Fan out the LLM call across the picked provider's 3-model trio and merge. Cost multiplies; agreement signal increases.</p>
+      <label class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider" for="f-ensemble_models">Models for the ensemble (you choose them)</label>
+      <input id="f-ensemble_models" name="ensemble_models" type="text" placeholder="e.g. model-a, model-b, model-c" class="w-full bg-surface-low border border-outline-variant rounded-lg p-3 px-4 font-code-md text-code-md text-on-surface placeholder-outline focus:outline-none input-glow transition-all"/>
+      <p class="font-body-md text-body-md text-outline italic">Fan out the LLM call across the models you name here (at least 2, comma separated) and merge. FI does not choose them for you; with fewer than two, no ensemble runs. Cost multiplies; agreement signal increases.</p>
     `;
     return wrap;
   }

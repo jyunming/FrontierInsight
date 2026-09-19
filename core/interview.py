@@ -308,33 +308,25 @@ def estimate_ensemble_cost_multiplier(profile: str) -> float:
     return _ENSEMBLE_COST_MULTIPLIERS.get(profile, 1.0)
 
 
-# Per-provider model trios used by every ensemble profile. These are
-# the models the interview will populate node_ensemble[*].models with
-# when the user picks a profile != "off". Edit the trio for a new
-# provider here (NOT in the YAML emitter) so all three frontends agree.
-_ENSEMBLE_MODEL_TRIOS: dict[str, tuple[str, str, str]] = {
-    "openai":           ("gpt-5", "gpt-5-mini", "o3-mini"),
-    "codex":            ("gpt-5", "gpt-5-mini", "gpt-4o"),
-    "claude_cli":       ("claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"),
-    "codex_cli":        ("gpt-5", "gpt-5-mini", "gpt-4o"),
-    "copilot_cli":      ("gpt-5", "claude-opus-4-7", "gemini-2.5-pro"),
-    "gemini_cli":       ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"),
-    "ollama":           ("llama3.3:70b", "qwen2.5:32b", "qwen2.5:7b"),
-    "vscode_extension": ("gpt-5", "claude-opus-4-7", "gemini-2.5-pro"),
-}
+# An ensemble fans one node out over several models and merges what they say, so it
+# needs at least two. FI never picks them: which models are worth the money, and which
+# the user has access to, is the user's decision. The interview asks; a profile without
+# models configures nothing.
+ENSEMBLE_MIN_MODELS = 2
 
 
-def ensemble_model_trio(provider: str, provider_model: str | None = None) -> list[str]:
-    """Return the three model ids the ensemble profile will fan out
-    over for ``provider``. Falls back to repeating ``provider_model``
-    (or "default") three times for unknown providers — the engine will
-    still fire 3 calls, just against the same model, which is mostly
-    useful as a smoke test for new providers."""
-    trio = _ENSEMBLE_MODEL_TRIOS.get(provider)
-    if trio is not None:
-        return list(trio)
-    fallback = provider_model or "default"
-    return [fallback, fallback, fallback]
+def parse_ensemble_models(raw: Any) -> list[str]:
+    """The model ids the user named for an ensemble: a comma / semicolon / newline
+    separated string, or a list. Order kept, blanks and repeats dropped."""
+    if raw is None:
+        return []
+    parts = re.split(r"[,;\n]", raw) if isinstance(raw, str) else list(raw)
+    out: list[str] = []
+    for part in parts:
+        model = str(part).strip()
+        if model and model not in out:
+            out.append(model)
+    return out
 
 
 AUDIENCE_CHOICES: tuple[Choice, ...] = (
@@ -688,6 +680,16 @@ QUESTIONS: tuple[Question, ...] = (
         tier=1,
     ),
     Question(
+        id="ensemble_models",
+        label="Models for the ensemble",
+        prompt="Only when you picked a fan-out profile above: the models to fan out over, one id per model, comma separated (at least 2). FI does not choose them for you — which models are worth the cost, and which you have access to, is your call. Leave empty and no ensemble is configured.",
+        kind="text",
+        default="",
+        placeholder="e.g. model-a, model-b, model-c",
+        mid_quest_editable=True,
+        tier=1,
+    ),
+    Question(
         id="max_iterations",
         label="Design-revise iteration budget",
         prompt="Hard cap on the design → review → revise loop (and the cross_check redirects to design / literature). Lower = cheaper + faster; higher = more chances to fix issues review caught. 2 default — bump to 3-4 only when you specifically want extra revise passes.",
@@ -830,6 +832,8 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # fan out across (ideate / analyze / cross_check) so a switch from
     # off → full re-runs all three with the new ensemble shape.
     "ensemble_profile": ("ideate", "analyze", "cross_check"),
+    # Different models are a different ensemble: same nodes re-run.
+    "ensemble_models": ("ideate", "analyze", "cross_check"),
     # knowledge.top_k / external_top_k change how many Axon + web
     # results the literature node fetches. The writer reads the
     # retrieved list, so a re-fetch should be followed by a re-write.
@@ -1274,8 +1278,11 @@ class InterviewAnswers:
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
-    # multipliers; ``ensemble_model_trio`` for the per-provider models.
+    # multipliers. FI does not choose the models: ``ensemble_models`` is what
+    # the user named (comma separated, at least ``ENSEMBLE_MIN_MODELS``); a
+    # profile without them configures nothing.
     ensemble_profile: str = "off"
+    ensemble_models: str = ""
     # Comma-separated "node:model" pairs, parsed by ``answers_to_yaml``
     # into the ``provider.node_models`` block. Empty (default) emits
     # nothing — no behavior change until the user opts in. See
@@ -1360,14 +1367,17 @@ def parse_node_models_answer(raw: str) -> dict[str, str]:
 
 
 def expand_ensemble_profile(
-    profile: str, *, provider: str, provider_model: str | None = None,
+    profile: str, *, models: Any,
 ) -> dict[str, dict[str, Any]]:
-    """Expand a profile name to a ``node_ensemble`` dict shape.
+    """Expand a profile name and the models the USER named to a ``node_ensemble``
+    dict shape.
 
     Returns a dict ready to plug into ``provider.node_ensemble`` in the
     YAML, mapping engine-node name → ``{models, merge[, moderator]}``.
-    Returns an empty dict for ``off`` so the YAML emitter can omit the
-    block entirely (no regression for users who don't pick a profile).
+    Returns an empty dict for ``off``, and for fewer than
+    ``ENSEMBLE_MIN_MODELS`` models: FI does not pick models to make up the
+    number, so a profile with nothing to fan out over configures nothing. The
+    moderator is the first model the user listed.
 
     The shape mirrors ``core.config.NodeEnsembleConfig`` but stays a
     plain dict so this module doesn't import from ``core.config`` (that
@@ -1376,7 +1386,9 @@ def expand_ensemble_profile(
     """
     if profile == "off" or not profile:
         return {}
-    trio = ensemble_model_trio(provider, provider_model)
+    trio = parse_ensemble_models(models)
+    if len(trio) < ENSEMBLE_MIN_MODELS:
+        return {}
     moderator = trio[0]
     nodes: dict[str, dict[str, Any]] = {}
     # cross_check: every profile that fans out includes it. Vote is the
@@ -1445,10 +1457,16 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     # something non-"off"; otherwise leave the engine on its
     # single-model path (no regression for default quests).
     node_ensemble = expand_ensemble_profile(
-        answers.ensemble_profile,
-        provider=answers.provider,
-        provider_model=answers.provider_model,
+        answers.ensemble_profile, models=answers.ensemble_models,
     )
+    if answers.ensemble_profile not in ("off", "") and not node_ensemble:
+        # A profile was chosen but the user named fewer than two models, and FI
+        # does not choose them. Say so where the person editing this file will see it.
+        lines.append(
+            f"{indent}# ensemble_profile {json.dumps(answers.ensemble_profile)} was chosen but "
+            f"fewer than {ENSEMBLE_MIN_MODELS} models were named, so no ensemble is configured. "
+            f"List the models under node_ensemble.<node>.models to fan out over."
+        )
     if node_ensemble:
         lines.append(f"{indent}node_ensemble:")
         for node, cfg in node_ensemble.items():
@@ -1617,9 +1635,7 @@ def export_schema_json() -> dict[str, Any]:
         "audience_choices": [_choice(c) for c in AUDIENCE_CHOICES],
         "ensemble_profiles": [_choice(c) for c in ENSEMBLE_PROFILES],
         "ensemble_cost_multipliers": dict(_ENSEMBLE_COST_MULTIPLIERS),
-        "ensemble_model_trios": {
-            name: list(trio) for name, trio in _ENSEMBLE_MODEL_TRIOS.items()
-        },
+        "ensemble_min_models": ENSEMBLE_MIN_MODELS,
         "providers": [_choice(c) for c in PROVIDER_CHOICES],
         "provider_models": {
             name: [_choice(c) for c in opts]

@@ -579,19 +579,20 @@ def test_expand_ensemble_profile_off_emits_no_block() -> None:
     """``off`` → empty dict so the YAML emitter can skip the
     ``node_ensemble`` block entirely."""
     from core.interview import expand_ensemble_profile
-    assert expand_ensemble_profile("off", provider="openai") == {}
-    assert expand_ensemble_profile("", provider="openai") == {}
+    assert expand_ensemble_profile("off", models=["a", "b"]) == {}
+    assert expand_ensemble_profile("", models=["a", "b"]) == {}
 
 
 def test_expand_ensemble_profile_cross_check_only_has_just_cross_check() -> None:
     """Cheapest non-trivial profile: fan-out limited to cross_check,
-    vote merge (no moderator call — pure tally)."""
+    vote merge (no moderator call — pure tally). The models are the
+    ones the user named, not ones FI picked."""
     from core.interview import expand_ensemble_profile
-    out = expand_ensemble_profile("cross_check_only", provider="openai")
+    out = expand_ensemble_profile("cross_check_only", models="alpha, beta, gamma")
     assert set(out) == {"cross_check"}
     assert out["cross_check"]["merge"] == "vote"
     assert "moderator" not in out["cross_check"]
-    assert len(out["cross_check"]["models"]) == 3
+    assert out["cross_check"]["models"] == ["alpha", "beta", "gamma"]
 
 
 def test_expand_ensemble_profile_full_avoids_analyze_synthesize() -> None:
@@ -599,22 +600,52 @@ def test_expand_ensemble_profile_full_avoids_analyze_synthesize() -> None:
     — that combination is rejected by ProviderConfig's validator.
     Tournament is the only safe merger for analyze."""
     from core.interview import expand_ensemble_profile
-    out = expand_ensemble_profile("full", provider="claude_cli")
+    out = expand_ensemble_profile("full", models=["m-one", "m-two"])
     assert set(out) == {"cross_check", "ideate", "analyze"}
     assert out["analyze"]["merge"] == "tournament"
     assert out["ideate"]["merge"] == "tournament"
     assert out["cross_check"]["merge"] == "vote"
-    # Tournament needs a moderator. The first trio model is the default.
-    assert out["analyze"]["moderator"] == out["analyze"]["models"][0]
+    # Tournament needs a moderator: the first model the user listed.
+    assert out["analyze"]["moderator"] == "m-one"
+    assert out["analyze"]["models"] == ["m-one", "m-two"]
 
 
-def test_ensemble_model_trio_unknown_provider_falls_back() -> None:
-    """Providers not in the trio catalog still get a 3-element list
-    (repeated provider_model). The engine fans out 3 calls; the user
-    can edit the YAML to swap models."""
-    from core.interview import ensemble_model_trio
-    out = ensemble_model_trio("nonsense-provider", provider_model="my-model")
-    assert out == ["my-model", "my-model", "my-model"]
+def test_an_ensemble_never_invents_models_to_make_up_the_number() -> None:
+    """FI used to fill in three models per provider (opus, gemini...). Which
+    models are worth the money, and which the user can reach, is the user's
+    decision: fewer than two named means no ensemble, not a guessed one."""
+    from core.interview import ENSEMBLE_MIN_MODELS, expand_ensemble_profile, parse_ensemble_models
+    for named in (None, "", "   ", "only-one", ["only-one"], "dup, dup"):
+        assert expand_ensemble_profile("full", models=named) == {}, named
+    assert ENSEMBLE_MIN_MODELS == 2
+    assert parse_ensemble_models("a, b;c\nd, a") == ["a", "b", "c", "d"]
+    assert parse_ensemble_models(["x", " y ", "x"]) == ["x", "y"]
+
+
+def test_a_chosen_profile_without_models_says_so_in_the_yaml() -> None:
+    from core.interview import InterviewAnswers, answers_to_yaml
+    import inspect
+    fields = {f: None for f in inspect.signature(InterviewAnswers).parameters}
+    base = dict(
+        topic="t", title="t", output_kinds=["paper_md"], paper_format="generic",
+        clarify_mode="auto", review_panel=[], knowledge_enabled=False, no_simulation=False,
+        study_depth="journal-length", comparative_baseline="", success_metric="", budget="",
+        provider="openai", provider_model=None,
+    )
+    none_named = answers_to_yaml(InterviewAnswers(**base, ensemble_profile="full"))
+    assert "node_ensemble:" not in none_named
+    assert "no ensemble is configured" in none_named
+    named = answers_to_yaml(InterviewAnswers(**base, ensemble_profile="full", ensemble_models="m1, m2"))
+    assert "node_ensemble:" in named and '"m1", "m2"' in named
+    assert "no ensemble is configured" not in named
+    assert "opus" not in named and "gemini" not in named
+
+
+def test_the_ensemble_models_question_asks_and_never_defaults() -> None:
+    from core.interview import QUESTIONS
+    q = next(q for q in QUESTIONS if q.id == "ensemble_models")
+    assert q.kind == "text" and q.default == "" and q.mid_quest_editable is True
+    assert "does not choose" in q.prompt
 
 
 def test_estimate_ensemble_cost_multiplier_orders_match_intuition() -> None:
@@ -640,7 +671,7 @@ def test_answers_to_yaml_emits_node_ensemble_when_profile_picked() -> None:
         paper_format="generic", no_simulation=False, study_depth="journal-length",
         comparative_baseline="b", success_metric="m", budget="b",
         clarify_mode="auto", review_panel=[], knowledge_enabled=False,
-        provider="openai", ensemble_profile="full",
+        provider="openai", ensemble_profile="full", ensemble_models="m1, m2, m3",
     )
     yaml_text = answers_to_yaml(answers)
     assert "node_ensemble:" in yaml_text

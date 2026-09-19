@@ -12,6 +12,7 @@
 import * as vscode from "vscode";
 import { execSync } from "child_process";
 import {
+    ENSEMBLE_MIN_MODELS,
     InterviewAnswers,
     PaperFormat,
     answersToYaml,
@@ -23,6 +24,34 @@ import { discoverAxon } from "./axon-endpoint";
 
 // Re-export so callers don't have to know about the split.
 export { InterviewAnswers, answersToYaml, writeInterviewYaml };
+
+/**
+ * Let the user tick the models an ensemble fans out over. The list is what THIS
+ * VSCode offers through `vscode.lm` — Copilot's, an Ollama server's, a BYOK
+ * endpoint's — and nothing is pre-ticked: FI does not choose models for you.
+ * Returns the picked model ids (fewer than two is allowed: no ensemble then),
+ * or undefined when the user pressed Esc.
+ */
+async function pickEnsembleModels(): Promise<string[] | undefined> {
+    const models = await vscode.lm.selectChatModels();
+    if (models.length === 0) {
+        vscode.window.showWarningMessage(
+            "Frontier Insight: this VSCode lists no language models, so no ensemble can be configured. " +
+            "Sign in to Copilot Chat or add a model provider, then edit provider.node_ensemble in the YAML.",
+        );
+        return [];
+    }
+    const items = models
+        .map((m) => ({ label: m.name || m.id, description: `${m.vendor} · ${m.family}`, detail: m.id, id: m.id }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    const picked = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: "Frontier Insight — which models should the ensemble fan out over?",
+        placeHolder: `Tick at least ${ENSEMBLE_MIN_MODELS}. Nothing is chosen for you; each extra model multiplies the cost.`,
+        ignoreFocusOut: true,
+    });
+    return picked ? picked.map((p) => p.id) : undefined;
+}
 
 /** Return true iff `where`/`which` finds the given binary on PATH. */
 function isOnPath(binary: string): boolean {
@@ -94,6 +123,7 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
     "success_metric",
     "budget",
     "ensemble_profile",
+    "ensemble_models",
     "max_iterations",
     "node_models",
     "reasoning_effort",
@@ -391,6 +421,20 @@ export async function runInterview(
     const ensembleProfile = ensembleChoice.value;
     stream.markdown(`  **Ensemble:** \`${ensembleProfile}\`\n\n`);
 
+    // 7b. Which models? FI does not choose them: the list is what THIS VSCode
+    // offers (Copilot, an Ollama server, a BYOK endpoint...), and the user ticks.
+    let ensembleModels = "";
+    if (ensembleProfile !== "off") {
+        const picked = await pickEnsembleModels();
+        if (picked === undefined) return undefined;
+        ensembleModels = picked.join(", ");
+        stream.markdown(
+            picked.length >= ENSEMBLE_MIN_MODELS
+                ? `  **Ensemble models:** ${picked.map((m) => `\`${m}\``).join(", ")}\n\n`
+                : `  ⚠ **Fewer than ${ENSEMBLE_MIN_MODELS} models picked** — no ensemble will be configured. FI does not choose models for you.\n\n`,
+        );
+    }
+
     // 8. Author line — optional, printed on the paper, slides and poster.
     // Mirrors the tier-1 author questions in core/interview.py.
     const authorLine = await askAuthorLine();
@@ -437,6 +481,7 @@ export async function runInterview(
         // Asked above (tier 1 in the schema). "off" keeps single-call
         // semantics; anything else expands into provider.node_ensemble.
         ensemble_profile: ensembleProfile,
+        ensemble_models: ensembleModels,
         // Schema defaults, editable from the review screen below.
         paper_style: "latex",
         pause_for_user_input: "never",
@@ -534,6 +579,9 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
     lines.push(`| Pause for my papers / datasets | \`${a.pause_for_user_input ?? "never"}\` |`);
     lines.push(`| Multi-model ensemble | \`${a.ensemble_profile ?? "off"}\` |`);
+    if ((a.ensemble_profile ?? "off") !== "off") {
+        lines.push(`| Ensemble models (your choice) | ${a.ensemble_models ? a.ensemble_models : "none named: no ensemble"} |`);
+    }
     lines.push(`| Paper audience | \`${a.audience}\` |`);
     const authorCell = formatAuthorLine(a).replace(/\|/g, "\\|");
     lines.push(`| Author line | ${authorCell || "Frontier Insight (no author set)"} |`);

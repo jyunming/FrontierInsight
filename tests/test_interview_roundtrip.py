@@ -46,6 +46,7 @@ def _full_answers() -> InterviewAnswers:
         web_research=True,
         supply_papers=True,
         ensemble_profile="full",
+        ensemble_models="m1, m2",
     )
 
 

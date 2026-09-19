@@ -2847,12 +2847,22 @@ async def _run_new(
     # ---- Stage 1: ask tier-1 sequentially ----
     try:
         for q in tier1:
+            if q.id == "ensemble_models" and str(partial.get("ensemble_profile") or "off") == "off":
+                partial[q.id] = ""      # no ensemble, nothing to name
+                continue
             answer = _cli_prompt_for(q, partial, {})
             if answer is None:
                 print()
                 print("— interview cancelled.")
                 return 1
             partial[q.id] = answer
+            if q.id == "ensemble_models":
+                from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
+                if len(parse_ensemble_models(answer)) < ENSEMBLE_MIN_MODELS:
+                    print(
+                        f"    ⚠ fewer than {ENSEMBLE_MIN_MODELS} models named — no ensemble will be "
+                        "configured (FI does not pick models for you)."
+                    )
     except (KeyboardInterrupt, EOFError):
         print()
         print("— interview cancelled (Ctrl-C / EOF).")
@@ -2957,6 +2967,7 @@ async def _run_new(
         ensemble_profile=str(
             partial.get("ensemble_profile") or advanced.get("ensemble_profile") or "off"
         ),
+        ensemble_models=str(partial.get("ensemble_models") or ""),
         max_iterations=int(advanced.get("max_iterations", 2) or 2),
         author=" ".join(str(partial.get("author") or "").split()),
         affiliation=" ".join(str(partial.get("affiliation") or "").split()),

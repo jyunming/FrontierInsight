@@ -94,6 +94,11 @@ export interface InterviewAnswers {
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
     ensemble_profile?: "off" | "cross_check_only" | "ideate_and_check" | "full";
+    // The models the ensemble fans out over: what the USER named, comma
+    // separated, at least ENSEMBLE_MIN_MODELS. FI does not choose them; a
+    // profile without them configures nothing. Must stay in sync with
+    // core/interview.py:InterviewAnswers.ensemble_models.
+    ensemble_models?: string;
     // Comma-separated "node:model" pairs (e.g. "poster:gpt-4o-mini,
     // slides:gpt-4o-mini"), parsed by `parseNodeModelsAnswer` into
     // provider.node_models at YAML emit time. Empty (default) emits
@@ -120,24 +125,30 @@ export interface InterviewAnswers {
 
 
 /**
- * Per-provider model trios used by every ensemble profile. Mirrors
- * ``_ENSEMBLE_MODEL_TRIOS`` in core/interview.py.
- *
- * Drift between the two definitions is caught by
- * ``test_ts_ensemble_model_trios_match_python`` in
- * ``tests/test_interview_schema_parity.py`` — that test parses this
- * record out of the TS file and compares it to the JSON snapshot.
+ * An ensemble fans one node out over several models and merges what they say,
+ * so it needs at least two. FI never picks them: which models are worth the
+ * cost, and which the user has access to, is the user's decision. Mirrors
+ * ``ENSEMBLE_MIN_MODELS`` in core/interview.py (checked by
+ * ``test_ts_ensemble_min_models_match_python``).
  */
-export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
-    "openai": ["gpt-5", "gpt-5-mini", "o3-mini"],
-    "codex": ["gpt-5", "gpt-5-mini", "gpt-4o"],
-    "claude_cli": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
-    "codex_cli": ["gpt-5", "gpt-5-mini", "gpt-4o"],
-    "copilot_cli": ["gpt-5", "claude-opus-4-7", "gemini-2.5-pro"],
-    "gemini_cli": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
-    "ollama": ["llama3.3:70b", "qwen2.5:32b", "qwen2.5:7b"],
-    "vscode_extension": ["gpt-5", "claude-opus-4-7", "gemini-2.5-pro"],
-};
+export const ENSEMBLE_MIN_MODELS = 2;
+
+/**
+ * The model ids the user named for an ensemble: comma / semicolon / newline
+ * separated. Order kept, blanks and repeats dropped. Mirrors
+ * core/interview.py:parse_ensemble_models.
+ */
+export function parseEnsembleModels(raw: string | string[] | undefined): string[] {
+    const parts = Array.isArray(raw) ? raw : (raw ?? "").split(/[,;\n]/);
+    const out: string[] = [];
+    for (const part of parts) {
+        const model = String(part).trim();
+        if (model && !out.includes(model)) {
+            out.push(model);
+        }
+    }
+    return out;
+}
 
 
 /**
@@ -193,8 +204,7 @@ type EnsembleProfile = "off" | "cross_check_only" | "ideate_and_check" | "full";
 
 export function expandEnsembleProfile(
     profile: string,
-    provider: string,
-    providerModel: string | undefined,
+    models: string | string[] | undefined,
 ): Record<string, {models: string[]; merge: string; moderator?: string}> | null {
     const known: ReadonlySet<EnsembleProfile> = new Set([
         "off", "cross_check_only", "ideate_and_check", "full",
@@ -202,8 +212,13 @@ export function expandEnsembleProfile(
     if (!profile || profile === "off" || !known.has(profile as EnsembleProfile)) {
         return null;
     }
-    const trio = ENSEMBLE_MODEL_TRIOS[provider]
-        ?? [providerModel || "default", providerModel || "default", providerModel || "default"];
+    // The models are the user's. Fewer than two and nothing is configured:
+    // FI does not pick models to make up the number. The moderator is the
+    // first model the user listed.
+    const trio = parseEnsembleModels(models);
+    if (trio.length < ENSEMBLE_MIN_MODELS) {
+        return null;
+    }
     const moderator = trio[0];
     const out: Record<string, {models: string[]; merge: string; moderator?: string}> = {};
     if (profile === "cross_check_only" || profile === "ideate_and_check" || profile === "full") {
@@ -267,9 +282,18 @@ export function answersToYaml(answers: InterviewAnswers): string {
     // Multi-model ensemble preset. Only emit when non-"off".
     const nodeEnsemble = expandEnsembleProfile(
         answers.ensemble_profile ?? "off",
-        "vscode_extension",
-        answers.provider_model,
+        answers.ensemble_models,
     );
+    if ((answers.ensemble_profile ?? "off") !== "off" && !nodeEnsemble) {
+        // A profile was chosen but the user named fewer than two models, and FI
+        // does not choose them. Say so where the person editing this file will
+        // see it. Mirrors core/interview.py:answers_to_yaml.
+        lines.push(
+            `${indent}# ensemble_profile "${yamlEscape(answers.ensemble_profile ?? "")}" was chosen but ` +
+            `fewer than ${ENSEMBLE_MIN_MODELS} models were named, so no ensemble is configured. ` +
+            `List the models under node_ensemble.<node>.models to fan out over.`,
+        );
+    }
     if (nodeEnsemble) {
         lines.push(`${indent}node_ensemble:`);
         for (const [node, cfg] of Object.entries(nodeEnsemble)) {
