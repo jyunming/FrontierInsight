@@ -174,6 +174,7 @@ def test_vscode_emitter_translates_the_supply_pause(tmp_path: Path) -> None:
     The TS emitter must use the same table as core/interview.py, or the
     same answer would mean different things on different surfaces."""
     for answer, emitted in (
+        ("after_literature", "after_literature"),
         ("after_design", "before_build"),
         ("after_paper", "before_review"),
         ("both", "both"),

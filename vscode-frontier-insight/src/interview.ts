@@ -800,6 +800,11 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
                         value: "never" as const,
                     },
                     {
+                        label: "$(book) Pause after literature",
+                        description: "Stop once the literature is saved; skills, design and the experiment start on resume with it in hand (the search is not run again).",
+                        value: "after_literature" as const,
+                    },
+                    {
                         label: "$(debug-step-over) Pause after design",
                         description: "Drop reference papers / data BEFORE the implement → execute → analyze stages spend compute.",
                         value: "after_design" as const,

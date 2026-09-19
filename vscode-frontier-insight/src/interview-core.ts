@@ -89,7 +89,7 @@ export interface InterviewAnswers {
     // resume. Maps to pauses.supply via SUPPLY_TO_PAUSE; "never" (the
     // default) emits nothing. Must stay in sync with
     // core/interview.py:InterviewAnswers.pause_for_user_input.
-    pause_for_user_input?: "never" | "after_design" | "after_paper" | "both";
+    pause_for_user_input?: "never" | "after_literature" | "after_design" | "after_paper" | "both";
     // Multi-model ensemble preset. "off" (default) keeps single-call
     // semantics; other values expand into provider.node_ensemble via
     // the Python `expand_ensemble_profile` helper at YAML emit time.
@@ -150,6 +150,7 @@ export const ENSEMBLE_MODEL_TRIOS: Record<string, [string, string, string]> = {
  */
 export const SUPPLY_TO_PAUSE: Record<string, string> = {
     never: "never",
+    after_literature: "after_literature",
     after_design: "before_build",
     after_paper: "before_review",
     both: "both",

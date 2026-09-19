@@ -165,7 +165,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
     # rest of the interview UI sees the values it expects.
     pauses = raw.get("pauses") or {}
     _rev_clarify = {"ask": "interactive"}
-    _rev_supply = {"before_build": "after_design", "before_review": "after_paper"}
+    _rev_supply = {"before_build": "after_design", "before_review": "after_paper"}  # after_literature keeps its name
 
     def _pause(new_key: str, legacy: dict, legacy_key: str, default: Any) -> Any:
         if new_key in pauses:

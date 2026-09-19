@@ -179,7 +179,8 @@ There are five places it can stop, all configured in one place — the `pauses:`
 |---|---|---|---|
 | **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
 | **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` (the default; `false` turns it off) |
-| **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` |
+| **after the literature** | SUPPLY | the literature is saved; add papers, files or change the config, then the experiment is designed with it in hand (no second search) | `pauses.supply: after_literature` |
+| **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` \| `all` |
 | **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
 | **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
 

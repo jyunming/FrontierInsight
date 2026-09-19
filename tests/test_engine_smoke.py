@@ -644,3 +644,49 @@ async def test_await_with_heartbeat_returns_result_and_logs(smoke_config: Config
 
     assert result == "RESULT"
     assert any("still running" in m for m in msgs), msgs
+
+
+@pytest.mark.asyncio
+async def test_after_literature_pause_then_resume_does_not_search_again(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first half of a quest is the literature; the second half designs and
+    runs the experiment with it. ``pauses.supply: after_literature`` stops once
+    the literature is saved, and ``--resume`` continues from select_skills — the
+    search is not run a second time."""
+    from core.state_dump import dump_state
+
+    cfg = smoke_config.model_copy(update={
+        "pauses": smoke_config.pauses.model_copy(update={"supply": "after_literature"}),
+    })
+    calls: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        calls.append(_classify(prompt))
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    first = Engine(cfg)
+    await first.run()
+    log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[supply] paused" in log and "(after_literature)" in log
+    assert (first.fi_dir / "paused_at_after_literature.flag").is_file()
+    assert (first.quest_root / "NEXT_STEP.md").is_file()
+    stopped = dump_state(first.quest_root)
+    assert "literature" in stopped
+    assert "  design " not in stopped, "the design must not exist before the resume"
+    assert not (first.quest_root / "paper" / "paper.md").exists()
+    calls_before_resume = list(calls)
+
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await second.run()
+
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    log = (second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert log.count("[literature] searching sources=") == 1, "the search ran again"
+    assert "Experiment Design" not in calls_before_resume
+    assert "Experiment Design" in calls
+    path = dump_state(second.quest_root)
+    assert "->  pause_after_literature" in path and "->  select_skills" in path
