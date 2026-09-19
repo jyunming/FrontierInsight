@@ -8911,26 +8911,188 @@ def _math_folded(text: str) -> str:
     return " ".join(text.split())
 
 
+# What text extraction does to the layout of a source, and a quotation of it
+# does not repeat. Each is a further chance for a part that is not there as
+# written (see _quote_in_source), and none lets a different word match.
+#
+# A PDF hyphenates at the end of a line and can leave a space before the
+# hyphen ("inap -" newline "propriate"); _normalized_text joins only a hyphen
+# that touches the word.
+_SPACED_HYPHEN_BREAK_RE = re.compile(r"(\w)[ \t]+-[ \t]*\r?\n\s*(\w)")
+# A stacked fraction comes out as numerator, line break, denominator ("( 1",
+# "R0", ")i") with no bar; the paper quoting it writes the bar. Only a bar with
+# an operand on each side is one.
+_FRACTION_BAR_RE = re.compile(r"(?<=[\w)\]])\s*/\s*(?=[\w(\[])")
+# "0,1,...,N" runs its dots through a sequence of numbers: that is mathematics,
+# not an omission from the quotation.
+_MATH_ELLIPSIS_RE = re.compile(r"(\w,\s?)\.\.\.(\s?,\s?\w)")
+# A word: letters, hyphens or apostrophes between them, punctuation around. What
+# is not one is a formula (it has a digit, an operator, a bracket around a
+# letter, ...).
+_WORD_TOKEN_RE = re.compile(r"[\W_]*[^\W\d_]+(?:['-][^\W\d_]+)*[\W_]*")
+# A formula a web page's text extraction took out leaves a hole where it was:
+# two spaces in a row, or a space before the punctuation that came after it
+# ("when ."). The hole is marked, in a copy of the source, with an invisible
+# separator, which is neither a space nor a word character.
+_STRIPPED_MATH_HOLE_RE = re.compile(r"(?<=\S)[ \t]{2,}(?=\S)|(?<=\S)[ \t]+(?=[,.;:)])")
+_HOLE = chr(0x2063)  # INVISIBLE SEPARATOR
+
+
+def _quote_parts(normalised: str, *, keep_sequences: bool = False) -> list[str]:
+    """The parts of a normalised quotation that an ellipsis joins. With
+    ``keep_sequences`` an ellipsis inside a run of numbers (``0,1,...,N``) is
+    not one. NFKC has already turned every ``…`` into three dots, so ``…`` is
+    free to mark the ones that stay."""
+    if keep_sequences:
+        normalised = _MATH_ELLIPSIS_RE.sub(r"\1…\2", normalised)
+    parts = [p.strip(" .,;:[]").replace("…", "...") for p in normalised.split("...")]
+    return [p for p in parts if p]
+
+
+def _spaced_pattern(text: str) -> re.Pattern[str]:
+    """``text`` as a pattern that also matches it with one stray space inside
+    any of its words. A PDF puts a space into a word ("equati on", "p
+    robability") and the quotation, written from the text, does not have it.
+
+    One direction only, on purpose: the source may have a space the quotation
+    does not, but the words the quotation separates stay separate, so "the
+    rapist" is not found in "therapist"."""
+    return re.compile(" ".join(" ?".join(map(re.escape, word)) for word in text.split()))
+
+
+def _words_around_stripped_math(part: str, holed: str) -> bool:
+    """Whether ``part`` is words the source has, with the formulas among them
+    left out of the source altogether. ``holed`` is the source with the holes
+    such formulas leave marked (:data:`_STRIPPED_MATH_HOLE_RE`).
+
+    A source taken from a web page can lose its mathematics whole: "Given S(t)
+    and I(t), the epidemic ends at time t, when I(t)=0." is stored as "Given
+    and , the epidemic ends at time t, when ." Nothing can check a formula the
+    source no longer has, but the words around it can be checked, and are: the
+    quotation is cut into runs of words at its formulas, and the runs must be
+    found in that order with, between one and the next, a hole and nothing but
+    punctuation and spaces around it: not a letter, not a digit. So a formula
+    the source still has (and the quotation changed) is a mismatch, as is a
+    word of the source the quotation left out, a word it added, and a formula
+    put between two words that were next to each other in the source.
+
+    Only when the words dominate: a quotation that is mostly formula is not a
+    quotation of words, and one that starts or ends in a formula has no word to
+    anchor that edge to."""
+    tokens = part.split()
+    is_word = [bool(_WORD_TOKEN_RE.fullmatch(t)) for t in tokens]
+    if not tokens or not is_word[0] or not is_word[-1] or all(is_word):
+        return False
+    runs: list[str] = []
+    run: list[str] = []
+    formula_chars = 0
+    for token, word in zip(tokens, is_word):
+        if word:
+            run.append(token)
+            continue
+        formula_chars += len(token)
+        if run:
+            runs.append(" ".join(run))
+            run = []
+    runs.append(" ".join(run))
+    word_chars = sum(len(r) for r in runs)
+    if word_chars < _QUOTE_MIN_CHARS or formula_chars > word_chars:
+        return False
+    # A run may not begin or end inside a word of the source, and a hole may
+    # fall between two of its words as well as between two runs.
+    bounded = [
+        ("(?<!\\w)" if r[0].isalnum() else "")
+        + re.escape(r).replace("\\ ", f"[ {_HOLE}]")
+        + ("(?!\\w)" if r[-1].isalnum() else "")
+        for r in runs
+    ]
+    return re.search(f"\\W*{_HOLE}\\W*".join(bounded), holed) is not None
+
+
+class _SourceLayouts:
+    """One source, looked at the ways :func:`_quote_in_source` allows for: as
+    normalised and with the mathematics folded, again with the words a PDF
+    broke at a hyphen with a space before it joined, and (only if a part needs
+    it) with the holes a stripped formula leaves marked."""
+
+    def __init__(self, source: str, haystack: str, folded: str) -> None:
+        self._source = source
+        # (text, whether its mathematics is folded, which a part must match)
+        self._views = [(haystack, False), (folded, True)]
+        if _SPACED_HYPHEN_BREAK_RE.search(source):
+            joined = _normalized_text(_SPACED_HYPHEN_BREAK_RE.sub(r"\1\2", source))
+            self._views += [(joined, False), (_math_folded(joined), True)]
+        self._holed: str | None = None
+
+    def holds(self, part: str) -> bool:
+        """Whether ``part`` is in the source once its layout is allowed for: a
+        stray space inside a word, a line break where the quotation has a
+        fraction bar, a formula the source no longer has."""
+        shapes = [part]
+        if "/" in part:
+            # The one place an operator is dropped, and only from the
+            # quotation, only as a last chance, and only for a bar between two
+            # operands: "(1/R0)" is looked for as "(1 R0)", so "(R0/1)" is still
+            # not found in "(1 R0)".
+            shapes.append(_FRACTION_BAR_RE.sub(" ", part))
+        for shape in shapes:
+            for text, is_folded in self._views:
+                needle = _math_folded(shape) if is_folded else shape
+                # Folding can leave nothing (a "quotation" of dollar signs), and
+                # nothing is in every text.
+                if needle and (needle in text or _spaced_pattern(needle).search(text)):
+                    return True
+        if self._holed is None:
+            marked = _STRIPPED_MATH_HOLE_RE.sub(_HOLE, unicodedata.normalize("NFKC", self._source))
+            self._holed = _normalized_text(marked)
+        return _words_around_stripped_math(part, self._holed)
+
+
 def _quote_in_source(quote: str, source: str) -> bool:
     """Whether ``quote`` is words ``source`` has. Parts an ellipsis joins are
     looked for one by one, and together they must be long enough to mean
     something.
 
-    A part that is not there as written is looked for once more with the
-    mathematics folded (:func:`_math_folded`), because a source that renders a
-    formula one way and a paper that quotes it another are still quoting it.
-    The fold is only ever a second chance: a quote found as written is accepted
-    on that alone, and the length floor is measured before any folding, so no
-    quote a source really does contain can be rejected because of it."""
+    A part that is not there as written is looked for again, each time with
+    something a source's text extraction is known to do to its layout allowed
+    for, and never with a different word allowed:
+
+    * the mathematics folded (:func:`_math_folded`), because a source that
+      renders a formula one way and a paper that quotes it another are still
+      quoting it;
+    * a stray space inside a word of the source (:func:`_spaced_pattern`), and a
+      hyphen a PDF broke a word at with a space before it;
+    * a fraction bar in the quotation where the source has the numerator and
+      the denominator on separate lines;
+    * a formula the source no longer has, when the words around it all are
+      there in order and the source shows the hole the formula left
+      (:func:`_words_around_stripped_math`).
+
+    Every one is only ever a further chance: a quote found as written is
+    accepted on that alone, and the length floor is measured before any of
+    them, so no quote a source really does contain can be rejected because of
+    them. The letters, digits and operators the quotation has, and the order
+    they come in, must all be there; so a word changed, a word left out, two
+    sentences that are not neighbours run together, and a quotation of another
+    source are all still rejected."""
     haystack = _normalized_text(source)
-    parts = [p.strip(" .,;:[]") for p in re.split(r"\.\.\.", _normalized_text(quote))]
-    parts = [p for p in parts if p]
+    normalised = _normalized_text(quote)
+    parts = _quote_parts(normalised)
     if not parts or sum(len(p) for p in parts) < _QUOTE_MIN_CHARS:
         return False
     if all(p in haystack for p in parts):
         return True
     folded = _math_folded(haystack)
-    return all(p in haystack or _math_folded(p) in folded for p in parts)
+    # Folding can leave nothing (a "quotation" of dollar signs), and nothing is
+    # in every text.
+    if all(p in haystack or (bool(m := _math_folded(p)) and m in folded) for p in parts):
+        return True
+    layouts = _SourceLayouts(source, haystack, folded)
+    splits = [parts]
+    sequenced = _quote_parts(normalised, keep_sequences=True)
+    if sequenced != parts:
+        splits.append(sequenced)
+    return any(all(layouts.holds(p) for p in split) for split in splits)
 
 
 def render_references_marp_slide(refs: list[dict[str, Any]], *, paper_md: str = "") -> str:
