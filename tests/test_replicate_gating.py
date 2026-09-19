@@ -323,8 +323,8 @@ async def test_identical_runs_of_a_seed_ignoring_script_are_not_replicates(
     patch = await eng._node_execute({"deps": []})
 
     assert eng.executor.execute.await_count == 2, "one extra run settles it"
-    assert "result_json_replicates" not in patch, "a repeated run is not replicates"
-    assert "result_json_deterministic" not in patch, "unreplicated, not deterministic"
+    assert not patch.get("result_json_replicates"), "a repeated run is not replicates"
+    assert patch["result_json_deterministic"] is False, "unreplicated, not deterministic"
     assert patch["result_json_replicate_seed_ignored"] is True
     # The downstream consequence that matters: nothing can say "seed 0 of N".
     assert _replicate_seed_count(patch) is None
@@ -345,7 +345,7 @@ async def test_a_seeded_script_whose_runs_agree_is_still_deterministic(
     assert eng.executor.execute.await_count == 2
     assert patch["result_json_deterministic"] is True
     assert len(patch["result_json_replicates"]) == 2
-    assert "result_json_replicate_seed_ignored" not in patch
+    assert patch["result_json_replicate_seed_ignored"] is False
 
 
 @pytest.mark.asyncio
@@ -366,7 +366,7 @@ async def test_runs_that_legitimately_agree_to_many_digits_still_report(
     assert eng.executor.execute.await_count == 3
     assert len(patch["result_json_replicates"]) == 3
     assert patch["result_json_deterministic"] is False
-    assert "result_json_replicate_seed_ignored" not in patch
+    assert patch["result_json_replicate_seed_ignored"] is False
     assert _replicate_seed_count(patch) == 3
     agg = _aggregate_result_json_replicates(patch["result_json_replicates"])
     assert agg["final_size"]["n"] == 3
@@ -413,3 +413,46 @@ async def test_an_ordinary_run_gets_no_such_note(tmp_path: Path) -> None:
         "exec_result": {"returncode": 0}, "figures": [], "design": {},
     })
     assert "never reads FI_REPLICATE_SEED" not in prompt
+
+
+# --- and the verdict does not outlive the script it was about ----------------
+
+@pytest.mark.asyncio
+async def test_a_repaired_seed_ignoring_script_clears_the_earlier_replicates(
+    tmp_path: Path,
+) -> None:
+    """``_node_execute`` runs again on a repair and on a re_experiment, and the
+    state's fields are last-value channels. A pass that merely WITHHELD the
+    replicate list would leave the previous script's seeds sitting on the
+    state, and analyze would aggregate those against this script's result."""
+    eng = _engine(tmp_path, replicates=3)
+    (eng.quest_root / "code" / "experiment.py").write_text(
+        TERRA_SHAPED_SCRIPT, encoding="utf-8")
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"p": 0.667}')))
+    patch = await eng._node_execute({  # the state an earlier, seeded pass left
+        "deps": [],
+        "result_json_replicates": [{"_seed": k, "p": 0.1 * k} for k in range(3)],
+        "result_json_deterministic": False,
+    })
+    assert patch["result_json_replicates"] == [], "the earlier seeds must not survive"
+    assert patch["result_json_replicate_seed_ignored"] is True
+    assert _replicate_seed_count(patch) is None
+
+
+@pytest.mark.asyncio
+async def test_a_repaired_seeded_script_clears_the_earlier_verdict(
+    tmp_path: Path,
+) -> None:
+    """The other direction: a quest whose earlier script ignored the seed must
+    not carry "there is one measurement here" into a pass that replicated
+    properly, or analyze gets the aggregate and the banner together."""
+    eng = _engine(tmp_path, replicates=3)
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"p": 0.10}')), _er(_rj('{"p": 0.20}')), _er(_rj('{"p": 0.30}')),
+    ])
+    patch = await eng._node_execute({
+        "deps": [], "result_json_replicate_seed_ignored": True,
+    })
+    assert len(patch["result_json_replicates"]) == 3
+    assert patch["result_json_replicate_seed_ignored"] is False

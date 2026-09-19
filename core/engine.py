@@ -4508,8 +4508,22 @@ class Engine:
             # Lets ``analyze`` say "every seed agreed" instead of reporting an
             # empty aggregate, which reads like the aggregator broke.
             patch["result_json_deterministic"] = deterministic
+            # This node runs again on a repair and on a re_experiment, and
+            # these are last-value channels: a key a pass leaves out keeps the
+            # PREVIOUS pass's value. Clearing the flag stops a quest whose
+            # earlier script ignored the seed from carrying "there is one
+            # measurement here" alongside this script's full aggregate.
+            patch["result_json_replicate_seed_ignored"] = False
         if seed_ignored:
             patch["result_json_replicate_seed_ignored"] = True
+            # The same hazard the other way round. An earlier pass may have
+            # left a replicate list on the state, and merely withholding the
+            # key would KEEP it -- so analyze would aggregate the previous
+            # script's seeds against this script's result. An empty list is
+            # what every consumer already reads as "no replication", and
+            # ``_replicate_seed_count`` returns None for it.
+            patch["result_json_replicates"] = []
+            patch["result_json_deterministic"] = False
         return patch
 
     async def _replot_replicate_figures(
