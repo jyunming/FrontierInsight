@@ -168,6 +168,44 @@ async def test_lock_pins_a_requested_package_the_venv_inherited(
     assert "provided by FI's own interpreter" in body
 
 
+_PIP_LONG_PATH_STDERR = (
+    "Collecting torch\n"
+    "  Downloading torch-2.4.0-cp311-cp311-win_amd64.whl (197.9 MB)\n"
+    "ERROR: Could not install packages due to an OSError: [Errno 2] No such file "
+    r"or directory: 'C:\Users\x\OneDrive\venv\Lib\site-packages\torch\include\ATen\native\a.h'"
+    "\n"
+    "HINT: This error might have been caused by the fact that Windows Long Path "
+    "support is not enabled. You can find information on how to enable this at "
+    "https://pip.pypa.io/warnings/enable-long-paths\n"
+    "\n[notice] A new release of pip is available: 24.0 -> 26.2.1\n"
+)
+
+
+def test_pip_failure_summary_keeps_the_real_error_and_names_the_long_path_cause() -> None:
+    """The log used to keep the last 400 characters of pip's stderr, which on a
+    long-path failure is the generic HINT and pip's upgrade notice — never the
+    package or path that failed."""
+    from core.execution import pip_failure_summary
+    out = pip_failure_summary(_PIP_LONG_PATH_STDERR)
+    assert r"torch\include\ATen\native\a.h" in out
+    assert "260-character" in out
+    assert "notice" not in out
+
+
+def test_pip_failure_summary_adds_no_hint_to_an_unrelated_failure() -> None:
+    from core.execution import pip_failure_summary
+    out = pip_failure_summary(
+        "ERROR: No matching distribution found for nosuchpkg\n"
+        "[notice] A new release of pip is available\n"
+    )
+    assert out == "ERROR: No matching distribution found for nosuchpkg"
+
+
+def test_pip_failure_summary_falls_back_to_the_tail_without_error_lines() -> None:
+    from core.execution import pip_failure_summary
+    assert "boom" in pip_failure_summary("a\nb\nboom")
+
+
 def test_make_executor_defaults_to_the_shared_interpreter() -> None:
     from core.execution import SharedInterpreterExecutor, make_executor
     exe = make_executor("venv", python_version="3.11", docker_image="x")

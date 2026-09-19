@@ -141,8 +141,8 @@ class VenvExecutor:
         # retried: another 600-second wait is not a transient.
         if result.returncode != 0 and not result.timed_out:
             _log.warning(
-                "[install] pip install rc=%d; retrying once. stderr_tail=%s",
-                result.returncode, result.stderr[-300:],
+                "[install] pip install rc=%d; retrying once. %s",
+                result.returncode, pip_failure_summary(result.stderr),
             )
             result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
         if result.returncode == 0:
@@ -355,6 +355,34 @@ _DLL_LOAD_HINT = (
     "Windows long-path support (LongPathsEnabled) or set a shorter "
     "output.output_dir (e.g. C:\\fi) and re-run."
 )
+
+
+_LONG_PATH_HINT = (
+    "cause: a file in this install has a path over Windows' 260-character "
+    "limit, so pip installed nothing. Fix: enable LongPathsEnabled (needs "
+    "admin), or run FI on a Python installed at a short path (e.g. "
+    "C:\\Python311); with execution.shared_interpreter: false, set "
+    "output.output_dir to a short path such as C:\\fi."
+)
+
+
+def pip_failure_summary(stderr: str) -> str:
+    """What to log when ``pip install`` fails. pip prints the real cause on its
+    ``ERROR:`` lines and follows them with generic hints, so the last few
+    hundred characters (what used to be logged) were only the hint — never the
+    package or the path that failed."""
+    errors = [
+        ln.strip() for ln in stderr.splitlines() if ln.strip().startswith("ERROR:")
+    ]
+    summary = " | ".join(errors) if errors else stderr.strip()[-400:]
+    summary = summary[:800]
+    low = stderr.lower()
+    if (
+        "enable-long-paths" in low or "winerror 206" in low
+        or "filename or extension is too long" in low
+    ):
+        summary += " || " + _LONG_PATH_HINT
+    return summary
 
 
 def _looks_like_dll_load_failure(stderr: str) -> bool:

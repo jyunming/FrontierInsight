@@ -217,6 +217,25 @@ async def test_a_provider_message_written_as_the_paper_fails_the_quest(
 
 
 @pytest.mark.asyncio
+async def test_run_log_says_why_the_literature_search_found_nothing(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quest that "did not look for literature" left only "retrieved 0 docs"
+    in its log — no way to tell a disabled search from a failed one."""
+    engine = Engine(smoke_config)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[literature] searching sources=" in log
+    assert "knowledge.enabled is false, so nothing was searched" in log
+
+
+@pytest.mark.asyncio
 async def test_run_log_names_the_interpreter_running_fi(
     smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

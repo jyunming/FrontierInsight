@@ -50,7 +50,7 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
     resolve_page_limit,
 )
-from .execution import ExecutionResult, make_executor
+from .execution import ExecutionResult, make_executor, pip_failure_summary
 from .knowledge import (
     WORK_SCOPE_PAPERS,
     WORK_SCOPE_PAPERS_AND_BOOKS,
@@ -2313,6 +2313,12 @@ class Engine:
         sources = await self.knowledge.choose_sources(
             query, chosen_idea=chosen, chat_fn=chat_fn,
         )
+        self._log.info(
+            "[literature] searching sources=%s (knowledge.enabled=%s, "
+            "source_routing=%s)",
+            sources or "none", self.config.knowledge.enabled,
+            self.config.knowledge.source_routing,
+        )
 
         async def _retrieve(q: str, *, web: bool = True) -> list:
             return await self.knowledge.asearch(
@@ -2340,6 +2346,19 @@ class Engine:
             _retrieve(q, web=(i == 0)) for i, q in enumerate(queries)
         ))
         docs = _merge_round_robin(list(per_facet))
+        if docs:
+            why_none = ""
+        elif not self.config.knowledge.enabled:
+            why_none = " — knowledge.enabled is false, so nothing was searched"
+        else:
+            why_none = (
+                " — no source returned anything; look for [source-failures] at "
+                "the end of this log, and check network access"
+            )
+        self._log.info(
+            "[literature] hits per query=%s, %d after merging%s",
+            [len(x) for x in per_facet], len(docs), why_none,
+        )
         # Relevance floor: drop off-topic sources the retriever returned before
         # they reach the corpus. This is the ONLY relevance filter on the
         # literature path — the LLM guard runs only under auto_collect, which
@@ -2401,7 +2420,12 @@ class Engine:
         docs = docs + await self._foundational_works(rel_topic, docs, work_scope=scope)
         # The floor scores word overlap; the screen asks whether the paper
         # could cite each source for a claim (see _screen_literature).
+        n_before_screen = len(docs)
         docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
+        self._log.info(
+            "[literature] kept %d of %d after the relevance floor and the screen",
+            len(docs), n_before_screen,
+        )
         # Legal full text for the scholarly sources that were kept (web pages
         # already carry their page text). Once here rather than per facet.
         docs = await self.knowledge.fetch_full_text(docs)
@@ -3976,8 +4000,8 @@ class Engine:
             install = await self.executor.install(deps, quest_root=self.quest_root)
             if install.returncode != 0:
                 self._log.warning(
-                    "[execute] pip install rc=%d stderr_tail=%s",
-                    install.returncode, install.stderr[-400:],
+                    "[execute] pip install rc=%d: %s",
+                    install.returncode, pip_failure_summary(install.stderr),
                 )
 
         py = self.executor.python_path(self.quest_root)
