@@ -2883,6 +2883,39 @@ class Engine:
         self._log.info("[%s] paused — %s", kind, headline)
         return interrupt({**payload, "pause": descriptor})
 
+    def _pause_stage_enabled(self, stage: str) -> bool:
+        """Whether ``pauses.supply`` asks for a stop at ``stage``. ``both`` is
+        before_build + before_review, as it always was; ``all`` adds the stop
+        after the literature."""
+        value = self.config.pauses.supply
+        if value == "all":
+            return True
+        if value == "both":
+            return stage in ("before_build", "before_review")
+        return value == stage
+
+    async def _node_pause_after_literature(self, state: QuestState) -> QuestState:
+        """The literature is done and saved. When ``pauses.supply`` asks for it,
+        stop here: skills, design and the experiment start on ``--resume`` with
+        the literature already in state (the search is not run again). Papers
+        dropped in ``inputs/papers/`` meanwhile join it. A node of its own so a
+        resume re-enters this cheap node, not the search."""
+        if not self._pause_stage_enabled("after_literature"):
+            return {}
+        self._maybe_pause_for_user_input(state, "after_literature")
+        merged = list(state.get("literature") or [])
+        seen = {i for entry in merged for i in _entry_identities(entry)}
+        merged, added = _ingest_user_dropped_papers(
+            self.quest_root, merged, seen, self._log,
+        )
+        if not added:
+            return {}
+        self._log.info(
+            "[after_literature] picked up %d paper(s) dropped in inputs/papers/ "
+            "while paused", added,
+        )
+        return {"literature": merged}
+
     def _maybe_pause_for_user_input(
         self, state: QuestState, stage: str,
     ) -> None:
@@ -2897,10 +2930,7 @@ class Engine:
         interrupt(). The user drops files and re-runs ``fi --resume <id>``;
         the resume picks up the files via the normal literature / analyze paths.
         """
-        cfg_value = self.config.pauses.supply
-        if cfg_value == "never":
-            return
-        if cfg_value not in ("both", stage):
+        if not self._pause_stage_enabled(stage):
             return
         # Disk marker is the authoritative "already paused at this
         # stage" signal — same pattern as wait_for_data uses with the
