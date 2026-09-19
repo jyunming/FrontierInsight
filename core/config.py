@@ -222,31 +222,34 @@ class ProviderConfig(BaseModel):
             "web_plots": 180.0,
         }
     )
-    # Per-node MODEL ESCALATION on tenacity retry. Maps an engine
-    # node name to a fallback model string. ``_chat_cli`` uses the
-    # primary (per-node or endpoint) model on attempt 1; if that
-    # raises ``_CliTransientError``, attempt 2+ uses the fallback.
+    # Per-node MODEL ESCALATION on tenacity retry — OPT-IN, empty by
+    # default. Maps an engine node name to a fallback model string.
+    # ``_chat_cli`` uses the primary (per-node or endpoint) model on
+    # attempt 1; if that raises ``_CliTransientError``, attempt 2+ uses
+    # the fallback for that node. Unset (or ``{}``), every attempt uses
+    # the primary model.
     #
-    # The primary motivation is empirical: Sonnet 4.6 on long
-    # code-gen prompts (implement_body, write) goes into extended-
-    # thinking and never produces text — 15-minute runaway with zero
-    # output, reproduced 3× across prompt-size and output-shape
-    # variants. Opus 4.7 lands the same prompt in ~5 minutes. By
-    # escalating to Opus only on retry, we honour the user's
-    # configured primary model (cheaper, often sufficient) on first
-    # try, then degrade gracefully when it transient-fails.
+    # Why the feature exists: a smaller Claude model on a long code-gen
+    # prompt (implement_body, write) can go into extended thinking and
+    # never produce text — a 15-minute runaway with zero output,
+    # reproduced 3× across prompt-size and output-shape variants.
+    # Retrying the same prompt on a stronger model escapes it. Doing
+    # that only on retry keeps the user's primary model (cheaper, often
+    # sufficient) for the first try.
     #
-    # Default escalates the two demonstrably-paralysis-prone nodes
-    # (implement, write) to ``claude-opus-4-7``. Cheap nodes stay
-    # on the user's primary because retry-escalation has a cost
-    # cliff and they rarely transient-fail. Set ``{}`` to disable
-    # escalation entirely.
-    node_model_fallbacks: dict[str, str] = Field(
-        default_factory=lambda: {
-            "implement": "claude-opus-4-7",
-            "write": "claude-opus-4-7",
-        }
-    )
+    # Why it is empty by default: FI never picks the models a quest
+    # pays for; the user does. The fallback is sent to whichever CLI
+    # provider is active (claude_cli, codex_cli, gemini_cli,
+    # copilot_cli, antigravity_cli), and a model name belongs to one
+    # vendor — a built-in default would name a model most of them do
+    # not offer, and would spend on a model the user never chose. To
+    # opt in, name a model the ACTIVE provider accepts:
+    #
+    #     provider:
+    #       node_model_fallbacks:
+    #         implement: <your stronger model>
+    #         write: <your stronger model>
+    node_model_fallbacks: dict[str, str] = Field(default_factory=dict)
     # Per-node model routing. Maps an engine node name (or a
     # qualified subkey like `review_panel.methodologist`) to the model
     # string this provider should use when that node fires a chat call.

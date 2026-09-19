@@ -438,3 +438,251 @@ def test_powerpoint_draws_the_equations(tmp_path: Path) -> None:
     # italic ℎ (U+210E), where the fallback text has a plain h.
     assert "ℎ = 0.01" in text and "×" in text
     assert [f for f in slides_report(doc)["findings"] if f["check"] == "raw_markup"] == []
+
+
+# ---------------------------------------------------------------- tables
+
+# The validation quest's slide 4: a bold lead line, a table, two bullets. It
+# printed the table as five lines of pipes.
+TABLE_DECK = r"""---
+marp: true
+theme: fi
+---
+
+## Stronger transmission makes agreement immediate
+
+**For $R_0=3.0$, large outbreaks follow the deterministic size.**
+
+| Population | Conditional rate | Note |
+|---:|:---:|:---|
+| 100 | **0.930** | _low_ |
+| 1,000 | 0.940 | `code` |
+| $N=5{,}000$ | $0.941$ | a $x^2$ b |
+
+- The magnitude is predictable.
+- Its occurrence remains probabilistic.
+"""
+
+
+def _table_pptx(tmp_path: Path, deck: str = TABLE_DECK) -> Path:
+    md = tmp_path / "slides.md"
+    md.write_text(deck, encoding="utf-8")
+    out = tmp_path / "slides.pptx"
+    assert render_marp_to_pptx(md, out) is True
+    return out
+
+
+def _slide_xml(pptx: Path, number: int = 1) -> str:
+    import zipfile
+
+    return zipfile.ZipFile(pptx).read(f"ppt/slides/slide{number}.xml").decode("utf-8")
+
+
+def _table_shape(pptx: Path):
+    from pptx import Presentation
+
+    return next(sh for sh in Presentation(str(pptx)).slides[0].shapes if sh.has_table)
+
+
+def test_a_table_is_parsed_with_its_cells_and_alignment() -> None:
+    slide = parse_marp(TABLE_DECK)[0]
+    (table,) = slide.tables
+    assert table.header == ["Population", "Conditional rate", "Note"]
+    assert table.aligns == ["r", "c", "l"]
+    assert [row[0] for row in table.rows] == ["100", "1,000", "$N=5{,}000$"]
+    # It keeps its place between the lead line and the bullets, and its lines
+    # are no paragraphs.
+    assert [kind for kind, _index, _text in slide.body] == ["para", "table", "bullet", "bullet"]
+    assert len(slide.paras) == 1 and len(slide.bullets) == 2
+
+
+def test_table_syntax_variants_are_read() -> None:
+    """Every delimiter-row spelling the models wrote, rows short or long of the
+    header, and an escaped pipe."""
+    for delim in ("|---|---|", "| :--- | :--- |", "|----------|----------|", "|:---:|---:|"):
+        (table,) = parse_marp(f"## T\n\n| a | b |\n{delim}\n| 1 | 2 |\n")[0].tables
+        assert table.rows == [["1", "2"]], delim
+    assert parse_marp("## T\n\n| a | b |\n|:---:|---:|\n| 1 | 2 |\n")[0].tables[0].aligns == ["c", "r"]
+    (table,) = parse_marp("## T\n\n| a | b |\n|---|---|\n| only |\n| 1 | 2 | 3 |\n| x \\| y | z |\n")[0].tables
+    assert table.rows == [["only", ""], ["1", "2"], ["x | y", "z"]]
+
+
+def test_pipe_text_that_is_not_a_table_stays_text() -> None:
+    """A pipe line needs a delimiter row under it, and a bare --- is still a
+    slide break."""
+    slide = parse_marp("## T\n\n| not | a table |\n\nafter\n")[0]
+    assert slide.tables == [] and slide.paras == ["| not | a table |", "after"]
+    slides = parse_marp("## T\n\n| a | b |\n---\n## Next\n\n- x\n")
+    assert len(slides) == 2 and slides[0].tables == []
+
+
+def test_a_table_becomes_a_native_table_not_pipes(tmp_path: Path) -> None:
+    import re
+
+    from pptx import Presentation
+
+    pptx = _table_pptx(tmp_path)
+    xml = _slide_xml(pptx)
+    assert xml.count("<a:tbl>") == 1
+    assert [t for t in re.findall(r"<a:t>([^<]*)</a:t>", xml) if "|" in t or "---" in t] == []
+
+    table = _table_shape(pptx).table
+    assert (len(table.rows), len(table.columns)) == (4, 3)
+    assert [table.cell(0, c).text for c in range(3)] == ["Population", "Conditional rate", "Note"]
+    assert [table.cell(r, 0).text for r in (1, 2)] == ["100", "1,000"]
+    assert table.cell(1, 1).text == "0.930" and table.cell(2, 2).text == "code"
+    # The bullets under it are still text.
+    slide = Presentation(str(pptx)).slides[0]
+    assert any("magnitude is predictable" in sh.text_frame.text for sh in slide.shapes if sh.has_text_frame)
+
+
+def test_a_column_keeps_the_alignment_the_delimiter_row_gave_it(tmp_path: Path) -> None:
+    from pptx.enum.text import PP_ALIGN
+
+    table = _table_shape(_table_pptx(tmp_path)).table
+    for row in range(4):
+        alignments = [table.cell(row, c).text_frame.paragraphs[0].alignment for c in range(3)]
+        assert alignments == [PP_ALIGN.RIGHT, PP_ALIGN.CENTER, PP_ALIGN.LEFT]
+
+
+def test_a_formula_in_a_cell_is_a_native_equation(tmp_path: Path) -> None:
+    import re
+
+    xml = _slide_xml(_table_pptx(tmp_path))
+    frame = xml[xml.index("<a:tbl>"): xml.index("</a:tbl>")]
+    # $N=5{,}000$, $0.941$ and the $x^2$ inside a sentence.
+    assert len(re.findall(r"<m:oMath[ >]", frame)) == 3 and frame.count("<mc:Fallback>") == 3
+    assert [t for t in re.findall(r"<a:t>([^<]*)</a:t>", frame) if "$" in t or "\\" in t] == []
+    # Text, equation, text: the formula sits where it was written.
+    at = frame.index(">a <")
+    assert at < frame.index("<mc:AlternateContent", at) < frame.index("> b<")
+    # A cell that is only a formula keeps its column's alignment (PowerPoint
+    # would set it in the middle); the one inside a sentence stays inline.
+    assert re.findall(r'<m:jc m:val="(\w+)"/>', frame) == ["right", "center"]
+
+
+def test_a_table_is_drawn_in_the_fi_theme(tmp_path: Path) -> None:
+    from pptx.dml.color import RGBColor
+    from pptx.enum.dml import MSO_FILL
+
+    pptx = _table_pptx(tmp_path)
+    xml = _slide_xml(pptx)
+    # Not Office's blue banded default.
+    assert "5C22544A" not in xml
+    table = _table_shape(pptx).table
+    assert table.first_row is True and table.horz_banding is False
+    header, body = table.cell(0, 0), table.cell(1, 0)
+    assert header.fill.fore_color.rgb == RGBColor(0xEE, 0xF1, 0xEE)
+    assert body.fill.type == MSO_FILL.BACKGROUND, "no fill under the body: the paper shows"
+    head_run = header.text_frame.paragraphs[0].runs[0]
+    assert head_run.font.bold and head_run.font.color.rgb == RGBColor(0x0A, 0x4F, 0x4D)
+    assert head_run.font.name == "Segoe UI" and head_run.font.size.pt == 14.5
+    body_run = body.text_frame.paragraphs[0].runs[0]
+    assert not body_run.font.bold and body_run.font.color.rgb == RGBColor(0x16, 0x22, 0x2B)
+    # A 2 pt rule of the theme's teal under the header, 1 pt hairlines under the rows.
+    assert 'w="25400"' in xml and 'val="0E6E6B"' in xml and 'w="12700"' in xml and 'val="E4E2DA"' in xml
+
+
+def test_text_above_and_below_a_table_keeps_its_place(tmp_path: Path) -> None:
+    from pptx import Presentation
+
+    prs = Presentation(str(_table_pptx(tmp_path)))
+    slide = prs.slides[0]
+    table = next(sh for sh in slide.shapes if sh.has_table)
+    lead = next(sh for sh in slide.shapes if sh.has_text_frame and "large outbreaks" in sh.text_frame.text)
+    bullets = next(sh for sh in slide.shapes if sh.has_text_frame and "magnitude is predictable" in sh.text_frame.text)
+    assert lead.top + lead.height <= table.top
+    assert table.top + table.height <= bullets.top
+    assert bullets.top + bullets.height <= prs.slide_height - int(0.85 * 914400)
+
+
+def test_a_table_takes_the_room_of_the_slide_body(tmp_path: Path) -> None:
+    """A table counts in the height the deck's own scale logic fits: fourteen
+    rows shrink the table's type from 14.5 pt so it ends above the footer, and
+    a table too tall even at its floor stops at 10 pt."""
+    from pptx import Presentation
+
+    def built(rows: int):
+        body = "".join(f"| row {i} | {i} |\n" for i in range(rows))
+        prs = Presentation(str(_table_pptx(tmp_path, f"## Many rows\n\n| Name | Value |\n|---|---|\n{body}")))
+        table = next(sh for sh in prs.slides[0].shapes if sh.has_table)
+        return table, table.table.cell(1, 0).text_frame.paragraphs[0].runs[0].font.size.pt, prs
+
+    _, short_pt, _ = built(4)
+    assert short_pt == 14.5
+    tall, tall_pt, prs = built(14)
+    assert 10 <= tall_pt < 14.5
+    assert tall.top + tall.height <= prs.slide_height - int(0.85 * 914400)
+    _, floor_pt, _ = built(40)
+    assert floor_pt == 10.0
+
+
+def test_a_table_over_a_figure_leaves_the_figure_its_room(tmp_path: Path) -> None:
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    (tmp_path / "figures").mkdir()
+    Image.new("RGB", (1500, 900), "white").save(tmp_path / "figures" / "energy.png")
+    md = tmp_path / "slides.md"
+    md.write_text(
+        "## T\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n![w:800](figures/energy.png)\n", encoding="utf-8",
+    )
+    out = tmp_path / "slides.pptx"
+    assert render_marp_to_pptx(md, out, figures_dir=tmp_path / "figures") is True
+    prs = Presentation(str(out))
+    table = next(sh for sh in prs.slides[0].shapes if sh.has_table)
+    picture = next(sh for sh in prs.slides[0].shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE)
+    assert picture.top >= table.top + table.height
+    assert picture.height >= int(2.0 * 914400)
+
+
+def test_a_title_with_only_a_table_is_not_a_title_slide(tmp_path: Path) -> None:
+    from pptx import Presentation
+
+    pptx = _table_pptx(tmp_path, "# Results\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
+    assert any(sh.has_table for sh in Presentation(str(pptx)).slides[0].shapes)
+
+
+def test_a_tidy_table_is_not_counted_as_wrapping() -> None:
+    """The header's longest cell fills its column exactly; a rounding error in
+    the wrap estimate once counted it as two lines and drew a header row
+    almost twice the height of the rows."""
+    from generation._pptx_slides import MARGIN_IN, SLIDE_W_IN, _table_layout
+
+    body_w = SLIDE_W_IN - 2 * MARGIN_IN
+    (table,) = parse_marp(
+        "## T\n\n| Population | Conditional attack rate | Deterministic attack rate |\n|---:|---:|---:|\n"
+        "| 100 | 0.930 | 0.941 |\n| 1,000 | 0.940 | 0.941 |\n"
+    )[0].tables
+    size, widths, heights = _table_layout(table, body_w, 1.0)
+    assert size == 14.5
+    assert len({round(h, 4) for h in heights}) == 1, "every row is one line"
+    assert sum(widths) < body_w, "a compact table does not fill the slide"
+
+
+def test_a_wide_table_wraps_its_cells_inside_the_body() -> None:
+    from generation._pptx_slides import MARGIN_IN, SLIDE_W_IN, _table_layout
+
+    body_w = SLIDE_W_IN - 2 * MARGIN_IN
+    long_cell = "Sauropodomorpha repositioned within the tree by the newer analysis " * 3
+    (table,) = parse_marp(f"## T\n\n| Old | New |\n|---|---|\n| short | {long_cell} |\n")[0].tables
+    _size, widths, heights = _table_layout(table, body_w, 1.0)
+    assert abs(sum(widths) - body_w) < 1e-6
+    assert heights[1] > 2 * heights[0], "the long cell wraps onto several lines"
+
+
+@pytest.mark.slow
+def test_libreoffice_draws_the_table_without_pipes_or_overlap(tmp_path: Path) -> None:
+    from generation._office_pdf import find_libreoffice, pptx_to_pdf
+    from generation._pdf_measure import measure_pdf, slides_report
+
+    if find_libreoffice() is None:
+        pytest.skip("LibreOffice is not installed")
+    pdf, reason = pptx_to_pdf(_table_pptx(tmp_path), tmp_path / "export")
+    assert pdf is not None, reason
+    doc = measure_pdf(pdf)
+    text = " ".join(line.text for page in doc.pages for line in page.lines)
+    assert "|" not in text and "0.930" in text and "Population" in text
+    findings = slides_report(doc)["findings"]
+    assert [f for f in findings if f["check"] in ("overlap", "overflow", "raw_markup")] == []
