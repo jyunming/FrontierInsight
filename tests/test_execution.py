@@ -221,6 +221,26 @@ async def test_shared_interpreter_records_what_the_quest_asked_for(
 
 
 @pytest.mark.asyncio
+async def test_shared_interpreter_can_install_twice_in_one_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pip lock is taken in a worker thread and released on the event-loop
+    thread. With filelock's default thread-local state that release does
+    nothing, so the second install in the same process waits out the whole
+    timeout — a quest hung for 30 minutes. A short timeout makes a regression
+    fail in seconds."""
+    from core.execution import SharedInterpreterExecutor
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    exe = SharedInterpreterExecutor()
+    exe._pip_lock_timeout_s = 20
+    quest_root = tmp_path / "shared-quest"
+    await exe.setup(quest_root)
+    for _ in range(2):
+        res = await exe.install(["pytest>=1"], quest_root=quest_root)
+        assert res.returncode == 0, res.stderr
+
+
+@pytest.mark.asyncio
 async def test_cleanup_after_success_is_noop_when_no_venv(tmp_path: Path) -> None:
     """When the quest never created a venv (no_simulation mode, or
     cleanup already ran on a prior resume), cleanup_after_success is a

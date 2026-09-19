@@ -639,9 +639,11 @@ class SharedInterpreterExecutor(VenvExecutor):
     in FI's environment.
     """
 
+    _pip_lock_timeout_s: float = 1800
+
     async def setup(self, quest_root: Path) -> None:
         quest_root.mkdir(parents=True, exist_ok=True)
-        want = tuple(int(p) for p in self.python_version.split(".")[:2] if p.isdigit())
+        want =tuple(int(p) for p in self.python_version.split(".")[:2] if p.isdigit())
         if want and want != tuple(sys.version_info[:2]):
             _log.info(
                 "[setup] execution.python_version=%s is not used: quests run on "
@@ -665,7 +667,15 @@ class SharedInterpreterExecutor(VenvExecutor):
         from filelock import FileLock
         lock_dir = Path.home() / ".frontier-insight"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock = FileLock(str(lock_dir / "pip-install.lock"), timeout=1800)
+        # thread_local=False is load-bearing: acquire runs in a worker thread
+        # and release on the event-loop thread, and with the default a release
+        # from a different thread is a silent no-op — the lock stays held and
+        # the NEXT install in this process blocks for the whole timeout.
+        lock = FileLock(
+            str(lock_dir / "pip-install.lock"),
+            timeout=self._pip_lock_timeout_s, thread_local=False,
+        )
+        _log.info("[install] waiting for the shared pip lock (%s)", lock.lock_file)
         await asyncio.to_thread(lock.acquire)
         try:
             return await super().install(pkgs, quest_root=quest_root)
