@@ -520,7 +520,7 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 ### Use a different model per node
 
-Cheap model for clarify/cross_check, strong model for write/review:
+A cheaper model for the light nodes and a stronger one where you want it. Only `cross_check`, `select_skills`, `literature_screen`, `slides` and `poster` have been measured on a cheaper model (about 15% fewer tokens, no score drop seen in three runs per arm on one topic); the other nodes below are illustrations, not measured advice:
 
 ```yaml
 provider:

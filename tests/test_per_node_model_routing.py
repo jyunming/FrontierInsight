@@ -294,11 +294,13 @@ async def test_engine_node_calls_route_per_node_models(
 async def test_cli_retry_escalates_to_fallback_model_on_attempt_2(
     tmp_path: Path,
 ) -> None:
-    """Attempt 1 fails with ``_CliTransientError``; attempt 2 must
-    spawn claude_cli with the fallback model (``claude-opus-4-7``) in
-    argv, not the primary model. Empirically motivated by the OPC
-    quest where Sonnet 4.6 paralysis-thinks indefinitely on long
-    code-gen prompts; Opus 4.7 lands the same prompt in ~5 min."""
+    """Opt-in path: when the user HAS written a fallback for the node,
+    attempt 1 fails with ``_CliTransientError`` and attempt 2 must
+    spawn claude_cli with that fallback model in argv, not the primary
+    model. Motivated by a smaller model paralysis-thinking
+    indefinitely on long code-gen prompts, where a stronger model
+    lands the same prompt on retry. The model names here are test
+    literals: FI ships no default."""
     from core.provider import _CliTransientError, resolve_endpoint
     ep = resolve_endpoint(ProviderConfig(name="claude_cli", model="claude-sonnet-4-6"))
     client = LLMClient(
@@ -365,6 +367,173 @@ async def test_cli_retry_no_fallback_keeps_primary_model_on_all_attempts(
     assert captured_models == ["claude-sonnet-4-6"] * 3, (
         "no fallback configured → all attempts use primary"
     )
+
+
+# Every CLI provider, each with a model name that is its own. Retry
+# escalation is applied to whichever of these is active, so a model name
+# that belongs to one vendor must never reach another's CLI.
+_CLI_PROVIDERS_AND_OWN_MODELS = [
+    ("claude_cli", "claude-sonnet-4-6"),
+    ("codex_cli", "gpt-5-codex"),
+    ("gemini_cli", "gemini-3-pro"),
+    ("copilot_cli", "gpt-5-mini"),
+    ("antigravity_cli", "gemini-3.6-flash-low"),
+]
+
+
+async def _models_over_retries(
+    cfg: ProviderConfig, node: str, *, failures: int,
+) -> list[str]:
+    """The model ``_chat_cli`` hands ``_run_cli`` on each attempt of one call.
+
+    The client is built the way ``Engine.run`` builds it: the endpoint from
+    the provider config and ``node_model_fallbacks`` straight from
+    ``cfg.node_model_fallbacks``. So whatever the config defaults to is what
+    this exercises, not a value the test typed in. The first ``failures``
+    attempts raise a transient error; the next one succeeds.
+    """
+    from core.provider import _CliTransientError
+    client = LLMClient(
+        resolve_endpoint(cfg), cli_timeout_s=5.0,
+        node_model_fallbacks=cfg.node_model_fallbacks,
+    )
+    seen: list[str] = []
+
+    async def fake_run_cli(*args, **kwargs):
+        seen.append(kwargs.get("model", "?"))
+        if len(seen) <= failures:
+            raise _CliTransientError(f"simulated transient failure {len(seen)}")
+        return "ok"
+
+    try:
+        with patch("core.provider._run_cli", new=fake_run_cli), \
+             patch("core.provider.wait_random_exponential",
+                   return_value=lambda *a, **kw: 0):
+            result = await client.chat(
+                [{"role": "user", "content": "hi"}], node=node,
+            )
+    finally:
+        await client.aclose()
+    assert result == "ok"
+    return seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node", ["implement", "write"])
+@pytest.mark.parametrize("provider,own_model", _CLI_PROVIDERS_AND_OWN_MODELS)
+async def test_default_config_never_switches_model_on_retry(
+    provider: str, own_model: str, node: str,
+) -> None:
+    """With the DEFAULT provider config (the user set no
+    ``node_model_fallbacks``) every retry attempt of every CLI provider
+    keeps the model the user chose. In particular the nodes that used to be
+    escalated by default, ``implement`` and ``write``, must not send another
+    vendor's model name to the CLI."""
+    cfg = ProviderConfig(name=provider, model=own_model)
+    seen = await _models_over_retries(cfg, node, failures=2)
+    assert seen == [own_model] * 3
+    if provider != "claude_cli":
+        assert not any("claude" in m.lower() for m in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_explicit_fallback_switches_model_from_attempt_2_for_that_node_only(
+) -> None:
+    """The feature is still there for a user who opts in, on any CLI
+    provider: the mapping the user writes escalates that node from attempt 2
+    on, and leaves nodes the user did not list on their primary model."""
+    cfg = ProviderConfig(
+        name="codex_cli", model="gpt-5-codex",
+        node_model_fallbacks={"implement": "user-chosen-stronger-model"},
+    )
+    assert await _models_over_retries(cfg, "implement", failures=2) == [
+        "gpt-5-codex", "user-chosen-stronger-model", "user-chosen-stronger-model",
+    ]
+    assert await _models_over_retries(cfg, "write", failures=2) == [
+        "gpt-5-codex"] * 3
+
+
+class _StopBeforeAnyCall(Exception):
+    """Raised by the spy to end ``Engine.run`` right after the client is built."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured,expected", [
+    (None, {}),                                   # user set nothing
+    ({"write": "my-stronger-model"}, {"write": "my-stronger-model"}),
+])
+async def test_engine_hands_the_client_only_what_the_user_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    configured: dict | None, expected: dict,
+) -> None:
+    """The wiring between the config and the client: ``Engine.run`` passes
+    ``provider.node_model_fallbacks`` through untouched, so no built-in
+    escalation can be added at the engine level."""
+    provider_kw = {} if configured is None else {"node_model_fallbacks": configured}
+    cfg = Config(
+        topic="fallback wiring",
+        title="fw",
+        provider=ProviderConfig(name="codex_cli", model="gpt-5-codex", **provider_kw),
+        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    seen: dict = {}
+
+    def spy_init(self, endpoint, **kwargs):  # noqa: ANN001
+        seen.update(kwargs)
+        raise _StopBeforeAnyCall
+
+    monkeypatch.setattr("core.engine.LLMClient.__init__", spy_init)
+    with pytest.raises(_StopBeforeAnyCall):
+        await Engine(cfg).run()
+    assert seen["node_model_fallbacks"] == expected
+
+
+@pytest.mark.asyncio
+async def test_codex_default_config_retry_never_puts_a_claude_model_in_argv(
+) -> None:
+    """Spawn level, not just the ``_run_cli`` hand-off: a codex_cli quest on
+    the default config whose first call fails is respawned with codex's own
+    ``-m gpt-5-codex`` and nothing that names a Claude model."""
+    cfg = ProviderConfig(name="codex_cli", model="gpt-5-codex")
+    client = LLMClient(
+        resolve_endpoint(cfg), cli_timeout_s=5.0,
+        node_model_fallbacks=cfg.node_model_fallbacks,
+    )
+    spawned: list[list[str]] = []
+
+    async def fake_spawn(*args, **kw):
+        argv = [str(a) for a in args]
+        spawned.append(argv)
+        first = len(spawned) == 1
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(
+            return_value=(b"", b"simulated failure" if first else b""),
+        )
+        proc.returncode = 1 if first else 0
+        if not first:
+            out = argv[argv.index("--output-last-message") + 1]
+            Path(out).write_text("codex answer", encoding="utf-8")
+        return proc
+
+    try:
+        with patch("core.provider.shutil.which", return_value="/usr/bin/codex"), \
+             patch("core.provider.asyncio.create_subprocess_exec", new=fake_spawn), \
+             patch("core.provider.wait_random_exponential",
+                   return_value=lambda *a, **kw: 0):
+            result = await client.chat(
+                [{"role": "user", "content": "hi"}], node="implement",
+            )
+    finally:
+        await client.aclose()
+
+    assert result == "codex answer"
+    assert len(spawned) == 2, "the failed first call must have been retried"
+    for argv in spawned:
+        assert argv[argv.index("-m") + 1] == "gpt-5-codex"
+        assert not any("claude" in a.lower() for a in argv), argv
 
 
 @pytest.mark.asyncio
