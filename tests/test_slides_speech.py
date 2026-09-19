@@ -224,6 +224,106 @@ async def test_the_written_deck_puts_each_figure_in_its_own_paragraph(
     assert "- A point\n\n![w:800](figures/fig.png)\n\n**Figure 1:** Caption." in body
 
 
+# ---------- math delimiters ----------
+#
+# A model that writes \(x\) got "((R_0=1.5))" in the PDF (Marp reads \( as an escaped
+# parenthesis) and the LaTeX source as text in the pptx, on every content slide of both
+# codex decks of a measured run; gemma4 writes $x$ and was fine. Both spellings now
+# become $x$ before either renderer sees the deck.
+
+_BS = chr(92)   # a backslash, spelled out so no escaping level can change these strings
+
+
+def _paren(x: str) -> str:
+    return _BS + "(" + x + _BS + ")"
+
+
+def _bracket(x: str) -> str:
+    return _BS + "[" + x + _BS + "]"
+
+
+def test_inline_backslash_math_becomes_dollar_math() -> None:
+    from generation.slides import _math_as_dollars
+
+    deck = f"- At {_paren('R_0=1.5')} and {_paren(' N = 5{,}000 ')} the mean was 0.2.\n"
+    assert _math_as_dollars(deck) == "- At $R_0=1.5$ and $N = 5{,}000$ the mean was 0.2.\n"
+
+
+def test_display_backslash_math_becomes_double_dollar_and_may_span_lines() -> None:
+    from generation.slides import _math_as_dollars
+
+    one = _bracket("z = 1 - e^{-R_0 z}")
+    two = _BS + "[\n  z = 1 - e^{-R_0 z}\n" + _BS + "]"
+    assert _math_as_dollars(one) == "$$z = 1 - e^{-R_0 z}$$"
+    assert _math_as_dollars(two) == "$$z = 1 - e^{-R_0 z}$$"
+
+
+def test_math_in_code_an_escaped_backslash_and_dollar_math_are_left_alone() -> None:
+    from generation.slides import _math_as_dollars
+
+    fence = "```python\nprint(" + _paren("x") + ")\n```\n"
+    span = "Type `" + _paren("x") + "` to get it, or " + _paren("y") + ".\n"
+    linebreak = "a " + _BS + _BS + "(b" + _BS + ")\n"          # \\( is a line break then a paren
+    dollars = "Already $R_0>1$ and $$z=1$$ here.\n"
+    assert _math_as_dollars(fence) == fence
+    assert _math_as_dollars(span) == "Type `" + _paren("x") + "` to get it, or $y$.\n"
+    assert _math_as_dollars(linebreak) == linebreak
+    assert _math_as_dollars(dollars) == dollars
+    assert _math_as_dollars(_math_as_dollars(span)) == _math_as_dollars(span)
+
+
+def test_the_written_deck_reads_backslash_math_as_dollars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    art = _make_artifacts(tmp_path, with_figure=False)
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    reply = "---\nmarp: true\n---\n\n## Outbreaks\n\n- Moderate at " + _paren("R_0=1.5") + ".\n"
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return reply
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+    asyncio.run(SlideGenerator(cfg).generate(art, art.quest_root))
+    body = (art.quest_root / "slides.md").read_text(encoding="utf-8")
+    assert "- Moderate at $R_0=1.5$." in body
+    assert _BS + "(" not in body
+
+
+def test_a_deck_separated_by_bare_fences_still_gets_its_math_converted() -> None:
+    """The bare ``` lines are slide breaks, not code: converting first would have
+    treated every other slide as a code block and skipped it."""
+    from generation.slides import _fences_as_slide_breaks, _math_as_dollars
+
+    deck = "```\n# One\nAt " + _paren("R_0") + ".\n```\n# Two\nAt " + _paren("N") + ".\n```\n"
+    fixed = _math_as_dollars(_fences_as_slide_breaks(deck))
+    assert "$R_0$" in fixed and "$N$" in fixed and _BS + "(" not in fixed
+
+
+def test_backslash_math_in_a_deck_becomes_native_powerpoint_equations(tmp_path: Path) -> None:
+    """End to end through the in-process pptx builder: before the fix the slide
+    carried the LaTeX source as text; after it the formula is a native equation."""
+    from generation._pptx_slides import render_marp_to_pptx
+    from generation.slides import _math_as_dollars
+    import zipfile
+
+    md = (
+        "---\nmarp: true\n---\n\n# Title\n\n---\n\n## Outbreaks\n\n- Moderate at "
+        + _paren("R_0=1.5") + " for large populations.\n"
+    )
+    for name, text, expect_native in (("raw", md, False), ("fixed", _math_as_dollars(md), True)):
+        src = tmp_path / f"{name}.md"
+        src.write_text(text, encoding="utf-8")
+        out = tmp_path / f"{name}.pptx"
+        assert render_marp_to_pptx(src, out) is True
+        with zipfile.ZipFile(out) as z:
+            xml = "".join(z.read(n).decode("utf-8", "ignore") for n in z.namelist() if n.startswith("ppt/slides/slide"))
+        assert ("<m:oMath" in xml) is expect_native, name
+        assert ((_BS + "(R_0=1.5") in xml) is (not expect_native), name
+
+
 # ---------- --allow-local-files safety gate ----------
 
 

@@ -288,7 +288,10 @@ class SlideGenerator:
             if own_supervisor:
                 await sup.shutdown()
 
-        content = _figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text)))
+        # Math last among the repairs that look at fences: a deck a model separated
+        # with bare ``` lines is only unfenced once _fences_as_slide_breaks has run.
+        content = _math_as_dollars(
+            _figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
         # Append one References slide built from the quest's actual papers,
         # guaranteed rather than left to the LLM: the deck author only saw the
         # first 8000 chars of paper.md and would usually miss the References
@@ -535,6 +538,40 @@ _BARE_FENCE_LINE_RE = re.compile(r"^```[ \t]*$", re.MULTILINE)
 
 
 _FIGURE_LINE_RE = re.compile(r"^\s*!\[(?P<alt>[^\]]*)\]\([^)]*\)\s*$")
+
+# Math the way a deck's renderers read it: ``$x$`` and ``$$x$$``. Models also write
+# ``\(x\)`` and ``\[x\]``. Marp reads ``\(`` as an escaped parenthesis and prints
+# "((R_0=1.5))" with the underscore raw, and the pptx builder shows the LaTeX source
+# as text. The paper already reads both spellings (``generation/_pandoc.py``).
+_PAREN_MATH_RE = re.compile(r"(?<!\\)\\\((.+?)(?<!\\)\\\)")
+_BRACKET_MATH_RE = re.compile(r"(?<!\\)\\\[(.+?)(?<!\\)\\\]", re.DOTALL)
+_CODE_FENCE_SPLIT_RE = re.compile(r"(^```.*?^```[ \t]*$)", re.DOTALL | re.MULTILINE)
+_CODE_SPAN_SPLIT_RE = re.compile(r"(`[^`\n]*`)")
+
+
+def _math_as_dollars(content: str) -> str:
+    """Write ``\\(x\\)`` as ``$x$`` and ``\\[x\\]`` as ``$$x$$``, so every renderer of
+    the deck reads the same math.
+
+    The text inside is stripped, because a ``$`` renderer will not open math on a
+    space. Fenced code blocks and inline code spans are left as written, an escaped
+    backslash before the parenthesis (``\\\\(``) is not a delimiter, and a deck that
+    already uses ``$`` comes back unchanged."""
+
+    def convert(text: str) -> str:
+        text = _BRACKET_MATH_RE.sub(lambda m: "$$" + m.group(1).strip() + "$$", text)
+        return _PAREN_MATH_RE.sub(lambda m: "$" + m.group(1).strip() + "$", text)
+
+    out: list[str] = []
+    for index, part in enumerate(_CODE_FENCE_SPLIT_RE.split(content)):
+        if index % 2:                       # a fenced code block
+            out.append(part)
+            continue
+        out.append("".join(
+            piece if position % 2 else convert(piece)
+            for position, piece in enumerate(_CODE_SPAN_SPLIT_RE.split(part))
+        ))
+    return "".join(out)
 
 
 def _figures_as_own_paragraphs(content: str) -> str:
