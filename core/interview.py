@@ -566,11 +566,13 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="pause_for_user_input",
         label="Pause for user-supplied papers / datasets",
-        prompt="Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
+        prompt="Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-literature stops once the literature is saved, so the experiment is designed with it in hand; after-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
         kind="single",
         choices=(
             Choice("never", "Never (default)",
                    "Engine runs to completion without pause-drop opportunities."),
+            Choice("after_literature", "Pause after literature",
+                   "Stop once the literature is saved; skills, design and the experiment start on resume with it in hand (the search is not run again)."),
             Choice("after_design", "Pause after design",
                    "Drop reference papers / data BEFORE the implement → execute → analyze stages spend compute."),
             Choice("after_paper", "Pause after paper draft",
@@ -1395,7 +1397,8 @@ def expand_ensemble_profile(
 # Interview answer vocabulary → canonical `pauses.*` vocabulary.
 _CLARIFY_TO_PAUSE = {"off": "off", "auto": "auto", "interactive": "ask"}
 _SUPPLY_TO_PAUSE = {
-    "never": "never", "after_design": "before_build",
+    "never": "never", "after_literature": "after_literature",
+    "after_design": "before_build",
     "after_paper": "before_review", "both": "both",
 }
 

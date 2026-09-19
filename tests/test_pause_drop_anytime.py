@@ -305,3 +305,60 @@ def test_interview_yaml_emits_supply_pause_when_non_default() -> None:
     # Explicit choice → supply line under pauses, translated to new vocab.
     assert "pauses:" in yaml_pause
     assert 'supply: "before_build"' in yaml_pause
+
+
+# --- after_literature ------------------------------------------------------
+
+
+def test_pause_after_literature_fires_only_at_that_stage(tmp_path: Path) -> None:
+    eng = _mk_engine(tmp_path, "after_literature")
+    fired, payload = _drive_pause(eng, {}, "after_literature")
+    assert fired is True
+    assert payload["stage"] == "after_literature"
+    assert _drive_pause(eng, {}, "before_build")[0] is False
+    assert _drive_pause(eng, {}, "before_review")[0] is False
+
+
+def test_both_still_means_before_build_and_before_review_only(tmp_path: Path) -> None:
+    """Adding a stop after the literature must not change what existing
+    ``both`` configs do."""
+    eng = _mk_engine(tmp_path, "both")
+    assert _drive_pause(eng, {}, "after_literature")[0] is False
+    assert _drive_pause(eng, {}, "before_build")[0] is True
+
+
+def test_all_fires_at_every_stage(tmp_path: Path) -> None:
+    eng = _mk_engine(tmp_path, "all")
+    for stage in ("after_literature", "before_build", "before_review"):
+        eng.fi_dir.mkdir(parents=True, exist_ok=True)
+        assert _drive_pause(eng, {}, stage)[0] is True, stage
+
+
+def test_after_literature_node_is_a_passthrough_unless_asked_for(tmp_path: Path) -> None:
+    import asyncio
+
+    eng = _mk_engine(tmp_path, "before_build")
+    assert asyncio.run(eng._node_pause_after_literature({"literature": []})) == {}
+    assert not (eng.fi_dir / "paused_at_after_literature.flag").exists()
+
+
+def test_after_literature_resume_picks_up_papers_dropped_while_paused(
+    tmp_path: Path,
+) -> None:
+    """The literature search is not run again on resume, so a paper dropped in
+    inputs/papers/ while paused has to join the literature here."""
+    import asyncio
+
+    eng = _mk_engine(tmp_path, "after_literature")
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "paused_at_after_literature.flag").write_text("x", encoding="utf-8")
+    papers = tmp_path / "inputs" / "papers"
+    papers.mkdir(parents=True)
+    (papers / "mine.md").write_text("A paper the user supplied. " * 30, encoding="utf-8")
+    prior = {"content": "an earlier source " * 20, "metadata": {"title": "Earlier"}}
+
+    patch = asyncio.run(eng._node_pause_after_literature({"literature": [prior]}))
+
+    lit = patch["literature"]
+    assert lit[0] is prior or lit[0] == prior
+    assert [e["metadata"].get("source") for e in lit[1:]] == ["user_supplied"]

@@ -441,7 +441,7 @@ PauseForUserInput = Literal[
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 SupplyPause = Literal[                              # was pause_for_user_input
-    "never", "before_build", "before_review", "both",
+    "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
 # Legacy value → canonical value, applied field-by-field in PausesConfig.
 _CLARIFY_ALIASES = {"interactive": "ask"}
@@ -473,8 +473,11 @@ class PausesConfig(BaseModel):
     # not fetch is listed in needs/WANTED_PAPERS.md and the quest waits for it.
     papers: bool = True
     # SUPPLY — fixed drop-in checkpoint(s) for papers/data.
-    #   "never" · "before_build" (after design) · "before_review" (after the
-    #   first draft) · "both".
+    #   "never" · "after_literature" (the literature is done and saved; the
+    #   rest of the quest — skills, design, experiment — starts on resume with
+    #   it in hand) · "before_build" (after design) · "before_review" (after
+    #   the first draft) · "both" (before_build + before_review, as it always
+    #   was) · "all" (all three).
     supply: SupplyPause = "never"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.

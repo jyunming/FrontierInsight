@@ -1139,6 +1139,7 @@ class Engine:
         g.add_node("clarify", self._node_clarify)
         g.add_node("ideate", self._node_ideate)
         g.add_node("literature", self._node_literature)
+        g.add_node("pause_after_literature", self._node_pause_after_literature)
         g.add_node("select_skills", self._node_select_skills)
         g.add_node("design", self._node_design)
         # design → implement_outline → implement → execute (two-stage
@@ -1185,7 +1186,11 @@ class Engine:
         # Selection sits between literature and design so it sees the
         # chosen direction and the retrieved sources — the direction is
         # what actually names the instrument a quest needs.
-        g.add_edge("literature", "select_skills")
+        # ``pause_after_literature`` is a passthrough unless pauses.supply asks
+        # for a stop there: the search is saved, and a resume starts here
+        # rather than searching again.
+        g.add_edge("literature", "pause_after_literature")
+        g.add_edge("pause_after_literature", "select_skills")
         g.add_edge("select_skills", "design")
         # design → implement (normal sim path) OR auto_collect_data
         # (no-simulation, agent attempts auto-collect via Axon first
@@ -2883,6 +2888,39 @@ class Engine:
         self._log.info("[%s] paused — %s", kind, headline)
         return interrupt({**payload, "pause": descriptor})
 
+    def _pause_stage_enabled(self, stage: str) -> bool:
+        """Whether ``pauses.supply`` asks for a stop at ``stage``. ``both`` is
+        before_build + before_review, as it always was; ``all`` adds the stop
+        after the literature."""
+        value = self.config.pauses.supply
+        if value == "all":
+            return True
+        if value == "both":
+            return stage in ("before_build", "before_review")
+        return value == stage
+
+    async def _node_pause_after_literature(self, state: QuestState) -> QuestState:
+        """The literature is done and saved. When ``pauses.supply`` asks for it,
+        stop here: skills, design and the experiment start on ``--resume`` with
+        the literature already in state (the search is not run again). Papers
+        dropped in ``inputs/papers/`` meanwhile join it. A node of its own so a
+        resume re-enters this cheap node, not the search."""
+        if not self._pause_stage_enabled("after_literature"):
+            return {}
+        self._maybe_pause_for_user_input(state, "after_literature")
+        merged = list(state.get("literature") or [])
+        seen = {i for entry in merged for i in _entry_identities(entry)}
+        merged, added = _ingest_user_dropped_papers(
+            self.quest_root, merged, seen, self._log,
+        )
+        if not added:
+            return {}
+        self._log.info(
+            "[after_literature] picked up %d paper(s) dropped in inputs/papers/ "
+            "while paused", added,
+        )
+        return {"literature": merged}
+
     def _maybe_pause_for_user_input(
         self, state: QuestState, stage: str,
     ) -> None:
@@ -2897,10 +2935,7 @@ class Engine:
         interrupt(). The user drops files and re-runs ``fi --resume <id>``;
         the resume picks up the files via the normal literature / analyze paths.
         """
-        cfg_value = self.config.pauses.supply
-        if cfg_value == "never":
-            return
-        if cfg_value not in ("both", stage):
+        if not self._pause_stage_enabled(stage):
             return
         # Disk marker is the authoritative "already paused at this
         # stage" signal — same pattern as wait_for_data uses with the
@@ -2932,19 +2967,28 @@ class Engine:
             self._log.warning(
                 "[%s] couldn't write pause marker %s: %r", stage, marker, e,
             )
-        when = ("before the experiment is built / run" if stage == "before_build"
-                else "before the draft goes to review")
+        when = {
+            "after_literature": "after the literature search, before skills, "
+                                "design and the experiment",
+            "before_build": "before the experiment is built / run",
+        }.get(stage, "before the draft goes to review")
+        steps = [
+            f"Optional — paused {when} so you can add your own sources.",
+            "Drop reference papers (PDF / Markdown) into `inputs/papers/` "
+            "— they become citable literature.",
+            "Drop datasets (CSV / JSON / TSV / Parquet) into `inputs/data/` "
+            "— the analyze node reasons over them.",
+        ]
+        if stage == "after_literature":
+            steps.insert(
+                1, "The literature is saved: resuming continues with it and "
+                "does not search again.",
+            )
         self._pause_for_human(
             kind="supply",
             interaction="supply",
             headline=f"add any papers or data ({stage})",
-            steps=[
-                f"Optional — paused {when} so you can add your own sources.",
-                "Drop reference papers (PDF / Markdown) into `inputs/papers/` "
-                "— they become citable literature.",
-                "Drop datasets (CSV / JSON / TSV / Parquet) into `inputs/data/` "
-                "— the analyze node reasons over them.",
-            ],
+            steps=steps,
             payload={
                 "user_input_required": True,
                 "stage": stage,
@@ -11051,6 +11095,20 @@ write nodes then see real full text instead of bare abstracts.
 Accepted formats: ``.pdf`` / ``.md`` / ``.txt``. Other formats are
 ignored. The README itself never counts as a paper.
 """
+
+
+def _entry_identities(entry: dict[str, Any]) -> list[str]:
+    """The keys a literature entry is known by: DOI, else URL, else the first
+    200 characters of its text, and its normalised title. The literature node
+    dedups on the same keys."""
+    md = entry.get("metadata") or {}
+    ident = (
+        str(md.get("doi") or "").strip()
+        or str(md.get("url") or "").strip()
+        or (entry.get("content") or "")[:200]
+    )
+    norm_title = _normalize_title(md.get("title") or "")
+    return [i for i in (ident, f"title:{norm_title}" if norm_title else "") if i]
 
 
 def _ingest_user_dropped_papers(

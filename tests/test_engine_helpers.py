@@ -925,8 +925,11 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert ("ideate", "literature") in plain_edges
     # `select_skills` sits between literature and design: it needs the chosen
     # direction and the retrieved sources to match the topic against the skill
-    # catalogue, and design needs its answer.
-    assert ("literature", "select_skills") in plain_edges
+    # catalogue, and design needs its answer. `pause_after_literature` sits
+    # between the literature and it: a passthrough unless pauses.supply asks
+    # for a stop there, so a resume starts after the search, not inside it.
+    assert ("literature", "pause_after_literature") in plain_edges
+    assert ("pause_after_literature", "select_skills") in plain_edges
     assert ("select_skills", "design") in plain_edges
     assert ("implement", "execute") in plain_edges
     # `execute → execute_reflect` replaces the old `execute → analyze`
