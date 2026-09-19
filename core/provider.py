@@ -2488,9 +2488,10 @@ async def resolve_endpoint_async(
 # tokens; downstream multiplies by token count and divides by 1000.
 #
 # Entries are matched by SUBSTRING on the model name (case-insensitive)
-# — handles versioned variants like "claude-opus-4-7-20251201" matching
-# "claude-opus-4-7". Order matters: more-specific (longer) keys are
-# checked first.
+# — handles dated variants like "claude-opus-4-7-20251201" matching
+# "claude-opus-4-7". A key followed by "." or a digit is a different model
+# ("gpt-5" is not "gpt-5.6-terra"), so it does not match. Order matters:
+# more-specific (longer) keys are checked first.
 MODEL_PRICING: dict[str, dict[str, float]] = {
     # OpenAI — gpt-5 family
     "gpt-5-mini": {"prompt_per_1k": 0.00025, "completion_per_1k": 0.002},
@@ -2526,13 +2527,18 @@ def estimate_cost_usd(
     """Multiply token counts by per-model rates from
     :data:`MODEL_PRICING`. Returns ``None`` when no pricing row matches
     — callers log usage but skip the cost field so partial data is
-    obvious in the chart."""
+    obvious in the chart.
+
+    A key names one model. The same characters followed by more version
+    (``gpt-5`` inside ``gpt-5.6-terra``, ``gpt-5.5``) name a different model
+    with its own price, so that row is not borrowed: the answer is ``None``,
+    not another model's rate presented as this one's."""
     if not model:
         return None
     needle = model.lower()
     # Longest key first so "gpt-4o-mini" matches before "gpt-4o".
     for key in sorted(MODEL_PRICING.keys(), key=len, reverse=True):
-        if key.lower() in needle:
+        if re.search(re.escape(key.lower()) + r"(?![.\d])", needle):
             rates = MODEL_PRICING[key]
             return (
                 prompt_tokens * rates["prompt_per_1k"] / 1000.0
