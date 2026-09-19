@@ -454,13 +454,18 @@
     {
       "id": "pause_for_user_input",
       "label": "Pause for user-supplied papers / datasets",
-      "prompt": "Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
+      "prompt": "Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-literature stops once the literature is saved, so the experiment is designed with it in hand; after-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
       "kind": "single",
       "choices": [
         {
           "value": "never",
           "label": "Never (default)",
           "description": "Engine runs to completion without pause-drop opportunities."
+        },
+        {
+          "value": "after_literature",
+          "label": "Pause after literature",
+          "description": "Stop once the literature is saved; skills, design and the experiment start on resume with it in hand (the search is not run again)."
         },
         {
           "value": "after_design",
