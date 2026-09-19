@@ -380,6 +380,10 @@ _UPLOAD_TARGETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "papers": (("inputs", "papers"), _PAPER_UPLOAD_SUFFIXES),     # literature / supply
     "data": (("inputs", "data"), _DATA_UPLOAD_SUFFIXES),          # supply gate datasets
     "root_data": (("data",), _DATA_UPLOAD_SUFFIXES),              # no-sim data pause
+    # Example files for the experiment: any type ("*"). Never among a pause's
+    # ``upload_targets``: the banner offers every file to every target, and a
+    # paper would land here too. It has its own control.
+    "examples": (("inputs", "examples"), ("*",)),
 }
 
 
@@ -1211,7 +1215,9 @@ def make_app(
         skipped: list[str] = []
         for f in files:
             name = Path(f.filename or "").name  # strip any directory parts
-            if not name or Path(name).suffix.lower() not in suffixes:
+            if not name or (
+                "*" not in suffixes and Path(name).suffix.lower() not in suffixes
+            ):
                 skipped.append(f.filename or "(unnamed)")
                 continue
             # Read at most cap+1 bytes so an oversized upload can't be slurped

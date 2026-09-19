@@ -886,6 +886,14 @@ class ExecutionConfig(BaseModel):
     # core.execution._resolve_python_for_version.
     python_version: str = "3.11"
     docker_image: str = "python:3.11-slim"
+    # Example files or folders the experiment should start from: a simulation
+    # setup, an input deck, a config, a script, a document — any file type. They
+    # are copied into <quest>/inputs/examples/ (files dropped there by hand while
+    # the quest is paused count too), the design and the code-writing steps are
+    # shown their names and the text of the small ones, and the experiment finds
+    # the folder in the FI_INPUT_DIR environment variable. A path that does not
+    # exist stops the quest before its first LLM call.
+    inputs: list[str] = Field(default_factory=list)
     # Run quest code with the interpreter that runs FI itself — no per-quest
     # venv. One Python for everything: a package installed once (pip install
     # -e ., or an earlier quest) is just there for the next quest, and nothing
