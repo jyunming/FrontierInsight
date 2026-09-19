@@ -295,13 +295,28 @@ def numeric_literals(code: str) -> set[float]:
     sentinel, a cap, an initial value. A bound that appears nowhere in the
     script had to be arrived at. Unparseable code yields nothing rather than
     raising, which makes the rule no harsher on a script this cannot read.
+
+    A number that appears only inside an ``assert`` is the script CHECKING for
+    that value, not able to produce it, so it does not count. The implement step
+    copies the design's declared bounds into the script as asserts
+    (``assert 0.0 <= p <= 0.6666666667``); counting those made every derived
+    bound look like a constant the code wrote down, and a result that legitimately
+    reached the design's own predicted maximum in several settings was sent back
+    for repair. A number the script also uses anywhere else still counts.
     """
     try:
         tree = ast.parse(code or "")
     except (SyntaxError, ValueError):
         return set()
+    checks = {
+        id(inner)
+        for node in ast.walk(tree) if isinstance(node, ast.Assert)
+        for inner in ast.walk(node)
+    }
     out: set[float] = set()
     for node in ast.walk(tree):
+        if id(node) in checks:
+            continue
         v = _literal(node)
         if v is not None:
             out.add(v)
@@ -419,6 +434,13 @@ def _matches(assertion_path: str, leaf_path: str) -> bool:
 # the run is sent back (see "Why several values on a bound fail" above). One is
 # ordinary: a probability of 0 at one working point is often the answer.
 AT_BOUND_MIN_SETTINGS = 2
+
+# A range [0, m] with m no larger than this describes a tolerance rather than a
+# scale, and its lower bound is where a correct answer lands. A residual of the
+# equation a script just solved is the case seen: an exact 0.0 at six settings
+# sent a quest through three repairs (14% of its tokens) that rewrote a correct
+# solver to avoid returning a perfect residual.
+TOLERANCE_MAX = 1e-3
 
 # Below this the epidemic dies out, so a zero is the prediction rather than a
 # failure. The value is the critical point of the branching-process
@@ -681,6 +703,11 @@ def _at_bound(
         settings = keep
 
     if len(settings) < AT_BOUND_MIN_SETTINGS:
+        return None
+    # A range that ends just above 0 is a tolerance: a residual, a discretisation
+    # error, an invariant's drift. The design asked for "as close to 0 as this
+    # gets", so a 0 in several settings is the best answer, not a trivial one.
+    if bound == 0 and a.min == 0 and a.max is not None and 0 < a.max <= TOLERANCE_MAX:
         return None
     return Violation(
         a.path, bound, a, kind="at_bound",
