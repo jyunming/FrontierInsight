@@ -33,7 +33,10 @@ numbered in the order it first cites them. The foundational papers and textbooks
 the literature search adds (up to eight the model names, plus the works several
 retrieved papers cite) are put to the writer with a request to cite the ones that
 bear on the paper, and the reviewer sees, as advice, the ones the paper leaves
-out. The References are
+out. A retrieved work that holds only its title or a short book blurb is marked
+so in the writer's prior-work block (`[title only]`, `[short blurb only]`), with
+the instruction to cite it only to say the work exists or for what its title
+states. The References are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON). The web pages it drew on are listed under Further reading, not
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A

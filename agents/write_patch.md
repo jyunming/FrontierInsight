@@ -8,7 +8,7 @@ The engine applies your edits to the draft exactly as it stands. Every word you 
 - **A caption that describes what its figure does not show.** Rewrite the caption so that it describes what the figure shows, as the reason says. Keep `**Figure N.**` and the figure's link exactly as they are.
 - **A number that nothing in the run accounts for, or a statistic the paper describes as something the run did not compute.** Use the value the Analysis block gives, or say what the number is (a setting, a threshold, a limit), or take the sentence out if it cannot be stated from the Analysis block.
 
-Cite only labels that appear in the Prior work block. Never cite a source from memory, and never invent an author, year, DOI or URL. A new sentence keeps the voice of the paper it sits in and never mentions the pipeline, the engine, the run or the checks.
+Cite only labels that appear in the Prior work block. Never cite a source from memory, and never invent an author, year, DOI or URL. An entry marked `[title only]` or `[short blurb only]` has no text beyond that: cite it only to say the work exists or for what its own title states, never for a specific finding, number or mechanism. A new sentence keeps the voice of the paper it sits in and never mentions the pipeline, the engine, the run or the checks.
 
 # Output format
 

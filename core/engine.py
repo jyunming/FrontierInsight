@@ -5941,7 +5941,7 @@ class Engine:
             # not what to publish.
             literature_block=_format_lit_from_state(
                 state, audience=self.config.output.audience,
-                **self._lit_kwargs(state),
+                mark_thin=True, **self._lit_kwargs(state),
             ),
             # Empty when the prior-work block holds no foundational work.
             foundational_block=_foundational_write_block(
@@ -6112,7 +6112,7 @@ class Engine:
             topic=state["topic"],
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             literature_block=_format_lit_from_state(
-                state, audience=self.config.output.audience, **self._lit_kwargs(state),
+                state, audience=self.config.output.audience, mark_thin=True, **self._lit_kwargs(state),
             ),
             passages_block=paper_patch.format_passages(passages),
             paper_block=previous,
@@ -8780,8 +8780,35 @@ def _load_prompts() -> dict[str, string.Template]:
 # to discuss prior work by content rather than by title alone.
 _LIT_EXCERPT_CHARS = 2000
 
+# A record the retrieval layer kept no full text of holds its title and whatever
+# followed it: an abstract, or nothing. Over the 2,321 sources of the 131 stored
+# quests, the text after the title is empty for 508 of them and 22-85 characters
+# for five more; the next-shortest holds 100, so 100 is a clean cut for a
+# title-only record. A book is the other kind: it has no abstract, so the text
+# kept for one is a blurb or the opening of a review (62 records of 760-1,376
+# characters; the other 59 books are title-only). Length alone would not
+# separate a blurb from an abstract: 137 articles have an abstract of 700-1,499
+# characters. Together 575 records (25%) are flagged, and none of them has full
+# text or an abstract.
+_THIN_TEXT_CHARS = 100
+_THIN_MARKS = {"title": "title only", "blurb": "short blurb only"}
 
-def _format_lit_header(meta: dict[str, Any], i: int) -> str:
+
+def _thin_source(meta: dict[str, Any], content: str) -> str | None:
+    """``"title"`` when a source's stored text is only its title, ``"blurb"``
+    when it is a book without full text (all it has is a short description), and
+    ``None`` for every other source, full text and abstracts included. Such a
+    record cannot show a finding, a number or a mechanism, whatever it is cited
+    for."""
+    if meta.get("content_quality") == "full_text" or meta.get("fetched_full_text"):
+        return None
+    title = str(meta.get("title") or meta.get("source") or "")
+    if len(_format_lit_excerpt(content or "", title).strip()) < _THIN_TEXT_CHARS:
+        return "title"
+    return "blurb" if str(meta.get("work_type") or "") == "book" else None
+
+
+def _format_lit_header(meta: dict[str, Any], i: int, thin: str | None = None) -> str:
     """Render the header line of a prior-work block entry.
 
     Includes title + authors + year + venue + DOI/URL when the
@@ -8794,6 +8821,9 @@ def _format_lit_header(meta: dict[str, Any], i: int) -> str:
     Format example:
         [3] Lipton-Lifschitz, 2003. Closed-form approximations ...
             Quantitative Finance. DOI: 10.1088/1469-7688/3/1/305.
+
+    ``thin`` (see :func:`_thin_source`) adds ``[title only]`` or ``[short
+    blurb only]`` after the title, on the first line.
     """
     title = meta.get("title") or meta.get("source") or f"item-{i}"
     authors = meta.get("authors") or []
@@ -8834,6 +8864,10 @@ def _format_lit_header(meta: dict[str, Any], i: int) -> str:
         head = title
     parts.append(head)
     line1 = " ".join(parts)
+    if thin in _THIN_MARKS:
+        # The record holds no more than this says, and the writer is told so
+        # where it reads the entry (see agents/write.md, "Citing sources").
+        line1 += f" [{_THIN_MARKS[thin]}]"
 
     extras: list[str] = []
     if venue:
@@ -9039,21 +9073,24 @@ def _format_lit_from_state(
     query: str = "",
     budget: int | None = None,
     mode: str = "lexical",
+    mark_thin: bool = False,
 ) -> str:
     """The prior-work block from ``state['literature']``. Entries carry the
     labels the paper's References ([1], [2]…) and Further reading ([W1],
     [W2]…) use, taken from the same de-duplicated list
     (:func:`_labelled_sources`), so the writer's [2] is the claim check's and
-    the bib's [2]."""
+    the bib's [2]. With ``mark_thin`` (the writer's block) an entry whose stored
+    text is only a title or a short blurb says so (:func:`_thin_source`)."""
     items = state.get("literature") or []
     if not items:
         return "(no prior work surfaced from the knowledge base)"
     lines: list[str] = []
     for label, meta, item in _labelled_sources(items, audience):
         title = meta.get("title") or meta.get("source") or f"item-{label}"
-        header = _format_lit_header(meta, label)
+        content = item.get("content", "") or ""
+        header = _format_lit_header(meta, label, _thin_source(meta, content) if mark_thin else None)
         excerpt = _format_lit_excerpt(
-            item.get("content", "") or "", title,
+            content, title,
             query=query, budget=budget, mode=mode,
         )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
@@ -9163,11 +9200,15 @@ def _foundational_sources(
     ]
 
 
-def _foundational_line(label: str, meta: dict[str, Any], *, numbered: bool) -> str:
+def _foundational_line(
+    label: str, meta: dict[str, Any], *, numbered: bool, thin: str | None = None,
+) -> str:
     """One foundational work as the prior-work block's header line gives it
     (authors, year, title), with ``[label]`` when ``numbered``, and a note of
-    what kind of work it is: a book, or how many retrieved papers cite it."""
-    line = _format_lit_header(meta, label).split("\n", 1)[0]
+    what kind of work it is: a book, or how many retrieved papers cite it. A
+    ``thin`` record (:func:`_thin_source`) carries the same ``[title only]`` /
+    ``[short blurb only]`` as its entry in the block."""
+    line = _format_lit_header(meta, label, thin).split("\n", 1)[0]
     if not numbered:
         line = re.sub(r"^\[[^\]]*\]\s*", "", line)
     notes: list[str] = []
@@ -9190,6 +9231,10 @@ def _foundational_write_block(literature: list[Any], audience: str = "external")
     works = _foundational_sources(literature, audience)
     if not works:
         return ""
+    thin = {
+        label: _thin_source(meta, _item_content(item))
+        for label, meta, item in _labelled_sources(literature, audience)
+    }
     return (
         "\n\n### Foundational works in the prior-work block\n"
         "The literature search marked these entries as foundational: the original papers "
@@ -9197,7 +9242,9 @@ def _foundational_write_block(literature: list[Any], audience: str = "external")
         "cite. Cite each one that bears on this paper's claims, where it belongs: the original "
         "paper for a method, model or relation the paper uses, the standard textbook for the "
         "field. A work that does not bear on the paper is not to be cited just to be cited.\n\n"
-        + "\n".join(_foundational_line(label, meta, numbered=True) for label, meta in works)
+        + "\n".join(
+            _foundational_line(label, meta, numbered=True, thin=thin.get(label)) for label, meta in works
+        )
     )
 
 
