@@ -10,6 +10,7 @@ coexist in one process for the fleet runner.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import functools
 import json
@@ -52,6 +53,8 @@ from .config import (
 )
 from .execution import ExecutionResult, make_executor, pip_failure_summary
 from .knowledge import (
+    FOUNDATIONAL_MAX_SUGGESTED,
+    FOUNDATIONAL_SUGGESTED,
     WORK_SCOPE_PAPERS,
     WORK_SCOPE_PAPERS_AND_BOOKS,
     Knowledge,
@@ -59,6 +62,7 @@ from .knowledge import (
     _doc_dedup_keys,
     _is_bot_check_title,
     _normalize_title,
+    _titles_match,
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
@@ -74,6 +78,10 @@ from .provider import (
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
 _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
+
+# Under the Docker sandbox, the skills mounted into the experiment's container
+# (names), kept in ``.fi/`` for a ``--watch`` that has no quest state.
+_SKILL_MOUNTS_FILE = "skill_mounts.json"
 
 # Default sampling temperature for generative nodes (ideate, write, analyze…).
 _DEFAULT_CHAT_TEMPERATURE = 0.2
@@ -3457,14 +3465,22 @@ class Engine:
     ) -> list:
         """Candidates a keyword search does not reach: the original papers and
         standard textbooks of what a topic rests on. One call asks the model
-        for up to five, each is looked up by title in OpenAlex and dropped when
+        for up to eight, each is looked up by title in OpenAlex and dropped when
         not found, and the works several retrieved papers cite are added. They
         are labelled foundational and go through the literature screen. Off
-        with ``knowledge.foundational_works: false``; any failure adds nothing."""
+        with ``knowledge.foundational_works: false``; any failure adds nothing.
+
+        The run log names every work the model suggested and what became of
+        each, because a work the model never named cannot be told from one
+        OpenAlex does not hold without it."""
         kn = self.config.knowledge
         if not (kn.enabled and kn.foundational_works):
             return []
         suggestions = await self._suggest_foundational_works(topic, work_scope=work_scope)
+        self._log.info(
+            "[literature] foundational works suggested (%d): %s",
+            len(suggestions), "; ".join(_foundational_work_text(w) for w in suggestions) or "(none)",
+        )
         try:
             found = await self.knowledge.find_foundational_works(suggestions, docs)
         except Exception as e:  # noqa: BLE001 — never costs the retrieval
@@ -3478,20 +3494,31 @@ class Engine:
             (": " + "; ".join(f"{d.metadata.get('title')} ({d.metadata.get('year')}, "
                               f"{d.metadata.get('foundational')})" for d in new))[:600] if new else "",
         )
+        if suggestions:
+            added, kept_already, dropped = _foundational_outcomes(suggestions, new, found, docs)
+            self._log.info(
+                "[literature] foundational works: found in OpenAlex and added (%d): %s | "
+                "already among the search results (%d): %s | dropped, not found in OpenAlex "
+                "(%d): %s",
+                len(added), "; ".join(added) or "-",
+                len(kept_already), "; ".join(kept_already) or "-",
+                len(dropped), "; ".join(dropped) or "-",
+            )
         return new
 
     async def _suggest_foundational_works(
         self, topic: str, *, work_scope: str = WORK_SCOPE_PAPERS,
     ) -> list[dict]:
-        """Up to five foundational works the model names for ``topic``, each
-        ``{title, authors, year}``. Empty when the call fails."""
+        """Up to eight foundational works the model names for ``topic``, each
+        ``{title, authors, year}``; any beyond the eighth are ignored. Empty
+        when the call fails."""
         if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
             what = "the classic books and articles scholars of this subject cite as its foundations"
         else:
             what = ("the original papers that introduced the methods, models or effects it "
                     "relies on, and the standard textbooks on them")
         prompt = (
-            f"List up to FIVE foundational works for this research topic: {what}. "
+            f"List up to EIGHT foundational works for this research topic: {what}. "
             "Name only works you are sure exist, with their exact titles: each one is "
             "looked up by title, and a work that is not found is dropped.\n\n"
             f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
@@ -3508,7 +3535,7 @@ class Engine:
         return [
             w for w in (works if isinstance(works, list) else [])
             if isinstance(w, dict) and str(w.get("title") or "").strip()
-        ][:5]
+        ][:FOUNDATIONAL_MAX_SUGGESTED]
 
     async def _derive_literature_queries(
         self, topic: str, idea_title: str = "", hypothesis: str = "",
@@ -4044,6 +4071,7 @@ class Engine:
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
         text = await self._chat(prompt, node="implement")
         code, deps = _parse_implement_response(text)
+        extracted = bool(code)
         if not code:
             # Empty-code path: log the LLM head so the user can see WHAT
             # came back rather than silently shipping a stub experiment
@@ -4066,9 +4094,101 @@ class Engine:
         code_path = self.quest_root / "code" / "experiment.py"
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
+        if extracted:  # nothing to seed in the stub written above
+            code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         return {"code": code, "deps": deps}
 
+    async def _repair_ignored_replicate_seed(
+        self, state: QuestState, code_path: Path, code: str, deps: list[str],
+    ) -> tuple[str, list[str]]:
+        """Ask for ONE repair of a script that never reads ``FI_REPLICATE_SEED``.
+
+        Such a script makes every replicate run the same run: ``execute`` finds
+        the results identical, publishes no aggregate, and the paper can report
+        one measurement with no interval (four of six codex quests did exactly
+        that). The instruction not to write a seed of its own is in the
+        implement prompts; a model that ignores it is asked again, once, here.
+
+        The request reuses the ``execute_reflect`` template (the directive
+        stands where a traceback would) and is applied the way its patches
+        are, but it is not a repair iteration: the node's
+        ``exec_reflect_*`` budget is untouched. Never a call when replication
+        is off, for a background job (no replicate runs are made), or when the
+        script already names the variable.
+
+        A repair is kept only if it parses as Python and now reads the seed. A
+        model that rewrote the script and still missed the target, or returned
+        half of it, would leave a script worse than the one it had, so the
+        original stays and the single-measurement fallback in ``execute``
+        handles it. Failure never blocks the quest: one warning, then on.
+        """
+        if (
+            self.config.execution.background_jobs
+            or max(1, int(self.config.engine.execute_replicates)) <= 1
+            or state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or _script_reads_replicate_seed(code_path)
+        ):
+            return code, deps
+        self._log.info(
+            "[implement] %s never reads FI_REPLICATE_SEED, so its %d replicate runs "
+            "would repeat one run; asking for one repair",
+            code_path.name, self.config.engine.execute_replicates,
+        )
+        prompt = self._prompts["execute_reflect"].substitute(
+            # Whole: a repair that returns the script must not lose the tail of it.
+            previous_code=code,
+            returncode="(not run yet)",
+            stdout_tail=_SEED_REPAIR_DIRECTIVE,
+            stderr_tail="",
+            duration_s="0.00",
+            figures_count="0",
+            result_json_present="no (not run yet)",
+            reflect_history_block=_format_reflect_history([]),
+            design_block=json.dumps(state.get("design") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+        )
+        why = ""
+        try:
+            text = await self._chat(prompt, node="implement_seed")
+        except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
+            text, why = "", f"the repair call failed ({exc!r})"
+        parsed: dict[str, Any] = {}
+        if _strip_outer_fence(text).lstrip().startswith("{"):
+            parsed = _parse_json_lenient(text, node="implement_seed") or {}
+        new_code, new_deps = parsed.get("code"), _coerce_dep_list(parsed.get("deps"))
+        if not (isinstance(new_code, str) and new_code.strip()):
+            new_code, new_deps = _parse_implement_response(text)  # fence drift
+        if not why:
+            try:
+                ast.parse(new_code)
+                usable = bool(new_code.strip())
+            except (SyntaxError, ValueError):
+                usable = False
+            if not usable:
+                why = "the model returned no usable script"
+            elif "FI_REPLICATE_SEED" not in new_code:  # the test _script_reads_replicate_seed applies
+                why = "the repaired script still does not read it"
+        if why:
+            self._log.warning(
+                "[implement] %s: keeping the script as written. Its replicates will "
+                "repeat one run, so the quest will be reported as a single "
+                "measurement with no confidence interval", why,
+            )
+            return code, deps
+        code_path.write_text(new_code, encoding="utf-8")
+        self._log.info(
+            "[implement] the script now reads FI_REPLICATE_SEED (%s); rewrote %s (%d bytes)",
+            str(parsed.get("patch_summary") or "no summary")[:120], code_path, len(new_code),
+        )
+        return new_code, sorted({*deps, *new_deps})
+
     async def _node_execute(self, state: QuestState) -> QuestState:
+        # Docker sandbox: the selected, approved external skills are mounted
+        # read-only in every container this node starts (a thread: resolving
+        # the skills can run their self-tests).
+        if self.config.execution.sandbox == "docker":
+            await asyncio.to_thread(self._mount_selected_skills, state)
         deps = state.get("deps") or []
         if deps:
             self._log.info("[execute] pip install %s", deps)
@@ -5736,6 +5856,10 @@ class Engine:
                 state, audience=self.config.output.audience,
                 **self._lit_kwargs(state),
             ),
+            # Empty when the prior-work block holds no foundational work.
+            foundational_block=_foundational_write_block(
+                state.get("literature") or [], self.config.output.audience,
+            ),
             figure_list=_figure_list_for_prompt(state),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
@@ -5785,6 +5909,18 @@ class Engine:
             self._log.warning(
                 "[write] removed citations of sources the prior-work block does not have: %s",
                 ", ".join(f"[{n}]" for n in dropped),
+            )
+        # What the foundational works came to: how many were in the prior-work
+        # block and which of them the draft cites, so a paper that leaves the
+        # field's original papers out can be found in the run log.
+        foundational = _foundational_sources(literature, self.config.output.audience)
+        if foundational:
+            left_out = _uncited_foundational_works(literature, markdown, self.config.output.audience)
+            self._log.info(
+                "[write] foundational works in the prior-work block: %d; the draft cites %d; "
+                "not cited: %s",
+                len(foundational), len(foundational) - len(left_out),
+                "; ".join(str(meta.get("title") or "") for _label, meta in left_out) or "-",
             )
         # A figure the design planned and the run drew that this draft leaves
         # out goes back in here, before the review reads it. The review checks
@@ -6192,18 +6328,39 @@ class Engine:
             "unused — say why in `method`."
         )
         parts = [" ".join(lead)]
+        # Under the Docker sandbox the experiment cannot see a host path. Each
+        # approved external skill is mounted read-only in the container, and
+        # every path the model is given for it is the container's.
+        plan = _skill_mount_plan(self.config, usable)
         for st in usable:
             skill = st.skill
             self._log.info(
                 "[skills] loaded %s (%s, %s)",
                 skill.name, skill.kind.value, skill.maturity.value,
             )
+            mount = plan.mounts.get(skill.name) if plan is not None else None
+            not_mounted = plan.refused.get(skill.name) if plan is not None else None
             parts.append(f"\n## Skill: {skill.name} ({skill.kind.value})\n")
             why = reasons.get(skill.name)
             if why:
                 parts.append(f"*Selected because:* {why}\n")
-            parts.append(skill.instructions().strip())
+            if mount is not None:
+                parts.append(
+                    f"*In the Docker sandbox this skill's folder is `{mount.container}`, "
+                    f"mounted read-only: read or run what it ships from there, and "
+                    f"write only under the working directory.*\n"
+                )
+            elif not_mounted:
+                parts.append(
+                    f"*This skill's folder is NOT available in the Docker sandbox "
+                    f"({not_mounted}), so the experiment cannot read or run the "
+                    f"files it ships. Use what is written here only.*\n"
+                )
+            instructions = skill.instructions().strip()
             surface = skill.api_surface().strip()
+            if mount is not None:
+                instructions, surface = mount.translate(instructions), mount.translate(surface)
+            parts.append(instructions)
             if surface:
                 parts.append(f"\n### {skill.name} — API surface\n")
                 parts.append(surface)
@@ -6217,16 +6374,60 @@ class Engine:
             refs = skill.reference_files()
             if bundled or refs:
                 parts.append(f"\n### {skill.name} — bundled files\n")
-                parts.append(
-                    f"These ship with the skill, at paths relative to "
-                    f"`{skill.path}`. Read or run them as needed; their "
-                    f"contents are deliberately not reproduced here."
-                )
+                if not_mounted:
+                    parts.append(
+                        "These ship with the skill but are not reachable from the "
+                        "sandbox, so do not write code that opens or runs them:"
+                    )
+                else:
+                    base = mount.container if mount is not None else skill.path
+                    parts.append(
+                        f"These ship with the skill, at paths relative to "
+                        f"`{base}`. Read or run them as needed; their "
+                        f"contents are deliberately not reproduced here."
+                    )
                 for rel in bundled:
                     parts.append(f"- `{rel}` (executable)")
                 for rel in refs:
                     parts.append(f"- `{rel}` (reference)")
         return "\n".join(parts).strip()
+
+    def _mount_selected_skills(self, state: Any, *, record: bool = True) -> None:
+        """Docker sandbox only: mount the folders of the approved external skills
+        this quest selected for its experiment, read-only, into every container
+        from here on. Only those: an approved skill that was not selected, an
+        unapproved one, and FI's own skills are not mounted, and a folder that is
+        a link or leads outside its skills folder is refused with the reason in
+        the log. The names are written to ``.fi/skill_mounts.json`` so a
+        ``--watch`` (which has no quest state) mounts the same ones."""
+        setter = getattr(self.executor, "set_skill_mounts", None)
+        if self.config.execution.sandbox != "docker" or setter is None:
+            return
+        usable, _ = _resolve_selected_skills(
+            state, self._log, use="experiment", external_dirs=self._skill_dirs,
+        )
+        plan = _skill_mount_plan(self.config, usable)
+        setter(list(plan.mounts.values()))
+        found_at = {st.skill.name: st.skill.path for st in usable}
+        for name, why in plan.refused.items():
+            self._log.warning(
+                "[skills] %s is NOT mounted into the Docker sandbox: %s (%s)",
+                name, why, found_at.get(name),
+            )
+        for m in plan.mounts.values():
+            self._log.info(
+                "[skills] mounted read-only in the Docker sandbox: %s -> %s (%s)",
+                m.name, m.container, m.host,
+            )
+        if not record:
+            return
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _SKILL_MOUNTS_FILE).write_text(
+                json.dumps({"skills": list(plan.mounts)}), encoding="utf-8",
+            )
+        except OSError as exc:
+            self._log.debug("[skills] could not record the mounted skills: %s", exc)
 
     def _skills_summary_block(self, state: QuestState | None = None) -> str:
         """The selected skills as ``design`` needs them: what each is for,
@@ -6732,6 +6933,12 @@ class Engine:
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
             figure_check_block=_format_figure_check(paper_md, state),
+            # Advisory, unlike the figure check: what the reviewer may ask for,
+            # never a must-flag hit. Empty when the paper cites every foundational
+            # work it has, or has none.
+            foundational_check_block=_foundational_review_block(
+                state.get("literature") or [], paper_md, self.config.output.audience,
+            ),
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.
@@ -7794,6 +8001,19 @@ class Engine:
         from core.example_inputs import ENV_VAR, examples_dir, list_inputs
 
         await self.executor.setup(self.quest_root)
+        if self.config.execution.sandbox == "docker":
+            # The same skills the quest mounted when it ran the experiment: a
+            # script that reads /fi-skills/... needs them on every check.
+            try:
+                recorded = json.loads(
+                    (self.fi_dir / _SKILL_MOUNTS_FILE).read_text(encoding="utf-8")
+                ).get("skills") or []
+            except (OSError, ValueError, AttributeError):
+                recorded = []
+            await asyncio.to_thread(
+                self._mount_selected_skills,
+                {"selected_skills": [str(n) for n in recorded]}, record=False,
+            )
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
         env = (
@@ -8556,6 +8776,135 @@ def _labelled_sources(
             papers += 1
             out.append((str(papers), meta, item))
     return out
+
+
+def _foundational_work_text(work: dict[str, Any]) -> str:
+    """A work the model suggested as ``title (year, authors)``, on one line."""
+    title = " ".join(str(work.get("title") or "").split())
+    who = work.get("authors")
+    if isinstance(who, list):
+        who = ", ".join(str(a) for a in who if a)
+    bits = [b for b in (str(work.get("year") or "").strip(), " ".join(str(who or "").split())) if b]
+    return f"{title} ({', '.join(bits)})" if bits else title
+
+
+def _foundational_outcomes(
+    suggestions: list[dict[str, Any]], new: list[RetrievedDoc],
+    found: list[RetrievedDoc], docs: list[RetrievedDoc],
+) -> tuple[list[str], list[str], list[str]]:
+    """What became of each suggested work, as :func:`_foundational_work_text`
+    lines: the ones the pass added (``new``), the ones already among the search
+    results (the lookup found them, or the search had them, so they are not new)
+    and the ones OpenAlex did not have. A suggestion is matched to a record by
+    the same title rule the lookup used, so a record counts for the suggestion
+    that found it."""
+    def matches(work: dict[str, Any], candidates: list[RetrievedDoc]) -> bool:
+        title = str(work.get("title") or "")
+        return any(_titles_match(title, str((d.metadata or {}).get("title") or "")) for d in candidates)
+
+    added: list[str] = []
+    already: list[str] = []
+    dropped: list[str] = []
+    for work in suggestions:
+        text = _foundational_work_text(work)
+        if matches(work, new):
+            added.append(text)
+        elif matches(work, found) or matches(work, docs):
+            already.append(text)
+        else:
+            dropped.append(text)
+    return added, already, dropped
+
+
+def _foundational_sources(
+    literature: list[Any], audience: str = "external",
+) -> list[tuple[str, dict[str, Any]]]:
+    """The foundational works in the paper's citable set, as ``(label,
+    metadata)`` in the writer's label order. The citable set is the one
+    :func:`_labelled_sources` gives the prior-work block, so a label here is that
+    block's label. A work is foundational when the literature pass marked it
+    (``metadata["foundational"]``): an original paper or standard textbook the
+    model named and OpenAlex holds, or a work several retrieved papers cite. It
+    is in this set only if the literature screen kept it."""
+    return [
+        (label, meta)
+        for label, meta, _item in _labelled_sources(literature, audience)
+        if meta.get("foundational") and not label.startswith("W")
+    ]
+
+
+def _foundational_line(label: str, meta: dict[str, Any], *, numbered: bool) -> str:
+    """One foundational work as the prior-work block's header line gives it
+    (authors, year, title), with ``[label]`` when ``numbered``, and a note of
+    what kind of work it is: a book, or how many retrieved papers cite it."""
+    line = _format_lit_header(meta, label).split("\n", 1)[0]
+    if not numbered:
+        line = re.sub(r"^\[[^\]]*\]\s*", "", line)
+    notes: list[str] = []
+    if meta.get("work_type") in ("book", "book-chapter"):
+        notes.append("book")
+    how = str(meta.get("foundational") or "")
+    if how.startswith("cited by"):
+        notes.append(how)
+    return f"- {line}" + (f" ({', '.join(notes)})" if notes else "")
+
+
+def _foundational_write_block(literature: list[Any], audience: str = "external") -> str:
+    """The write prompt's note on the foundational works in the prior-work block,
+    or "" when there are none, so a prompt without any is unchanged. It lists each
+    with the label the writer cites it by, and asks for the ones that bear on the
+    paper. The works were retrieved, kept by the literature screen and marked
+    foundational, and on stored quests the papers left 175 of 312 such works
+    uncited. The ask is only for the ones that bear on the paper, so it never
+    pushes the writer to cite a work the paper does not use."""
+    works = _foundational_sources(literature, audience)
+    if not works:
+        return ""
+    return (
+        "\n\n### Foundational works in the prior-work block\n"
+        "The literature search marked these entries as foundational: the original papers "
+        "and standard textbooks the topic rests on, or works several of the retrieved papers "
+        "cite. Cite each one that bears on this paper's claims, where it belongs: the original "
+        "paper for a method, model or relation the paper uses, the standard textbook for the "
+        "field. A work that does not bear on the paper is not to be cited just to be cited.\n\n"
+        + "\n".join(_foundational_line(label, meta, numbered=True) for label, meta in works)
+    )
+
+
+def _uncited_foundational_works(
+    literature: list[Any], paper_md: str, audience: str = "external",
+) -> list[tuple[str, dict[str, Any]]]:
+    """The foundational works in the citable set that the paper's text does not
+    cite. The paper's citation numbers are the labels of ``literature`` in the
+    order the write node leaves it in (:func:`_finalize_paper_sources`), the same
+    numbers :func:`cited_references` reads."""
+    cited = {str(n) for n in _citation_counts(paper_md)}
+    return [(label, meta) for label, meta in _foundational_sources(literature, audience) if label not in cited]
+
+
+def _foundational_review_block(literature: list[Any], paper_md: str, audience: str = "external") -> str:
+    """The review prompt's advisory line on foundational works the paper does not
+    cite, or "" when it cites every one (or there are none). Advisory: it is
+    handed to the reviewer as something it may ask for, and nothing here adds a
+    must-flag hit, because whether a work bears on a paper is a judgement, not a
+    set difference."""
+    if not (paper_md or "").strip():
+        return ""  # nothing was read, so nothing can be said to be left out
+    missing = _uncited_foundational_works(literature, paper_md, audience)
+    if not missing:
+        return ""
+    return (
+        "\n\n## Foundational works this paper does not cite (advisory)\n"
+        "These works were retrieved, kept by the literature screen and marked as foundational "
+        "(an original paper or standard textbook the topic rests on, or a work several of the "
+        "retrieved papers cite), but the paper does not cite them:\n"
+        + "\n".join(_foundational_line(label, meta, numbered=False) for label, meta in missing)
+        + "\nAdvisory only: if one of them bears on a claim the paper makes (the original paper "
+        "for a method or relation the paper uses, the standard textbook for the field), you may "
+        "ask for it under `suggestions`. Do not add anything to `must_flag_hits` and do not "
+        "choose `revise` because of this alone. A work that does not bear on the paper needs "
+        "no citation."
+    )
 
 
 def _reference_entry(label: str, meta: dict[str, Any]) -> dict[str, Any]:
@@ -9405,6 +9754,31 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
         )
     except OSError:
         return True
+
+
+# Stands where the traceback would be in the ``execute_reflect`` prompt, for the
+# one repair a script that ignores ``FI_REPLICATE_SEED`` is offered before it
+# has run (see ``Engine._repair_ignored_replicate_seed``).
+_SEED_REPAIR_DIRECTIVE = (
+    "This script has NOT been run, and it has not failed: the account of a crash "
+    "above does not apply. It needs one change before it is run, and no other.\n\n"
+    "The engine runs this script several times, each run handed its own integer "
+    "in the environment variable FI_REPLICATE_SEED, so that the spread between "
+    "the runs can be reported. This script never reads that variable, so every "
+    "run would repeat one measurement and no mean or confidence interval could "
+    "be reported over them.\n\n"
+    "Change exactly this: read the integer from the environment variable "
+    "FI_REPLICATE_SEED (default 0 when it is unset) and derive the seed of "
+    "every random generator the script creates from it (random.seed, "
+    "np.random.seed, np.random.default_rng, torch.manual_seed, ...), replacing "
+    "any seed constant the script wrote for itself. Where it derives one seed "
+    "per trial, derive it as that integer plus the trial index. Keep everything "
+    "else in the script unchanged: the same functions, parameters, outputs and "
+    "figures, and the same final RESULT_JSON line. Do not add randomness the "
+    "experiment does not already have, and do not shorten or simplify anything.\n\n"
+    "Return the whole script in `code`, one sentence in `patch_summary`, and "
+    "leave `give_up_reason` empty."
+)
 
 
 def _replicate_assertions(state: QuestState) -> list[Any]:
@@ -11188,6 +11562,17 @@ def _compact_result_json_block(
         if len(out) <= budget_chars:
             return out, len(full)
     return out[:budget_chars], len(full)
+
+
+def _skill_mount_plan(config: Any, usable: list[Any]) -> "Any | None":
+    """Where each approved external skill among ``usable`` is mounted in the
+    Docker sandbox (``core.skills.mounts``), or None when the experiment does
+    not run in Docker: every other sandbox sees the host's own paths."""
+    if config.execution.sandbox != "docker":
+        return None
+    from core.skills.mounts import plan_mounts
+
+    return plan_mounts(usable)
 
 
 def _discover_skill_names(external_dirs: Any = None) -> list:

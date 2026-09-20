@@ -29,7 +29,11 @@ machine-readable summary in `outputs/<quest_id>/`. A scientific paper opens with
 an abstract and 4–6 keywords; a report, brief, essay or whitepaper keeps its
 keywords out of sight, and an accepted paper's keywords go into its Axon index
 card. FI writes the paper's References itself: the papers the text cites,
-numbered in the order it first cites them. They are
+numbered in the order it first cites them. The foundational papers and textbooks
+the literature search adds (up to eight the model names, plus the works several
+retrieved papers cite) are put to the writer with a request to cite the ones that
+bear on the paper, and the reviewer sees, as advice, the ones the paper leaves
+out. The References are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
 (CSL-JSON). The web pages it drew on are listed under Further reading, not
 References, and exported as `paper/further_reading.bib` / `.csl.json`. A
@@ -54,7 +58,8 @@ with 95% confidence intervals (a probability's kept within 0–1), effect sizes 
 inside a parameter sweep), and a multiple-comparison guard instead of bare
 numbers. A line figure, error bars included, is drawn as the mean of the seeds, shaded with its 95%
 confidence interval; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. Every run gets its own seed, spaced far enough apart that no two runs draw the same
-ones, so what varies between them is variation the experiment produced; and when the experiment turns out not to read its seed
+ones, so what varies between them is variation the experiment produced; a script that never names its seed is sent back once,
+right after it is written, to read it (one extra model call, spent only then); and when the experiment still turns out not to read its seed
 at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical. You see every node firing live in the chat panel.
 
 After the outputs render, a visual check measures and screenshots each PDF;
@@ -174,7 +179,7 @@ The active Copilot model is captured automatically into `provider.model` so the 
 
 ### Skills
 
-A **skill** is what FI has learned about driving one piece of software — when to use it, how to call it, and an executable check that proves it still works. FI ships none; a skill is what it picks up working with you, on this machine. A quest carries only the skills that fit its topic, and sends each where it is used: a writing skill to the writer, the rest to the experiment's design and code. A quest does not re-run a self-test that already passed for the same skill content, Python interpreter and installed packages; a change to any of them, or a failure anywhere, runs it again. The record is `~/.frontier-insight/skill_selftest_cache.json`, and deleting it is always safe.
+A **skill** is what FI has learned about driving one piece of software — when to use it, how to call it, and an executable check that proves it still works. FI ships none; a skill is what it picks up working with you, on this machine. A quest carries only the skills that fit its topic, and sends each where it is used: a writing skill to the writer, the rest to the experiment's design and code. A quest does not re-run a self-test that already passed for the same skill content, Python interpreter and installed packages; a change to any of them, or a failure anywhere, runs it again. The record is `~/.frontier-insight/skill_selftest_cache.json`, and deleting it is always safe. Skills another agent installed (`~/.claude/skills`, `~/.codex/skills`, ...) are read where they are once you approve them; with `execution.sandbox: docker`, each one a quest uses is mounted read-only into the container and the prompts name that path.
 
 Two gates stand before any skill reaches a quest, and both are visible here:
 
