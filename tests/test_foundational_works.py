@@ -14,8 +14,11 @@ import core.passages as pmod
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig,
 )
-from core.engine import Engine
-from core.knowledge import RetrievedDoc, _openalex_cited_by_retrieved, _openalex_title_lookup, _titles_match
+from core.engine import Engine, _foundational_outcomes
+from core.knowledge import (
+    RetrievedDoc, _content_stems, _openalex_author_year_lookup, _openalex_cited_by_retrieved,
+    _openalex_title_lookup, _surname_among, _titles_match,
+)
 
 VERLET = {
     "id": "https://openalex.org/W2323178299",
@@ -33,6 +36,13 @@ DECOY = {
 @pytest.fixture(autouse=True)
 def _unscored(monkeypatch):
     monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_author_year_lookup(monkeypatch):
+    """A title lookup that finds nothing is followed by an author + year one. Here that finds nothing too, unless a
+    test puts the real one back, so no test reaches the network by accident."""
+    monkeypatch.setattr(kn, "_openalex_author_year_lookup", lambda work, **kw: None)
 
 
 def _fake_http(monkeypatch, responses: list[dict]) -> list[dict]:
@@ -364,3 +374,226 @@ async def test_the_run_log_lists_every_suggestion_and_what_became_of_each(tmp_pa
             "Stochastic epidemic models and their statistical analysis (2000, Andersson, Britton) |") in outcome
     assert "dropped, not found in OpenAlex (6): " + f"{_works(6)[0]['title']} (1901, Author1); " in outcome
     assert whittle_text not in outcome.split("dropped")[1]
+
+
+# --- a title that matches nothing is looked up by author and year ----------------
+#
+# The shape three real quests met: the model names Whittle (1955) and gives the work an invented
+# title. OpenAlex holds the real one as the first record of that surname and year that is about
+# the subject; ahead of it by citations sit a paper on stationary processes by the same Whittle and
+# a chemist's paper by another one. The fixtures below are the records OpenAlex returned.
+
+WHITTLE_EPIDEMIC = {
+    "id": "https://openalex.org/W1965", "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER",
+    "publication_year": 1955, "type": "article", "doi": "https://doi.org/10.1093/biomet/42.1-2.116",
+    "cited_by_count": 257, "authorships": [{"author": {"display_name": "Peter Whittle"}}],
+    "primary_location": {"source": {"display_name": "Biometrika"}},
+}
+WHITTLE_PLANE = {
+    "id": "https://openalex.org/W2001", "title": "ON STATIONARY PROCESSES IN THE PLANE", "publication_year": 1954,
+    "type": "article", "cited_by_count": 1502, "authorships": [{"author": {"display_name": "Peter Whittle"}}],
+}
+WHITTLE_CHEMIST = {
+    "id": "https://openalex.org/W2002", "title": "Matrix Isolation Method for the Experimental Study of Unstable Species",
+    "publication_year": 1954, "type": "article", "cited_by_count": 314,
+    "authorships": [{"author": {"display_name": "E. Whittle"}}, {"author": {"display_name": "David A. Dows"}}],
+}
+INVENTED = {"title": "A stochastic model for the spread of an infectious disease", "authors": "Whittle", "year": 1955}
+REAL_AUTHOR_YEAR_LOOKUP = _openalex_author_year_lookup
+
+
+@pytest.fixture
+def real_author_year_lookup(monkeypatch):
+    monkeypatch.setattr(kn, "_openalex_author_year_lookup", REAL_AUTHOR_YEAR_LOOKUP)
+
+
+def test_the_author_and_year_lookup_finds_the_work_behind_an_invented_title(monkeypatch) -> None:
+    calls = _fake_http(monkeypatch, [{"results": [WHITTLE_PLANE, WHITTLE_CHEMIST, WHITTLE_EPIDEMIC]}])
+    doc = _openalex_author_year_lookup(INVENTED)
+    assert doc is not None and doc.metadata["doi"] == "10.1093/biomet/42.1-2.116"
+    assert doc.metadata["foundational"] == kn.FOUNDATIONAL_BY_AUTHOR
+    # One request: the surname, a year either side of 1955, most cited first, a page deep enough to
+    # get past a common surname's famous work.
+    assert len(calls) == 1
+    assert calls[0]["filter"].startswith("raw_author_name.search:whittle,publication_year:1954-1956,type:")
+    assert "book|book-chapter" in calls[0]["filter"]
+    assert calls[0]["sort"] == "cited_by_count:desc" and calls[0]["per-page"] == "25"
+
+
+def test_a_work_by_the_author_that_shares_no_subject_word_is_not_taken(monkeypatch) -> None:
+    """Bailey (1975) is a name the model attached to a work that is not in the database: the
+    author's other papers of those years are about something else."""
+    _fake_http(monkeypatch, [{"results": [
+        {"id": "https://openalex.org/W3", "title": "Communication of Innovations: A Cross-Cultural Approach.",
+         "publication_year": 1974, "type": "article", "cited_by_count": 2821,
+         "authorships": [{"author": {"display_name": "Fiona Bailey"}}]},
+    ]}])
+    assert _openalex_author_year_lookup(
+        {"title": "A stochastic model for the spread of a disease", "authors": "Bailey", "year": 1975}) is None
+
+
+def test_the_surname_must_be_a_whole_word_of_an_author_name(monkeypatch) -> None:
+    assert _surname_among("ball", ["J. Timothy Ball", "Ian Woodrow"])
+    assert not _surname_among("ball", ["Ballesteros", "Ian Woodrow"])
+    epidemic = {"id": "https://openalex.org/W4", "title": "Stochastic epidemic models", "publication_year": 1986,
+                "type": "article", "authorships": [{"author": {"display_name": "M. Ballesteros"}}]}
+    _fake_http(monkeypatch, [{"results": [epidemic]}])
+    assert _openalex_author_year_lookup(
+        {"title": "The probability of a major outbreak in a stochastic epidemic model", "authors": "Ball", "year": 1986}) is None
+
+
+def test_a_subject_word_is_matched_across_its_endings() -> None:
+    assert _content_stems("The general theory of epidemics") & _content_stems(
+        "A contribution to the mathematical theory of epidemics") == {"theory", "epidem"}
+    # "Mikroskope" and "Mikroskops" are one word; the other words of the two titles differ.
+    assert _content_stems("Über die Bildnisse der Mikroskope") & _content_stems(
+        "Beiträge zur Theorie des Mikroskops und der mikroskopischen Wahrnehmung") == {"mikros"}
+    # Nothing in common but words that name no subject: not evidence the record is the work meant.
+    assert not _content_stems("A stochastic model for the spread of a disease") & _content_stems(
+        "Perioperative outcomes after open and endovascular repair of an aneurysm")
+
+
+def test_no_request_is_made_without_an_author_a_year_or_a_subject_word(monkeypatch) -> None:
+    calls = _fake_http(monkeypatch, [])
+    assert _openalex_author_year_lookup({"title": "A stochastic model", "authors": "", "year": 1955}) is None
+    assert _openalex_author_year_lookup({"title": "A stochastic model", "authors": "Whittle"}) is None
+    assert _openalex_author_year_lookup({"title": "The of the", "authors": "Whittle", "year": 1955}) is None
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_title_that_matches_nothing_is_looked_up_again_by_author_and_year(
+    monkeypatch, real_author_year_lookup,
+) -> None:
+    calls = _fake_http(monkeypatch, [{"results": []}, {"results": [WHITTLE_PLANE, WHITTLE_EPIDEMIC]}])
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED], [])
+    assert [c["filter"].split(":")[0] for c in calls] == ["title.search", "raw_author_name.search"]
+    assert [d.metadata["title"] for d in found] == ["THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER"]
+    assert found[0].metadata["suggested_titles"] == [INVENTED["title"]]
+
+
+@pytest.mark.asyncio
+async def test_a_title_that_matched_costs_no_second_request(monkeypatch, real_author_year_lookup) -> None:
+    calls = _fake_http(monkeypatch, [{"results": [VERLET]}])
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works(
+        [{"title": "Computer experiments on classical fluids", "authors": "Verlet", "year": 1967}], [])
+    assert len(calls) == 1 and found[0].metadata["foundational"] == kn.FOUNDATIONAL_SUGGESTED
+    assert "suggested_titles" not in found[0].metadata
+
+
+@pytest.mark.asyncio
+async def test_two_suggestions_that_find_one_work_return_it_once_and_both_are_noted(
+    monkeypatch, real_author_year_lookup,
+) -> None:
+    other = {"title": "Stochastic epidemic models and their normalization", "authors": "Whittle", "year": 1955}
+    _fake_http(monkeypatch, [
+        {"results": []}, {"results": [WHITTLE_EPIDEMIC]}, {"results": []}, {"results": [WHITTLE_EPIDEMIC]},
+    ])
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED, other], [])
+    assert len(found) == 1
+    assert found[0].metadata["suggested_titles"] == sorted([INVENTED["title"], other["title"]])
+
+
+@pytest.mark.asyncio
+async def test_a_work_the_search_already_returned_is_annotated_not_returned_again(
+    monkeypatch, real_author_year_lookup,
+) -> None:
+    _fake_http(monkeypatch, [{"results": []}, {"results": [WHITTLE_EPIDEMIC]}])
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    retrieved = RetrievedDoc(content="w", metadata={
+        "title": "The outcome of a stochastic epidemic", "doi": "10.1093/biomet/42.1-2.116", "source": "openalex"})
+    found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED], [retrieved])
+    assert found == []
+    assert retrieved.metadata["suggested_titles"] == [INVENTED["title"]]
+
+
+@pytest.mark.asyncio
+async def test_no_author_and_year_request_follows_a_refused_title_lookup(monkeypatch) -> None:
+    """A budget OpenAlex has spent refuses the next request as well: asking again only counts a
+    second refusal against the quest."""
+    import core.source_failures as sf
+
+    monkeypatch.setattr(kn, "_OPENALEX_GAP_S", 0.0)
+
+    def refused(work, **kw):  # noqa: ANN001
+        sf.record_failure("openalex", "http_429", status=429, url="https://api.openalex.org/works")
+        return None
+
+    def never(work, **kw):  # noqa: ANN001
+        raise AssertionError("asked again after a refusal")
+
+    monkeypatch.setattr(kn, "_openalex_title_lookup", refused)
+    monkeypatch.setattr(kn, "_openalex_author_year_lookup", never)
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    token = sf.current_quest.set("q-refused-title")
+    try:
+        assert await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED], []) == []
+    finally:
+        sf.current_quest.reset(token)
+        sf.reset("q-refused-title")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_author_and_year_lookup_loses_only_its_own_work(monkeypatch) -> None:
+    def boom(work, **kw):  # noqa: ANN001
+        raise RuntimeError("network")
+
+    monkeypatch.setattr(kn, "_OPENALEX_GAP_S", 0.0)
+    monkeypatch.setattr(kn, "_openalex_title_lookup", lambda work, **kw: None)
+    monkeypatch.setattr(kn, "_openalex_author_year_lookup", boom)
+    monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
+    assert await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED], []) == []
+
+
+def test_the_outcome_of_a_work_found_by_author_and_year_is_added_not_dropped() -> None:
+    found_doc = RetrievedDoc(content="w", metadata={
+        "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER", "year": 1955,
+        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_titles": [INVENTED["title"]]})
+    held = RetrievedDoc(content="k", metadata={
+        "title": "A contribution to the mathematical theory of epidemics", "year": 1927,
+        "suggested_titles": ["The general theory of epidemics"]})
+    matched = {"title": "Stochastic epidemic models and their statistical analysis", "authors": "Andersson", "year": 2000}
+    by_title = RetrievedDoc(content="a", metadata={
+        "title": "Stochastic epidemic models and their statistical analysis", "year": 2000,
+        "foundational": kn.FOUNDATIONAL_SUGGESTED})
+    kermack = {"title": "The general theory of epidemics", "authors": "Kermack", "year": 1927}
+    invented = {"title": "A study nobody wrote", "authors": "Nobody", "year": 1901}
+    added, already, dropped = _foundational_outcomes(
+        [INVENTED, matched, kermack, invented], [found_doc, by_title], [found_doc, by_title], [held])
+    assert added == [
+        "A stochastic model for the spread of an infectious disease (1955, Whittle) -> "
+        "THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER, by author and year",
+        "Stochastic epidemic models and their statistical analysis (2000, Andersson)",  # a title match reads as before
+    ]
+    assert already == [
+        "The general theory of epidemics (1927, Kermack) -> "
+        "A contribution to the mathematical theory of epidemics, by author and year",
+    ]
+    assert dropped == ["A study nobody wrote (1901, Nobody)"]
+
+
+@pytest.mark.asyncio
+async def test_the_run_log_says_which_record_a_suggestion_found_by_author_and_year_resolved_to(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+
+    async def chat(prompt, node=""):  # noqa: ANN001
+        return json.dumps({"works": [INVENTED]})
+
+    eng._chat = chat  # type: ignore[method-assign]
+    whittle = RetrievedDoc(content="w", metadata={
+        "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER", "year": 1955,
+        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_titles": [INVENTED["title"]]})
+
+    async def fake_find(suggested, docs):  # noqa: ANN001
+        return [whittle]
+
+    eng.knowledge.find_foundational_works = fake_find  # type: ignore[method-assign]
+    assert await eng._foundational_works("Some research topic", []) == [whittle]
+    outcome = next(ln for ln in (eng.fi_dir / "run.log").read_text(encoding="utf-8").splitlines()
+                   if "found in OpenAlex and added" in ln)
+    assert ("found in OpenAlex and added (1): A stochastic model for the spread of an infectious disease (1955, Whittle)"
+            " -> THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER, by author and year |") in outcome
+    assert "dropped, not found in OpenAlex (0): -" in outcome
