@@ -28,7 +28,7 @@ from core.config import (
 )
 from core.engine import (
     Engine, _aggregate_result_json_replicates, _replicate_env,
-    _replicate_seed_count, _script_reads_replicate_seed,
+    _replicate_seed_count, _script_reads_replicate_seed, unseeded_rng_calls,
 )
 
 # The fixtures' scripts are never executed (the executor is mocked); they are
@@ -456,3 +456,95 @@ async def test_a_repaired_seeded_script_clears_the_earlier_verdict(
     })
     assert len(patch["result_json_replicates"]) == 3
     assert patch["result_json_replicate_seed_ignored"] is False
+
+
+# --- a script the seed cannot reach ------------------------------------------
+#
+# The shape a graded quest shipped: the script reads FI_REPLICATE_SEED and
+# seeds numpy's legacy global with it, then draws every trajectory from a
+# Generator built ninety lines earlier with no seed at all. It passes
+# ``_script_reads_replicate_seed`` -- the name is right there -- and its
+# replicates differ, so nothing downstream notices that the seed reached none
+# of the randomness and no run can be reproduced.
+
+GILLESPIE_SHAPED_SCRIPT = (
+    "import os\n"
+    "import numpy as np\n"
+    "def trial() -> float:\n"
+    "    rng = np.random.default_rng()\n"
+    "    return float(rng.random())\n"
+    "def main() -> None:\n"
+    "    np.random.seed(int(os.environ.get('FI_REPLICATE_SEED', '0')))\n"
+    "    print(trial())\n"
+)
+
+
+@pytest.mark.parametrize("code, line", [
+    (GILLESPIE_SHAPED_SCRIPT, 4),
+    ("import numpy as np\nrng = np.random.default_rng(None)\n", 2),
+    ("import numpy as np\nrng = np.random.default_rng(seed=None)\n", 2),
+    ("import numpy as np\nnp.random.seed()\n", 2),
+    ("from numpy.random import default_rng\nrng = default_rng()\n", 2),
+    ("import numpy.random as nr\nrng = nr.default_rng()\n", 2),
+    ("from numpy import random as npr\nrng = npr.RandomState()\n", 2),
+    ("import random\nr = random.Random()\n", 2),
+])
+def test_a_generator_built_without_a_seed_is_found(code: str, line: int) -> None:
+    assert [n for n, _ in unseeded_rng_calls(code)] == [line]
+
+
+@pytest.mark.parametrize("code", [
+    # Seeded, in every spelling.
+    "import numpy as np\nrng = np.random.default_rng(12)\n",
+    "import numpy as np\nrng = np.random.default_rng(seed=12)\n",
+    "import os\nimport numpy as np\n"
+    "rng = np.random.default_rng(int(os.environ['FI_REPLICATE_SEED']))\n",
+    "import numpy as np\nkw = {}\nrng = np.random.default_rng(**kw)\n",  # unknowable
+    "import numpy as np\nnp.random.seed(7)\n",
+    # The two fallback idioms the archived quests write, where every call site
+    # hands in a seeded generator and the branch is never taken.
+    "import numpy as np\n"
+    "def trial(rng=None):\n"
+    "    if rng is None:\n"
+    "        rng = np.random.default_rng()\n"
+    "    return rng.random()\n"
+    "trial(np.random.default_rng(3))\n",
+    "import numpy as np\n"
+    "def trial(seed=None):\n"
+    "    if seed is not None:\n"
+    "        rng = np.random.RandomState(seed)\n"
+    "    else:\n"
+    "        rng = np.random.RandomState()\n"
+    "    return rng.random()\n"
+    "trial(3)\n",
+    # A name that is not numpy's or the stdlib's, however much it looks it.
+    "from mypkg import Random\nr = Random()\n",
+    "class Random:\n    pass\nr = Random()\n",
+    # Not valid Python: it has a louder problem than its seeding.
+    "import numpy as np\nrng = np.random.default_rng(\n",
+])
+def test_a_reproducible_script_is_left_alone(code: str) -> None:
+    assert unseeded_rng_calls(code) == []
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.filterwarnings("ignore::SyntaxWarning")
+def test_every_archived_generated_script_but_the_known_one_is_left_alone() -> None:
+    """The sweep that decided this check was worth shipping, kept as a test.
+
+    Over every script the stored quests generated, the only finding is the
+    Gillespie quest whose Generator drew from entropy; the two fallback idioms
+    that earlier drafts flagged are in this corpus and must stay silent. Skips
+    when the outputs are not in the checkout (CI has no quest archive).
+    """
+    outputs = Path(__file__).resolve().parents[1] / "outputs"
+    scripts = sorted(outputs.glob("*/code/*.py"))
+    if len(scripts) < 50:
+        pytest.skip("no archived quest outputs in this checkout")
+    flagged = {
+        path.parent.parent.name: unseeded_rng_calls(
+            path.read_text(encoding="utf-8", errors="replace"))
+        for path in scripts
+        if unseeded_rng_calls(path.read_text(encoding="utf-8", errors="replace"))
+    }
+    assert flagged == {"1789886314-fi-trend-sir-fin-fm2-3eb3a8": [(43, "np.random.default_rng()")]}
