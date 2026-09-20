@@ -26,7 +26,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from generation._figure_captions import numbers_off_figure_captions
+from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
 from generation._keywords import keywords_block
 from generation._pandoc import HTML_MARKDOWN_READER
 
@@ -182,7 +182,7 @@ def render_paper_html_pdf(
     # A table right under its caption line would print as raw pipes.
     from generation._tables import blank_line_before_tables
 
-    title, body = _split_title(blank_line_before_tables(numbers_off_figure_captions(md_text)))
+    title, body = _split_title(blank_line_before_tables(blank_lines_around_figures(numbers_off_figure_captions(md_text))))
     # The keywords line under the abstract becomes a block the themes style.
     keywords, body = keywords_block(body)
 

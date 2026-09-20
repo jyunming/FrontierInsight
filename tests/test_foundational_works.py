@@ -17,7 +17,7 @@ from core.config import (
 from core.engine import Engine, _foundational_outcomes
 from core.knowledge import (
     RetrievedDoc, _content_stems, _openalex_author_year_lookup, _openalex_cited_by_retrieved,
-    _openalex_title_lookup, _surname_among, _titles_match,
+    _openalex_title_lookup, _surname_among, _titles_match, foundational_work_text,
 )
 
 VERLET = {
@@ -470,7 +470,7 @@ async def test_a_title_that_matches_nothing_is_looked_up_again_by_author_and_yea
     found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED], [])
     assert [c["filter"].split(":")[0] for c in calls] == ["title.search", "raw_author_name.search"]
     assert [d.metadata["title"] for d in found] == ["THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER"]
-    assert found[0].metadata["suggested_titles"] == [INVENTED["title"]]
+    assert found[0].metadata["suggested_works"] == [foundational_work_text(INVENTED)]
 
 
 @pytest.mark.asyncio
@@ -480,7 +480,7 @@ async def test_a_title_that_matched_costs_no_second_request(monkeypatch, real_au
     found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works(
         [{"title": "Computer experiments on classical fluids", "authors": "Verlet", "year": 1967}], [])
     assert len(calls) == 1 and found[0].metadata["foundational"] == kn.FOUNDATIONAL_SUGGESTED
-    assert "suggested_titles" not in found[0].metadata
+    assert "suggested_works" not in found[0].metadata
 
 
 @pytest.mark.asyncio
@@ -494,7 +494,7 @@ async def test_two_suggestions_that_find_one_work_return_it_once_and_both_are_no
     monkeypatch.setattr(kn, "_openalex_cited_by_retrieved", lambda docs, **kw: [])
     found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED, other], [])
     assert len(found) == 1
-    assert found[0].metadata["suggested_titles"] == sorted([INVENTED["title"], other["title"]])
+    assert found[0].metadata["suggested_works"] == sorted([foundational_work_text(INVENTED), foundational_work_text(other)])
 
 
 @pytest.mark.asyncio
@@ -507,7 +507,7 @@ async def test_a_work_the_search_already_returned_is_annotated_not_returned_agai
         "title": "The outcome of a stochastic epidemic", "doi": "10.1093/biomet/42.1-2.116", "source": "openalex"})
     found = await kn.Knowledge(KnowledgeConfig(enabled=False)).find_foundational_works([INVENTED], [retrieved])
     assert found == []
-    assert retrieved.metadata["suggested_titles"] == [INVENTED["title"]]
+    assert retrieved.metadata["suggested_works"] == [foundational_work_text(INVENTED)]
 
 
 @pytest.mark.asyncio
@@ -551,10 +551,10 @@ async def test_a_failed_author_and_year_lookup_loses_only_its_own_work(monkeypat
 def test_the_outcome_of_a_work_found_by_author_and_year_is_added_not_dropped() -> None:
     found_doc = RetrievedDoc(content="w", metadata={
         "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER", "year": 1955,
-        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_titles": [INVENTED["title"]]})
+        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_works": [foundational_work_text(INVENTED)]})
     held = RetrievedDoc(content="k", metadata={
         "title": "A contribution to the mathematical theory of epidemics", "year": 1927,
-        "suggested_titles": ["The general theory of epidemics"]})
+        "suggested_works": ["The general theory of epidemics (1927, Kermack)"]})
     matched = {"title": "Stochastic epidemic models and their statistical analysis", "authors": "Andersson", "year": 2000}
     by_title = RetrievedDoc(content="a", metadata={
         "title": "Stochastic epidemic models and their statistical analysis", "year": 2000,
@@ -575,6 +575,30 @@ def test_the_outcome_of_a_work_found_by_author_and_year_is_added_not_dropped() -
     assert dropped == ["A study nobody wrote (1901, Nobody)"]
 
 
+def test_two_suggestions_that_share_a_title_are_each_paired_with_their_own_record() -> None:
+    """Whittle's 1955 note and Bailey's 1962 book were suggested under one title; a record was
+    paired with the first suggestion that carried the title, so the log line named the wrong one."""
+    same = "A stochastic model for the spread of infection"
+    whittle = {"title": same, "authors": "Whittle", "year": 1955}
+    bailey = {"title": same, "authors": "Bailey", "year": 1962}
+    note = RetrievedDoc(content="w", metadata={
+        "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC", "year": 1955, "foundational": kn.FOUNDATIONAL_BY_AUTHOR,
+        "suggested_works": [foundational_work_text(whittle)]})
+    book = RetrievedDoc(content="b", metadata={
+        "title": "The mathematical theory of infectious diseases", "year": 1975,
+        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_works": [foundational_work_text(bailey)]})
+    added, already, dropped = _foundational_outcomes([bailey, whittle], [note, book], [note, book], [])
+    assert added == [
+        f"{same} (1962, Bailey) -> The mathematical theory of infectious diseases, by author and year",
+        f"{same} (1955, Whittle) -> THE OUTCOME OF A STOCHASTIC EPIDEMIC, by author and year",
+    ]
+    assert already == [] and dropped == []
+    # A suggestion no record answers is dropped even though another record answers its title's twin.
+    added, already, dropped = _foundational_outcomes([bailey, whittle], [note], [note], [])
+    assert added == [f"{same} (1955, Whittle) -> THE OUTCOME OF A STOCHASTIC EPIDEMIC, by author and year"]
+    assert dropped == [f"{same} (1962, Bailey)"]
+
+
 @pytest.mark.asyncio
 async def test_the_run_log_says_which_record_a_suggestion_found_by_author_and_year_resolved_to(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
@@ -585,7 +609,7 @@ async def test_the_run_log_says_which_record_a_suggestion_found_by_author_and_ye
     eng._chat = chat  # type: ignore[method-assign]
     whittle = RetrievedDoc(content="w", metadata={
         "title": "THE OUTCOME OF A STOCHASTIC EPIDEMIC—A NOTE ON BAILEY'S PAPER", "year": 1955,
-        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_titles": [INVENTED["title"]]})
+        "foundational": kn.FOUNDATIONAL_BY_AUTHOR, "suggested_works": [foundational_work_text(INVENTED)]})
 
     async def fake_find(suggested, docs):  # noqa: ANN001
         return [whittle]

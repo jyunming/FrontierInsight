@@ -45,6 +45,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from . import paper_patch
+from . import paper_trim
 from . import stats as _stats
 from .config import (
     Config,
@@ -60,10 +61,12 @@ from .knowledge import (
     WORK_SCOPE_PAPERS_AND_BOOKS,
     Knowledge,
     RetrievedDoc,
+    _content_stems,
     _doc_dedup_keys,
     _is_bot_check_title,
     _normalize_title,
     _titles_match,
+    foundational_work_text as _foundational_work_text,
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
@@ -101,6 +104,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "cross_check",
     "relevance_guard",
     "literature_screen",
+    "write.trim",
 })
 
 
@@ -6311,6 +6315,13 @@ class Engine:
                 "quote": quote,
                 "evidence": evidence,
             })
+        # A source with nothing but its title cannot back what a sentence says
+        # beyond it, whatever the check made of the quote.
+        claims, held = _apply_title_only_rule(paper_text, sources, claims)
+        if held:
+            self._log.info(
+                "[claim_check] %d claim(s) rest on a source held as its title only; marked unsupported", held,
+            )
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         grounding = {
             "claims": claims,
@@ -7193,6 +7204,100 @@ class Engine:
         paper_path.write_text(_trim_further_reading(text, keep), encoding="utf-8")
         return found, block.labels[keep:], n_entries
 
+    async def _trim_body_to_fit(
+        self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
+    ) -> tuple[dict[str, Any], paper_trim.Trimmed] | None:
+        """Bring a draft whose body is a little over the page limit within it by
+        taking whole sentences out of its background and discussion, when that
+        alone does it, and write the result over ``paper_path``.
+
+        The alternative is the whole-paper rewrite the review forces, the largest
+        part of the revise loop (:mod:`core.paper_trim` has the numbers) and the
+        step that changes correct citations. Here the model is shown the paper with
+        a number before each sentence that may go (:func:`paper_trim.candidates`
+        offers no Abstract, Method or Result, nothing that says what the paper does
+        or finds, no number stated nowhere else, no figure or table) and answers
+        with the numbers of sentences that together are about the words to cut. The
+        engine takes them out, skipping one that holds a source's only citation,
+        and renders the draft. A list that falls short, or a draft that is still
+        over, is another round on the paper as it now stands, at most
+        ``_TRIM_ROUNDS`` calls. Nothing the model writes reaches the paper.
+
+        Returns the measurement of the draft written and what was taken out, or
+        ``None`` (with the reason in the log, the paper untouched) when the draft
+        is more than ``paper_trim.MAX_WORDS`` over, the sections that may lose a
+        sentence hold too few words, a reply is not a list of numbers, or the
+        rounds do not bring it within the limit."""
+        need = _words_to_cut(int(measured["pages"]), limit, float(measured.get("last_page_empty") or 0.0))
+        try:
+            current = paper_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        trial = self.fi_dir / "page_check_trial.md"
+        self.fi_dir.mkdir(parents=True, exist_ok=True)
+        spent = 0
+        taken: list[paper_trim.Sentence] = []
+        try:
+            for _ in range(_TRIM_ROUNDS):
+                if spent + need > paper_trim.MAX_WORDS:
+                    self._log.info(
+                        "[page_limit] the draft is about %d words over the limit, more than the %d a trim takes out",
+                        spent + need, paper_trim.MAX_WORDS,
+                    )
+                    return None
+                source_lists = _SOURCE_LIST_HEADING_RE.search(current)
+                end = source_lists.start() if source_lists else len(current)
+                offered = paper_trim.candidates(current, end)
+                if sum(sentence.words for sentence in offered) < need:
+                    self._log.info(
+                        "[page_limit] the draft is about %d words over the limit and its background and discussion "
+                        "offer %d words that could go without losing what the paper does or finds, a number, a "
+                        "figure or a paragraph's opening",
+                        need, sum(sentence.words for sentence in offered),
+                    )
+                    return None
+                prompt = self._prompts["write_trim"].substitute(
+                    topic=state.get("topic") or self.config.topic,
+                    words=need,
+                    upper=need + 40,
+                    paper_block=paper_trim.marked_body(current, end, offered),
+                )
+                try:
+                    ranking = paper_trim.parse_ranking(await self._chat(prompt, node="write.trim"), len(offered))
+                except paper_patch.PatchError as e:
+                    self._log.warning("[page_limit] the sentences to take out could not be used (%s)", e)
+                    return None
+                except Exception as e:  # noqa: BLE001 - the rewrite the review forces is what a real outage stops
+                    self._log.warning(
+                        "[page_limit] the call for sentences to take out failed (%s: %s)",
+                        type(e).__name__, str(e)[:200],
+                    )
+                    return None
+                cut = paper_trim.choose(current, end, offered, ranking, need, partial=True)
+                if cut is None:
+                    self._log.info(
+                        "[page_limit] none of the sentences the model chose can go (each holds a source's only "
+                        "citation or a number stated nowhere else)",
+                    )
+                    return None
+                current, spent = cut.text, spent + cut.words
+                taken += cut.taken
+                if cut.words < need:
+                    need -= cut.words  # the list fell short of the words: ask again on what is left
+                    continue
+                trial.write_text(current, encoding="utf-8")
+                found = await self._measure_draft_pages(trial, state)
+                if found is None:
+                    return None
+                if int(found["pages"]) <= limit:
+                    paper_path.write_text(current, encoding="utf-8")
+                    return found, paper_trim.Trimmed(current, tuple(taken), spent)
+                need = _words_to_cut(int(found["pages"]), limit, float(found.get("last_page_empty") or 0.0))
+        finally:
+            trial.unlink(missing_ok=True)
+        self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
+        return None
+
     async def _page_limit_review(
         self, state: QuestState, paper_path: str | Path | None,
     ) -> tuple[list[str], dict[str, Any] | None]:
@@ -7228,6 +7333,22 @@ class Engine:
                     "Further reading was over: dropped %d of its %d entries from the end (%s); it now "
                     "renders to %d pages",
                     before, limit, len(dropped), n_entries, ", ".join(f"[{w}]" for w in dropped), pages,
+                )
+        if pages > limit:
+            # Then the body: a few sentences of background and discussion out, no
+            # rewrite and no second claim check. Whether or not shortening
+            # rewrites have been used up, since it costs the model one short call.
+            cut = await self._trim_body_to_fit(state, Path(paper_path), limit, measured)
+            if cut is not None:
+                before, (measured, taken) = pages, cut
+                pages = int(measured["pages"])
+                record["pages"] = pages
+                record["trimmed"] = {"words": taken.words, "sentences": [sentence.text for sentence in taken.taken]}
+                self._log.warning(
+                    "[page_limit] the draft renders to %d pages, over the limit of %d: took %d sentences "
+                    "(%d words) out of its background and discussion instead of writing the paper again; "
+                    "it now renders to %d pages. Taken out: %s",
+                    before, limit, len(taken.taken), taken.words, pages, paper_trim.summary(taken),
                 )
         if pages <= limit:
             self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
@@ -7271,6 +7392,15 @@ class Engine:
                 paper_md = Path(paper_path).read_text(encoding="utf-8")
             except OSError:
                 paper_md = ""
+        # A sentence the trim took out may be a claim the check listed, and one it
+        # marked unsupported would still be forced against a paper that no longer
+        # says it: the grounding is read as of the paper the review reads.
+        grounding = state.get("claim_grounding")
+        cut = (page_record or {}).get("trimmed")
+        pruned = _grounding_after_trim(grounding, cut["sentences"], paper_md) if cut and grounding else None
+        if pruned is not None:
+            state = {**state, "claim_grounding": pruned}  # type: ignore[typeddict-item]
+            self._write_claims_ledger(pruned)
         base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
@@ -7363,6 +7493,8 @@ class Engine:
             if page_record is not None:
                 review["page_limit"] = page_record
             update: QuestState = {"review": review}
+            if pruned is not None:
+                update["claim_grounding"] = pruned
             if page_hits:
                 update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
             # Counted here, like the shortening rewrites above, so the router
@@ -7524,6 +7656,8 @@ class Engine:
             review["page_limit"] = page_record
 
         update: QuestState = {"review": review, "review_panel": panel_results}
+        if pruned is not None:
+            update["claim_grounding"] = pruned
         if page_hits:
             update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
         # As on the single-reviewer path: count a review that sends the
@@ -8798,6 +8932,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "write", "review",
         "write_patch",      # a revise for flagged passages: edits, not a new paper
+        "write_trim",       # a draft a little over its page limit: sentences to take out
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
@@ -9183,16 +9318,6 @@ def _labelled_sources(
     return out
 
 
-def _foundational_work_text(work: dict[str, Any]) -> str:
-    """A work the model suggested as ``title (year, authors)``, on one line."""
-    title = " ".join(str(work.get("title") or "").split())
-    who = work.get("authors")
-    if isinstance(who, list):
-        who = ", ".join(str(a) for a in who if a)
-    bits = [b for b in (str(work.get("year") or "").strip(), " ".join(str(who or "").split())) if b]
-    return f"{title} ({', '.join(bits)})" if bits else title
-
-
 def _foundational_outcomes(
     suggestions: list[dict[str, Any]], new: list[RetrievedDoc],
     found: list[RetrievedDoc], docs: list[RetrievedDoc],
@@ -9203,7 +9328,8 @@ def _foundational_outcomes(
     and the ones OpenAlex did not have. A suggestion is matched to a record by
     the same title rule the lookup used, so a record counts for the suggestion
     that found it; a record found by author and year, whose title is not the
-    suggested one, names the suggestions it answers (``suggested_titles``), and
+    suggested one, names the suggestions it answers (``suggested_works``: title,
+    year and authors, so two suggestions with one title are told apart), and
     its line says so: ``suggested (year, author) -> the record's title, by author
     and year``."""
     def record_for(work: dict[str, Any], candidates: list[RetrievedDoc]) -> RetrievedDoc | None:
@@ -9212,7 +9338,7 @@ def _foundational_outcomes(
             md = d.metadata or {}
             if _titles_match(title, str(md.get("title") or "")):
                 return d
-            if title and title in (md.get("suggested_titles") or []):
+            if title and _foundational_work_text(work) in (md.get("suggested_works") or []):
                 return d
         return None
 
@@ -9323,17 +9449,34 @@ def _foundational_review_block(literature: list[Any], paper_md: str, audience: s
     missing = _uncited_foundational_works(literature, paper_md, audience)
     if not missing:
         return ""
+    # The prior-work block marks a record FI holds no more than the title (or a
+    # blurb) of, and the writer is told to cite it only for what that text says.
+    # The reviewer was not told, and asked for one to back a specific claim: a
+    # rewrite then cited it, and the claim check marked the sentence unsupported.
+    thin = {
+        label: _thin_source(meta, _item_content(item))
+        for label, meta, item in _labelled_sources(literature, audience)
+    }
+    marked = any(thin.get(label) for label, _meta in missing)
     return (
         "\n\n## Foundational works this paper does not cite (advisory)\n"
         "These works were retrieved, kept by the literature screen and marked as foundational "
         "(an original paper or standard textbook the topic rests on, or a work several of the "
         "retrieved papers cite), but the paper does not cite them:\n"
-        + "\n".join(_foundational_line(label, meta, numbered=False) for label, meta in missing)
+        + "\n".join(
+            _foundational_line(label, meta, numbered=False, thin=thin.get(label)) for label, meta in missing
+        )
         + "\nAdvisory only: if one of them bears on a claim the paper makes (the original paper "
         "for a method or relation the paper uses, the standard textbook for the field), you may "
         "ask for it under `suggestions`. Do not add anything to `must_flag_hits` and do not "
         "choose `revise` because of this alone. A work that does not bear on the paper needs "
         "no citation."
+        + (
+            " An entry marked `[title only]` or `[short blurb only]` has no text beyond that: ask "
+            "for it only to say the work exists or for what its title states, never to back a "
+            "finding, a number or a mechanism, which it cannot show."
+            if marked else ""
+        )
     )
 
 
@@ -9498,6 +9641,119 @@ def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
                     if sentence not in sentences:
                         sentences.append(sentence)
     return found
+
+
+# A source FI holds only the title of contains no statement, so it cannot show a
+# finding, a number or a mechanism whatever it is cited for. The claim check reads
+# the sentence and the source and says whether the citation holds, and it misses
+# some: on the 72 stored SIR papers 9 sentences cite only title-only records and say
+# more than the title, the check had marked 6 of them unsupported and had not listed
+# the other 3 as claims at all.
+# A sentence is said to go beyond the title when it names this many words that its
+# cited sources' titles, authors and stored text do not. A record's words come from
+# :func:`_content_stems`, the word test the foundational-work lookup uses, so
+# "epidemic" and "epidemics" are one word. Attribution ("Kermack and McKendrick [1]
+# introduced the SIR model") adds one or two such words to a title that names its
+# subject; a specific result adds more.
+_TITLE_ONLY_UNEXPLAINED_STEMS = 4
+# A claim and a sentence are the same statement when this share of the shorter
+# one's content words are in the other, and at least this many words are: a
+# three-word title shares all three with any claim that names the same things.
+_SAME_STATEMENT_SHARE = 0.6
+_SAME_STATEMENT_WORDS = 4
+
+
+def _title_only_sentences(
+    paper_md: str, sources: dict[str, tuple[dict[str, Any], str]],
+) -> list[tuple[str, list[str], list[str]]]:
+    """``(sentence, labels, words)`` for each sentence of the paper's text that
+    cites sources, cites only ones whose stored text is nothing but the title
+    (:func:`_thin_source`), and says at least ``_TITLE_ONLY_UNEXPLAINED_STEMS``
+    words that neither those sources' titles, authors nor stored text contain.
+    The words are what the sentence says beyond the sources' text. A book's blurb
+    is not this: it is a description the check can read."""
+    titled = {label for label, (meta, text) in sources.items() if _thin_source(meta, text) == "title"}
+    if not titled:
+        return []
+    known: dict[str, set[str]] = {}
+    for label in titled:
+        meta, text = sources[label]
+        authors = meta.get("authors") or []
+        if not isinstance(authors, list):
+            authors = [authors]
+        known[label] = _content_stems(" ".join(
+            [str(meta.get("title") or ""), *(str(a) for a in authors), str(text or "")]
+        ))
+    found: list[tuple[str, list[str], list[str]]] = []
+    seen: set[str] = set()
+    for block in re.split(r"\n\s*\n", _paper_body(paper_md)):
+        for sentence in _SENTENCE_END_RE.split(" ".join(block.split())):
+            labels: list[str] = []
+            for match in _CITATION_BRACKET_RE.finditer(sentence):
+                labels += [x for x in _citation_labels(match.group(1)) if x not in labels]
+            if not labels or any(label not in titled for label in labels) or sentence in seen:
+                continue
+            seen.add(sentence)
+            said = _content_stems(_CITATION_BRACKET_RE.sub(" ", sentence))
+            extra = said - set().union(*(known[label] for label in labels))
+            if len(extra) >= _TITLE_ONLY_UNEXPLAINED_STEMS:
+                found.append((sentence, labels, sorted(extra)))
+    return found
+
+
+def _same_statement(a: str, b: str) -> bool:
+    """Whether two texts state one thing: the shorter one's content words are
+    mostly in the other. A claim the check quotes or paraphrases is compared
+    with the paper's sentence this way."""
+    wa, wb = _content_stems(_CITATION_BRACKET_RE.sub(" ", a)), _content_stems(_CITATION_BRACKET_RE.sub(" ", b))
+    shared = len(wa & wb)
+    return shared >= _SAME_STATEMENT_WORDS and shared / min(len(wa), len(wb)) >= _SAME_STATEMENT_SHARE
+
+
+def _apply_title_only_rule(
+    paper_md: str,
+    sources: dict[str, tuple[dict[str, Any], str]],
+    claims: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """``claims`` with the sentences that rest on title-only sources marked
+    ``unsupported``, and how many were changed or added.
+
+    For each sentence :func:`_title_only_sentences` finds: a claim the check
+    grounded in one of its citations is marked ``unsupported`` (the quote it gave
+    can only have been the title), and a sentence the check did not list as a claim
+    at all is added as one. A claim the check already marked ``unsupported`` is
+    left as it is, and so is one it grounded in the run's results: a result the
+    experiment produced does not need the citation beside it."""
+    found = _title_only_sentences(paper_md, sources)
+    if not found:
+        return claims, 0
+    out = [dict(c) for c in claims]
+    changed = 0
+    for sentence, labels, words in found:
+        same = [c for c in out if _same_statement(c["claim"], sentence)]
+        if any(c["basis"] in ("unsupported", "experiment") for c in same):
+            continue
+        first = labels[0]
+        why = (
+            f"[{first}] is held as its title only ({str(sources[first][0].get('title') or '').strip()!r}), "
+            f"which cannot show what the sentence says beyond it: {', '.join(words[:6])}"
+        )
+        cited = [c for c in same if c["basis"] == "citation" and str(c.get("citation_index")) in labels]
+        if cited:
+            for claim in cited:
+                claim.update(basis="unsupported", quote="", evidence=why)
+        elif not same:
+            out.append({
+                "claim": sentence,
+                "basis": "unsupported",
+                "citation_index": int(first) if first.isdigit() else first,
+                "quote": "",
+                "evidence": why,
+            })
+        else:
+            continue
+        changed += 1
+    return out, changed
 
 
 # Claim grounding shows the model this much of each cited source's text: the
@@ -11127,6 +11383,34 @@ def _format_claim_grounding(state: QuestState) -> str:
     return "\n".join(lines)
 
 
+def _grounding_after_trim(
+    grounding: dict[str, Any], taken: list[str], paper_md: str,
+) -> dict[str, Any] | None:
+    """``grounding`` without the claims whose sentence a trim took out of the
+    paper (``taken``), or ``None`` when none of them is affected. A claim stays
+    when another sentence of the paper still says it, since the same statement
+    is often made twice and the check lists it once."""
+    # Headings are left out: a title names the same things a claim does.
+    body = re.sub(r"(?m)^#{1,6}[ \t].*$", "", _paper_body(paper_md))
+    remaining = [
+        sentence
+        for block in re.split(r"\n\s*\n", body)
+        for sentence in _SENTENCE_END_RE.split(" ".join(block.split()))
+    ]
+    kept: list[dict[str, Any]] = []
+    for claim in grounding.get("claims") or []:
+        text = str(claim.get("claim") or "")
+        gone = any(_same_statement(text, sentence) for sentence in taken)
+        if gone and not any(_same_statement(text, sentence) for sentence in remaining):
+            continue
+        kept.append(claim)
+    if len(kept) == len(grounding.get("claims") or []):
+        return None
+    unsupported = [c["claim"] for c in kept if c.get("basis") == "unsupported"]
+    return {**grounding, "claims": kept, "total": len(kept), "grounded": len(kept) - len(unsupported),
+            "unsupported": unsupported}
+
+
 # Must-flag hits that are problems with the paper's text, not with the study:
 # fixing one means writing the paper again, not running the experiment again.
 # ``figure_missing`` is one: the figure exists, the paper left it out.
@@ -11148,6 +11432,10 @@ _TEXT_ONLY_HITS = frozenset({
 # ``engine.max_iterations``.
 _PAGE_LIMIT_REWRITES = 2
 _PAGE_LIMIT_HIT = "over_page_limit"
+# The most calls one trim makes to the model: a list that falls short of the words to
+# cut, or a draft still over the limit after the sentences were taken, is another
+# round on the paper as it then stands.
+_TRIM_ROUNDS = 3
 # Words a full page holds and the share of a page one figure takes, from the
 # graded SIR papers at the 1 in layout. The page-limit layout holds more, so a
 # budget worked out from these leaves room.

@@ -453,6 +453,19 @@ def _content_stems(title: str) -> set[str]:
     return {w[:6] for w in _title_words(title) if len(w) >= 4 and w not in _TITLE_STOP_WORDS}
 
 
+def foundational_work_text(work: dict[str, Any]) -> str:
+    """A work the model suggested as ``title (year, authors)``, on one line: how the
+    run log names it, and what a record found for it by author and year remembers of
+    it. The year and the authors are part of it because two suggestions can share a
+    title (Whittle's 1955 note and Bailey's 1962 book carry the same one)."""
+    title = " ".join(str(work.get("title") or "").split())
+    who = work.get("authors")
+    if isinstance(who, list):
+        who = ", ".join(str(a) for a in who if a)
+    bits = [b for b in (str(work.get("year") or "").strip(), " ".join(str(who or "").split())) if b]
+    return f"{title} ({', '.join(bits)})" if bits else title
+
+
 def _surname_among(surname: str, names: list[str]) -> bool:
     """Whether ``surname`` is a whole word of one of the names ("Ball" is not in
     "Ballesteros")."""
@@ -3765,9 +3778,9 @@ class Knowledge:
         then the works the retrieved papers cite most. None already in ``docs``
         comes back, and a failed lookup only loses its own works.
 
-        A record found by author and year carries ``suggested_titles``, the
-        titles of the suggestions it answers, so the run log can say what became
-        of each. When the record is one the search already returned, or one
+        A record found by author and year carries ``suggested_works``, the
+        suggestions it answers (:func:`foundational_work_text`), so the run log can
+        say what became of each. When the record is one the search already returned, or one
         another suggestion found, it is the record that is annotated (the caller
         never gets a work twice)."""
         api_key = str(getattr(self.cfg, "openalex_api_key", "") or "")
@@ -3800,7 +3813,7 @@ class Knowledge:
                     except Exception:  # noqa: BLE001
                         doc = None
                     if doc is not None:
-                        doc.metadata["suggested_titles"] = [str(suggestion.get("title") or "")]
+                        doc.metadata["suggested_works"] = [foundational_work_text(suggestion)]
                 if doc is not None:
                     found.append(doc)
                 time.sleep(_OPENALEX_GAP_S)
@@ -3838,10 +3851,10 @@ class Knowledge:
                 # A work the search already had, or another suggestion found: the record
                 # already there answers this suggestion too, so it takes note of it.
                 held = next((holders[k] for k in keys if k in holders), None)
-                titles = doc.metadata.get("suggested_titles")
-                if held is not None and titles:
+                answers = doc.metadata.get("suggested_works")
+                if held is not None and answers:
                     md = held.metadata
-                    md["suggested_titles"] = sorted({*(md.get("suggested_titles") or []), *titles})
+                    md["suggested_works"] = sorted({*(md.get("suggested_works") or []), *answers})
                 continue
             seen |= keys
             holders.update({k: doc for k in keys})
