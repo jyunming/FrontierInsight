@@ -18,6 +18,8 @@ from core.plot_style import (
     BOOT_DIRNAME,
     FI_COLOR_CYCLE,
     FI_TEAL_CMAP_NAME,
+    FONT_SCALE,
+    HOUSE_TICK_PT,
     apply_style,
     fi_rcparams,
     figure_facecolor,
@@ -63,6 +65,22 @@ def test_fi_rcparams_despines_and_sets_teal_heatmap() -> None:
     assert rc["axes.spines.top"] is False
     assert rc["axes.spines.right"] is False
     assert rc["image.cmap"] == FI_TEAL_CMAP_NAME
+
+
+def test_fi_rcparams_text_is_one_and_a_half_times_the_size_it_was_first_set_at() -> None:
+    """The experiments draw figures 8-13 in wide and a slide shows them at 0.3-0.9
+    of that, so ticks first set at 10 pt came out at 2.9-6.9 pt. The canvas and the
+    dpi did not change: only these six sizes."""
+    rc = fi_rcparams("latex")
+    assert {key: rc[key] for key in (
+        "font.size", "axes.titlesize", "axes.labelsize",
+        "xtick.labelsize", "ytick.labelsize", "legend.fontsize",
+    )} == {
+        "font.size": 17.25, "axes.titlesize": 20.25, "axes.labelsize": 17.25,
+        "xtick.labelsize": 15.0, "ytick.labelsize": 15.0, "legend.fontsize": 15.0,
+    }
+    assert FONT_SCALE == 1.5 and HOUSE_TICK_PT == rc["xtick.labelsize"]
+    assert (rc["figure.figsize"], rc["savefig.dpi"], rc["figure.dpi"]) == ([7.0, 4.3], 200, 140)
 
 
 # ---- generated bootstrap source -----------------------------------------
@@ -199,6 +217,36 @@ def test_bootstrap_records_what_each_saved_figure_draws(tmp_path) -> None:
         "forward_euler": "yes", "rk4": "flat", "velocity_verlet": "flat",
     }
     assert {s["label"]: s["shows"] for s in errors["series"]} == {"euler": "yes", "rk4": "yes"}
+
+
+def test_bootstrap_records_the_smallest_tick_label_a_figure_draws(tmp_path) -> None:
+    """The slide check multiplies this size by how much smaller than drawn the slide
+    shows the figure, so a script's own ``tick_params(labelsize=...)`` has to count,
+    not only the house style's size; a figure with no tick labels records null."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots(); ax.plot([0, 1], [0, 1]); fig.savefig('house.png')\n"
+        "fig, (a, b) = plt.subplots(1, 2); a.plot([0, 1], [0, 1]); b.plot([0, 1], [0, 1])\n"
+        "b.tick_params(labelsize=8); fig.savefig('smaller.png')\n"
+        "fig, ax = plt.subplots(); ax.plot([0, 1], [0, 1]); ax.set_xticks([]); ax.set_yticks([])\n"
+        "fig.savefig('bare.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    ticks = {
+        stem: json.loads((records / f"{stem}.json").read_text(encoding="utf-8"))["tick_pt"]
+        for stem in ("house", "smaller", "bare")
+    }
+    assert ticks == {"house": HOUSE_TICK_PT, "smaller": 8.0, "bare": None}
 
 
 def test_bootstrap_names_series_labelled_only_in_the_legend(tmp_path) -> None:

@@ -293,6 +293,39 @@ def test_a_figure_goes_under_the_text_it_follows(tmp_path: Path) -> None:
     assert crowded.height >= int(2.0 * 914400)
 
 
+def test_a_figure_slide_gives_its_figure_the_slide_width_and_a_slide_with_bullets_keeps_the_text_width(
+    tmp_path: Path,
+) -> None:
+    """A figure is drawn at its box's width and its tick labels shrink with it: a slide
+    of a title, a lead line and the figure gives it the room out to 0.75 in, one that also
+    has bullets keeps the text's margins. Under 90% of the slide's width, past which the
+    measurements of a rendered slide would take the figure for a full-bleed decoration."""
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    from generation._pptx_slides import MARGIN_IN, SLIDE_W_IN, _FIG_SLIDE_MARGIN_IN
+
+    (tmp_path / "figures").mkdir()
+    Image.new("RGB", (1500, 450), "white").save(tmp_path / "figures" / "row.png", dpi=(100, 100))
+    md = tmp_path / "slides.md"
+    md.write_text(
+        "## A figure slide\n\n**The lead line of the slide.**\n\n![](figures/row.png)\n\n---\n\n"
+        "## A slide with a bullet\n\n- One point.\n\n![](figures/row.png)\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "slides.pptx"
+    assert render_marp_to_pptx(md, out, figures_dir=tmp_path / "figures") is True
+    alone, shared = (
+        next(sh for sh in slide.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE) for slide in Presentation(str(out)).slides
+    )
+    inch = 914400
+    assert abs(alone.width / inch - (SLIDE_W_IN - 2 * _FIG_SLIDE_MARGIN_IN)) < 0.01
+    assert abs(shared.width / inch - (SLIDE_W_IN - 2 * MARGIN_IN)) < 0.01
+    assert alone.width < 0.9 * SLIDE_W_IN * inch
+    assert alone.top + alone.height <= 7.5 * inch - int(0.6 * inch) + 1
+
+
 @pytest.mark.slow
 def test_the_exported_deck_has_no_figure_over_its_text(tmp_path: Path) -> None:
     from generation._office_pdf import find_libreoffice, pptx_to_pdf
