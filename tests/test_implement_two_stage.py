@@ -254,7 +254,9 @@ async def test_implement_body_uses_outline_block_when_present(
     # The outline scaffold should have been substituted into the body
     # prompt — search for the function-signature literal.
     assert captured_prompts, "no prompt was captured"
-    body_prompt = captured_prompts[-1]
+    # The body call is the first one: the fake script above ignores
+    # FI_REPLICATE_SEED, so a seed-repair call follows it.
+    body_prompt = captured_prompts[0]
     assert "def foo() -> None:" in body_prompt
     assert "Implementation Body" in body_prompt
 
@@ -294,7 +296,9 @@ async def test_implement_body_falls_back_to_legacy_when_outline_empty(
     }
     result = await eng._node_implement(state)
     assert result["code"]
-    body_prompt = captured_prompts[-1]
+    # The first call is the implement prompt; the fake script ignores
+    # FI_REPLICATE_SEED, so a seed-repair call follows it.
+    body_prompt = captured_prompts[0]
     # Legacy prompt headline: "Implementation" (no "Body" qualifier).
     # The "Implementation Body" string MUST NOT appear in the fallback.
     assert "Implementation Body" not in body_prompt

@@ -158,7 +158,7 @@ $design_block
 $analysis_block
 
 ## Prior work
-$literature_block
+$literature_block$foundational_block
 
 ## Figures available (reference each by filename)
 $figure_list
