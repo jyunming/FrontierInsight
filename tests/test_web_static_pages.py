@@ -137,6 +137,177 @@ def test_watch_rejects_path_traversal(tmp_path: Path) -> None:
         assert client.post(f"/api/quests/{hostile}/watch").status_code in (400, 404, 422)
 
 
+class _WatcherProc:
+    """A launched watcher the test can end with an exit code."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.code: int | None = None
+
+    def poll(self) -> int | None:
+        return self.code
+
+
+@pytest.fixture
+def watcher_procs(monkeypatch: pytest.MonkeyPatch) -> list[_WatcherProc]:
+    procs: list[_WatcherProc] = []
+
+    def fake_popen(argv, **_kwargs):
+        procs.append(_WatcherProc(9100 + len(procs)))
+        return procs[-1]
+
+    monkeypatch.setattr("web.quest_launcher.subprocess.Popen", fake_popen)
+    return procs
+
+
+def _paused_on_job(client: TestClient, quest_id: str) -> Path:
+    """A quest waiting on a background job, as the engine leaves it."""
+    quest_dir = client.app.state.output_root / quest_id  # type: ignore[attr-defined]
+    (quest_dir / ".fi").mkdir(parents=True)
+    (quest_dir / ".fi" / "pending.json").write_text("{}", encoding="utf-8")
+    (quest_dir / "config.yaml").write_text("topic: x", encoding="utf-8")
+    return quest_dir
+
+
+def _watcher_log(client: TestClient, quest_id: str) -> Path:
+    root = client.app.state.output_root  # type: ignore[attr-defined]
+    return root / "_jobs" / f"{quest_id}-watch" / "launch.log"
+
+
+def test_watch_status_before_the_button_was_pressed(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    quest_dir = _paused_on_job(client, "s1")
+
+    body = client.get("/api/quests/s1/watch").json()
+
+    assert body == {
+        "quest_id": "s1", "state": "not_started", "returncode": None,
+        "last_line": "", "log_tail": [], "pending": True,
+    }
+    # ``pending`` follows .fi/pending.json: false once the quest no longer waits.
+    (quest_dir / ".fi" / "pending.json").unlink()
+    assert client.get("/api/quests/s1/watch").json()["pending"] is False
+
+
+def test_watch_status_running_shows_the_watchers_last_line(
+    tmp_path: Path, watcher_procs: list[_WatcherProc],
+) -> None:
+    client = _client(tmp_path)
+    _paused_on_job(client, "s2")
+    assert client.post("/api/quests/s2/watch").status_code == 200
+    _watcher_log(client, "s2").write_text(
+        "[watch] quest s2 is waiting on its job\n\n"
+        "[watch] 10:00:00 check 3: pending - queued\n\n",
+        encoding="utf-8",
+    )
+
+    body = client.get("/api/quests/s2/watch").json()
+
+    assert body["state"] == "running" and body["returncode"] is None
+    assert body["last_line"] == "[watch] 10:00:00 check 3: pending - queued"
+    assert body["log_tail"] == [  # blank lines are dropped
+        "[watch] quest s2 is waiting on its job",
+        "[watch] 10:00:00 check 3: pending - queued",
+    ]
+    assert body["pending"] is True
+
+
+def test_watch_status_says_the_watcher_died_and_why(
+    tmp_path: Path, watcher_procs: list[_WatcherProc],
+) -> None:
+    """The case the page used to hide: ``--watch`` exits at once (here: no
+    checkpoint) and the page kept saying "Watching"."""
+    client = _client(tmp_path)
+    _paused_on_job(client, "s3")
+    assert client.post("/api/quests/s3/watch").status_code == 200
+    error = "[FI] --watch 's3': no checkpoint at C:/x/.fi/state.sqlite"
+    _watcher_log(client, "s3").write_text(
+        "".join(f"[FI] line {i}\n" for i in range(1, 8)) + "\n" + error + "\n",
+        encoding="utf-8",
+    )
+    watcher_procs[0].code = 1
+
+    body = client.get("/api/quests/s3/watch").json()
+
+    assert body["state"] == "exited" and body["returncode"] == 1
+    assert body["last_line"] == error
+    assert len(body["log_tail"]) == 5 and body["log_tail"][-1] == error
+
+
+def test_watch_exit_code_survives_another_request_reaping_the_process(
+    tmp_path: Path, watcher_procs: list[_WatcherProc],
+) -> None:
+    """The Jobs page polls /api/jobs every 3 s, which reaps finished children.
+    The watcher's exit code must outlive that, or the quest page would find no
+    trace of the exit within seconds of it."""
+    client = _client(tmp_path)
+    _paused_on_job(client, "s4")
+    assert client.post("/api/quests/s4/watch").status_code == 200
+    watcher_procs[0].code = 3
+
+    assert client.get("/api/jobs").status_code == 200
+
+    body = client.get("/api/quests/s4/watch").json()
+    assert body["state"] == "exited" and body["returncode"] == 3
+
+
+def test_watch_status_is_unknown_when_the_server_lost_the_handle(
+    tmp_path: Path, watcher_procs: list[_WatcherProc],
+) -> None:
+    """A restarted server holds no process handle for a watcher the previous
+    one started. It may still be running; the honest answer is "unknown"."""
+    client = _client(tmp_path)
+    _paused_on_job(client, "s5")
+    assert client.post("/api/quests/s5/watch").status_code == 200
+    _watcher_log(client, "s5").write_text(
+        "[watch] 10:00:00 check 1: pending\n", encoding="utf-8",
+    )
+
+    restarted = TestClient(make_app(client.app.state.output_root))  # type: ignore[attr-defined]
+    body = restarted.get("/api/quests/s5/watch").json()
+
+    assert body["state"] == "unknown" and body["returncode"] is None
+    assert body["last_line"] == "[watch] 10:00:00 check 1: pending"
+
+
+def test_pressing_watch_again_after_it_died_shows_the_new_watcher(
+    tmp_path: Path, watcher_procs: list[_WatcherProc],
+) -> None:
+    client = _client(tmp_path)
+    _paused_on_job(client, "s6")
+    assert client.post("/api/quests/s6/watch").status_code == 200
+    watcher_procs[0].code = 1
+    assert client.get("/api/quests/s6/watch").json()["state"] == "exited"
+
+    assert client.post("/api/quests/s6/watch").status_code == 200
+
+    body = client.get("/api/quests/s6/watch").json()
+    assert body["state"] == "running" and body["returncode"] is None
+
+
+def test_watch_status_rejects_a_bad_quest_id(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    for hostile in ("bad%20id", "x%24y", "%2E%2E"):
+        assert client.get(f"/api/quests/{hostile}/watch").status_code == 400, hostile
+
+
+def test_quest_page_asks_for_the_watchers_real_status() -> None:
+    page = Path(__file__).resolve().parent.parent / "web" / "static" / "quest.html"
+    text = page.read_text(encoding="utf-8")
+    # GET (not just the POST) on the same route, on a timer, while visible.
+    assert "fetch(`/api/quests/${encodeURIComponent(questId)}/watch`)" in text
+    assert "WATCH_POLL_MS = 5000" in text
+    assert "document.hidden" in text and "visibilitychange" in text
+    # What it says: running, stopped with the exit code, unknown; the original
+    # sentence is still the message right after the button is pressed.
+    assert "'Watching: '" in text
+    assert "'Watcher stopped (exit code '" in text
+    assert "Watcher status unknown" in text
+    assert "Watching: each check is written to the quest log." in text
+    # The button comes back only once the watcher is not running.
+    assert 'id="watch-btn"' in text and "showWatchButton(" in text
+
+
 def test_resume_rejects_path_traversal(tmp_path: Path) -> None:
     client = _client(tmp_path)
     for hostile in ("../somewhere", "a/b"):
