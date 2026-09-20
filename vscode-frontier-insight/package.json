@@ -130,6 +130,10 @@
             "description": "Draft a skill from an installed library, reading its real signatures by introspection."
           },
           {
+            "name": "probe",
+            "description": "Ask the model selected in the Chat picker, from the outside, whether text FI did not send appears to be in its context (a hidden system prompt, tool definitions, a persona). Two small requests. `@fi /probe all` probes every model VS Code lists, after a confirmation that states the request count. Behavioural evidence only: vscode.lm reports no usage figures, so real overhead is not measured."
+          },
+          {
             "name": "help",
             "description": "Show the available commands."
           }

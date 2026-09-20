@@ -6342,7 +6342,15 @@ class Engine:
             results = {**(state.get("result_json") or {})}
             if intervals:
                 results["mean_over_seeds"] = intervals
-            report = numeric_oracle.check(paper_md, results)
+            # The settings the run was given (the topic's grid, the design's
+            # variables and method): a paper that prints ``R0 = 1.5`` is
+            # quoting its setup, not a result that happens to sit near one.
+            report = numeric_oracle.check(
+                paper_md, results,
+                declared=numeric_oracle.declared_numbers(
+                    state.get("design"), state.get("topic"),
+                ),
+            )
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[numeric_oracle] check failed (%s); skipping", e)
             return []
