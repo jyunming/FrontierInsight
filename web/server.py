@@ -1126,6 +1126,46 @@ def make_app(
             "quest_id": quest_id, "pid": launched.pid, "watching": True,
         })
 
+    @app.get("/api/quests/{quest_id}/watch")
+    async def watch_status(quest_id: str) -> JSONResponse:
+        """Whether the watcher started by ``POST /watch`` is still running, or
+        how it ended. Starting a process says nothing about it still being
+        there a second later (``--watch`` exits at once on a quest with no
+        checkpoint), so the quest page asks this instead of assuming.
+
+        ``state`` is ``running`` (the launcher's own process handle is alive),
+        ``exited`` (it ended; ``returncode`` is its exit code), ``unknown`` (a
+        watcher was started once, but this server no longer holds its handle,
+        so it cannot say whether it is still running), or ``not_started``.
+        ``log_tail`` is the last few non-empty lines the watcher printed;
+        ``pending`` says whether the quest is still waiting on its job."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        job_id = f"{quest_id}-watch"
+        launched = app.state.launcher.job_state(job_id)
+        log_path = (launched or {}).get("log_path") or (
+            app.state.output_root / "_jobs" / job_id / "launch.log"
+        )
+        lines = [
+            line.strip()[:400]
+            for line in _read_log_tail(log_path, n=200) if line.strip()
+        ][-5:]
+        returncode: int | None = None
+        if launched is not None:
+            state = "running" if launched["alive"] else "exited"
+            returncode = launched["returncode"]
+        else:
+            state = "unknown" if log_path.is_file() else "not_started"
+        return JSONResponse({
+            "quest_id": quest_id,
+            "state": state,
+            "returncode": returncode,
+            "last_line": lines[-1] if lines else "",
+            "log_tail": lines,
+            "pending": (quest_root / ".fi" / "pending.json").is_file(),
+        })
+
     @app.post("/api/quests/{quest_id}/generate")
     async def generate_artifact(quest_id: str, kind: str) -> JSONResponse:
         """Generate ONE additional output format (paper_pdf / slides / poster
