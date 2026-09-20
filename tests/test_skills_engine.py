@@ -406,3 +406,7 @@ def test_bundled_files_are_named_but_never_inlined(
     assert "SENTINEL_REFERENCE_BODY" not in block
     # And the model is told where they are, or naming them is useless.
     assert str(d) in block
+    # The listed paths are relative to the skill's folder, but the experiment runs
+    # in the quest folder and on the interpreter running it, not on `python` from PATH.
+    assert "working directory is the quest folder, not the skill's folder" in block
+    assert "launch it with `sys.executable`" in block and "not the bare command `python`" in block
