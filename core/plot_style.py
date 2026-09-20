@@ -180,6 +180,12 @@ RECORDS_DIRNAME = "figure_records"
 # On each savefig this writes <stem>.json with every Axes' title, labels, y
 # scale and limits, and each labelled series' range and whether it shows on
 # that axis ("yes", "flat" under 1% of the axis span, or "outside the axis").
+# Its "layout" lists what the saved canvas draws over what a reader needs: a
+# suptitle over a panel title (a real quest's three-panel figure), or a legend
+# over its data (a real quest's legend sat on the line it named). Both are
+# measured on the canvas after the figure is saved, since only the drawn
+# positions can say so; a record without "layout" was not measured, and one
+# with an empty list was measured and is clean.
 # Beside it, <stem>.seed<k>.json keeps the run's lines themselves (points and
 # style, per panel, and whether the panel holds anything but lines and error
 # bars), which the engine uses to redraw a figure as the mean over the seeds.
@@ -191,6 +197,11 @@ try:
     if _fi_records:
         import json as _fi_json
         import math as _fi_math
+        import time as _fi_time
+        import numpy as _fi_np
+        from matplotlib.collections import LineCollection as _FiLineCollection
+        from matplotlib.collections import PathCollection as _FiPathCollection
+        from matplotlib.collections import PolyCollection as _FiPolyCollection
         from matplotlib.figure import Figure as _FiFigure
 
         def _fi_values(values):
@@ -283,6 +294,23 @@ try:
                 return {}, set()
             return names, pieces
 
+        def _fi_collection_ys(ax, artist):
+            # The y values a collection draws, in data units: a scatter's points, the
+            # ends of the segments of hlines / vlines, the corners of a fill_between
+            # band. Only a scatter has offsets that say where it is: every other
+            # collection reports [0, 0], which recorded an hlines drawn at 0.94 as a
+            # series at 0. None for a collection read no such way (a mesh, a contour,
+            # one drawn in axes coordinates), which is left out rather than recorded.
+            if isinstance(artist, _FiPathCollection):
+                return _fi_values(point[1] for point in artist.get_offsets())
+            if artist.get_transform() != ax.transData:
+                return None
+            if isinstance(artist, _FiLineCollection):
+                return _fi_values(point[1] for segment in artist.get_segments() for point in segment)
+            if isinstance(artist, _FiPolyCollection):
+                return _fi_values(point[1] for path in artist.get_paths() for point in path.vertices)
+            return None
+
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
@@ -306,14 +334,19 @@ try:
                     if hasattr(artist, "get_ydata"):
                         ys = _fi_values(artist.get_ydata())
                     else:
-                        ys = _fi_values(point[1] for point in artist.get_offsets())
+                        ys = _fi_collection_ys(ax, artist)
                 except Exception:
+                    continue
+                if ys is None:
                     continue
                 style, marker = _fi_style(artist), _fi_marker(artist)
                 if label and not label.startswith("_"):
                     groups.append((label, style, marker, ys))
                 elif style is not None and (style[0] == "points" or style[3] not in ("None", "", " ")):
-                    unlabelled.append((style, marker, ys))
+                    # Only markers join a series drawn by several calls: a band or a
+                    # segment collection is not one of its points.
+                    if hasattr(artist, "get_ydata") or isinstance(artist, _FiPathCollection):
+                        unlabelled.append((style, marker, ys))
             for style, marker, ys in unlabelled:
                 same_style = [g for g in groups if g[1] == style]
                 same_marker = [g for g in groups if marker is not None and g[2] == marker]
@@ -422,13 +455,137 @@ try:
                 "axes": [_fi_panel(ax) for ax in fig.get_axes()],
             }
 
+        # A suptitle covering at least this share of a panel title is drawn over it.
+        _FI_TITLE_SHARE = 0.2
+        # A legend's box is measured this many pixels in from its frame, so a line
+        # that only grazes the frame is not "under" it.
+        _FI_LEGEND_INSET = 3
+
+        def _fi_share(a, b):
+            # The part of the smaller of two boxes that the other one covers, 0 to 1.
+            x0, y0, x1, y1 = max(a.x0, b.x0), max(a.y0, b.y0), min(a.x1, b.x1), min(a.y1, b.y1)
+            smaller = min(a.width * a.height, b.width * b.height)
+            if x1 <= x0 or y1 <= y0 or smaller <= 0:
+                return 0.0
+            return (x1 - x0) * (y1 - y0) / smaller
+
+        def _fi_titles(ax):
+            # The house style puts titles on the left, so all three are read.
+            texts = (ax.title, getattr(ax, "_left_title", None), getattr(ax, "_right_title", None))
+            return [t for t in texts if t is not None and t.get_visible() and t.get_text().strip()]
+
+        def _fi_length_inside(a, b, box):
+            # Total length of the segments a[i] -> b[i] that lie inside box (pixels):
+            # Liang-Barsky, over every segment at once. NaN ends draw nothing.
+            np = _fi_np
+            x0, y0, x1, y1 = box
+            d = b - a
+            t0, t1 = np.zeros(len(a)), np.ones(len(a))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                for p, q in ((-d[:, 0], a[:, 0] - x0), (d[:, 0], x1 - a[:, 0]),
+                             (-d[:, 1], a[:, 1] - y0), (d[:, 1], y1 - a[:, 1])):
+                    r = q / p
+                    t0 = np.where(p < 0, np.maximum(t0, r), t0)
+                    t1 = np.where(p > 0, np.minimum(t1, r), t1)
+                    t1 = np.where((p == 0) & (q < 0), -1.0, t1)
+                inside = np.clip(t1 - t0, 0.0, None) * np.hypot(d[:, 0], d[:, 1])
+            return float(np.nansum(np.where(np.isfinite(inside), inside, 0.0)))
+
+        def _fi_under(ax, artist, box, axes_box):
+            # What a data line or a scatter has inside box, on the canvas:
+            # (the length of its line in pixels, the number of its markers or points).
+            np = _fi_np
+            if not artist.get_visible():
+                return 0.0, 0
+            if artist.get_clip_on():
+                # Outside the axes a line is clipped, so nothing of it is drawn there.
+                box = (max(box[0], axes_box.x0), max(box[1], axes_box.y0),
+                       min(box[2], axes_box.x1), min(box[3], axes_box.y1))
+                if box[2] <= box[0] or box[3] <= box[1]:
+                    return 0.0, 0
+            if hasattr(artist, "get_xydata"):
+                if artist.get_transform() != ax.transData:
+                    return 0.0, 0
+                xy = np.asarray(artist.get_xydata(), dtype=float)
+                if len(xy) > 20000:
+                    xy = xy[:: -(-len(xy) // 20000)]
+                if len(xy) == 0:
+                    return 0.0, 0
+                pts = ax.transData.transform(xy)
+                joined = str(artist.get_linestyle()) not in ("None", "none", "", " ")
+                marked = str(artist.get_marker()) not in ("None", "none", "", " ")
+                length = _fi_length_inside(pts[:-1], pts[1:], box) if joined and len(pts) > 1 else 0.0
+                hit = (pts[:, 0] >= box[0]) & (pts[:, 0] <= box[2]) & (pts[:, 1] >= box[1]) & (pts[:, 1] <= box[3])
+                return length, int(hit.sum()) if (marked or len(pts) == 1) else 0
+            if isinstance(artist, _FiPathCollection):
+                offsets = np.ma.filled(np.ma.asarray(artist.get_offsets(), dtype=float), np.nan)
+                if len(offsets) == 0:
+                    return 0.0, 0
+                pts = artist.get_offset_transform().transform(offsets)
+                hit = (pts[:, 0] >= box[0]) & (pts[:, 0] <= box[2]) & (pts[:, 1] >= box[1]) & (pts[:, 1] <= box[3])
+                return 0.0, int(hit.sum())
+            return 0.0, 0
+
+        def _fi_layout(fig):
+            # Text drawn over text, and a legend drawn over the data, measured on the
+            # canvas the figure was saved from. None when it could not be measured.
+            found = []
+            try:
+                try:
+                    fig.canvas.draw()
+                    renderer = fig.canvas.get_renderer()
+                except Exception:
+                    renderer = fig._get_renderer()
+                suptitle = getattr(fig, "_suptitle", None)
+                if suptitle is not None and suptitle.get_visible() and suptitle.get_text().strip():
+                    box = suptitle.get_window_extent(renderer)
+                    for ax in fig.get_axes():
+                        for text in _fi_titles(ax):
+                            share = _fi_share(box, text.get_window_extent(renderer))
+                            if share >= _FI_TITLE_SHARE:
+                                found.append({"check": "title_overlap", "text": suptitle.get_text(),
+                                              "over": text.get_text(), "share": round(share, 2)})
+                for ax in fig.get_axes():
+                    legend = ax.get_legend()
+                    if legend is None or not legend.get_visible():
+                        continue
+                    lb = legend.get_window_extent(renderer)
+                    inset = _FI_LEGEND_INSET
+                    if lb.width <= 2 * inset or lb.height <= 2 * inset:
+                        continue
+                    inner = (lb.x0 + inset, lb.y0 + inset, lb.x1 - inset, lb.y1 - inset)
+                    axes_box = ax.get_window_extent(renderer)
+                    line_px, points = 0.0, 0
+                    for artist in list(ax.get_lines()) + list(ax.collections):
+                        try:
+                            length, count = _fi_under(ax, artist, inner, axes_box)
+                        except Exception:
+                            continue
+                        line_px += length
+                        points += count
+                    if line_px > 0 or points > 0:
+                        found.append({"check": "legend_over_data",
+                                      "axes_title": " ".join(t.get_text() for t in _fi_titles(ax)),
+                                      "legend": [t.get_text() for t in legend.get_texts()],
+                                      "line_px": round(line_px, 1), "points": points})
+            except Exception:
+                return None
+            return found
+
         _fi_savefig = _FiFigure.savefig
 
         def _fi_recording_savefig(self, fname, *args, **kwargs):
+            started = _fi_time.perf_counter()
             result = _fi_savefig(self, fname, *args, **kwargs)
+            saved_in = _fi_time.perf_counter() - started
             try:
                 name = _fi_os.path.basename(_fi_os.fspath(fname))
                 record = {"file": name, "axes": [_fi_axes(ax) for ax in self.get_axes()]}
+                # Measuring draws the figure once more, so a figure that was slow to
+                # save is not measured.
+                layout = _fi_layout(self) if saved_in < 10 else None
+                if layout is not None:
+                    record["layout"] = layout
                 _fi_os.makedirs(_fi_records, exist_ok=True)
                 stem = _fi_os.path.join(_fi_records, _fi_os.path.splitext(name)[0])
                 with open(stem + ".json", "w", encoding="utf-8") as handle:
