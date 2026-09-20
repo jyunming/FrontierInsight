@@ -38,8 +38,9 @@ from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 # ``pdflatex`` + ``\usepackage[utf8]{inputenc}`` can't handle on its
 # own. Maps each char to a LaTeX replacement that works in BOTH text
 # and math contexts (``\ensuremath`` flips into math mode if
-# necessary) — except the two dashes, which are ligatures of the TEXT
-# fonts and mean something else in math (see ``_LATEX_MATH_OVERRIDES``).
+# necessary) — except the two dashes (ligatures of the TEXT fonts) and the
+# super/subscript glyphs (a double script when two meet), which are set
+# differently INSIDE a math span (see ``_LATEX_MATH_OVERRIDES``).
 # This map is the ONLY protection for these glyphs — the
 # paper templates load ``inputenc`` but do not currently define
 # ``\DeclareUnicodeCharacter`` mappings, so any glyph that escapes
@@ -172,19 +173,49 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
 # char destination strings transparently.
 _LATEX_UNICODE_TRANSLATOR = str.maketrans(_LATEX_UNICODE_REPLACEMENTS)
 
-# INSIDE a math span, ``--`` and ``---`` are not dashes: they are two and three
-# minus signs ("0.322 - -0.338" for a range written ``$0.322–0.338$``). A dash is
-# a ligature of the text fonts, so in math it is set by ``\text{}``. Of the map
-# above these are the only entries that mean something else in math. The
-# ``\ensuremath`` ones are already math, the empty strings and the spaces vanish
-# in it, and a curly quote is left as the map has it: bare in math it is a
-# prime (``f’(x)``), inside a ``\text{}`` it is a quote, and both are what the
-# writer typed. A ``--`` the writer typed in math stays as written.
+# Two kinds of entry above mean something else INSIDE a math span.
+#
+# * ``--`` and ``---`` are not dashes there: they are two and three minus signs
+#   ("0.322 - -0.338" for a range written ``$0.322–0.338$``). A dash is a
+#   ligature of the text fonts, so in math it is set by ``\text{}``.
+# * ``\ensuremath{^{-}}`` is a bare ``^{-}`` in math, so two script glyphs in a
+#   row (``10⁻³``, ``x₁₂``) are a double script and stop the compile. In text
+#   each is its own ``$..$`` and nothing happens. In math a run of them is set
+#   as ONE script (``10^{-3}``), which is what the writer meant.
+#
+# The rest of the map is right in math: the other ``\ensuremath`` entries are
+# math already, the empty strings and the spaces vanish in it, and a curly quote
+# is left as the map has it (bare in math it is a prime, ``f’(x)``; inside a
+# ``\text{}`` it is a quote; both are what the writer typed). A ``--`` the writer
+# typed in math stays as written.
 _LATEX_MATH_OVERRIDES: dict[str, str] = {
     "—": r"\text{---}",   # — em dash
     "–": r"\text{--}",    # – en dash
 }
 _LATEX_MATH_TRANSLATOR = str.maketrans({**_LATEX_UNICODE_REPLACEMENTS, **_LATEX_MATH_OVERRIDES})
+
+# The super/subscript entries of the map, read off it: glyph -> ("^" or "_", what
+# goes in the braces). ``°`` is one of them (``^{\circ}``).
+_SCRIPT_GLYPH_LATEX_RE = re.compile(r"\\ensuremath\{([\^_])\{(.*)\}\}")
+_SCRIPT_GLYPHS: dict[str, tuple[str, str]] = {
+    glyph: (script.group(1), script.group(2))
+    for glyph, latex in _LATEX_UNICODE_REPLACEMENTS.items()
+    if (script := _SCRIPT_GLYPH_LATEX_RE.fullmatch(latex))
+}
+# Two or more glyphs of the same kind in a row.
+_SCRIPT_GLYPH_RUN_RE = re.compile("|".join(
+    "[" + re.escape("".join(g for g, (kind, _) in _SCRIPT_GLYPHS.items() if kind == wanted)) + "]{2,}"
+    for wanted in "^_"
+))
+
+
+def _script_glyph_runs_as_one_script(math: str) -> str:
+    """``10⁻³`` in math as ``10\\ensuremath{^{-3}}``: one script, not two."""
+    def merged(m: "re.Match[str]") -> str:
+        kind = _SCRIPT_GLYPHS[m.group(0)[0]][0]
+        return "\\ensuremath{" + kind + "{" + "".join(_SCRIPT_GLYPHS[c][1] for c in m.group(0)) + "}}"
+
+    return _SCRIPT_GLYPH_RUN_RE.sub(merged, math)
 
 
 def _sanitize_unicode_for_latex(markdown: str) -> str:
@@ -202,11 +233,13 @@ def _sanitize_unicode_for_latex(markdown: str) -> str:
 
     A math span (``$..$``, ``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, found by
     pandoc's own rules) takes :data:`_LATEX_MATH_OVERRIDES` for the dashes, so
-    ``$0.322–0.338$`` prints a dash between the numbers. Code, fenced or
-    inline, is not math and is rewritten as prose is: a raw glyph left in it
-    would still stop pdflatex."""
+    ``$0.322–0.338$`` prints a dash between the numbers, and sets a run of
+    super/subscript glyphs as one script (``$10⁻³$`` is ``10^{-3}``). Code,
+    fenced or inline, is not math and is rewritten as prose is: a raw glyph
+    left in it would still stop pdflatex."""
     return "".join(
-        segment.translate(_LATEX_MATH_TRANSLATOR if is_math else _LATEX_UNICODE_TRANSLATOR)
+        _script_glyph_runs_as_one_script(segment).translate(_LATEX_MATH_TRANSLATOR)
+        if is_math else segment.translate(_LATEX_UNICODE_TRANSLATOR)
         for segment, is_math in _split_math_segments(markdown)
     )
 
