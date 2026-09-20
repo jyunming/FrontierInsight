@@ -44,6 +44,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from . import paper_patch
 from . import stats as _stats
 from .config import (
     Config,
@@ -255,6 +256,11 @@ class QuestState(TypedDict, total=False):
     # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
     evidence_broaden_count: int
     paper_md: str
+    # A fingerprint of the study the current draft was written from (design,
+    # analysis, results, figures, cross-check and the user's feedback). A revise
+    # edits the flagged passages of that draft only while the fingerprint still
+    # matches, i.e. while nothing the paper is based on has been run again.
+    paper_basis: str
     # Claim grounding: which paper claims trace to evidence
     # (experiment / citation / unsupported), from the claim_check node.
     claim_grounding: dict[str, Any]
@@ -5908,12 +5914,11 @@ class Engine:
             patch["evidence_broaden_count"] = broadened + 1
         return patch
 
-    async def _node_write(self, state: QuestState) -> QuestState:
-        persona_block = self._resolve_write_persona(state)
-        self._log.info(
-            "[write] authoring paper.md (persona=%s)",
-            persona_block.split("\n", 1)[0][:80] if persona_block else "default",
-        )
+    async def _write_whole_paper(self, state: QuestState, persona_block: str) -> str:
+        """The paper's markdown as the writer gives it: the whole paper, written
+        from the study, with the review of an earlier draft (when there is one)
+        in the prompt. A first draft always comes from here, and so does a revise
+        that :meth:`_patch_flagged_passages` cannot answer with edits."""
         # When the evidence gate judged the evidence thin (insufficient,
         # or "broaden" with the broaden budget exhausted), hand the writer
         # an explicit note so the paper frames its limits honestly instead
@@ -5972,6 +5977,21 @@ class Engine:
                 f"like a provider message (a usage limit, an expired login), fix "
                 f"the provider and resume the quest."
             )
+        return markdown
+
+    async def _node_write(self, state: QuestState) -> QuestState:
+        persona_block = self._resolve_write_persona(state)
+        self._log.info(
+            "[write] authoring paper.md (persona=%s)",
+            persona_block.split("\n", 1)[0][:80] if persona_block else "default",
+        )
+        # A revise whose every must-fix hit names a passage edits those passages
+        # of the earlier draft and leaves the rest as it was; anything else
+        # (a first draft, a hit about the whole paper, edits the engine cannot
+        # apply) writes the whole paper.
+        markdown = await self._patch_flagged_passages(state, persona_block)
+        if markdown is None:
+            markdown = await self._write_whole_paper(state, persona_block)
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -6026,7 +6046,102 @@ class Engine:
         # resume, ``user_pauses_fired`` carries "before_review" and the
         # gate falls through to review.
         self._maybe_pause_for_user_input(state, "before_review")
-        return {"paper_md": str(paper_path), "literature": literature}
+        return {
+            "paper_md": str(paper_path), "literature": literature,
+            "paper_basis": _paper_basis(state),
+        }
+
+    async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
+        """The earlier draft with the passages the review named edited, or
+        ``None`` when this round writes the whole paper.
+
+        Eligible when the review's must-fix hits all name one passage of the
+        paper (an unsupported claim, a figure caption, a number nothing accounts
+        for, a mislabelled statistic), the earlier draft is on disk, and nothing
+        it was written from has been run again since (``paper_basis``). The model
+        gets that draft and only those passages and answers with
+        ``find``/``replace`` edits; :mod:`core.paper_patch` applies each edit only
+        where its ``find`` occurs exactly once and leaves every other character
+        as it was. The source lists are then rebuilt from the citations in the
+        edited text by the same step a whole paper goes through.
+
+        A first draft, a hit about the whole paper (``over_page_limit``,
+        ``figure_missing``), a study that changed, a reply that is not usable
+        edits, and an edit that cannot be applied all return ``None``, and the log
+        says which."""
+        review = state.get("review") or {}
+        hits = [str(h).strip() for h in review.get("must_flag_hits") or [] if str(h).strip()]
+        if not hits:
+            return None  # a first draft, or a revise with no hit to answer
+        previous = ""
+        try:
+            if state.get("paper_md"):
+                previous = Path(str(state["paper_md"])).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            previous = ""
+        grounding = state.get("claim_grounding") or {}
+        claims = [
+            {"claim": str(c.get("claim") or ""), "evidence": str(c.get("evidence") or "")}
+            for c in grounding.get("claims") or []
+            if isinstance(c, dict) and c.get("basis") == "unsupported"
+        ] or [{"claim": str(c), "evidence": ""} for c in _review_items(grounding.get("unsupported"))]
+        start = _SOURCE_LIST_HEADING_RE.search(previous)
+        end = start.start() if start else len(previous)
+        reason = ""
+        passages: list[paper_patch.Passage] = []
+        if not previous.strip():
+            reason = "there is no earlier draft on disk to edit"
+        elif state.get("paper_basis") != _paper_basis(state):
+            reason = "the study the draft was written from has been run again since"
+        elif len(previous) > _PAPER_PROMPT_CHARS:
+            reason = f"the draft is longer than the {_PAPER_PROMPT_CHARS:,} characters a model reads"
+        else:
+            passages, reason = paper_patch.plan_passages(
+                previous, end,
+                hits=[(_hit_name(h), h) for h in hits],
+                claims=claims,
+                captions=_review_items(review.get("figure_caption_warnings")),
+            )
+        if reason:
+            self._log.info("[write] writing the whole paper again: %s", reason)
+            return None
+        located = sum(1 for p in passages if p.located)
+        prompt = self._prompts["write_patch"].substitute(
+            persona_block=persona_block,
+            topic=state["topic"],
+            analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
+            literature_block=_format_lit_from_state(
+                state, audience=self.config.output.audience, **self._lit_kwargs(state),
+            ),
+            passages_block=paper_patch.format_passages(passages),
+            paper_block=previous,
+        )
+        self._log.info(
+            "[write] editing the earlier draft: %d passage(s) named by the review, %d found in it",
+            len(passages), located,
+        )
+        try:
+            reply = await self._chat(prompt, node="write.patch")
+        except Exception as e:  # noqa: BLE001 - the whole-paper call below is what a real outage stops
+            self._log.warning(
+                "[write] the call for edits failed (%s: %s); writing the whole paper again",
+                type(e).__name__, str(e)[:200],
+            )
+            return None
+        try:
+            patched = paper_patch.apply_edits(previous, end, paper_patch.parse_edits(reply))
+        except paper_patch.PatchError as e:
+            self._log.warning(
+                "[write] the edits could not be used (%s); writing the whole paper again. "
+                "The reply began: %r", e, " ".join(str(reply).split())[:160],
+            )
+            return None
+        self._log.info(
+            "[write] applied %d edit(s) to the earlier draft (%d characters replaced by %d, %d unchanged "
+            "as given); every other character of the paper is as it was",
+            patched.applied, patched.removed_chars, patched.added_chars, patched.ignored,
+        )
+        return patched.text
 
     async def _node_claim_check(self, state: QuestState) -> QuestState:
         """Ground each substantive claim in the written paper to evidence — the
@@ -8511,6 +8626,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "evidence_gate",        # weigh evidence sufficiency before write
         "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "write", "review",
+        "write_patch",      # a revise for flagged passages: edits, not a new paper
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
@@ -10711,6 +10827,24 @@ def _review_items(value: Any) -> list[str]:
     string, or nothing."""
     items = value if isinstance(value, list) else [value] if value else []
     return [s for s in (str(i).strip() for i in items) if s]
+
+
+# What the writer is given about the study, apart from the review and the source
+# lists. While none of it has changed, an earlier draft still describes the
+# study and can be edited; once the design, the run or the analysis has been done
+# again, it cannot.
+_PAPER_BASIS_KEYS = (
+    "design", "analysis", "result_json", "figures", "figure_records", "cross_check",
+    "feedback_history",
+)
+
+
+def _paper_basis(state: QuestState) -> str:
+    """A fingerprint of the study a draft is written from (``_PAPER_BASIS_KEYS``)."""
+    import hashlib
+
+    basis = {key: state.get(key) for key in _PAPER_BASIS_KEYS}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
 def _format_review_for_writer(state: QuestState) -> str:
