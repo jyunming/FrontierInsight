@@ -280,6 +280,163 @@ def test_bootstrap_joins_a_series_drawn_one_point_at_a_time(tmp_path) -> None:
     assert [(s["label"], s["min"], s["max"]) for s in axes["series"]] == [("a", 0.1, 0.1), ("b", 0.2, 0.2)]
 
 
+def test_bootstrap_records_the_values_of_hlines_vlines_and_bands(tmp_path) -> None:
+    """A real quest drew "Large-N final-size root" with ``ax.hlines`` at 0.94 and
+    the record said it lay at 0. The offsets of a segment collection or a
+    fill_between band are always [0, 0]; where they are drawn is in their
+    segments and their polygons."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([0, 1, 2], [0.1, 0.5, 0.9], label='line')\n"
+        "ax.hlines(0.94, 0, 2, linestyle=':', label='root')\n"
+        "ax.hlines(0.0, 0, 2, label='zero')\n"
+        "ax.vlines(1.0, 0.2, 0.6, label='marker')\n"
+        "ax.fill_between([0, 1, 2], [0.3, 0.4, 0.5], [0.6, 0.7, 0.8], alpha=0.2, label='band')\n"
+        "ax.scatter([1.0], [0.5], label='dot')\n"
+        # In axes coordinates the numbers are fractions of the axes, not data; and a
+        # mesh has no y values of its own: neither is a series of this figure.
+        "ax.vlines(0.5, 0, 1, transform=ax.get_xaxis_transform(), label='across the axes')\n"
+        "ax.pcolormesh([[0.0, 1.0], [0.0, 1.0]], label='mesh')\n"
+        "ax.set_ylim(0, 1)\n"
+        "fig.savefig('collections.png')\n"
+        # A band drawn in the log axis: only its positive corners count.
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.set_yscale('log'); ax2.fill_between([0, 1], [1e-3, 1e-2], [1e-1, 1.0], label='band')\n"
+        "ax2.hlines(1e-2, 0, 1, label='floor'); fig2.savefig('log.png')\n"
+        # A band drawn in the colour of a labelled scatter is not one of its points.
+        "fig3, ax3 = plt.subplots()\n"
+        "ax3.scatter([0.5], [0.5], color='C0', alpha=0.2, label='pts')\n"
+        "ax3.fill_between([0, 1], [0.6, 0.6], [0.9, 0.9], color='C0', alpha=0.2)\n"
+        "fig3.savefig('join.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    (axes,) = json.loads((records / "collections.json").read_text(encoding="utf-8"))["axes"]
+    series = {s["label"]: (s["min"], s["max"], s["shows"]) for s in axes["series"]}
+    assert series == {
+        "line": (0.1, 0.9, "yes"),
+        "root": (0.94, 0.94, "flat"),
+        "zero": (0.0, 0.0, "flat"),
+        "marker": (0.2, 0.6, "yes"),
+        "band": (0.3, 0.8, "yes"),
+        "dot": (0.5, 0.5, "yes"),
+    }
+    (axes,) = json.loads((records / "log.json").read_text(encoding="utf-8"))["axes"]
+    series = {s["label"]: (s["min"], s["max"], s["shows"]) for s in axes["series"]}
+    assert series == {"band": (1e-3, 1.0, "yes"), "floor": (1e-2, 1e-2, "flat")}
+    (axes,) = json.loads((records / "join.json").read_text(encoding="utf-8"))["axes"]
+    assert [(s["label"], s["min"], s["max"]) for s in axes["series"]] == [("pts", 0.5, 0.5)]
+
+
+def _layout_records(tmp_path, probe: str):
+    """Run ``probe`` under the bootstrap, as the executor does, and return a
+    function from a saved figure's stem to its layout findings."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    out = subprocess.run([sys.executable, "-c", "import matplotlib; matplotlib.use('Agg')\n" + probe],
+                         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr
+
+    def layout(stem: str) -> list[dict]:
+        return json.loads((records / f"{stem}.json").read_text(encoding="utf-8"))["layout"]
+
+    return layout
+
+
+def test_bootstrap_records_a_suptitle_drawn_over_a_panel_title(tmp_path) -> None:
+    """A real quest's three-panel figure: a short, wide figure with a suptitle
+    and no room made for it, so it covers the middle panel's title."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(1, 3, sharey=True, figsize=(12, 4))\n"
+        "for ax, n in zip(axes, (100, 1000, 5000)):\n"
+        "    ax.hist([0.0, 0.0, 0.6, 0.62], bins=5); ax.set_title(f'N = {n}')\n"
+        "plt.suptitle('Final Size Distribution for R0 = 1.5')\n"
+        "fig.savefig('titles.png')\n"
+        # The same figure with the room made: nothing is drawn over anything.
+        "fig2, axes2 = plt.subplots(1, 3, sharey=True, figsize=(12, 4))\n"
+        "for ax, n in zip(axes2, (100, 1000, 5000)):\n"
+        "    ax.hist([0.0, 0.0, 0.6, 0.62], bins=5); ax.set_title(f'N = {n}')\n"
+        "fig2.suptitle('Final Size Distribution for R0 = 1.5'); fig2.subplots_adjust(top=0.76)\n"
+        "fig2.savefig('room.png')\n"
+    ))
+    found = layout("titles")
+    assert found and {f["check"] for f in found} == {"title_overlap"}
+    assert "N = 1000" in {f["over"] for f in found}
+    assert all(f["text"] == "Final Size Distribution for R0 = 1.5" and f["share"] >= 0.2 for f in found)
+    assert layout("room") == []
+
+
+def test_bootstrap_records_a_legend_drawn_over_the_lines_it_names(tmp_path) -> None:
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        # A legend placed where the lines run.
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([0, 1], [0, 1], label='rising'); ax.plot([0, 1], [0.5, 0.5], label='level')\n"
+        "ax.legend(loc='center'); fig.savefig('covered.png')\n"
+        # A legend in an empty corner, with a title and no suptitle.
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.plot([0, 1], [0, 0.2], label='low'); ax2.set_ylim(0, 1)\n"
+        "ax2.legend(loc='upper left'); ax2.set_title('Clean'); fig2.savefig('clean.png')\n"
+    ))
+    (found,) = layout("covered")
+    assert found["check"] == "legend_over_data" and found["legend"] == ["rising", "level"]
+    assert found["line_px"] > 0
+    assert layout("clean") == []
+
+
+def test_bootstrap_records_a_legend_drawn_over_scatter_points(tmp_path) -> None:
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.scatter([0.1, 0.5, 0.9], [0.1, 0.5, 0.9], label='runs'); ax.set_xlim(0, 1); ax.set_ylim(0, 1)\n"
+        "ax.legend(loc='center'); fig.savefig('covered.png')\n"
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.scatter([0.1, 0.5, 0.9], [0.1, 0.5, 0.9], label='runs'); ax2.set_xlim(0, 1); ax2.set_ylim(0, 1)\n"
+        "ax2.legend(loc='upper left'); fig2.savefig('clean.png')\n"
+    ))
+    (found,) = layout("covered")
+    assert found["check"] == "legend_over_data" and found["legend"] == ["runs"] and found["points"] >= 1
+    assert layout("clean") == []
+
+
+def test_bootstrap_measures_a_legend_on_a_log_axis_where_it_is_drawn(tmp_path) -> None:
+    """On a log-log axis a diagonal line is still a diagonal: the legend is
+    measured in pixels, not in data units. Data that lies past the axis limits
+    is clipped, so a legend beside the axes has nothing under it."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.loglog([1, 10, 100], [1, 10, 100], label='power law'); ax.legend(loc='center'); fig.savefig('covered.png')\n"
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.loglog([1, 10, 100], [1, 10, 100], label='power law'); ax2.legend(loc='upper left')\n"
+        "fig2.savefig('clean.png')\n"
+        # The line runs on past x = 5, where it is clipped; the legend sits there.
+        "fig3, ax3 = plt.subplots()\n"
+        "ax3.plot([0, 10], [0, 10], label='a'); ax3.set_xlim(0, 5)\n"
+        "ax3.legend(loc='center left', bbox_to_anchor=(1.02, 0.5)); fig3.savefig('beside.png')\n"
+    ))
+    assert [f["check"] for f in layout("covered")] == ["legend_over_data"]
+    assert layout("clean") == []
+    assert layout("beside") == []
+
+
 def test_bootstrap_records_nothing_without_a_records_folder(tmp_path) -> None:
     pytest.importorskip("matplotlib")
     boot_dir = write_boot(tmp_path, "latex")
