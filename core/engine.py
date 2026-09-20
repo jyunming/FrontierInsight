@@ -444,9 +444,10 @@ class Engine:
         self._log = _quest_logger(self.quest_id, self.fi_dir)
         # Skills other agents installed are read where they are. Which folders
         # is this quest's own setting, held here and passed to every lookup, so
-        # quests sharing a process (--fleet) never see one another's. The
-        # commands that run without a config (--skills, --approve-skill) pass
-        # none and see the known folders and the environment override instead.
+        # quests sharing a process (--fleet) never see one another's. The skill
+        # commands (--skills, --approve-skill, ...) build the same object from
+        # ``--config <this quest's YAML>``; without it they pass none and see the
+        # known folders and the environment override instead.
         from core.skills import ExternalSkillDirs
         self._skill_dirs = ExternalSkillDirs.of(
             config.engine.skills_dirs, scan_known=config.engine.skills_scan_known_dirs,
@@ -6058,7 +6059,9 @@ class Engine:
             self._log.info(
                 "[skills] found %d skill(s) in %d folder(s) of other agents; none is "
                 "approved yet, so they are not candidates (`python launch.py --skills` "
-                "lists them, `--approve-skill <name>` approves one)",
+                "lists them, `--approve-skill <name>` approves one; add `--config "
+                "<this quest's YAML>` to see those in a folder its engine.skills_dirs "
+                "names)",
                 len(never_asked), len(folders),
             )
 
@@ -11148,7 +11151,9 @@ def _raise_if_required_skills_unusable(
             + "; ".join(problems)
             + ". An external or newly written skill is approved one at a time: "
             "python launch.py --approve-skill <name> --approve-as <you> "
-            "(--skills lists them and their status). Or remove the name."
+            "(--skills lists them and their status). For a skill that lives in a "
+            "folder this quest's engine.skills_dirs names, add --config <this "
+            "quest's YAML> to those commands. Or remove the name."
         )
 
 

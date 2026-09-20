@@ -861,7 +861,9 @@ class EngineConfig(BaseModel):
     # a folder whose sub-folders hold a SKILL.md. You only need this for a folder
     # FI would not look in itself. An external skill has no FI self-test, so it is
     # loadable only after a person approves its exact content (edit it and the
-    # approval lapses).
+    # approval lapses). ``python launch.py --config <this YAML> --approve-skill
+    # NAME --approve-as YOU`` finds a skill that lives only in one of these
+    # folders (likewise --skills, --why-skills, --scan-skill, --revoke-skill).
     skills_dirs: list[str] = Field(default_factory=list)
     # FI looks for other agents' skills by itself, in the usual places on Linux,
     # macOS and Windows (tool folders in the home directory and their plugin

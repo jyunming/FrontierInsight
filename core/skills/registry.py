@@ -242,9 +242,13 @@ class ExternalSkillDirs:
     which the last engine to start decided for all of them: an earlier quest
     lost its own skills, or found and used a skill from a folder it never named.
 
-    Commands that run without a config (``--skills``, ``--approve-skill``, the
-    web skills page) pass none, and get the default: no folder named, the usual
-    places searched.
+    A caller with no quest config of its own (the web skills page, the VSCode
+    chat panel, and ``--skills`` / ``--why-skills`` / ``--scan-skill`` /
+    ``--approve-skill`` / ``--revoke-skill`` given no ``--config``) passes none,
+    and gets the default: no folder named, the usual places searched. Those
+    commands given ``--config quest.yaml`` build this from that quest's own
+    ``engine.skills_dirs`` / ``engine.skills_scan_known_dirs``, exactly as its
+    Engine does, so they find the skills that quest would.
     """
 
     dirs: tuple[Path, ...] = ()

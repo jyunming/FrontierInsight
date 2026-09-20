@@ -370,6 +370,7 @@ def render_selection_report(
     catalogue: Catalogue,
     sel: "Selection",
     near: list[SkillState],
+    approve_flags: str = "",
 ) -> str:
     """Human-readable account of what selection decided and why.
 
@@ -377,6 +378,11 @@ def render_selection_report(
     afterwards. Without it the reasoning exists only in a log line that
     scrolls away, and a skill can sit unapproved indefinitely while every
     quest quietly does without it.
+
+    ``approve_flags`` is appended to the approve command shown for the skills
+    that were not available: ``--why-skills --config quest.yaml`` passes that
+    ``--config``, since without it the command would not find a skill that only
+    the quest's own folders hold.
     """
     lines = [f"Considered {len(catalogue.entries)} candidate skill(s)."]
     if sel.chosen:
@@ -413,7 +419,7 @@ def render_selection_report(
             lines.append(f"  - {st.skill.name} ({st.status.value}): {st.reason}")
         lines.append(
             "  Approve with: python launch.py --approve-skill <name> "
-            "--approve-as <you>"
+            f"--approve-as <you>{approve_flags}"
         )
     return "\n".join(lines) + "\n"
 

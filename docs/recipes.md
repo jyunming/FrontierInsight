@@ -257,9 +257,11 @@ engine:
 ```
 
 ```bash
-python launch.py --skills                                   # external ones are marked, status "proposed"
-python launch.py --approve-skill deepscientist-experiment --approve-as you   # reads its scripts list first
+python launch.py --config quest.yaml --skills               # external ones are marked, status "proposed"
+python launch.py --config quest.yaml --approve-skill deepscientist-experiment --approve-as you   # reads its scripts list first
 ```
+
+`--config quest.yaml` makes these commands read the folders that quest names in `engine.skills_dirs`, and it starts no quest. Without it they look only in the usual places (and `FI_EXTERNAL_SKILLS_DIRS`, which when set outranks the config's folders too), so a skill that lives only in `skills_dirs` would be reported as not found. `--why-skills`, `--scan-skill` and `--revoke-skill` take it the same way; a config that cannot be read is a one-line error. A skill kept in one of the usual places needs no `--config`.
 
 An external skill has no FI self-test, so your approval of its exact content is the only gate; edit it and the approval lapses. `--approve-all-skills` never approves them. If a name in `skills_required` cannot be used (not found, not approved), the quest stops before its first LLM call and tells you which and why.
 
