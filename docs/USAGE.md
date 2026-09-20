@@ -263,7 +263,7 @@ knowledge:
   requery_on_low_relevance: true    # When NO doc clears relevance_min_score on its own merits, the query was probably worded badly (a field publishes under different terms than the topic statement uses). Ask the model for an alternative query and search again, instead of handing the writer the relevance_min_keep least-bad hits as if they were evidence. Skipped when embeddings are unavailable — without scores there is no signal the query was bad.
   requery_max: 2                    # Bound on those retries. Each costs one small LLM call plus a retrieval.
   literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened.
-  foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 10 OpenAlex requests per literature pass.
+  foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
   write_back_only_on_accept: true
 

@@ -3496,8 +3496,9 @@ class Engine:
     ) -> list:
         """Candidates a keyword search does not reach: the original papers and
         standard textbooks of what a topic rests on. One call asks the model
-        for up to eight, each is looked up by title in OpenAlex and dropped when
-        not found, and the works several retrieved papers cite are added. They
+        for up to eight, each is looked up by title in OpenAlex, or by author and
+        year when no title matches, and dropped when not found, and the works
+        several retrieved papers cite are added. They
         are labelled foundational and go through the literature screen. Off
         with ``knowledge.foundational_works: false``; any failure adds nothing.
 
@@ -9201,22 +9202,37 @@ def _foundational_outcomes(
     results (the lookup found them, or the search had them, so they are not new)
     and the ones OpenAlex did not have. A suggestion is matched to a record by
     the same title rule the lookup used, so a record counts for the suggestion
-    that found it."""
-    def matches(work: dict[str, Any], candidates: list[RetrievedDoc]) -> bool:
+    that found it; a record found by author and year, whose title is not the
+    suggested one, names the suggestions it answers (``suggested_titles``), and
+    its line says so: ``suggested (year, author) -> the record's title, by author
+    and year``."""
+    def record_for(work: dict[str, Any], candidates: list[RetrievedDoc]) -> RetrievedDoc | None:
         title = str(work.get("title") or "")
-        return any(_titles_match(title, str((d.metadata or {}).get("title") or "")) for d in candidates)
+        for d in candidates:
+            md = d.metadata or {}
+            if _titles_match(title, str(md.get("title") or "")):
+                return d
+            if title and title in (md.get("suggested_titles") or []):
+                return d
+        return None
+
+    def line(work: dict[str, Any], doc: RetrievedDoc) -> str:
+        text = _foundational_work_text(work)
+        found_title = " ".join(str((doc.metadata or {}).get("title") or "").split())
+        if _titles_match(str(work.get("title") or ""), found_title):
+            return text
+        return f"{text} -> {found_title}, by author and year"
 
     added: list[str] = []
     already: list[str] = []
     dropped: list[str] = []
     for work in suggestions:
-        text = _foundational_work_text(work)
-        if matches(work, new):
-            added.append(text)
-        elif matches(work, found) or matches(work, docs):
-            already.append(text)
+        if (doc := record_for(work, new)) is not None:
+            added.append(line(work, doc))
+        elif (doc := record_for(work, found) or record_for(work, docs)) is not None:
+            already.append(line(work, doc))
         else:
-            dropped.append(text)
+            dropped.append(_foundational_work_text(work))
     return added, already, dropped
 
 

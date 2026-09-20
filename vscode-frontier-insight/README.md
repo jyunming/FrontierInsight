@@ -30,8 +30,8 @@ an abstract and 4–6 keywords; a report, brief, essay or whitepaper keeps its
 keywords out of sight, and an accepted paper's keywords go into its Axon index
 card. FI writes the paper's References itself: the papers the text cites,
 numbered in the order it first cites them. The foundational papers and textbooks
-the literature search adds (up to eight the model names, plus the works several
-retrieved papers cite) are put to the writer with a request to cite the ones that
+the literature search adds (up to eight the model names, looked up by title or, when the
+title matches nothing, by author and year, plus the works several retrieved papers cite) are put to the writer with a request to cite the ones that
 bear on the paper, and the reviewer sees, as advice, the ones the paper leaves
 out. A retrieved work that holds only its title or a short book blurb is marked
 so in the writer's prior-work block (`[title only]`, `[short blurb only]`), with

@@ -415,10 +415,48 @@ FOUNDATIONAL_SUGGESTED = "suggested as a foundational work"
 FOUNDATIONAL_MAX_SUGGESTED = 8
 # Between the lookups' requests, which go one at a time.
 _OPENALEX_GAP_S = 1.0
+# A suggestion whose title matched nothing is looked up once more, by its author and
+# year. The model usually has both right and the title wrong: for one topic it named
+# Whittle (1955) under four different invented titles, and OpenAlex holds the real one
+# ("The outcome of a stochastic epidemic -- a note on Bailey's paper") as the first
+# result for that surname and year. The same lookup found Gillespie (1977) and Kermack
+# (1927) when the model paraphrased their titles.
+FOUNDATIONAL_BY_AUTHOR = (
+    "suggested as a foundational work; found by author and year, the suggested title did not match"
+)
+# Years either side of the suggested one. The title lookup allows two; a wrong year is
+# the model's other habit, and a wider window finds that author's neighbouring papers.
+_AUTHOR_YEAR_WINDOW = 1
+# Works fetched per suggestion, most cited first. A common surname (Bernstein) puts
+# famous work from other fields ahead of the one wanted, so the page is deep enough
+# to reach past it; the word check below thins it and the literature screen decides.
+_AUTHOR_YEAR_PER_PAGE = 25
+# Words that say nothing about a title's subject, so sharing one is not evidence the
+# record is the work the model meant.
+_TITLE_STOP_WORDS = frozenset(
+    "a an the of in on for and or to with without its their from by at as is are be not this that these those "
+    "after before between into over under about using use via toward towards new some general introduction "
+    "study studies analysis approach review method methods model models".split()
+)
 
 
 def _title_words(title: str) -> list[str]:
     return re.findall(r"[^\W_]+", str(title or "").lower())
+
+
+def _content_stems(title: str) -> set[str]:
+    """The first six letters of each word of a title that names its subject, so
+    "epidemic" and "epidemics" are one word and "Mikroskope" and "Mikroskops" are
+    one word. Words of three letters or fewer are left out: in the languages a
+    title comes in they are the articles, conjunctions and prepositions ("der",
+    "und", "les"), which the English stop list cannot name."""
+    return {w[:6] for w in _title_words(title) if len(w) >= 4 and w not in _TITLE_STOP_WORDS}
+
+
+def _surname_among(surname: str, names: list[str]) -> bool:
+    """Whether ``surname`` is a whole word of one of the names ("Ball" is not in
+    "Ballesteros")."""
+    return any(surname in re.findall(r"[^\W\d_]+", str(n).lower()) for n in names)
 
 
 def _titles_match(suggested: str, found: str) -> bool:
@@ -476,6 +514,54 @@ def _openalex_title_lookup(
         same_author = bool(surname) and any(surname in a.lower() for a in _openalex_authors(w))
         if same_year or same_author:
             return _openalex_work_doc(w, foundational=FOUNDATIONAL_SUGGESTED)
+    return None
+
+
+def _openalex_author_year_lookup(
+    work: dict, *, timeout_s: float = 15.0, api_key: str = "",
+) -> RetrievedDoc | None:
+    """The record of a suggested work whose title matched nothing, found by its
+    author and year instead: the most cited work by that surname within a year
+    of the suggested one that shares a word of the subject with the suggested
+    title. One request; None when there is no such work, or no author, year or
+    subject word to go on.
+
+    The suggested title is only used to tell the author's papers apart, never to
+    match: the model invents titles for works it knows the author and year of. So
+    the record's own title is what the paper cites, and it need not resemble the
+    suggestion. The result is a candidate, not a finding: a wrong work by the
+    right author (a sequel, a neighbouring paper) can pass the word check, and
+    the literature screen that grades every foundational candidate is what keeps
+    off-topic ones out: tried on six topics, the screen dropped the works from
+    other fields this fetches (surgery, genetics, marketing) and let through the
+    author's neighbouring papers and, once, a wrong paper of the right field."""
+    title = " ".join(str(work.get("title") or "").split())
+    surname = _first_surname(work.get("authors"))
+    try:
+        year = int(work.get("year"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    stems = _content_stems(title)
+    if not surname or not stems:
+        return None
+    params = {
+        "filter": (
+            f"raw_author_name.search:{_openalex_filter_text(surname)},"
+            f"publication_year:{year - _AUTHOR_YEAR_WINDOW}-{year + _AUTHOR_YEAR_WINDOW},"
+            f"type:{'|'.join(_FOUNDATIONAL_TYPES)}"
+        ),
+        "sort": "cited_by_count:desc",
+        "per-page": str(_AUTHOR_YEAR_PER_PAGE),
+    }
+    data = _http_get_json(
+        "https://api.openalex.org/works", params, timeout_s, source="openalex",
+        headers=_openalex_headers(api_key),
+    )
+    for w in (data or {}).get("results") or []:
+        if not _surname_among(surname, _openalex_authors(w)):
+            continue
+        if stems & _content_stems(_clean_openalex_title(w.get("title"))):
+            return _openalex_work_doc(w, foundational=FOUNDATIONAL_BY_AUTHOR)
     return None
 
 
@@ -3674,11 +3760,24 @@ class Knowledge:
         self, suggestions: list[dict], docs: list[RetrievedDoc],
     ) -> list[RetrievedDoc]:
         """Foundational works for a literature pass: each suggested work (the
-        first ``FOUNDATIONAL_MAX_SUGGESTED``) looked up by title in OpenAlex
-        (kept only when found), then the works the retrieved papers cite most.
-        None already in ``docs`` comes back, and a failed lookup only loses its
-        own works."""
+        first ``FOUNDATIONAL_MAX_SUGGESTED``) looked up by title in OpenAlex,
+        or, when no title matches, by its author and year (kept only when found),
+        then the works the retrieved papers cite most. None already in ``docs``
+        comes back, and a failed lookup only loses its own works.
+
+        A record found by author and year carries ``suggested_titles``, the
+        titles of the suggestions it answers, so the run log can say what became
+        of each. When the record is one the search already returned, or one
+        another suggestion found, it is the record that is annotated (the caller
+        never gets a work twice)."""
         api_key = str(getattr(self.cfg, "openalex_api_key", "") or "")
+
+        def refused() -> int:
+            # OpenAlex answers that were HTTP 429, as this quest has counted them.
+            qid = _sf.current_quest.get()
+            if qid is None:
+                return 0
+            return int((_sf.snapshot(qid)["by_source"].get("openalex") or {}).get("http_429", 0))
 
         def lookups() -> list[RetrievedDoc]:
             # One request at a time: fired together, three of five title
@@ -3687,10 +3786,21 @@ class Knowledge:
             for suggestion in [
                 s for s in suggestions[:FOUNDATIONAL_MAX_SUGGESTED] if isinstance(s, dict)
             ]:
+                turned_away = refused()
                 try:
                     doc = _openalex_title_lookup(suggestion, api_key=api_key)
                 except Exception:  # noqa: BLE001 — one lookup, not the rest
                     doc = None
+                if doc is None and refused() == turned_away:
+                    # Not a refusal (a spent budget would refuse this one too): the title
+                    # matched nothing, so ask for the author's work of that year instead.
+                    time.sleep(_OPENALEX_GAP_S)
+                    try:
+                        doc = _openalex_author_year_lookup(suggestion, api_key=api_key)
+                    except Exception:  # noqa: BLE001
+                        doc = None
+                    if doc is not None:
+                        doc.metadata["suggested_titles"] = [str(suggestion.get("title") or "")]
                 if doc is not None:
                     found.append(doc)
                 time.sleep(_OPENALEX_GAP_S)
@@ -3700,17 +3810,14 @@ class Knowledge:
                 pass
             return found
 
-        def refused() -> int:
-            # OpenAlex answers that were HTTP 429, as this quest has counted them.
-            qid = _sf.current_quest.get()
-            if qid is None:
-                return 0
-            return int((_sf.snapshot(qid)["by_source"].get("openalex") or {}).get("http_429", 0))
+        def keys_of(d: RetrievedDoc) -> set[str]:
+            md = d.metadata or {}
+            return {str(v).lower() for v in (md.get("url"), md.get("doi")) if v}
 
-        seen = {
-            str(value).lower()
-            for d in docs for value in ((d.metadata or {}).get("url"), (d.metadata or {}).get("doi")) if value
-        }
+        # Every record the search returned and, as they are kept, every one this pass
+        # returns, by url and doi: where a later find turns out to be one of them.
+        holders: dict[str, RetrievedDoc] = {k: d for d in docs for k in keys_of(d)}
+        seen = set(holders)
         before = refused()
         found = await asyncio.to_thread(lookups)
         # A refused lookup looks exactly like a work OpenAlex does not hold, so
@@ -3726,10 +3833,18 @@ class Knowledge:
             )
         out: list[RetrievedDoc] = []
         for doc in found:
-            keys = {str(v).lower() for v in (doc.metadata.get("url"), doc.metadata.get("doi")) if v}
+            keys = keys_of(doc)
             if keys & seen:
+                # A work the search already had, or another suggestion found: the record
+                # already there answers this suggestion too, so it takes note of it.
+                held = next((holders[k] for k in keys if k in holders), None)
+                titles = doc.metadata.get("suggested_titles")
+                if held is not None and titles:
+                    md = held.metadata
+                    md["suggested_titles"] = sorted({*(md.get("suggested_titles") or []), *titles})
                 continue
             seen |= keys
+            holders.update({k: doc for k in keys})
             out.append(doc)
         return out
 
