@@ -46,7 +46,7 @@ check reads every finding the run recorded, whole, with the results branches
 those findings name, so a claim is never called unsupported because the
 evidence that proves it was cut short. Each
 figure keeps a record of what it draws, and a caption that describes a line the
-figure draws flat or not at all goes back to the reviewer; the human review in
+figure draws flat or not at all, or calls a line flat that it draws varying (found by the line's exact label, and measured on SIR figures only), goes back to the reviewer; the human review in
 the chat lists those captions. A figure saved with its legend drawn over its own
 lines, or its title over a panel title, is measured on the finished canvas and
 sent back to the experiment for one redraw before the paper is written. A figure the design planned and the run drew

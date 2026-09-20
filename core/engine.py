@@ -8095,11 +8095,20 @@ class Engine:
               "total_completion_tokens": <int>,
               "total_tokens": <int>,
               "total_cost_usd": <float | null>,
+              "total_cost_usd_partial": <bool>,  # some rows priced, some not
               "estimated_rows": <int>,        # rows from char-based fallback
+              "unpriced_requests": <int>,     # rows whose cost_usd is null
               "by_node":  { <node>: {...same shape...} },
               "by_model": { <model>: {...same shape...} },
               "generated_at": <epoch>,
             }
+
+        ``total_cost_usd`` (and each bucket's ``cost_usd``) sums the rows
+        that carry a price; it is ``null`` only when no row does. A model the
+        price table does not list logs ``cost_usd: null`` with its tokens, so
+        a quest that mixes priced and unpriced models has a total that is a
+        lower bound: ``total_cost_usd_partial`` is ``true`` then, and
+        ``unpriced_requests`` says how many calls the total leaves out.
 
         Best-effort: a missing / unreadable cost.jsonl produces a
         summary with zeros; no exception bubbles out.
@@ -8571,7 +8580,9 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total_completion_tokens": 0,
         "total_tokens": 0,
         "total_cost_usd": 0.0,
+        "total_cost_usd_partial": False,
         "estimated_rows": 0,
+        "unpriced_requests": 0,
     }
     has_cost_value = False
     by_node: dict[str, dict[str, Any]] = {}
@@ -8585,6 +8596,7 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "total_tokens": 0,
             "cost_usd": 0.0,
             "estimated_rows": 0,
+            "unpriced_requests": 0,
         }
 
     for row in rows:
@@ -8595,15 +8607,18 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         completion_t = int(usage.get("completion_tokens", 0) or 0)
         total_t = int(usage.get("total_tokens", 0) or 0) or (prompt_t + completion_t)
         cost = row.get("cost_usd")
+        is_priced = isinstance(cost, (int, float))
         is_estimated = bool(usage.get("estimated"))
 
         totals["total_requests"] += 1
         totals["total_prompt_tokens"] += prompt_t
         totals["total_completion_tokens"] += completion_t
         totals["total_tokens"] += total_t
-        if isinstance(cost, (int, float)):
+        if is_priced:
             totals["total_cost_usd"] += float(cost)
             has_cost_value = True
+        else:
+            totals["unpriced_requests"] += 1
         if is_estimated:
             totals["estimated_rows"] += 1
 
@@ -8615,8 +8630,10 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             bucket["prompt_tokens"] += prompt_t
             bucket["completion_tokens"] += completion_t
             bucket["total_tokens"] += total_t
-            if isinstance(cost, (int, float)):
+            if is_priced:
                 bucket["cost_usd"] += float(cost)
+            else:
+                bucket["unpriced_requests"] += 1
             if is_estimated:
                 bucket["estimated_rows"] += 1
 
@@ -8626,6 +8643,11 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals["total_cost_usd"] = None  # type: ignore[assignment]
         for bucket in list(by_node.values()) + list(by_model.values()):
             bucket["cost_usd"] = None  # type: ignore[assignment]
+    elif totals["unpriced_requests"]:
+        # Some rows were priced and some were not (a model the price table
+        # does not list). The total above counts the priced rows only, so it
+        # is a lower bound; say so rather than let it pass for the whole cost.
+        totals["total_cost_usd_partial"] = True
 
     return {
         **totals,
@@ -11505,9 +11527,156 @@ def _panels_where_flat_and_where_not(
     return (flat, varies) if flat and varies else ([], [])
 
 
+# What a caption says when it calls a series flat: the reverse of ``_FLAT_WORDS_RE``,
+# which lists what excuses a caption for naming a series the figure draws flat. Only
+# claims of a constant value count here ("negligible", "overlap" and "at zero" do not),
+# and "horizontal" as an axis ("on the horizontal axis") is not a claim about a series.
+_SAYS_FLAT_RE = re.compile(
+    r"\b(?:flat|constant|unchanged"
+    r"|horizontal(?!\s+(?:axis|axes|scale|position|direction|extent|bars?|error)))\b"
+)
+# A claim that stops short of "flat" or denies it: "nearly flat", "approximately
+# constant", "not flat", "non-constant" ("-" reads as a space, as in ``_plain_words``).
+_SOFTENED_FLAT_RE = re.compile(
+    r"\b(?:nearly|almost|approximately|roughly|essentially|virtually|practically"
+    r"|effectively|quasi|not|non|never|hardly|barely|no longer)"
+    r"(?:\s+\w+){0,2}\s+(?:flat|constant|unchanged|horizontal)\b"
+    r"|n['’]t(?:\s+\w+){0,2}\s+(?:flat|constant|unchanged|horizontal)\b"
+    # "near flat", but not "near the flat line", which places a flat line and hedges nothing.
+    r"|\bnear\s+(?:flat|constant|unchanged|horizontal)\b"
+)
+# A clause that says a series is flat for a part of its run ("starts flat", "flat until
+# t = 5", "flat only at R0 = 3") is not calling the whole series flat.
+_PARTIAL_FLAT_RE = re.compile(
+    r"\b(?:starts?|started|starting|begins?|beginning|initially|at first|early|until|before"
+    r"|after|then|later|eventually|briefly|only|except|plateaus?|beyond)\b"
+)
+# The share of a y axis's span a series must cover for its figure to draw it varying.
+# The recorder calls a series "flat" under 1%; a caption that calls a line flat is
+# wrong once the eye can read a slope, which the sample put at about 5%.
+_VARYING_SHARE = 0.05
+
+
+def _share_of_axis(ax: dict[str, Any], s: dict[str, Any]) -> float:
+    """The share of ``ax``'s y span that series ``s`` covers: the recorder's own test
+    for "flat" (``core/plot_style.py``), clipped to the axis and measured in log
+    units on a log axis. 0.0 when the record cannot say (no limits, a malformed
+    range, a log axis reaching zero)."""
+    try:
+        lo, hi = (float(v) for v in ax["ylim"])
+        low, high = float(s["min"]), float(s["max"])
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    if not all(math.isfinite(v) for v in (lo, hi, low, high)):
+        return 0.0
+    bottom, top = min(lo, hi), max(lo, hi)
+    low, high = max(low, bottom), min(high, top)
+    pos: Callable[[float], float] = float
+    if ax.get("yscale") == "log":
+        if bottom <= 0:
+            return 0.0
+        pos = math.log10
+    span = pos(top) - pos(bottom)
+    return (pos(high) - pos(low)) / span if span > 0 and high > low else 0.0
+
+
+def _panels_drawn_varying(
+    axes: list[dict[str, Any]], label: str,
+) -> tuple[list[tuple[str, float, float]], list[str]]:
+    """For one series label: ``(title, min, max)`` of each panel that draws it varying
+    over more than ``_VARYING_SHARE`` of the axis, and the titles of the panels that
+    do not (flat there, or under 5%).
+
+    A series the recorder marks min = max = 0 "yes" has a range of 0 and is never
+    varying here. That is a measurement artefact and not a drawing: the recorder
+    reads ``ax.hlines`` and ``fill_between`` through ``get_offsets()`` and gives 18 of
+    918 series in the stored quests that range, so the rule must stay silent on them."""
+    varying: list[tuple[str, float, float]] = []
+    calm: list[str] = []
+    for index, ax in enumerate(axes, start=1):
+        title = str(ax.get("title") or f"panel {index}")
+        for s in ax.get("series") or []:
+            if not isinstance(s, dict) or str(s.get("label")) != label:
+                continue
+            if s.get("shows") == "yes" and _share_of_axis(ax, s) > _VARYING_SHARE:
+                varying.append((title, float(s["min"]), float(s["max"])))
+            else:
+                calm.append(title)
+    return varying, calm
+
+
+def _clause_names_a_panel(clause: str, titles: list[str]) -> bool:
+    """True when ``clause`` names one of the panels ``titles`` by its title, ignoring
+    case, spacing and punctuation ("R0 = 3" and "R₀=3" are the same panel).
+    Titles of fewer than two letters or digits ("A") would match anything."""
+    def squeeze(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", text).lower())
+
+    body = squeeze(clause)
+    return any(len(t) >= 2 and t in body for t in map(squeeze, titles))
+
+
+def _flat_claim_findings(name: str, record: dict[str, Any] | None, caption: str) -> list[str]:
+    """Findings for a caption that calls a series flat when its figure draws it varying.
+
+    ``caption`` is the image's alt text as ``_plain_words`` leaves it. A clause counts
+    when it names the series by its exact label, says flat / constant / unchanged /
+    horizontal of it (the label's own words are not the claim: a series labelled
+    "constant N" is not called constant by being named), and does not hedge or deny
+    it ("nearly flat", "not flat") or confine it to part of the run ("starts flat"),
+    and the figure draws that series varying over more than 5% of an axis in at least
+    one panel. A clause that names a panel where the series is not varying is scoping
+    its claim to that panel, which is what the finding asks for, so it is left alone.
+
+    Exact labels only: a caption that names the series in other words ("flat
+    deterministic predictions" for a series labelled "Deterministic ODE") is not read."""
+    axes = [ax for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)]
+    findings: list[str] = []
+    seen: set[str] = set()
+    for ax in axes:
+        for s in ax.get("series") or []:
+            raw = str(s.get("label") or "") if isinstance(s, dict) else ""
+            if not raw or raw in seen:
+                continue
+            seen.add(raw)
+            label = _plain_words(raw)
+            named = rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])"
+            if not label or not re.search(named, caption):
+                continue
+            varying, calm = _panels_drawn_varying(axes, raw)
+            if not varying:
+                continue
+            for clause in _CAPTION_CLAUSE_RE.split(caption):
+                if not re.search(named, clause):
+                    continue
+                said = re.sub(named, " ", clause)
+                claim = _SOFTENED_FLAT_RE.sub(" ", said)
+                if (
+                    not _SAYS_FLAT_RE.search(claim) or _PARTIAL_FLAT_RE.search(said)
+                    or _clause_names_a_panel(clause, calm)
+                ):
+                    continue
+                head = f'figure_caption: the caption of figures/{name} calls "{raw}" flat, but the figure draws it varying'
+                if len(axes) < 2:
+                    ylabel = str(axes[0].get("ylabel") or "y")
+                    findings.append(
+                        f'{head} ({varying[0][1]:.3g} to {varying[0][2]:.3g}) on its axis "{ylabel}". '
+                        "Say that it varies"
+                    )
+                else:
+                    where = ", ".join(f'"{t}" ({lo:.3g} to {hi:.3g})' for t, lo, hi in varying)
+                    findings.append(
+                        f"{head} in {where}. Say that it varies there, or describe only the panels "
+                        "where it is flat"
+                    )
+                break
+    return findings
+
+
 def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str]:
     """Captions that name a series their figure does not show, or one it draws
-    flat without saying so.
+    flat without saying so, and captions that call a series flat when the figure
+    draws it varying (``_flat_claim_findings``).
 
     A series a multi-panel figure draws flat in only some panels is flagged with
     those panels named, and the panels where it varies listed. A finding that named
@@ -11548,6 +11717,9 @@ def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str
                     )
             if finding not in findings:
                 findings.append(finding)
+        for claim_finding in _flat_claim_findings(name, record, caption):
+            if claim_finding not in findings:
+                findings.append(claim_finding)
     return findings
 
 

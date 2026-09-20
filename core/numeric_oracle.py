@@ -539,8 +539,10 @@ def check(
 
     # U+2212 is the minus a paper typeset with (and a language model writes).
     # ``_NUMBER`` reads only ``-``, so ``−0.114`` was compared as 0.114 --
-    # a positive number, near some positive result. Confined to this check:
-    # ``number_provenance`` shares the extractor and is left as it was.
+    # a positive number, near some positive result. Folded here, before the
+    # shared extractor is called, and not inside it: ``number_provenance`` folds
+    # it the same way in its own reading of the paper, so neither check's
+    # findings depend on what the other does with the extractor.
     numbers = extract_paper_numbers(paper_text.replace(_MINUS_SIGN, "-"))
     report.paper_numbers = len(numbers)
     settings = list(declared) if declared else []

@@ -281,3 +281,98 @@ def test_aggregate_cost_rows_no_pricing_data_surfaces_null_cost() -> None:
     summary = _aggregate_cost_rows(rows)
     assert summary["total_cost_usd"] is None
     assert summary["by_node"]["ideate"]["cost_usd"] is None
+
+
+def _priced(node: str, model: str, cost: float) -> dict:
+    return {"node": node, "model": model, "cost_usd": cost,
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}
+
+
+def _unpriced(node: str, model: str) -> dict:
+    """What ``append_cost_row`` writes for a model the price table does not list:
+    the tokens are there, the dollar field is null."""
+    return {"node": node, "model": model, "cost_usd": None,
+            "usage": {"prompt_tokens": 400, "completion_tokens": 100, "total_tokens": 500}}
+
+
+def test_aggregate_cost_rows_all_priced_is_not_partial() -> None:
+    from core.engine import _aggregate_cost_rows
+    summary = _aggregate_cost_rows([
+        _priced("ideate", "gpt-4o", 0.0008),
+        _priced("write", "gpt-4o", 0.0012),
+        _priced("write", "llama3.1:8b", 0.0),  # a free local model is priced at zero
+    ])
+    assert summary["total_cost_usd"] == pytest.approx(0.002)
+    assert summary["total_cost_usd_partial"] is False
+    assert summary["unpriced_requests"] == 0
+    assert all(b["unpriced_requests"] == 0
+               for b in list(summary["by_node"].values()) + list(summary["by_model"].values()))
+
+
+def test_aggregate_cost_rows_none_priced_is_null_not_partial() -> None:
+    """Nothing to be a lower bound of: the total stays null (unknown), as before, and
+    every call is counted as unpriced."""
+    from core.engine import _aggregate_cost_rows
+    summary = _aggregate_cost_rows([
+        _unpriced("ideate", "gpt-5.6-luna"),
+        _unpriced("write", "gpt-5.6-luna"),
+        {"node": "speech", "model": "", "usage": None, "cost_usd": None},
+    ])
+    assert summary["total_cost_usd"] is None
+    assert summary["total_cost_usd_partial"] is False
+    assert summary["unpriced_requests"] == summary["total_requests"] == 3
+    assert summary["by_node"]["write"]["cost_usd"] is None
+    assert summary["by_node"]["write"]["unpriced_requests"] == 1
+    assert summary["by_model"]["gpt-5.6-luna"]["unpriced_requests"] == 2
+
+
+def test_aggregate_cost_rows_mixed_total_is_a_lower_bound_and_says_so() -> None:
+    """A quest that mixes priced and unpriced models: the dollar total is the priced
+    calls only, so it is flagged partial and the calls it leaves out are counted,
+    in total and in each node and model bucket. The token counts stay complete."""
+    from core.engine import _aggregate_cost_rows
+    rows = [
+        _priced("ideate", "gpt-4o", 0.0008),
+        _priced("write", "gpt-4o", 0.0012),
+        _unpriced("write", "gpt-5.6-luna"),
+        _unpriced("review", "gpt-5.6-luna"),
+        # A breadcrumb mirrors a call already in the log: neither a request nor unpriced.
+        {"node": "ideate.ensemble[m1]", "model": "m1", "ensemble": True,
+         "role": "fanout", "ok": True},
+    ]
+    summary = _aggregate_cost_rows(rows)
+    assert summary["total_cost_usd"] == pytest.approx(0.002)   # exactly as before
+    assert summary["total_cost_usd_partial"] is True
+    assert summary["total_requests"] == 4
+    assert summary["unpriced_requests"] == 2
+    assert summary["total_tokens"] == 150 + 150 + 500 + 500  # tokens are complete
+    by_node = summary["by_node"]
+    assert by_node["ideate"]["unpriced_requests"] == 0
+    assert by_node["ideate"]["cost_usd"] == pytest.approx(0.0008)
+    assert by_node["write"]["unpriced_requests"] == 1
+    assert by_node["write"]["cost_usd"] == pytest.approx(0.0012)
+    assert by_node["review"]["unpriced_requests"] == 1
+    assert by_node["review"]["cost_usd"] == 0.0   # a priced-run node with no priced call
+    assert "ideate.ensemble[m1]" not in by_node
+    by_model = summary["by_model"]
+    assert by_model["gpt-4o"]["unpriced_requests"] == 0
+    assert by_model["gpt-5.6-luna"]["unpriced_requests"] == 2
+    assert by_model["gpt-5.6-luna"]["requests"] == 2
+
+
+def test_write_cost_summary_carries_the_partial_flag(tmp_path: Path) -> None:
+    """The file quest finalization writes is the same roll-up, flag included."""
+    from core.engine import write_cost_summary
+    (tmp_path / "cost.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in [
+            _priced("ideate", "gpt-4o", 0.001),
+            _unpriced("write", "gpt-5.6-luna"),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    write_cost_summary(tmp_path)
+    on_disk = json.loads((tmp_path / "cost.summary.json").read_text(encoding="utf-8"))
+    assert on_disk["total_cost_usd"] == pytest.approx(0.001)
+    assert on_disk["total_cost_usd_partial"] is True
+    assert on_disk["unpriced_requests"] == 1
+    assert on_disk["by_node"]["write"]["unpriced_requests"] == 1
