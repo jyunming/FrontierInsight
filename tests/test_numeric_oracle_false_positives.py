@@ -18,17 +18,40 @@ Two parser faults produced them, both pinned below:
 The fixes remove this instance. The *exposure* is structural -- the check is a
 regex over prose -- which is why the findings are now reported rather than
 enforced.
+
+Four more classes turned up when the check was replayed over every stored
+quest (311 near-misses in 76 quests):
+
+* a confidence LEVEL -- the ``95`` in ``95% CI`` -- reported against a count of
+  93 or a population of 100 (``TestConfidenceLevel``);
+* a SETTING the topic or the design gave the run -- ``R0 = 1.5`` printed beside
+  an outcome of 1.33, a 13.5 nm wavelength, ``gamma = 1.0`` -- reported against
+  whatever result happened to be within 25% (``TestDeclaredSettings``);
+* a MINUS written as U+2212, read without its sign, so ``-0.114`` was compared
+  as 0.114 (``TestUnicodeMinus``);
+* ``97.5th`` read as ``97``, the integer part of a number nobody wrote
+  (``TestPercentileRank``).
+
+Each class has controls that must STILL be reported: the check is only worth
+having if a paper that prints a result slightly wrong is still caught, so the
+tests below pin the silence and the catch together.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from core import numeric_oracle as no
 from core.numeric_oracle import extract_paper_numbers
 
 
 def _values(text: str) -> list[float]:
     return [v for v, _tok, _ctx in extract_paper_numbers(text)]
+
+
+def _flagged(paper: str, results: dict, **kw) -> list[tuple[str, float]]:
+    """``(kind, paper value)`` of every finding, for compact assertions."""
+    return [(f.kind, f.paper_value) for f in no.check(paper, results, **kw).findings]
 
 
 # --- the skip guard vs. punctuation -----------------------------------------
@@ -101,3 +124,201 @@ def test_a_number_after_an_unrelated_colon_is_kept() -> None:
     """The separator relaxation must not swallow real claims: only the listed
     structural keywords suppress, not every colon in the paper."""
     assert _values("Result: 0.4217 was observed.") == [pytest.approx(0.4217)]
+
+
+# --- a confidence level is not a result -------------------------------------
+
+
+class TestConfidenceLevel:
+    """``95`` in ``95% CI`` is within 25% of every result between 72 and 126.
+
+    It was the most frequent false finding across the stored quests: reported
+    against a count of 93, a population of 100, an upper bound of 97.6.
+    """
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "the outbreak probability was low (95% CI 0.036 to 0.058)",
+            "probabilities were reported with 95% Wilson intervals",
+            "Wilson 95% intervals summarise each threshold",
+            "a 95% bootstrap confidence interval was used",
+            "a 95 % credible interval was used",
+            r"the $95\%$ CI excluded zero",
+            "the 95%-CI excluded zero",
+        ],
+    )
+    def test_the_level_is_not_a_number_to_check(self, phrase: str) -> None:
+        assert 95.0 not in _values(phrase)
+        # 93 is a count the run computed; a level beside it is not a near-miss.
+        assert _flagged(phrase, {"n_major": 93.0}) == []
+
+    def test_the_bounds_of_the_interval_are_still_checked(self) -> None:
+        """Only the level is cleared. The numbers the interval brackets are
+        results, and a wrong one is still a near-miss."""
+        got = _flagged("It was 0.347 (95% CI 0.32-0.37).", {"p": 0.333})
+        assert ("near_miss", 0.347) in got
+        assert all(value != 95.0 for _kind, value in got)
+
+    def test_a_percentage_result_is_not_a_level(self) -> None:
+        """``93% of runs`` is a measurement: a percent sign alone clears
+        nothing, so a mis-copied 93 against a stored 91 is still reported."""
+        got = _flagged("93% of runs converged.", {"converged_pct": 91.0})
+        assert ("near_miss", 93.0) in got
+
+    def test_empirical_coverage_is_not_a_level(self) -> None:
+        """``94% of the intervals covered the truth`` is a coverage RESULT
+        that merely names intervals; ``of`` between the two stops the level
+        rule from reading it as a level."""
+        text = "94% of the confidence intervals covered the true value."
+        assert ("near_miss", 94.0) in _flagged(text, {"coverage_pct": 92.0})
+
+
+# --- a setting the run was given is not a result ----------------------------
+
+_DESIGN = {
+    "hypothesis": "the deterministic limit is 0.9403",
+    "variables": {
+        "independent": [
+            "R0 (0.9, 1.5, 3.0)",
+            "population size N (100, 1000, 5000)",
+        ],
+        "controls": ["recovery rate gamma = 1", "300 runs per setting"],
+    },
+    "method": "A final size of at least 10% of N counts as a major outbreak.",
+    "expected_outcome": "predict a crossover near 28 nm and P(outbreak) about 0.58",
+    "result_assertions": [{"path": "p", "min": 0.01, "max": 0.97}],
+}
+
+
+class TestDeclaredSettings:
+    """``R0 = 1.5`` beside an outcome of 1.33 is the paper quoting its setup."""
+
+    def test_the_setup_is_declared_and_the_predictions_are_not(self) -> None:
+        got = set(
+            no.declared_numbers(_DESIGN, "Compare models for R0 in {0.9, 1.5, 3.0} at 13.5 nm.")
+        )
+        # topic, variables (list strings), method; a percentage also as a fraction
+        assert {0.9, 1.5, 3.0, 100.0, 1000.0, 5000.0, 300.0, 13.5, 10.0, 0.1} <= got
+        # what the author expected, and the bounds on results, are not settings
+        assert not ({28.0, 0.58, 0.9403, 0.97, 0.01} & got)
+
+    def test_a_setting_beside_an_unrelated_result_is_not_a_near_miss(self) -> None:
+        paper = "At R_0 = 1.5 the simulations gave a mean of 1.33."
+        results = {"mean_final_size": 1.33}
+        # without the settings the 1.5 is 11% from 1.33 and is reported
+        assert _flagged(paper, results) == [("near_miss", 1.5)]
+        assert _flagged(paper, results, declared=no.declared_numbers(_DESIGN, "")) == []
+
+    def test_the_topic_alone_declares_its_grid(self) -> None:
+        declared = no.declared_numbers(None, "For R0 in {0.9, 1.5, 3.0} run 300 times.")
+        assert _flagged("At R_0 = 1.5 we saw 1.33.", {"m": 1.33}, declared=declared) == []
+
+    def test_a_number_that_merely_resembles_a_setting_is_still_checked(self) -> None:
+        """Declared 1.5 clears 1.5 and 1.50, not 1.45 -- the paper's own
+        precision decides."""
+        declared = no.declared_numbers(_DESIGN, "")
+        assert ("near_miss", 1.45) in _flagged(
+            "The mean was 1.45.", {"m": 1.33}, declared=declared,
+        )
+
+    def test_a_prediction_printed_as_a_result_is_still_reported(self) -> None:
+        """The design's ``expected_outcome`` says 28 nm; the run measured 32.
+        A paper that prints 28 as the finding is the mistake this check is for,
+        so the design's predictions are not settings."""
+        declared = no.declared_numbers(_DESIGN, "")
+        got = _flagged(
+            "The crossover pitch moved from 28 nm to 41 nm.",
+            {"crossover_pitch_nm": 32.0},
+            declared=declared,
+        )
+        assert ("near_miss", 28.0) in got
+
+    def test_a_transposition_of_a_setting_is_still_reported(self) -> None:
+        """Same digits in another order is the signal least likely to be a
+        coincidence, so a declared number does not silence it."""
+        declared = no.declared_numbers({"variables": {"controls": ["target NILS 2.41"]}}, "")
+        assert _flagged("NILS reached 2.41.", {"nils": 2.14}, declared=declared) == [
+            ("transposed", 2.41)
+        ]
+
+    def test_no_settings_means_no_change(self) -> None:
+        assert _flagged("At R_0 = 1.5 we saw 1.33.", {"m": 1.33}, declared=None) == [
+            ("near_miss", 1.5)
+        ]
+        assert _flagged("At R_0 = 1.5 we saw 1.33.", {"m": 1.33}, declared=[]) == [
+            ("near_miss", 1.5)
+        ]
+
+    @pytest.mark.parametrize("design", [None, {}, "not a dict", {"variables": None}])
+    def test_a_malformed_design_declares_nothing(self, design) -> None:
+        assert no.declared_numbers(design, None) == []
+
+
+# --- a minus written as U+2212 keeps its sign -------------------------------
+
+
+_MINUS = chr(0x2212)  # U+2212 MINUS SIGN, not the ASCII hyphen
+
+
+class TestUnicodeMinus:
+    def test_a_signed_number_is_not_compared_as_its_magnitude(self) -> None:
+        """0.0963 sits 1.2% from the unrelated positive result 0.0975; -0.0963
+        does not."""
+        paper = f"The conditional bias was {_MINUS}0.0963 at N = 100."
+        assert _flagged(paper, {"p_lower": 0.0975}) == []
+
+    def test_the_ascii_minus_was_already_read_that_way(self) -> None:
+        paper = "The conditional bias was -0.0963 at N = 100."
+        assert _flagged(paper, {"p_lower": 0.0975}) == []
+
+    def test_a_negative_number_is_still_checked_against_a_negative_result(self) -> None:
+        """The observed case: a CI bound of -0.114 beside a stored -0.1167.
+        Keeping the sign must not stop a genuine negative near-miss."""
+        paper = f"The difference was {_MINUS}0.114 at N = 100."
+        assert _flagged(paper, {"diff": -0.1167}) == [("near_miss", -0.114)]
+
+
+# --- a percentile rank is not its integer part ------------------------------
+
+
+class TestPercentileRank:
+    def test_97_5th_is_not_read_as_97(self) -> None:
+        text = "ranges are the empirical 2.5th and 97.5th percentiles"
+        assert _values(text) == []
+        # 98 is a stored count; 97 was reported against it before
+        assert _flagged(text, {"n_boot": 98.0}) == []
+
+    def test_a_decimal_without_a_suffix_is_still_read_whole(self) -> None:
+        assert _values("97.5 was observed") == [pytest.approx(97.5)]
+        assert _values("a dose of 37.4 nm") == [pytest.approx(37.4)]
+
+    def test_a_number_cut_off_from_a_dotted_one_is_not_read(self) -> None:
+        assert _values("released as 3.4.1 last year") == []
+
+
+# --- what must never stop being reported ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "paper,results,expected",
+    [
+        # truncated, not rounded: 2.1259 rounds to 2.13 (observed in a stored quest)
+        (
+            "the MEEF only slightly degrades to 2.12",
+            {"meef_at_100nm": 2.1259},
+            ("near_miss", 2.12),
+        ),
+        # last digit off: 0.18346 rounds to 0.183 (observed in a stored quest)
+        (
+            "causing NILS to drop to 0.184 at sigma 0.45",
+            {"dipole_nils": [0.18346]},
+            ("near_miss", 0.184),
+        ),
+        # the classic transposition
+        ("NILS reached 2.41", {"nils": 2.14}, ("transposed", 2.41)),
+    ],
+)
+def test_a_genuine_near_miss_is_still_reported(paper, results, expected) -> None:
+    declared = no.declared_numbers(_DESIGN, "Compare models for R0 in {0.9, 1.5, 3.0}.")
+    assert expected in _flagged(paper, results, declared=declared)
