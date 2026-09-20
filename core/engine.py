@@ -10,6 +10,7 @@ coexist in one process for the fleet runner.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import functools
 import json
@@ -4044,6 +4045,7 @@ class Engine:
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
         text = await self._chat(prompt, node="implement")
         code, deps = _parse_implement_response(text)
+        extracted = bool(code)
         if not code:
             # Empty-code path: log the LLM head so the user can see WHAT
             # came back rather than silently shipping a stub experiment
@@ -4066,7 +4068,94 @@ class Engine:
         code_path = self.quest_root / "code" / "experiment.py"
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
+        if extracted:  # nothing to seed in the stub written above
+            code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         return {"code": code, "deps": deps}
+
+    async def _repair_ignored_replicate_seed(
+        self, state: QuestState, code_path: Path, code: str, deps: list[str],
+    ) -> tuple[str, list[str]]:
+        """Ask for ONE repair of a script that never reads ``FI_REPLICATE_SEED``.
+
+        Such a script makes every replicate run the same run: ``execute`` finds
+        the results identical, publishes no aggregate, and the paper can report
+        one measurement with no interval (four of six codex quests did exactly
+        that). The instruction not to write a seed of its own is in the
+        implement prompts; a model that ignores it is asked again, once, here.
+
+        The request reuses the ``execute_reflect`` template (the directive
+        stands where a traceback would) and is applied the way its patches
+        are, but it is not a repair iteration: the node's
+        ``exec_reflect_*`` budget is untouched. Never a call when replication
+        is off, for a background job (no replicate runs are made), or when the
+        script already names the variable.
+
+        A repair is kept only if it parses as Python and now reads the seed. A
+        model that rewrote the script and still missed the target, or returned
+        half of it, would leave a script worse than the one it had, so the
+        original stays and the single-measurement fallback in ``execute``
+        handles it. Failure never blocks the quest: one warning, then on.
+        """
+        if (
+            self.config.execution.background_jobs
+            or max(1, int(self.config.engine.execute_replicates)) <= 1
+            or state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or _script_reads_replicate_seed(code_path)
+        ):
+            return code, deps
+        self._log.info(
+            "[implement] %s never reads FI_REPLICATE_SEED, so its %d replicate runs "
+            "would repeat one run; asking for one repair",
+            code_path.name, self.config.engine.execute_replicates,
+        )
+        prompt = self._prompts["execute_reflect"].substitute(
+            # Whole: a repair that returns the script must not lose the tail of it.
+            previous_code=code,
+            returncode="(not run yet)",
+            stdout_tail=_SEED_REPAIR_DIRECTIVE,
+            stderr_tail="",
+            duration_s="0.00",
+            figures_count="0",
+            result_json_present="no (not run yet)",
+            reflect_history_block=_format_reflect_history([]),
+            design_block=json.dumps(state.get("design") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+        )
+        why = ""
+        try:
+            text = await self._chat(prompt, node="implement_seed")
+        except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
+            text, why = "", f"the repair call failed ({exc!r})"
+        parsed: dict[str, Any] = {}
+        if _strip_outer_fence(text).lstrip().startswith("{"):
+            parsed = _parse_json_lenient(text, node="implement_seed") or {}
+        new_code, new_deps = parsed.get("code"), _coerce_dep_list(parsed.get("deps"))
+        if not (isinstance(new_code, str) and new_code.strip()):
+            new_code, new_deps = _parse_implement_response(text)  # fence drift
+        if not why:
+            try:
+                ast.parse(new_code)
+                usable = bool(new_code.strip())
+            except (SyntaxError, ValueError):
+                usable = False
+            if not usable:
+                why = "the model returned no usable script"
+            elif "FI_REPLICATE_SEED" not in new_code:  # the test _script_reads_replicate_seed applies
+                why = "the repaired script still does not read it"
+        if why:
+            self._log.warning(
+                "[implement] %s: keeping the script as written. Its replicates will "
+                "repeat one run, so the quest will be reported as a single "
+                "measurement with no confidence interval", why,
+            )
+            return code, deps
+        code_path.write_text(new_code, encoding="utf-8")
+        self._log.info(
+            "[implement] the script now reads FI_REPLICATE_SEED (%s); rewrote %s (%d bytes)",
+            str(parsed.get("patch_summary") or "no summary")[:120], code_path, len(new_code),
+        )
+        return new_code, sorted({*deps, *new_deps})
 
     async def _node_execute(self, state: QuestState) -> QuestState:
         deps = state.get("deps") or []
@@ -9321,6 +9410,31 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
         )
     except OSError:
         return True
+
+
+# Stands where the traceback would be in the ``execute_reflect`` prompt, for the
+# one repair a script that ignores ``FI_REPLICATE_SEED`` is offered before it
+# has run (see ``Engine._repair_ignored_replicate_seed``).
+_SEED_REPAIR_DIRECTIVE = (
+    "This script has NOT been run, and it has not failed: the account of a crash "
+    "above does not apply. It needs one change before it is run, and no other.\n\n"
+    "The engine runs this script several times, each run handed its own integer "
+    "in the environment variable FI_REPLICATE_SEED, so that the spread between "
+    "the runs can be reported. This script never reads that variable, so every "
+    "run would repeat one measurement and no mean or confidence interval could "
+    "be reported over them.\n\n"
+    "Change exactly this: read the integer from the environment variable "
+    "FI_REPLICATE_SEED (default 0 when it is unset) and derive the seed of "
+    "every random generator the script creates from it (random.seed, "
+    "np.random.seed, np.random.default_rng, torch.manual_seed, ...), replacing "
+    "any seed constant the script wrote for itself. Where it derives one seed "
+    "per trial, derive it as that integer plus the trial index. Keep everything "
+    "else in the script unchanged: the same functions, parameters, outputs and "
+    "figures, and the same final RESULT_JSON line. Do not add randomness the "
+    "experiment does not already have, and do not shorten or simplify anything.\n\n"
+    "Return the whole script in `code`, one sentence in `patch_summary`, and "
+    "leave `give_up_reason` empty."
+)
 
 
 def _replicate_assertions(state: QuestState) -> list[Any]:
