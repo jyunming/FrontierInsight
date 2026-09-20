@@ -26,7 +26,7 @@ from pathlib import Path
 
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
-from core.engine import QuestArtifacts, build_further_reading, cited_references
+from core.engine import QuestArtifacts, build_further_reading, cited_references, further_reading_listed
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
 from generation._figure_captions import numbers_off_figure_captions
@@ -612,10 +612,24 @@ class PaperGenerator:
         literature = (art.raw_state or {}).get("literature") or []
         audience = self.config.output.audience
         cited_md = art.paper_md.read_text(encoding="utf-8") if art.paper_md is not None else ""
+        further = build_further_reading(literature, audience=audience)
+        # The pages its Further reading lists: a page dropped to keep the paper
+        # within its page limit is not in the export either. With the whole
+        # list dropped the paper has no such section, and the review's record
+        # of what was dropped says which pages.
+        listed = further_reading_listed(cited_md)
+        if listed is not None:
+            further = [w for w in further if w["label"] in listed]
+        else:
+            review = (art.raw_state or {}).get("review")
+            record = review.get("page_limit") if isinstance(review, dict) else None
+            gone = record.get("further_reading_dropped") if isinstance(record, dict) else None
+            if gone:
+                further = [w for w in further if w["label"] not in gone]
         for stem, entries in (
             # The sources the paper's References list: the ones its text cites.
             ("references", cited_references(literature, cited_md, audience=audience)),
-            ("further_reading", build_further_reading(literature, audience=audience)),
+            ("further_reading", further),
         ):
             if not entries:
                 continue

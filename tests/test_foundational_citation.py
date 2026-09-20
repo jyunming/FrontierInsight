@@ -31,7 +31,8 @@ from core.engine import (
 
 def _lit(title: str, year: int, authors: list[str], **meta) -> dict:
     return {
-        "content": f"{title}. An abstract.",
+        # An abstract of the length a real record has (the writer marks a shorter one as title-only).
+        "content": f"{title}. " + "An abstract that says what the work shows, in about the space a real one takes. " * 2,
         "metadata": {
             "title": title, "year": year, "authors": authors, "source": "openalex",
             "venue": "A Venue", "doi": "10.1/" + re.sub(r"\W+", "-", title.lower())[:40],
@@ -87,7 +88,9 @@ def test_the_write_block_names_the_foundational_works_by_the_writers_labels() ->
     assert lines[0] == "- [2] W. O. Kermack & A. G. McKendrick (1927). A contribution to the mathematical theory of epidemics"
     assert lines[1] == ("- [4] P. Whittle (1955). The outcome of a stochastic epidemic - a note on Bailey's paper "
                         "(cited by 7 of the retrieved papers)")
-    assert lines[2] == "- [5] R. M. Anderson & R. M. May (1991). Infectious diseases of humans (book, cited by 10 of the retrieved papers)"
+    # A book with no full text is a blurb, and the list says so, as the entry in the block does.
+    assert lines[2] == ("- [5] R. M. Anderson & R. M. May (1991). Infectious diseases of humans [short blurb only] "
+                        "(book, cited by 10 of the retrieved papers)")
     # The ask: cite what bears on the paper, and only that.
     assert "Cite each one that bears on this paper's claims" in block
     assert "the original paper for a method, model or relation the paper uses" in block
