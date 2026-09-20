@@ -220,9 +220,13 @@ def test_a_hedged_clause_is_not_a_flat_claim() -> None:
     covers 7.1% of the axis in one panel. Hedged, so it is left to the reader. The same words
     without the hedge are flagged, so the hedge is what the difference rests on."""
     for hedge in ("nearly flat", "Approximately constant", "roughly-flat", "essentially unchanged",
-                  "almost perfectly flat"):
+                  "almost perfectly flat", "near-flat"):
         caption = f"Attack rates against the {hedge} deterministic reference within each R0 panel."
         assert _figure_caption_findings(_paper(caption), {CB1_FILE: CB1}) == [], hedge
+    # "near" hedges only the word beside it: a flat line placed near something is still a flat line.
+    placed = "Attack rates against the deterministic reference drawn near the flat threshold lines."
+    (finding,) = _figure_caption_findings(_paper(placed), {CB1_FILE: CB1})
+    assert 'calls "deterministic" flat' in finding
     for plain in ("flat", "constant", "unchanged", "horizontal"):
         caption = f"Attack rates against the {plain} deterministic reference within each R0 panel."
         # ("horizontal" also draws the first finding, which does not count it as saying flat.)

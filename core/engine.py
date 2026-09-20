@@ -11204,9 +11204,11 @@ _SAYS_FLAT_RE = re.compile(
 # constant", "not flat", "non-constant" ("-" reads as a space, as in ``_plain_words``).
 _SOFTENED_FLAT_RE = re.compile(
     r"\b(?:nearly|almost|approximately|roughly|essentially|virtually|practically"
-    r"|effectively|quasi|near|not|non|never|hardly|barely|no longer)"
+    r"|effectively|quasi|not|non|never|hardly|barely|no longer)"
     r"(?:\s+\w+){0,2}\s+(?:flat|constant|unchanged|horizontal)\b"
     r"|n['’]t(?:\s+\w+){0,2}\s+(?:flat|constant|unchanged|horizontal)\b"
+    # "near flat", but not "near the flat line", which places a flat line and hedges nothing.
+    r"|\bnear\s+(?:flat|constant|unchanged|horizontal)\b"
 )
 # A clause that says a series is flat for a part of its run ("starts flat", "flat until
 # t = 5", "flat only at R0 = 3") is not calling the whole series flat.
