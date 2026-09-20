@@ -303,6 +303,104 @@ def test_status_for_unknown_quest_returns_none(launcher: QuestLauncher) -> None:
 
 
 # ---------------------------------------------------------------------------
+# job_state: is it still running, or how did it end
+# ---------------------------------------------------------------------------
+
+
+def _end(entry: LaunchedQuest, code: int) -> None:
+    entry.process._alive = False  # type: ignore[attr-defined]
+    entry.process._exit_code = code  # type: ignore[attr-defined]
+
+
+def test_job_state_of_a_job_this_launcher_never_started_is_none(
+    launcher: QuestLauncher,
+) -> None:
+    assert launcher.job_state("never-launched") is None
+
+
+def test_job_state_reports_running_then_the_exit_code(launcher: QuestLauncher) -> None:
+    entry = launcher.launch_command(argv_tail=["--watch", "w"], job_id="w-watch")
+
+    state = launcher.job_state("w-watch")
+    assert state is not None
+    assert state["alive"] is True and state["returncode"] is None
+    assert state["pid"] == entry.pid and state["log_path"] == entry.log_path
+
+    _end(entry, 1)
+    state = launcher.job_state("w-watch")
+    assert state is not None
+    assert state["alive"] is False and state["returncode"] == 1
+
+
+def test_job_state_keeps_the_exit_code_after_the_registry_reaps_the_job(
+    launcher: QuestLauncher,
+) -> None:
+    entry = launcher.launch_command(argv_tail=["--watch", "w"], job_id="w-watch")
+    _end(entry, 3)
+
+    assert launcher.list_alive() == []  # the reap: the entry leaves the registry
+
+    state = launcher.job_state("w-watch")
+    assert state is not None
+    assert state["alive"] is False and state["returncode"] == 3
+
+
+def _two_runs(
+    launcher: QuestLauncher, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[LaunchedQuest, LaunchedQuest]:
+    """Two runs under one id, the second started later (the clock is pinned:
+    two launches in one test can otherwise share a timestamp)."""
+    clock = iter([1000.0, 2000.0])
+    monkeypatch.setattr("web.quest_launcher.time.time", lambda: next(clock))
+    first = launcher.launch_command(argv_tail=["--watch", "w"], job_id="w-watch")
+    second = launcher.launch_command(argv_tail=["--watch", "w"], job_id="w-watch")
+    return first, second
+
+
+def test_job_state_prefers_the_run_that_is_still_going(
+    launcher: QuestLauncher, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second press of the button starts a second run under the same id. If
+    that newer run dies at once, the older one that is still alive is the
+    watcher there is, and it must not be hidden behind the dead one."""
+    first, second = _two_runs(launcher, monkeypatch)
+    _end(second, 1)
+
+    for _ in range(2):  # before and after the reap
+        state = launcher.job_state("w-watch")
+        assert state is not None
+        assert state["alive"] is True and state["pid"] == first.pid
+        launcher.list_alive()
+
+
+def test_job_state_reports_the_newest_run_when_all_have_ended(
+    launcher: QuestLauncher, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = _two_runs(launcher, monkeypatch)
+    _end(first, 1)
+    _end(second, 2)
+
+    for _ in range(2):  # before and after the reap
+        state = launcher.job_state("w-watch")
+        assert state is not None
+        assert state["alive"] is False and state["returncode"] == 2
+        launcher.list_alive()
+
+
+def test_job_state_forgets_the_oldest_finished_runs(
+    launcher: QuestLauncher, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("web.quest_launcher._FINISHED_KEPT", 2)
+    for job_id in ("j0", "j1", "j2"):
+        _end(launcher.launch_command(argv_tail=["--digest"], job_id=job_id), 0)
+        launcher.list_alive()
+
+    assert launcher.job_state("j0") is None
+    assert launcher.job_state("j1") is not None
+    assert launcher.job_state("j2") is not None
+
+
+# ---------------------------------------------------------------------------
 # FI is not always run from its own folder
 # ---------------------------------------------------------------------------
 

@@ -278,7 +278,7 @@ python launch.py --config quest.yaml            # designs and writes the driver,
 python launch.py --config quest.yaml --watch <quest_id>   # re-checks on a timer; resumes the quest when the job is done
 ```
 
-`--watch` prints and logs every check (`[watch] 14:02:11 check 7: pending - running`). Ctrl-C only stops watching: the quest stays paused, and `--resume <quest_id>` (or a new `--watch`) picks the same job up without submitting it again. On the web quest page use *Watch automatically*; in VSCode `@fi /watch`.
+`--watch` prints and logs every check (`[watch] 14:02:11 check 7: pending - running`). Ctrl-C only stops watching: the quest stays paused, and `--resume <quest_id>` (or a new `--watch`) picks the same job up without submitting it again. On the web quest page use *Watch automatically*: it then shows `Watching: <the last check>` while the watcher runs, or `Watcher stopped (exit code N): <its last log line>` (and offers the button again) if it exited, so a watcher that died at once is never shown as watching. In VSCode `@fi /watch`.
 
 ### Start the experiment from your own example files
 
