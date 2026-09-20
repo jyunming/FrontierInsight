@@ -317,6 +317,427 @@ def test_the_grounding_accepts_the_real_quotation_and_rejects_the_fabricated_one
     assert "the quote is not in the text of [1]" in claims[2]["evidence"]
 
 
+# --- what a source's text extraction does to its layout ---------------------
+#
+# Real stored sources, cut to the passage a real quotation was taken from, with
+# their line breaks and stray spaces exactly as FI stored them. Every quotation
+# in LAYOUT_QUOTES was called "not in the text of [N]" by a run whose source did
+# contain it; every one in LAYOUT_MISQUOTES is wrong, and the first five of
+# those are what real runs really wrote. (The "fi" of "final" in the sources is
+# the single ligature character a PDF stores, and the dashes, minus signs and
+# Greek letters are the characters it stores, not look-alikes typed for the test.)
+LAYOUT_SOURCES = {
+    # A stacked fraction reaches the stored text as numerator, line break,
+    # denominator, with no bar.
+    "whittle": (
+        "the susceptible–infectious–recovered (SIR) model when the population size is large and a small\n"
+        "number of infectious individuals are introduced. In Whittle’s approximation, ifI(0) = i infectious\n"
+        "individuals are introduced into the population, then the probability of a major outbreak is\n"
+        "1 −\n( 1\nR0\n)i\n(1)\n"
+        "or, alternately, the probability of disease extinction is(1/R0)i [32]. Important assumptions in this\n"
+        "approximation are that each infected individual g"
+    ),
+    # A PDF's text with a space put inside words, and a formula it set on
+    # lines of its own.
+    "britton": (
+        "result s from probabilistic analyses of\n"
+        "a class of epidemic models (containing the general stochast ic epidemic model) it is known\n"
+        "that in case a major outbreak occurs in a large community, the n the outbreak size Z is\n"
+        "approximately normally distributed with mean nτ and variance nσ 2 where τ and σ 2 are\n"
+        "functions of the model parameters. These results, together with delta-method, can be\n"
+        "used to obtain an explicit estimate ˆR0 and standard error for the estimate (see Section\n"
+        "5.4 in Diekmann et al. (2013)):\n"
+        "ˆR0 = − log(1 − Z/n )\n"
+        "Z/n s.e. ( ˆR0) = 1√ n\n√\n1 +c2\nv(1 − Z/n ) ˆR2\n0\n(Z/n )(1 − Z/n ) .\n"
+        "The point estimate is based on the so-called ﬁnal size equati on for the limiting fraction\n"
+        "infectedτ: 1− τ =e− R0τ . The expression for the standard error contains one unknown p"
+    ),
+    # A hyphen with a space before it at the end of a line, and spaces inside
+    # brackets.
+    "practical_guide": (
+        "ions, identical dynamics occur each time the system is \nsolved numerically. "
+        "However, this deterministic formulation is inap -\n"
+        "propriate for modelling the start of an outbreak, when randomness in \n"
+        "contacts between individuals is important for determining whether or \n"
+        "not a major outbreak occurs. Stochastic models account for this \n"
+        "randomness and can be simulated using various methods, including \n"
+        "variants of the Gillespie stochastic simulation algorithm ( Gillespie, \n"
+        "1977 ). \nUnder the Gillespie direct method, each event (for the SIR model, \n"
+        "infection events and removal events) is simulated. For the SIR model at \n"
+        "time t , the probability "
+    ),
+    "percolation_discussion": (
+        "n [1]. In this paper, we showed that epid emic\n"
+        "percolation networks can be used to analyze stochastic SIR models with random\n"
+        "and proportionate mixing. In the limit of a large population, the epidem ic\n"
+        "percolation network for these models is purely directed. Using the p robability\n"
+        "generating function for its degree distribution, we accurately pre dicted the mean\n"
+        "size of outbreaks and the probability and ﬁnal size of epidemics for a variety of\n"
+        "models in homogeneous and heterogeneous populations.\n"
+        "The ability of epidemic percolation networks to analyze both network -based\n"
+        "and fully-mixed epidemic models makes them a simple but powerful gene raliza-\n"
+        "tion of earlier meth"
+    ),
+    "percolation_abstract": (
+        "cted co ntact net-\n"
+        "works. We then show how the same theory can be used to analyze st ochastic\n"
+        "SIR models with random and proportionate mixing. The epidemic perco lation\n"
+        "networks for these models are purely directed because undirecte d edges disap-\n"
+        "pear in the limit of a large population. In a series of simulations, we show\n"
+        "that epidemic percolation networks accurately predict the mean ou tbreak size\n"
+        "and probability and ﬁnal size of an epidemic for a variety of epidemic mo dels in\n"
+        "homogeneous and heterogeneous populations. Finally, we show tha t epidemic\n"
+        "percolation networks can be used to re-derive classical results fr om several dif-\n"
+        "ferent areas of infectious disease epidemiology. In an ap"
+    ),
+    # A web page's full text with its mathematics taken out entirely: each
+    # formula is simply gone, and nothing in what is left says what it was.
+    "allen_primer": (
+        "Summarized in Table 1 are the changes,  and , associated with the two events, infection and recovery.\n"
+        "Given  and , the epidemic ends at time t, when . The states , where  are referred to as absorbing "
+        "states; the epidemic stops when an absorbing state is reached. The absorbing states are the states  with .\n"
+        "Kolmogorov differential"
+    ),
+    "kermack": (
+        "The disease spreads from the affected to the unaffected by contact infection. Each infected person "
+        "runs through the course of his sickness, and finally is removed from the number of those who are sick, "
+        "by recovery or by death. The chances of recovery or death vary from day to day during the course of his "
+        "illness. The chances that the affected may convey infection to the unaffected are likewise dependent "
+        "upon the stage of the sickness. As the epidemic spreads, the number of unaffected members of the "
+        "community becomes reduced."
+    ),
+    "kermack_termination": (
+        "One of the most important probems in epidemiology is to ascertain whether this termination occurs only "
+        "when no susceptible individuals are left, or whether the interplay of the various factors of "
+        "infectivity, recovery and mortality, may result in termination, whilst many susceptible individuals "
+        "are still present in the unaffected population."
+    ),
+    "andreasen": (
+        "When mixing heterogeneities arise only from variation in contact rates and proportionate mixing, the "
+        "final size of the epidemic in a heterogeneously mixing population is always smaller than that in a "
+        "homogeneously mixing population with the same basic reproduction number . For other mixing patterns, "
+        "the relation may be reversed."
+    ),
+    "mathmodels": (
+        "The random effects among individuals tend to cancel each other out as the number of infected "
+        "individuals increases — the law of large numbers. Therefore, even if the underlying distribution "
+        "of the number of secondary cases is highly skew, an epidemic will progress smoothly as long as the "
+        "expected incidence at each observation is reasonably large. If the incidence of infection is small, "
+        "however, more complex and resurgent epi"
+    ),
+}
+_WHITTLE_HEAD = (
+    "In Whittle’s approximation, ifI(0) = i infectious individuals are introduced into the "
+    "population, then the probability of a major outbreak is "
+)
+_ALLEN_PRIMER_QUOTE = (
+    "Given S(t) and I(t), the epidemic ends at time t, when I(t)=0. The states (s,0), where "
+    "s=0,1,...,N, are referred to as absorbing states."
+)
+_PRACTICAL_GUIDE_QUOTE = (
+    "this deterministic formulation is inappropriate for modelling the start of an outbreak, when "
+    "randomness in contacts between individuals is important for determining whether or not a major "
+    "outbreak occurs."
+)
+# name -> (source, quotation): all of them are in their source.
+LAYOUT_QUOTES = {
+    "spaces inside words of the source": (
+        "percolation_discussion",
+        "Using the probability generating function for its degree distribution, we accurately predicted "
+        "the mean size of outbreaks and the probability and final size of epidemics for a variety of "
+        "models in homogeneous and heterogeneous populations.",
+    ),
+    "spaces inside words of the source, another copy": (
+        "percolation_abstract",
+        "we show that epidemic percolation networks accurately predict the mean outbreak size and "
+        "probability and final size of an epidemic for a variety of epidemic models in homogeneous and "
+        "heterogeneous populations.",
+    ),
+    "a space inside a word, then a formula": (
+        "britton",
+        "The point estimate is based on the so-called final size equation for the limiting fraction "
+        "infectedτ: 1− τ =e− R0τ .",
+    ),
+    "a space inside a superscripted variable": (
+        "britton",
+        "the outbreak size Z is approximately normally distributed with mean nτ and variance nσ2",
+    ),
+    "the source's stray 'the n the' is 'then the'": (
+        "britton",
+        "in case a major outbreak occurs in a large community, then the outbreak size Z is "
+        "approximately normally distributed with mean nτ and variance nσ2",
+    ),
+    "a hyphen with a space before it": ("practical_guide", _PRACTICAL_GUIDE_QUOTE),
+    "that, and spaces inside brackets": (
+        "practical_guide",
+        "However, " + _PRACTICAL_GUIDE_QUOTE + " Stochastic models account for this randomness and can "
+        "be simulated using various methods, including variants of the Gillespie stochastic simulation "
+        "algorithm (Gillespie, 1977).",
+    ),
+    "a fraction with its bar": ("whittle", _WHITTLE_HEAD + "1 − ( 1 / R0 )i"),
+    "a fraction, no spaces around the bar": ("whittle", _WHITTLE_HEAD + "1 − (1/R0)i"),
+    "a fraction, caret exponent": ("whittle", _WHITTLE_HEAD + "1-(1/R0)^i"),
+}
+# name -> (source, quotation): every word of them is in the source, and they are
+# still not found. The source has lost the formulas the quotation has between
+# those words ("Given  and , the epidemic ends at time t, when ."), so nothing
+# in it says what those formulas were. Matching the words on either side of a
+# hole would accept any formula a quotation put there, so a quotation that spans
+# one is treated as not in the source: the decision is to stay strict.
+LOST_FORMULA_QUOTES = {
+    "formulas the source has lost": ("allen_primer", _ALLEN_PRIMER_QUOTE),
+    "the same, written in LaTeX": (
+        "allen_primer",
+        "Given $S(t)$ and $I(t)$, the epidemic ends at time t, when $I(t)=0$. The states $(s,0)$, where "
+        "$s=0,1,\\ldots,N$, are referred to as absorbing states.",
+    ),
+    "the same, with a different formula": (
+        "allen_primer", _ALLEN_PRIMER_QUOTE.replace("I(t)=0", "I(t)=7"),
+    ),
+    "only the words either side of one hole": (
+        "allen_primer",
+        "the epidemic ends at time t, when I(t)=0. The states (s,0), where s=0,1,...,N, are referred "
+        "to as absorbing states",
+    ),
+}
+# name -> (source, quotation): none of them is in their source.
+LAYOUT_MISQUOTES = {
+    # What real runs wrote, and the source shows they got wrong.
+    "a word left out": (
+        "kermack_termination",
+        "One of the most important probems in epidemiology is to ascertain whether this termination occurs "
+        "only when no susceptible individuals are left, or whether the interplay of the various factors of "
+        "infectivity, recovery and mortality, may result in termination, whilst many susceptible "
+        "individuals still present in the unaffected population.",
+    ),
+    "a word changed": (
+        "andreasen",
+        "When mixing heterogeneities arise only from variation in contact rates and proportionate mixing, "
+        "the final size of an epidemic in a heterogeneously mixing population is always smaller than that in "
+        "a homogeneously mixing population with the same basic reproduction number .",
+    ),
+    "a word in another script": (
+        "mathmodels",
+        "The random effects among individuals tend to cancel each other out as the number of infected "
+        "individuals increases — the law of large numbers. ამიტომ, "
+        "even if the underlying distribution of the number of secondary cases is highly skew, an epidemic "
+        "will progress smoothly as long as the expected incidence at each observation is reasonably large.",
+    ),
+    "two sentences that are not neighbours": (
+        "kermack",
+        "The disease spreads from the affected to the unaffected by contact infection. Each infected person "
+        "runs through the course of his sickness, and finally is removed from the number of those who are "
+        "sick, by recovery or by death. As the epidemic spreads, the number of unaffected members of the "
+        "community becomes reduced.",
+    ),
+    "a word the source garbles, left out": (
+        "britton",
+        "in case a major outbreak occurs in a large community, the outbreak size Z is approximately "
+        "normally distributed with mean nτ and variance nσ2",
+    ),
+    # The quotations above, with one thing changed.
+    "a word changed in a source with spaces in its words": (
+        "percolation_discussion",
+        "Using the possibility generating function for its degree distribution, we accurately predicted "
+        "the mean size of outbreaks and the probability and final size of epidemics for a variety of "
+        "models in homogeneous and heterogeneous populations.",
+    ),
+    "a word changed after a hyphen break": (
+        "practical_guide",
+        _PRACTICAL_GUIDE_QUOTE.replace("randomness", "uncertainty"),
+    ),
+    "a word left out after a hyphen break": (
+        "practical_guide",
+        _PRACTICAL_GUIDE_QUOTE.replace("start of an outbreak", "start of outbreak"),
+    ),
+    "a word changed before a formula": (
+        "britton",
+        "The point estimate is based on the so-called initial size equation for the limiting fraction "
+        "infectedτ: 1− τ =e− R0τ .",
+    ),
+    "a formula the source has, changed": (
+        "britton",
+        "The point estimate is based on the so-called final size equation for the limiting fraction "
+        "infectedτ: 1− τ =e− R1τ .",
+    ),
+    # One word where the source has two, and two where it has one: the space
+    # the source has is not one the quotation may add.
+    "a space the source does not have": (
+        "practical_guide",
+        _PRACTICAL_GUIDE_QUOTE.replace("formulation", "form ulation"),
+    ),
+    "two words for the one the source hyphenates": (
+        "practical_guide",
+        _PRACTICAL_GUIDE_QUOTE.replace("inappropriate", "in appropriate"),
+    ),
+    "two words for one, in a source with spaces in its words": (
+        "percolation_abstract",
+        "we show that epidemic percolation networks accurately predict the mean out break size and "
+        "probability and final size of an epidemic",
+    ),
+    # The fraction, with what it says changed.
+    "a fraction inverted": ("whittle", _WHITTLE_HEAD + "1 − ( R0 / 1 )i"),
+    "another denominator": ("whittle", _WHITTLE_HEAD + "1 − ( 1 / R1 )i"),
+    "another exponent": ("whittle", _WHITTLE_HEAD + "1 − ( 1 / R0 )2"),
+    "a plus for the minus": ("whittle", _WHITTLE_HEAD + "1 + ( 1 / R0 )i"),
+    "a product for the fraction": ("whittle", _WHITTLE_HEAD + "1 − ( 1 * R0 )i"),
+    "a bar that is between no two operands": ("whittle", _WHITTLE_HEAD + "1 / − ( 1 R0 )i"),
+    "a fraction of another sentence": (
+        "whittle",
+        _WHITTLE_HEAD.replace("major outbreak", "minor outbreak") + "1 − ( 1 / R0 )i",
+    ),
+    # A formula put into words the source has intact.
+    "a formula between words the source has next to each other": (
+        "kermack",
+        "The disease spreads from the affected to the unaffected by contact infection. Each infected "
+        "person runs through the course of x=1 his sickness, and finally is removed from the number of "
+        "those who are sick",
+    ),
+}
+
+
+def test_a_source_whose_layout_differs_is_still_quoted_from_it() -> None:
+    """Each quotation is the source's own words. The source has them with
+    spaces inside words, a hyphen broken with a space before it, or a fraction
+    with no bar."""
+    from core.engine import _quote_in_source
+
+    for name, (source, quote) in LAYOUT_QUOTES.items():
+        assert _quote_in_source(quote, LAYOUT_SOURCES[source]), name
+
+
+def test_a_quotation_of_other_words_is_not_in_a_source_however_it_is_laid_out() -> None:
+    """The same sources, with a word changed, left out or added, two sentences
+    run together, a fraction or a formula changed, a space the source does not
+    have. If this ever goes green the check no longer protects a paper from a
+    misquotation: every layout allowance above is only for spacing."""
+    from core.engine import _quote_in_source
+
+    for name, (source, quote) in LAYOUT_MISQUOTES.items():
+        assert not _quote_in_source(quote, LAYOUT_SOURCES[source]), name
+
+
+def test_a_quotation_is_not_in_another_source() -> None:
+    from core.engine import _quote_in_source
+
+    for name, (source, quote) in LAYOUT_QUOTES.items():
+        for other, text in LAYOUT_SOURCES.items():
+            if other != source:
+                assert not _quote_in_source(quote, text), (name, other)
+
+
+def test_every_word_of_a_quotation_must_be_in_the_source_however_it_is_spaced() -> None:
+    """Each accepted quotation, with each of its words in turn changed to
+    another word of the same source, to a word no source has, or left out."""
+    from core.engine import _quote_in_source
+
+    for name, (source, quote) in LAYOUT_QUOTES.items():
+        words = quote.split(" ")
+        elsewhere = sorted({w for w in LAYOUT_SOURCES[source].split() if w.isalpha() and len(w) > 4})
+        for k, word in enumerate(words):
+            if not word.isalpha() or len(word) < 5 or k in (0, len(words) - 1):
+                continue
+            other = next(w for w in elsewhere if w.lower() != word.lower())
+            for variant in (other, "zzqxvw", ""):
+                changed = " ".join(words[:k] + ([variant] if variant else []) + words[k + 1:])
+                assert not _quote_in_source(changed, LAYOUT_SOURCES[source]), (name, word, variant)
+
+
+def test_a_quotation_that_spans_a_formula_the_source_has_lost_is_not_found() -> None:
+    """The stored text of a web page can have its formulas removed altogether:
+    the Allen primer's "Given S(t) and I(t), the epidemic ends at time t, when
+    I(t)=0." is stored as "Given  and , the epidemic ends at time t, when ."
+    Every word of the quotation is there, in order, and it is still not found:
+    nothing in the source says what the formula between two words was, so
+    accepting the words would accept any formula a quotation put there. The
+    decision is to stay strict; a quotation that spans such a hole is
+    unsupported, and the writer has to quote words the source has whole."""
+    from core.engine import _quote_in_source
+
+    source = LAYOUT_SOURCES["allen_primer"]
+    # The source really is what the docstring says, and the words really are all there.
+    assert "Given  and , the epidemic ends at time t, when ." in source
+    for name, (which, quote) in LOST_FORMULA_QUOTES.items():
+        assert not _quote_in_source(quote, LAYOUT_SOURCES[which]), name
+    # Words the source has whole, right after a hole, are found as before.
+    assert _quote_in_source("the epidemic stops when an absorbing state is reached", source)
+    # A source that still has its formulas is compared with them, so a number
+    # that changed there is caught (ALLEN_FABRICATIONS above).
+    assert not _quote_in_source(
+        "if R0 > 2" + _ALLEN_TAIL + "1-(1/R0)^i", _allen_text()
+    )
+
+
+def test_a_stray_space_is_allowed_in_the_source_and_not_added_to_it() -> None:
+    from core.engine import _spaced_pattern
+
+    assert _spaced_pattern("equation").search("size equati on for")
+    assert _spaced_pattern("the point estimate").search("the poi nt estimate")
+    # Only one direction: the words a quotation separates stay separate.
+    assert not _spaced_pattern("the rapist").search("the therapist said")
+    assert not _spaced_pattern("in to").search("moving into it")
+    # A space is not a letter.
+    assert not _spaced_pattern("equation").search("equa on")
+    assert not _spaced_pattern("equation").search("equatin on")
+
+
+def test_a_source_with_windows_line_breaks_is_read_the_same() -> None:
+    from core.engine import _quote_in_source
+
+    for name in ("practical_guide", "whittle"):
+        source = LAYOUT_SOURCES[name].replace("\n", "\r\n")
+        for label, (which, quote) in LAYOUT_QUOTES.items():
+            if which == name:
+                assert _quote_in_source(quote, source), (name, label)
+
+
+def test_a_quotation_that_folds_to_nothing_is_not_in_every_source() -> None:
+    from core.engine import _quote_in_source
+
+    assert not _quote_in_source("$" * 40, LAYOUT_SOURCES["kermack"])
+    assert not _quote_in_source("^_" * 20, LAYOUT_SOURCES["kermack"])
+
+
+def test_the_grounding_accepts_a_quotation_of_a_laid_out_source_and_rejects_a_misquotation(
+    tmp_path: Path,
+) -> None:
+    """End to end through the node, on the stored sources: each pair below is a
+    quotation the check called unsupported and a misquotation of the same source
+    that it must keep calling unsupported."""
+    eng = _engine(tmp_path)
+    order = ["whittle", "britton", "allen_primer", "practical_guide", "kermack"]
+    # (source number, quotation) in the order the sources are cited.
+    cited = [
+        (1, LAYOUT_QUOTES["a fraction with its bar"][1]),
+        (2, LAYOUT_MISQUOTES["a formula the source has, changed"][1]),
+        (3, LOST_FORMULA_QUOTES["formulas the source has lost"][1]),
+        (4, LAYOUT_QUOTES["a hyphen with a space before it"][1]),
+        (5, LAYOUT_MISQUOTES["two sentences that are not neighbours"][1]),
+        (2, LAYOUT_QUOTES["a space inside a word, then a formula"][1]),
+    ]
+    _set_chat(eng, json.dumps({"claims": [
+        {"claim": f"claim {k} [{n}]", "basis": "citation", "citation_index": n, "quote": quote}
+        for k, (n, quote) in enumerate(cited, start=1)
+    ], "summary": ""}))
+    state = {
+        "topic": "t",
+        "paper_md": _paper(tmp_path, "# P\n\nSee [1], [2], [3], [4], [5].\n"),
+        "literature": [
+            {"content": LAYOUT_SOURCES[name],
+             "metadata": {"title": f"Source {name}", "doi": f"10.1/{name}", "source": "openalex"}}
+            for name in order
+        ],
+    }
+    claims = asyncio.run(eng._node_claim_check(state))["claim_grounding"]["claims"]  # type: ignore[arg-type]
+    assert [c["basis"] for c in claims] == [
+        "citation", "unsupported", "unsupported", "citation", "unsupported", "citation",
+    ]
+    assert "the quote is not in the text of [2]" in claims[1]["evidence"]
+    # The source has lost the formulas the quotation has: not found, by decision.
+    assert "the quote is not in the text of [3]" in claims[2]["evidence"]
+    assert "the quote is not in the text of [5]" in claims[4]["evidence"]
+
+
 def test_the_check_sees_the_text_of_each_source_the_paper_cites(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     seen: list[str] = []
