@@ -70,7 +70,9 @@ at all, the chat says so and the paper reports a single measurement instead of a
 After the outputs render, a visual check measures and screenshots each PDF;
 with `output.visual_check_ai: true` it also asks the chat model to check the pages. The slides and poster are redone, at most twice,
 when the check finds problems a new version can fix, and a paper whose last
-page holds only a line or two is recompiled one line taller. With LibreOffice
+page holds only a line or two is recompiled one line taller. The slides give each figure a slide of its own, and the check
+measures each figure's tick labels on its slide: a deck whose ticks come out under 8 pt is one of the redos. Figures are drawn
+with text 1.5 times the old house size, at most three panels to a figure (a prompt whose effect is not measured). With LibreOffice
 installed, `slides.pptx` is exported to PDF and checked too; its formulas are native
 PowerPoint equations, with a readable text form for other viewers. A VS Code build or chat
 model that cannot take images checks from the measurements alone, and the chat

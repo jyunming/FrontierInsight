@@ -13,6 +13,11 @@ import pytest
 pdfium = pytest.importorskip("pypdfium2")
 
 from generation._pdf_measure import (  # noqa: E402
+    SLIDE_FIGURE_TICK_MIN_PT,
+    FigureSource,
+    Line,
+    Page,
+    figure_tick_findings,
     measure_pdf,
     paper_report,
     poster_report,
@@ -50,9 +55,10 @@ def _pdf(tmp_path, pages, name="doc.pdf"):
                 raw.FPDFPath_SetDrawMode(obj, raw.FPDF_FILLMODE_WINDING, 0)
                 raw.FPDFPage_InsertObject(page.raw, obj)
             elif item[0] == "image":
-                _, left, bottom, right, top = item
+                _, left, bottom, right, top, *pixels = item
                 image = pdfium.PdfImage.new(pdf)
-                image.set_bitmap(pdfium.PdfBitmap.from_pil(Image.new("RGB", (8, 8), (40, 90, 140))))
+                size = pixels[0] if pixels else (8, 8)
+                image.set_bitmap(pdfium.PdfBitmap.from_pil(Image.new("RGB", size, (40, 90, 140))))
                 image.set_matrix(pdfium.PdfMatrix().scale(right - left, top - bottom).translate(left, bottom))
                 page.insert_obj(image)
         page.gen_content()
@@ -294,6 +300,127 @@ def test_slides_report_finds_latex_math_shown_as_text(tmp_path):
     path = _pdf(tmp_path, [(*SLIDE, raw), (*SLIDE, prices), (*SLIDE, typeset)])
     findings = [f for f in slides_report(measure_pdf(path))["findings"] if f["check"] == "raw_markup"]
     assert [(f["page"], f["lines_with_latex"]) for f in findings] == [(1, 2)]
+
+
+# ---------------------------------------------------------------------------
+# Tick labels of a figure on a slide
+
+# A figure drawn 13.1 in wide at 100 dpi, whose ticks were drawn at 15 pt (the house
+# style). Its pixels are what a placed image is matched to it by.
+ROW = FigureSource("row.png", 1310, 410, 13.1, 15.0)
+GRID = FigureSource("grid.png", 1310, 1010, 13.1, 15.0)
+
+
+def _slide_page(images, *, bullets=True, title="Established outbreaks match theory", number=1):
+    """A slide as ``measure_pdf`` reads it: a title, a lead line, optionally bullets
+    beside or under the figure, the page number in the footer, and ``images``, each
+    ``(box, pixel size)``."""
+    lines = [
+        Line(title, 27.4, True, (58.0, 430.0, 800.0, 460.0)),
+        Line("Figure 3 shows the final size against the population.", 18.75, True, (58.0, 390.0, 700.0, 412.0)),
+        Line(str(number), 15.0, False, (924.0, 25.0, 928.0, 32.0)),
+    ]
+    if bullets:
+        lines += [
+            Line("First point with its number.", 18.75, False, (58.0, 300.0, 440.0, 322.0)),
+            Line("Second point with its number.", 18.75, False, (58.0, 260.0, 440.0, 282.0)),
+        ]
+    return Page(number, 960.0, 540.0, lines, [box for box, _px in images], [], [px for _box, px in images])
+
+
+def test_measure_pdf_reads_the_pixel_size_of_each_image(tmp_path):
+    path = _pdf(tmp_path, [(*SLIDE, [("image", 100, 100, 500, 220, (1310, 410)), ("image", 600, 100, 700, 200)])])
+    assert measure_pdf(path).pages[0].image_px == [(1310, 410), (8, 8)]
+
+
+def test_a_figure_beside_bullets_with_tick_labels_under_8_pt_is_sent_back_to_be_given_its_own_slide():
+    """cb1 of the six stored quests: a 13.1 in figure in a 5.6 in side pane, so
+    10 pt ticks came out at 4.3 pt. The finding says what to do about it."""
+    assert SLIDE_FIGURE_TICK_MIN_PT == 8.0
+    page = _slide_page([((500.0, 200.0, 903.0, 328.0), (1310, 410))])
+    (finding,) = figure_tick_findings(page, [ROW])
+    assert (finding["check"], finding["severity"], finding["page"]) == ("figure_ticks_small", "medium", 1)
+    assert finding["figure"] == "row.png" and finding["alone"] is False
+    assert finding["tick_pt"] == 6.4 and finding["scale"] == 0.427
+    problem = finding["problem"]
+    assert "row.png" in problem and "Established outbreaks match theory" in problem
+    assert "5.6 in wide" in problem and "43%" in problem and "6.4 pt" in problem and "at least 8 pt" in problem
+    assert "slide of its own" in problem and "no bullets" in problem and "next slide" in problem
+
+
+def test_a_figure_that_is_large_enough_is_not_reported_and_its_tick_size_is_a_metric():
+    wide = _slide_page([((57.0, 60.0, 903.0, 335.0), (1310, 410))], bullets=False)
+    assert figure_tick_findings(wide, [ROW]) == []
+    # The floor is 8 pt: a 15 pt tick drawn at 8.01/15 of the width it was drawn at is enough, at 7.99/15 it is not.
+    def at(tick_pt):
+        return _slide_page([((100.0, 60.0, 100.0 + 13.1 * 72 * tick_pt / 15, 200.0), (1310, 410))], bullets=False)
+
+    assert figure_tick_findings(at(8.01), [ROW]) == []
+    assert [f["check"] for f in figure_tick_findings(at(7.99), [ROW])] == ["figure_ticks_small"]
+
+    from generation._pdf_measure import Document
+
+    report = slides_report(Document([wide, _slide_page([], number=2)]), figures=[ROW])
+    assert [e.get("figure_tick_pt") for e in report["metrics"]["per_page"]] == [[13.5], None]
+    assert report["findings"] == []
+
+
+def test_a_figure_that_already_has_its_slide_is_low_since_no_new_deck_changes_it():
+    """A 3x3 grid is 10.1 in tall: alone on its slide it still reaches only 0.45 of
+    its size. That is a figure with too many panels, not a slide with too much text."""
+    page = _slide_page([((268.0, 53.0, 692.0, 380.0), (1310, 1010))], bullets=False)
+    (finding,) = figure_tick_findings(page, [GRID])
+    assert (finding["severity"], finding["alone"], finding["tick_pt"]) == ("low", True, 6.7)
+    assert "already has a slide of its own" in finding["problem"] and "too many panels" in finding["problem"]
+    assert "Give the figure a slide of its own" not in finding["problem"]
+
+
+def test_a_caption_under_the_figure_means_it_shares_its_slide_but_the_page_number_does_not():
+    box = (500.0, 200.0, 903.0, 328.0)
+    caption = _slide_page([(box, (1310, 410))], bullets=False)
+    caption.lines.append(Line("Figure 3: conditional final size.", 12.0, False, (58.0, 170.0, 500.0, 186.0)))
+    assert figure_tick_findings(caption, [ROW])[0]["alone"] is False
+    assert figure_tick_findings(_slide_page([(box, (1310, 410))], bullets=False), [ROW])[0]["alone"] is True
+
+
+def test_an_image_no_figure_file_matches_is_left_out_and_so_is_one_two_files_disagree_on():
+    small = ((500.0, 200.0, 903.0, 328.0), (1310, 410))
+    assert figure_tick_findings(_slide_page([((500.0, 200.0, 903.0, 328.0), (999, 700))]), [ROW]) == []
+    assert figure_tick_findings(_slide_page([((500.0, 200.0, 903.0, 328.0), None)]), [ROW]) == []
+    # Two files of one pixel size but different tick sizes: naming either could be wrong.
+    other = FigureSource("row_small.png", 1310, 410, 13.1, 8.0)
+    assert figure_tick_findings(_slide_page([small]), [ROW, other]) == []
+    # The same size and the same ticks: the finding stands, without a name.
+    twin = FigureSource("row_twin.png", 1310, 410, 13.1, 15.0)
+    (finding,) = figure_tick_findings(_slide_page([small]), [ROW, twin])
+    assert finding["figure"] is None and "row.png" not in finding["problem"]
+
+
+def test_a_resampled_figure_is_matched_by_its_proportions_and_a_bar_or_an_icon_is_not_a_figure():
+    """LibreOffice reduces a picture to 300 dpi in its PDF: the pixels change and the
+    proportions do not. Its accent bar and logo are images too."""
+    resampled = _slide_page([((36.0, 46.0, 924.0, 324.0), (655, 205))], bullets=False)   # 92% of the width
+    (finding,) = figure_tick_findings(resampled, [FigureSource("row.png", 1310, 410, 24.0, 15.0)])
+    assert finding["figure"] == "row.png" and finding["tick_pt"] == 7.7 and finding["severity"] == "low"
+    decorations = _slide_page([
+        ((-3.0, 527.0, 963.0, 541.0), (966, 14)),      # the accent bar
+        ((62.0, 464.0, 110.0, 473.0), (200, 39)),      # a logo
+        ((0.0, 0.0, 960.0, 540.0), (1310, 410)),       # a picture covering the slide
+    ], bullets=False)
+    assert figure_tick_findings(decorations, [ROW, FigureSource("bar.png", 966, 14, 9.7, 15.0)]) == []
+
+
+def test_the_slide_title_is_the_largest_text_even_when_the_pdf_gives_it_one_glyph_at_a_time():
+    """The serif titles of the Marp deck come out of the PDF one glyph to a line."""
+    glyphs = [
+        Line(ch, 36.5, False, (58.0 + 16 * i + (12 if i > 3 else 0), 425.0, 70.0 + 16 * i + (12 if i > 3 else 0), 445.0))
+        for i, ch in enumerate("Fig one")
+        if ch != " "
+    ]
+    body = Line("A bullet under the title that is set smaller.", 18.75, False, (58.0, 300.0, 600.0, 322.0))
+    page = Page(1, 960.0, 540.0, [*glyphs, body], [(500.0, 100.0, 903.0, 230.0)], [], [(1310, 410)])
+    (finding,) = figure_tick_findings(page, [ROW])
+    assert 'on the slide "Fig one"' in finding["problem"]
 
 
 def test_paper_report_finds_a_line_running_into_the_margin(tmp_path):

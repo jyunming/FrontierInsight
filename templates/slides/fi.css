@@ -153,6 +153,19 @@ section:has(> p > img) > p > img {
   margin-block: 0;
 }
 
+/* A slide that holds a title, a lead line and its figure and no list, table,
+   code or quote is a figure slide: its figure takes all the room under the
+   text. The 48vh cap above is for a figure that shares its slide with text; on
+   a slide of its own it left about a fifth of a square figure's height unused.
+   The paragraph still shrinks to the room that is left, so a wide figure keeps
+   the width the slide gives it. */
+section:has(> p > img):not(:has(> :is(ul, ol, table, pre, blockquote))) > p:has(> img) {
+  max-height: none;
+}
+section:has(> p > img):not(:has(> :is(ul, ol, table, pre, blockquote))) > p > img {
+  max-height: 100%;
+}
+
 /* ---- Tables ---------------------------------------------------------- */
 section table { font-size: 0.86em; border-collapse: collapse; }
 section th {
@@ -228,13 +241,16 @@ section.lead p {
 /* ---- References slide ----------------------------------------------- */
 /* The auto-appended `## References` slide ("- [4] ..." entries), a numbered
    list a deck wrote itself, and a `## Further reading` slide a deck wrote
-   itself: compact + mono so several sources fit, with teal markers. */
+   itself: mono, in two columns, with teal markers. 0.96em is 18 pt on the
+   slide. The auto-appended slide lists as many sources as fit at this size
+   (_SOURCE_SLIDE_* in core/engine.py); change the size and that budget
+   together. */
 section:has(h2[id^="references"]) ol,
 section:has(h2[id^="references"]) ul,
 section:has(h2[id^="further-reading"]) ul,
 section:has(h2 + ol) ol {
   font-family: var(--mono);
-  font-size: 0.6em;
+  font-size: 0.96em;
   line-height: 1.42;
   color: var(--muted);
   columns: 2;
@@ -248,4 +264,4 @@ section:has(h2[id^="further-reading"]) a,
 section:has(h2 + ol) a { color: var(--accent-2); border: none; word-break: break-all; }
 /* The "(8 more sources in the paper)" line under the list, at the list's size. */
 section:has(h2[id^="references"]) :is(ul, ol) + p,
-section:has(h2[id^="further-reading"]) ul + p { font-size: 0.6em; }
+section:has(h2[id^="further-reading"]) ul + p { font-size: 0.96em; }

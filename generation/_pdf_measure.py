@@ -17,7 +17,7 @@ from __future__ import annotations
 import ctypes
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -39,6 +39,13 @@ POSTER_MAX_WORDS = 1000
 POSTER_MAX_REFERENCES = 8
 POSTER_MAX_CHARS_PER_LINE = 65
 SLIDE_MIN_PT = 12.0
+# The smallest tick label a figure may have on a slide, in points as the slide
+# draws it: the figure's tick size times how much smaller the slide draws the
+# figure than it was drawn. The models draw figures 8-13 in wide and a slide
+# shows them at 0.3-0.9 of that, so ticks drawn at 10 pt came out at 2.9-6.9 pt
+# on the slides of six stored quests. A figure below this is sent back to the
+# slides step to be given a slide of its own.
+SLIDE_FIGURE_TICK_MIN_PT = 8.0
 PAPER_MIN_PT = 7.0
 
 _BOLD_WEIGHT = 600
@@ -72,6 +79,9 @@ class Page:
     lines: list[Line]
     images: list[Box]
     rules: list[Box]  # thin filled paths spanning most of the page width
+    # The stored pixel size of each image in ``images`` (same order), or None
+    # when the PDF library cannot say: what tells a figure file from another.
+    image_px: list[tuple[int, int] | None] = field(default_factory=list)
 
 
 @dataclass
@@ -165,16 +175,26 @@ def _measure_page(page, number: int, raw) -> Page:
         lines = _read_lines(textpage, raw)
     finally:
         textpage.close()
-    images = [
-        _object_box(obj, raw)
-        for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_IMAGE], max_depth=5)
-    ]
+    images, image_px = [], []
+    for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_IMAGE], max_depth=5):
+        images.append(_object_box(obj, raw))
+        image_px.append(_image_pixels(obj))
     rules = []
     for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_PATH], max_depth=5):
         box = _object_box(obj, raw)
         if box[2] - box[0] >= 0.8 * width and box[3] - box[1] <= _RULE_MAX_HEIGHT:
             rules.append(box)
-    return Page(number, width, height, lines, images, rules)
+    return Page(number, width, height, lines, images, rules, image_px)
+
+
+def _image_pixels(obj) -> tuple[int, int] | None:
+    """The pixel size an image object is stored at, or None."""
+    try:
+        info = obj.get_metadata()
+        width, height = int(info.width), int(info.height)
+    except Exception:  # noqa: BLE001 — an image the library cannot describe is just not matched
+        return None
+    return (width, height) if width > 0 and height > 0 else None
 
 
 def _read_lines(textpage, raw) -> list[Line]:
@@ -682,20 +702,174 @@ def poster_report(
 # Slides
 
 
-def slides_report(doc: Document) -> dict:
-    """Per-slide overflow and text too small to read when projected."""
+@dataclass
+class FigureSource:
+    """A figure file the deck may show, as the tick check needs it: how large
+    the figure was drawn and how large its tick labels were drawn."""
+
+    name: str
+    width_px: int
+    height_px: int
+    width_in: float  # the file's width at the dpi it was saved at
+    tick_pt: float  # its tick labels' size in points, as drawn
+
+
+# A figure's pixel size in the PDF against its file: Chromium keeps it exactly,
+# LibreOffice may resample (its PDF export reduces images to 300 dpi), which
+# keeps the aspect ratio to a pixel.
+_PIXEL_SLACK = 4
+_ASPECT_SLACK = 0.005
+# An image narrower than this (in pixels) is not matched by aspect ratio: an
+# icon or a logo could share a figure's proportions.
+_MATCH_BY_ASPECT_MIN_PX = 200
+
+
+def _is_decoration(image: Box, page: Page) -> bool:
+    """A bar, an icon or a picture covering the slide, not a figure. A figure
+    nearly as wide as the slide is a figure, unlike in the checks above, which
+    take anything 90% of the width for the pptx's accent bar."""
+    width, height = image[2] - image[0], image[3] - image[1]
+    return height < 24.0 or (width >= 0.9 * page.width and height >= 0.9 * page.height)
+
+
+def _match_figures(pixels: tuple[int, int], figures: Sequence[FigureSource]) -> list[FigureSource]:
+    """The figure files an image of this pixel size can be: those of the same
+    size, else (a resampled image) those of the same proportions."""
+    width, height = pixels
+    exact = [
+        f for f in figures
+        if abs(f.width_px - width) <= _PIXEL_SLACK and abs(f.height_px - height) <= _PIXEL_SLACK
+    ]
+    if exact or width < _MATCH_BY_ASPECT_MIN_PX:
+        return exact
+    ratio = width / height
+    return [f for f in figures if f.height_px > 0 and abs(f.width_px / f.height_px - ratio) <= _ASPECT_SLACK * ratio]
+
+
+def _placed_figures(page: Page, figures: Sequence[FigureSource]) -> list[dict]:
+    """Each figure of ``figures`` the page shows: where it is, how much smaller
+    than drawn, and so how large its tick labels are on this page. An image
+    that could be two files of different size or tick size is left out, since
+    naming the wrong one would say the wrong size."""
+    placed = []
+    for box, pixels in zip(page.images, page.image_px):
+        if pixels is None or _is_decoration(box, page):
+            continue
+        matches = _match_figures(pixels, figures)
+        if not matches or any((m.width_in, m.tick_pt) != (matches[0].width_in, matches[0].tick_pt) for m in matches):
+            continue
+        source = matches[0]
+        width = box[2] - box[0]
+        scale = width / (source.width_in * 72.0)
+        placed.append({
+            "box": box, "names": [m.name for m in matches], "source": source,
+            "placed_in": width / 72.0, "scale": scale, "tick_pt": source.tick_pt * scale,
+        })
+    return placed
+
+
+def _slide_title(page: Page) -> str:
+    """The largest text on the page, in reading order: a slide's title. The
+    serif title of the Marp deck comes out of the PDF one glyph to a line, so
+    the pieces are joined, with a space where they are apart."""
+    lines = [line for line in page.lines if line.visible]
+    if not lines:
+        return ""
+    size = max(line.size for line in lines)
+    rows: list[list[Line]] = []
+    top = 0.0
+    for line in sorted((l for l in lines if abs(l.size - size) < 0.05), key=lambda l: -l.box[3]):
+        if not rows or top - line.box[3] > 0.5 * size:
+            rows.append([])
+            top = line.box[3]
+        rows[-1].append(line)
+    title = ""
+    for row in rows:
+        row.sort(key=lambda l: l.box[0])
+        for index, piece in enumerate(row):
+            if title and (index == 0 or piece.box[0] - row[index - 1].box[2] > 0.2 * size):
+                title += " "
+            title += piece.text
+    return title
+
+
+def _text_beside_or_under(page: Page, figure: Box) -> bool:
+    """Whether the slide has text that is not above the figure: bullets beside
+    it or a caption under it. The footer (the page number, the wordmark) is not
+    counted. PDF y runs up, so a line above the figure has its bottom at or over
+    the figure's top."""
+    footer = 0.08 * page.height
+    return any(
+        line.visible and line.box[3] > footer and line.box[1] < figure[3] - 2.0
+        for line in page.lines
+    )
+
+
+def figure_tick_findings(page: Page, figures: Sequence[FigureSource], *, region: str = "slide") -> list[dict]:
+    """A finding for each figure whose tick labels are under
+    ``SLIDE_FIGURE_TICK_MIN_PT`` on this slide.
+
+    A figure that shares its slide with text is asked to be given a slide of its
+    own, which a new version of the deck can do: medium, so the slides step is
+    sent back. One that already is alone and is still too small is a figure with
+    too many panels for a slide, and nothing a new deck writes changes that: low,
+    reported and not redone."""
+    found = []
+    title = _slide_title(page)
+    where = f' on the slide "{title[:60]}"' if title else ""
+    for placed in _placed_figures(page, figures):
+        tick = placed["tick_pt"]
+        if tick >= SLIDE_FIGURE_TICK_MIN_PT:
+            continue
+        source: FigureSource = placed["source"]
+        names = placed["names"]
+        name = f" {names[0]}" if len(names) == 1 else ""
+        drawn = (
+            f"is drawn {placed['placed_in']:.1f} in wide, {placed['scale']:.0%} of the "
+            f"{source.width_in:.1f} in it was drawn at, so its tick labels come out at about "
+            f"{tick:.1f} pt"
+        )
+        shares = _text_beside_or_under(page, placed["box"])
+        if shares:
+            problem = (
+                f"The figure{name}{where} {drawn}; a slide needs at least {SLIDE_FIGURE_TICK_MIN_PT:g} pt. "
+                "Give the figure a slide of its own: the slide title, one lead sentence and the figure, "
+                "with no bullets, and put its discussion on the next slide."
+            )
+        else:
+            problem = (
+                f"The figure{name}{where} {drawn}, under the {SLIDE_FIGURE_TICK_MIN_PT:g} pt a slide needs, "
+                "though it already has a slide of its own: it has too many panels, or is too tall, for one slide."
+            )
+        found.append(_finding(
+            "figure_ticks_small", page.number, region, problem, "medium" if shares else "low",
+            figure=names[0] if len(names) == 1 else None,
+            tick_pt=round(tick, 1), scale=round(placed["scale"], 3), alone=not shares,
+        ))
+    return found
+
+
+def slides_report(doc: Document, figures: Sequence[FigureSource] = ()) -> dict:
+    """Per-slide overflow and text too small to read when projected.
+    ``figures`` are the quest's figure files; each one a slide shows is checked
+    for the size of its tick labels there."""
     findings: list[dict] = []
     per_page = []
     for page in doc.pages:
         lines = [line for line in page.lines if line.visible]
         smallest = _smallest_readable_size(lines)
-        per_page.append({
+        entry = {
             "page": page.number,
             "body_pt": _size_mode(lines),
             "smallest_pt": smallest,
             "words": sum(line.words for line in lines),
             "figures": len(page.images),
-        })
+        }
+        ticks = [round(placed["tick_pt"], 1) for placed in _placed_figures(page, figures)]
+        if ticks:
+            entry["figure_tick_pt"] = ticks
+        per_page.append(entry)
+        findings += figure_tick_findings(page, figures)
         findings += _overflow_findings(page, region="slide")
         findings += _figure_over_text_findings(page, region="slide")
         findings += _figure_under_text_findings(page, region="slide")

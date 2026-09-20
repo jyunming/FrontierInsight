@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from core.config import Config
+from core.plot_style import HOUSE_TICK_PT, RECORDS_DIRNAME
 from core.provider import (
     PROXY_PROVIDERS,
     ImageInputUnsupported,
@@ -44,6 +45,7 @@ from core.provider import (
 from generation._cjk import has_cjk
 from generation._office_pdf import pptx_to_pdf
 from generation._pdf_measure import (
+    FigureSource,
     measure_pdf,
     paper_report,
     poster_report,
@@ -147,7 +149,10 @@ async def _check(
     if doc is None or not doc.pages:
         return {"transport": "none", "error": "the PDF could not be read"}
     base = _BASE_KIND.get(kind, kind)
-    measured = _REPORTS[base](doc)
+    if base == "slides":
+        measured = slides_report(doc, figures=_figure_sources(quest_root))
+    else:
+        measured = _REPORTS[base](doc)
     result: dict[str, Any] = {
         "pages": len(doc.pages),
         "measured": {"metrics": measured["metrics"], "findings": measured["findings"]},
@@ -181,6 +186,44 @@ async def _check(
         return result
     result["findings"], result["dropped"] = grounded_findings(raw, doc, set(checks))
     return result
+
+
+def _figure_sources(quest_root: Path) -> list[FigureSource]:
+    """The quest's figure files, with the size of their tick labels, for the
+    slides' readability check. Never raises.
+
+    Only a figure the experiment drew under the house style is listed: the
+    plot-style recorder wrote a record of it (``.fi/figure_records/<stem>.json``).
+    A fetched web figure or a web plot has none, and its tick size is unknown.
+    The tick size is the record's own ``tick_pt``, the smallest tick label the
+    figure drew, so a script's ``tick_params(labelsize=...)`` counts. A record
+    from before the recorder wrote it has none, and takes the house style's size
+    (``HOUSE_TICK_PT``), which every figure of the house style is drawn at unless
+    its script says otherwise. A record with a null ``tick_pt`` draws no tick
+    labels, and there is nothing to read."""
+    sources: list[FigureSource] = []
+    try:
+        from PIL import Image
+
+        for png in sorted((quest_root / "figures").glob("*.png")):
+            try:
+                record = json.loads((quest_root / ".fi" / RECORDS_DIRNAME / f"{png.stem}.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            tick = record["tick_pt"] if "tick_pt" in record else HOUSE_TICK_PT
+            if not isinstance(tick, (int, float)) or isinstance(tick, bool) or tick <= 0:
+                continue
+            with Image.open(png) as image:
+                width, height = image.size
+                dpi = image.info.get("dpi")
+            dots = float(dpi[0]) if dpi and dpi[0] else 0.0
+            if dots > 0:
+                sources.append(FigureSource(png.name, width, height, width / dots, float(tick)))
+    except Exception as exc:  # noqa: BLE001 — a check must never stop the quest
+        _log.info("visual check: could not read the figure files (%r)", exc)
+    return sources
 
 
 _KIND_NAMES = {
@@ -366,7 +409,10 @@ def _write_report(quest_root: Path, kind: str, report: dict[str, Any]) -> None:
 # Redo
 
 # Findings a new version can fix. The slides' model writes the whole deck,
-# layout included. The poster's layout is the planner's, so only text the
+# layout included: a figure whose tick labels come out under 8 pt beside text
+# is moved to a slide of its own (figure_ticks_small; the same finding on a
+# figure that already is alone is low, so it is not redone, and the redo cap
+# below is unchanged). The poster's layout is the planner's, so only text the
 # model wrote counts there: a new reply would not change empty space, uneven
 # columns or overflow. The paper is never rewritten; a script repairs a last
 # page that holds only a line or two by making the text area taller.
@@ -374,6 +420,7 @@ REDO_CHECKS = {
     "slides": frozenset({
         "overflow", "small_font", "cut_off_text", "overlap", "unreadable_figure",
         "raw_markup", "broken_math", "garbled_text", "slide_overflow", "crowded_slide",
+        "figure_ticks_small",
     }),
     "poster": frozenset({"raw_markup", "broken_math", "garbled_text", "captions"}),
     "paper": frozenset({"last_page_nearly_empty"}),
