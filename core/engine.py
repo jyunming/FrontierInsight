@@ -44,6 +44,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from . import paper_patch
 from . import stats as _stats
 from .config import (
     Config,
@@ -228,6 +229,11 @@ class QuestState(TypedDict, total=False):
     # repair attempt; otherwise the paper is written from the run before it,
     # next to code that never ran.
     exec_patch_pending: bool
+    # True once the run's figures have been sent back for a redraw because a
+    # legend or a title was drawn over what a reader needs (see
+    # ``_figure_overlap_findings``). One such round per quest, so a model that
+    # cannot lay a figure out is not asked again.
+    figure_overlap_repaired: bool
     # Set by the execute-repair loop when a script exits 0 but every
     # numeric metric is ~0 (a degenerate run) and the repair attempts
     # couldn't produce real numbers. analyze/write/review read this so a
@@ -250,6 +256,11 @@ class QuestState(TypedDict, total=False):
     # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
     evidence_broaden_count: int
     paper_md: str
+    # A fingerprint of the study the current draft was written from (design,
+    # analysis, results, figures, cross-check and the user's feedback). A revise
+    # edits the flagged passages of that draft only while the fingerprint still
+    # matches, i.e. while nothing the paper is based on has been run again.
+    paper_basis: str
     # Claim grounding: which paper claims trace to evidence
     # (experiment / citation / unsupported), from the claim_check node.
     claim_grounding: dict[str, Any]
@@ -1384,6 +1395,20 @@ class Engine:
             protocol.topic_type, expected, actual_path, protocol.source_policy,
         )
 
+    def _figure_overlaps_to_repair(self, state: QuestState) -> list[str]:
+        """The figure overlaps the run is to be sent back for: those of
+        ``_figure_overlap_findings``, when the repair budget can spare an
+        attempt for them.
+
+        A redraw rewrites a script that ran, and a rewrite can break it, so it
+        is offered only while one more attempt is left after it to repair that.
+        Without the reserve, a redraw on the last attempt that crashed would
+        turn a run with an overlapping legend into a run with no result.
+        """
+        if int(state.get("exec_reflect_iter", 0) or 0) + 1 >= self.config.engine.exec_reflect_max_iterations:
+            return []
+        return _figure_overlap_findings(state)
+
     def _route_after_execute_reflect(self, state: QuestState) -> str:
         """Route based on whether the reflect node patched the
         code (→ retry execute) or accepted the failure / success
@@ -1422,6 +1447,11 @@ class Engine:
             # design declared what its outputs may legally be; enforce it
             # here, before a paper gets written from them.
             if _assertion_violations(state):
+                return "retry"
+            # Figures with a legend or a title drawn over what a reader needs go
+            # back once: the reflect node writes the redraw, and the flag it sets
+            # ends the finding, so this cannot loop.
+            if self._figure_overlaps_to_repair(state):
                 return "retry"
             return "proceed"
         return "retry"
@@ -4740,12 +4770,28 @@ class Engine:
             and _is_degenerate_result(state.get("result_json") or {})
         )
         implausible = _assertion_violations(state)
+        # A legend drawn over its data, or a figure title over a panel title, is
+        # sent back for a redraw once, and only when nothing else is wrong with
+        # the run: a repair of a crash, an all-zero result or a broken bound
+        # regenerates the figures anyway, and they are measured again after it.
+        overlaps = (
+            self._figure_overlaps_to_repair(state)
+            if rc == 0 and has_result_json and not degenerate and not implausible
+            else []
+        )
 
         # Clean success (and not a degenerate all-zero run) → no-op.
         if rc == 0 and has_result_json and not degenerate and implausible:
             for v in implausible:
                 self._log.warning("[execute_reflect] implausible: %s", v.describe())
-        if rc == 0 and has_result_json and not degenerate and not implausible:
+        if rc == 0 and has_result_json and not degenerate and not implausible and not overlaps:
+            left = _figure_overlap_findings({**state, "figure_overlap_repaired": False})
+            if left:
+                self._log.warning(
+                    "[execute_reflect] figure_overlap left as drawn (%s): %s",
+                    "the one redraw has been made" if state.get("figure_overlap_repaired")
+                    else "no repair attempt to spare", "; ".join(left[:3]),
+                )
             self._log.info("[execute_reflect] script succeeded; skipping repair")
             return {}
 
@@ -4836,13 +4882,26 @@ class Engine:
             )
             returncode_for_prompt = "0 (ran, but values break the declared bounds)"
             result_json_note = "yes (rejected — see stdout)"
+        elif overlaps:
+            self._log.warning(
+                "[execute_reflect] figure_overlap: rc=0 and the results stand, but %d overlap(s) "
+                "were measured on the saved canvas -- asking for one redraw (iter %d): %s",
+                len(overlaps), iters + 1, "; ".join(overlaps[:3]),
+            )
+            stdout_for_prompt = _figure_overlap_directive(overlaps)
+            returncode_for_prompt = "0 (ran; the figures overlap)"
+            result_json_note = "yes (stands: change only the figures' layout)"
         else:
             stdout_for_prompt = exec_result.get("stdout_tail", "")[:2000]
             returncode_for_prompt = str(rc)
             result_json_note = "yes" if has_result_json else "no"
 
+        # The one round the redraw gets, spent whatever the model answers.
+        spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
         prompt = self._prompts["execute_reflect"].substitute(
-            previous_code=(state.get("code") or "")[:8000],
+            # Whole for a redraw: it returns the script, and a script cut at the
+            # limit would lose its tail.
+            previous_code=(state.get("code") or "") if overlaps else (state.get("code") or "")[:8000],
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
             stderr_tail=exec_result.get("stderr_tail", "")[:2000],
@@ -4853,12 +4912,28 @@ class Engine:
             design_block=json.dumps(state.get("design") or {}, indent=2),
             clarify_block=_format_clarify(state),
         )
-        text = await self._chat(prompt, node="execute_reflect")
+        try:
+            text = await self._chat(prompt, node="execute_reflect")
+        except Exception as exc:  # noqa: BLE001
+            if not overlaps:
+                raise
+            # A redraw is a nicety on a run that worked: failing to ask for it
+            # never stops the quest.
+            self._log.warning(
+                "[execute_reflect] the figure redraw call failed (%r); keeping the figures as drawn", exc,
+            )
+            return spent
         parsed = _parse_json_lenient(text) or {}
 
+        # A run whose figures merely overlap has a result that stands, so a
+        # refusal, an empty answer or a redraw that is not Python leaves the
+        # script and its figures as they are: no give-up sentinel (which would
+        # switch off every later repair) and no repair attempt spent.
         give_up = (parsed.get("give_up_reason") or "").strip()
         if give_up:
             self._log.warning("[execute_reflect] LLM gave up: %s", give_up[:200])
+            if overlaps:
+                return spent
             history.append({
                 "iter": iters + 1,
                 "returncode": rc,
@@ -4876,10 +4951,21 @@ class Engine:
             self._log.warning(
                 "[execute_reflect] LLM returned no `code` field; proceeding without repair"
             )
+            if overlaps:
+                return spent
             return {
                 "exec_give_up_reason": "(LLM produced no patched code)",
                 "exec_reflect_iter": iters + 1,
             }
+        if overlaps:
+            try:
+                ast.parse(new_code)
+            except (SyntaxError, ValueError):
+                self._log.warning(
+                    "[execute_reflect] the figure redraw is not a Python script; keeping the "
+                    "script as written, with its figures as drawn",
+                )
+                return spent
 
         patch_summary = parsed.get("patch_summary") or "(no summary)"
         history.append({
@@ -4900,6 +4986,7 @@ class Engine:
         code_path.write_text(new_code, encoding="utf-8")
 
         patch: QuestState = {
+            **spent,
             "code": new_code,
             "exec_reflect_iter": iters + 1,
             "exec_reflect_history": history,
@@ -5827,12 +5914,11 @@ class Engine:
             patch["evidence_broaden_count"] = broadened + 1
         return patch
 
-    async def _node_write(self, state: QuestState) -> QuestState:
-        persona_block = self._resolve_write_persona(state)
-        self._log.info(
-            "[write] authoring paper.md (persona=%s)",
-            persona_block.split("\n", 1)[0][:80] if persona_block else "default",
-        )
+    async def _write_whole_paper(self, state: QuestState, persona_block: str) -> str:
+        """The paper's markdown as the writer gives it: the whole paper, written
+        from the study, with the review of an earlier draft (when there is one)
+        in the prompt. A first draft always comes from here, and so does a revise
+        that :meth:`_patch_flagged_passages` cannot answer with edits."""
         # When the evidence gate judged the evidence thin (insufficient,
         # or "broaden" with the broaden budget exhausted), hand the writer
         # an explicit note so the paper frames its limits honestly instead
@@ -5891,6 +5977,21 @@ class Engine:
                 f"like a provider message (a usage limit, an expired login), fix "
                 f"the provider and resume the quest."
             )
+        return markdown
+
+    async def _node_write(self, state: QuestState) -> QuestState:
+        persona_block = self._resolve_write_persona(state)
+        self._log.info(
+            "[write] authoring paper.md (persona=%s)",
+            persona_block.split("\n", 1)[0][:80] if persona_block else "default",
+        )
+        # A revise whose every must-fix hit names a passage edits those passages
+        # of the earlier draft and leaves the rest as it was; anything else
+        # (a first draft, a hit about the whole paper, edits the engine cannot
+        # apply) writes the whole paper.
+        markdown = await self._patch_flagged_passages(state, persona_block)
+        if markdown is None:
+            markdown = await self._write_whole_paper(state, persona_block)
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -5945,7 +6046,102 @@ class Engine:
         # resume, ``user_pauses_fired`` carries "before_review" and the
         # gate falls through to review.
         self._maybe_pause_for_user_input(state, "before_review")
-        return {"paper_md": str(paper_path), "literature": literature}
+        return {
+            "paper_md": str(paper_path), "literature": literature,
+            "paper_basis": _paper_basis(state),
+        }
+
+    async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
+        """The earlier draft with the passages the review named edited, or
+        ``None`` when this round writes the whole paper.
+
+        Eligible when the review's must-fix hits all name one passage of the
+        paper (an unsupported claim, a figure caption, a number nothing accounts
+        for, a mislabelled statistic), the earlier draft is on disk, and nothing
+        it was written from has been run again since (``paper_basis``). The model
+        gets that draft and only those passages and answers with
+        ``find``/``replace`` edits; :mod:`core.paper_patch` applies each edit only
+        where its ``find`` occurs exactly once and leaves every other character
+        as it was. The source lists are then rebuilt from the citations in the
+        edited text by the same step a whole paper goes through.
+
+        A first draft, a hit about the whole paper (``over_page_limit``,
+        ``figure_missing``), a study that changed, a reply that is not usable
+        edits, and an edit that cannot be applied all return ``None``, and the log
+        says which."""
+        review = state.get("review") or {}
+        hits = [str(h).strip() for h in review.get("must_flag_hits") or [] if str(h).strip()]
+        if not hits:
+            return None  # a first draft, or a revise with no hit to answer
+        previous = ""
+        try:
+            if state.get("paper_md"):
+                previous = Path(str(state["paper_md"])).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            previous = ""
+        grounding = state.get("claim_grounding") or {}
+        claims = [
+            {"claim": str(c.get("claim") or ""), "evidence": str(c.get("evidence") or "")}
+            for c in grounding.get("claims") or []
+            if isinstance(c, dict) and c.get("basis") == "unsupported"
+        ] or [{"claim": str(c), "evidence": ""} for c in _review_items(grounding.get("unsupported"))]
+        start = _SOURCE_LIST_HEADING_RE.search(previous)
+        end = start.start() if start else len(previous)
+        reason = ""
+        passages: list[paper_patch.Passage] = []
+        if not previous.strip():
+            reason = "there is no earlier draft on disk to edit"
+        elif state.get("paper_basis") != _paper_basis(state):
+            reason = "the study the draft was written from has been run again since"
+        elif len(previous) > _PAPER_PROMPT_CHARS:
+            reason = f"the draft is longer than the {_PAPER_PROMPT_CHARS:,} characters a model reads"
+        else:
+            passages, reason = paper_patch.plan_passages(
+                previous, end,
+                hits=[(_hit_name(h), h) for h in hits],
+                claims=claims,
+                captions=_review_items(review.get("figure_caption_warnings")),
+            )
+        if reason:
+            self._log.info("[write] writing the whole paper again: %s", reason)
+            return None
+        located = sum(1 for p in passages if p.located)
+        prompt = self._prompts["write_patch"].substitute(
+            persona_block=persona_block,
+            topic=state["topic"],
+            analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
+            literature_block=_format_lit_from_state(
+                state, audience=self.config.output.audience, **self._lit_kwargs(state),
+            ),
+            passages_block=paper_patch.format_passages(passages),
+            paper_block=previous,
+        )
+        self._log.info(
+            "[write] editing the earlier draft: %d passage(s) named by the review, %d found in it",
+            len(passages), located,
+        )
+        try:
+            reply = await self._chat(prompt, node="write.patch")
+        except Exception as e:  # noqa: BLE001 - the whole-paper call below is what a real outage stops
+            self._log.warning(
+                "[write] the call for edits failed (%s: %s); writing the whole paper again",
+                type(e).__name__, str(e)[:200],
+            )
+            return None
+        try:
+            patched = paper_patch.apply_edits(previous, end, paper_patch.parse_edits(reply))
+        except paper_patch.PatchError as e:
+            self._log.warning(
+                "[write] the edits could not be used (%s); writing the whole paper again. "
+                "The reply began: %r", e, " ".join(str(reply).split())[:160],
+            )
+            return None
+        self._log.info(
+            "[write] applied %d edit(s) to the earlier draft (%d characters replaced by %d, %d unchanged "
+            "as given); every other character of the paper is as it was",
+            patched.applied, patched.removed_chars, patched.added_chars, patched.ignored,
+        )
+        return patched.text
 
     async def _node_claim_check(self, state: QuestState) -> QuestState:
         """Ground each substantive claim in the written paper to evidence — the
@@ -8430,6 +8626,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "evidence_gate",        # weigh evidence sufficiency before write
         "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "write", "review",
+        "write_patch",      # a revise for flagged passages: edits, not a new paper
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
@@ -10632,6 +10829,24 @@ def _review_items(value: Any) -> list[str]:
     return [s for s in (str(i).strip() for i in items) if s]
 
 
+# What the writer is given about the study, apart from the review and the source
+# lists. While none of it has changed, an earlier draft still describes the
+# study and can be edited; once the design, the run or the analysis has been done
+# again, it cannot.
+_PAPER_BASIS_KEYS = (
+    "design", "analysis", "result_json", "figures", "figure_records", "cross_check",
+    "feedback_history",
+)
+
+
+def _paper_basis(state: QuestState) -> str:
+    """A fingerprint of the study a draft is written from (``_PAPER_BASIS_KEYS``)."""
+    import hashlib
+
+    basis = {key: state.get(key) for key in _PAPER_BASIS_KEYS}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 def _format_review_for_writer(state: QuestState) -> str:
     """The write prompt's ``$review_feedback``: what the review of the previous
     draft asks for (its must-fix hits, the captions that describe what their
@@ -10935,6 +11150,80 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
         for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)
         for s in (ax.get("series") or []) if isinstance(s, dict) and s.get("shows") != "yes"
     ]
+
+
+def _one_line(text: Any, limit: int = 60) -> str:
+    """One line of ``text``, at most ``limit`` characters, for a message."""
+    one = " ".join(str(text or "").split())
+    return one if len(one) <= limit else one[: limit - 1] + "…"
+
+
+def _figure_overlap_findings(state: QuestState) -> list[str]:
+    """What the run's saved figures draw over what a reader needs, one sentence
+    per finding: a legend over the data it labels, or a figure title over a
+    panel title. The plot-style recorder measured each on the finished canvas
+    (``layout`` in the figure's record), since only the drawn positions can say.
+
+    Empty once the redraw has been asked for, which happens once per quest, and
+    for a figure drawn as the mean over the seeds: the engine drew that one, so
+    a repair of the experiment's own script would not change it. A record with
+    no ``layout`` (an older one, or a figure that could not be measured) has
+    nothing to report. Never raises: a defect here must not stall a quest.
+    """
+    if state.get("figure_overlap_repaired"):
+        return []
+    records = state.get("figure_records") or {}
+    found: list[str] = []
+    try:
+        for name in state.get("figures") or []:
+            record = records.get(name)
+            if not isinstance(record, dict) or record.get("replicate_mean"):
+                continue
+            for item in record.get("layout") or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("check") == "title_overlap":
+                    found.append(
+                        f'figures/{name}: the figure title "{_one_line(item.get("text"))}" is drawn '
+                        f'over the panel title "{_one_line(item.get("over"))}"'
+                    )
+                elif item.get("check") == "legend_over_data":
+                    names = [_one_line(n, 30) for n in (item.get("legend") or [])[:4]]
+                    more = ", ..." if len(item.get("legend") or []) > 4 else ""
+                    panel = f'in the panel "{_one_line(item.get("axes_title"))}", ' if item.get("axes_title") else ""
+                    found.append(
+                        f"figures/{name}: {panel}the legend ({', '.join(names)}{more}) is drawn over "
+                        "the lines or points it labels"
+                    )
+    except Exception:  # noqa: BLE001
+        return []
+    return found
+
+
+def _figure_overlap_directive(findings: list[str]) -> str:
+    """Stands where the traceback would be in the ``execute_reflect`` prompt, for
+    the one redraw a run whose figures overlap is offered (see
+    ``Engine._node_execute_reflect``)."""
+    return (
+        "FIGURE LAYOUT: the script exited 0, printed its RESULT_JSON and drew its figures, "
+        "and those results stand: the account of a crash above does not apply. But the saved "
+        "figures have text or a legend drawn over what a reader needs, measured on the "
+        "finished canvas:\n"
+        + "\n".join(f"- {finding}" for finding in findings[:8])
+        + "\n\nChange only how these figures are laid out, so that nothing is drawn over "
+        "anything else. For a legend over the data: put it outside the axes (loc=\"upper left\" "
+        "with bbox_to_anchor=(1.02, 1.0), or loc=\"lower center\" with bbox_to_anchor=(0.5, 1.02) "
+        "and ncol), or in a corner the data does not reach, or make it smaller (fontsize, ncol). "
+        "loc=\"best\" alone is not a fix: a bare ax.legend() already uses it, and it only picks the "
+        "emptiest corner, which is not always empty. Keep the legend inside the saved image "
+        "(bbox_inches=\"tight\" does that). For a figure title over a panel title: make "
+        "room for it (fig.suptitle(..., y=1.02) with bbox_inches=\"tight\", or "
+        "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout).\n\n"
+        "Do NOT change any computation, data, parameter, use of the random seed, printed value, "
+        "the final RESULT_JSON line, the file name of any figure, or what any panel plots: only "
+        "positions, sizes and the number of legend columns. Return the whole script in `code`, one "
+        "sentence in `patch_summary`, and leave `give_up_reason` empty."
+    )
 
 
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
