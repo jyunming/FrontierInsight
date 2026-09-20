@@ -41,6 +41,7 @@ import {
 } from "./terminal-command";
 import { runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
+import { runProbe } from "./probe";
 
 
 /**
@@ -330,6 +331,14 @@ async function handleRequest(
         await runAxonStatus(stream);
         return;
     }
+    if (cmd === "probe") {
+        // Behavioural check of the model in the Chat picker (or, with
+        // `all`, every model VS Code lists) for text FI did not send.
+        // Reads no settings and needs no folder: it only talks to the
+        // models through vscode.lm.
+        await runProbe(prompt, userPickedModel, stream, token);
+        return;
+    }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
         // No-admin LaTeX install for paper_pdf support.
         await runTerminalCommand(
@@ -374,6 +383,7 @@ function helpText(): string {
         "- `@fi /import-skill [path]` — import a skill written for another agent (Agent Skills layout). Opens a picker with no path, then asks for optional domain tags.",
         "- `@fi /teach-skill <name> <module>` — draft a skill from an installed library, reading its real signatures by introspection.",
         "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable. Its port is discovered automatically; override it with the `frontierInsight.axonUrl` setting. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
+        "- `@fi /probe [all]` — ask the model selected in the Chat picker (or, with `all`, every model VS Code lists, after a confirmation that states the request count) whether text FI did not send appears to be in its context: a hidden system prompt, tool definitions, a persona. Two small requests per model. It is behavioural evidence only: `vscode.lm` reports no usage figures, so real overhead is not measured.",
         "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
         "",
         "All LLM calls go through your Copilot subscription via the",

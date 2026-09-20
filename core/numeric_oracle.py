@@ -41,6 +41,31 @@ Two signals, strongest first:
 Both are reported with the JSON path they contradict, so the writer node
 gets told which number to fix rather than "something is wrong".
 
+Numbers that are not results are not compared
+=============================================
+A paper prints three kinds of number that sit near a result without being one,
+and each is left out rather than compared:
+
+* **A confidence level** -- the ``95`` in ``95% CI`` or ``Wilson 95%
+  intervals``. It lands within ``NEAR_REL`` of any result near 90-100 (a count
+  of 93, a population of 100) and was the single most frequent false finding
+  across the stored quests. Only a number followed by ``%`` and then interval
+  wording counts as a level; ``93% of runs`` is a result and is still checked.
+* **A setting the run was given** -- ``R0 = 1.5`` printed next to an outcome
+  that happens to be 1.33. ``declared_numbers`` collects the numbers the topic,
+  the design's ``variables`` and its ``method`` state, and ``check`` does not
+  report a ``near_miss`` on a number equal to one of them (at the paper's own
+  precision). Deliberately NOT the design's ``hypothesis`` /
+  ``expected_outcome``: those hold what the author *predicted* a result would
+  be, and a paper that prints the prediction where the measured value belongs
+  is the very mistake this check exists to find. A digit transposition is still
+  reported for a declared number -- it is the signal least likely to be a
+  coincidence. Known blind spot: a result that really is equal to a declared
+  setting, and is misquoted as it, goes unreported.
+* **A sign that was dropped** -- ``check`` reads U+2212 (``−``) as a minus, as
+  it already read ``-``. Left alone, ``−0.114`` was compared as ``0.114`` and
+  reported against an unrelated positive result.
+
 A third signal does not read the paper at all
 =============================================
 ``trivial_reference`` compares the results against *themselves*. A
@@ -77,7 +102,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 # A paper number must land within this relative distance of a result value
 # before it is even considered a candidate mis-transcription. Beyond it, the
@@ -202,11 +227,39 @@ _LATEX_SCI = re.compile(
 
 # Number tokens: optional sign, digits, optional decimal, optional exponent.
 # Thousands separators are handled by stripping commas between digit groups.
+#
+# The trailing guard also refuses a token that is followed by ``.<digit>``.
+# ``97.5th`` cannot be read whole (``5th`` is a word), so the pattern used to
+# back off to ``97`` -- the integer part of a number nobody wrote -- and a
+# percentile rank was reported against a count of 98. The same guard stops
+# ``1.2.3`` being read as ``1.2``.
 _NUMBER = re.compile(
     r"(?<![\w.])"
     r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)"
     r"(?:[eE]([-+]?\d+))?"
-    r"(?![\w])"
+    r"(?!\w|\.\d)"
+)
+
+# U+2212 MINUS SIGN, spelled as a code point so it cannot be mistaken for the
+# hyphen next to it. Papers typeset a negative number with it.
+_MINUS_SIGN = chr(0x2212)
+
+# The text right after a number that marks it as a confidence LEVEL: ``95% CI``,
+# ``95% Wilson interval``, ``95% bootstrap confidence interval``, LaTeX
+# ``$95\%$ CI``. A level is a convention the author chose, never a result, yet
+# ``95`` sits within 25% of any result between 72 and 126.
+#
+# ``%`` alone is not enough (``93% of runs`` is a measurement) and neither is
+# any interval word after it: ``of`` may not stand between them, or
+# ``94% of the intervals covered the truth`` -- an empirical coverage, which IS
+# a result -- would be treated as a level. Listed words only; no ``coverage``,
+# ``level`` or ``band``, which no stored paper needed and which read as results
+# more often than as levels.
+_LEVEL_AFTER = re.compile(
+    r"^\s*\\?%\$?\s*[-–]?\s*"
+    r"(?:(?!of\b)[A-Za-z]+[-\s]+){0,2}"
+    r"(?:CIs?|confidence|credible|intervals?)\b",
+    re.IGNORECASE,
 )
 
 # Markdown constructs whose numbers are structural rather than claimed.
@@ -375,6 +428,8 @@ def extract_paper_numbers(text: str) -> list[tuple[float, str, str]]:
         before = cleaned[max(0, m.start() - 24): m.start()]
         if _CONTEXT_SKIP.search(before):
             continue
+        if _LEVEL_AFTER.match(cleaned[m.end(): m.end() + 40]):
+            continue
         if _significant_digits(token) < MIN_SIG_DIGITS:
             continue
         try:
@@ -390,13 +445,85 @@ def extract_paper_numbers(text: str) -> list[tuple[float, str, str]]:
     return out
 
 
+# The design fields that say how the experiment was SET UP: the parameters, the
+# sweep values, the controls. Not ``hypothesis`` / ``expected_outcome`` (what
+# the author predicted a result would be) and not ``result_assertions`` (bounds
+# on results): a paper that prints one of those where the measured value
+# belongs is the mistake this check is for.
+_SETUP_FIELDS = ("variables", "method")
+
+
+def _text_and_numbers(obj: Any, texts: list[str], values: list[float]) -> None:
+    """Collect every string and every numeric leaf under ``obj``."""
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, str):
+        texts.append(obj)
+    elif isinstance(obj, (int, float)):
+        if math.isfinite(obj):
+            values.append(float(obj))
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _text_and_numbers(v, texts, values)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _text_and_numbers(v, texts, values)
+
+
+def declared_numbers(design: Any = None, topic: Any = None) -> list[float]:
+    """The numbers the run was *given*: written in the topic, or in the design's
+    ``variables`` and ``method``.
+
+    ``R0 in {0.9, 1.5, 3.0}`` and ``recovery rate gamma = 1`` are settings, and
+    a paper that prints them is quoting its own setup, not a result. A
+    percentage in the setup is also declared as the fraction a paper may print
+    for it (``10% of N`` -> 0.10).
+    """
+    texts: list[str] = []
+    values: list[float] = []
+    if isinstance(topic, str):
+        texts.append(topic)
+    if isinstance(design, dict):
+        for name in _SETUP_FIELDS:
+            _text_and_numbers(design.get(name), texts, values)
+
+    for text in texts:
+        folded = _LATEX_SCI.sub(
+            lambda m: f"{m.group(1)}e{m.group(2).replace('+', '')}",
+            text.replace(_MINUS_SIGN, "-"),
+        )
+        for m in _NUMBER.finditer(folded):
+            try:
+                value = float(m.group(1).replace(",", "") + (f"e{m.group(2)}" if m.group(2) else ""))
+            except ValueError:
+                continue
+            if not math.isfinite(value):
+                continue
+            values.append(value)
+            if re.match(r"\s*\\?%", folded[m.end(): m.end() + 4]):
+                values.append(value / 100.0)
+    return sorted({v for v in values if abs(v) > MIN_MAGNITUDE})
+
+
+def _is_declared(value: float, token: str, declared: list[float]) -> bool:
+    """Is the paper's number one of the settings, at the precision it wrote?"""
+    return any(d == value or _rounds_to(value, d, token) for d in declared)
+
+
 # Report order: the self-contradiction first, then the classic copy error,
 # then the weaker distance signal.
 _KIND_RANK = {"trivial_reference": 0, "transposed": 1, "near_miss": 2}
 
 
-def check(paper_text: str, result_json: Any) -> OracleReport:
-    """Compare a paper's prose numbers against the computed results."""
+def check(
+    paper_text: str, result_json: Any, *, declared: Iterable[float] | None = None,
+) -> OracleReport:
+    """Compare a paper's prose numbers against the computed results.
+
+    ``declared`` are the settings the run was given (see ``declared_numbers``).
+    A paper number equal to one of them is a quoted setting, so it is not
+    reported as a ``near_miss`` -- but a ``transposed`` one still is.
+    """
     report = OracleReport()
 
     results = list(flatten_numbers(result_json))
@@ -410,8 +537,13 @@ def check(paper_text: str, result_json: Any) -> OracleReport:
         report.skip_reason = "paper text is empty"
         return report
 
-    numbers = extract_paper_numbers(paper_text)
+    # U+2212 is the minus a paper typeset with (and a language model writes).
+    # ``_NUMBER`` reads only ``-``, so ``−0.114`` was compared as 0.114 --
+    # a positive number, near some positive result. Confined to this check:
+    # ``number_provenance`` shares the extractor and is left as it was.
+    numbers = extract_paper_numbers(paper_text.replace(_MINUS_SIGN, "-"))
     report.paper_numbers = len(numbers)
+    settings = list(declared) if declared else []
 
     seen: set[tuple[float, str]] = set()
     for value, token, ctx in numbers:
@@ -431,13 +563,15 @@ def check(paper_text: str, result_json: Any) -> OracleReport:
         key = (value, path)
         if key in seen:
             continue
-        seen.add(key)
 
         kind = (
             "transposed"
             if _digit_bag(value) and _digit_bag(value) == _digit_bag(actual)
             else "near_miss"
         )
+        if kind == "near_miss" and settings and _is_declared(value, token, settings):
+            continue
+        seen.add(key)
         report.findings.append(
             Finding(
                 kind=kind,
