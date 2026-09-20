@@ -35,6 +35,9 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+# How many ended runs the launcher keeps an exit code for.
+_FINISHED_KEPT = 64
+
 
 @dataclass
 class LaunchedQuest:
@@ -105,6 +108,11 @@ class QuestLauncher:
         self.vscode_bridge_port = vscode_bridge_port
         self.vscode_bridge_socket = vscode_bridge_socket
         self._quests: list[LaunchedQuest] = []
+        # The newest run under each id that has ended and been reaped, so its
+        # exit code outlives the reap. Any other request that reaps (the Jobs
+        # page does, every 3 s) would otherwise erase the only record of how
+        # a job ended. Bounded; the oldest is forgotten first.
+        self._finished: dict[str, LaunchedQuest] = {}
         self._lock = Lock()
 
     def launch(self, *, quest_id: str, yaml_path: Path) -> LaunchedQuest:
@@ -302,10 +310,54 @@ class QuestLauncher:
     def _reap_finished(self) -> None:
         """Walk the registry, drop any entry whose child has exited.
         Called from every public method so the alive-count is
-        accurate without a separate sweep thread."""
+        accurate without a separate sweep thread. A dropped entry is
+        remembered in ``_finished`` (see :meth:`job_state`)."""
         with self._lock:
-            self._quests = [q for q in self._quests if q.is_alive()]
+            kept: list[LaunchedQuest] = []
+            for q in self._quests:
+                if q.is_alive():
+                    kept.append(q)
+                else:
+                    self._remember_finished(q)
+            self._quests = kept
 
+    def _remember_finished(self, entry: LaunchedQuest) -> None:
+        """Record an ended run. Caller holds the lock. Only the newest run
+        under an id is kept (a re-launch replaces its predecessor)."""
+        previous = self._finished.pop(entry.quest_id, None)
+        if previous is not None and previous.started_at > entry.started_at:
+            entry = previous
+        self._finished[entry.quest_id] = entry
+        while len(self._finished) > _FINISHED_KEPT:
+            del self._finished[next(iter(self._finished))]
+
+    def job_state(self, job_id: str) -> dict[str, Any] | None:
+        """What this launcher knows about the newest run started under
+        ``job_id``: ``{"alive", "returncode", "pid", "started_at",
+        "log_path"}``. ``returncode`` is None while it runs.
+
+        ``None`` means this launcher never started one. That is also what a
+        restarted server sees for a child it started before the restart: the
+        registry is in memory, so the child may still be running and this
+        cannot tell. A run that is still going wins over an older one that
+        ended, so starting a job twice does not hide the live one."""
+        with self._lock:
+            runs = [q for q in self._quests if q.quest_id == job_id]
+            ended = self._finished.get(job_id)
+        if ended is not None:
+            runs.append(ended)
+        if not runs:
+            return None
+        alive = [q for q in runs if q.process.poll() is None]
+        entry = max(alive or runs, key=lambda q: q.started_at)
+        returncode = entry.process.poll()
+        return {
+            "alive": returncode is None,
+            "returncode": returncode,
+            "pid": entry.pid,
+            "started_at": entry.started_at,
+            "log_path": entry.log_path,
+        }
 
     def get_log_tail(self, quest_id: str, *, n: int = 200) -> list[str] | None:
         """Read the last ``n`` lines of the subprocess's captured
