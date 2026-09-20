@@ -20,6 +20,8 @@ import re
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
+from generation._pandoc import TEX_MATH_DOLLARS
+
 MATH_FONT = "Cambria Math"
 _MATHML = "{http://www.w3.org/1998/Math/MathML}"
 _A_NS = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
@@ -27,14 +29,9 @@ _MC_NS = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
 _A14_NS = 'xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"'
 _M_NS = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
 
-# Pandoc's tex_math_dollars rule, which the paper already follows: $$...$$, or
-# $...$ whose opening $ has a non-space right after it and whose closing $ has
-# a non-space right before it and no digit right after it, so "costs $5 and
-# $7" stays text. An escaped \$ neither opens nor closes.
-_MATH_RE = re.compile(
-    r"(?<!\\)\$\$(.+?)(?<!\\)\$\$"
-    r"|(?<!\\)\$(?=\S)((?:\\\$|[^$])*?[^\s\\])\$(?!\d)"
-)
+# Pandoc's tex_math_dollars rule, which the paper follows too: defined once, in
+# ``generation/_pandoc.py``, so the two cannot drift.
+_MATH_RE = re.compile(TEX_MATH_DOLLARS)
 
 # Operators the fallback sets with a space on each side, as an equation
 # editor would.

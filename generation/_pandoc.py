@@ -28,6 +28,7 @@ to start on a host that would in fact have worked.
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -82,6 +83,33 @@ MARKDOWN_READER = (
 # than as a hole in the sentence. Math is unaffected: ``\(...\)``, ``\[...\]``
 # and ``$...$`` are still parsed as math and rendered as MathML.
 HTML_MARKDOWN_READER = MARKDOWN_READER + "-raw_tex"
+
+# What counts as a math span in that dialect, defined ONCE so the renderers
+# that have to find the math themselves read it the way pandoc does.
+#
+# ``tex_math_dollars``: ``$$...$$``, or ``$...$`` whose opening ``$`` has a
+# non-space right after it and whose closing ``$`` has a non-space right before
+# it and no digit right after it, so "costs $5 and $7" stays text. An escaped
+# ``\$`` neither opens nor closes. (The deck's equation builder,
+# ``generation/_pptx_math.py``, compiles this string as it stands.)
+TEX_MATH_DOLLARS = (
+    r"(?<!\\)\$\$(.+?)(?<!\\)\$\$"
+    r"|(?<!\\)\$(?=\S)((?:\\\$|[^$])*?[^\s\\])\$(?!\d)"
+)
+# ``tex_math_single_backslash`` (in ``MARKDOWN_READER``): ``\(...\)`` and
+# ``\[...\]``.
+TEX_MATH_BACKSLASH = (
+    r"(?<!\\)\\\(.+?(?<!\\)\\\)"
+    r"|(?<!\\)\\\[.+?(?<!\\)\\\]"
+)
+# Every math span in a text, its delimiters included. DOTALL because display
+# math and a wrapped paragraph run over lines. Two things are not in the
+# pattern: pandoc's math never runs across a blank line (a paragraph ends
+# there), and code is not math. A caller checks a match for a blank line
+# (``BLANK_LINE_RE``) and splits off fenced blocks and code spans first, as
+# ``generation/paper.py`` does.
+MATH_SPAN_RE = re.compile(TEX_MATH_BACKSLASH + "|" + TEX_MATH_DOLLARS, re.DOTALL)
+BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 
 
 def _pypandoc_pandoc() -> str | None:
