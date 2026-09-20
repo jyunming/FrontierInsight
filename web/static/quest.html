@@ -90,7 +90,7 @@
       <!-- RESULTS pause: the experiment submitted a background job and the quest is waiting for it. -->
       <div id="next-step-results" class="hidden flex flex-wrap items-center gap-3">
         <button onclick="resumeQuest()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Check now</button>
-        <button onclick="watchQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Watch automatically</button>
+        <button id="watch-btn" onclick="watchQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Watch automatically</button>
         <span id="next-step-results-status" class="text-on-surface-variant text-body-sm"></span>
       </div>
       <!-- SUPPLY pauses: drop files straight into the named folder(s) + Resume. -->
@@ -404,6 +404,9 @@
 
   // The upload target(s) for the current SUPPLY pause (e.g. ["papers","data"]).
   let nextStepTargets = [];
+  // True while the quest is paused on a background job (pause kind "results");
+  // it is the only time the watcher's status is worth asking for.
+  let resultsPaused = false;
 
   async function refreshNextStep() {
     const banner = document.getElementById('next-step-banner');
@@ -413,10 +416,15 @@
       const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/next-step`);
       // On any non-OK response, hide the banner rather than leave a stale
       // "Action needed" showing after the pause was resolved.
-      if (!res.ok) { banner.classList.add('hidden'); return; }
+      if (!res.ok) { banner.classList.add('hidden'); resultsPaused = false; return; }
       const data = await res.json();
-      if (!data.waiting) { banner.classList.add('hidden'); return; }
+      if (!data.waiting) { banner.classList.add('hidden'); resultsPaused = false; return; }
       banner.classList.remove('hidden');
+      const wasResultsPaused = resultsPaused;
+      resultsPaused = data.kind === 'results';
+      // A watcher may already be running (started earlier, or from another
+      // tab): show its status as soon as the page knows the quest is waiting.
+      if (resultsPaused && !wasResultsPaused) refreshWatchStatus();
       document.getElementById('next-step-headline').textContent =
         data.headline || 'Action needed';
       // The headline is rendered separately above, so drop the duplicate
@@ -445,7 +453,7 @@
       // or no-simulation data pauses.
       const exEl = document.getElementById('next-step-examples');
       if (exEl) exEl.classList.toggle('hidden', !(data.interaction === 'supply' && data.kind === 'supply'));
-    } catch (e) { banner.classList.add('hidden'); }
+    } catch (e) { banner.classList.add('hidden'); resultsPaused = false; }
   }
 
   async function uploadExamples() {
@@ -1062,13 +1070,60 @@
   }
   // A quest waiting on a background job: re-check it on a timer and resume it
   // when the job is done (the same as `launch.py --watch`).
+  const WATCH_STARTED_TEXT = 'Watching: each check is written to the quest log. The quest resumes by itself when the job is done.';
+  const WATCH_POLL_MS = 5000;
+  let watchStatusBusy = false;
+
+  function setWatchStatus(text, warn) {
+    const el = document.getElementById('next-step-results-status');
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('text-status-warning', !!warn);
+    el.classList.toggle('text-on-surface-variant', !warn);
+  }
+  function showWatchButton(show) {
+    const btn = document.getElementById('watch-btn');
+    if (btn) btn.classList.toggle('hidden', !show);
+  }
+  // Starting the watcher only starts a process; this is what it is doing now,
+  // so the page never says "Watching" about a watcher that has already died.
+  function renderWatchStatus(d) {
+    const last = d.last_line || '';
+    if (d.state === 'running') {
+      showWatchButton(false);
+      setWatchStatus(last ? 'Watching: ' + last : WATCH_STARTED_TEXT, false);
+    } else if (d.state === 'exited') {
+      showWatchButton(true);
+      setWatchStatus('Watcher stopped (exit code ' + d.returncode + '): ' + (last || 'no output'), true);
+    } else if (d.state === 'unknown') {
+      showWatchButton(true);
+      setWatchStatus('Watcher status unknown (the web server was restarted after it started, so it cannot tell whether it is still running)' + (last ? ': ' + last : '.'), true);
+    } else {
+      showWatchButton(true);   // not_started: nothing to report
+    }
+  }
+  async function refreshWatchStatus() {
+    if (!resultsPaused || document.hidden || watchStatusBusy) return;
+    watchStatusBusy = true;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/watch`);
+      if (res.ok) renderWatchStatus(await res.json());
+    } catch (e) { /* the next tick asks again */ }
+    finally { watchStatusBusy = false; }
+  }
+  setInterval(refreshWatchStatus, WATCH_POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshWatchStatus(); });
+
   async function watchQuest() {
-    const statusEl = document.getElementById('next-step-results-status');
     const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/watch`, { method: 'POST' });
-    if (!res.ok) { if (statusEl) statusEl.textContent = 'Could not start watching: ' + await res.text(); return; }
-    if (statusEl) statusEl.textContent = 'Watching: each check is written to the quest log. The quest resumes by itself when the job is done.';
+    if (!res.ok) { setWatchStatus('Could not start watching: ' + await res.text(), true); return; }
+    showWatchButton(false);
+    setWatchStatus(WATCH_STARTED_TEXT, false);
     if (!pollHandle) pollHandle = setInterval(refresh, 3000);
     refresh();
+    // A watcher that dies on start-up is gone within a couple of seconds:
+    // look once soon, then every WATCH_POLL_MS.
+    setTimeout(refreshWatchStatus, 2000);
   }
   async function trashQuest() {
     if (!confirm(`Move quest ${questId} to trash? You can restore it from /trash.`)) return;

@@ -9363,17 +9363,96 @@ def _math_folded(text: str) -> str:
     return " ".join(text.split())
 
 
+# What text extraction does to the layout of a source, and a quotation of it
+# does not repeat. Each is a further chance for a part that is not there as
+# written (see _quote_in_source), and none lets a different word match.
+#
+# A PDF hyphenates at the end of a line and can leave a space before the
+# hyphen ("inap -" newline "propriate"); _normalized_text joins only a hyphen
+# that touches the word.
+_SPACED_HYPHEN_BREAK_RE = re.compile(r"(\w)[ \t]+-[ \t]*\r?\n\s*(\w)")
+# A stacked fraction comes out as numerator, line break, denominator ("( 1",
+# "R0", ")i") with no bar; the paper quoting it writes the bar. Only a bar with
+# an operand on each side is one.
+_FRACTION_BAR_RE = re.compile(r"(?<=[\w)\]])\s*/\s*(?=[\w(\[])")
+
+
+def _spaced_pattern(text: str) -> re.Pattern[str]:
+    """``text`` as a pattern that also matches it with one stray space inside
+    any of its words. A PDF puts a space into a word ("equati on", "p
+    robability") and the quotation, written from the text, does not have it.
+
+    One direction only, on purpose: the source may have a space the quotation
+    does not, but the words the quotation separates stay separate, so "the
+    rapist" is not found in "therapist"."""
+    return re.compile(" ".join(" ?".join(map(re.escape, word)) for word in text.split()))
+
+
+def _layout_views(source: str, haystack: str, folded: str) -> list[tuple[str, bool]]:
+    """The source as :func:`_quote_in_source` looks in it: as normalised and
+    with the mathematics folded, and, when it has a hyphen a PDF broke a word
+    at with a space before it, again with that word joined. Each with whether
+    the mathematics is folded, which the part being looked for must match."""
+    views = [(haystack, False), (folded, True)]
+    if _SPACED_HYPHEN_BREAK_RE.search(source):
+        joined = _normalized_text(_SPACED_HYPHEN_BREAK_RE.sub(r"\1\2", source))
+        views += [(joined, False), (_math_folded(joined), True)]
+    return views
+
+
+def _part_in_layouts(part: str, views: list[tuple[str, bool]]) -> bool:
+    """Whether ``part`` is in the source once the layout of the source is
+    allowed for: a stray space inside a word, or a line break where the
+    quotation has a fraction bar.
+
+    A formula the source has lost altogether is not a layout difference. A web
+    page's text can read "Given  and , the epidemic ends at time t, when ."
+    for "Given S(t) and I(t), the epidemic ends at time t, when I(t)=0.", and
+    nothing in it says what the formulas were, so a quotation that spans one is
+    not found: the words around it could be, but the formula between them could
+    be anything."""
+    shapes = [part]
+    if "/" in part:
+        # The one place an operator is dropped, and only from the quotation,
+        # only as a last chance, and only for a bar between two operands:
+        # "(1/R0)" is looked for as "(1 R0)", so "(R0/1)" is still not found
+        # in "(1 R0)".
+        shapes.append(_FRACTION_BAR_RE.sub(" ", part))
+    for shape in shapes:
+        for text, is_folded in views:
+            needle = _math_folded(shape) if is_folded else shape
+            # Folding can leave nothing (a "quotation" of dollar signs), and
+            # nothing is in every text.
+            if needle and (needle in text or _spaced_pattern(needle).search(text)):
+                return True
+    return False
+
+
 def _quote_in_source(quote: str, source: str) -> bool:
     """Whether ``quote`` is words ``source`` has. Parts an ellipsis joins are
     looked for one by one, and together they must be long enough to mean
     something.
 
-    A part that is not there as written is looked for once more with the
-    mathematics folded (:func:`_math_folded`), because a source that renders a
-    formula one way and a paper that quotes it another are still quoting it.
-    The fold is only ever a second chance: a quote found as written is accepted
-    on that alone, and the length floor is measured before any folding, so no
-    quote a source really does contain can be rejected because of it."""
+    A part that is not there as written is looked for again, each time with
+    something a source's text extraction is known to do to its layout allowed
+    for, and never with a different word allowed:
+
+    * the mathematics folded (:func:`_math_folded`), because a source that
+      renders a formula one way and a paper that quotes it another are still
+      quoting it;
+    * a stray space inside a word of the source (:func:`_spaced_pattern`), and a
+      hyphen a PDF broke a word at with a space before it;
+    * a fraction bar in the quotation where the source has the numerator and
+      the denominator on separate lines.
+
+    Every one is only ever a further chance: a quote found as written is
+    accepted on that alone, and the length floor is measured before any of
+    them, so no quote a source really does contain can be rejected because of
+    them. The letters, digits and operators the quotation has, and the order
+    they come in, must all be there; so a word changed, a word left out, two
+    sentences that are not neighbours run together, a formula the source has
+    lost (:func:`_part_in_layouts`) and a quotation of another source are all
+    still rejected."""
     haystack = _normalized_text(source)
     parts = [p.strip(" .,;:[]") for p in re.split(r"\.\.\.", _normalized_text(quote))]
     parts = [p for p in parts if p]
@@ -9382,7 +9461,12 @@ def _quote_in_source(quote: str, source: str) -> bool:
     if all(p in haystack for p in parts):
         return True
     folded = _math_folded(haystack)
-    return all(p in haystack or _math_folded(p) in folded for p in parts)
+    # Folding can leave nothing (a "quotation" of dollar signs), and nothing is
+    # in every text.
+    if all(p in haystack or (bool(m := _math_folded(p)) and m in folded) for p in parts):
+        return True
+    views = _layout_views(source, haystack, folded)
+    return all(_part_in_layouts(p, views) for p in parts)
 
 
 def render_references_marp_slide(refs: list[dict[str, Any]], *, paper_md: str = "") -> str:
