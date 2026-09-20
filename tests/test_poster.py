@@ -308,6 +308,22 @@ async def test_inline_latex_math_and_currency_survive(
 
 
 @pytest.mark.asyncio
+async def test_a_range_written_with_a_dash_inside_math_keeps_its_dash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--`` is two minus signs inside ``$...$``: ``$0.322–0.338$`` printed as
+    ``0.322 - -0.338``. The poster rewrites its unicode with the paper's helper,
+    which sets a dash in math with ``\\text{}``; prose keeps ``--``."""
+    _no_engine(monkeypatch)
+    reply = _reply()
+    reply["blocks"][1]["text"] = "Survival was 0.33 (95% CI $0.322–0.338$) over 10–20 runs."
+    result, _art = await _generate(tmp_path, monkeypatch, reply)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert r"$0.322\text{--}0.338$" in tex
+    assert "10--20 runs" in tex
+
+
+@pytest.mark.asyncio
 async def test_poster_falls_back_when_llm_returns_garbage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1063,3 +1079,21 @@ async def test_a_real_poster_prints_a_chinese_author_line(
     assert "poster_pdf" in result
     text = " ".join(line.text for page in measure_pdf(result["poster_pdf"]).pages for line in page.lines)
     assert "陳建明" in text and "國立台灣大學" in text
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_real_poster_prints_a_range_inside_math_as_a_dash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("pdflatex") is None or _missing_tex_packages("beamerposter.sty", "qrcode.sty", "newpxtext.sty"):
+        pytest.skip("needs pdflatex with beamerposter, qrcode and newpxtext")
+    from generation._pdf_measure import measure_pdf
+
+    reply = _reply()
+    reply["blocks"][1]["text"] = "Survival was 0.33 (95% CI $0.322–0.338$) over 10–20 runs."
+    result, _art = await _generate(tmp_path, monkeypatch, reply, real_figure=True)
+    assert "poster_pdf" in result, result.get("poster_pdf_skipped") and result["poster_pdf_skipped"].read_text(encoding="utf-8")
+    text = " ".join(line.text for page in measure_pdf(result["poster_pdf"]).pages for line in page.lines)
+    assert "0.322–0.338" in text and "10–20 runs" in text
+    assert "−" not in text        # two minus signs would print as U+2212
