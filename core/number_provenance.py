@@ -94,6 +94,30 @@ the defence:
     DOIs and equation numbers are removed upstream by the two tokenizers this
     module reuses rather than re-implements.
 
+``how a number is read``
+    A number is checked as a reader reads it, and the shared tokenizer reads a
+    few things differently, so the text is rewritten before it is tokenized
+    (``paper_numbers``). Measured over the stored papers, sixteen of the
+    numbers this check flagged were the tokenizer's reading, not the paper's:
+
+    * a **minus sign** typeset as U+2212 was read as no sign at all, so a
+      pullback of "U+2212 38.61 nm" was checked as ``38.61`` and reported
+      against a run that holds ``-38.61``. It is now one number with its sign,
+      compared with its sign;
+    * a **range dash after a percent sign** (``68.1%-85.5%``) was read as the
+      minus sign of the upper bound, the reverse mistake;
+    * ``±18.5`` names two numbers, ``18.5`` and ``-18.5``, and either one
+      traces;
+    * ``n=107,104,94`` is a list, not ``107104`` and ``94``: a thousands
+      separator is followed by exactly three digits, so a comma run in which
+      a later group is not three digits is read as separate numbers;
+    * ``SPIE 11609`` is an identifier, an integer of four or more digits that
+      follows a capitalised acronym, and ``Abbe's 1873`` a year in the
+      possessive attribution of a work.
+
+    Nothing here is a derived-value allowance. A number the run never
+    produced, next to a sign, in a list or after an acronym, is still flagged.
+
 ``quoted and cited material``
     Reference lists and citation brackets are stripped before a number is
     read, so a figure belonging to a cited source is never asked to trace to
@@ -113,7 +137,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from core.numeric_oracle import extract_paper_numbers, flatten_numbers
+from core.numeric_oracle import _MINUS_SIGN, extract_paper_numbers, flatten_numbers
 from core.stat_claims import normalise
 
 # A number must carry this many significant digits before its value says
@@ -203,7 +227,41 @@ _VERSION = re.compile(r"(?<![\w.])\d+\.\d+(?:\.\d+)+")
 # majority of all flags (every one in six runs), so it is rewritten to a word
 # before any number is read. The lookbehind keeps a genuine negative: "Cohen's
 # d = -178.3" follows a space, not a digit.
-_RANGE_DASH = re.compile(r"(?<=\d)\s*(?:-{1,3}|[‐-―])\s*(?=\d)")
+#
+# A percent sign ends a number too: "sat 68.108593%-85.522718% below" is a range,
+# and its upper bound was read as -85.522718 -- the run holds 85.522718. The
+# sign of "-0.175906 for CAR" in the same sentence follows a space and stays.
+_RANGE_DASH = re.compile(r"(?<=[\d%])\s*(?:-{1,3}|[‐-―])\s*(?=\d)")
+
+# A comma run written with no space after the commas: "n_major=107,104,94". The
+# tokenizer reads the well-formed head of it, "107,104", as one number with a
+# thousands separator (107104) and then "94". But a thousands separator is
+# followed by exactly three digits, and only three, so a run in which a later
+# group is not three digits is a list. Such a run is spaced so that each member
+# is read on its own. A well-formed run ("1,000" and "1,000,000") is left alone,
+# and so are "1,000, 2,000" and "3, 4, 5", which the tokenizer already reads as
+# two and three numbers. A well-formed run that is really a list ("202,206,189")
+# cannot be told from one number by its digits, and is not touched.
+_COMMA_RUN = re.compile(r"(?<![\w.,])\d{1,3}(?:,\d{1,3})+(?!\w|\.\d|,\d)")
+_THOUSANDS_RUN = re.compile(r"\d{1,3}(?:,\d{3})+")
+
+# An identifier is not a measurement: "the SPIE 11609 review" cites a proceedings
+# volume, and the tokenizer read 11609 as a five-digit result. It is an integer
+# of four or more digits that follows a capitalised acronym (two to eight capital
+# letters and a space). "13.5 nm" and "NA 0.55" are decimals and "N = 5000" has a
+# single capital and an operator; none is touched.
+_ACRONYM_ID = re.compile(r"\b([A-Z]{2,8})([ \xa0])(\d{4,})\b(?![.,]?\d)")
+
+# A year that credits a work to its author in the possessive: "Ernst Abbe's 1873
+# description". The year guard below stops at 1900, and a count in the same range
+# ("1600 qubits", "1024 samples") is a result, so the year is recognised by what
+# stands before it, not by its size. Years from 1500 on; a citation in
+# parentheses ("Abbe (1873)") is not read this way, because a group label
+# followed by a parenthesised count ("Control (1200)") has the same shape.
+_ATTRIBUTED_YEAR = re.compile(r"\b([A-Z][a-z]+['\u2019]s)(\s+)(1[5-8]\d\d)\b(?![.,]?\d)")
+
+# "±18.5", "\pm 18.5", "+/-18.5": the number stands for +18.5 and -18.5.
+_PLUS_MINUS = r"(?:\xb1|\\pm|\+\s*/\s*-|\+-)"
 
 # An arithmetic step the paper shows in full ("0.3396 x 0.5617 + ... = 0.1907").
 _OPERATOR = re.compile(r"[=+*/×÷]|\\times|\\cdot|\\frac")
@@ -271,9 +329,37 @@ def paper_numbers(paper_text: str) -> list[tuple[float, str, str]]:
     into a single value and drops figure/table/section/DOI references. Tables
     survive both, deliberately: a results table is where an untraceable number
     does the most damage, and it is where the observed one lived.
+
+    The text is rewritten first so that the tokenizer reads what a reader does
+    (see the module docstring, "how a number is read"). The order matters: the
+    minus sign is folded before the range dash is looked for, so a U+2212
+    between two numbers is a range or a subtraction exactly as ``-`` is.
     """
-    text = _RANGE_DASH.sub(" to ", _VERSION.sub(" ", normalise(paper_text)))
+    text = normalise(paper_text).replace(_MINUS_SIGN, "-")
+    text = _RANGE_DASH.sub(" to ", _VERSION.sub(" ", text))
+    text = _COMMA_RUN.sub(_spaced_if_a_list, text)
+    # An underscore is a word character, so the tokenizer no longer starts a
+    # number on the digits it now follows.
+    text = _ACRONYM_ID.sub(r"\1_\3", text)
+    text = _ATTRIBUTED_YEAR.sub(r"\1_\3", text)
     return extract_paper_numbers(text)
+
+
+def _spaced_if_a_list(m: re.Match[str]) -> str:
+    """A comma run whose groups are not all thousands groups is a list."""
+    run = m.group(0)
+    return run if _THOUSANDS_RUN.fullmatch(run) else ", ".join(run.split(","))
+
+
+def _either_sign(token: str, context: str) -> bool:
+    """Is this number written after a plus-minus sign, so that it stands for
+    both ``x`` and ``-x``? ``\\(\\pm 18.5\\) nm`` names two edges, and the run
+    holds one of them. The token's own sign is set aside: ``+/-18.5`` is read by
+    the tokenizer as ``-18.5``, and it is the plus-minus that says what it is."""
+    return re.search(
+        _PLUS_MINUS + r"\s*" + re.escape(token.lstrip("-")) + r"(?!\d|\.\d)",
+        context,
+    ) is not None
 
 
 def _derivable(value: float, token: str, context: str, traceable: Traceable) -> bool:
@@ -435,8 +521,10 @@ def _strings(obj: Any, path: str = "") -> Iterator[tuple[str, str]]:
 def _numbers_in_text(text: str) -> Iterator[tuple[float, str]]:
     """``(value, token)`` for each number written in a run of text. The token
     is kept because the precision a number was written at decides what it may
-    be compared against."""
-    for m in _TEXT_NUMBER.finditer(text):
+    be compared against. A U+2212 is read as the minus it is, on this side as on
+    the paper's: a design that declares a value with one and a paper that
+    prints it must both read a negative."""
+    for m in _TEXT_NUMBER.finditer(text.replace(_MINUS_SIGN, "-")):
         token = m.group(1)
         try:
             yield float(token.replace(",", "")), token
@@ -603,10 +691,13 @@ def check(
             continue
         report.paper_numbers += 1
         hedged = bool(_HEDGE.search(context))
+        # A number after a plus-minus sign is two numbers, and either traces.
+        readings = (value, -value) if _either_sign(token, context) else (value,)
         if any(
             traceable.find(cand, dec) is not None
             or traceable.find_truncated(cand, dec) is not None
-            for cand, dec, _ in _variants(value, token)
+            for reading in readings
+            for cand, dec, _ in _variants(reading, token)
         ):
             continue
         if hedged and traceable.find_near(value, HEDGED_REL_TOL) is not None:
