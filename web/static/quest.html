@@ -1011,6 +1011,16 @@
         fw.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
         '</div>');
     }
+    // Numbers and figures the topic asked for that the experiment does not
+    // have. Advisory, like the numeric checks: a topic is prose.
+    const gc = snap.goal_coverage_notes || [];
+    if (gc.length) {
+      summary.insertAdjacentHTML('beforeend',
+        '<div class="font-label-sm text-label-sm text-outline uppercase">Topic coverage (advisory, not blocking):</div>' +
+        '<div class="flex flex-wrap gap-2">' +
+        gc.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
+        '</div>');
+    }
     const suggestions = snap.suggestions || [];
     document.getElementById('human-review-suggestions').innerHTML = suggestions.length
       ? '<b>Suggestions:</b><ul class="list-disc list-inside">' +
