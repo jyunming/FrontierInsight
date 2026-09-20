@@ -176,6 +176,7 @@ class ProviderConfig(BaseModel):
             "implement": 900.0,
             "write": 600.0,
             "execute_reflect": 600.0,
+            "implement_seed": 600.0,
             "design_self_critique": 600.0,
             "analyze": 300.0,
         }
@@ -215,6 +216,8 @@ class ProviderConfig(BaseModel):
             # finish well before the ceiling.
             "implement": 1800.0,
             "execute_reflect": 900.0,
+            # Returns the whole script again, like execute_reflect does.
+            "implement_seed": 900.0,
             "design_self_critique": 900.0,
             # web_plots writes a short matplotlib script — it should be
             # quick. A tight ceiling kills a stuck codex_cli call fast
@@ -643,7 +646,9 @@ class EngineConfig(BaseModel):
     # This is the cheap kind of rigour: replication re-runs the generated
     # SCRIPT only. ``implement`` is not re-invoked, so there are no extra
     # LLM calls and no extra provider cost -- it spends local compute, and
-    # buys a mean +/- std instead of a point estimate. Wall-clock grows
+    # buys a mean +/- std instead of a point estimate. (One exception: a
+    # script that never reads FI_REPLICATE_SEED is sent back once, right
+    # after implement, to read it -- the ``implement_seed`` call.) Wall-clock grows
     # ~N x the execute step (bounded by ``execution.timeout_s`` each), so
     # set 1 to opt out on a slow experiment, or higher when the measurement
     # is noisy.
@@ -1102,10 +1107,11 @@ class KnowledgeConfig(BaseModel):
     # the original method papers and textbooks a topic rests on rarely come
     # back: a damped-oscillator integrator quest found none of Verlet (1967),
     # Hairer, Lubich & Wanner, or Butcher. One call asks the model for up to
-    # five, each is looked up by title in OpenAlex and dropped when not found,
+    # eight, each is looked up by title in OpenAlex and dropped when not found,
     # and the works at least two retrieved papers cite are added (books too,
     # whatever the quest's work scope). All of them go through the literature
-    # screen, labelled foundational. Costs one LLM call and up to seven OpenAlex
+    # screen, labelled foundational, and the writer is asked to cite the ones
+    # that bear on the paper. Costs one LLM call and up to ten OpenAlex
     # requests per literature pass. Off → no extra candidates.
     foundational_works: bool = True
     # Pause-for-user-papers gate. When True, the literature node pauses

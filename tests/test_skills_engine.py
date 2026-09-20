@@ -45,6 +45,7 @@ def _engine(names: list[str], skills_dir: Path, ledger: Path) -> SimpleNamespace
     return SimpleNamespace(
         config=SimpleNamespace(
             engine=SimpleNamespace(skills=names, skills_exclude=[]),
+            execution=SimpleNamespace(sandbox="venv"),
         ),
         _skill_dirs=None,  # no folders of its own: the process default
         _log=SimpleNamespace(
