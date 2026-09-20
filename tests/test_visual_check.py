@@ -328,3 +328,128 @@ async def test_the_paper_is_repaired_at_most_once(tmp_path: Path, monkeypatch) -
 
     report = await vc.check_and_redo(_limit(2), "paper", pdf, tmp_path, repair)
     assert len(calls) == 1 and [a["attempt"] for a in report["attempts"]] == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Tick labels of the figures a slide shows
+
+
+def _quest_with_figure(root: Path, *, record: dict | None, dpi: int | None = 100, size=(1310, 410), name="row") -> None:
+    from PIL import Image
+
+    (root / "figures").mkdir(exist_ok=True)
+    Image.new("RGB", size, "white").save(root / "figures" / f"{name}.png", **({"dpi": (dpi, dpi)} if dpi else {}))
+    if record is not None:
+        (root / ".fi" / "figure_records").mkdir(parents=True, exist_ok=True)
+        (root / ".fi" / "figure_records" / f"{name}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_a_figure_source_knows_its_size_in_inches_and_where_its_tick_size_comes_from(tmp_path: Path) -> None:
+    from core.plot_style import HOUSE_TICK_PT
+
+    _quest_with_figure(tmp_path, record={"file": "own.png", "axes": [], "tick_pt": 8.0}, name="own")
+    _quest_with_figure(tmp_path, record={"file": "older.png", "axes": []}, name="older")
+    _quest_with_figure(tmp_path, record={"file": "bare.png", "axes": [], "tick_pt": None}, name="bare")
+    _quest_with_figure(tmp_path, record=None, name="fetched")
+    _quest_with_figure(tmp_path, record={"file": "no_dpi.png", "axes": []}, dpi=None, name="no_dpi")
+    sources = {s.name: s for s in vc._figure_sources(tmp_path)}
+    # The record's own size when it has one; a record from before the recorder wrote
+    # it takes the house style's; no tick labels, no record and no dpi are left out.
+    assert set(sources) == {"own.png", "older.png"}
+    assert (sources["own.png"].tick_pt, sources["older.png"].tick_pt) == (8.0, HOUSE_TICK_PT)
+    own = sources["own.png"]
+    assert (own.width_px, own.height_px, round(own.width_in, 2)) == (1310, 410, 13.1)
+    assert vc._figure_sources(tmp_path / "nothing") == []
+
+
+def _slide_pdf(tmp_path: Path, *, image_width_pt: float = 403.0) -> Path:
+    pdfium = pytest.importorskip("pypdfium2")
+    import ctypes
+
+    from PIL import Image
+
+    raw = pdfium.raw
+    pdf = pdfium.PdfDocument.new()
+    page = pdf.new_page(960.0, 540.0)
+    for text, size, x, y in (
+        ("Established outbreaks match theory", 27, 58, 450),
+        ("A point beside the figure that is long enough.", 19, 58, 300),
+    ):
+        obj = raw.FPDFPageObj_NewTextObj(pdf.raw, b"Helvetica", ctypes.c_float(size))
+        buf = ctypes.create_string_buffer((text + "\x00").encode("utf-16-le"))
+        raw.FPDFText_SetText(obj, ctypes.cast(buf, ctypes.POINTER(raw.FPDF_WCHAR)))
+        raw.FPDFPageObj_Transform(obj, 1, 0, 0, 1, x, y)
+        raw.FPDFPage_InsertObject(page.raw, obj)
+    image = pdfium.PdfImage.new(pdf)
+    image.set_bitmap(pdfium.PdfBitmap.from_pil(Image.new("RGB", (1310, 410), (40, 90, 140))))
+    image.set_matrix(pdfium.PdfMatrix().scale(image_width_pt, image_width_pt * 410 / 1310).translate(500, 200))
+    page.insert_obj(image)
+    page.gen_content()
+    page.close()
+    path = tmp_path / "slides.pdf"
+    pdf.save(path)
+    pdf.close()
+    return path
+
+
+@pytest.mark.asyncio
+async def test_the_slides_check_reads_each_figures_tick_size_from_its_file_and_asks_for_a_redo(tmp_path: Path) -> None:
+    """The real measure of a real PDF, its image matched to the quest's figure file by
+    its pixels: the finding is one the slides step is sent back for, with what to do."""
+    _quest_with_figure(tmp_path, record={"file": "row.png", "axes": [], "tick_pt": 15.0})
+    report = await vc.check_pdf(_config(tmp_path, ai=False), "slides", _slide_pdf(tmp_path), tmp_path)
+    found = [f for f in report["measured"]["findings"] if f["check"] == "figure_ticks_small"]
+    assert [(f["page"], f["severity"], f["figure"], f["tick_pt"]) for f in found] == [(1, "medium", "row.png", 6.4)]
+    assert vc.redo_findings("slides", report) == found
+    assert "slide of its own" in vc.feedback_text(found) and "no bullets" in vc.feedback_text(found)
+    assert report["measured"]["metrics"]["per_page"][0]["figure_tick_pt"] == [6.4]
+    # The same figure at 0.90 of the width it was drawn at is not reported.
+    big = await vc.check_pdf(_config(tmp_path, ai=False), "slides", _slide_pdf(tmp_path, image_width_pt=846.0), tmp_path)
+    assert [f for f in big["measured"]["findings"] if f["check"] == "figure_ticks_small"] == []
+
+
+@pytest.mark.asyncio
+async def test_only_the_slides_are_checked_for_figure_ticks_and_only_figures_the_recorder_saw(tmp_path: Path) -> None:
+    pdf = _slide_pdf(tmp_path)
+    _quest_with_figure(tmp_path, record={"file": "row.png", "axes": [], "tick_pt": 15.0})
+    as_paper = await vc.check_pdf(_config(tmp_path, ai=False), "paper", pdf, tmp_path)
+    assert [f for f in as_paper["measured"]["findings"] if f["check"] == "figure_ticks_small"] == []
+    # A figure with no record (a fetched web figure, a web plot): its tick size is unknown.
+    (tmp_path / ".fi" / "figure_records" / "row.json").unlink()
+    as_slides = await vc.check_pdf(_config(tmp_path, ai=False), "slides", pdf, tmp_path)
+    assert [f for f in as_slides["measured"]["findings"] if f["check"] == "figure_ticks_small"] == []
+
+
+def test_a_figure_too_small_on_its_slide_is_a_redo_finding_only_when_a_new_deck_can_fix_it() -> None:
+    shared = _problem("figure_ticks_small", "medium")
+    alone = _problem("figure_ticks_small", "low")
+    report = _checked(measured=(shared, alone))
+    assert vc.redo_findings("slides", report) == [shared]
+    assert vc.redo_findings("paper", report) == [] and vc.redo_findings("poster", report) == []
+
+
+@pytest.mark.asyncio
+async def test_a_deck_with_a_figure_under_the_floor_is_regenerated_with_what_to_do_and_no_more_than_the_cap(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from generation._pdf_measure import _finding
+
+    problem = _finding(
+        "figure_ticks_small", 3, "slide",
+        "The figure row.png is drawn 5.6 in wide. Give the figure a slide of its own: the slide title, one lead "
+        "sentence and the figure, with no bullets, and put its discussion on the next slide.",
+    )
+    # Each new deck checks slightly better than the one before, so each is kept and the
+    # loop runs to its cap: a deck that ignores the finding is redone twice, and no more.
+    second = _finding("figure_ticks_small", 3, "slide", "a shorter one", "low")
+    _script(monkeypatch, [_checked(measured=(problem, problem)), _checked(measured=(problem,)), _checked(measured=(second,)), _checked()])
+    pdf = _deck(tmp_path, "first")
+    feedback: list[str] = []
+
+    async def regenerate(text: str) -> None:
+        feedback.append(text)
+        _deck(tmp_path, f"try {len(feedback)}")
+
+    report = await vc.check_and_redo(_limit(2), "slides", pdf, tmp_path, regenerate)
+    assert len(feedback) == 2 and "a slide of its own" in feedback[0]
+    assert [a["attempt"] for a in report["attempts"]] == [0, 1, 2]
