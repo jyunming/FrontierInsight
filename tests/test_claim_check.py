@@ -390,8 +390,8 @@ LAYOUT_SOURCES = {
         "percolation networks can be used to re-derive classical results fr om several dif-\n"
         "ferent areas of infectious disease epidemiology. In an ap"
     ),
-    # A web page's full text with its mathematics taken out: each formula left
-    # a hole (two spaces, or a space before the punctuation that followed it).
+    # A web page's full text with its mathematics taken out entirely: each
+    # formula is simply gone, and nothing in what is left says what it was.
     "allen_primer": (
         "Summarized in Table 1 are the changes,  and , associated with the two events, infection and recovery.\n"
         "Given  and , the epidemic ends at time t, when . The states , where  are referred to as absorbing "
@@ -477,11 +477,27 @@ LAYOUT_QUOTES = {
     "a fraction with its bar": ("whittle", _WHITTLE_HEAD + "1 − ( 1 / R0 )i"),
     "a fraction, no spaces around the bar": ("whittle", _WHITTLE_HEAD + "1 − (1/R0)i"),
     "a fraction, caret exponent": ("whittle", _WHITTLE_HEAD + "1-(1/R0)^i"),
-    "formulas the source no longer has": ("allen_primer", _ALLEN_PRIMER_QUOTE),
+}
+# name -> (source, quotation): every word of them is in the source, and they are
+# still not found. The source has lost the formulas the quotation has between
+# those words ("Given  and , the epidemic ends at time t, when ."), so nothing
+# in it says what those formulas were. Matching the words on either side of a
+# hole would accept any formula a quotation put there, so a quotation that spans
+# one is treated as not in the source: the decision is to stay strict.
+LOST_FORMULA_QUOTES = {
+    "formulas the source has lost": ("allen_primer", _ALLEN_PRIMER_QUOTE),
     "the same, written in LaTeX": (
         "allen_primer",
         "Given $S(t)$ and $I(t)$, the epidemic ends at time t, when $I(t)=0$. The states $(s,0)$, where "
         "$s=0,1,\\ldots,N$, are referred to as absorbing states.",
+    ),
+    "the same, with a different formula": (
+        "allen_primer", _ALLEN_PRIMER_QUOTE.replace("I(t)=0", "I(t)=7"),
+    ),
+    "only the words either side of one hole": (
+        "allen_primer",
+        "the epidemic ends at time t, when I(t)=0. The states (s,0), where s=0,1,...,N, are referred "
+        "to as absorbing states",
     ),
 }
 # name -> (source, quotation): none of them is in their source.
@@ -570,37 +586,7 @@ LAYOUT_MISQUOTES = {
         "whittle",
         _WHITTLE_HEAD.replace("major outbreak", "minor outbreak") + "1 − ( 1 / R0 )i",
     ),
-    # Formulas the source no longer has: the words around them must all be
-    # there, in order, and the source must show the hole a formula left.
-    "a word changed around the formulas": (
-        "allen_primer", _ALLEN_PRIMER_QUOTE.replace("epidemic", "outbreak"),
-    ),
-    "a word left out around the formulas": (
-        "allen_primer", _ALLEN_PRIMER_QUOTE.replace("S(t) and I(t)", "S(t) I(t)"),
-    ),
-    "a word added around the formulas": (
-        "allen_primer", _ALLEN_PRIMER_QUOTE.replace("S(t) and", "S(t) then and"),
-    ),
-    "a word where the formula was": (
-        "allen_primer",
-        "Given the count and the total, the epidemic ends at time t, when nobody is infected. The states "
-        ", where are referred to as absorbing states.",
-    ),
-    "the sentences swapped": (
-        "allen_primer",
-        "The states (s,0), where s=0,1,...,N, are referred to as absorbing states. Given S(t) and I(t), "
-        "the epidemic ends at time t, when I(t)=0.",
-    ),
-    "a formula at the start, where nothing anchors it": (
-        "allen_primer", "S(t)=0 " + _ALLEN_PRIMER_QUOTE,
-    ),
-    "a formula at the end, where nothing anchors it": (
-        "allen_primer", _ALLEN_PRIMER_QUOTE + " N=0",
-    ),
-    "mostly formula": (
-        "allen_primer",
-        "Given S(t)=1, I(t)=0, R(t)=0, N=0, S(0)=9, I(0)=1, R(0)=0, the epidemic ends when",
-    ),
+    # A formula put into words the source has intact.
     "a formula between words the source has next to each other": (
         "kermack",
         "The disease spreads from the affected to the unaffected by contact infection. Each infected "
@@ -612,8 +598,8 @@ LAYOUT_MISQUOTES = {
 
 def test_a_source_whose_layout_differs_is_still_quoted_from_it() -> None:
     """Each quotation is the source's own words. The source has them with
-    spaces inside words, a hyphen broken with a space before it, a fraction
-    with no bar, or a formula taken out."""
+    spaces inside words, a hyphen broken with a space before it, or a fraction
+    with no bar."""
     from core.engine import _quote_in_source
 
     for name, (source, quote) in LAYOUT_QUOTES.items():
@@ -646,8 +632,6 @@ def test_every_word_of_a_quotation_must_be_in_the_source_however_it_is_spaced() 
     from core.engine import _quote_in_source
 
     for name, (source, quote) in LAYOUT_QUOTES.items():
-        if "formulas the source no longer has" in name or "LaTeX" in name:
-            continue  # the formulas of these are not checked; their words are (below)
         words = quote.split(" ")
         elsewhere = sorted({w for w in LAYOUT_SOURCES[source].split() if w.isalpha() and len(w) > 4})
         for k, word in enumerate(words):
@@ -659,15 +643,24 @@ def test_every_word_of_a_quotation_must_be_in_the_source_however_it_is_spaced() 
                 assert not _quote_in_source(changed, LAYOUT_SOURCES[source]), (name, word, variant)
 
 
-def test_a_formula_the_source_no_longer_has_is_not_checked_but_its_words_are() -> None:
-    """The price of accepting a quotation around a formula the source lost: the
-    formula itself cannot be compared with anything, so one that changed a
-    number is not caught. What the words say still is."""
+def test_a_quotation_that_spans_a_formula_the_source_has_lost_is_not_found() -> None:
+    """The stored text of a web page can have its formulas removed altogether:
+    the Allen primer's "Given S(t) and I(t), the epidemic ends at time t, when
+    I(t)=0." is stored as "Given  and , the epidemic ends at time t, when ."
+    Every word of the quotation is there, in order, and it is still not found:
+    nothing in the source says what the formula between two words was, so
+    accepting the words would accept any formula a quotation put there. The
+    decision is to stay strict; a quotation that spans such a hole is
+    unsupported, and the writer has to quote words the source has whole."""
     from core.engine import _quote_in_source
 
     source = LAYOUT_SOURCES["allen_primer"]
-    assert _quote_in_source(_ALLEN_PRIMER_QUOTE.replace("I(t)=0", "I(t)=7"), source)
-    assert not _quote_in_source(_ALLEN_PRIMER_QUOTE.replace("ends", "began"), source)
+    # The source really is what the docstring says, and the words really are all there.
+    assert "Given  and , the epidemic ends at time t, when ." in source
+    for name, (which, quote) in LOST_FORMULA_QUOTES.items():
+        assert not _quote_in_source(quote, LAYOUT_SOURCES[which]), name
+    # Words the source has whole, right after a hole, are found as before.
+    assert _quote_in_source("the epidemic stops when an absorbing state is reached", source)
     # A source that still has its formulas is compared with them, so a number
     # that changed there is caught (ALLEN_FABRICATIONS above).
     assert not _quote_in_source(
@@ -705,18 +698,6 @@ def test_a_quotation_that_folds_to_nothing_is_not_in_every_source() -> None:
     assert not _quote_in_source("^_" * 20, LAYOUT_SOURCES["kermack"])
 
 
-def test_dots_inside_a_run_of_numbers_are_not_an_omission() -> None:
-    from core.engine import _quote_parts
-
-    quote = "the states (s,0), where s=0,1,...,n, are referred to as absorbing ... the epidemic stops"
-    assert _quote_parts(quote) == [
-        "the states (s,0), where s=0,1", "n, are referred to as absorbing", "the epidemic stops",
-    ]
-    assert _quote_parts(quote, keep_sequences=True) == [
-        "the states (s,0), where s=0,1,...,n, are referred to as absorbing", "the epidemic stops",
-    ]
-
-
 def test_the_grounding_accepts_a_quotation_of_a_laid_out_source_and_rejects_a_misquotation(
     tmp_path: Path,
 ) -> None:
@@ -729,7 +710,7 @@ def test_the_grounding_accepts_a_quotation_of_a_laid_out_source_and_rejects_a_mi
     cited = [
         (1, LAYOUT_QUOTES["a fraction with its bar"][1]),
         (2, LAYOUT_MISQUOTES["a formula the source has, changed"][1]),
-        (3, LAYOUT_QUOTES["formulas the source no longer has"][1]),
+        (3, LOST_FORMULA_QUOTES["formulas the source has lost"][1]),
         (4, LAYOUT_QUOTES["a hyphen with a space before it"][1]),
         (5, LAYOUT_MISQUOTES["two sentences that are not neighbours"][1]),
         (2, LAYOUT_QUOTES["a space inside a word, then a formula"][1]),
@@ -749,9 +730,11 @@ def test_the_grounding_accepts_a_quotation_of_a_laid_out_source_and_rejects_a_mi
     }
     claims = asyncio.run(eng._node_claim_check(state))["claim_grounding"]["claims"]  # type: ignore[arg-type]
     assert [c["basis"] for c in claims] == [
-        "citation", "unsupported", "citation", "citation", "unsupported", "citation",
+        "citation", "unsupported", "unsupported", "citation", "unsupported", "citation",
     ]
     assert "the quote is not in the text of [2]" in claims[1]["evidence"]
+    # The source has lost the formulas the quotation has: not found, by decision.
+    assert "the quote is not in the text of [3]" in claims[2]["evidence"]
     assert "the quote is not in the text of [5]" in claims[4]["evidence"]
 
 
