@@ -149,6 +149,17 @@ def model_for_node(node_models: dict[str, str] | None, node: str) -> str | None:
     return None
 
 
+def node_budget(budgets: dict[str, float], node: str, default: float) -> float:
+    """The per-node time budget for ``node``: an exact entry wins, then the entry
+    for the part before the first dot (``write.patch`` gets ``write``'s budget,
+    as it gets ``write``'s model in :func:`model_for_node`), then ``default``."""
+    if node in budgets:
+        return budgets[node]
+    if "." in node and node.split(".", 1)[0] in budgets:
+        return budgets[node.split(".", 1)[0]]
+    return default
+
+
 @dataclass(frozen=True)
 class _CliSpec:
     """How to invoke a local CLI as a chat endpoint."""
@@ -2931,8 +2942,8 @@ class LLMClient:
                 # Per-node HTTP read-timeout: heavy nodes (implement/write) get
                 # headroom, cheap nodes keep the tight base that catches a hung
                 # server fast. Miss → base client timeout.
-                http_timeout = self._node_http_timeout_s.get(
-                    node, self._http_timeout_s,
+                http_timeout = node_budget(
+                    self._node_http_timeout_s, node, self._http_timeout_s,
                 )
                 r = await self._http.post(
                     url, json=body, headers=headers, timeout=http_timeout,
@@ -3155,8 +3166,8 @@ class LLMClient:
 
         # Pick the per-call total-timeout: node-specific override wins,
         # else the client-level default.
-        effective_total_timeout = self._node_cli_timeout_s.get(
-            node, self._cli_timeout_s,
+        effective_total_timeout = node_budget(
+            self._node_cli_timeout_s, node, self._cli_timeout_s,
         )
         # Effective inactivity timeout. None means "disabled, only the
         # total ceiling applies" — preserved for compat / tests.
