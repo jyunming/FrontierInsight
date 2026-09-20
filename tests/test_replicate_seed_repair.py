@@ -216,7 +216,9 @@ async def test_the_repair_is_logged_under_its_own_node_name(tmp_path: Path) -> N
     await eng._node_implement(_implement_state())  # type: ignore[arg-type]
 
     assert _cost_nodes(eng) == ["implement", "implement_seed"]
-    assert any("[implement] the script now reads FI_REPLICATE_SEED" in m for _, m in logged)
+    assert any(
+        "[implement] the script now seeds every generator it builds" in m for _, m in logged
+    )
 
 
 @pytest.mark.asyncio
@@ -339,3 +341,124 @@ def test_the_repair_node_has_a_timeout_that_fits_a_whole_script() -> None:
     cfg = ProviderConfig(name="codex_cli")
     assert cfg.node_cli_timeout_s["implement_seed"] >= cfg.node_cli_timeout_s["execute_reflect"]
     assert cfg.node_http_timeout_s["implement_seed"] >= cfg.node_http_timeout_s["execute_reflect"]
+
+
+# --- the other shape: it reads the seed, and the seed reaches nothing ---------------
+#
+# A graded quest shipped this: FI_REPLICATE_SEED read and handed to numpy's
+# legacy global, and every trajectory drawn from a Generator built with no seed
+# ninety lines earlier. The name is in the file, so the repair above never
+# fired; the replicates differ, so ``execute`` published an aggregate; and not
+# one of the runs could be reproduced.
+
+ENTROPY = (
+    "import json\n"
+    "import os\n"
+    "import random\n"
+    "# " + "x" * 9000 + "\n"
+    'random.seed(int(os.environ.get("FI_REPLICATE_SEED", 0)))\n'
+    "rng = random.Random()\n"
+    'print("RESULT_JSON: " + json.dumps({"draw": rng.random()}))\n'
+    + TAIL
+)
+SEEDED = ENTROPY.replace(
+    "rng = random.Random()\n",
+    'rng = random.Random(int(os.environ.get("FI_REPLICATE_SEED", 0)))\n',
+)
+# Rewritten, and the generator is still built from entropy.
+STILL_ENTROPY = ENTROPY.replace("random.Random()", "random.Random(None)")
+
+
+@pytest.mark.asyncio
+async def test_a_script_whose_generator_the_seed_cannot_reach_is_repaired_once(
+    tmp_path: Path,
+) -> None:
+    eng, client, logged = _engine(tmp_path, [_implement_reply(ENTROPY), _repair_reply(SEEDED)])
+
+    patch = await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+
+    assert client.nodes == ["implement", "implement_seed"]
+    assert patch["code"] == SEEDED
+    assert _code_path(eng).read_text(encoding="utf-8") == SEEDED
+    assert not _warnings(logged), _warnings(logged)
+
+    # The prompt says which line, and that seeding the global is not enough.
+    prompt = client.calls[1][1]
+    assert TAIL in prompt, "the script was cut short, so a returned script would be too"
+    assert "line 6: random.Random()" in prompt
+    assert "np.random.seed) does NOT seed a Generator" in prompt
+    assert "$previous_code" not in prompt and "$stdout_tail" not in prompt
+
+    # And the point of the repair: the same seed now gives the same draw twice.
+    _run_with_this_python(eng)
+    executed = await eng._node_execute({"deps": []})  # type: ignore[arg-type]
+    draws = [r["draw"] for r in executed["result_json_replicates"]]
+    assert len(set(draws)) == len(draws), draws
+    again = await eng._node_execute({"deps": []})  # type: ignore[arg-type]
+    assert [r["draw"] for r in again["result_json_replicates"]] == draws
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_still_draws_from_entropy_is_dropped_and_says_so(
+    tmp_path: Path,
+) -> None:
+    eng, client, logged = _engine(tmp_path, [_implement_reply(ENTROPY), _repair_reply(STILL_ENTROPY)])
+
+    patch = await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+
+    assert client.nodes == ["implement", "implement_seed"]
+    assert patch["code"] == ENTROPY
+    assert _code_path(eng).read_text(encoding="utf-8") == ENTROPY
+    warned = _warnings(logged)
+    assert len(warned) == 1, warned
+    assert "still builds a generator without a seed" in warned[0]
+    # The consequence is not the one the other shape has: these replicates DO
+    # differ, so the aggregate stands and only reproducibility is lost.
+    assert "will not reproduce these numbers" in warned[0]
+    assert "single measurement" not in warned[0]
+
+
+@pytest.mark.asyncio
+async def test_execute_says_in_the_log_that_the_runs_cannot_be_reproduced(
+    tmp_path: Path,
+) -> None:
+    """The script reaches ``execute`` anyway -- the repair is offered once, and
+    may fail. ``run.log`` has to be readable on its own."""
+    eng, _, logged = _engine(tmp_path, [_implement_reply(ENTROPY), _repair_reply(STILL_ENTROPY)])
+    await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+    logged.clear()
+
+    _run_with_this_python(eng)
+    executed = await eng._node_execute({"deps": []})  # type: ignore[arg-type]
+
+    assert len(executed["result_json_replicates"]) == 3, "independent samples, so they aggregate"
+    assert executed["result_json_replicate_seed_ignored"] is False
+    warned = [w for w in _warnings(logged) if "[execute]" in w]
+    assert len(warned) == 1, warned
+    assert "draws from OS entropy (line 6: random.Random())" in warned[0]
+    assert "not reproducible" in warned[0]
+
+
+@pytest.mark.asyncio
+async def test_a_guarded_fallback_is_not_sent_back(tmp_path: Path) -> None:
+    """``if rng is None: rng = random.Random()`` is how a script says its
+    caller hands it a seeded generator. Rewriting a reproducible script costs a
+    call and risks the script."""
+    guarded = (
+        "import json\n"
+        "import os\n"
+        "import random\n"
+        "def draw(rng=None):\n"
+        "    if rng is None:\n"
+        "        rng = random.Random()\n"
+        "    return rng.random()\n"
+        'print("RESULT_JSON: " + json.dumps('
+        '{"draw": draw(random.Random(int(os.environ.get("FI_REPLICATE_SEED", 0))))}))'
+    )
+    eng, client, logged = _engine(tmp_path, [_implement_reply(guarded)])
+
+    patch = await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+
+    assert client.nodes == ["implement"]
+    assert patch["code"] == guarded
+    assert not _warnings(logged)

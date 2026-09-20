@@ -65,7 +65,9 @@ numbers. A line figure, error bars included, is drawn as the mean of the seeds, 
 confidence interval; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. Every run gets its own seed, spaced far enough apart that no two runs draw the same
 ones, so what varies between them is variation the experiment produced; a script that never names its seed is sent back once,
 right after it is written, to read it (one extra model call, spent only then); and when the experiment still turns out not to read its seed
-at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical. You see every node firing live in the chat panel.
+at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical.
+The same call goes out when the script reads the seed and builds a random generator without one anyway -- its runs differ, so nothing looks wrong, but the seed reached none
+of the randomness and no run can be reproduced; the chat names the line, and says so in the log if the repair does not land. You see every node firing live in the chat panel.
 
 After the outputs render, a visual check measures and screenshots each PDF;
 with `output.visual_check_ai: true` it also asks the chat model to check the pages. The slides and poster are redone, at most twice,

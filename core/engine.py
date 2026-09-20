@@ -4132,13 +4132,18 @@ class Engine:
     async def _repair_ignored_replicate_seed(
         self, state: QuestState, code_path: Path, code: str, deps: list[str],
     ) -> tuple[str, list[str]]:
-        """Ask for ONE repair of a script that never reads ``FI_REPLICATE_SEED``.
+        """Ask for ONE repair of a script whose randomness the seed cannot reach.
 
-        Such a script makes every replicate run the same run: ``execute`` finds
-        the results identical, publishes no aggregate, and the paper can report
-        one measurement with no interval (four of six codex quests did exactly
-        that). The instruction not to write a seed of its own is in the
-        implement prompts; a model that ignores it is asked again, once, here.
+        Two shapes, one call. A script that never reads ``FI_REPLICATE_SEED``
+        makes every replicate run the same run: ``execute`` finds the results
+        identical, publishes no aggregate, and the paper can report one
+        measurement with no interval (four of six codex quests did exactly
+        that). A script that reads it and still builds a generator from OS
+        entropy has the opposite failure and hides it better: the replicates
+        differ, so an aggregate is published, but the seed reached none of the
+        randomness and no run can be reproduced. The instruction not to write a
+        seed of its own is in the implement prompts; a model that ignores it
+        either way is asked again, once, here.
 
         The request reuses the ``execute_reflect`` template (the directive
         stands where a traceback would) and is applied the way its patches
@@ -4147,30 +4152,45 @@ class Engine:
         is off, for a background job (no replicate runs are made), or when the
         script already names the variable.
 
-        A repair is kept only if it parses as Python and now reads the seed. A
-        model that rewrote the script and still missed the target, or returned
-        half of it, would leave a script worse than the one it had, so the
-        original stays and the single-measurement fallback in ``execute``
-        handles it. Failure never blocks the quest: one warning, then on.
+        A repair is kept only if it parses as Python and the script would no
+        longer be sent back -- it reads the seed AND builds no generator
+        without one. A model that rewrote the script and still missed the
+        target, or returned half of it, would leave a script worse than the one
+        it had, so the original stays and the fallbacks in ``execute`` (the
+        single-measurement one, or the warning that the runs cannot be
+        reproduced) handle it. Failure never blocks the quest: one warning,
+        then on.
         """
+        reads_seed = _script_reads_replicate_seed(code_path)
+        unseeded = _unseeded_rng_calls(code_path)
         if (
             self.config.execution.background_jobs
             or max(1, int(self.config.engine.execute_replicates)) <= 1
             or state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
-            or _script_reads_replicate_seed(code_path)
+            or (reads_seed and not unseeded)
         ):
             return code, deps
-        self._log.info(
-            "[implement] %s never reads FI_REPLICATE_SEED, so its %d replicate runs "
-            "would repeat one run; asking for one repair",
-            code_path.name, self.config.engine.execute_replicates,
-        )
+        if reads_seed:
+            self._log.info(
+                "[implement] %s reads FI_REPLICATE_SEED but builds a generator with no "
+                "seed (%s), so none of its %d replicate runs could be reproduced; "
+                "asking for one repair",
+                code_path.name,
+                "; ".join(f"line {line}: {expr}" for line, expr in unseeded[:6]),
+                self.config.engine.execute_replicates,
+            )
+        else:
+            self._log.info(
+                "[implement] %s never reads FI_REPLICATE_SEED, so its %d replicate runs "
+                "would repeat one run; asking for one repair",
+                code_path.name, self.config.engine.execute_replicates,
+            )
         prompt = self._prompts["execute_reflect"].substitute(
             # Whole: a repair that returns the script must not lose the tail of it.
             previous_code=code,
             returncode="(not run yet)",
-            stdout_tail=_SEED_REPAIR_DIRECTIVE,
+            stdout_tail=_unseeded_rng_directive(unseeded) if reads_seed else _SEED_REPAIR_DIRECTIVE,
             stderr_tail="",
             duration_s="0.00",
             figures_count="0",
@@ -4200,16 +4220,27 @@ class Engine:
                 why = "the model returned no usable script"
             elif "FI_REPLICATE_SEED" not in new_code:  # the test _script_reads_replicate_seed applies
                 why = "the repaired script still does not read it"
+            elif unseeded_rng_calls(new_code):
+                why = "the repaired script still builds a generator without a seed"
         if why:
-            self._log.warning(
-                "[implement] %s: keeping the script as written. Its replicates will "
-                "repeat one run, so the quest will be reported as a single "
-                "measurement with no confidence interval", why,
-            )
+            if reads_seed:
+                self._log.warning(
+                    "[implement] %s: keeping the script as written. Its replicates will "
+                    "differ, so the quest keeps its aggregate, but the randomness is "
+                    "drawn from OS entropy and a rerun will not reproduce these numbers",
+                    why,
+                )
+            else:
+                self._log.warning(
+                    "[implement] %s: keeping the script as written. Its replicates will "
+                    "repeat one run, so the quest will be reported as a single "
+                    "measurement with no confidence interval", why,
+                )
             return code, deps
         code_path.write_text(new_code, encoding="utf-8")
         self._log.info(
-            "[implement] the script now reads FI_REPLICATE_SEED (%s); rewrote %s (%d bytes)",
+            "[implement] the script now seeds every generator it builds from "
+            "FI_REPLICATE_SEED (%s); rewrote %s (%d bytes)",
             str(parsed.get("patch_summary") or "no summary")[:120], code_path, len(new_code),
         )
         return new_code, sorted({*deps, *new_deps})
@@ -4467,9 +4498,11 @@ class Engine:
         )
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
-        # Whether the script can respond to the seed at all, read once from the
-        # source that is about to run.
+        # Whether the script can respond to the seed at all, and whether it
+        # hands any of its randomness to a generator the seed cannot reach.
+        # Both read once from the source that is about to run.
         reads_seed = _script_reads_replicate_seed(code_path)
+        unseeded_rng = _unseeded_rng_calls(code_path)
         seed_ignored = False
         replicates_ran = False
         primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
@@ -4593,16 +4626,20 @@ class Engine:
         # or any other figure goes back to the primary run's (seed 0), and its
         # record says it shows that one run, so the text can quote seed 0's
         # values for it rather than the means.
-        # The script never reads the seed yet its runs differ: it is drawing
-        # from OS entropy. Those replicates ARE independent samples, so the
-        # aggregate stands -- but nothing about the run is reproducible, and a
-        # rerun will not land on these numbers.
-        if not reads_seed and not seed_ignored and len(result_json_replicates) > 1:
+        # The seed did not reach the randomness yet the runs differ: they are
+        # drawing from OS entropy, either because the script never reads the
+        # seed or because it reads it and builds a generator without one
+        # anyway. Those replicates ARE independent samples, so the aggregate
+        # stands -- but nothing about the run is reproducible, and a rerun will
+        # not land on these numbers.
+        if (not reads_seed or unseeded_rng) and not seed_ignored and len(result_json_replicates) > 1:
             self._log.warning(
-                "[execute] %s never reads FI_REPLICATE_SEED yet its replicates "
-                "differ -- the randomness is unseeded, so the results are "
-                "independent but not reproducible",
+                "[execute] %s draws from OS entropy (%s), so its replicates are "
+                "independent samples but not reproducible: a rerun of these seeds "
+                "will not land on these numbers",
                 code_path.name,
+                "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
+                if unseeded_rng else "it never reads FI_REPLICATE_SEED",
             )
         replotted: dict[str, int] = {}
         # A figure drawn as "the mean of the seeds" over replicates that are one
@@ -10219,6 +10256,243 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
         )
     except OSError:
         return True
+
+
+# Generators that draw from OS entropy when they are handed no seed.
+# ``np.random.Generator`` is deliberately absent: it takes a bit generator, not
+# a seed, and is always constructed from one that was seeded or was not.
+_UNSEEDED_RNG_FACTORIES = frozenset({
+    "default_rng",      # numpy: np.random.default_rng()
+    "RandomState",      # numpy legacy: np.random.RandomState()
+    "Random",           # stdlib: random.Random()
+    "SeedSequence",     # numpy: np.random.SeedSequence()
+    "PCG64", "MT19937", "Philox", "SFC64",  # numpy bit generators
+})
+
+
+def _rng_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """The names, in this script, that reach a random module or one of the
+    factories above: ``({"np"}, {"default_rng"})`` for a file that wrote
+    ``import numpy as np`` and ``from numpy.random import default_rng``.
+
+    Read from the imports rather than guessed, so a script's own ``Random``
+    class or ``default_rng`` helper is not mistaken for numpy's, and an alias
+    nobody would guess (``import numpy.random as nr``) still resolves.
+    """
+    modules: set[str] = set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in {"numpy", "random"}:
+                    modules.add(alias.asname or root)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[0] not in {"numpy", "random"}:
+                continue
+            for alias in node.names:
+                if alias.name in _UNSEEDED_RNG_FACTORIES:
+                    names.add(alias.asname or alias.name)
+                elif alias.name == "random":  # from numpy import random as nr
+                    modules.add(alias.asname or alias.name)
+    return modules, names
+
+
+def _guarded_absent(test: ast.AST, *, absent: bool = True) -> set[str]:
+    """The names a branch says it does not have.
+
+    With ``absent=True``, the names the ``if`` body runs without: ``rng`` in
+    ``if rng is None``, ``if not rng``, ``if rng is None or force``. With
+    ``absent=False``, the ones its ``else`` runs without, which is the same
+    guard written the other way round: ``if seed is not None: ... else:``.
+    """
+    names: set[str] = set()
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.left, ast.Name):
+        other = test.comparators[0]
+        if isinstance(other, ast.Constant) and other.value is None:
+            if isinstance(test.ops[0], ast.Is if absent else ast.IsNot):
+                names.add(test.left.id)
+    elif isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and absent:
+        if isinstance(test.operand, ast.Name):
+            names.add(test.operand.id)
+    elif isinstance(test, ast.Name) and not absent:
+        names.add(test.id)
+    elif isinstance(test, ast.BoolOp):
+        for value in test.values:
+            names |= _guarded_absent(value, absent=absent)
+    return names
+
+
+class _UnseededRngFinder(ast.NodeVisitor):
+    """Collects the generators a script builds without a seed, skipping the
+    ones that stand in a ``if <param> is None:`` fallback branch.
+
+    That branch is the idiom for "my caller hands me a seeded generator"; in
+    every archived quest that writes it, every call site does hand one, and
+    asking a model to rewrite a reproducible script is the expensive mistake.
+    Three blind spots come with it, all deliberate: a fallback that IS taken,
+    because some call site omitted the argument, reads as seeded here; the
+    branch is skipped wholesale, so an unrelated generator built inside one is
+    skipped with it; and a lambda's parameters are not tracked, so a generator
+    a lambda falls back to is reported. None has occurred in the stored quests,
+    and the first two would need the call sites to settle.
+    """
+
+    def __init__(self, modules: set[str], names: set[str]) -> None:
+        self.found: list[tuple[int, str]] = []
+        self._modules = modules
+        self._names = names
+        self._params: list[set[str]] = [set()]
+        self._guarded: list[set[str]] = [set()]
+
+    def _visit_function(self, node: Any) -> None:
+        args = node.args
+        params = {a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+        for extra in (args.vararg, args.kwarg):
+            if extra is not None:
+                params.add(extra.arg)
+        self._params.append(params)
+        self._guarded.append(set())
+        self.generic_visit(node)
+        self._params.pop()
+        self._guarded.pop()
+
+    visit_FunctionDef = _visit_function
+    visit_AsyncFunctionDef = _visit_function
+
+    def visit_If(self, node: ast.If) -> None:
+        outer = set(self._guarded[-1])
+        for branch, absent in ((node.body, True), (node.orelse, False)):
+            self._guarded[-1] = outer | (
+                _guarded_absent(node.test, absent=absent) & self._params[-1]
+            )
+            for child in branch:
+                self.visit(child)
+        self._guarded[-1] = outer
+        self.visit(node.test)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.generic_visit(node)
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            dotted = _dotted_name(func)
+            if not dotted or dotted.split(".")[0] not in self._modules:
+                return
+            if func.attr in _UNSEEDED_RNG_FACTORIES:
+                kind = "factory"
+            elif func.attr == "seed":  # np.random.seed() reseeds from entropy
+                kind = "reseed"
+            else:
+                return
+            expr = dotted
+        elif isinstance(func, ast.Name) and func.id in self._names:
+            kind, expr = "factory", func.id
+        else:
+            return
+        if self._guarded[-1]:
+            return
+        bare = not node.args and not node.keywords
+        if kind == "reseed":
+            if bare:
+                self.found.append((node.lineno, f"{expr}()"))
+        elif not _rng_call_is_seeded(node):
+            self.found.append((node.lineno, f"{expr}()" if bare else f"{expr}(None)"))
+
+
+def _dotted_name(node: ast.AST) -> str:
+    """``np.random.default_rng`` for an attribute chain, or "" when its base is
+    not a plain name (a call, a subscript, an attribute of a literal)."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _rng_call_is_seeded(call: ast.Call) -> bool:
+    """Whether a generator was handed a seed. An explicit ``None`` is not one:
+    ``default_rng(None)`` draws from entropy exactly as ``default_rng()`` does.
+    ``default_rng(**kwargs)`` is unknowable, so it counts as seeded."""
+    def _real(value: ast.AST) -> bool:
+        return not (isinstance(value, ast.Constant) and value.value is None)
+
+    if call.args:
+        return _real(call.args[0])
+    for kw in call.keywords:
+        if kw.arg in {"seed", "entropy"}:
+            return _real(kw.value)
+        if kw.arg is None:
+            return True
+    return False
+
+
+def unseeded_rng_calls(code: str) -> list[tuple[int, str]]:
+    """``(line, expression)`` for every random generator the script builds
+    without a seed, sorted by line.
+
+    A generator built from entropy ignores ``FI_REPLICATE_SEED`` however
+    faithfully the rest of the script reads it, so the seed the engine hands
+    each replicate never reaches the randomness the run measures and a rerun
+    cannot land on the same numbers. Seeding numpy's legacy global does not
+    reach a Generator, which is the shape this misses most often: one archived
+    quest called ``np.random.seed(seed)`` from the environment variable and
+    built ``np.random.default_rng()`` ninety lines earlier, so its 300
+    Gillespie trajectories per cell were drawn from OS entropy.
+
+    A source scan, like ``_script_reads_replicate_seed``, and for the same
+    reason: it is exact for the case that occurs and costs nothing. A file that
+    does not parse returns no calls, because a script that is not valid Python
+    has a louder problem than its seeding.
+    """
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return []
+    finder = _UnseededRngFinder(*_rng_aliases(tree))
+    finder.visit(tree)
+    return sorted(set(finder.found))
+
+
+def _unseeded_rng_calls(code_path: Path) -> list[tuple[int, str]]:
+    """``unseeded_rng_calls`` for a file. An unreadable one reports nothing:
+    silence is not evidence of a fault, and a repair costs a model call."""
+    try:
+        return unseeded_rng_calls(code_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return []
+
+
+def _unseeded_rng_directive(calls: list[tuple[int, str]]) -> str:
+    """The ``execute_reflect`` directive for a script that reads
+    ``FI_REPLICATE_SEED`` and then builds a generator that cannot hear it."""
+    where = "; ".join(f"line {line}: {expr}" for line, expr in calls[:6])
+    return (
+        "This script has NOT been run, and it has not failed: the account of a crash "
+        "above does not apply. It needs one change before it is run, and no other.\n\n"
+        "The engine runs this script several times, each run handed its own integer "
+        "in the environment variable FI_REPLICATE_SEED, so that the spread between "
+        "the runs can be reported and any one of them can be reproduced. This script "
+        "does read that variable, but it also builds a random generator without a "
+        f"seed, which draws from the operating system's entropy instead: {where}. "
+        "Nothing that generator produces can be reproduced, and the seed handed to "
+        "the run never reaches it. Note that seeding numpy's legacy global "
+        "(np.random.seed) does NOT seed a Generator made by np.random.default_rng: "
+        "they are separate streams.\n\n"
+        "Change exactly this: derive the seed of EVERY random generator the script "
+        "creates from the integer in FI_REPLICATE_SEED (default 0 when it is unset), "
+        "including the ones listed above. Where a generator is created per call, per "
+        "trial or inside a loop, hand it that integer plus the trial index (or pass "
+        "one generator in from the caller) so no two draws repeat and the run stays "
+        "reproducible. Keep everything else in the script unchanged: the same "
+        "functions, parameters, outputs and figures, and the same final RESULT_JSON "
+        "line. Do not add randomness the experiment does not already have, and do not "
+        "shorten or simplify anything.\n\n"
+        "Return the whole script in `code`, one sentence in `patch_summary`, and "
+        "leave `give_up_reason` empty."
+    )
 
 
 # Stands where the traceback would be in the ``execute_reflect`` prompt, for the
