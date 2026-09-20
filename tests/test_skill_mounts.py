@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -504,6 +505,88 @@ def test_under_docker_a_refused_skill_is_not_described_as_reachable(env, tmp_pat
     assert "not reachable from the sandbox" in block
     assert "at paths relative to" not in block
     assert str(folder) not in block and "/fi-skills" not in block
+    # files the experiment cannot reach get no instruction on how to launch them
+    assert "sys.executable" not in block and "working directory is the quest folder" not in block
+
+
+# --- where the experiment runs, and which Python launches a skill's script ---
+#
+# A skill's files are listed relative to the skill's folder, but every run of the
+# experiment has the QUEST folder as its working directory, and it runs on the
+# interpreter that runs FI (or the container's), which need not be the first
+# `python` on PATH. Left unsaid, a model copied the skill's own `python <script>`
+# into the experiment as subprocess.run(["python", <path>, ...]) and a script's
+# output landed beside paper.md.
+
+
+def test_the_prompt_says_the_experiment_runs_in_the_quest_folder_and_to_use_sys_executable(env, tmp_path) -> None:
+    folder = _skill(
+        env["ext"], "ext-one",
+        text=f"Run `python {env['ext'] / 'ext-one'}/scripts/run.py`.\n",
+    )
+    _approve("ext-one")
+    eng = _engine(tmp_path, "venv")
+
+    block = eng._skills_block(_state("ext-one"))
+
+    assert "working directory is the quest folder, not the skill's folder" in block
+    assert "a file a script writes without a path lands in the quest folder" in block
+    assert f"give each one in full (`{folder}` plus the path listed)" in block
+    assert "launch it with `sys.executable` (the Python running the experiment)" in block
+    assert "not the bare command `python`" in block
+    assert "even where the skill's text above writes `python`" in block
+    assert "`/work`" not in block, "the Docker cwd is not mentioned when the sandbox is not Docker"
+    assert "skill's directory" not in block
+
+
+def test_under_docker_the_same_instruction_names_the_containers_folders(env, tmp_path) -> None:
+    folder = _skill(
+        env["ext"], "ext-one",
+        text=f"Run `python {env['ext'] / 'ext-one'}/scripts/run.py`.\n",
+    )
+    _approve("ext-one")
+    eng = _engine(tmp_path, "docker")
+
+    block = eng._skills_block(_state("ext-one"))
+
+    assert (
+        "working directory is the quest folder (`/work` in the Docker sandbox), "
+        "not the skill's folder"
+    ) in block
+    assert "give each one in full (`/fi-skills/ext-one` plus the path listed)" in block
+    # sys.executable is the interpreter inside the container: one wording serves both
+    assert "launch it with `sys.executable` (the Python running the experiment)" in block
+    assert "not the bare command `python`" in block
+    assert "write only under the working directory (the quest folder)" in block
+    assert str(folder) not in block and str(folder.resolve()) not in block
+    assert "skill's directory" not in block
+
+
+def test_nothing_says_the_experiment_runs_in_the_skills_directory() -> None:
+    """The experiment's working directory is the quest folder (``cwd=self.quest_root``,
+    ``/work`` in Docker). A comment saying it ran in the skill's directory sat beside the
+    prompt block that should have said otherwise."""
+    claim = re.compile(
+        r"\bruns?(?: \w+)? (?:in|from|inside) (?:the |a |that )?skill(?:'s|s')?"
+        r" (?:own )?(?:directory|folder|dir)\b",
+        re.IGNORECASE,
+    )
+    # a known positive first: the sentence this replaced
+    assert claim.search("Naming them is enough: the generated code runs in the skill's directory and")
+    assert claim.search("the experiment runs from the skill folder")
+    assert not claim.search("the experiment runs in the quest folder, not the skill's folder")
+
+    root = Path(__file__).resolve().parent.parent
+    files = [
+        *(root / "core").rglob("*.py"), *(root / "agents").glob("*.md"),
+        root / "README.md", *(root / "docs").glob("*.md"),
+    ]
+    hits = [
+        f"{p.relative_to(root)}: {m.group(0)}"
+        for p in files if p.is_file()
+        for m in claim.finditer(p.read_text(encoding="utf-8", errors="replace"))
+    ]
+    assert hits == []
 
 
 @pytest.mark.asyncio

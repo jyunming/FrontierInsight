@@ -6547,7 +6547,7 @@ class Engine:
                 parts.append(
                     f"*In the Docker sandbox this skill's folder is `{mount.container}`, "
                     f"mounted read-only: read or run what it ships from there, and "
-                    f"write only under the working directory.*\n"
+                    f"write only under the working directory (the quest folder).*\n"
                 )
             elif not_mounted:
                 parts.append(
@@ -6567,8 +6567,17 @@ class Engine:
             # Bundled files are named, never inlined. A references directory
             # can be larger than the whole quest, and inlining it would undo
             # the selection step this block exists to serve. Naming them is
-            # enough: the generated code runs in the skill's directory and
-            # can open what it needs.
+            # enough: the generated code opens what it needs. The skill's
+            # folder is not its working directory: every run of the experiment
+            # has the quest folder as its cwd (`cwd=self.quest_root`; `/work`
+            # in Docker), so a file a script writes without a path lands beside
+            # `paper.md`, and the listed paths are relative to the skill's
+            # folder, not to the cwd. The block says so, gives the folder in
+            # full, and says to launch a script with `sys.executable`: the
+            # experiment runs on FI's interpreter (`SharedInterpreterExecutor`)
+            # or the container's, not necessarily the first `python` on PATH,
+            # which is what a skill's own text says. One wording fits both
+            # sandboxes.
             bundled = skill.bundled_scripts()
             refs = skill.reference_files()
             if bundled or refs:
@@ -6584,6 +6593,18 @@ class Engine:
                         f"These ship with the skill, at paths relative to "
                         f"`{base}`. Read or run them as needed; their "
                         f"contents are deliberately not reproduced here."
+                    )
+                    in_docker = " (`/work` in the Docker sandbox)" if plan is not None else ""
+                    parts.append(
+                        f"The experiment's working directory is the quest folder"
+                        f"{in_docker}, not the skill's folder: a file a script "
+                        f"writes without a path lands in the quest folder, and a "
+                        f"relative path will not find these files, so give each "
+                        f"one in full (`{base}` plus the path listed). To run one "
+                        f"of these scripts as a subprocess, launch it with "
+                        f"`sys.executable` (the Python running the experiment), "
+                        f"not the bare command `python`, even where the skill's "
+                        f"text above writes `python`."
                     )
                 for rel in bundled:
                     parts.append(f"- `{rel}` (executable)")
