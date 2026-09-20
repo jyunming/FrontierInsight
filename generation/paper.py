@@ -27,7 +27,7 @@ from pathlib import Path
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
 from core.engine import QuestArtifacts, build_further_reading, cited_references
-from generation._pandoc import MARKDOWN_READER, find_pandoc
+from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
 from generation._figure_captions import numbers_off_figure_captions
 from generation._keywords import extract_keywords
@@ -38,7 +38,9 @@ from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 # ``pdflatex`` + ``\usepackage[utf8]{inputenc}`` can't handle on its
 # own. Maps each char to a LaTeX replacement that works in BOTH text
 # and math contexts (``\ensuremath`` flips into math mode if
-# necessary). This map is the ONLY protection for these glyphs — the
+# necessary) — except the two dashes, which are ligatures of the TEXT
+# fonts and mean something else in math (see ``_LATEX_MATH_OVERRIDES``).
+# This map is the ONLY protection for these glyphs — the
 # paper templates load ``inputenc`` but do not currently define
 # ``\DeclareUnicodeCharacter`` mappings, so any glyph that escapes
 # this dict will reach pdflatex unchanged and fail compile. Extend
@@ -170,6 +172,20 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
 # char destination strings transparently.
 _LATEX_UNICODE_TRANSLATOR = str.maketrans(_LATEX_UNICODE_REPLACEMENTS)
 
+# INSIDE a math span, ``--`` and ``---`` are not dashes: they are two and three
+# minus signs ("0.322 - -0.338" for a range written ``$0.322–0.338$``). A dash is
+# a ligature of the text fonts, so in math it is set by ``\text{}``. Of the map
+# above these are the only entries that mean something else in math. The
+# ``\ensuremath`` ones are already math, the empty strings and the spaces vanish
+# in it, and a curly quote is left as the map has it: bare in math it is a
+# prime (``f’(x)``), inside a ``\text{}`` it is a quote, and both are what the
+# writer typed. A ``--`` the writer typed in math stays as written.
+_LATEX_MATH_OVERRIDES: dict[str, str] = {
+    "—": r"\text{---}",   # — em dash
+    "–": r"\text{--}",    # – en dash
+}
+_LATEX_MATH_TRANSLATOR = str.maketrans({**_LATEX_UNICODE_REPLACEMENTS, **_LATEX_MATH_OVERRIDES})
+
 
 def _sanitize_unicode_for_latex(markdown: str) -> str:
     """Replace common LLM-emitted Unicode math/typography glyphs with
@@ -182,9 +198,17 @@ def _sanitize_unicode_for_latex(markdown: str) -> str:
     safety net covers them, fine; otherwise pdflatex will still error
     — at which point the right fix is to extend the map. Logged at
     INFO when the sanitizer actually replaced anything so run.log
-    surfaces what was rewritten."""
-    replaced = markdown.translate(_LATEX_UNICODE_TRANSLATOR)
-    return replaced
+    surfaces what was rewritten.
+
+    A math span (``$..$``, ``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, found by
+    pandoc's own rules) takes :data:`_LATEX_MATH_OVERRIDES` for the dashes, so
+    ``$0.322–0.338$`` prints a dash between the numbers. Code, fenced or
+    inline, is not math and is rewritten as prose is: a raw glyph left in it
+    would still stop pdflatex."""
+    return "".join(
+        segment.translate(_LATEX_MATH_TRANSLATOR if is_math else _LATEX_UNICODE_TRANSLATOR)
+        for segment, is_math in _split_math_segments(markdown)
+    )
 
 
 # Pattern: any code-fence block (used by tests + downstream tooling
@@ -228,6 +252,17 @@ def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
 # two must be non-empty for the rewrite to be observable.
 _INLINE_MATH_TIGHTEN_RE = re.compile(
     r"\$([ \t]*\\[a-zA-Z][^$\n]*?[ \t]*)\$",
+)
+
+# The math spans of the paper's markdown as the PDF will have them: pandoc's own
+# (``generation/_pandoc.py``) plus the spaced ``$ \beta $`` the tightening above
+# turns into one. The unicode rewrite runs before the tightening and has to
+# treat that text as the math it becomes. Once tight it is read by pandoc's
+# rule, so a digit right after the closing ``$`` ends it as math, as in
+# ``$\pm$1nm``.
+_MATH_OR_TIGHTENED_RE = re.compile(
+    MATH_SPAN_RE.pattern + r"|(?<!\\)" + _INLINE_MATH_TIGHTEN_RE.pattern + r"(?!\d)",
+    re.DOTALL,
 )
 
 
@@ -279,6 +314,33 @@ def _split_code_segments(text: str):
         pos = m.end()
     if pos < len(text):
         yield text[pos:], False
+
+
+def _split_math_segments(text: str):
+    """Yield ``(segment, is_math)`` pairs that, concatenated, reproduce
+    ``text`` exactly. A math segment keeps its delimiters and never holds a
+    blank line, as in pandoc. Code, fenced or inline, is never math (a ``$``
+    in it is a dollar sign), so it is split off first and comes back as text."""
+    for segment, is_code in _split_code_segments(text):
+        if is_code:
+            yield segment, False
+            continue
+        pos = scan = 0
+        while True:
+            m = _MATH_OR_TIGHTENED_RE.search(segment, scan)
+            if m is None:
+                break
+            if BLANK_LINE_RE.search(m.group(0)):
+                # A paragraph ends inside it, so pandoc reads no math from this
+                # opening delimiter; it is text and the search goes on after it.
+                scan = m.start() + 1
+                continue
+            if m.start() > pos:
+                yield segment[pos:m.start()], False
+            yield m.group(0), True
+            pos = scan = m.end()
+        if pos < len(segment):
+            yield segment[pos:], False
 
 
 def _count_sanitized_glyphs(markdown: str) -> int:
