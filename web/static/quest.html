@@ -819,10 +819,17 @@
       if (!data.records || data.records.length === 0) return;
       const sec = document.getElementById('cost-section');
       sec.classList.remove('hidden'); sec.classList.add('flex');
-      renderCostChart(data.records);
+      renderCostChart(data.records, data.summary);
     } catch (_) {}
   }
-  function renderCostChart(records) {
+  // A quest that mixes priced and unpriced models has a dollar total that counts
+  // the priced calls only. The server's summary says so; the marker follows the total.
+  function costPartialNote(summary) {
+    if (!summary || summary.total_cost_usd_partial !== true) return '';
+    const n = summary.unpriced_requests || 0;
+    return ` (partial: ${n} call${n === 1 ? '' : 's'} unpriced)`;
+  }
+  function renderCostChart(records, summary) {
     const byNode = {};
     let totalCost = 0, totalCalls = 0;
     for (const r of records) {
@@ -833,7 +840,12 @@
       byNode[node].calls += 1; byNode[node].cost += cost; byNode[node].tokens += tokens;
       totalCost += cost; totalCalls += 1;
     }
-    document.getElementById('cost-summary').textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} · $${totalCost.toFixed(4)}`;
+    const costNote = costPartialNote(summary);
+    const costEl = document.getElementById('cost-summary');
+    costEl.textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} · $${totalCost.toFixed(4)}${costNote}`;
+    costEl.title = costNote
+      ? 'The dollar figure counts only the calls whose model has a listed price; the others are not in it, so the real cost is higher.'
+      : '';
     const nodes = Object.keys(byNode).sort();
     const maxCost = Math.max(...nodes.map(n => byNode[n].cost), 0.0001);
     const html = nodes.map(n => {
