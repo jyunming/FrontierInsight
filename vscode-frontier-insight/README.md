@@ -173,6 +173,7 @@ The active Copilot model is captured automatically into `provider.model` so the 
 - `@fi /install-tectonic` — install the tectonic LaTeX binary (~70 MB) into `tools/` so `paper.pdf` works without an admin install of MiKTeX. Opens an integrated terminal.
 - `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.
 - `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable, and report which endpoint answered. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking).
+- `@fi /probe [all]` — ask the model selected in the Chat picker whether text FI did not send (a hidden system prompt, tool definitions, a persona) appears to be in its context. `@fi /probe all` does the same for every model VS Code lists, after a confirmation that says how many requests will be sent. Behavioural evidence only; see [Does a model carry a hidden system prompt?](#does-a-model-carry-a-hidden-system-prompt).
 
 ### Skills
 
@@ -195,6 +196,14 @@ All of these run the same `launch.py` the CLI does and render the result; none o
   On activation the extension keeps watching for the sidecar for `frontierInsight.axonStartupWaitSec` (10 minutes by default) before it says anything, because Axon needs time to load its model and open its indexes — and you may start it long after opening the editor. The wait is silent, so starting Axon at any point during it means you never see a notice.
 
 **Air-gapped machines:** the knowledge layer downloads ~184 MB of embedding + reranker models from Hugging Face on first use. To run with no network, on a connected machine run `python launch.py --export-models <dir>`, copy `<dir>` to the offline machine, and set `FI_MODELS_DIR=<dir>` + `FI_OFFLINE=1` (or `knowledge.models_dir` / `knowledge.offline` in YAML). See `docs/INSTALL.md`.
+
+### Does a model carry a hidden system prompt?
+
+`vscode.lm` reports no token usage and no quota, so what a provider wraps around FI's request (a system prompt, tool definitions, a persona) cannot be measured from inside the extension. `@fi /probe` gathers the one kind of evidence the extension can get, which is behavioural. For each model it sends two small requests, each a single User message, as FI's bridge does: a **canary** (`Reply with exactly the single word PONG and nothing else.`, where anything but `PONG` is what wrapped instructions would look like, and also what a chatty default looks like) and a **preamble question** that asks whether anything outside the conversation was in the model's context and to quote its first 300 characters, or reply `NONE`. It also calls `model.countTokens` on the text of each, which counts only what FI sent.
+
+`@fi /probe` probes the model selected in the Chat picker (2 requests). `@fi /probe all` probes every model VS Code lists, third-party providers such as an Ollama server included, one after another, after a confirmation that states how many models and requests (2 per model) it will send, because on a metered plan each request can count against a quota. The result is one table (model, vendor, family, version, max input tokens, canary exact?, preamble said `NONE`?, tokens we sent, milliseconds), then the quoted reply for each model whose preamble answer was not `NONE`, and the exact text of the two requests so a pasted result says what was asked. An error from one model (quota, consent, no capacity) is reported in its row and the run goes on. It needs no folder open and starts no Python.
+
+What it cannot show is printed under the table: a model's description of its own context is not proof (it can deny or invent), no usage figures come back so the real overhead is not measured, the token counts cover only the text FI sent, and a provider's own token accounting, where one exists, is the way to measure overhead.
 
 ### Note on Copilot billing units
 

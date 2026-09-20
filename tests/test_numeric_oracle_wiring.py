@@ -33,14 +33,15 @@ _ORACLE_KINDS = ("transposed:", "near_miss:", "trivial_reference:")
 class _Recorder:
     """Minimal stand-in exposing only what the oracle helper touches."""
 
-    def __init__(self, tmp: Path, result_json: dict) -> None:
+    def __init__(self, tmp: Path, result_json: dict, **state) -> None:
         self.quest_root = tmp
         self._log = SimpleNamespace(
             warning=lambda *a, **k: self.msgs.append(("warn", a)),
             info=lambda *a, **k: self.msgs.append(("info", a)),
         )
         self.msgs: list = []
-        self.state = {"result_json": result_json}
+        # ``design`` and ``topic`` are what the quest gave the run.
+        self.state = {"result_json": result_json, **state}
 
     def hits(self, paper: str) -> list[str]:
         return Engine._numeric_oracle_hits(self, paper, self.state)  # type: ignore[arg-type]
@@ -104,6 +105,40 @@ def test_a_trivial_reference_is_not_called_an_unverified_number(
     assert not hits[0].startswith("unverified_number")
     # The finding still points at the cause rather than the value.
     assert "check the bracket" in hits[0]
+
+
+def test_a_setting_the_quest_gave_the_run_is_not_a_finding(tmp_path: Path) -> None:
+    """``R_0 = 1.5`` is the paper quoting its own setup. The engine hands the
+    oracle the design and the topic, so a number they state is not reported
+    as a near-miss of whatever result sits within 25% of it."""
+    paper = "At R_0 = 1.5 the simulations gave a mean of 1.33."
+    results = {"mean_final_size": 1.33}
+
+    # Nothing declares 1.5: it is 11% from the stored 1.33 and is reported.
+    hits = _Recorder(tmp_path, results).hits(paper)
+    assert len(hits) == 1 and hits[0].startswith("near_miss:") and "1.5" in hits[0]
+
+    design = {"variables": {"independent": ["R0 (0.9, 1.5, 3.0)"]}}
+    assert _Recorder(tmp_path, results, design=design).hits(paper) == []
+
+    topic = "Compare models for R0 in {0.9, 1.5, 3.0}."
+    assert _Recorder(tmp_path, results, topic=topic).hits(paper) == []
+
+    # The audit still says the number was read and the paper was clean.
+    data = json.loads((tmp_path / "paper" / "numeric_audit.json").read_text("utf-8"))
+    assert data["ok"] is True and data["paper_numbers_checked"] >= 2
+
+
+def test_a_declared_prediction_does_not_hide_a_wrong_result(tmp_path: Path) -> None:
+    """The design predicted a 28 nm crossover; the run measured 32. Only the
+    setup is declared, so a paper that prints the prediction is still caught."""
+    design = {
+        "variables": {"controls": ["dose 1.4"]},
+        "expected_outcome": "the crossover pitch shifts to 28 nm",
+    }
+    rec = _Recorder(tmp_path, {"crossover_pitch_nm": 32.0}, design=design)
+    hits = rec.hits("The crossover pitch shifts to 28 nm.")
+    assert len(hits) == 1 and hits[0].startswith("near_miss:")
 
 
 def test_consistent_paper_produces_no_hits(tmp_path: Path) -> None:
