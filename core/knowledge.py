@@ -410,6 +410,9 @@ def _openalex_work_doc(w: dict, **extra: Any) -> RetrievedDoc:
 _FOUNDATIONAL_TYPES = ("article", "review", "preprint", "conference-paper", "book", "book-chapter", "dissertation")
 _OPENALEX_WORK_ID_RE = re.compile(r"openalex\.org/(W\d+)", re.IGNORECASE)
 FOUNDATIONAL_SUGGESTED = "suggested as a foundational work"
+# How many suggested works one literature pass looks up, one OpenAlex request
+# each. The suggestion prompt asks for this many and any beyond it are ignored.
+FOUNDATIONAL_MAX_SUGGESTED = 8
 # Between the lookups' requests, which go one at a time.
 _OPENALEX_GAP_S = 1.0
 
@@ -3670,17 +3673,20 @@ class Knowledge:
     async def find_foundational_works(
         self, suggestions: list[dict], docs: list[RetrievedDoc],
     ) -> list[RetrievedDoc]:
-        """Foundational works for a literature pass: each suggested work looked
-        up by title in OpenAlex (kept only when found), then the works the
-        retrieved papers cite most. None already in ``docs`` comes back, and a
-        failed lookup only loses its own works."""
+        """Foundational works for a literature pass: each suggested work (the
+        first ``FOUNDATIONAL_MAX_SUGGESTED``) looked up by title in OpenAlex
+        (kept only when found), then the works the retrieved papers cite most.
+        None already in ``docs`` comes back, and a failed lookup only loses its
+        own works."""
         api_key = str(getattr(self.cfg, "openalex_api_key", "") or "")
 
         def lookups() -> list[RetrievedDoc]:
             # One request at a time: fired together, three of five title
             # lookups came back 429 from OpenAlex's keyless pool.
             found: list[RetrievedDoc] = []
-            for suggestion in [s for s in suggestions[:5] if isinstance(s, dict)]:
+            for suggestion in [
+                s for s in suggestions[:FOUNDATIONAL_MAX_SUGGESTED] if isinstance(s, dict)
+            ]:
                 try:
                     doc = _openalex_title_lookup(suggestion, api_key=api_key)
                 except Exception:  # noqa: BLE001 — one lookup, not the rest

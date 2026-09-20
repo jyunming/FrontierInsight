@@ -1107,10 +1107,11 @@ class KnowledgeConfig(BaseModel):
     # the original method papers and textbooks a topic rests on rarely come
     # back: a damped-oscillator integrator quest found none of Verlet (1967),
     # Hairer, Lubich & Wanner, or Butcher. One call asks the model for up to
-    # five, each is looked up by title in OpenAlex and dropped when not found,
+    # eight, each is looked up by title in OpenAlex and dropped when not found,
     # and the works at least two retrieved papers cite are added (books too,
     # whatever the quest's work scope). All of them go through the literature
-    # screen, labelled foundational. Costs one LLM call and up to seven OpenAlex
+    # screen, labelled foundational, and the writer is asked to cite the ones
+    # that bear on the paper. Costs one LLM call and up to ten OpenAlex
     # requests per literature pass. Off → no extra candidates.
     foundational_works: bool = True
     # Pause-for-user-papers gate. When True, the literature node pauses

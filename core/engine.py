@@ -53,6 +53,8 @@ from .config import (
 )
 from .execution import ExecutionResult, make_executor, pip_failure_summary
 from .knowledge import (
+    FOUNDATIONAL_MAX_SUGGESTED,
+    FOUNDATIONAL_SUGGESTED,
     WORK_SCOPE_PAPERS,
     WORK_SCOPE_PAPERS_AND_BOOKS,
     Knowledge,
@@ -60,6 +62,7 @@ from .knowledge import (
     _doc_dedup_keys,
     _is_bot_check_title,
     _normalize_title,
+    _titles_match,
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
@@ -3462,14 +3465,22 @@ class Engine:
     ) -> list:
         """Candidates a keyword search does not reach: the original papers and
         standard textbooks of what a topic rests on. One call asks the model
-        for up to five, each is looked up by title in OpenAlex and dropped when
+        for up to eight, each is looked up by title in OpenAlex and dropped when
         not found, and the works several retrieved papers cite are added. They
         are labelled foundational and go through the literature screen. Off
-        with ``knowledge.foundational_works: false``; any failure adds nothing."""
+        with ``knowledge.foundational_works: false``; any failure adds nothing.
+
+        The run log names every work the model suggested and what became of
+        each, because a work the model never named cannot be told from one
+        OpenAlex does not hold without it."""
         kn = self.config.knowledge
         if not (kn.enabled and kn.foundational_works):
             return []
         suggestions = await self._suggest_foundational_works(topic, work_scope=work_scope)
+        self._log.info(
+            "[literature] foundational works suggested (%d): %s",
+            len(suggestions), "; ".join(_foundational_work_text(w) for w in suggestions) or "(none)",
+        )
         try:
             found = await self.knowledge.find_foundational_works(suggestions, docs)
         except Exception as e:  # noqa: BLE001 — never costs the retrieval
@@ -3483,20 +3494,31 @@ class Engine:
             (": " + "; ".join(f"{d.metadata.get('title')} ({d.metadata.get('year')}, "
                               f"{d.metadata.get('foundational')})" for d in new))[:600] if new else "",
         )
+        if suggestions:
+            added, kept_already, dropped = _foundational_outcomes(suggestions, new, found, docs)
+            self._log.info(
+                "[literature] foundational works: found in OpenAlex and added (%d): %s | "
+                "already among the search results (%d): %s | dropped, not found in OpenAlex "
+                "(%d): %s",
+                len(added), "; ".join(added) or "-",
+                len(kept_already), "; ".join(kept_already) or "-",
+                len(dropped), "; ".join(dropped) or "-",
+            )
         return new
 
     async def _suggest_foundational_works(
         self, topic: str, *, work_scope: str = WORK_SCOPE_PAPERS,
     ) -> list[dict]:
-        """Up to five foundational works the model names for ``topic``, each
-        ``{title, authors, year}``. Empty when the call fails."""
+        """Up to eight foundational works the model names for ``topic``, each
+        ``{title, authors, year}``; any beyond the eighth are ignored. Empty
+        when the call fails."""
         if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
             what = "the classic books and articles scholars of this subject cite as its foundations"
         else:
             what = ("the original papers that introduced the methods, models or effects it "
                     "relies on, and the standard textbooks on them")
         prompt = (
-            f"List up to FIVE foundational works for this research topic: {what}. "
+            f"List up to EIGHT foundational works for this research topic: {what}. "
             "Name only works you are sure exist, with their exact titles: each one is "
             "looked up by title, and a work that is not found is dropped.\n\n"
             f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
@@ -3513,7 +3535,7 @@ class Engine:
         return [
             w for w in (works if isinstance(works, list) else [])
             if isinstance(w, dict) and str(w.get("title") or "").strip()
-        ][:5]
+        ][:FOUNDATIONAL_MAX_SUGGESTED]
 
     async def _derive_literature_queries(
         self, topic: str, idea_title: str = "", hypothesis: str = "",
@@ -5834,6 +5856,10 @@ class Engine:
                 state, audience=self.config.output.audience,
                 **self._lit_kwargs(state),
             ),
+            # Empty when the prior-work block holds no foundational work.
+            foundational_block=_foundational_write_block(
+                state.get("literature") or [], self.config.output.audience,
+            ),
             figure_list=_figure_list_for_prompt(state),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
@@ -5883,6 +5909,18 @@ class Engine:
             self._log.warning(
                 "[write] removed citations of sources the prior-work block does not have: %s",
                 ", ".join(f"[{n}]" for n in dropped),
+            )
+        # What the foundational works came to: how many were in the prior-work
+        # block and which of them the draft cites, so a paper that leaves the
+        # field's original papers out can be found in the run log.
+        foundational = _foundational_sources(literature, self.config.output.audience)
+        if foundational:
+            left_out = _uncited_foundational_works(literature, markdown, self.config.output.audience)
+            self._log.info(
+                "[write] foundational works in the prior-work block: %d; the draft cites %d; "
+                "not cited: %s",
+                len(foundational), len(foundational) - len(left_out),
+                "; ".join(str(meta.get("title") or "") for _label, meta in left_out) or "-",
             )
         # A figure the design planned and the run drew that this draft leaves
         # out goes back in here, before the review reads it. The review checks
@@ -6895,6 +6933,12 @@ class Engine:
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
             figure_check_block=_format_figure_check(paper_md, state),
+            # Advisory, unlike the figure check: what the reviewer may ask for,
+            # never a must-flag hit. Empty when the paper cites every foundational
+            # work it has, or has none.
+            foundational_check_block=_foundational_review_block(
+                state.get("literature") or [], paper_md, self.config.output.audience,
+            ),
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.
@@ -8732,6 +8776,135 @@ def _labelled_sources(
             papers += 1
             out.append((str(papers), meta, item))
     return out
+
+
+def _foundational_work_text(work: dict[str, Any]) -> str:
+    """A work the model suggested as ``title (year, authors)``, on one line."""
+    title = " ".join(str(work.get("title") or "").split())
+    who = work.get("authors")
+    if isinstance(who, list):
+        who = ", ".join(str(a) for a in who if a)
+    bits = [b for b in (str(work.get("year") or "").strip(), " ".join(str(who or "").split())) if b]
+    return f"{title} ({', '.join(bits)})" if bits else title
+
+
+def _foundational_outcomes(
+    suggestions: list[dict[str, Any]], new: list[RetrievedDoc],
+    found: list[RetrievedDoc], docs: list[RetrievedDoc],
+) -> tuple[list[str], list[str], list[str]]:
+    """What became of each suggested work, as :func:`_foundational_work_text`
+    lines: the ones the pass added (``new``), the ones already among the search
+    results (the lookup found them, or the search had them, so they are not new)
+    and the ones OpenAlex did not have. A suggestion is matched to a record by
+    the same title rule the lookup used, so a record counts for the suggestion
+    that found it."""
+    def matches(work: dict[str, Any], candidates: list[RetrievedDoc]) -> bool:
+        title = str(work.get("title") or "")
+        return any(_titles_match(title, str((d.metadata or {}).get("title") or "")) for d in candidates)
+
+    added: list[str] = []
+    already: list[str] = []
+    dropped: list[str] = []
+    for work in suggestions:
+        text = _foundational_work_text(work)
+        if matches(work, new):
+            added.append(text)
+        elif matches(work, found) or matches(work, docs):
+            already.append(text)
+        else:
+            dropped.append(text)
+    return added, already, dropped
+
+
+def _foundational_sources(
+    literature: list[Any], audience: str = "external",
+) -> list[tuple[str, dict[str, Any]]]:
+    """The foundational works in the paper's citable set, as ``(label,
+    metadata)`` in the writer's label order. The citable set is the one
+    :func:`_labelled_sources` gives the prior-work block, so a label here is that
+    block's label. A work is foundational when the literature pass marked it
+    (``metadata["foundational"]``): an original paper or standard textbook the
+    model named and OpenAlex holds, or a work several retrieved papers cite. It
+    is in this set only if the literature screen kept it."""
+    return [
+        (label, meta)
+        for label, meta, _item in _labelled_sources(literature, audience)
+        if meta.get("foundational") and not label.startswith("W")
+    ]
+
+
+def _foundational_line(label: str, meta: dict[str, Any], *, numbered: bool) -> str:
+    """One foundational work as the prior-work block's header line gives it
+    (authors, year, title), with ``[label]`` when ``numbered``, and a note of
+    what kind of work it is: a book, or how many retrieved papers cite it."""
+    line = _format_lit_header(meta, label).split("\n", 1)[0]
+    if not numbered:
+        line = re.sub(r"^\[[^\]]*\]\s*", "", line)
+    notes: list[str] = []
+    if meta.get("work_type") in ("book", "book-chapter"):
+        notes.append("book")
+    how = str(meta.get("foundational") or "")
+    if how.startswith("cited by"):
+        notes.append(how)
+    return f"- {line}" + (f" ({', '.join(notes)})" if notes else "")
+
+
+def _foundational_write_block(literature: list[Any], audience: str = "external") -> str:
+    """The write prompt's note on the foundational works in the prior-work block,
+    or "" when there are none, so a prompt without any is unchanged. It lists each
+    with the label the writer cites it by, and asks for the ones that bear on the
+    paper. The works were retrieved, kept by the literature screen and marked
+    foundational, and on stored quests the papers left 175 of 312 such works
+    uncited. The ask is only for the ones that bear on the paper, so it never
+    pushes the writer to cite a work the paper does not use."""
+    works = _foundational_sources(literature, audience)
+    if not works:
+        return ""
+    return (
+        "\n\n### Foundational works in the prior-work block\n"
+        "The literature search marked these entries as foundational: the original papers "
+        "and standard textbooks the topic rests on, or works several of the retrieved papers "
+        "cite. Cite each one that bears on this paper's claims, where it belongs: the original "
+        "paper for a method, model or relation the paper uses, the standard textbook for the "
+        "field. A work that does not bear on the paper is not to be cited just to be cited.\n\n"
+        + "\n".join(_foundational_line(label, meta, numbered=True) for label, meta in works)
+    )
+
+
+def _uncited_foundational_works(
+    literature: list[Any], paper_md: str, audience: str = "external",
+) -> list[tuple[str, dict[str, Any]]]:
+    """The foundational works in the citable set that the paper's text does not
+    cite. The paper's citation numbers are the labels of ``literature`` in the
+    order the write node leaves it in (:func:`_finalize_paper_sources`), the same
+    numbers :func:`cited_references` reads."""
+    cited = {str(n) for n in _citation_counts(paper_md)}
+    return [(label, meta) for label, meta in _foundational_sources(literature, audience) if label not in cited]
+
+
+def _foundational_review_block(literature: list[Any], paper_md: str, audience: str = "external") -> str:
+    """The review prompt's advisory line on foundational works the paper does not
+    cite, or "" when it cites every one (or there are none). Advisory: it is
+    handed to the reviewer as something it may ask for, and nothing here adds a
+    must-flag hit, because whether a work bears on a paper is a judgement, not a
+    set difference."""
+    if not (paper_md or "").strip():
+        return ""  # nothing was read, so nothing can be said to be left out
+    missing = _uncited_foundational_works(literature, paper_md, audience)
+    if not missing:
+        return ""
+    return (
+        "\n\n## Foundational works this paper does not cite (advisory)\n"
+        "These works were retrieved, kept by the literature screen and marked as foundational "
+        "(an original paper or standard textbook the topic rests on, or a work several of the "
+        "retrieved papers cite), but the paper does not cite them:\n"
+        + "\n".join(_foundational_line(label, meta, numbered=False) for label, meta in missing)
+        + "\nAdvisory only: if one of them bears on a claim the paper makes (the original paper "
+        "for a method or relation the paper uses, the standard textbook for the field), you may "
+        "ask for it under `suggestions`. Do not add anything to `must_flag_hits` and do not "
+        "choose `revise` because of this alone. A work that does not bear on the paper needs "
+        "no citation."
+    )
 
 
 def _reference_entry(label: str, meta: dict[str, Any]) -> dict[str, Any]:
