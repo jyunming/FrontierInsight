@@ -43,6 +43,32 @@ FI_TEAL_CMAP_NAME = "fi_teal"
 # Name of the dir the engine drops the bootstrap into, under <quest>/.fi/.
 BOOT_DIRNAME = "plotstyle"
 
+# The size (pt) the house style first set its text at, and the factor it is
+# enlarged by now. A figure is shown at a fraction of the width it was drawn
+# at: the experiments draw 8-13 in wide (the house canvas is 7 in), a slide's
+# side pane is 5.6 in, so ticks that were 10 pt came out at 2.9-6.9 pt (median
+# 4.6) on the slides of six stored quests, and 3.3-7.3 pt in their papers.
+# Larger text in the same canvas fixes both without touching the canvas or the
+# dpi. Measured on those quests at 1.5x: the papers keep their page counts, the
+# recorder's layout check stays silent, and clipping only starts at about 1.8x
+# (a y label). An explicit ``fontsize=`` in a script (a legend's) is not scaled.
+FONT_SCALE = 1.5
+_TEXT_PT = {
+    "font.size": 11.5,
+    "axes.titlesize": 13.5,
+    "axes.labelsize": 11.5,
+    "xtick.labelsize": 10.0,
+    "ytick.labelsize": 10.0,
+    "legend.fontsize": 10.0,
+}
+# The tick label size of a figure drawn in the house style, in pt. The slide
+# check falls back to it for a figure whose record holds no tick size.
+HOUSE_TICK_PT = round(_TEXT_PT["xtick.labelsize"] * FONT_SCALE, 2)
+
+
+def _text_pt(key: str) -> float:
+    return round(_TEXT_PT[key] * FONT_SCALE, 2)
+
 
 def figure_facecolor(paper_style: str) -> str:
     """Backdrop for figures, keyed to the paper they'll be embedded in."""
@@ -67,16 +93,16 @@ def fi_rcparams(paper_style: str) -> dict[str, object]:
         "font.sans-serif": [
             "Segoe UI", "Inter", "Helvetica Neue", "Arial", "DejaVu Sans",
         ],
-        "font.size": 11.5,
-        "axes.titlesize": 13.5,
+        "font.size": _text_pt("font.size"),
+        "axes.titlesize": _text_pt("axes.titlesize"),
         "axes.titleweight": "semibold",
         "axes.titlelocation": "left",
         "axes.titlepad": 11,
-        "axes.labelsize": 11.5,
+        "axes.labelsize": _text_pt("axes.labelsize"),
         "axes.labelpad": 6,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 10,
+        "xtick.labelsize": _text_pt("xtick.labelsize"),
+        "ytick.labelsize": _text_pt("ytick.labelsize"),
+        "legend.fontsize": _text_pt("legend.fontsize"),
         # ink
         "text.color": INK,
         "axes.titlecolor": INK,
@@ -185,7 +211,9 @@ RECORDS_DIRNAME = "figure_records"
 # over its data (a real quest's legend sat on the line it named). Both are
 # measured on the canvas after the figure is saved, since only the drawn
 # positions can say so; a record without "layout" was not measured, and one
-# with an empty list was measured and is clean.
+# with an empty list was measured and is clean. Its "tick_pt" is the smallest
+# tick label size in points (null: no tick labels), which the slide check
+# multiplies by how much smaller a slide draws the figure than it was drawn.
 # Beside it, <stem>.seed<k>.json keeps the run's lines themselves (points and
 # style, per panel, and whether the panel holds anything but lines and error
 # bars), which the engine uses to redraw a figure as the mean over the seeds.
@@ -447,6 +475,18 @@ try:
                 "lines": lines,
             }
 
+        def _fi_tick_pt(fig):
+            # The smallest size (pt) of a tick label the saved figure draws, or None
+            # when it draws none. Read from the labels themselves, so a script's own
+            # tick_params(labelsize=...) counts, not only the house style's size.
+            sizes = []
+            for ax in fig.get_axes():
+                for axis in (ax.xaxis, ax.yaxis):
+                    for label in axis.get_ticklabels():
+                        if label.get_visible() and label.get_text().strip():
+                            sizes.append(float(label.get_fontsize()))
+            return min(sizes) if sizes else None
+
         def _fi_plot_data(fig, name):
             suptitle = getattr(fig, "_suptitle", None)
             return {
@@ -581,6 +621,12 @@ try:
             try:
                 name = _fi_os.path.basename(_fi_os.fspath(fname))
                 record = {"file": name, "axes": [_fi_axes(ax) for ax in self.get_axes()]}
+                # A failure here leaves the key out: a record without "tick_pt" was
+                # not measured, one with null draws no tick labels.
+                try:
+                    record["tick_pt"] = _fi_tick_pt(self)
+                except Exception:
+                    pass
                 # Measuring draws the figure once more, so a figure that was slow to
                 # save is not measured.
                 layout = _fi_layout(self) if saved_in < 10 else None

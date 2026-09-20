@@ -30,7 +30,9 @@ model to emit):
 * ``# H1`` / ``## H2`` / ``### H3``  -- thesis / slide title / eyebrow
 * ``- `` bullets (one nesting level), ``**bold**``, ``*italic*``, ``_italic_``
 * ``![bg right:40% fit](figures/x)`` -- figure right, text left
-* ``![w:900](...)`` / ``![h:420](...)`` / bare ``![](...)`` -- figure slide
+* ``![w:900](...)`` / ``![h:420](...)`` / bare ``![](...)`` -- figure slide;
+  with a title and a lead line and no bullets it is drawn as wide as the slide
+  allows (the deck prompt asks for every figure on a slide of its own)
 * ``> blockquote``                   -- pull quote
 * fenced code blocks
 * ``| a | b |`` tables with a ``|---|---|`` delimiter row (``:---:`` / ``---:``
@@ -446,6 +448,13 @@ def _body_scale(s: "Slide", width_in: float, avail_h: float) -> float:
 # A figure under a slide's text keeps at least this much height; the text
 # shrinks before the figure does. The gap separates the two.
 _FIG_MIN_IN, _FIG_GAP_IN = 2.2, 0.2
+# A figure slide (a title, a lead line and the figure, no bullets, table, quote
+# or code) gives its figure the room out to these margins instead of the text's
+# 0.9 in and 0.85 in: a figure is drawn at its box's width, and its tick labels
+# shrink with it. The footer starts 0.52 in above the slide's bottom edge. The
+# side margin keeps the box under 90% of the slide's width, past which the
+# measurements of a rendered slide take a picture for a full-bleed decoration.
+_FIG_SLIDE_MARGIN_IN, _FIG_SLIDE_BOTTOM_IN = 0.75, 0.6
 
 
 def _textbox(slide, x, y, w, h):
@@ -766,10 +775,11 @@ def _render_content(slide, s: Slide, page: int, figures_dir: Path | None) -> Non
         # 1.6 in put the figure over the third bullet of a slide with a lead
         # line and three bullets.
         top = body_top + body_h + _FIG_GAP_IN if body_h else body_top
-        _fit_picture(
-            slide, block_img, MARGIN_IN, top, text_w,
-            max(1.5, SLIDE_H_IN - top - 0.85),
-        )
+        if s.bullets or s.tables or s.quote or s.code:
+            left, width, bottom = MARGIN_IN, text_w, 0.85
+        else:
+            left, width, bottom = _FIG_SLIDE_MARGIN_IN, SLIDE_W_IN - 2 * _FIG_SLIDE_MARGIN_IN, _FIG_SLIDE_BOTTOM_IN
+        _fit_picture(slide, block_img, left, top, width, max(1.5, SLIDE_H_IN - top - bottom))
 
     _footer(slide, page, dark=False)
 

@@ -9255,10 +9255,15 @@ def _latex_esc(s: str) -> str:
 # The deck ends on one slide of sources: the ones the paper cites most, as many
 # as fit, and a pointer to the paper for the rest. The validation quest's
 # nine-slide talk ended on three References and three Further reading slides
-# that no slide cited. A slide holds about this much list text; each entry
-# costs its wrapped lines plus half a line of spacing.
-_SOURCE_SLIDE_CHARS_PER_LINE = 95
-_SOURCE_SLIDE_LINES = 12
+# that no slide cited. The list is set at 0.96em (18 pt) in two columns
+# (templates/slides/fi.css): a column holds about 35 characters of monospace
+# text a line, and the slide about 27 lines across both columns, so change one
+# with the other. Each entry costs its wrapped lines plus half a line of
+# spacing. Measured with the real Marp theme, the four sources of a stored quest
+# (26 lines) end at the slide's bottom padding edge, and a set of 30 lines or
+# more ran past it; the deck lists as many as the budget holds.
+_SOURCE_SLIDE_CHARS_PER_LINE = 35
+_SOURCE_SLIDE_LINES = 27
 _SOURCE_SLIDE_MAX = 6
 # A citation in a paper's text: "[3]", "[1, 4]", "[2-5]", "[W1]" or "[2, W1]".
 _CITATION_PART = r"(?:W\d+|\d+(?:\s*[–-]\s*\d+)?)"

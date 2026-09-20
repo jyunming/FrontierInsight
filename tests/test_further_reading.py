@@ -290,6 +290,28 @@ def test_the_source_slide_lists_the_most_cited_references_on_one_slide() -> None
     assert deck.rstrip().endswith(f"_({12 - len(numbers)} more sources in the paper)_")
 
 
+def test_the_source_slide_budget_is_the_size_of_the_list_it_is_set_at() -> None:
+    """At 0.96em in two columns the list holds about 35 characters a line and 27 lines: six
+    references of about 110 characters cost 4.5 lines each and all fit, while a stored quest's
+    six (150 to 270 characters, see test_slide_figure_fit) fit four."""
+    from core import engine
+
+    assert (engine._SOURCE_SLIDE_CHARS_PER_LINE, engine._SOURCE_SLIDE_LINES, engine._SOURCE_SLIDE_MAX) == (35, 27, 6)
+    shorter = [
+        {"n": k, "title": f"A study of extinction thresholds number {k}", "authors": ["A. Author", "B. Author"],
+         "year": 2000 + k, "venue": "Journal of Dynamics", "doi": f"10.1000/j.{k}"}
+        for k in range(1, 7)
+    ]
+    assert _entries(render_references_marp_slide(shorter, paper_md="Cites [1] [2] [3] [4] [5] [6].")) == [1, 2, 3, 4, 5, 6]
+    longer = [
+        {"n": k, "title": "A long study title about damped oscillators and symplectic integration " * 2,
+         "authors": ["A. Author", "B. Author"], "year": 2000 + k, "venue": "Journal of Computational Physics"}
+        for k in range(1, 7)
+    ]
+    # About 210 characters each: 7.5 lines apiece, three of them.
+    assert len(_entries(render_references_marp_slide(longer))) == 3
+
+
 def test_a_short_source_list_is_listed_whole() -> None:
     short = [{"n": k, "title": f"Study {k}", "authors": ["A. Author"], "year": 2000 + k} for k in range(1, 9)]
     assert _entries(render_references_marp_slide(short[:3])) == [1, 2, 3]
@@ -305,6 +327,10 @@ def test_the_deck_theme_styles_the_source_slide() -> None:
     assert 'section:has(h2[id^="further-reading"]) ul' in css
     # The "(N more sources in the paper)" line under the list.
     assert 'section:has(h2[id^="references"]) :is(ul, ol) + p' in css
+    # 0.96em is 18 pt on the slide; the list, and the line under it, are set at that size and
+    # the engine's budget (_SOURCE_SLIDE_*) counts lines at it.
+    section = css[css.index("References slide"):]
+    assert section.count("font-size: 0.96em;") == 2 and "0.6em" not in section
 
 
 @pytest.mark.parametrize("deck,further_slides", [

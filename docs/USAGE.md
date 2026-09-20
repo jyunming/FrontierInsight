@@ -475,6 +475,18 @@ sees; PowerPoint shows them as native equations.
 - **What runs:** the PDF is measured (font sizes, overflow, columns, and a
   paper page left half empty before the paper ends) and screenshotted into
   the report folder. No model is asked by default.
+- **Figures on slides:** a figure's tick labels must be at least 8 pt on its
+  slide. A slide shows a figure at a fraction of the width it was drawn at, so
+  the check takes the tick size the figure was drawn at (from the figure's
+  record in `.fi/figure_records/`, the house style's size for an older
+  record) times that fraction. A figure that shares its slide with text and
+  comes out under 8 pt is a finding the slides are redone for: the model is told to
+  give the figure a slide of its own, with no bullets, and to put its
+  discussion on the next slide. A figure that already has its slide and is still
+  under 8 pt (too many panels for one slide) is reported, not redone. Figures
+  without a record (fetched web figures, and every figure under
+  `execution.sandbox: docker`) are not measured. The redo is the usual one, at
+  most `visual_check_max_redos` times.
 - **AI check (`visual_check_ai: true`):** the screenshots, the measurements
   and a fixed checklist also go to your configured provider in one call. The
   checklist asks only what a script cannot see, such as raw LaTeX showing as

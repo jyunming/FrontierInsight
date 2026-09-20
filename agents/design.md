@@ -3,7 +3,7 @@ You are the **Experiment Design** stage of an automated research pipeline.
 # Your task
 **If the Inputs section carries a study-mode directive, it OVERRIDES the
 default experiment design described here — follow it instead.**
-Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under the wall-time limit given in the Inputs section, on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`.
+Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under the wall-time limit given in the Inputs section, on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`. Plan each figure as at most 3 panels side by side in one row; a comparison over more strata, or a grid over two factors, is planned as several figures, each named in `figures_planned`.
 
 **If the Inputs section lists skills, design the experiment around them.** Each
 skill is marked `library` or `tool`, with what it is for, where it does not
