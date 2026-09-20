@@ -429,7 +429,11 @@ def test_a_draft_over_the_limit_is_sent_back_without_using_an_iteration(
     calls = _measured(monkeypatch, 5)
     # The iterations are already spent: the shortening still happens.
     patch = _review(eng, tmp_path, iteration=2, page_limit_rewrites=0)
-    assert calls == [tmp_path / "paper" / "paper.md"]
+    # The paper lists a Further reading entry, so it is tried once without it;
+    # still 5 pages, the body is what is over and the paper stays as written.
+    assert calls == [tmp_path / "paper" / "paper.md", tmp_path / ".fi" / "page_check_trial.md"]
+    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == PAPER
+    assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
     hits = patch["review"]["must_flag_hits"]
     assert hits == [_page_limit_hit(5, 4, 250)]
     assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4, "rewrites": 0, "words_to_cut": 250}

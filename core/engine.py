@@ -7088,15 +7088,85 @@ class Engine:
             )
         return None
 
+    async def _drop_further_reading_to_fit(
+        self, state: QuestState, paper_path: Path, limit: int,
+    ) -> tuple[dict[str, Any], list[str], int] | None:
+        """Bring a draft that is over the page limit within it by dropping
+        entries from the end of its Further reading, when that alone does it.
+
+        FI writes that list itself and sets it after the body, so on a paper
+        cut to the limit it is what spills onto one page more: a real quest
+        (limit 4) ended on 5 pages, page 5 holding two entries of it, and the
+        whole-paper rewrites that followed changed a correct citation and added
+        unsupported ones. The body is not touched here and no model is called.
+
+        First the draft is rendered with as many entries removed as may go (an
+        entry the text cites is never one of them, since the citation would then
+        name nothing); if it is still over, the body is what is too long and
+        nothing is changed. Otherwise one more entry is put back at a time,
+        rendering each time, and the first draft that fits is written over
+        ``paper_path``. That is one render per entry at most, each the render
+        the page check makes. Returns the measurement of the draft written, the
+        labels dropped and how many entries there were, or ``None`` when
+        nothing was dropped."""
+        try:
+            text = paper_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        block = _further_reading_block(text)
+        if block is None:
+            return None
+        cited = _web_labels_cited(text)
+        droppable = 0
+        for label in reversed(block.labels):
+            if label in cited:
+                break
+            droppable += 1
+        if not droppable:
+            return None
+        n_entries = len(block.labels)
+        trial = self.fi_dir / "page_check_trial.md"
+        self.fi_dir.mkdir(parents=True, exist_ok=True)
+
+        async def render(keep: int) -> dict[str, Any] | None:
+            trial.write_text(_trim_further_reading(text, keep), encoding="utf-8")
+            return await self._measure_draft_pages(trial, state)
+
+        try:
+            fewest = n_entries - droppable
+            found = await render(fewest)
+            if found is None or int(found["pages"]) > limit:
+                self._log.info(
+                    "[page_limit] the draft is still over the limit of %d with its Further reading "
+                    "%s, so the body is what is too long; the list is left as written",
+                    limit, "removed" if not fewest else f"cut to its first {fewest} entries",
+                )
+                return None
+            keep = fewest
+            for more in range(n_entries - 1, fewest, -1):
+                measured = await render(more)
+                if measured is None:
+                    return None
+                if int(measured["pages"]) <= limit:
+                    keep, found = more, measured
+                    break
+        finally:
+            trial.unlink(missing_ok=True)
+        paper_path.write_text(_trim_further_reading(text, keep), encoding="utf-8")
+        return found, block.labels[keep:], n_entries
+
     async def _page_limit_review(
         self, state: QuestState, paper_path: str | Path | None,
     ) -> tuple[list[str], dict[str, Any] | None]:
         """The page-limit part of the review: the forced hit (a list of at most
         one) and the record for ``review["page_limit"]``. Without a page limit
         nothing is rendered and both are empty, as they are when the draft
-        cannot be measured. A draft over the limit is forced while fewer than
-        ``_PAGE_LIMIT_REWRITES`` shortening rewrites have been made; after
-        that the overrun is only recorded."""
+        cannot be measured. A draft over the limit only because of its Further
+        reading is not sent back: the list's last entries are dropped from
+        ``paper_path`` until it fits (:meth:`_drop_further_reading_to_fit`), and
+        the record names them. Any other draft over the limit is forced while
+        fewer than ``_PAGE_LIMIT_REWRITES`` shortening rewrites have been made;
+        after that the overrun is only recorded."""
         limit = resolve_page_limit(self.config)
         if limit is None or not paper_path or not Path(paper_path).is_file():
             return [], None
@@ -7106,6 +7176,21 @@ class Engine:
         pages = int(measured["pages"])
         done = int(state.get("page_limit_rewrites") or 0)
         record: dict[str, Any] = {"pages": pages, "limit": limit, "rewrites": done}
+        if pages > limit:
+            # The engine's own Further reading may be all that is over. Dropping
+            # its last entries costs no model call and no rewrite of the body.
+            fitted = await self._drop_further_reading_to_fit(state, Path(paper_path), limit)
+            if fitted is not None:
+                before, (measured, dropped, n_entries) = pages, fitted
+                pages = int(measured["pages"])
+                record["pages"] = pages
+                record["further_reading_dropped"] = dropped
+                self._log.warning(
+                    "[page_limit] the draft renders to %d pages, over the limit of %d, and only its "
+                    "Further reading was over: dropped %d of its %d entries from the end (%s); it now "
+                    "renders to %d pages",
+                    before, limit, len(dropped), n_entries, ", ".join(f"[{w}]" for w in dropped), pages,
+                )
         if pages <= limit:
             self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
             return [], record
@@ -7135,17 +7220,19 @@ class Engine:
         ``provider.node_models["review_panel.<name>"]``.
         """
         self._log.info("[review] judging paper")
-        paper_md = ""
         paper_path = state.get("paper_md")
+        # With a page limit, this draft is rendered the way paper.pdf will be
+        # and its pages counted, for both review paths below. Without one,
+        # nothing is rendered.
+        page_hits, page_record = await self._page_limit_review(state, paper_path)
+        # Read after that: it may have dropped Further reading entries from the
+        # file, and the review reads the paper as it now is.
+        paper_md = ""
         if paper_path:
             try:
                 paper_md = Path(paper_path).read_text(encoding="utf-8")
             except OSError:
                 paper_md = ""
-        # With a page limit, this draft is rendered the way paper.pdf will be
-        # and its pages counted, for both review paths below. Without one,
-        # nothing is rendered.
-        page_hits, page_record = await self._page_limit_review(state, paper_path)
         base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
@@ -9703,6 +9790,89 @@ def _strip_source_lists(markdown: str) -> str:
         head, tail = markdown[:m.start()].rstrip(), markdown[end:]
         markdown = f"{head}\n\n{tail}" if tail else f"{head}\n"
     return markdown
+
+
+# The heading line of the Further reading the engine writes, and one of its entries
+# ("- [W3] Title. https://…").
+_FURTHER_HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]*further[ \t]+reading[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_FURTHER_ENTRY_RE = re.compile(r"^- \[(W\d+)\] ")
+
+
+@dataclass(frozen=True)
+class _FurtherReadingBlock:
+    """The paper's ``## Further reading`` section, as offsets into the text."""
+
+    start: int  # where the heading begins
+    body_start: int  # the end of the heading line
+    end: int  # where the section ends
+    lines: list[str]  # the section's body, split at line ends
+    entries: list[int]  # the indices in ``lines`` of its entries, in order
+    labels: list[str]  # the labels of those entries: "W1", "W2"...
+
+
+def _further_reading_block(markdown: str) -> _FurtherReadingBlock | None:
+    """The Further reading section of ``markdown`` when it is a list the engine
+    wrote: nothing in it but ``- [W1] …`` lines and blank ones. A section with
+    any other line (a page's prose, a list the writer made) is not the
+    engine's, so it is ``None`` and no code here touches it."""
+    m = _FURTHER_HEADING_LINE_RE.search(markdown)
+    if m is None:
+        return None
+    level = len(m.group(1))
+    end = next(
+        (h.start() for h in _ANY_HEADING_RE.finditer(markdown, m.end()) if len(h.group(1)) <= level),
+        len(markdown),
+    )
+    lines = markdown[m.end():end].split("\n")
+    entries: list[int] = []
+    labels: list[str] = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        entry = _FURTHER_ENTRY_RE.match(line)
+        if entry is None:
+            return None
+        entries.append(i)
+        labels.append(entry.group(1))
+    return _FurtherReadingBlock(m.start(), m.end(), end, lines, entries, labels)
+
+
+def further_reading_listed(markdown: str) -> list[str] | None:
+    """The labels (``"W1"``…) of the web pages the paper's Further reading
+    lists, in order; ``None`` when it has no such section written by the
+    engine. What the ``further_reading`` bib export follows."""
+    block = _further_reading_block(markdown)
+    return None if block is None else block.labels
+
+
+def _trim_further_reading(markdown: str, keep: int) -> str:
+    """``markdown`` with only the first ``keep`` entries of its Further reading:
+    the rest are dropped from the end, one line each. At 0 the section goes,
+    heading and all. Everything outside the section, and every entry kept, is
+    as it was; a paper with no such section, or ``keep`` at or above the
+    number of entries, comes back unchanged."""
+    block = _further_reading_block(markdown)
+    if block is None or keep >= len(block.entries):
+        return markdown
+    if keep <= 0:
+        head, tail = markdown[:block.start].rstrip(), markdown[block.end:]
+        return f"{head}\n\n{tail.lstrip()}" if tail.strip() else f"{head}\n"
+    dropped = set(block.entries[keep:])
+    body = "\n".join(line for i, line in enumerate(block.lines) if i not in dropped)
+    return markdown[:block.body_start] + body + markdown[block.end:]
+
+
+def _web_labels_cited(markdown: str) -> set[str]:
+    """The web-page labels (``"W2"``) the text of the paper cites, outside its
+    source lists, inline code and math."""
+    body = _strip_source_lists(markdown)
+    spans = [(s.start(), s.end()) for s in _NOT_PROSE_RE.finditer(body)]
+    labels: set[str] = set()
+    for m in _CITATION_BRACKET_RE.finditer(body):
+        if body[m.end():m.end() + 1] == "(" or any(s <= m.start() < e for s, e in spans):
+            continue
+        labels.update(label for label in _citation_labels(m.group(1)) if label.startswith("W"))
+    return labels
 
 
 def _number_list(numbers: list[int]) -> str:

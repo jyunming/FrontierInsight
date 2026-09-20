@@ -85,7 +85,10 @@ the must-flag hit `over_page_limit`, with the page count, the limit and about
 how many words to cut, and the paper is written again, shorter. There are at
 most two of these rewrites, and they do not count against
 `engine.max_iterations`; a draft still over after two is recorded in the review
-instead. Without a limit the paper keeps its usual layout and length.
+instead. When the overflow is only FI's own Further reading list, the body is
+not rewritten: the list's last entries are dropped, one at a time, until the
+PDF fits (no model call). Without a limit the paper keeps its usual layout and
+length.
 
 ## One-time setup
 
