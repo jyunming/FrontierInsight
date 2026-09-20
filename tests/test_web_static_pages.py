@@ -702,6 +702,61 @@ def test_cost_endpoint_returns_records(tmp_path: Path) -> None:
     body = res.json()
     assert body["available"] is True
     assert len(body["records"]) == 2
+    # One row priced, one not: the summary the pages read says the total is partial.
+    summary = body["summary"]
+    assert summary["total_cost_usd"] == 0.0008
+    assert summary["total_cost_usd_partial"] is True
+    assert summary["unpriced_requests"] == 1
+
+
+def _write_cost_rows(client: TestClient, quest_id: str, rows: list[dict]) -> None:
+    import json as _json
+    fi_dir = client.app.state.output_root / quest_id / ".fi"  # type: ignore[attr-defined]
+    fi_dir.mkdir(parents=True)
+    (fi_dir / "cost.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in rows) + "\n", encoding="utf-8",
+    )
+
+
+def test_cost_endpoint_summary_is_not_partial_when_every_call_is_priced(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    _write_cost_rows(client, "q-priced", [
+        {"node": "ideate", "model": "gpt-4o", "usage": usage, "cost_usd": 0.001},
+        {"node": "write", "model": "gpt-4o", "usage": usage, "cost_usd": 0.002},
+    ])
+    summary = client.get("/api/quests/q-priced/cost").json()["summary"]
+    assert summary["total_cost_usd"] == pytest.approx(0.003)
+    assert summary["total_cost_usd_partial"] is False
+    assert summary["unpriced_requests"] == 0
+
+
+def test_cost_endpoint_summary_keeps_a_null_total_when_no_call_is_priced(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    _write_cost_rows(client, "q-unpriced", [
+        {"node": "ideate", "model": "gpt-5.6-luna", "usage": usage, "cost_usd": None},
+        # a breadcrumb row is not a call, priced or not
+        {"node": "ideate.ensemble[m1]", "model": "m1", "ensemble": True, "role": "fanout"},
+    ])
+    summary = client.get("/api/quests/q-unpriced/cost").json()["summary"]
+    assert summary["total_cost_usd"] is None
+    assert summary["total_cost_usd_partial"] is False
+    assert summary["unpriced_requests"] == 1
+
+
+def test_cost_endpoint_tolerates_a_row_that_is_not_an_object(tmp_path: Path) -> None:
+    """A stray line that parses as JSON but is not a row must not take the route down."""
+    client = _client(tmp_path)
+    fi_dir = client.app.state.output_root / "q-stray" / ".fi"  # type: ignore[attr-defined]
+    fi_dir.mkdir(parents=True)
+    (fi_dir / "cost.jsonl").write_text(
+        '[1, 2]\n{"node": "ideate", "model": "gpt-4o", "usage": null, "cost_usd": 0.5}\n',
+        encoding="utf-8",
+    )
+    res = client.get("/api/quests/q-stray/cost")
+    assert res.status_code == 200
+    assert res.json()["summary"]["total_cost_usd"] == 0.5
 
 
 def test_cost_endpoint_when_no_file(tmp_path: Path) -> None:
@@ -711,6 +766,26 @@ def test_cost_endpoint_when_no_file(tmp_path: Path) -> None:
     res = client.get("/api/quests/q-nocost/cost")
     assert res.json()["available"] is False
     assert res.json()["records"] == []
+
+
+def test_quest_and_compare_pages_mark_a_total_that_counts_only_the_priced_calls() -> None:
+    """Where a dollar total is shown, a quest that mixes priced and unpriced models
+    says the number is partial and how many calls it leaves out."""
+    static = Path(__file__).resolve().parent.parent / "web" / "static"
+    for name in ("quest.html", "compare.html"):
+        text = (static / name).read_text(encoding="utf-8")
+        # The marker is built from the server's summary, and only when it says partial.
+        assert "summary.total_cost_usd_partial !== true" in text, name
+        assert "summary.unpriced_requests" in text, name
+        assert "(partial: ${n} call${n === 1 ? '' : 's'} unpriced)" in text, name
+        # ...and it follows the dollar figure it qualifies.
+        assert "costPartialNote(" in text, name
+    quest = (static / "quest.html").read_text(encoding="utf-8")
+    assert "renderCostChart(data.records, data.summary)" in quest
+    assert "$${totalCost.toFixed(4)}${costNote}" in quest
+    compare = (static / "compare.html").read_text(encoding="utf-8")
+    assert "costPartialNote(cost.summary)" in compare
+    assert "Cost: $${cost.total.toFixed(4)}${escapeHtml(costNote)}" in compare
 
 
 def test_execute_edit_disabled_by_default(

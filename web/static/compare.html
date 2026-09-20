@@ -109,6 +109,7 @@
       const verdict = data.review?.verdict || data.summary?.verdict || '(no review)';
       const score = data.review?.score ?? '?';
       const cost = await fetchCost(qid);
+      const costNote = costPartialNote(cost.summary);
       const pillColor = verdict === 'accept' || verdict === 'complete' ? 'text-status-success'
                        : verdict === 'revise' ? 'text-status-warning' : 'text-on-surface-variant';
       const icon = verdict === 'accept' || verdict === 'complete' ? 'check_circle'
@@ -116,7 +117,7 @@
       meta.innerHTML = `
         <span class="${pillColor} flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">${icon}</span> ${escapeHtml(verdict)}</span>
         <span>•</span><span>Score: ${escapeHtml(String(score))}</span>
-        <span>•</span><span>Cost: $${cost.toFixed(4)}</span>
+        <span>•</span><span${costNote ? ' title="The dollar figure counts only the calls whose model has a listed price; the others are not in it, so the real cost is higher."' : ''}>Cost: $${cost.total.toFixed(4)}${escapeHtml(costNote)}</span>
       `;
       if (data.paper_preview && window.fi_renderMarkdown) {
         paper.innerHTML = window.fi_renderMarkdown(data.paper_preview);
@@ -129,10 +130,19 @@
   async function fetchCost(qid) {
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(qid)}/cost`);
-      if (!res.ok) return 0;
+      if (!res.ok) return { total: 0, summary: null };
       const data = await res.json();
-      return (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
-    } catch (_) { return 0; }
+      const total = (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
+      return { total, summary: data.summary || null };
+    } catch (_) { return { total: 0, summary: null }; }
+  }
+
+  // A quest that mixes priced and unpriced models has a dollar total that counts
+  // the priced calls only. The server's summary says so; the marker follows the total.
+  function costPartialNote(summary) {
+    if (!summary || summary.total_cost_usd_partial !== true) return '';
+    const n = summary.unpriced_requests || 0;
+    return ` (partial: ${n} call${n === 1 ? '' : 's'} unpriced)`;
   }
 
   function escapeHtml(s) {

@@ -8074,11 +8074,20 @@ class Engine:
               "total_completion_tokens": <int>,
               "total_tokens": <int>,
               "total_cost_usd": <float | null>,
+              "total_cost_usd_partial": <bool>,  # some rows priced, some not
               "estimated_rows": <int>,        # rows from char-based fallback
+              "unpriced_requests": <int>,     # rows whose cost_usd is null
               "by_node":  { <node>: {...same shape...} },
               "by_model": { <model>: {...same shape...} },
               "generated_at": <epoch>,
             }
+
+        ``total_cost_usd`` (and each bucket's ``cost_usd``) sums the rows
+        that carry a price; it is ``null`` only when no row does. A model the
+        price table does not list logs ``cost_usd: null`` with its tokens, so
+        a quest that mixes priced and unpriced models has a total that is a
+        lower bound: ``total_cost_usd_partial`` is ``true`` then, and
+        ``unpriced_requests`` says how many calls the total leaves out.
 
         Best-effort: a missing / unreadable cost.jsonl produces a
         summary with zeros; no exception bubbles out.
@@ -8550,7 +8559,9 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "total_completion_tokens": 0,
         "total_tokens": 0,
         "total_cost_usd": 0.0,
+        "total_cost_usd_partial": False,
         "estimated_rows": 0,
+        "unpriced_requests": 0,
     }
     has_cost_value = False
     by_node: dict[str, dict[str, Any]] = {}
@@ -8564,6 +8575,7 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "total_tokens": 0,
             "cost_usd": 0.0,
             "estimated_rows": 0,
+            "unpriced_requests": 0,
         }
 
     for row in rows:
@@ -8574,15 +8586,18 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         completion_t = int(usage.get("completion_tokens", 0) or 0)
         total_t = int(usage.get("total_tokens", 0) or 0) or (prompt_t + completion_t)
         cost = row.get("cost_usd")
+        is_priced = isinstance(cost, (int, float))
         is_estimated = bool(usage.get("estimated"))
 
         totals["total_requests"] += 1
         totals["total_prompt_tokens"] += prompt_t
         totals["total_completion_tokens"] += completion_t
         totals["total_tokens"] += total_t
-        if isinstance(cost, (int, float)):
+        if is_priced:
             totals["total_cost_usd"] += float(cost)
             has_cost_value = True
+        else:
+            totals["unpriced_requests"] += 1
         if is_estimated:
             totals["estimated_rows"] += 1
 
@@ -8594,8 +8609,10 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             bucket["prompt_tokens"] += prompt_t
             bucket["completion_tokens"] += completion_t
             bucket["total_tokens"] += total_t
-            if isinstance(cost, (int, float)):
+            if is_priced:
                 bucket["cost_usd"] += float(cost)
+            else:
+                bucket["unpriced_requests"] += 1
             if is_estimated:
                 bucket["estimated_rows"] += 1
 
@@ -8605,6 +8622,11 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals["total_cost_usd"] = None  # type: ignore[assignment]
         for bucket in list(by_node.values()) + list(by_model.values()):
             bucket["cost_usd"] = None  # type: ignore[assignment]
+    elif totals["unpriced_requests"]:
+        # Some rows were priced and some were not (a model the price table
+        # does not list). The total above counts the priced rows only, so it
+        # is a lower bound; say so rather than let it pass for the whole cost.
+        totals["total_cost_usd_partial"] = True
 
     return {
         **totals,

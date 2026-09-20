@@ -45,7 +45,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from core.config import Config
-from core.engine import Engine
+from core.engine import Engine, _aggregate_cost_rows
 from core.provider import ProxySupervisor
 from generation._visual_check import report_summary
 
@@ -2547,7 +2547,11 @@ def make_app(
     async def get_quest_cost(quest_id: str) -> JSONResponse:
         """Read <quest_root>/.fi/cost.jsonl rows produced by the
         engine's cost instrumentation. Returns the per-call records;
-        the chart on /quest/<id> aggregates client-side."""
+        the chart on /quest/<id> aggregates client-side. ``summary`` is the
+        same roll-up ``cost.summary.json`` holds, computed from the rows as
+        they stand (a running quest has no summary file yet), so the pages
+        can tell when a total counts only the priced calls
+        (``total_cost_usd_partial`` / ``unpriced_requests``)."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         cost_path = quest_root / ".fi" / "cost.jsonl"
         if not cost_path.is_file():
@@ -2564,7 +2568,13 @@ def make_app(
                     continue
         except OSError:
             pass
-        return JSONResponse({"records": records, "available": True})
+        return JSONResponse({
+            "records": records,
+            "available": True,
+            "summary": _aggregate_cost_rows(
+                [r for r in records if isinstance(r, dict)],
+            ),
+        })
 
     @app.get("/api/quests/{quest_id}/figure/{name}")
     async def get_figure(quest_id: str, name: str) -> FileResponse:
