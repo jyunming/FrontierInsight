@@ -47,7 +47,9 @@ those findings name, so a claim is never called unsupported because the
 evidence that proves it was cut short. Each
 figure keeps a record of what it draws, and a caption that describes a line the
 figure draws flat or not at all goes back to the reviewer; the human review in
-the chat lists those captions. A figure the design planned and the run drew
+the chat lists those captions. A figure saved with its legend drawn over its own
+lines, or its title over a panel title, is measured on the finished canvas and
+sent back to the experiment for one redraw before the paper is written. A figure the design planned and the run drew
 that a draft leaves out is put back into the paper as soon as the draft is
 written, captioned from that record and placed beside the paragraph that
 discusses it and never carried past the reference list to print among the
