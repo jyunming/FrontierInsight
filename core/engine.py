@@ -4014,7 +4014,7 @@ class Engine:
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
-                skills_block=self._skills_block(state) or "(no skills selected for this quest)",
+                skills_block=self._outline_skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
             )
@@ -5509,9 +5509,9 @@ class Engine:
             figure_list=_figure_list_for_prompt(state),
             # The literature is analyze's ONLY evidence in survey / no-sim
             # mode (no experiment, and — in survey mode — no dataset either),
-            # so it must reach the analyze prompt to be synthesised. Harmless
-            # extra grounding in the simulation path.
-            literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
+            # so it must reach the analyze prompt whole to be synthesised. With
+            # an experiment's results to interpret it is the titles only.
+            literature_block=self._analyze_literature_block(state, degenerate=degenerate),
         )
         # Multi-model ensemble path: when the YAML carries
         # provider.node_ensemble["analyze"], fan out N parallel calls
@@ -6697,6 +6697,58 @@ class Engine:
             )
         except OSError as exc:
             self._log.debug("[skills] could not record the mounted skills: %s", exc)
+
+    def _outline_skills_block(self, state: QuestState | None = None) -> str:
+        """The selected skills as ``implement_outline`` needs them.
+
+        The outline fixes the structure (the functions, the constants, the result
+        template); the body stage, which writes the calls, still receives each
+        skill's full text from :meth:`_skills_block`. So the outline gets the summary
+        the design node gets. Replayed from three stored quests, outlines written
+        from the summary named the same functions and result template as ones written
+        from the full text (18 of 18 parsed, and the two arms agreed with each other
+        as much as two outlines of one arm did) for 2,066 prompt tokens instead of
+        22,894. The full text stays for a run that submits a background job or carries
+        the user's example files: there the skills say how the job is submitted and how
+        the examples are combined, and that is structure."""
+        from core.example_inputs import render_block
+
+        if self.config.execution.background_jobs or render_block(self.quest_root):
+            return self._skills_block(state)
+        return self._skills_summary_block(state) or self._skills_block(state)
+
+    def _analyze_literature_block(self, state: QuestState, *, degenerate: bool = False) -> str:
+        """The reviewed-literature block of the analyze prompt.
+
+        Whole for a survey or no-simulation study (the literature is what it
+        interprets), for a run on the user's own data (``--analyze``), and for a run
+        with no results or a degenerate one. When an experiment produced results, the
+        analysis interprets those, and the block is the titles of the sources
+        retrieved (about 700 tokens instead of 8,000 to 13,000): the write step
+        receives the literature and each key finding is cross-checked against it
+        afterwards. Replayed from three stored quests (two calls each), analyses
+        written with only the titles matched the ones written with the whole block
+        (5.0 against 5.3 key findings, 2.0 against 2.5 supported claims, every
+        ``next_step`` still ``publish``) at 25,098 prompt tokens instead of 34,702."""
+        sources = _labelled_sources(state.get("literature") or [], self.config.output.audience)
+        if (
+            state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+            or degenerate
+            or not state.get("result_json")
+            or not sources
+        ):
+            return _format_lit_from_state(state, **self._lit_kwargs(state))
+        titles = "\n".join(
+            f"- [{label}] {' '.join(str(meta.get('title') or '').split())} ({meta.get('year') or 'n.d.'})"
+            for label, meta, _item in sources
+        )
+        return (
+            "Titles of the sources retrieved for this study (their text is not shown at this step: the "
+            "write step receives it, and each key finding is cross-checked against the literature "
+            "afterwards):\n" + titles
+        )
 
     def _skills_summary_block(self, state: QuestState | None = None) -> str:
         """The selected skills as ``design`` needs them: what each is for,
