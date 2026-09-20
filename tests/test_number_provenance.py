@@ -174,6 +174,256 @@ def test_a_genuine_negative_number_still_reads_as_negative() -> None:
     assert "-240.55" in _tokens(report)
 
 
+# --- a number is read the way a reader reads it -------------------------------
+#
+# Sixteen numbers the check flagged across the stored papers were the number
+# tokenizer's reading and not the paper's: a typeset minus dropped, a range dash
+# taken for a sign, a comma list taken for one number, an identifier and a year
+# taken for results. Each rule below is tested on the sentence it was found in,
+# and each comes with the control that must STILL be flagged, because a rule that
+# stopped flagging real numbers would be worse than the artifact it removed.
+
+MINUS = chr(0x2212)  # U+2212, spelt as a code point so it is not mistaken for "-"
+EM_DASH = chr(0x2014)
+
+# The values the real sentences below refer to. Every one of the signed values is
+# negative in the run: the paper's sign is right, and a reading that drops it
+# reports a correct number as one the run never produced.
+SIGNED = {
+    "no_opc_pullback_k130": -38.61,
+    "rule_opc_pullback_k130": -44.61,
+    "rule_opc_pullback_k160": -51.61,
+    "effective_gain_pct": -74.5868,
+    "conditional_minus_deterministic": -0.0084,
+    "analytic_monte_carlo_percent_error": {"CAR": 85.522718, "MOR": 68.108593},
+    "gap": {"high": 0.5936, "low": 0.4797},
+    "loss_pct": 20.55,
+    "n_major": [107, 104, 94],
+    "cell": {"n_major": 106, "mean": 0.353, "lo": 0.301, "hi": 0.409},
+}
+
+
+def _signed(text: str, **kw):
+    kw.setdefault("result_json", SIGNED)
+    kw.setdefault("intervals", None)
+    kw.setdefault("aggregate", None)
+    return check(text, **kw)
+
+
+def _read(text: str) -> list[tuple[float, str]]:
+    from core.number_provenance import paper_numbers
+
+    return [(value, token) for value, token, _ctx in paper_numbers(text)]
+
+
+@pytest.mark.parametrize("sentence", [
+    f"The no-OPC condition produced a constant pullback of {MINUS}38.61 nm across "
+    "all k1 values from 0.30 to 0.60.",
+    "The rule-based OPC condition produced even larger pullback than no-OPC, "
+    f"ranging from {MINUS}44.61 nm (k1 = 0.30) to {MINUS}51.61 nm (k1 = 0.60).",
+    f"- NA=0.55 produced larger mean printed CD (reported effective_gain_pct = {MINUS}74.5868).",
+    f"| 1.5 | 1,000 | 106/300 | 0.353 (0.301 to 0.409) | {MINUS}0.0084 |",
+])
+def test_a_typeset_minus_is_one_number_with_its_sign(sentence: str) -> None:
+    """The observed sentences. U+2212 was read as no sign at all, so a U+2212 before 38.61 was
+    checked as 38.61 and reported as a number the run never computed, when the
+    run holds -38.61."""
+    assert _tokens(_signed(sentence)) == []
+
+
+def test_a_typeset_minus_is_read_with_its_sign() -> None:
+    assert _read(f"a pullback of {MINUS}38.61 nm") == [(-38.61, "-38.61")]
+
+
+def test_the_sign_is_compared_in_both_directions() -> None:
+    """Controls. A number printed without the run's sign, and one printed with a
+    sign the run does not have, are both still numbers the run never produced."""
+    assert "38.61" in _tokens(_signed("The pullback was 38.61 nm."))
+    only_positive = {"no_opc_pullback_k130": 38.61}
+    report = _signed(f"The pullback was {MINUS}38.61 nm.", result_json=only_positive)
+    assert _tokens(report) == ["-38.61"]
+
+
+def test_a_number_beside_a_typeset_minus_is_still_checked() -> None:
+    """Control: a fabricated value next to a real one, both signed. Only the
+    fabricated one is reported."""
+    report = _signed(
+        f"The pullback went from {MINUS}38.61 nm to {MINUS}77.77 nm as k1 grew."
+    )
+    assert _tokens(report) == ["-77.77"]
+
+
+@pytest.mark.parametrize("sentence", [
+    "a pullback of (-38.61 nm) across k1",
+    "a pullback = -38.61 nm across k1",
+    "a pullback of -38.61 nm across k1",
+])
+def test_a_hyphen_minus_after_a_bracket_an_equals_or_a_space_is_a_sign(
+    sentence: str,
+) -> None:
+    """The ASCII forms were already read with their sign; pinned so the range
+    rewrite next to them can never take one for a range."""
+    assert _read(sentence) == [(-38.61, "-38.61")]
+    assert _tokens(_signed(sentence)) == []
+
+
+@pytest.mark.parametrize("spacing", [" ", ""])
+def test_a_typeset_minus_after_a_number_is_a_difference_not_a_sign(spacing: str) -> None:
+    """A U+2212 between two numbers is a difference, exactly as a hyphen is, and
+    the minus is folded BEFORE the range dash is looked for so that it is read
+    the same way. Folded after, a U+2212 stuck to the second number would invent
+    -0.4797 (a number the run does not hold) where the hyphen, and the reading
+    before the fold, both gave 0.4797."""
+    text = f"The two levels are 0.5936 {MINUS}{spacing}0.4797 apart."
+    assert _read(text) == [(0.5936, "0.5936"), (0.4797, "0.4797")]
+    assert _tokens(_signed(text)) == []
+
+
+def test_an_em_dash_before_a_number_is_punctuation_not_a_minus() -> None:
+    """Control for what is deliberately NOT folded: the dash in "the loss
+    — 20.55% at N = 100 — is small" is punctuation, and reading it as a minus
+    would report the run's own 20.55 as a value it does not hold."""
+    text = f"The loss {EM_DASH}20.55% at N = 100{EM_DASH} is small."
+    assert _read(text) == [(20.55, "20.55")]
+    assert _tokens(_signed(text)) == []
+
+
+def test_a_design_and_a_paper_that_both_print_a_typeset_minus_agree() -> None:
+    """The design's own text is read the same way. Folded on one side only, a
+    declared -18.5 would be read as +18.5 and the paper's -18.5 reported."""
+    design = {"method": f"Evaluate the slope at x = {MINUS}18.5 nm."}
+    text = f"The slope was taken at {MINUS}18.5 nm."
+    assert _tokens(_signed(text, design=design)) == []
+    assert "-18.5" in _tokens(_signed(text))
+
+
+def test_a_range_after_a_percent_sign_is_not_a_negative_number() -> None:
+    """"sat 68.108593%-85.522718% below" — the dash after the percent sign
+    ended a number, and 85.522718 was read as -85.522718. The run holds
+    +85.522718. The sign of "-0.175906" in the same sentence follows a space
+    and is kept."""
+    text = (
+        "The Monte Carlo estimator produced much flatter exponents, -0.175906 "
+        "for CAR, and sat 68.108593%-85.522718% below the analytic values."
+    )
+    assert [v for v, _ in _read(text)] == [-0.175906, 68.108593, 85.522718]
+    assert "85.522718" not in _tokens(_signed(text))
+    assert "-0.175906" in _tokens(_signed(text)), "a sign after a space stays a sign"
+
+
+def test_the_upper_bound_of_a_percent_range_is_still_checked() -> None:
+    """Control: the range is read as two numbers, and a bound the run does not
+    hold is reported as itself, not as its negation."""
+    report = _signed("The estimator sat 68.108593%-85.999999% below the analytic values.")
+    assert _tokens(report) == ["85.999999"]
+
+
+@pytest.mark.parametrize("held", ["-18.5", "18.5"])
+@pytest.mark.parametrize("sign", ["\\pm ", "\xb1", "\xb1 ", "+/-", "+/- ", "+-"])
+def test_a_number_after_a_plus_minus_sign_is_either_sign(sign: str, held: str) -> None:
+    """"nominal dark-line edges, ±18.5 nm from line center" names two edges.
+    The run holds -18.5 (the design states it) and 18.5 was reported. It must
+    clear whichever sign the run holds: written "+/-18.5" the tokenizer itself
+    reads a minus, which only clears a run that holds the negative."""
+    design = {"method": f"The target-CD edge sits at x = {held} nm."}
+    text = f"NILS was computed at the nominal edges, \\({sign}18.5\\) nm from line center."
+    assert _tokens(_signed(text, design=design)) == []
+
+
+def test_a_plus_minus_number_the_run_does_not_hold_is_still_flagged() -> None:
+    """Control: ±22.75 traces at neither sign. And a plain 18.5 with no
+    plus-minus in front of it still needs the run to hold +18.5."""
+    design = {"method": "The target-CD edge sits at x = -18.5 nm."}
+    assert "22.75" in _tokens(_signed("edges at \xb122.75 nm", design=design))
+    assert "18.5" in _tokens(_signed("the edge sat at 18.5 nm", design=design))
+
+
+def test_a_comma_list_with_a_short_group_is_a_list_not_a_thousands_number() -> None:
+    """"n_major=107,104,94": the tokenizer read the head, 107,104, as 107104
+    and then 94. A separator is followed by exactly three digits, so this is a
+    list. The run holds 107 and 104."""
+    text = "with \\(n_{\\mathrm{major}}=107,104,94\\)."
+    assert [v for v, _ in _read(text)] == [107.0, 104.0, 94.0]
+    assert _tokens(_signed(text)) == []
+
+
+def test_a_list_with_a_fabricated_member_is_still_flagged() -> None:
+    """Control: after the split the members are checked one by one, so the
+    invented 105 is reported as itself and 104 is not."""
+    report = _signed("with \\(n_{major}=105,104,94\\).")
+    assert _tokens(report) == ["105"]
+
+
+def test_a_thousands_separator_is_still_a_thousands_separator() -> None:
+    """1,000 is 1000; 1,000, 2,000 is two numbers; 3, 4, 5 is three. None of
+    the readings the tokenizer already had is touched."""
+    assert _read("with 1,250 realizations") == [(1250.0, "1,250")]
+    assert _read("cells of 1,250, 2,250 runs") == [(1250.0, "1,250"), (2250.0, "2,250")]
+    assert _read("N in {105, 204, 307}") == [(105.0, "105"), (204.0, "204"), (307.0, "307")]
+    assert _read("1,000,000 elements") == []  # one number, of one significant digit
+    assert _read("10,793,366 sales") == [(10793366.0, "10,793,366")]
+
+
+def test_a_run_of_three_digit_groups_is_left_as_one_number() -> None:
+    """Known limit, pinned. "n_major=202,206,189" is a list, but its digits are
+    a well-formed thousands run and nothing in the text says otherwise, so it is
+    still one number, and still flagged when the run does not hold 202206189."""
+    text = "with \\(n_{major}=202,206,189\\)."
+    assert _read(text) == [(202206189.0, "202,206,189")]
+    assert _tokens(_signed(text)) == ["202,206,189"]
+
+
+@pytest.mark.parametrize("gap", [" ", chr(0xA0)])
+def test_an_identifier_after_an_acronym_is_not_a_result(gap: str) -> None:
+    """"emphasised in the SPIE 11609 review" cites a proceedings volume. The
+    gap is a space or a no-break space, which is what a typeset paper has."""
+    text = (
+        "This is consistent with the low-k1 imaging-enhancement pillar emphasised "
+        f"in the SPIE{gap}11609 review [6]."
+    )
+    assert _read(text) == []
+    assert _tokens(_signed(text)) == []
+
+
+@pytest.mark.parametrize("sentence", [
+    "The review reports 11609 runs.",
+    "The SPIE review reports 11609 runs.",
+    "AUC 0.7093 in that cell.",
+    "Set N = 12345 for the sweep.",
+    "XPS 193 eV peaks were used.",
+])
+def test_a_number_that_only_resembles_an_identifier_is_still_checked(
+    sentence: str,
+) -> None:
+    """Controls: no acronym, an acronym before a decimal, one capital and an
+    operator, an acronym before a three-digit integer. Each is still a number
+    the run never produced."""
+    assert _tokens(_signed(sentence)) != [], sentence
+
+
+@pytest.mark.parametrize("apostrophe", ["'", chr(0x2019)])
+def test_a_year_in_a_possessive_attribution_is_not_a_result(apostrophe: str) -> None:
+    """"Ernst Abbe's 1873 description of coherent image formation": 1873 is
+    outside the 1900-2099 year guard. Straight or curly apostrophe."""
+    text = f"Ernst Abbe{apostrophe}s 1873 description of coherent image formation."
+    assert _read(text) == []
+    assert _tokens(_signed(text)) == []
+
+
+@pytest.mark.parametrize("sentence", [
+    "The grid held 1873 samples.",
+    "The model's 1873 samples were drawn once.",
+    "Control (1873) and treated (1902) groups differed.",
+    "Abbe's 18730 samples.",
+    "Sweden's 2431 registrations were counted.",
+])
+def test_a_count_in_the_same_range_is_still_checked(sentence: str) -> None:
+    """Controls: a count is recognised as a count by what stands before it. No
+    name, a lower-case noun, a parenthesised label, a five-digit number, and a
+    possessive name before a number that is not in the years a work is dated."""
+    assert _tokens(_signed(sentence)) != [], sentence
+
+
 # --- numbers that are not measurements ----------------------------------------
 
 def test_a_year_is_not_a_measurement() -> None:
