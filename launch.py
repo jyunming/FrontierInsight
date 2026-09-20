@@ -22,6 +22,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 # Make sibling packages importable when launched as a script.
@@ -30,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.config import Config
 from core.engine import Engine, QuestArtifacts, write_cost_summary
 from core.provider import ProxySupervisor
+from core.skills import ExternalSkillDirs
 from generation.paper import PaperGenerator
 from generation.poster import PosterGenerator
 from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
@@ -37,13 +39,56 @@ from generation.slides import SlideGenerator
 from generation.speech import SpeechGenerator
 
 
+#: The modes that read ``--config`` for the skill folders it names instead of
+#: refusing it (they start no quest, so the YAML is not a quest to run here).
+_SKILL_MODES_READING_CONFIG = frozenset({
+    "skills", "why_skills", "scan_skill", "approve_skill", "revoke_skill",
+})
+
+
+def _check_mode(
+    p: argparse.ArgumentParser, modes: list[argparse.Action], args: argparse.Namespace,
+) -> None:
+    """Exactly one mode (``--config`` alone, a quest, counts as one), and no
+    mode beside ``--config`` other than the skill commands that read it.
+
+    argparse enforced this itself while ``--config`` sat in the mutually
+    exclusive group of modes. It cannot say "exclusive, except these five", so
+    the rule is kept here, with the same errors a person saw before.
+    """
+    chosen = [a for a in modes if getattr(args, a.dest) != a.default]
+    if args.config is None and not chosen:
+        p.error(
+            "one of the arguments --config "
+            + " ".join(a.option_strings[0] for a in modes) + " is required"
+        )
+    if args.config is not None:
+        for a in chosen:
+            if a.dest not in _SKILL_MODES_READING_CONFIG:
+                p.error(f"argument {a.option_strings[0]}: not allowed with argument --config")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="frontier-insight",
         description="End-to-end automated research pipeline.",
     )
-    mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--config", type=Path, help="YAML config for a single quest.")
+    # Exactly one mode is required, and that is checked once the arguments are
+    # parsed (see ``_check_mode``), not by argparse: a required, exclusive group
+    # would forbid ``--config`` beside the skill commands, which read the quest's
+    # YAML for the folders it names.
+    mode = p.add_mutually_exclusive_group()
+    p.add_argument(
+        "--config",
+        type=Path,
+        help="YAML config for a single quest. Beside --skills, --why-skills, "
+             "--scan-skill, --approve-skill or --revoke-skill it starts no "
+             "quest: those commands also read the folders of other agents' "
+             "skills this quest names (engine.skills_dirs, "
+             "engine.skills_scan_known_dirs), so a skill that lives only there "
+             "can be found, reviewed and approved. FI_EXTERNAL_SKILLS_DIRS, "
+             "when set, still outranks them.",
+    )
     mode.add_argument(
         "--fleet",
         type=Path,
@@ -229,7 +274,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="List simulation skills and their promotion status. A skill is "
              "usable only when its own selftest passes AND you have approved "
-             "that exact content; anything else is listed with the reason.",
+             "that exact content; anything else is listed with the reason. "
+             "Add --config <quest.yaml> to include the skill folders that "
+             "quest names in engine.skills_dirs (FI_EXTERNAL_SKILLS_DIRS, "
+             "when set, still outranks them).",
     )
     mode.add_argument(
         "--why-skills",
@@ -238,7 +286,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show which skills would be selected for a topic, and why, "
              "without running a quest. Uses the same catalogue and the same "
              "call the pipeline would, so it answers 'would this topic reach "
-             "my ambit skill?' for the cost of one small request.",
+             "my ambit skill?' for the cost of one small request. Add "
+             "--config <quest.yaml> to include the skill folders that quest "
+             "names in engine.skills_dirs (FI_EXTERNAL_SKILLS_DIRS, when set, "
+             "still outranks them).",
     )
     mode.add_argument(
         "--import-skill",
@@ -299,7 +350,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="Approve a skill for use, after reviewing it. Approval binds to "
              "the skill's current content, so a later edit lapses it and "
-             "requires approving again. Pair with --approve-as.",
+             "requires approving again. Pair with --approve-as. A skill that "
+             "lives only in a folder a quest's YAML names (engine.skills_dirs) "
+             "is found with --config <quest.yaml>; FI_EXTERNAL_SKILLS_DIRS, "
+             "when set, still outranks that.",
     )
     mode.add_argument(
         "--approve-all-skills",
@@ -316,7 +370,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--revoke-skill",
         metavar="NAME",
         default="",
-        help="Withdraw approval for a skill, returning it to proposed.",
+        help="Withdraw approval for a skill, returning it to proposed. Add "
+             "--config <quest.yaml> for a skill that lives only in a folder "
+             "that quest names (engine.skills_dirs).",
     )
     mode.add_argument(
         "--scan-skill",
@@ -326,7 +382,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "instruction-injection patterns and hidden characters in its "
              "prose, network access, exec and environment reads in its code. "
              "Nothing is imported or run. Findings never block a skill — they "
-             "are heuristics, shown so a person reviews the right lines.",
+             "are heuristics, shown so a person reviews the right lines. Add "
+             "--config <quest.yaml> for a skill that lives only in a folder "
+             "that quest names (engine.skills_dirs).",
     )
     # Not modes: these qualify --skills / --scan-skill.
     p.add_argument(
@@ -878,6 +936,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "sidecar isn't wanted.",
     )
     args = p.parse_args(argv)
+    _check_mode(p, mode._group_actions, args)
     # Env-var fallback for the bridge port. The VSCode extension can
     # expose ``FI_VSCODE_BRIDGE_PORT`` to a terminal session it spawns,
     # which lets the user run ``python launch.py --serve`` (or any
@@ -2140,8 +2199,25 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.list_drafts:
             return _list_drafts(args.output_root)
 
+        # ``--config`` beside a skill command is not a quest to run: it names the
+        # folders those commands look in (``_check_mode`` allows nothing else
+        # beside it). Read once, and a config that cannot be read is one line on
+        # stderr -- stdout stays clean for ``--skills --json``.
+        folders: _SkillFolders | None = None
+        if args.config is not None and (
+            args.skills or args.why_skills or args.scan_skill
+            or args.approve_skill or args.revoke_skill
+        ):
+            try:
+                folders = _SkillFolders.load(args.config)
+            except _QuestConfigError as e:
+                print(f"[FI] --config {args.config}: {e}", file=sys.stderr)
+                return 2
+
         if args.skills:
-            return _list_skills(args.json_out, not args.no_run_selftests)
+            return _list_skills(
+                args.json_out, not args.no_run_selftests, folders=folders,
+            )
 
         if args.teach_skill:
             return _teach_skill(
@@ -2151,6 +2227,7 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.why_skills:
             return await _why_skills(
                 args.why_skills, args.skills_provider, args.skills_model,
+                folders=folders,
             )
 
         if args.import_skill:
@@ -2172,13 +2249,14 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.approve_skill:
             return _approve_skill(
                 args.approve_skill, args.approve_as, args.despite_findings,
+                folders=folders,
             )
 
         if args.revoke_skill:
-            return _revoke_skill(args.revoke_skill)
+            return _revoke_skill(args.revoke_skill, folders=folders)
 
         if args.scan_skill:
-            return _scan_skill(args.scan_skill, args.json_out)
+            return _scan_skill(args.scan_skill, args.json_out, folders=folders)
 
         if args.new:
             return await _run_new(
@@ -4041,12 +4119,100 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
     return 0
 
 
-async def _why_skills(topic: str, provider_name: str, model: str) -> int:
+class _QuestConfigError(Exception):
+    """``--config`` named a file that cannot serve as a quest config. ``str()``
+    of it is the one-line reason."""
+
+
+def _config_problem(exc: ValueError) -> str:
+    """One line for a config that failed validation. pydantic's own text runs
+    to several lines; the first problem and how many more follow is what a
+    person needs to fix the file."""
+    errors = getattr(exc, "errors", None)
+    try:
+        found = errors() if callable(errors) else []
+    except Exception:  # noqa: BLE001 -- an odd error object is still just a problem
+        found = []
+    if found:
+        first = found[0]
+        where = ".".join(str(part) for part in first.get("loc", ()))
+        text = f"{where}: {first.get('msg')}" if where else str(first.get("msg"))
+        return text + (f" (and {len(found) - 1} more)" if len(found) > 1 else "")
+    # The unknown-key check writes a sentence of advice after the keys; the keys
+    # and "check for typos" are what a person needs on this one line.
+    return " ".join(str(exc).split()).split(". ", 1)[0].rstrip(".")
+
+
+@dataclass(frozen=True)
+class _SkillFolders:
+    """Where one quest's YAML says to look for the skills other agents installed.
+
+    The skill commands run without a quest, so on their own they see the usual
+    places and ``FI_EXTERNAL_SKILLS_DIRS``. Given ``--config quest.yaml`` they
+    also look where that quest's ``engine.skills_dirs`` /
+    ``engine.skills_scan_known_dirs`` point. It is built the way the Engine builds
+    its own, so a command sees the skills that quest would see. The environment
+    override still outranks it (``core.skills.registry.external_skill_dirs``).
+
+    It changes only where skills are looked for. Approval stays by name and
+    exact content, recorded by the same ledger call as without it.
+    """
+
+    config: Path
+    dirs: ExternalSkillDirs
+
+    @classmethod
+    def load(cls, config: Path) -> "_SkillFolders":
+        import yaml
+
+        try:
+            cfg = Config.from_yaml(config)
+        except OSError as e:
+            raise _QuestConfigError(f"cannot be read: {e.strerror or e}") from e
+        except yaml.YAMLError as e:
+            raise _QuestConfigError(
+                f"is not valid YAML: {' '.join(str(e).split())}") from e
+        except ValueError as e:  # also a config value or key it does not accept
+            raise _QuestConfigError(
+                f"is not a valid quest config: {_config_problem(e)}") from e
+        except Exception as e:  # noqa: BLE001 -- a person's file: say so in one line
+            raise _QuestConfigError(
+                f"could not be loaded: {type(e).__name__}: {' '.join(str(e).split())}"
+            ) from e
+        return cls(
+            config,
+            ExternalSkillDirs.of(
+                cfg.engine.skills_dirs, scan_known=cfg.engine.skills_scan_known_dirs,
+            ),
+        )
+
+    @property
+    def flag(self) -> str:
+        """`` --config <path>``, added to the follow-up commands printed to a
+        person: run without it, they would say the skill is not there."""
+        text = str(self.config)
+        return f' --config "{text}"' if " " in text else f" --config {text}"
+
+
+def _dirs_of(folders: "_SkillFolders | None") -> "ExternalSkillDirs | None":
+    return folders.dirs if folders else None
+
+
+def _flag_of(folders: "_SkillFolders | None") -> str:
+    return folders.flag if folders else ""
+
+
+async def _why_skills(
+    topic: str, provider_name: str, model: str, *, folders: "_SkillFolders | None" = None,
+) -> int:
     """Preview the selection for a topic without running a quest.
 
     Uses the same catalogue and the same prompt the pipeline uses, so what it
     shows is what would happen — a preview built from a different code path
     would be a guess dressed up as an answer.
+
+    ``folders`` is the quest YAML's own skill folders (``--config``); without
+    it, the usual places and ``FI_EXTERNAL_SKILLS_DIRS``.
     """
     import json as _json
 
@@ -4060,8 +4226,9 @@ async def _why_skills(topic: str, provider_name: str, model: str) -> int:
     from core.config import ProviderConfig
 
     provider = ProviderConfig(name=provider_name, model=model or None)
-    names = [s.name for s in discover()]
-    usable, rejected = loadable_skills(names)
+    external_dirs = _dirs_of(folders)
+    names = [s.name for s in discover(external_dirs=external_dirs)]
+    usable, rejected = loadable_skills(names, external_dirs=external_dirs)
     catalogue = build_catalogue(usable)
 
     if not catalogue:
@@ -4099,7 +4266,8 @@ async def _why_skills(topic: str, provider_name: str, model: str) -> int:
 
     sel = parse_selection(text, catalogue)
     print(render_selection_report(sel=sel, catalogue=catalogue,
-                                  near=near_misses(rejected, sel.chosen, catalogue)))
+                                  near=near_misses(rejected, sel.chosen, catalogue),
+                                  approve_flags=_flag_of(folders)))
     return 0
 
 
@@ -4249,8 +4417,13 @@ def _teach_skill(name: str, module_name: str, kind: str = "library") -> int:
     return 0
 
 
-def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
+def _list_skills(
+    as_json: bool = False, run_tests: bool = True, *,
+    folders: "_SkillFolders | None" = None,
+) -> int:
     """Print every discoverable skill and why it is or is not usable.
+
+    ``folders`` adds the skill folders a quest's YAML names (``--config``).
 
     Running each skill's selftest is the point of the listing — a status
     that did not actually execute the check would be a guess. ``run_tests``
@@ -4266,7 +4439,7 @@ def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
 
     from core.skills import discover, evaluate
 
-    skills = discover()
+    skills = discover(external_dirs=_dirs_of(folders))
     if as_json:
         print(_json.dumps({
             "skills": [
@@ -4302,7 +4475,7 @@ def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
         highs = [f for f in st.findings if f.startswith("[high")]
         if highs:
             print(f"      ! {len(highs)} high-severity scan finding(s) — "
-                  f"see --scan-skill {skill.name}")
+                  f"see --scan-skill {skill.name}{_flag_of(folders)}")
         # A generated self-test proves the tooling runs, not that it behaves.
         # Trusted means something weaker for such a skill, and the listing has
         # to say so or the two look identical.
@@ -4311,31 +4484,39 @@ def _list_skills(as_json: bool = False, run_tests: bool = True) -> int:
             print("      ~ self-test is auto-generated "
                   "(proves the tooling runs, not that it behaves)")
     print()
+    flag = _flag_of(folders)
     print("* = usable in a quest. Enable with `engine.skills: [name]` in your "
           "YAML.\nApprove with: python launch.py --approve-skill <name> "
-          "--approve-as <you>\nReview one first: python launch.py "
-          "--scan-skill <name>")
+          f"--approve-as <you>{flag}\nReview one first: python launch.py "
+          f"--scan-skill <name>{flag}")
     return 0
 
 
-def _scan_skill(name: str, as_json: bool = False) -> int:
+def _scan_skill(
+    name: str, as_json: bool = False, *, folders: "_SkillFolders | None" = None,
+) -> int:
     """Show the static review of a skill's contents.
 
     Separate from ``--skills`` because this is the report a person reads
     while deciding, and it is long by design: the value is in the specific
     lines, not in a count.
+
+    ``folders`` adds the skill folders a quest's YAML names (``--config``), so
+    a skill that lives only there can be reviewed before it is approved.
     """
     import json as _json
 
     from core.skills import discover, scan
 
-    skill = next((s for s in discover() if s.name == name), None)
+    skill = next(
+        (s for s in discover(external_dirs=_dirs_of(folders)) if s.name == name), None,
+    )
     if skill is None:
         if as_json:
             print(_json.dumps({"error": f"no skill named {name}"}))
         else:
-            print(f"No skill named {name!r}. Run --skills to see what is "
-                  "available.")
+            print(f"No skill named {name!r}. Run --skills{_flag_of(folders)} "
+                  "to see what is available.")
         return 1
 
     if as_json:
@@ -4595,25 +4776,35 @@ def _approve_all_skills(
     return 0
 
 
-def _approve_skill(name: str, approved_by: str, despite: bool = False) -> int:
+def _approve_skill(
+    name: str, approved_by: str, despite: bool = False, *,
+    folders: "_SkillFolders | None" = None,
+) -> int:
     """Record approval of a skill's current content.
 
     Refuses when the selftest does not pass: approving something that
     provably does not work is the one case where a person's sign-off
     should not be the last word.
+
+    ``folders`` adds the skill folders a quest's YAML names (``--config``), so a
+    skill that lives only there can be found. That is the whole of what it
+    changes: what is shown, what is refused and what is recorded are the same.
     """
     from core.skills import approval, discover, evaluate
     from core.skills.base import Status
 
+    flag = _flag_of(folders)
     who = (approved_by or "").strip()
     if not who:
         print("--approve-skill requires --approve-as <who>: the gate exists "
               "so a person decides, so approvals are attributed.")
         return 2
 
-    skill = next((s for s in discover() if s.name == name), None)
+    skill = next(
+        (s for s in discover(external_dirs=_dirs_of(folders)) if s.name == name), None,
+    )
     if skill is None:
-        print(f"No skill named {name!r}. Run --skills to see what is available.")
+        print(f"No skill named {name!r}. Run --skills{flag} to see what is available.")
         return 1
 
     state = evaluate(skill)
@@ -4642,9 +4833,9 @@ def _approve_skill(name: str, approved_by: str, despite: bool = False) -> int:
             print("Not approved. These are heuristics, not verdicts — a real "
                   "tool may legitimately need what they flag, and approving "
                   "anyway is a normal outcome.")
-            print(f"Read the full report:  python launch.py --scan-skill {name}")
+            print(f"Read the full report:  python launch.py --scan-skill {name}{flag}")
             print(f"Then approve with:     python launch.py --approve-skill "
-                  f"{name} --approve-as {who} --despite-findings")
+                  f"{name} --approve-as {who} --despite-findings{flag}")
             return 1
         print("Approving despite these findings, as asked. Recorded in the "
               "ledger so the decision is attributable later.")
@@ -4684,10 +4875,16 @@ def _approve_skill(name: str, approved_by: str, despite: bool = False) -> int:
     return 0
 
 
-def _revoke_skill(name: str) -> int:
+def _revoke_skill(name: str, *, folders: "_SkillFolders | None" = None) -> int:
+    """Withdraw approval. An external skill's approval is recorded under its
+    namespaced ledger name, which is known only once the skill is found, so a
+    skill that lives only in a quest's folders needs ``folders`` (``--config``)
+    here as much as it did to be approved."""
     from core.skills import approval, discover
 
-    skill = next((s for s in discover() if s.name == name), None)
+    skill = next(
+        (s for s in discover(external_dirs=_dirs_of(folders)) if s.name == name), None,
+    )
     if approval.revoke(skill.ledger_name if skill else name):
         print(f"Revoked approval for {name}; it returns to 'proposed'.")
         return 0
