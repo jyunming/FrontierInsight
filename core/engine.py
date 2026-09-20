@@ -76,6 +76,10 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
 _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
 
+# Under the Docker sandbox, the skills mounted into the experiment's container
+# (names), kept in ``.fi/`` for a ``--watch`` that has no quest state.
+_SKILL_MOUNTS_FILE = "skill_mounts.json"
+
 # Default sampling temperature for generative nodes (ideate, write, analyze…).
 _DEFAULT_CHAT_TEMPERATURE = 0.2
 # Judgment / gate / classifier nodes: their job is to reach a *verdict* or a
@@ -4158,6 +4162,11 @@ class Engine:
         return new_code, sorted({*deps, *new_deps})
 
     async def _node_execute(self, state: QuestState) -> QuestState:
+        # Docker sandbox: the selected, approved external skills are mounted
+        # read-only in every container this node starts (a thread: resolving
+        # the skills can run their self-tests).
+        if self.config.execution.sandbox == "docker":
+            await asyncio.to_thread(self._mount_selected_skills, state)
         deps = state.get("deps") or []
         if deps:
             self._log.info("[execute] pip install %s", deps)
@@ -6281,18 +6290,39 @@ class Engine:
             "unused — say why in `method`."
         )
         parts = [" ".join(lead)]
+        # Under the Docker sandbox the experiment cannot see a host path. Each
+        # approved external skill is mounted read-only in the container, and
+        # every path the model is given for it is the container's.
+        plan = _skill_mount_plan(self.config, usable)
         for st in usable:
             skill = st.skill
             self._log.info(
                 "[skills] loaded %s (%s, %s)",
                 skill.name, skill.kind.value, skill.maturity.value,
             )
+            mount = plan.mounts.get(skill.name) if plan is not None else None
+            not_mounted = plan.refused.get(skill.name) if plan is not None else None
             parts.append(f"\n## Skill: {skill.name} ({skill.kind.value})\n")
             why = reasons.get(skill.name)
             if why:
                 parts.append(f"*Selected because:* {why}\n")
-            parts.append(skill.instructions().strip())
+            if mount is not None:
+                parts.append(
+                    f"*In the Docker sandbox this skill's folder is `{mount.container}`, "
+                    f"mounted read-only: read or run what it ships from there, and "
+                    f"write only under the working directory.*\n"
+                )
+            elif not_mounted:
+                parts.append(
+                    f"*This skill's folder is NOT available in the Docker sandbox "
+                    f"({not_mounted}), so the experiment cannot read or run the "
+                    f"files it ships. Use what is written here only.*\n"
+                )
+            instructions = skill.instructions().strip()
             surface = skill.api_surface().strip()
+            if mount is not None:
+                instructions, surface = mount.translate(instructions), mount.translate(surface)
+            parts.append(instructions)
             if surface:
                 parts.append(f"\n### {skill.name} — API surface\n")
                 parts.append(surface)
@@ -6306,16 +6336,60 @@ class Engine:
             refs = skill.reference_files()
             if bundled or refs:
                 parts.append(f"\n### {skill.name} — bundled files\n")
-                parts.append(
-                    f"These ship with the skill, at paths relative to "
-                    f"`{skill.path}`. Read or run them as needed; their "
-                    f"contents are deliberately not reproduced here."
-                )
+                if not_mounted:
+                    parts.append(
+                        "These ship with the skill but are not reachable from the "
+                        "sandbox, so do not write code that opens or runs them:"
+                    )
+                else:
+                    base = mount.container if mount is not None else skill.path
+                    parts.append(
+                        f"These ship with the skill, at paths relative to "
+                        f"`{base}`. Read or run them as needed; their "
+                        f"contents are deliberately not reproduced here."
+                    )
                 for rel in bundled:
                     parts.append(f"- `{rel}` (executable)")
                 for rel in refs:
                     parts.append(f"- `{rel}` (reference)")
         return "\n".join(parts).strip()
+
+    def _mount_selected_skills(self, state: Any, *, record: bool = True) -> None:
+        """Docker sandbox only: mount the folders of the approved external skills
+        this quest selected for its experiment, read-only, into every container
+        from here on. Only those: an approved skill that was not selected, an
+        unapproved one, and FI's own skills are not mounted, and a folder that is
+        a link or leads outside its skills folder is refused with the reason in
+        the log. The names are written to ``.fi/skill_mounts.json`` so a
+        ``--watch`` (which has no quest state) mounts the same ones."""
+        setter = getattr(self.executor, "set_skill_mounts", None)
+        if self.config.execution.sandbox != "docker" or setter is None:
+            return
+        usable, _ = _resolve_selected_skills(
+            state, self._log, use="experiment", external_dirs=self._skill_dirs,
+        )
+        plan = _skill_mount_plan(self.config, usable)
+        setter(list(plan.mounts.values()))
+        found_at = {st.skill.name: st.skill.path for st in usable}
+        for name, why in plan.refused.items():
+            self._log.warning(
+                "[skills] %s is NOT mounted into the Docker sandbox: %s (%s)",
+                name, why, found_at.get(name),
+            )
+        for m in plan.mounts.values():
+            self._log.info(
+                "[skills] mounted read-only in the Docker sandbox: %s -> %s (%s)",
+                m.name, m.container, m.host,
+            )
+        if not record:
+            return
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _SKILL_MOUNTS_FILE).write_text(
+                json.dumps({"skills": list(plan.mounts)}), encoding="utf-8",
+            )
+        except OSError as exc:
+            self._log.debug("[skills] could not record the mounted skills: %s", exc)
 
     def _skills_summary_block(self, state: QuestState | None = None) -> str:
         """The selected skills as ``design`` needs them: what each is for,
@@ -7883,6 +7957,19 @@ class Engine:
         from core.example_inputs import ENV_VAR, examples_dir, list_inputs
 
         await self.executor.setup(self.quest_root)
+        if self.config.execution.sandbox == "docker":
+            # The same skills the quest mounted when it ran the experiment: a
+            # script that reads /fi-skills/... needs them on every check.
+            try:
+                recorded = json.loads(
+                    (self.fi_dir / _SKILL_MOUNTS_FILE).read_text(encoding="utf-8")
+                ).get("skills") or []
+            except (OSError, ValueError, AttributeError):
+                recorded = []
+            await asyncio.to_thread(
+                self._mount_selected_skills,
+                {"selected_skills": [str(n) for n in recorded]}, record=False,
+            )
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
         env = (
@@ -11218,6 +11305,17 @@ def _compact_result_json_block(
         if len(out) <= budget_chars:
             return out, len(full)
     return out[:budget_chars], len(full)
+
+
+def _skill_mount_plan(config: Any, usable: list[Any]) -> "Any | None":
+    """Where each approved external skill among ``usable`` is mounted in the
+    Docker sandbox (``core.skills.mounts``), or None when the experiment does
+    not run in Docker: every other sandbox sees the host's own paths."""
+    if config.execution.sandbox != "docker":
+        return None
+    from core.skills.mounts import plan_mounts
+
+    return plan_mounts(usable)
 
 
 def _discover_skill_names(external_dirs: Any = None) -> list:

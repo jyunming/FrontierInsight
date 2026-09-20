@@ -23,7 +23,10 @@ import time
 import venv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import TYPE_CHECKING, Iterable, Protocol
+
+if TYPE_CHECKING:
+    from core.skills.mounts import SkillMount
 
 _log = logging.getLogger("frontier_insight.execution")
 
@@ -530,11 +533,50 @@ class DockerExecutor:
     is available, `install` runs `pip install ...` inside the container,
     `execute` runs the given command. `python_path` returns the
     in-container interpreter path (caller treats it as opaque).
+
+    The approved external skills a quest selected are the one other thing
+    mounted, read-only, each at ``/fi-skills/<name>`` (``set_skill_mounts``).
     """
 
     def __init__(self, *, image: str = "python:3.11-slim") -> None:
         self.image = image
         self._client: object | None = None  # lazy docker client
+        self._skill_mounts: tuple["SkillMount", ...] = ()
+
+    @property
+    def skill_mounts(self) -> tuple["SkillMount", ...]:
+        """The approved external skill folders every container from now on
+        gets, read-only."""
+        return self._skill_mounts
+
+    def set_skill_mounts(self, mounts: Iterable["SkillMount"]) -> None:
+        """Replace the skill folders mounted read-only next to the quest. The
+        engine sets these from the skills a quest selected and a person
+        approved (``core.skills.mounts.plan_mounts``); nothing else is ever
+        mounted, and an empty list (the default) mounts nothing."""
+        self._skill_mounts = tuple(mounts)
+
+    def _volumes(self, host_root: Path) -> dict[str, dict[str, str]]:
+        """The quest read-write at /work, plus each planned skill folder
+        read-only. A skill folder that is no longer what was planned (replaced
+        by a link since) is left out and said so: the container never gets a
+        path the plan did not check."""
+        volumes: dict[str, dict[str, str]] = {
+            str(host_root): {"bind": "/work", "mode": "rw"},
+        }
+        for m in self._skill_mounts:
+            try:
+                host = m.bind_host if m.still_safe() else None
+            except ValueError:
+                host = None
+            if host is None:
+                _log.warning(
+                    "[docker] not mounting skill %r: %s is no longer the folder that "
+                    "was approved and planned", m.name, m.declared,
+                )
+                continue
+            volumes[host] = m.volume
+        return volumes
 
     def _docker(self) -> object:
         if self._client is not None:
@@ -625,7 +667,7 @@ class DockerExecutor:
             self.image,
             command=translated,
             working_dir="/work",
-            volumes={str(host_root): {"bind": "/work", "mode": "rw"}},
+            volumes=self._volumes(host_root),
             environment=env,
             network_disabled=True,  # no network from the experiment by default
             detach=True,

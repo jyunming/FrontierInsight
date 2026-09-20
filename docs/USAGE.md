@@ -517,6 +517,7 @@ When you set `sandbox: docker`, FI runs the generated experiment inside a Docker
 - **Image**: `python:3.11-slim` (override via `execution.docker_image`).
 - **Network**: disabled (`--network none`) — the experiment can't reach the internet, which prevents accidental literature scraping or data exfiltration from generated code.
 - **Mount**: the quest output directory is bind-mounted at `/work` inside the container; the experiment's working directory is `/work`. Code reads/writes there.
+- **Skills from other agents**: each external skill (found in `~/.claude/skills`, `~/.codex/skills`, ...) that you approved and the quest selected is bind-mounted **read-only** at `/fi-skills/<name>`, and the prompts give that path instead of the host one. Nothing else of yours is mounted; a skill folder that is a symbolic link or leads outside its skills folder is refused and `run.log` says so.
 - **Lifetime**: a fresh container per execute step. State doesn't persist between retries — the execute-repair loop sees a clean environment each iteration.
 
 Requires the `docker` Python package (`pip install docker`) and a running Docker daemon. On Windows that means Docker Desktop or WSL2. If you don't have those, leave the default `sandbox: venv` — the per-quest venv is faster anyway.
