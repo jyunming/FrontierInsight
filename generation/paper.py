@@ -29,7 +29,7 @@ from core.config import Config, resolve_page_limit
 from core.engine import QuestArtifacts, build_further_reading, cited_references, further_reading_listed
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
-from generation._figure_captions import numbers_off_figure_captions
+from generation._figure_captions import blank_lines_around_figures, numbers_off_figure_captions
 from generation._keywords import extract_keywords
 from generation._pdf_engine import find_pdf_engine as _find_pdf_engine_impl
 
@@ -949,6 +949,9 @@ class PaperGenerator:
             # The template numbers figures, so the writer's "**Figure 2.**"
             # would print as "Figure 2: Figure 2.".
             sanitized_md = numbers_off_figure_captions(sanitized_md)
+            # Pandoc gives a caption only to an image that is a paragraph of its
+            # own, so figures written one under the other lost theirs.
+            sanitized_md = blank_lines_around_figures(sanitized_md)
             # A table right under its caption line would be read as more text
             # of the caption's paragraph and print as raw pipes.
             from generation._tables import blank_line_before_tables

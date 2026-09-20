@@ -56,3 +56,25 @@ def numbers_off_figure_captions(markdown: str) -> str:
                 line = fig.group("lead") + without_number(fig.group("alt")) + fig.group("rest")
         out.append(line)
     return "\n".join(out)
+
+
+def blank_lines_around_figures(markdown: str) -> str:
+    """``markdown`` with a blank line before and after each figure line that lacks
+    one. Pandoc makes an image a numbered figure, with its caption, only when the
+    image is a paragraph of its own: two figure lines one under the other are one
+    paragraph of two inline images, which prints both without their captions (a
+    stored quest with three in a row lost all three). Code blocks are left alone."""
+    lines = markdown.split("\n")
+    out: list[str] = []
+    fence = None
+    for i, line in enumerate(lines):
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = None if fence == m.group(1) else (fence or m.group(1))
+        is_figure = fence is None and not m and _FIGURE_LINE_RE.match(line) is not None
+        if is_figure and out and out[-1].strip():
+            out.append("")
+        out.append(line)
+        if is_figure and i + 1 < len(lines) and lines[i + 1].strip():
+            out.append("")
+    return "\n".join(out)

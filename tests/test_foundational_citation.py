@@ -117,7 +117,10 @@ def test_the_review_line_lists_the_foundational_works_the_paper_does_not_cite() 
     block = _foundational_review_block(LITERATURE, paper, "external")
     assert block.startswith("\n\n## Foundational works this paper does not cite (advisory)\n")
     assert "- P. Whittle (1955). The outcome of a stochastic epidemic - a note on Bailey's paper (cited by 7" in block
-    assert "Infectious diseases of humans (book, cited by 10 of the retrieved papers)" in block
+    # A book with no full text carries the same mark as its entry in the writer's block, and the
+    # advisory says what a marked entry may be asked for.
+    assert "Infectious diseases of humans [short blurb only] (book, cited by 10 of the retrieved papers)" in block
+    assert "ask for it only to say the work exists or for what its title states" in block
     assert "Kermack" not in block, "a cited work is not listed"
     # A reviewer reads a paper that cannot show it a label for a work it does not cite.
     assert "[4]" not in block and "[5]" not in block
