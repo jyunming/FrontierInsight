@@ -944,6 +944,20 @@ class ExecutionConfig(BaseModel):
     # submit, how to tell finished from failed, how to read the results). The
     # contract is in core/job_watch.py.
     background_jobs: bool = False
+    # Keep the simulation and its analysis in two scripts. ``code/simulate.py`` runs the
+    # simulation and saves what it produced under ``raw/seed<K>/``; ``code/experiment.py``
+    # reads those files, computes the statistics, draws the figures and prints the results.
+    # An analysis that fails, or that the review sends back, is rewritten and run again
+    # against the raw files already on disk; the simulation runs again only when its own
+    # script changed (or its files are gone), which is what a simulation that takes hours
+    # needs. Off by default: a small simulation is cheaper to keep in one script. Not
+    # yet combinable with ``background_jobs``. The contract is in core/split_run.py.
+    split_analysis: bool = False
+    # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
+    # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
+    # quest folder. FI records the path and each file's size and hash; it does not copy
+    # them. The Docker sandbox sees only the quest folder, so there it must be relative.
+    raw_dir: str = ""
     # Run quest code with the interpreter that runs FI itself — no per-quest
     # venv. One Python for everything: a package installed once (pip install
     # -e ., or an earlier quest) is just there for the next quest, and nothing
@@ -960,6 +974,28 @@ class ExecutionConfig(BaseModel):
     # quest doesn't ask for itself. Set false to restore full per-quest
     # isolation (nothing visible but what that quest explicitly installs).
     system_site_packages: bool = True
+
+    @model_validator(mode="after")
+    def _check_split_analysis(self) -> "ExecutionConfig":
+        if self.raw_dir.strip() and not self.split_analysis:
+            raise ValueError(
+                "execution.raw_dir only means something with execution.split_analysis: true"
+            )
+        if self.split_analysis and self.background_jobs:
+            raise ValueError(
+                "execution.split_analysis cannot be combined with execution.background_jobs yet: "
+                "a background job's script already submits, waits for and collects the run, "
+                "and the analysis of what it collects is not split from it"
+            )
+        if (
+            self.split_analysis and self.sandbox == "docker"
+            and self.raw_dir.strip() and Path(self.raw_dir).expanduser().is_absolute()
+        ):
+            raise ValueError(
+                "execution.raw_dir must be relative to the quest folder with sandbox: docker, "
+                "which sees only that folder"
+            )
+        return self
 
 
 class KnowledgeConfig(BaseModel):

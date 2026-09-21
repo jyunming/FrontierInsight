@@ -162,6 +162,18 @@ def _load_quest_artifacts(quest_dir: Path) -> QuestArtifactsForCritique:
     ]
     code_path = next((p for p in code_candidates if p.is_file()), None)
     code = _read_capped(code_path, limit=_CODE_CHARS) if code_path else ""
+    # A quest that kept its simulation apart from its analysis (execution.split_analysis) has
+    # two scripts, and the simulation is where a methodology problem usually is: both are read,
+    # each within half the budget.
+    simulate_path = quest_dir / "code" / "simulate.py"
+    if simulate_path.is_file():
+        half = _CODE_CHARS // 2
+        code = (
+            "# --- code/simulate.py (the simulation) ---\n"
+            + _read_capped(simulate_path, limit=half)
+            + "\n\n# --- code/experiment.py (the analysis) ---\n"
+            + (_read_capped(code_path, limit=half) if code_path else "")
+        )
 
     # Prior review: per-quest review.md (single-reviewer flow) OR the
     # moderator's synthesis from a reviewer-panel run.
