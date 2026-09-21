@@ -319,6 +319,8 @@ The design block's `protocol` (the grid, the runs per setting, the thresholds) i
 
 The protocol's `oracles` are checks the script must pass before its main run (a closed form, a limiting case, an invariant, an exact small case): the script is run with `FI_ORACLE=1`, answers them with an `ORACLE_JSON` line, and a quest whose script does not pass stops before its sweep. Turn it down with `engine.oracle_check: warn` (record it and go on) or `off`.
 
+A run whose own numerics warned (an overflow, a solver that did not converge, an argument that had no effect, a NaN in a result) is sent back like a failed one, and stops the quest if the repairs do not remove the warnings; `engine.numeric_warnings: warn` records them and goes on, `off` does not look. Resuming after the stop runs the script again if you changed it, and accepts the run as it is if you did not.
+
 ### Bootstrap a starter set of scientist skills
 
 FI ships no skills — the discovery root is user state (`~/.frontier-insight/skills`, or `FI_SKILLS_DIR`), not repository content, so a fresh clone starts with an empty library and a quest that would benefit from one, say, quantum-system simulation, or resolving a free-text term to its ontology ID, has nothing to reach for. `scripts/import_scientist_skills.py` sources a curated set of 69 scientist-workflow skills from 11 real upstream repositories — geoscience (obspy, landlab, lasio, simpeg, ...), bioinformatics and genomics, structural and control engineering, neuroscience, numerical methods and simulation, reliability engineering, Bayesian statistics, cheminformatics and materials science, causal inference, and template-driven chart/report generation — and imports them, reproducing on a fresh machine the same sourcing step done once by hand.

@@ -681,6 +681,14 @@ class EngineConfig(BaseModel):
     # sweep, ``warn`` only logs and records it, ``off`` does not look. Nothing is checked without a ``protocol`` in the
     # design, for a background job, or for a study with no experiment.
     oracle_check: Literal["block", "warn", "off"] = "block"
+    # A run that exits 0 and prints its results can still have been told by its own numerics that something is wrong:
+    # an overflow, an invalid value or a division by zero in NumPy, a solver or optimiser that did not converge, an
+    # argument that had no effect (SciPy's ``solve_ivp`` given ``abs_tol`` instead of ``atol``), an imaginary part
+    # discarded, a NaN or an infinity in a result (``core/numeric_warnings.py`` reads only these). ``block`` (default)
+    # sends the script back through the same repairs as a failed run (``exec_reflect_max_iterations``) and, if the
+    # warnings remain when they are used up, stops the quest for you to read them; a resume runs the script again if you
+    # changed it, and accepts the run as it is if you did not. ``warn`` only logs and records them; ``off`` does not look.
+    numeric_warnings: Literal["block", "warn", "off"] = "block"
     oracle_repair_attempts: int = Field(default=2, ge=0, le=5)
     # How far apart consecutive replicates' seeds sit. Replicate i is handed
     # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can

@@ -48,6 +48,7 @@ from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
+from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import protocol_check as _protocol
 from . import split_run as _split_run
@@ -238,6 +239,9 @@ class QuestState(TypedDict, total=False):
     # repair attempt; otherwise the paper is written from the run before it,
     # next to code that never ran.
     exec_patch_pending: bool
+    # True when the person, at the stop for numeric warnings, resumed without changing the script: the run is used
+    # as it is and its warnings are not raised again. Cleared by the next run of the experiment.
+    numeric_warnings_accepted: bool
     # True once the run's figures have been sent back for a redraw because a
     # legend or a title was drawn over what a reader needs (see
     # ``_figure_overlap_findings``). One such round per quest, so a model that
@@ -736,7 +740,7 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
-                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage"):
+                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage") or intr_value.get("numeric_stage"):
                             # The plan step wrote plan.md and stopped for the
                             # person to read and edit it. Same pause-exit as
                             # the pauses above; without this branch the payload
@@ -748,7 +752,8 @@ class Engine:
                                 "[FI] paused for the %s: read and edit %s "
                                 "(or ask for a change with `--revise-plan`), "
                                 "then run `fi --resume %s`",
-                                "oracle checks" if intr_value.get("oracle_stage")
+                                "run's numeric warnings" if intr_value.get("numeric_stage")
+                                else "oracle checks" if intr_value.get("oracle_stage")
                                 else "protocol" if intr_value.get("protocol_stage") else "plan",
                                 intr_value.get("plan_file", "plan.md"),
                                 self.quest_id,
@@ -1443,6 +1448,9 @@ class Engine:
             # design declared what its outputs may legally be; enforce it
             # here, before a paper gets written from them.
             if _assertion_violations(state):
+                return "retry"
+            # Warnings from the run's own numerics, until the repairs are spent.
+            if self._numeric_findings(state):
                 return "retry"
             # Figures with a legend or a title drawn over what a reader needs go
             # back once: the reflect node writes the redraw, and the flag it sets
@@ -4538,6 +4546,100 @@ class Engine:
         )
         return new_code, sorted({*deps, *new_deps})
 
+    def _scan_numeric_warnings(self, state: QuestState, stderr: str, result_json: Any) -> list[dict[str, str]]:
+        """The numeric warnings a run reported, as plain records for the state; logged and written to
+        ``needs/NUMERIC_WARNINGS.json`` whatever ``engine.numeric_warnings`` says (unless it is ``off``)."""
+        if (
+            self.config.engine.numeric_warnings == "off"
+            or state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            return []
+        try:
+            found = _numeric.scan(stderr, result_json)
+        except Exception as e:  # noqa: BLE001 -- a defect in the scan must never stall a quest
+            self._log.warning("[numeric] the warning scan failed (%r); skipping", e)
+            return []
+        if not found:
+            return []
+        for w in found:
+            self._log.warning("[numeric] %s", w.describe())
+        try:
+            path = self.quest_root / "needs" / "NUMERIC_WARNINGS.json"
+            history = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+            history.append({"warnings": [{"kind": w.kind, "text": w.text} for w in found], "mode": self.config.engine.numeric_warnings})
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+        return [{"kind": w.kind, "text": w.text} for w in found]
+
+    def _numeric_findings(self, state: QuestState) -> list[Any]:
+        """The numeric warnings of the last run that call for a repair (``block``), none once the person accepted the run."""
+        if self.config.engine.numeric_warnings != "block" or state.get("numeric_warnings_accepted"):
+            return []
+        recorded = (state.get("exec_result") or {}).get("numeric_warnings") or []
+        return [
+            _numeric.NumericWarning(str(r.get("kind") or ""), str(r.get("text") or ""))
+            for r in recorded if isinstance(r, dict)
+        ]
+
+    def _scripts_sha(self) -> str:
+        import hashlib
+
+        digest = hashlib.sha256()
+        for name in (_split_run.SIMULATE_NAME, "experiment.py"):
+            path = self.quest_root / "code" / name
+            if path.is_file():
+                digest.update(name.encode("utf-8") + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+        return digest.hexdigest()
+
+    def _pause_for_numeric(self, findings: list[Any]) -> None:
+        """Stop: the run's numerics warned and the repairs did not remove it. The person reads the warnings, then either
+        changes the script (a resume runs it again) or resumes as it is (the run is used, its warnings accepted)."""
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "numeric_stop.json").write_text(
+                json.dumps({"scripts_sha": self._scripts_sha(), "warnings": [w.describe() for w in findings]}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[numeric] couldn't write the stop record: %r", e)
+        steps = [
+            "The experiment ran and printed its results, but its numerics warned, and the repairs did not remove the "
+            "warnings: " + "; ".join(w.describe() for w in findings) + ".",
+            f"Read them, and fix the script (`{self.quest_root / 'code' / 'experiment.py'}`) if they mean the numbers are "
+            "not what it claims (a solver that did not converge, an argument that had no effect, an overflow). "
+            "Then resume: a script you changed is run again; a script you did not change is used as it is, with these "
+            "warnings accepted (they stay in `needs/NUMERIC_WARNINGS.json`).",
+        ]
+        self._pause_for_human(
+            kind="numeric",
+            interaction="supply",
+            headline="the run's numerics warned",
+            steps=steps,
+            payload={"numeric_stage": True, "quest_id": self.quest_id, "warnings": [w.describe() for w in findings]},
+        )
+
+    def _resume_after_numeric_stop(self) -> QuestState | None:
+        """After a stop for numeric warnings: a script the person changed is run again, and one they did not change
+        is accepted as it is. ``None`` when the quest was not stopped for them."""
+        marker = self.fi_dir / "numeric_stop.json"
+        if not marker.is_file():
+            return None
+        try:
+            was = json.loads(marker.read_text(encoding="utf-8")).get("scripts_sha")
+            marker.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            was = None
+        if was is not None and was != self._scripts_sha():
+            code_path = self.quest_root / "code" / "experiment.py"
+            self._log.info("[numeric] the script was changed while the quest was stopped; running it again")
+            return {"code": code_path.read_text(encoding="utf-8"), "exec_patch_pending": True}
+        self._log.warning("[numeric] resumed with the script unchanged: the run's warnings are accepted")
+        return {"numeric_warnings_accepted": True}
+
     async def _oracle_gate(self, state: QuestState, py: Any, exec_env: Any, seed_path: Path) -> str | None:
         """Run the script's oracle checks (FI_ORACLE=1) and hold the quest at them.
 
@@ -5323,12 +5425,14 @@ class Engine:
                 # The script a two-script quest's failure is in ("simulate.py" or
                 # "experiment.py"): the repair rewrites that one. None for one script.
                 "failed_script": failed_script,
+                "numeric_warnings": self._scan_numeric_warnings(state, result.stderr, result_json),
             },
             "figures": figures,
             "figure_records": figure_records,
             "result_json": result_json or {},
             "exec_patch_pending": False,
         }
+        patch["numeric_warnings_accepted"] = False
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         # Only populate ``result_json_replicates`` when replication
@@ -5445,6 +5549,9 @@ class Engine:
         graph proceed to analyze with the failure intact — `analyze`
         will surface it in the paper and `review` will mark it down.
         """
+        resumed = self._resume_after_numeric_stop()
+        if resumed is not None:
+            return resumed
         exec_result = state.get("exec_result") or {}
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
@@ -5452,6 +5559,7 @@ class Engine:
         # ``is not None`` wrongly counted as "parsed", skipping repair. Treat
         # an empty result_json as no usable result so execute_reflect retries.
         has_result_json = bool(state.get("result_json"))
+        findings = self._numeric_findings(state)
         degenerate = bool(
             rc == 0
             and has_result_json
@@ -5465,7 +5573,7 @@ class Engine:
         # regenerates the figures anyway, and they are measured again after it.
         overlaps = (
             self._figure_overlaps_to_repair(state)
-            if rc == 0 and has_result_json and not degenerate and not implausible
+            if rc == 0 and has_result_json and not degenerate and not implausible and not findings
             else []
         )
 
@@ -5473,7 +5581,7 @@ class Engine:
         if rc == 0 and has_result_json and not degenerate and implausible:
             for v in implausible:
                 self._log.warning("[execute_reflect] implausible: %s", v.describe())
-        if rc == 0 and has_result_json and not degenerate and not implausible and not overlaps:
+        if rc == 0 and has_result_json and not degenerate and not implausible and not findings and not overlaps:
             left = _figure_overlap_findings({**state, "figure_overlap_repaired": False})
             if left:
                 self._log.warning(
@@ -5488,6 +5596,9 @@ class Engine:
         if iters >= self.config.engine.exec_reflect_max_iterations:
             # Proceed regardless; analyze owns the authoritative degenerate
             # flag against the final result (covers max_iterations=0 too).
+            if rc == 0 and has_result_json and findings and not degenerate and not implausible:
+                # Numeric warnings the repairs did not remove: not something to write a paper over.
+                self._pause_for_numeric(findings)
             self._log.warning(
                 "[execute_reflect] %s after %d attempt(s); proceeding to analyze",
                 "result still degenerate (all metrics ~0)" if degenerate
@@ -5571,6 +5682,14 @@ class Engine:
             )
             returncode_for_prompt = "0 (ran, but values break the declared bounds)"
             result_json_note = "yes (rejected — see stdout)"
+        elif findings:
+            self._log.warning(
+                "[execute_reflect] rc=0 but the run's numerics warned (%d) — attempting repair (iter %d): %s",
+                len(findings), iters + 1, "; ".join(w.describe() for w in findings[:4]),
+            )
+            stdout_for_prompt = _numeric.directive(findings) + "\n\nOriginal stdout tail:\n" + exec_result.get("stdout_tail", "")[:1000]
+            returncode_for_prompt = "0 (ran, but its numerics warned)"
+            result_json_note = "yes (stands only if the warnings are resolved)"
         elif overlaps:
             self._log.warning(
                 "[execute_reflect] figure_overlap: rc=0 and the results stand, but %d overlap(s) "
