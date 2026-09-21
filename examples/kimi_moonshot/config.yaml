@@ -1,0 +1,46 @@
+# A small quest on Moonshot's Kimi, through FI's OpenAI-compatible provider.
+#
+# The key is read from the environment variable MOONSHOT_API_KEY. Put `MOONSHOT_API_KEY=<your key>` in a `.env` file in
+# the folder you run FI from (FI reads it at start, the file is git-ignored) or set it in the environment; never write the
+# key into this file. The global endpoint is api.moonshot.ai; a key made on the Chinese platform uses api.moonshot.cn.
+#
+# Kimi K2.6 and K3 answer only one temperature (0.6 with thinking off, 1 with it on) and reject any other with HTTP 400, so
+# `fixed_temperature` replaces the per-node temperatures, and `extra_body` turns thinking off: a reasoning model spends most
+# of its output tokens on reasoning, which is what made a one-word reply cost 32 tokens instead of 4. Remove `extra_body`
+# (and set `fixed_temperature: 1`) to run it with thinking on.
+#
+# Run it:  python launch.py --config examples/kimi_moonshot/config.yaml
+# In VSCode:  @fi /start examples/kimi_moonshot/config.yaml   (a YAML that names its own provider keeps it: the quest does
+# not go through Copilot.)
+topic: >
+  Estimate how the probability of a major outbreak in a stochastic SIR epidemic depends on the basic reproduction number
+  R0 in {1.5, 3.0} for a population of N = 200, from 100 stochastic runs per setting, and compare it with the deterministic
+  final-size prediction.
+title: kimi-sir-check
+provider:
+  name: openai
+  base_url: https://api.moonshot.ai/v1
+  api_key_env: MOONSHOT_API_KEY
+  model: kimi-k2.6
+  fixed_temperature: 0.6
+  extra_body:
+    thinking:
+      type: disabled
+engine:
+  max_iterations: 1
+  review_loop: false
+  clarify_mode: "off"
+  review_panel: []
+execution:
+  sandbox: venv
+  timeout_s: 300
+knowledge:
+  enabled: false
+  web_search: false
+  external_fallback: []
+  source_routing: manual
+pauses:
+  review: "off"
+  papers: false
+output:
+  kinds: [paper_md]

@@ -839,6 +839,10 @@ class ResolvedEndpoint:
     # from a resolved endpoint — the engine's, the fallback chain's, and the
     # slides/poster/speech/visual-check generators' — applies it.
     reasoning_effort: str = ""
+    # ``provider.fixed_temperature`` and ``provider.extra_body`` (HTTP providers only): a model that accepts one
+    # temperature, and request fields a model needs (see ProviderConfig).
+    fixed_temperature: float | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -2470,6 +2474,8 @@ def resolve_endpoint(
         api_key=api_key or _NO_KEY_SENTINEL,
         provider_name=name,
         reasoning_effort=provider.reasoning_effort or "",
+        fixed_temperature=provider.fixed_temperature,
+        extra_body=dict(provider.extra_body or {}),
     )
 
 
@@ -2487,6 +2493,8 @@ async def resolve_endpoint_async(
         api_key=api_key,
         provider_name=provider.name,
         reasoning_effort=provider.reasoning_effort or "",
+        fixed_temperature=provider.fixed_temperature,
+        extra_body=dict(provider.extra_body or {}),
     )
 
 
@@ -2879,7 +2887,10 @@ class LLMClient:
         body: dict[str, Any] = {
             "model": (model or self.endpoint.model),
             "messages": messages,
-            "temperature": temperature,
+            # A model that accepts one temperature gets it, whatever the node would have asked for.
+            "temperature": (
+                self.endpoint.fixed_temperature if self.endpoint.fixed_temperature is not None else temperature
+            ),
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -2889,6 +2900,8 @@ class LLMClient:
         reasoning_effort = _http_reasoning_effort(self.endpoint)
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
+        if self.endpoint.extra_body:
+            body.update(self.endpoint.extra_body)
         if extra:
             body.update(extra)
         url = self.endpoint.base_url.rstrip("/") + "/chat/completions"
