@@ -183,3 +183,19 @@ def test_pip_install_runs_before_approval(skills_env: Path, monkeypatch) -> None
     assert called, "pip was never invoked"
     assert "qutip" in called[0]
     assert called[0][1:3] == ["-m", "pip"]
+
+
+def test_a_failing_self_test_says_why_on_its_own_line(skills_env: Path, capsys) -> None:
+    """``[FAIL] landlab`` alone sent a person to another command to learn what failed."""
+    _make_skill(skills_env, "good")
+    _make_skill(
+        skills_env, "broken",
+        selftest="import sys\nprint('setting up')\nraise RuntimeError('landlab needs numpy < 2, found 2.1')\n",
+    )
+    launch._approve_all_skills("tester")
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    i = next(k for k, line in enumerate(lines) if line.startswith("[FAIL] broken"))
+    assert any("RuntimeError: landlab needs numpy < 2, found 2.1" in line for line in lines[i + 1:i + 4])
+    assert any(line.startswith("[OK  ] good") for line in lines)
+    assert "python launch.py --approve-skill broken --approve-as <you>" in out
