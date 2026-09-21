@@ -185,6 +185,8 @@ provider:
   base_url: null                   # only for HTTP-direct overrides (OpenAI-compatible proxies, local gateways). Honored by openai/codex/gemini/ollama/vllm transports.
   api_key_env: null                # override the standard env-var name (e.g. CORP_OPENAI_KEY). When null, the provider uses its conventional name (OPENAI_API_KEY, GEMINI_API_KEY, …).
   reasoning_effort: null           # minimal | low | medium | high | xhigh | max. Unset (null) sends nothing, so each provider keeps its own default. Sent as `reasoning_effort` (HTTP), `--effort` (claude_cli, antigravity_cli) or `model_reasoning_effort` (codex_cli); a level a provider cannot take is left out with one warning. See PROVIDERS.md, "Reasoning effort".
+  fixed_temperature: null          # HTTP providers only. Some OpenAI-compatible models accept one temperature and answer any other with HTTP 400 (Moonshot's Kimi K2.6 / K3: 0.6 with thinking off, 1 with it on). When set, it is sent on every call in place of the per-node temperatures. Not passed to a fallback provider.
+  extra_body: {}                   # HTTP providers only. Fields merged into every request body, e.g. Kimi's {thinking: {type: disabled}}, which turns its reasoning off. Not passed to a fallback provider.
   extra: {}                        # forward-compat transport bag. Currently only ``bridge_port`` is consumed (``vscode_extension`` transport, set automatically by ``launch.py``). Other keys parse fine but no transport reads them today — don't rely on stashing CLI flags or HTTP headers here.
   # Per-node override (optional). Match keys exactly to engine node
   # names. Reviewer-panel personas are routed via

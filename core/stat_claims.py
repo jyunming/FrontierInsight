@@ -462,6 +462,11 @@ def _check_interval_method(
             if (lo, hi) in seen:
                 continue
             for path, stat in intervals.items():
+                # Only an interval that IS the seed-level t interval can be one under another name. A pooled Wilson or
+                # bootstrap interval (``ci_method``) is the estimator its label says; a paper that prints it under that
+                # label was condemned as mislabelled by a real quest until this was told apart.
+                if stat.get("ci_method", "t_between_seeds") != "t_between_seeds":
+                    continue
                 cl, cu = stat.get("ci_lower"), stat.get("ci_upper")
                 if cl is None or cu is None:
                     continue
