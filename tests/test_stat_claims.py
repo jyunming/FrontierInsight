@@ -193,6 +193,33 @@ def test_one_finding_per_labelled_table_not_one_per_cell() -> None:
     assert _kinds(report).count("interval_method_mismatch") == 1
 
 
+def test_a_pooled_wilson_interval_printed_under_its_own_name_is_not_a_mislabel() -> None:
+    """A real quest (Kimi K2.6) reported counts beside its probabilities, FI pooled them into a Wilson interval, the paper
+    printed that interval as "Wilson", and the check called it "really the Student-t interval over the seeds" because the
+    interval it was handed was Wilson's and it assumed every one was a seed-level t interval."""
+    wilson = {"by_r0.3.0.p": {"mean": 0.41519, "ci_lower": 0.39673, "ci_upper": 0.43388, "ci_method": "wilson_pooled_counts"}}
+    table = (
+        "| R0 | p (95% Wilson CI, pooled across 2,700 runs) |\n|---|---|\n"
+        "| 3.0 | 0.415 (0.397–0.434) |\n"
+    )
+    assert _kinds(check(table, intervals=wilson, n_seeds=3)) == []
+    # The same numbers as a seed-level t interval under that label are still the mislabel.
+    as_t = {"by_r0.3.0.p": {**wilson["by_r0.3.0.p"], "ci_method": "t_between_seeds"}}
+    assert "interval_method_mismatch" in _kinds(check(table, intervals=as_t, n_seeds=3))
+    # And an interval with no method recorded (older callers) is treated as the t interval it always was.
+    bare = {"by_r0.3.0.p": {k: v for k, v in wilson["by_r0.3.0.p"].items() if k != "ci_method"}}
+    assert "interval_method_mismatch" in _kinds(check(table, intervals=bare, n_seeds=3))
+
+
+def test_the_engines_intervals_say_which_kind_they_are(tmp_path) -> None:
+    from core.engine import _replicate_result_intervals
+
+    reps = [{"_seed": i, "p": k / 300, "p_count": k, "p_total": 300, "rmse": 0.1 + i / 100} for i, k in enumerate((100, 99, 98))]
+    got = _replicate_result_intervals({"result_json_replicates": reps})  # type: ignore[arg-type]
+    assert got["p"]["ci_method"] == "wilson_pooled_counts" and got["rmse"]["ci_method"] == "t_between_seeds"
+    assert isinstance(got["p"]["ci_lower"], float)
+
+
 # --- 4. a figure's axis limit printed as a count ------------------------------
 
 FIG = {

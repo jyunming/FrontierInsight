@@ -12146,7 +12146,7 @@ def _series_at(
     return vals
 
 
-def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, float]]:
+def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
     """Each result's mean and 95% CI over the seeds, by dotted path, for the
     checks that compare the paper with the results: a paper reports the mean
     and its interval, and seed 0's ``RESULT_JSON`` holds neither. Only the
@@ -12155,8 +12155,14 @@ def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, float]
     if len(replicates) < 2:
         return {}
     aggregate = _aggregate_result_json_replicates(replicates, assertions=_replicate_assertions(state))
+    # ``ci_method`` says what the interval is an interval OF (``t_between_seeds`` or a pooled Wilson / bootstrap interval),
+    # so a check that asks "is this printed interval FI's own seed-level t interval under another name" only asks it
+    # about the ones that are.
     return {
-        path: {key: stats[key] for key in ("mean", "ci_lower", "ci_upper") if stats.get(key) is not None}
+        path: {
+            **{key: stats[key] for key in ("mean", "ci_lower", "ci_upper") if stats.get(key) is not None},
+            **({"ci_method": stats["ci_method"]} if isinstance(stats.get("ci_method"), str) else {}),
+        }
         for path, stats in aggregate.items() if stats.get("std")
     }
 
