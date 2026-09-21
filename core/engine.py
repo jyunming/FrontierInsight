@@ -47,6 +47,7 @@ from langgraph.types import Command, interrupt
 from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
+from . import split_run as _split_run
 from . import stats as _stats
 from .config import (
     Config,
@@ -4071,6 +4072,7 @@ class Engine:
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
+                split_block=self._split_block(),
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
@@ -4095,6 +4097,7 @@ class Engine:
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
+                split_block=self._split_block(),
             )
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
@@ -4106,8 +4109,34 @@ class Engine:
                 "[implement] the review sent the experiment back over %r", rerun_for,
             )
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
+            if self.config.execution.split_analysis:
+                prompt += _SPLIT_RERUN_NOTE
         text = await self._chat(prompt, node="implement")
-        code, deps = _parse_implement_response(text)
+        # Two scripts (execution.split_analysis): the simulation, and the analysis, which
+        # keeps the name ``experiment.py`` because everything else reads that one. A reply
+        # that does not hold both is asked for once more; if it still does not, the quest
+        # runs as one script and says so, rather than stopping.
+        simulate_code = ""
+        if self.config.execution.split_analysis:
+            scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
+            if scripts is None:
+                self._log.warning(
+                    "[implement] execution.split_analysis is on but the reply did not hold both "
+                    "scripts (`# file: simulate.py` and `# file: experiment.py`); asking once more",
+                )
+                text = await self._chat(prompt + _SPLIT_REPLY_REMINDER, node="implement")
+                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
+            if scripts is not None:
+                simulate_code, code = scripts["simulate"], scripts["analysis"]
+                deps = _parse_split_deps(text)
+            else:
+                self._log.warning(
+                    "[implement] the reply still did not hold both scripts; this quest runs as "
+                    "ONE script (execution.split_analysis has no effect on it)",
+                )
+                code, deps = _parse_implement_response(text)
+        else:
+            code, deps = _parse_implement_response(text)
         extracted = bool(code)
         if not code:
             # Empty-code path: log the LLM head so the user can see WHAT
@@ -4129,10 +4158,28 @@ class Engine:
         deps = sorted({*deps, *design_deps})
 
         code_path = self.quest_root / "code" / "experiment.py"
+        simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        if simulate_code.strip():
+            # A script written again identically is left exactly as it was: the raw files
+            # it wrote are recorded against its bytes, and are used only while they match.
+            previous = simulate_path.read_text(encoding="utf-8") if simulate_path.is_file() else ""
+            if not _split_run.same_script(previous, simulate_code):
+                simulate_path.write_text(simulate_code, encoding="utf-8")
+                self._log.info("[implement] wrote %s (%d bytes)", simulate_path, len(simulate_code))
+            else:
+                self._log.info("[implement] %s is unchanged; its raw files stay in use", simulate_path.name)
+        elif simulate_path.is_file():
+            simulate_path.unlink()  # no leftover simulation from an earlier pass beside a one-script quest
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
         if extracted:  # nothing to seed in the stub written above
-            code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
+            if simulate_code.strip():
+                # The seed belongs to the simulation: the analysis is deterministic.
+                _unused, deps = await self._repair_ignored_replicate_seed(
+                    state, simulate_path, simulate_path.read_text(encoding="utf-8"), deps,
+                )
+            else:
+                code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         return {"code": code, "deps": deps}
 
     async def _repair_ignored_replicate_seed(
@@ -4269,6 +4316,26 @@ class Engine:
 
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
+        # Two scripts (execution.split_analysis): every run of ``experiment.py`` below goes
+        # through ``runner``, which runs ``simulate.py`` first unless the raw files it wrote
+        # are still good. The seed is read by the simulation, so that is the script the
+        # seed checks read.
+        simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        runner: Any = self.executor
+        split = self.config.execution.split_analysis and simulate_path.is_file()
+        if self.config.execution.split_analysis and not split:
+            self._log.info(
+                "[execute] execution.split_analysis is on but this quest has no %s "
+                "(the code-writing step returned one script); running %s alone",
+                simulate_path.name, code_path.name,
+            )
+        if split:
+            runner = _split_run.SplitRunner(
+                self.executor, quest_root=self.quest_root,
+                raw_root=_split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir),
+                simulate=simulate_path, analysis=code_path, log=self._log,
+            )
+        seed_path = simulate_path if split else code_path
 
         # Clear figures from a PRIOR experiment version before this run. On a
         # re_experiment / broaden / repair loop the implement node rewrites
@@ -4366,7 +4433,9 @@ class Engine:
         # pilot's numbers are DISCARDED -- it is a smoke test of the design,
         # not a measurement.
         # No pilot for a background job: the script would submit it.
-        if self.config.engine.pilot_run and not self.config.execution.background_jobs:
+        if self.config.engine.pilot_run and split:
+            self._log.info("[execute] no pilot pass: the simulation and its analysis run as two scripts")
+        if self.config.engine.pilot_run and not self.config.execution.background_jobs and not split:
             pilot_timeout = max(
                 30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)
             )
@@ -4432,13 +4501,13 @@ class Engine:
         stride = max(1, int(self.config.engine.replicate_seed_stride))
         primary_env = _replicate_env(exec_env, 0, stride)
         result: ExecutionResult = await self._await_with_heartbeat(
-            self.executor.execute(
+            runner.execute(
                 [str(py), str(code_path)],
                 cwd=self.quest_root,
                 timeout_s=self.config.execution.timeout_s,
                 env=primary_env,
             ),
-            label="running experiment.py",
+            label="running simulate.py and experiment.py" if split else "running experiment.py",
         )
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
@@ -4460,12 +4529,15 @@ class Engine:
                 "[execute] suspicious fast-fail (rc=%d t=%.2fs); retrying once",
                 result.returncode, result.duration_s,
             )
-            result = await self.executor.execute(
+            result = await runner.execute(
                 [str(py), str(code_path)],
                 cwd=self.quest_root,
                 timeout_s=self.config.execution.timeout_s,
                 env=primary_env,
             )
+        # Which of the two scripts failed, for the repair; read now, before a replicate
+        # runs through the same runner.
+        failed_script = runner.failed_script if split else None
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
@@ -4507,8 +4579,8 @@ class Engine:
         # Whether the script can respond to the seed at all, and whether it
         # hands any of its randomness to a generator the seed cannot reach.
         # Both read once from the source that is about to run.
-        reads_seed = _script_reads_replicate_seed(code_path)
-        unseeded_rng = _unseeded_rng_calls(code_path)
+        reads_seed = _script_reads_replicate_seed(seed_path)
+        unseeded_rng = _unseeded_rng_calls(seed_path)
         seed_ignored = False
         replicates_ran = False
         primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
@@ -4565,7 +4637,7 @@ class Engine:
             for seed in range(1, replicates_n):
                 replicates_ran = True
                 rep_env = _replicate_env(exec_env, seed, stride)
-                rep_result = await self.executor.execute(
+                rep_result = await runner.execute(
                     [str(py), str(code_path)],
                     cwd=self.quest_root,
                     timeout_s=self.config.execution.timeout_s,
@@ -4615,7 +4687,7 @@ class Engine:
                                 "standard error or confidence interval will be "
                                 "reported over them: the quest stands on a single "
                                 "measurement. Skipping the remaining %d replicate(s).",
-                                code_path.name, replicates_n, max(0, replicates_n - 2),
+                                seed_path.name, replicates_n, max(0, replicates_n - 2),
                             )
                         break
                 else:
@@ -4643,7 +4715,7 @@ class Engine:
                 "[execute] %s draws from OS entropy (%s), so its replicates are "
                 "independent samples but not reproducible: a rerun of these seeds "
                 "will not land on these numbers",
-                code_path.name,
+                seed_path.name,
                 "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
                 if unseeded_rng else "it never reads FI_REPLICATE_SEED",
             )
@@ -4680,6 +4752,9 @@ class Engine:
                 "timed_out": result.timed_out,
                 "stdout_tail": result.stdout[-2000:],
                 "stderr_tail": result.stderr[-2000:],
+                # The script a two-script quest's failure is in ("simulate.py" or
+                # "experiment.py"): the repair rewrites that one. None for one script.
+                "failed_script": failed_script,
             },
             "figures": figures,
             "figure_records": figure_records,
@@ -4940,12 +5015,31 @@ class Engine:
             returncode_for_prompt = str(rc)
             result_json_note = "yes" if has_result_json else "no"
 
+        # Two scripts (execution.split_analysis): a failure in the simulation rewrites
+        # simulate.py; everything else (a crash in the analysis, a result that runs but is
+        # wrong, a figure that overlaps) rewrites experiment.py against the raw files that
+        # are already on disk.
+        simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        split = self.config.execution.split_analysis and simulate_path.is_file()
+        repair_simulation = split and exec_result.get("failed_script") == _split_run.SIMULATE_NAME
+        script_code = state.get("code") or ""
+        if split:
+            if repair_simulation:
+                script_code = simulate_path.read_text(encoding="utf-8")
+                split_note = _SPLIT_REFLECT_SIMULATE
+            else:
+                raw_root = _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
+                split_note = _SPLIT_REFLECT_ANALYSIS.format(
+                    listing=_split_run.listing(_split_run.raw_dir_for(raw_root, 0)) or "(none)",
+                )
+            stdout_for_prompt = split_note + "\n" + stdout_for_prompt
+
         # The one round the redraw gets, spent whatever the model answers.
         spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
         prompt = self._prompts["execute_reflect"].substitute(
             # Whole for a redraw: it returns the script, and a script cut at the
             # limit would lose its tail.
-            previous_code=(state.get("code") or "") if overlaps else (state.get("code") or "")[:8000],
+            previous_code=script_code if overlaps else script_code[:8000],
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
             stderr_tail=exec_result.get("stderr_tail", "")[:2000],
@@ -5025,17 +5119,22 @@ class Engine:
 
         # Write the patched code to disk so the next `execute` picks it
         # up. We mirror the implement node's behavior.
-        code_path = self.quest_root / "code" / "experiment.py"
+        code_path = self.quest_root / "code" / (
+            _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"
+        )
         code_path.parent.mkdir(parents=True, exist_ok=True)
         code_path.write_text(new_code, encoding="utf-8")
 
         patch: QuestState = {
             **spent,
-            "code": new_code,
             "exec_reflect_iter": iters + 1,
             "exec_reflect_history": history,
             "exec_patch_pending": True,
         }
+        if not repair_simulation:
+            # ``code`` is the script that prints RESULT_JSON, which is the analysis when
+            # there are two.
+            patch["code"] = new_code
         # If the agent declared additional deps for the fix, merge them
         # so the next `execute` pip-installs them.
         new_deps = parsed.get("deps") or []
@@ -6866,6 +6965,10 @@ class Engine:
         topic = str(state.get("topic") or self.config.topic or "")
         try:
             source = (self.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+            simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+            if simulate.is_file():
+                # The sweep and the number of runs are in the simulation.
+                source = simulate.read_text(encoding="utf-8") + "\n" + source
         except (OSError, UnicodeDecodeError):
             return []
         try:
@@ -8576,6 +8679,11 @@ class Engine:
         or nothing when ``execution.background_jobs`` is off."""
         return _JOB_PROTOCOL if self.config.execution.background_jobs else ""
 
+    def _split_block(self) -> str:
+        """The two-script contract for the code-writing prompts, or nothing when
+        ``execution.split_analysis`` is off."""
+        return _SPLIT_PROTOCOL if self.config.execution.split_analysis else ""
+
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
         """The experiment reported its job as pending. Record what is being
         waited for and pause; a resume runs the experiment node again, which
@@ -9907,6 +10015,37 @@ The real simulation runs on a cluster or takes longer than the wall-time limit, 
 4. Job finished: read its outputs, draw the figures into `figures/` as usual, and print the real `RESULT_JSON: {...}` (no `fi_job` key) in the format this prompt asks for results.
 5. Job failed: print the reason on stderr and exit non-zero.
 Never sleep-wait for the job. Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate run is made for a background job.
+"""
+
+_SPLIT_PROTOCOL = """\
+## The experiment is two scripts (execution.split_analysis is on)
+
+This quest keeps the simulation and its analysis apart, so an analysis mistake never repeats a long simulation. That CHANGES the output format and the "single file" rule above: reply with TWO fenced Python blocks, the first starting with the line `# file: simulate.py` and the second with the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
+
+**simulate.py** runs the simulation and nothing more: no statistics, no figures, no `RESULT_JSON`. It follows the `FI_REPLICATE_SEED` rule above (the seed belongs here). It saves EVERYTHING the analysis will need as files in the folder that the ENVIRONMENT VARIABLE `FI_RAW_DIR` names: `raw = pathlib.Path(os.environ["FI_RAW_DIR"])` then `raw.mkdir(parents=True, exist_ok=True)`. `FI_RAW_DIR` is a variable, not a folder name: FI sets it to the path chosen for this run (for example `raw/seed0`, relative to the working directory), and a folder called `FI_RAW_DIR` is not it. Save CSV, JSON, `.npy` or `.npz`, complete enough that the analysis never has to run the simulation again (the value of every run, not only its mean). It ignores `FI_PILOT`. A run that saves nothing in that folder fails.
+
+**experiment.py** is the analysis. It reads ONLY from that same folder, `pathlib.Path(os.environ["FI_RAW_DIR"])` (it never imports or calls simulate.py and never runs the simulation), computes the summary statistics, draws the figures into `figures/` and prints the `RESULT_JSON: {...}` last line, exactly as the rules above ask of the experiment: the figure rules, the stratification rule and the no-clamping rule are its rules. It is run once per seed straight after simulate.py, so it must be quick and deterministic.
+
+If an outline is given, it describes the whole experiment as one program: put its simulation functions in simulate.py and its statistics, figure and `RESULT_JSON` functions in experiment.py, keep every name and signature, and let the two meet only through the files in `FI_RAW_DIR`.
+"""
+
+_SPLIT_REPLY_REMINDER = """
+
+## Your last reply did not hold both scripts
+Reply with exactly two fenced Python blocks: the first starting with the line `# file: simulate.py`, the second starting with the line `# file: experiment.py`, then the `DEPS:` line. Nothing else.
+"""
+
+_SPLIT_RERUN_NOTE = """
+The experiment is two scripts. Give simulate.py back exactly as it is unless the problem the review found is IN the simulation: the raw files it already wrote are then used as they are, and only experiment.py runs again. Rewrite simulate.py only when the simulation itself has to change.
+"""
+
+_SPLIT_REFLECT_SIMULATE = """\
+SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. experiment.py (the analysis) reads only what simulate.py saves in the folder named by FI_RAW_DIR, and it did not run. Fix simulate.py and return the whole of it; it must keep saving everything the analysis needs in FI_RAW_DIR and must not print RESULT_JSON or draw figures.
+"""
+
+_SPLIT_REFLECT_ANALYSIS = """\
+SPLIT EXPERIMENT: this script is experiment.py, the analysis half of a two-script experiment. The simulation has already run and its raw files are on disk; this script reads only the folder named by FI_RAW_DIR and must not run the simulation again. Fix experiment.py and return the whole of it. The raw files there are:
+{listing}
 """
 
 
@@ -12803,6 +12942,38 @@ def _coerce_dep_list(value: Any) -> list[str]:
     return []
 
 
+def _deps_from_tail(tail: str) -> list[str]:
+    """The packages of the first ``DEPS:`` line in ``tail`` (the text after the last
+    fenced block, so a ``deps = [...]`` inside the code is never read)."""
+    deps_match = _DEPS_LINE_RE.search(tail)
+    if not deps_match:
+        return []
+    raw = deps_match.group(1).strip()
+    # Tolerate "numpy, matplotlib" / "[numpy, matplotlib]" /
+    # "['numpy', 'matplotlib']" — peel exactly ONE matched pair
+    # of outer brackets, not every leading/trailing bracket.
+    # The naive `.strip("[](){}")` would chew the trailing `]`
+    # off PEP 508 extras like `pandas[performance]`, leaving a
+    # broken spec `pandas[performance` that pip can't install.
+    for opener, closer in (("[", "]"), ("(", ")"), ("{", "}")):
+        if raw.startswith(opener) and raw.endswith(closer):
+            raw = raw[1:-1].strip()
+            break
+    return [
+        d.strip().strip("'\"")
+        for d in raw.split(",")
+        if d.strip().strip("'\"")
+    ]
+
+
+def _parse_split_deps(text: str) -> list[str]:
+    """The ``DEPS:`` line of a reply that holds two fenced blocks: read after the last one."""
+    last = None
+    for last in _PY_FENCE_RE.finditer(text or ""):
+        pass
+    return _deps_from_tail(text[last.end():] if last else text or "")
+
+
 def _parse_implement_response(text: str) -> tuple[str, list[str]]:
     """Extract ``(code, deps)`` from the implement-node LLM response.
 
@@ -12833,24 +13004,7 @@ def _parse_implement_response(text: str) -> tuple[str, list[str]]:
         # the whole text would falsely match Python statements like
         # `deps = [...]` INSIDE the fenced experiment code itself (the
         # prompt explicitly puts DEPS after the closing ```).
-        deps_match = _DEPS_LINE_RE.search(text[fence.end():])
-        if deps_match:
-            raw = deps_match.group(1).strip()
-            # Tolerate "numpy, matplotlib" / "[numpy, matplotlib]" /
-            # "['numpy', 'matplotlib']" — peel exactly ONE matched pair
-            # of outer brackets, not every leading/trailing bracket.
-            # The naive `.strip("[](){}")` would chew the trailing `]`
-            # off PEP 508 extras like `pandas[performance]`, leaving a
-            # broken spec `pandas[performance` that pip can't install.
-            for opener, closer in (("[", "]"), ("(", ")"), ("{", "}")):
-                if raw.startswith(opener) and raw.endswith(closer):
-                    raw = raw[1:-1].strip()
-                    break
-            deps = [
-                d.strip().strip("'\"")
-                for d in raw.split(",")
-                if d.strip().strip("'\"")
-            ]
+        deps = _deps_from_tail(text[fence.end():])
         return code, deps
 
     # Fallback: legacy JSON-wrapped shape.

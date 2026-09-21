@@ -282,6 +282,18 @@ python launch.py --config quest.yaml --watch <quest_id>   # re-checks on a timer
 
 `--watch` prints and logs every check (`[watch] 14:02:11 check 7: pending - running`). Ctrl-C only stops watching: the quest stays paused, and `--resume <quest_id>` (or a new `--watch`) picks the same job up without submitting it again. On the web quest page use *Watch automatically*: it then shows `Watching: <the last check>` while the watcher runs, or `Watcher stopped (exit code N): <its last log line>` (and offers the button again) if it exited, so a watcher that died at once is never shown as watching. In VSCode `@fi /watch`.
 
+### Keep a long simulation apart from its analysis
+
+```yaml
+execution:
+  split_analysis: true
+  # raw_dir: "D:/big-disk/my-run"   # optional: where the raw files go (default: raw/ in the quest folder)
+engine:
+  execute_replicates: 3
+```
+
+The quest writes two scripts. `code/simulate.py` runs the simulation for one seed and saves what it produced as files in the folder named by `FI_RAW_DIR` (`raw/seed0/`, `raw/seed1/`, ...), and `code/experiment.py` reads those files, computes the statistics, draws the figures and prints the results. Each replicate seed runs the pair, simulation then analysis. When the analysis fails, or the review sends the experiment back over something it computed, only the analysis is rewritten and run again against the raw files already there; `raw/seed<K>/manifest.json` records the hash of the `simulate.py` that wrote them, the seed and every file with its size, and the simulation runs again only when that no longer fits (its script changed, a file is gone, or nothing was written). Delete a seed's folder to make it simulate again. It cannot be combined with `execution.background_jobs`, and there is no pilot pass.
+
 ### Start the experiment from your own example files
 
 ```yaml
