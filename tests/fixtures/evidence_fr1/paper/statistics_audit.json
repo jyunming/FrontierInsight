@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "skipped": false,
+  "skip_reason": null,
+  "checks_run": [
+    "effect_size_overstated",
+    "threshold_as_pvalue",
+    "interval_method_mismatch",
+    "axis_limit_as_count",
+    "probability_complement"
+  ],
+  "findings": []
+}

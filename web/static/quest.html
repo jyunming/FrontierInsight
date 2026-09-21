@@ -67,6 +67,19 @@
     </div>
   </div>
 
+  <!-- How much of the result has been checked against something other than itself (needs/EVIDENCE.json). -->
+  <div id="evidence-banner" class="hidden fi-banner fi-banner-info">
+    <div class="font-body-md text-body-md text-on-surface flex flex-col gap-2 w-full">
+      <div class="flex flex-wrap items-center gap-2">
+        <b>Evidence</b>
+        <span id="evidence-status" class="font-label-sm text-label-sm uppercase px-3 py-1 rounded-full cyber-border"></span>
+      </div>
+      <div id="evidence-levels" class="flex flex-wrap gap-2"></div>
+      <div id="evidence-gaps" class="text-on-surface-variant font-code-md text-code-md flex flex-col gap-0.5"></div>
+      <span class="text-on-surface-variant">Each level needs the one before it; <code class="font-code-md">needs/EVIDENCE.json</code> lists every gap.</span>
+    </div>
+  </div>
+
   <!-- The screenshot + AI check of each output: one line per output. -->
   <div id="visual-check-banner" class="hidden fi-banner fi-banner-info">
     <div class="font-body-md text-body-md text-on-surface flex flex-col gap-1">
@@ -329,6 +342,7 @@
     renderQuestFailedBanner(data.quest_failed);
     renderSourceFailures(data.source_failures);
     renderVisualCheck(data.visual_check);
+    renderEvidence(data.evidence);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -916,6 +930,36 @@
       return `measurements only${reason}; ${c.problems_measured} measured problem(s)${redone}`;
     }
     return `not checked${reason}`;
+  }
+
+  const EVIDENCE_LEVELS = [
+    ['executed', 'Executed'], ['internally_consistent', 'Internally consistent'],
+    ['validated_against_oracle', 'Validated against an oracle'], ['publication_ready', 'Publication ready'],
+  ];
+  function renderEvidence(ev) {
+    const banner = document.getElementById('evidence-banner');
+    if (!ev || typeof ev !== 'object' || !ev.levels) { banner.classList.add('hidden'); return; }
+    banner.classList.remove('hidden');
+    const label = (EVIDENCE_LEVELS.find(([k]) => k === ev.status) || [null, 'Not executed'])[1];
+    document.getElementById('evidence-status').textContent = label;
+    const chips = document.getElementById('evidence-levels');
+    chips.innerHTML = '';
+    for (const [key, text] of EVIDENCE_LEVELS) {
+      const chip = document.createElement('span');
+      const ok = !!ev.levels[key];
+      chip.className = 'font-label-sm text-label-sm px-3 py-1 rounded-full border ' +
+        (ok ? 'border-status-success/40 text-status-success' : 'border-white/10 text-outline');
+      chip.textContent = (ok ? '✓ ' : '○ ') + text;
+      chips.appendChild(chip);
+    }
+    const gaps = document.getElementById('evidence-gaps');
+    gaps.innerHTML = '';
+    const next = (EVIDENCE_LEVELS.find(([k]) => k === ev.next_level) || [null, ''])[1];
+    for (const g of (ev.gaps || [])) {
+      const line = document.createElement('div');
+      line.textContent = (next ? next + ': ' : '') + g;
+      gaps.appendChild(line);
+    }
   }
 
   function renderVisualCheck(vc) {
