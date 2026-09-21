@@ -91,15 +91,18 @@ def _faked_model(eng: Engine, replies: list[str]) -> list[str]:
 # --- the configuration --------------------------------------------------------
 
 
-def test_the_switch_is_off_by_default_and_needs_no_folder() -> None:
+def test_the_switch_is_auto_by_default_and_needs_no_folder() -> None:
     execution = ExecutionConfig()
-    assert execution.split_analysis is False and execution.raw_dir == ""
+    assert execution.split_analysis == "auto" and execution.raw_dir == ""
+    assert ExecutionConfig(split_analysis=True).split_analysis is True
+    assert ExecutionConfig(split_analysis=False).split_analysis is False
+    assert ExecutionConfig(raw_dir="somewhere").raw_dir == "somewhere", "auto may keep its raw files elsewhere"
 
 
 @pytest.mark.parametrize(
     "kwargs,message",
     [
-        ({"raw_dir": "somewhere"}, "only means something with execution.split_analysis"),
+        ({"raw_dir": "somewhere", "split_analysis": False}, "only means something with execution.split_analysis"),
         ({"split_analysis": True, "background_jobs": True}, "cannot be combined with execution.background_jobs"),
         ({"split_analysis": True, "sandbox": "docker", "raw_dir": str(Path.cwd())}, "must be relative"),
     ],
@@ -112,6 +115,61 @@ def test_combinations_that_cannot_work_are_refused_at_load(kwargs: dict, message
 def test_a_relative_folder_is_fine_with_docker_and_an_absolute_one_with_venv(tmp_path: Path) -> None:
     ExecutionConfig(split_analysis=True, sandbox="docker", raw_dir="scratch/raw")
     ExecutionConfig(split_analysis=True, sandbox="venv", raw_dir=str(tmp_path / "big-disk"))
+
+
+# --- auto: a stochastic design keeps its raw results ----------------------------
+
+
+@pytest.mark.parametrize("design, expected", [
+    ({"hypothesis": "h", "protocol": {"runs_per_setting": 300}}, True),
+    ({"hypothesis": "h", "protocol": {"runs_per_setting": 1}}, False),
+    ({"hypothesis": "h", "method": "Gillespie simulation of an SIR epidemic"}, True),
+    ({"hypothesis": "A Monte Carlo study of variance"}, True),
+    ({"hypothesis": "h", "method": "stochastic differential equation"}, True),
+    ({"hypothesis": "h", "method": "integrate the ODE with RK4 and compare step sizes"}, False),
+    ({"hypothesis": "h", "method": "a deterministic simulation of heat flow"}, False),
+    ({"hypothesis": "h", "variables": {"independent": ["random walk length"]}}, True),
+    (None, False),
+])
+def test_a_design_counts_as_stochastic_by_its_runs_or_its_words(design, expected) -> None:
+    from core.split_run import design_is_stochastic
+
+    assert design_is_stochastic(design) is expected
+
+
+def _engine_with(tmp_path: Path, **execution) -> Engine:
+    cfg = Config(
+        topic="t", title="t", provider=ProviderConfig(name="openai"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60, **execution),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
+    )
+    return Engine(cfg)
+
+
+def test_auto_splits_a_stochastic_design_and_not_a_deterministic_one(tmp_path: Path) -> None:
+    eng = _engine_with(tmp_path)
+    stochastic = {"design": {"hypothesis": "h", "protocol": {"runs_per_setting": 300}}}
+    assert eng._split_on(stochastic) is True
+    assert eng._split_on({"design": {"hypothesis": "h", "method": "RK4 step sizes"}}) is False
+    assert eng._split_on({}) is False
+    assert eng._split_block(stochastic) != ""
+    assert eng._split_block({}) == ""
+
+
+def test_auto_never_splits_a_background_job_a_study_with_no_experiment_or_a_data_only_run(tmp_path: Path) -> None:
+    stochastic = {"design": {"hypothesis": "h", "protocol": {"runs_per_setting": 300}}}
+    assert _engine_with(tmp_path / "a", background_jobs=True)._split_on(stochastic) is False
+    eng = _engine_with(tmp_path / "b")
+    assert eng._split_on({**stochastic, "no_simulation_resolved": True}) is False
+    assert eng._split_on({**stochastic, "survey_mode_resolved": True}) is False
+    eng.config.engine.analyze_local_first = True
+    assert eng._split_on(stochastic) is False
+
+
+def test_true_and_false_decide_for_every_quest(tmp_path: Path) -> None:
+    stochastic = {"design": {"hypothesis": "h", "protocol": {"runs_per_setting": 300}}}
+    assert _engine_with(tmp_path / "t", split_analysis=True)._split_on({}) is True
+    assert _engine_with(tmp_path / "f", split_analysis=False)._split_on(stochastic) is False
 
 
 # --- the code-writing step ----------------------------------------------------

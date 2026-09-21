@@ -970,9 +970,14 @@ class ExecutionConfig(BaseModel):
     # An analysis that fails, or that the review sends back, is rewritten and run again
     # against the raw files already on disk; the simulation runs again only when its own
     # script changed (or its files are gone), which is what a simulation that takes hours
-    # needs. Off by default: a small simulation is cheaper to keep in one script. Not
-    # yet combinable with ``background_jobs``. The contract is in core/split_run.py.
-    split_analysis: bool = False
+    # needs, and the raw outcomes of every run stay on disk for any later analysis (an
+    # interval computed from the runs themselves, not from a few batch summaries).
+    # ``auto`` (default) turns it on for a study whose design is stochastic (its protocol
+    # fixes two or more runs per setting, or it describes a Monte Carlo / stochastic /
+    # Gillespie ... process) and leaves it off otherwise, and for a background job, a
+    # no-simulation study or a survey; ``true`` and ``false`` decide for every quest. Not
+    # yet combinable with ``background_jobs`` when ``true``. The contract is in core/split_run.py.
+    split_analysis: bool | Literal["auto"] = "auto"
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy
@@ -997,18 +1002,18 @@ class ExecutionConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_split_analysis(self) -> "ExecutionConfig":
-        if self.raw_dir.strip() and not self.split_analysis:
+        if self.raw_dir.strip() and self.split_analysis is False:
             raise ValueError(
-                "execution.raw_dir only means something with execution.split_analysis: true"
+                "execution.raw_dir only means something with execution.split_analysis: true (or auto)"
             )
-        if self.split_analysis and self.background_jobs:
+        if self.split_analysis is True and self.background_jobs:
             raise ValueError(
                 "execution.split_analysis cannot be combined with execution.background_jobs yet: "
                 "a background job's script already submits, waits for and collects the run, "
                 "and the analysis of what it collects is not split from it"
             )
         if (
-            self.split_analysis and self.sandbox == "docker"
+            self.split_analysis is not False and self.sandbox == "docker"
             and self.raw_dir.strip() and Path(self.raw_dir).expanduser().is_absolute()
         ):
             raise ValueError(
