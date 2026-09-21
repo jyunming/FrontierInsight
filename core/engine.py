@@ -48,6 +48,7 @@ from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
+from . import oracle_check as _oracle
 from . import protocol_check as _protocol
 from . import split_run as _split_run
 from . import stats as _stats
@@ -735,7 +736,7 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
-                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage"):
+                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage"):
                             # The plan step wrote plan.md and stopped for the
                             # person to read and edit it. Same pause-exit as
                             # the pauses above; without this branch the payload
@@ -747,7 +748,8 @@ class Engine:
                                 "[FI] paused for the %s: read and edit %s "
                                 "(or ask for a change with `--revise-plan`), "
                                 "then run `fi --resume %s`",
-                                "protocol" if intr_value.get("protocol_stage") else "plan",
+                                "oracle checks" if intr_value.get("oracle_stage")
+                                else "protocol" if intr_value.get("protocol_stage") else "plan",
                                 intr_value.get("plan_file", "plan.md"),
                                 self.quest_id,
                             )
@@ -2881,6 +2883,8 @@ class Engine:
                  for item in (objections if isinstance(objections, list) else [])]
         # What the topic sets and the protocol leaves out: said in the plan, where a person reads it before compute is spent.
         audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))
+        if isinstance(normalized.get("protocol"), dict):
+            audit += _protocol.oracle_notes(normalized.get("protocol"))
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit)
         path.write_text(body, encoding="utf-8")
@@ -4391,17 +4395,32 @@ class Engine:
 
     # ---- the protocol gate ---------------------------------------------------
 
-    def _protocol_of(self, state: QuestState) -> dict[str, Any] | None:
-        """The protocol the design carries, when there is an experiment to hold to it."""
+    def _protocol_block(self, state: QuestState) -> dict[str, Any] | None:
+        """The protocol to hold the experiment to, when there is an experiment.
+
+        On the first pass it is read from ``plan.md``, which is the source of truth for it: a person who edits the
+        protocol while the quest is stopped (or asks for a change) is heard at the next implement or execute, and not
+        only by the design step, which ran before. A later pass uses the design it made, or the plan's protocol if the
+        design has none."""
         if (
-            self.config.engine.protocol_check == "off"
-            or state.get("no_simulation_resolved")
+            state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
             or self.config.engine.analyze_local_first
         ):
             return None
-        protocol = (state.get("design") or {}).get("protocol")
+        design = state.get("design") or {}
+        if int(state.get("iteration", 0) or 0) == 0:
+            planned, _why = _plan.load_design(self.quest_root)
+            if isinstance(planned, dict) and isinstance(planned.get("protocol"), dict) and planned["protocol"]:
+                return planned["protocol"]
+        protocol = design.get("protocol")
         return protocol if isinstance(protocol, dict) and protocol else None
+
+    def _protocol_of(self, state: QuestState) -> dict[str, Any] | None:
+        """The protocol the script is compared with (``engine.protocol_check`` not off)."""
+        if self.config.engine.protocol_check == "off":
+            return None
+        return self._protocol_block(state)
 
     def _scripts_on_disk(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -4518,6 +4537,162 @@ class Engine:
             path.name, len(new_code), len(remaining), str(parsed.get("patch_summary") or "no summary")[:120],
         )
         return new_code, sorted({*deps, *new_deps})
+
+    async def _oracle_gate(self, state: QuestState, py: Any, exec_env: Any, seed_path: Path) -> str | None:
+        """Run the script's oracle checks (FI_ORACLE=1) and hold the quest at them.
+
+        Returns the text of ``code/experiment.py`` when a repair rewrote it (so it reaches the state), else ``None``.
+        A protocol that declares no oracle asks the plan for one first (:meth:`revise_plan`); a check that is missing
+        or fails asks for a repair of the script; each is up to ``engine.oracle_repair_attempts`` attempts. If the
+        oracles still do not pass, ``block`` stops the quest before its main sweep and ``warn`` records it and goes on.
+        Every attempt is in ``needs/ORACLE_CHECK.json``."""
+        if self.config.engine.oracle_check == "off" or self.config.execution.background_jobs:
+            return None
+        protocol = self._protocol_block(state)
+        if protocol is None:
+            return None
+        stride = max(1, int(self.config.engine.replicate_seed_stride))
+        env = {**_replicate_env(exec_env, 0, stride), "FI_ORACLE": "1"}
+        timeout = max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
+        budget = int(self.config.engine.oracle_repair_attempts)
+        attempts: list[dict[str, Any]] = []
+        found: list[str] = []
+        new_code: str | None = None
+        for attempt in range(budget + 1):
+            protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
+            oracles = _oracle.declared(protocol)
+            reported: dict[str, Any] | None = None
+            returncode, timed_out = 0, False
+            if oracles:
+                try:
+                    ran = await self.executor.execute(
+                        [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
+                    )
+                    reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
+                    stderr_tail = (ran.stderr or "")[-300:]
+                except Exception as e:  # noqa: BLE001 -- an oracle run that cannot start is a problem to report
+                    returncode, stderr_tail = -1, repr(e)
+                if reported is None and returncode not in (0, -1):
+                    self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail)
+            found = _oracle.problems(oracles, reported, returncode, timed_out)
+            attempts.append({
+                "attempt": attempt, "oracles": [o["name"] for o in oracles], "problems": found,
+                "checks": (reported or {}).get("checks"),
+            })
+            if not found or attempt == budget:
+                break
+            if not oracles:
+                self._log.warning("[oracle] %s; asking the plan for one (%d of %d)", found[0], attempt + 1, budget)
+                if not await self._declare_oracles():
+                    break
+                continue
+            self._log.warning(
+                "[oracle] %d problem(s): %s; asking for a repair (%d of %d)",
+                len(found), "; ".join(found), attempt + 1, budget,
+            )
+            text = await self._repair_script_for_oracle(state, seed_path, oracles, found)
+            if text is not None and seed_path.name == "experiment.py":
+                new_code = text
+        status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
+        self._oracle_record({"status": status, "attempts": attempts, "problems": found})
+        if not found:
+            self._log.info(
+                "[oracle] %d oracle(s) passed before the main run%s", len(attempts[-1]["oracles"]),
+                "" if len(attempts) == 1 else f" (after {len(attempts) - 1} repair(s))",
+            )
+            return new_code
+        if self.config.engine.oracle_check == "warn":
+            self._log.warning("[oracle] the oracles did not pass: %s; going on (engine.oracle_check: warn)", "; ".join(found))
+            return new_code
+        self._pause_for_oracle(found, seed_path)
+        return new_code  # not reached: the pause exits the run
+
+    def _oracle_record(self, payload: dict[str, Any]) -> None:
+        try:
+            path = self.quest_root / "needs" / "ORACLE_CHECK.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+        except OSError:
+            pass  # a record that cannot be written must never stop a quest
+
+    async def _declare_oracles(self) -> bool:
+        """Ask for the plan to be rewritten with at least one oracle in its protocol; ``False`` when it cannot be."""
+        request = (
+            "The protocol declares no oracle. Add `oracles` to the protocol block of the design: at least one check "
+            "that does not rely on the script's own numbers being right (a closed form the simulation must reproduce, a "
+            "limiting case with a known answer, a conservation law or invariant every run must satisfy, a small case whose "
+            "exact answer can be computed another way, or a second independent implementation). Each entry has a `name`, a "
+            "`kind`, a `check` saying what is compared with what on which small case, and a `tolerance`. Change nothing else."
+        )
+        try:
+            await self.revise_plan(request)
+        except (FileNotFoundError, ValueError) as e:
+            self._log.warning("[oracle] the plan could not be rewritten with an oracle: %s", e)
+            return False
+        return True
+
+    async def _repair_script_for_oracle(
+        self, state: QuestState, path: Path, oracles: list[dict[str, Any]], found: list[str],
+    ) -> str | None:
+        """ONE repair of the script for its oracle checks. Kept only if it parses and now mentions FI_ORACLE."""
+        code = path.read_text(encoding="utf-8")
+        prompt = self._prompts["execute_reflect"].substitute(
+            previous_code=code,
+            returncode="(the oracle run did not pass)",
+            stdout_tail=_oracle.directive(oracles, found),
+            stderr_tail="",
+            duration_s="0.00",
+            figures_count="0",
+            result_json_present="no (not run yet)",
+            reflect_history_block=_format_reflect_history([]),
+            design_block=json.dumps(state.get("design") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+        )
+        try:
+            text = await self._chat(prompt, node="implement_oracle")
+        except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
+            self._log.warning("[oracle] the repair call failed (%r); keeping %s as written", exc, path.name)
+            return None
+        parsed: dict[str, Any] = {}
+        if _strip_outer_fence(text).lstrip().startswith("{"):
+            parsed = _parse_json_lenient(text, node="implement_oracle") or {}
+        new_code = parsed.get("code")
+        if not (isinstance(new_code, str) and new_code.strip()):
+            new_code, _deps = _parse_implement_response(text)
+        try:
+            ast.parse(new_code)
+            usable = bool(new_code.strip()) and "FI_ORACLE" in new_code
+        except (SyntaxError, ValueError):
+            usable = False
+        if not usable:
+            self._log.warning("[oracle] the repair of %s is not usable (it must parse and honour FI_ORACLE); keeping it as written", path.name)
+            return None
+        path.write_text(new_code, encoding="utf-8")
+        self._log.info(
+            "[oracle] rewrote %s (%d bytes): %s", path.name, len(new_code),
+            str(parsed.get("patch_summary") or "no summary")[:160],
+        )
+        return new_code
+
+    def _pause_for_oracle(self, found: list[str], seed_path: Path) -> None:
+        """Stop before the main sweep: the oracles did not pass after the repairs."""
+        steps = [
+            "The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + ".",
+            f"Either fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
+            f"declared oracle check and prints an `ORACLE_JSON:` line, or, if the plan is what should change, edit the "
+            f"oracles in the protocol of `{_plan.plan_path(self.quest_root)}` (or ask for a change: `--revise-plan`). "
+            "Then resume: the oracle checks run again before anything else.",
+        ]
+        self._pause_for_human(
+            kind="oracle",
+            interaction="supply",
+            headline="the script has not passed its oracle checks",
+            steps=steps,
+            payload={
+                "oracle_stage": True, "quest_id": self.quest_id, "problems": found,
+                "plan_file": str(_plan.plan_path(self.quest_root)),
+            },
+        )
 
     def _pause_for_protocol(self, mismatches: list[Any], deps: list[str]) -> None:
         """Stop for the person: the script still contradicts the plan after the repairs. They edit ``plan.md`` (the
@@ -4805,6 +4980,10 @@ class Engine:
                     "proceeding to real script anyway",
                     warmup.returncode, warmup.stderr[-200:],
                 )
+
+        # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
+        # stops here, with what is missing): the script's own numbers are not evidence that they are right.
+        oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
 
         # Pilot pass: run the experiment small before running it for real.
         #
@@ -5150,6 +5329,8 @@ class Engine:
             "result_json": result_json or {},
             "exec_patch_pending": False,
         }
+        if oracle_code is not None:
+            patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         # Only populate ``result_json_replicates`` when replication
         # actually ran AND produced more than the primary entry. This
         # keeps the field absent on default single-seed quests so
@@ -10471,8 +10652,11 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "thresholds": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
-  "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"]
+  "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
+  "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what is compared with what, on which small case>", "tolerance": "<how close counts as agreeing>"}]
 }
+
+`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. The script is run once with FI_ORACLE=1 to answer them before its main run, and a run whose checks do not pass never reaches the main sweep.
 
 Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """

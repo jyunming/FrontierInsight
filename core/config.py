@@ -673,6 +673,15 @@ class EngineConfig(BaseModel):
     # when the plan has no ``protocol`` block, or for a study with no experiment.
     protocol_check: Literal["block", "warn", "off"] = "block"
     protocol_repair_attempts: int = Field(default=2, ge=0, le=5)
+    # The oracles the plan's protocol declares (a closed form, a limiting case, an invariant, an exact small case:
+    # ``core/oracle_check.py``) are checked before the pilot and the main run: the script is run with FI_ORACLE=1
+    # and must run them and print ``ORACLE_JSON``. A check that fails, one that is missing, or a protocol that
+    # declares none is sent back for up to ``oracle_repair_attempts`` repairs (a protocol with no oracle first asks the
+    # plan to be rewritten with one); if it still does not pass, ``block`` (default) stops the quest before the main
+    # sweep, ``warn`` only logs and records it, ``off`` does not look. Nothing is checked without a ``protocol`` in the
+    # design, for a background job, or for a study with no experiment.
+    oracle_check: Literal["block", "warn", "off"] = "block"
+    oracle_repair_attempts: int = Field(default=2, ge=0, le=5)
     # How far apart consecutive replicates' seeds sit. Replicate i is handed
     # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can
     # derive occupy ``[i*stride, (i+1)*stride)`` and no two replicates reach

@@ -285,6 +285,18 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
     return out
 
 
+def oracle_notes(protocol: dict[str, Any] | None) -> list[str]:
+    """What the plan says about the oracles its protocol declares (:mod:`core.oracle_check`)."""
+    oracles = protocol.get("oracles") if isinstance(protocol, dict) else None
+    if isinstance(oracles, list) and oracles:
+        return []
+    return [
+        "The protocol declares no oracle, so nothing independent of the script's own numbers will check that they are "
+        "right; the run stops before its main sweep until one is declared (a closed form, a limiting case, an invariant "
+        "that must hold, an exact small case, or a second implementation)."
+    ]
+
+
 def plan_notes(topic: str, protocol: dict[str, Any] | None) -> list[str]:
     """What the plan leaves out of the numbers the topic sets: one sentence each, for the plan's *Checks already made*."""
     asked = asked_numbers(topic or "")

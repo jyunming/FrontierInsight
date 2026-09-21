@@ -213,7 +213,7 @@
   function describeState(q) {
     if (q.verdict === 'needs_you') {
       const kind = { review: 'review', clarify: 'setup', papers: 'papers',
-                     supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol' }[q.pending] || '';
+                     supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'oracle' }[q.pending] || '';
       return {
         label: kind ? `Needs you · ${kind}` : 'Needs you',
         pillBg: 'bg-status-warning/15', pillText: 'text-status-warning',
