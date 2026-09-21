@@ -13,9 +13,11 @@ topic: |
 
 title: bakeoff-integrators-fi-redesign
 
+# The only thing to set before you run this: which model answers. `openai` reads the key from the environment variable
+# OPENAI_API_KEY (or a .env file in the folder you run from) and uses gpt-5. Any other provider works: gemini,
+# claude_cli, codex_cli, ollama or vscode_extension (see the table in the README and docs/PROVIDERS.md).
 provider:
-  name: codex
-  # api_key_env defaults to OPENAI_API_KEY; model defaults to gpt-5.
+  name: openai
 
 engine:
   framework: langgraph
@@ -27,20 +29,17 @@ execution:
   timeout_s: 1800
   python_version: "3.11"
 
+# The literature search. FI stops at two places for you by default: after the literature, to let you download paywalled
+# papers by hand (pauses.papers), and after the review, to let you accept or reject the paper (pauses.review). This
+# example turns both off so the first run finishes on its own; set them back to "ask" / true to be asked.
 knowledge:
   enabled: true
-  # Inline AxonConfig fields are passed straight through. Substitute a
-  # path like `axon_config: ~/axon-config.yaml` if you keep your Axon
-  # config separate.
-  axon_config:
-    embedding:
-      provider: ollama
-      model: nomic-embed-text
-    llm:
-      provider: ollama
-      model: qwen2.5-coder:32b
   top_k: 5
   write_back_quests: true
+
+pauses:
+  papers: false
+  review: "off"
 
 output:
   kinds:

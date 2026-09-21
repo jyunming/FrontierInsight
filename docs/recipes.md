@@ -4,7 +4,7 @@
 > full cookbook: provider setup, the headless interview, writing your own
 > quest, the human-in-the-loop pauses, and ~30 task-oriented recipes.
 > For the YAML schema see [`USAGE.md`](USAGE.md); for the full feature
-> catalogue see [`capabilities.md`](capabilities.md).
+> catalogue see [`capabilities-reference.md`](capabilities-reference.md).
 
 ---
 

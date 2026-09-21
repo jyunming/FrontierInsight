@@ -2479,6 +2479,28 @@ def resolve_endpoint(
     )
 
 
+def missing_api_key(provider: ProviderConfig) -> str | None:
+    """What to tell a person whose provider needs an API key that is not in the environment, ``None`` when nothing is missing.
+
+    Without this the request goes out with a placeholder key and the first sign of the problem is a ``401`` traceback from
+    inside the first model call. A gateway of your own (a ``base_url`` that is not the provider's) that never named a key is
+    left alone: it may not need one."""
+    defaults = _DIRECT_DEFAULTS.get(provider.name)
+    if defaults is None or provider.name in _PROXY_PROVIDERS or provider.name in _CLI_PROVIDERS:
+        return None
+    env = provider.api_key_env or defaults["api_key_env"]
+    if not env or os.environ.get(env):
+        return None
+    own_gateway = bool(provider.base_url) and provider.base_url != defaults["base_url"]
+    if own_gateway and not provider.api_key_env:
+        return None
+    return (
+        f"provider {provider.name!r} needs an API key in the environment variable {env}, and it is not set. "
+        f"Set it (PowerShell: $env:{env}=\"<your key>\"; bash: export {env}=<your key>) or put {env}=<your key> in a .env "
+        f"file in this folder, or choose another provider (docs/PROVIDERS.md). Nothing was started."
+    )
+
+
 async def resolve_endpoint_async(
     provider: ProviderConfig,
     supervisor: ProxySupervisor,

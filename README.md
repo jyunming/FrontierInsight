@@ -15,34 +15,35 @@ One engine, **three ways to drive it**: the command line, a local **web UI**, or
 
 ---
 
-## Quickstart (about 5 minutes)
+## Quickstart
+
+You need **Python 3.11 or newer** and a language model FI can talk to (an API key, a signed-in CLI, or VSCode Copilot).
 
 ```bash
 git clone https://github.com/jyunming/FrontierInsight
 cd FrontierInsight
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\activate            # macOS / Linux: source .venv/bin/activate   (PowerShell: .venv\Scripts\Activate.ps1)
+pip install -e .
 
-# 1. pick one LLM provider (table below), then
-# 2. run the bundled example (three numerical integrators on a damped oscillator, ~3 minutes):
-python launch.py --config examples/integrator_bakeoff/config.yaml
+export OPENAI_API_KEY=sk-...       # Windows PowerShell: $env:OPENAI_API_KEY = "sk-..."
+fi --config examples/integrator_bakeoff/config.yaml
 ```
 
-Open `outputs/<quest_id>/paper/paper.md`: that is your paper. The bundled example needs no data and no setup beyond a provider.
+That runs the bundled example (three numerical integrators on a damped oscillator). It needs no data. It takes a while (it searches the literature, writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (`fi` is the same command as `python launch.py`.)
 
-**Pick one LLM provider** — whichever you already have:
+**Not using OpenAI?** Change `provider: name:` at the top of the example's YAML:
 
 | You have… | Set `provider.name` to |
 |---|---|
-| GitHub Copilot, or any model VSCode already has | `vscode_extension` (use the `@fi` chat in VSCode) |
 | An API key | `openai` / `gemini` |
+| GitHub Copilot, or any model VSCode already has | `vscode_extension` (use the `@fi` chat in VSCode) |
 | A signed-in CLI (`claude login`, `codex login`) | `claude_cli` / `codex_cli` |
 | Nothing, offline | `ollama` (local, free) |
 
-Setup, cost and the billing model of each provider are in [docs/PROVIDERS.md](docs/PROVIDERS.md) and [docs/recipes.md](docs/recipes.md).
+If a key is missing FI says which variable before it starts anything. If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `fi --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
-**Prefer to be walked through it?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions and writes the `config.yaml` for you.
-
-**Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
+**Prefer to be asked?** `fi --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions and writes the config for you. **Web UI:** `fi --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 
 ---
 
@@ -111,18 +112,15 @@ The long descriptions of each are in [docs/features.md](docs/features.md).
 
 ---
 
-## Going deeper
+## Where to go next
 
-- **Rigor: how FI checks its own experiments** → [`docs/rigor.md`](docs/rigor.md)
-- **The trace: what a quest did, in order, and why** → [`docs/trace.md`](docs/trace.md)
-- **Recipes and how-tos** → [`docs/recipes.md`](docs/recipes.md)
-- **Every setting and flag** → [`docs/USAGE.md`](docs/USAGE.md)
-- **Full capability reference** → [`docs/capabilities.md`](docs/capabilities.md)
-- **Feature tour** → [`docs/features.md`](docs/features.md)
-- **Providers, cost and terms of use** → [`docs/PROVIDERS.md`](docs/PROVIDERS.md)
-- **Architecture and extension points** → [`docs/architecture.md`](docs/architecture.md)
-- **Install troubleshooting** → [`docs/INSTALL.md`](docs/INSTALL.md)
-- **Contributing** → [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Your first quest, step by step** → [`docs/first-quest.md`](docs/first-quest.md)
+- **The words FI uses** → [`docs/glossary.md`](docs/glossary.md)
+- **How FI checks its own experiments** → [`docs/rigor.md`](docs/rigor.md)
+- **What a quest did, in order, and why** → [`docs/trace.md`](docs/trace.md)
+- **Every setting and flag** → [`docs/USAGE.md`](docs/USAGE.md) · **how-tos** → [`docs/recipes.md`](docs/recipes.md) · **providers and cost** → [`docs/PROVIDERS.md`](docs/PROVIDERS.md)
+- **What FI can do, on one page** → [`docs/capabilities.md`](docs/capabilities.md)
+- The full map of the docs → [`docs/README.md`](docs/README.md) · Contributing → [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ---
 

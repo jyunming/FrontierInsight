@@ -1,6 +1,6 @@
 # Feature tour
 
-The longer descriptions behind the README's short highlights, one per topic. For the reference of every setting see [`capabilities.md`](capabilities.md) and [`USAGE.md`](USAGE.md).
+The longer descriptions behind the README's short highlights, one per topic. For the reference of every setting see [`capabilities-reference.md`](capabilities-reference.md) and [`USAGE.md`](USAGE.md).
 
 - **Literature and simulation as separate steps** — stop after the literature search (`pauses.supply: after_literature`), read it and add your own papers and files, then `--resume` designs and runs the experiment with it in hand, without searching again; the simulation itself (`execution.background_jobs`) and its analysis (`execution.split_analysis`) can be split off the same way. See *Search first, simulate second* at the end of this page.
 - **A plan you can read, edit and re-ask** — every quest writes `plan.md` (what the literature says, the gap, the design) before the experiment is designed; edit it or ask for a change, then resume, and the design block in the file is what runs. See [rigor.md](rigor.md) (the plan, its protocol and how it is checked) and the README's *Look at the plan before anything runs*.

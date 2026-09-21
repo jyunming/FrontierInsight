@@ -19,5 +19,5 @@ literature-router (`euv_mor_shot_noise`) and a sanctioned CLI provider
 (`bernstein_vazirani_noise`).
 
 Outputs land in `outputs/<quest_id>/` not in this directory. See
-[`docs/capabilities.md`](../docs/capabilities.md) for the per-quest
+[`docs/capabilities-reference.md`](../docs/capabilities-reference.md) for the per-quest
 artifact layout.

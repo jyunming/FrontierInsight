@@ -28,7 +28,7 @@ provider proxies.
 ## Shipped capabilities
 
 The shipped capability list, organized by area rather than dev order.
-For exact YAML field semantics see [`capabilities.md`](capabilities.md);
+For exact YAML field semantics see [`capabilities-reference.md`](capabilities-reference.md);
 for the layered design see [`architecture.md`](architecture.md).
 
 ### Engine
@@ -38,7 +38,7 @@ for the layered design see [`architecture.md`](architecture.md).
   or the no-simulation chain auto_collect_data → wait_for_data → data_load
   → web_plots → web_figures, analyze, cross_check, evidence_gate, write,
   claim_check, review, human_feedback). `core/engine.py:_build_graph` is
-  authoritative; `capabilities.md` describes each node.
+  authoritative; `capabilities-reference.md` describes each node.
 - `AsyncSqliteSaver` checkpointing → resumability via
   `--resume <quest_id>` or `@fi /resume`.
 - Stateless `Engine` so N parallel quests can share one process
