@@ -419,6 +419,20 @@ def oracle_notes(protocol: dict[str, Any] | None) -> list[str]:
     ]
 
 
+def failure_notes(protocol: dict[str, Any] | None) -> list[str]:
+    """What the plan says about a trial that fails, when the protocol has runs to fail (:mod:`core.run_manifest`). Said before
+    the freeze, where it can still be added: afterwards the only way to add it is an amendment."""
+    if not isinstance(protocol, dict) or not isinstance(protocol.get("runs_per_setting"), (int, float)):
+        return []
+    if str(protocol.get("failure_policy") or "").strip():
+        return []
+    return [
+        "The protocol does not say how a trial that fails (a solver that does not converge, an exception) is treated: counted "
+        "as a failure, excluded and reported, or retried. Add `failure_policy` while the plan is a draft; the run lists every "
+        "failed trial, and a failure the protocol has no policy for is a gap of the evidence level."
+    ]
+
+
 def plan_notes(topic: str, protocol: dict[str, Any] | None) -> list[str]:
     """What the plan leaves out of the numbers the topic sets: one sentence each, for the plan's *Checks already made*."""
     asked = asked_numbers(topic or "")

@@ -323,6 +323,8 @@ The protocol's `precision.target_half_width` says how tight a probability has to
 
 An amendment after the freeze: when a redesign asks to change the protocol the quest stops with an *Action needed* message and `needs/PROTOCOL_AMENDMENT_PENDING.json`. Approve it with `python launch.py --approve-amendment <quest_id> --approve-as <you>` (or the quest page's Approve button, or `@fi /approve-amendment <quest_id>`), then resume; resuming without approving keeps the frozen protocol. See *the protocol is frozen* in the README for what an approval does to the earlier run.
 
+A simulation's `run_manifest.json` (what it actually swept and ran) is compared with the frozen protocol after its first run; a difference sends `simulate.py` back once and then stops the quest with what differs. Fix `code/simulate.py` so that it runs the protocol's design and writes the manifest from what its loops did, then resume; `engine.run_manifest_check: warn` goes on with the difference recorded. `execution.split_failure: block` stops a quest whose code-writing reply does not hold both scripts instead of running it as one.
+
 A run whose own numerics warned (an overflow, a solver that did not converge, an argument that had no effect, a NaN in a result) is sent back like a failed one, and stops the quest if the repairs do not remove the warnings; `engine.numeric_warnings: warn` records them and goes on, `off` does not look. Resuming after the stop runs the script again if you changed it, and accepts the run as it is if you did not.
 
 ### Run a quest on Moonshot's Kimi (or any OpenAI-compatible model that fixes its sampling)

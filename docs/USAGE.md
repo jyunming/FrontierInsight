@@ -49,7 +49,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `implement_oracle` | 0–2 | One repair per attempt (`engine.oracle_repair_attempts`), only when the script does not answer the plan's oracles when run with `FI_ORACLE=1` (`engine.oracle_check`); a protocol with no oracle first makes a `plan_revise` call to add one. None when the oracles pass or the plan has no protocol. |
 | `implement_protocol` | 0–2 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`); none when it agrees or the plan has no protocol. |
 | `implement` | 1 per design pass | |
-| `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. |
+| `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. Also when the finished run's manifest differs from the frozen protocol (`engine.run_manifest_check`, `engine.run_manifest_repair_attempts`). |
 | `analyze` | 1 per design pass | |
 | `cross_check` | 0–10 | One per key finding that found related literature, up to 10 findings (skipped when `cross_check_per_finding_k = 0`); 0–8 in the measured runs. |
 | `evidence_gate` | 0–1 | Sufficiency check before write (`engine.evidence_gate`, default on); it made no call in 7 of the 17 measured runs. A `broaden` verdict re-enters literature once. |

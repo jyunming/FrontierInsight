@@ -698,6 +698,15 @@ class EngineConfig(BaseModel):
     # changed it, and accepts the run as it is if you did not. ``warn`` only logs and records them; ``off`` does not look.
     numeric_warnings: Literal["block", "warn", "off"] = "block"
     oracle_repair_attempts: int = Field(default=2, ge=0, le=5)
+    # What the finished simulation says it did (``run_manifest.json`` in its raw-data folder: the grid it swept, the trials
+    # it attempted and completed per setting, the failures, the thresholds) is compared with the frozen protocol
+    # (``core/run_manifest.py``); it needs the two-script layout (``execution.split_analysis``), because that is where the
+    # simulation is a script of its own. ``block`` (default) sends the simulation back for up to
+    # ``run_manifest_repair_attempts`` repairs (each is a full run again, so the default is one) and, if it still differs, stops
+    # the quest with what differs; ``warn`` only records it; ``off`` does not look. Every check is in
+    # ``needs/RUN_MANIFEST_CHECK.json``.
+    run_manifest_check: Literal["block", "warn", "off"] = "block"
+    run_manifest_repair_attempts: int = Field(default=1, ge=0, le=3)
     # How far apart consecutive replicates' seeds sit. Replicate i is handed
     # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can
     # derive occupy ``[i*stride, (i+1)*stride)`` and no two replicates reach
@@ -1003,6 +1012,11 @@ class ExecutionConfig(BaseModel):
     # no-simulation study or a survey; ``true`` and ``false`` decide for every quest. Not
     # yet combinable with ``background_jobs`` when ``true``. The contract is in core/split_run.py.
     split_analysis: bool | Literal["auto"] = "auto"
+    # What happens when a quest that should keep two scripts gets a reply that does not hold both, after the reply was asked
+    # for once more. ``warn`` (default): the quest runs as ONE script and says so, which loses the raw outcomes and the
+    # analysis-only rerun. ``block``: the quest stops with the reason, and a resume asks for the scripts again; nothing is
+    # degraded.
+    split_failure: Literal["warn", "block"] = "warn"
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy

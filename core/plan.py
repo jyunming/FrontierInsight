@@ -133,7 +133,7 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
 
     The protocol fixes what an experiment is not allowed to change on its own (:mod:`core.protocol_check`): ``grid`` (each
     parameter it sweeps, with every value), ``runs_per_setting``, ``thresholds``, and the prose ``seed_policy``,
-    ``ci_method`` and ``acceptance`` (what would count as support). Every key is optional, and keys beyond these are kept.
+    ``ci_method``, ``failure_policy`` (how a trial that fails is treated) and ``acceptance`` (what would count as support). Every key is optional, and keys beyond these are kept.
     Strict about the numbers, which are what a check reads."""
     if not isinstance(protocol, dict):
         return None, "`protocol` must be a mapping (`grid`, `runs_per_setting`, `thresholds`, ...)"
@@ -157,7 +157,7 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     if thresholds is not None:
         if not isinstance(thresholds, dict) or not all(_number(v) for v in thresholds.values()):
             return None, "`protocol.thresholds` must map each name to a number"
-    for key in ("seed_policy", "ci_method"):
+    for key in ("seed_policy", "ci_method", "failure_policy"):
         if out.get(key) is not None and not isinstance(out[key], str):
             return None, f"`protocol.{key}` must be text"
     precision = out.get("precision")

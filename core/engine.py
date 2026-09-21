@@ -46,6 +46,7 @@ from langgraph.types import Command, interrupt
 
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
+from . import run_manifest as _run_manifest
 from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
@@ -192,6 +193,8 @@ class QuestState(TypedDict, total=False):
     # be rewritten after its results are known -- but a finished paper looks
     # identical either way, which is what makes the record necessary.
     design_history: list[dict[str, Any]]
+    # How many times the simulation was sent back because its run manifest differed from the frozen protocol.
+    run_manifest_failures: int
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -742,7 +745,7 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
-                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage") or intr_value.get("numeric_stage") or intr_value.get("amendment_stage"):
+                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage") or intr_value.get("numeric_stage") or intr_value.get("amendment_stage") or intr_value.get("contract_stage"):
                             # The plan step wrote plan.md and stopped for the
                             # person to read and edit it. Same pause-exit as
                             # the pauses above; without this branch the payload
@@ -750,6 +753,13 @@ class Engine:
                             # left a clarify_questions.json that made the quest
                             # page ask for clarify answers.
                             data_paused = True
+                            if intr_value.get("contract_stage"):
+                                self._log.info(
+                                    "[FI] paused for the two-script contract (%s): read %s, fix what it names, then run `fi --resume %s`",
+                                    "; ".join(intr_value.get("problems") or [])[:200],
+                                    self.quest_root / "NEXT_STEP.md", self.quest_id,
+                                )
+                                break
                             if intr_value.get("amendment_stage"):
                                 self._log.info(
                                     "[FI] paused for the protocol amendment: read %s, approve it with `--approve-amendment \"%s\" "
@@ -2982,6 +2992,7 @@ class Engine:
         audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))
         if isinstance(normalized.get("protocol"), dict):
             audit += _protocol.oracle_notes(normalized.get("protocol"))
+            audit += _protocol.failure_notes(normalized.get("protocol"))
             audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
             audit += _protocol.grid_notes(normalized)
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
@@ -4443,7 +4454,15 @@ class Engine:
             if scripts is not None:
                 simulate_code, code = scripts["simulate"], scripts["analysis"]
                 deps = _parse_split_deps(text)
+                broken = _run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code})
+                if broken:
+                    self._split_contract_broken(broken, what="the two scripts break the two-script contract")
             else:
+                if self.config.execution.split_failure == "block":
+                    self._split_contract_broken(
+                        ["the reply did not hold both scripts (`# file: simulate.py` and `# file: experiment.py`), also when asked again"],
+                        what="the code-writing step did not return both scripts",
+                    )
                 self._log.warning(
                     "[implement] the reply still did not hold both scripts; this quest runs as "
                     "ONE script (execution.split_analysis has no effect on it)",
@@ -4568,6 +4587,89 @@ class Engine:
                 "change is made by asking for it when the quest is refined, which stops for your approval.",
                 "; ".join(_frozen.diff(frozen.get("protocol"), protocol)[:3]) or "no listed difference",
             )
+
+    def _run_manifest_record(self, payload: dict[str, Any]) -> None:
+        try:
+            path = self.quest_root / "needs" / "RUN_MANIFEST_CHECK.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+        except OSError:
+            pass  # a record that cannot be written must never stop a quest
+
+    def _run_manifest_problems(self, state: QuestState, split: bool, result: Any) -> tuple[str, list[str]]:
+        """``(status, differences)`` of the finished first run: what its manifest says against the frozen protocol.
+        Statuses other than ``ok`` and ``differs`` say why nothing was compared."""
+        self._manifest_failed_trials = 0
+        if self.config.engine.run_manifest_check == "off":
+            return "off", []
+        protocol = self._protocol_block(state)
+        if protocol is None or not _run_manifest.checkable(protocol):
+            return "not_applicable", []
+        if not split:
+            # The simulation is not a script of its own, so it writes no manifest. A stochastic study is asked to keep
+            # two scripts; a deterministic one (an ODE sweep) has no per-trial outcomes to keep and needs none.
+            return ("single_script" if _split_run.design_is_stochastic(state.get("design")) else "not_applicable"), []
+        if result.returncode != 0:
+            return "not_run", []
+        manifest, why = _run_manifest.read(_split_run.raw_dir_for(self._raw_root(), 0))
+        found = _run_manifest.problems(protocol, manifest, why)
+        self._manifest_failed_trials = _run_manifest.failure_count(manifest)
+        return ("differs" if found else "ok"), found
+
+    def _check_replicate_manifests(self, state: QuestState, split: bool, replicates: int) -> None:
+        """The other seeds' manifests against the same protocol. A difference is recorded (and is a gap of the evidence
+        level), not repaired: the primary run was already held to it."""
+        if not split or replicates < 2:
+            return
+        record = _read_json_or_none_path(self.quest_root / "needs" / "RUN_MANIFEST_CHECK.json")
+        if not isinstance(record, dict) or record.get("status") != "ok":
+            return
+        protocol = self._protocol_block(state)
+        if protocol is None:
+            return
+        seeds: dict[str, list[str]] = {}
+        for index in range(1, replicates):
+            raw_dir = _split_run.raw_dir_for(self._raw_root(), index)
+            if not raw_dir.is_dir():
+                continue  # that replicate was not run (the study was found deterministic after two seeds)
+            manifest, why = _run_manifest.read(raw_dir)
+            found = _run_manifest.problems(protocol, manifest, why)
+            if found:
+                seeds[str(index)] = found
+        if seeds:
+            record = {**record, "status": "differs_in_replicates", "seeds": seeds}
+            self._log.warning(
+                "[run_manifest] %d replicate(s) differ from the frozen protocol: %s", len(seeds),
+                "; ".join(f"seed {k}: {v[0]}" for k, v in seeds.items()),
+            )
+            self._run_manifest_record(record)
+
+    def _split_contract_broken(self, found: list[str], *, what: str) -> None:
+        """A quest that should keep two scripts got scripts that break the contract, or a reply without both: ``warn`` says
+        so and goes on, ``block`` stops the quest (a resume asks for the scripts again) and degrades nothing."""
+        if self.config.execution.split_failure != "block":
+            self._log.warning("[implement] %s: %s", what, "; ".join(found))
+            return
+        self._pause_for_contract(
+            kind="split",
+            headline=what,
+            steps=[
+                what[0].upper() + what[1:] + ": " + "; ".join(found) + ".",
+                "The quest keeps its simulation and its analysis in two scripts (execution.split_failure: block), so it does not go on "
+                "with something else. Resume to ask for the scripts again; set `execution.split_failure: warn` to let the quest run "
+                "as one script instead.",
+            ],
+            problems=found,
+        )
+
+    def _pause_for_contract(self, *, kind: str, headline: str, steps: list[str], problems: list[str]) -> None:
+        self._pause_for_human(
+            kind=kind,
+            interaction="supply",
+            headline=headline,
+            steps=steps,
+            payload={"contract_stage": True, "quest_id": self.quest_id, "problems": problems},
+        )
 
     def _raw_root(self) -> Path:
         return _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
@@ -4802,6 +4904,7 @@ class Engine:
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
                     "numeric_warnings": self.config.engine.numeric_warnings,
+                    "run_manifest_check": self.config.engine.run_manifest_check,
                 },
             )
             path = self.quest_root / "needs" / "EVIDENCE.json"
@@ -5518,6 +5621,61 @@ class Engine:
         # Which of the two scripts failed, for the repair; read now, before a replicate
         # runs through the same runner.
         failed_script = runner.failed_script if split else None
+        # What the simulation says it did, against the frozen protocol (core/run_manifest.py): a run that differs is sent
+        # back like a failed one, and after the repairs the quest stops.
+        manifest_stop = self.fi_dir / "run_manifest_stop.json"
+        if manifest_stop.is_file():  # a resume after a stop starts the repairs again
+            manifest_stop.unlink(missing_ok=True)
+            manifest_attempts = 0
+        else:
+            manifest_attempts = int(state.get("run_manifest_failures", 0) or 0)
+        manifest_status, manifest_found = self._run_manifest_problems(state, split, result)
+        manifest_attempts_next = 0
+        if manifest_found:
+            mode = self.config.engine.run_manifest_check
+            budget = int(self.config.engine.run_manifest_repair_attempts)
+            if mode == "warn":
+                manifest_status = "warned"
+                self._log.warning("[run_manifest] the run differs from the frozen protocol: %s; going on (engine.run_manifest_check: warn)", "; ".join(manifest_found))
+            elif manifest_attempts < budget:
+                manifest_status = "repairing"
+                manifest_attempts_next = manifest_attempts + 1
+                self._log.warning(
+                    "[run_manifest] the run differs from the frozen protocol (%d): %s; sending simulate.py back (%d of %d)",
+                    len(manifest_found), "; ".join(manifest_found), manifest_attempts_next, budget,
+                )
+                # The rejected run's numbers must not reach the analysis if the repair gives up: no RESULT_JSON line, no figures.
+                kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
+                result = ExecutionResult(
+                    1, kept,
+                    (result.stderr or "") + "\n[FI] " + _run_manifest.directive(manifest_found, self._protocol_block(state) or {}),
+                    result.duration_s, result.timed_out,
+                )
+                failed_script = _split_run.SIMULATE_NAME
+                self._clear_stale_figures()
+            else:
+                manifest_status = "stopped"
+        self._run_manifest_record({
+            "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
+            "failed_trials": getattr(self, "_manifest_failed_trials", 0),
+        })
+        if manifest_status == "stopped":
+            try:
+                manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+            self._pause_for_contract(
+                kind="manifest",
+                headline="the simulation does not do what the protocol fixed",
+                steps=[
+                    "The run's own manifest (`run_manifest.json` in its raw-data folder) differs from the frozen protocol, and the "
+                    "repairs did not remove it: " + "; ".join(manifest_found) + ".",
+                    f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that it runs the protocol's design and writes the "
+                    "manifest from what its loops did, then resume. (The protocol is frozen: a different design needs an amendment.) "
+                    "Set `engine.run_manifest_check: warn` to go on with the difference recorded.",
+                ],
+                problems=manifest_found,
+            )
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
@@ -5743,6 +5901,8 @@ class Engine:
             "exec_patch_pending": False,
         }
         patch["numeric_warnings_accepted"] = False
+        patch["run_manifest_failures"] = manifest_attempts_next
+        self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         # Only populate ``result_json_replicates`` when replication
@@ -11065,6 +11225,8 @@ This quest keeps the simulation and its analysis apart, so an analysis mistake n
 If an outline is given, it describes the whole experiment as one program: put its simulation functions in simulate.py and its statistics, figure and `RESULT_JSON` functions in experiment.py, keep every name and signature, and let the two meet only through the files in `FI_RAW_DIR`.
 """
 
+_SPLIT_PROTOCOL = _SPLIT_PROTOCOL.rstrip("\n") + "\n\n" + _run_manifest.contract().strip() + "\n"
+
 _PLAN_DIRECTIVE = """
 
 ## Also write the plan (added to the design; it replaces nothing above)
@@ -11089,6 +11251,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "thresholds": {"<name>": <value>},
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
+  "failure_policy": "<how a trial that fails (a solver that does not converge, an exception) is treated: counted as a failure, excluded and reported, or retried; every failed trial is listed by the run>",
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
@@ -14866,6 +15029,13 @@ def _extract_pdf_text(path: Path) -> str:
 # is well above 5000 chars even when truncated. 1500 splits the two
 # comfortably without over- or under-flagging.
 _ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
+
+
+def _read_json_or_none_path(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _append_design_revision(
