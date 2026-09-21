@@ -38,6 +38,15 @@
       <button onclick="approveAll()" class="px-4 py-2 rounded-lg bg-primary/20 hover:bg-primary/30 text-on-surface font-label-md">Approve all…</button>
       <span id="verified-note" class="text-body-sm text-on-surface-variant"></span>
     </div>
+    <div class="flex items-center gap-3 flex-wrap mt-4">
+      <label for="config" class="text-label-md text-on-surface-variant">Quest config</label>
+      <input id="config" type="text" autocomplete="off" spellcheck="false"
+             placeholder="full path to a quest .yaml: also look in the skill folders it names (engine.skills_dirs)"
+             class="flex-1 min-w-[16rem] px-3 py-2 rounded-lg bg-surface-container text-on-surface font-mono text-body-sm"
+             onkeydown="if (event.key === 'Enter') load(false)"/>
+      <button onclick="load(false)" class="px-3 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md">Use</button>
+    </div>
+    <p id="config-note" class="text-body-sm text-on-surface-variant mt-2"></p>
   </section>
 
   <section id="list" class="w-full max-w-5xl space-y-4 mb-16"></section>
@@ -46,6 +55,26 @@
 <script>
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => (
   {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// A quest's YAML can name skill folders of its own (engine.skills_dirs); the command
+// line reads them with --config, and this field is the same thing. It is optional,
+// and kept in the browser so a refresh does not lose it.
+const CONFIG_KEY = "fi.skills.config";
+function configValue() {
+  const box = document.getElementById("config");
+  return box ? box.value.trim() : "";
+}
+function withConfig(url) {
+  const c = configValue();
+  return c ? url + (url.includes("?") ? "&" : "?") + "config=" + encodeURIComponent(c) : url;
+}
+function rememberConfig(c) {
+  try { c ? localStorage.setItem(CONFIG_KEY, c) : localStorage.removeItem(CONFIG_KEY); } catch (_) { /* storage may be blocked */ }
+}
+try {
+  const saved = localStorage.getItem(CONFIG_KEY);
+  if (saved) document.getElementById("config").value = saved;
+} catch (_) { /* storage may be blocked: the field starts empty */ }
 
 const STATUS_STYLE = {
   trusted:     "bg-green-500/15 text-green-300",
@@ -61,13 +90,22 @@ async function load(runSelftests) {
     runSelftests ? "Running each self-test — this can take a while." : "";
   let data;
   try {
-    const r = await fetch("/api/skills?run_selftests=" + (runSelftests ? "true" : "false"));
-    if (!r.ok) throw new Error(await r.text());
+    const r = await fetch(withConfig("/api/skills?run_selftests=" + (runSelftests ? "true" : "false")));
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || ("HTTP " + r.status));
+    }
     data = await r.json();
   } catch (e) {
     el.innerHTML = '<p class="text-red-300">Could not read the skill library: ' + esc(e.message) + '</p>';
     return;
   }
+
+  const config = configValue();
+  rememberConfig(config);
+  document.getElementById("config-note").textContent = config
+    ? "Also looking in the skill folders that config names. \u201cApprove all\u2026\u201d covers the usual places only, as on the command line."
+    : "";
 
   // "Not verified" has to be visible. A listing that skipped the checks but
   // looked like one that ran them would be worse than no listing.
@@ -123,7 +161,7 @@ async function showScan(name) {
   if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
   box.classList.remove("hidden");
   box.innerHTML = '<p class="text-on-surface-variant text-body-sm">Reviewing…</p>';
-  const r = await fetch(`/api/skills/${encodeURIComponent(name)}/scan`);
+  const r = await fetch(withConfig(`/api/skills/${encodeURIComponent(name)}/scan`));
   const d = await r.json();
   if (!d.findings || !d.findings.length) {
     box.innerHTML = `<div class="p-4 rounded-lg bg-surface-container-high text-body-sm text-on-surface-variant">
@@ -155,7 +193,7 @@ async function approve(name, despite) {
       : `Approve "${name}".\nEnter your name — approval is recorded against it and binds to this exact content:`);
   if (!who || !who.trim()) return;
 
-  const r = await fetch(`/api/skills/${encodeURIComponent(name)}/approve`, {
+  const r = await fetch(withConfig(`/api/skills/${encodeURIComponent(name)}/approve`), {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({approved_by: who.trim(), despite_findings: !!despite}),
@@ -177,41 +215,27 @@ async function approveAll() {
   // Same gate as the single-skill path, just once: a name is still required
   // and the server still refuses anything whose self-test fails.
   const who = prompt(
-    "Approve every skill that passes its gates.
-
-" +
+    "Approve every skill that passes its gates.\n\n" +
     "Skills whose self-test fails are still refused, and high-severity " +
-    "findings are held unless you confirm them next.
-
-" +
-    "Enter your name — each approval is recorded against it:");
+    "findings are held unless you confirm them next.\n\n" +
+    "Enter your name \u2014 each approval is recorded against it:");
   if (!who || !who.trim()) return;
 
   const pip = confirm(
-    "Install missing Python packages first?
-
-" +
+    "Install missing Python packages first?\n\n" +
     "A skill whose library isn't installed fails its self-test and can't be " +
-    "approved, so FI can pip-install what's missing, re-test, then approve.
-
-" +
-    "OK = install (changes this Python environment)
-" +
+    "approved, so FI can pip-install what's missing, re-test, then approve.\n\n" +
+    "OK = install (changes this Python environment)\n" +
     "Cancel = approve only what already passes");
 
   const despite = confirm(
-    "Also approve skills carrying high-severity scan findings?
-
-" +
-    "These are heuristics, not verdicts — but sweeping them should be a " +
-    "decision, and it is recorded in the ledger.
-
-" +
-    "OK = include them
-Cancel = hold them for individual review");
+    "Also approve skills carrying high-severity scan findings?\n\n" +
+    "These are heuristics, not verdicts \u2014 but sweeping them should be a " +
+    "decision, and it is recorded in the ledger.\n\n" +
+    "OK = include them\nCancel = hold them for individual review");
 
   const note = document.getElementById("verified-note");
-  if (note) note.textContent = "Approving… self-tests are running, this can take minutes.";
+  if (note) note.textContent = "Approving\u2026 self-tests are running, this can take minutes.";
 
   const r = await fetch("/api/skills/approve-all", {
     method: "POST",
@@ -223,15 +247,13 @@ Cancel = hold them for individual review");
   const d = await r.json().catch(() => ({}));
   if (note) note.textContent = "";
   if (!r.ok) { alert(d.detail || d.message || "Bulk approval failed."); return; }
-  alert(`${d.approved_count} skill(s) now trusted.
-
-` + (d.report || ""));
+  alert(`${d.approved_count} skill(s) now trusted.\n\n` + (d.report || ""));
   load(false);
 }
 
 async function revoke(name) {
   if (!confirm(`Withdraw approval for "${name}"? It returns to proposed and no quest will load it.`)) return;
-  await fetch(`/api/skills/${encodeURIComponent(name)}/revoke`, {method: "POST"});
+  await fetch(withConfig(`/api/skills/${encodeURIComponent(name)}/revoke`), {method: "POST"});
   load(false);
 }
 
