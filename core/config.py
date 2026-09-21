@@ -1061,6 +1061,12 @@ class KnowledgeConfig(BaseModel):
     """
 
     enabled: bool = True
+    # How FI reaches Axon. ``http`` (default): through the Axon service that is already running (started for you when it
+    # is not), so no FI process builds an Axon of its own; a request is bracketed by switching the service to FI's project
+    # and back (``core/axon_http.py``). ``in_process``: the old behaviour, an ``AxonBrain`` inside every FI process, which
+    # is the one to choose on a machine that cannot run the Axon service. ``axon_config`` only applies to ``in_process``:
+    # a running service keeps the configuration it was started with.
+    axon_mode: Literal["http", "in_process"] = "http"
     axon_config: Path | dict[str, Any] | None = None
     # Air-gapped / offline model loading. ``models_dir`` is a local
     # Hugging Face cache root (HF-cache layout) that holds the embedding

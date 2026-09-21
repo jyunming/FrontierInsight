@@ -195,6 +195,53 @@ def axon_status(
     )
 
 
+def _pid_is_running(pid: int) -> bool:
+    """Whether a process with this id exists. Never signals it: on Windows ``os.kill(pid, 0)`` terminates the process."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists and is not ours
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True  # cannot tell: leave the lock alone
+    return True
+
+
+def _clear_stale_store_lock(log: Callable[[str], None]) -> None:
+    """Remove the Axon store lock when the server it names is no longer running. Best-effort: any doubt leaves it alone."""
+    try:
+        from axon.server_client import _store_lock_path  # type: ignore[import-not-found]
+
+        from .axon_endpoint import _axon_config
+
+        config = _axon_config()
+        lock = _store_lock_path(config) if config is not None else None
+        if lock is None or not lock.is_file():
+            return
+        pid = int(json.loads(lock.read_text(encoding="utf-8")).get("pid"))
+        if _pid_is_running(pid):
+            return
+        lock.unlink()
+        log(f"removed a stale Axon store lock ({lock}): the server it names (pid {pid}) is not running")
+    except Exception:  # noqa: BLE001 -- clearing a stale lock must never stop FI
+        return
+
+
 def ensure_axon_up(
     host: str | None = None,
     port: int | None = None,
@@ -260,7 +307,12 @@ def ensure_axon_up(
         )
         return status
 
-    # Nothing answered. Spawn on the endpoint Axon itself would pick,
+    # Nothing answered. A server that was killed instead of stopped leaves its store lock behind, and Axon's own
+    # start-up then refuses ("an Axon API server is already serving this store") and exits, so the wait below ends in a
+    # timeout that says nothing. Clear the lock when the process it names is gone.
+    _clear_stale_store_lock(log)
+
+    # Spawn on the endpoint Axon itself would pick,
     # not on whatever port FI happened to probe last.
     host, port = preferred_endpoint(host, port)
     log(

@@ -132,9 +132,19 @@ def _axon_config() -> object | None:
     rather than raising out of a health check.
     """
     try:
+        import logging
+
         from axon.config import AxonConfig
 
-        return AxonConfig.load(os.environ.get("AXON_CONFIG_PATH"))
+        # Loading prints one warning for every key Axon has retired from its config (dozens, on an older config file),
+        # every time FI looks for the service. FI only reads the address here; the file itself is Axon's to tidy.
+        axon_log = logging.getLogger("Axon")
+        level = axon_log.level
+        axon_log.setLevel(logging.ERROR)
+        try:
+            return AxonConfig.load(os.environ.get("AXON_CONFIG_PATH"))
+        finally:
+            axon_log.setLevel(level)
     except Exception:  # noqa: BLE001 - any import/parse failure means "no config"
         return None
 

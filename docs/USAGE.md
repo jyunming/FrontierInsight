@@ -263,6 +263,8 @@ knowledge:
   # got 768` — embedding dimension is a property of the STORE, not of a run.
   # Omit `embedding` to keep whatever the store was built with; only set it
   # for a fresh store.
+  # axon_config applies only with axon_mode: in_process. The default, axon_mode: http, uses the Axon service that is
+  # already running (started for you when it is not), which keeps the configuration it was started with.
   axon_config:
     embedding: { provider: ollama, model: nomic-embed-text }
     llm:       { provider: ollama, model: qwen2.5-coder:32b }

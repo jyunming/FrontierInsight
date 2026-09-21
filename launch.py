@@ -2197,6 +2197,10 @@ async def main_async(args: argparse.Namespace) -> int:
         # Rewriting plan.md is one model call and makes no Axon call.
         or getattr(args, "revise_plan", None) is not None
     )
+    if args.no_axon_sidecar:
+        # The web server starts the service again for itself (web.server._ensure_axon_sidecar), and it reads the
+        # environment, not this flag: without this, `--serve --no-axon-sidecar` still started one.
+        os.environ["FI_NO_AXON_SIDECAR"] = "1"
     if not args.no_axon_sidecar and not _axon_inert_modes:
         from core.axon_sidecar import ensure_axon_up
         ensure_axon_up()
