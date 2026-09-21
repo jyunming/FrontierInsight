@@ -480,3 +480,35 @@ async def test_the_one_shot_rewrite_says_why_it_could_not(
     rc = await launch._revise_plan_once(cfg, "1700000000-opc-abcdef", "anything", supervisor=ProxySupervisor())
     assert rc == 1
     assert "has no plan.md yet" in capsys.readouterr().err
+
+
+# --- a real model's protocol is repaired key by key, not refused whole ----------------------------------------------------
+
+
+def test_a_protocol_key_that_cannot_be_checked_is_left_out_with_a_note_and_the_rest_is_kept() -> None:
+    fixed, notes = plan.repair_protocol({
+        "grid": {"R0": [1.5, 3.0]}, "runs_per_setting": 300,
+        "thresholds": {"major outbreak": "more than 20% of the population"}, "ci_method": "Wilson",
+    })
+    assert fixed == {"grid": {"R0": [1.5, 3.0]}, "runs_per_setting": 300, "ci_method": "Wilson"}
+    assert len(notes) == 1 and "`protocol.thresholds` was left out" in notes[0] and "must map each name to a number" in notes[0]
+
+
+def test_several_bad_keys_are_each_left_out_and_a_good_protocol_is_untouched() -> None:
+    fixed, notes = plan.repair_protocol({"grid": {"R0": []}, "runs_per_setting": 2.5, "seed_policy": "independent"})
+    assert fixed == {"seed_policy": "independent"} and len(notes) == 2
+    good = {"grid": {"R0": [1.5]}, "runs_per_setting": 10}
+    assert plan.repair_protocol(good) == (good, [])
+    assert plan.repair_protocol("nope")[0] is None
+
+
+@pytest.mark.asyncio
+async def test_a_plan_whose_protocol_has_one_unusable_key_is_still_written_and_says_which(tmp_path: Path) -> None:
+    bad = {**DESIGN, "protocol": {"runs_per_setting": 300, "thresholds": ["a", "b"]}}
+    eng = _engine(tmp_path, [_plan_reply(bad), _audit_reply()])
+    await eng._node_plan({"topic": "OPC", "iteration": 0})
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    written = plan.parse(text).design
+    assert written["protocol"] == {"runs_per_setting": 300}
+    assert "`protocol.thresholds` was left out of the plan" in text
+    assert eng._client.chat.await_count == 2, "the design was not drafted again"

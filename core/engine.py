@@ -2934,11 +2934,23 @@ class Engine:
         design = obj if isinstance(obj, dict) and obj else {"hypothesis": "(parse failed)", "dependencies": []}
         design, objections = await self._audit_design(state, design)
         normalized, why = _plan.normalize_design(design)
+        repaired_notes: list[str] = []
+        if normalized is None and "`protocol" in (why or "") and isinstance(design, dict):
+            # The protocol is the part a model writes freest. Keep the design, drop the keys that cannot be checked, and
+            # say so in the plan, rather than losing the plan for one of them.
+            fixed_protocol, repaired_notes = _plan.repair_protocol(design.get("protocol"))
+            trial = {k: v for k, v in design.items() if k != "protocol"}
+            if fixed_protocol:
+                trial["protocol"] = fixed_protocol
+            normalized, why = _plan.normalize_design(trial)
+            for note in repaired_notes:
+                self._log.warning("[plan] %s", note)
         if normalized is None:
             self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
             return {}
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
+        audit += repaired_notes
         audit += self._critique_summary()
         # What the topic sets and the protocol leaves out: said in the plan, where a person reads it before compute is spent.
         audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))

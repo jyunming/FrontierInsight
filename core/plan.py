@@ -191,6 +191,34 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     return out, None
 
 
+_PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
+
+
+def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(protocol, notes)``: ``protocol`` with each key that cannot be checked left out, and a sentence per key saying so.
+
+    A model asked for a protocol writes what it means in the shape it likes (a real quest wrote the thresholds as prose
+    where numbers were asked for), and one such key used to cost the whole plan: the design was refused and drafted again
+    without a plan. A draft is repaired instead, key by key, and the plan says which keys were left out, so a person reads
+    it and puts them right; a protocol that a person has edited in ``plan.md`` is still refused with the reason
+    (:func:`normalize_protocol` is strict). ``(None, notes)`` when nothing usable is left."""
+    if not isinstance(protocol, dict):
+        return None, ["the protocol was not a mapping of names to values and was left out"]
+    out = dict(protocol)
+    notes: list[str] = []
+    for _ in range(len(out) + 1):
+        fixed, why = normalize_protocol(out)
+        if fixed is not None:
+            return fixed, notes
+        match = _PROTOCOL_KEY.search(why or "")
+        key = match.group(1) if match else ""
+        if key not in out:
+            return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
+        notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
+        del out[key]
+    return None, notes
+
+
 def _bullets(items: Any, empty: str) -> str:
     rows = _as_list(items)
     return "\n".join(f"- {row}" for row in rows) if rows else empty
