@@ -283,6 +283,14 @@ PAUSE_FOR_PLAN_CHOICES: tuple[Choice, ...] = (
 )
 
 
+RIGOR_PROFILE_CHOICES: tuple[Choice, ...] = (
+    Choice("default", "Default",
+           "The checks run and the evidence level says what was and was not shown, but a check can be turned down and the plan does not wait for you. Fine for a quick look or a survey."),
+    Choice("research", "Research (recommended for a simulation study)",
+           "Turns on together what a study needs before its result can be trusted: the plan is held for you to read before the protocol is frozen, the simulation and its analysis stay in two scripts, the protocol / oracle / numeric-warning / run-manifest checks stop the quest and cannot be turned off, and the cross-check verification and a review panel are on. Slower, and it stops for you more often. Written as rigor_profile: research."),
+)
+
+
 ENSEMBLE_PROFILES: tuple[Choice, ...] = (
     Choice("off", "Single model (default, cheapest)",
            "One LLM call per node. Cost baseline = 1×."),
@@ -646,6 +654,15 @@ QUESTIONS: tuple[Question, ...] = (
         choices=PAUSE_FOR_PLAN_CHOICES,
         default=False,
         mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
+        id="rigor_profile",
+        label="Rigor profile",
+        prompt="How strictly the experiment is checked. 'research' (recommended for a simulation study) makes the plan wait for you, keeps the simulation and its analysis in two scripts, makes every check stop the quest instead of only reporting, and turns on the cross-check verification and a review panel. 'default' changes nothing. The finished quest ends with an evidence level either way.",
+        kind="single",
+        choices=RIGOR_PROFILE_CHOICES,
+        default="default",
         tier=3,
     ),
     Question(
@@ -1310,6 +1327,9 @@ class InterviewAnswers:
     supply_papers: bool = True
     # Stop once plan.md is written, to read and edit it → ``pauses.plan``.
     pause_for_plan: bool = False
+    # ``rigor_profile`` at the top of the config: "default" (writes nothing) or "research". Must stay in sync with
+    # vscode-frontier-insight/src/interview-core.ts.
+    rigor_profile: str = "default"
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1483,6 +1503,9 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
 
     lines.append(f"title: {json.dumps(answers.title)}")
     lines.append("")
+    if answers.rigor_profile == "research":
+        lines.append('rigor_profile: "research"')
+        lines.append("")
 
     lines.append("provider:")
     lines.append(f"{indent}name: {json.dumps(answers.provider)}")
@@ -1550,7 +1573,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         lines.append(f"{indent}review_panel:")
         for persona in answers.review_panel:
             lines.append(f"{indent}{indent}- {json.dumps(persona)}")
-    else:
+    elif answers.rigor_profile != "research":
+        # An empty panel written beside the research profile would contradict it (the profile brings its own panel).
         lines.append(f"{indent}review_panel: []")
 
     # Clarify overrides — pin the three topic-tuned slots + study_depth +

@@ -231,6 +231,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         # pause runs with it on, so --update must not write it back as off.
         supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
         pause_for_plan=(pauses.get("plan") == "ask"),
+        rigor_profile=("research" if str(raw.get("rigor_profile") or "").strip().lower() == "research" else "default"),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
         ensemble_models=ensemble_models,
@@ -595,6 +596,7 @@ async def run_update_flow(
         web_research=bool(new_partial.get("web_research", current.web_research)),
         supply_papers=bool(new_partial.get("supply_papers", current.supply_papers)),
         pause_for_plan=bool(new_partial.get("pause_for_plan", current.pause_for_plan)),
+        rigor_profile=str(new_partial.get("rigor_profile", current.rigor_profile) or "default"),
         ensemble_profile=str(new_partial.get(
             "ensemble_profile", current.ensemble_profile,
         )),
