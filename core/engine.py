@@ -2928,7 +2928,10 @@ class Engine:
     async def revise_plan(self, request: str) -> dict[str, Any]:
         """Rewrite ``plan.md`` as the person asked (``--revise-plan``): the whole file goes to the model with the
         request, and the reply replaces it only if its design block can be used (one retry with the reason).
-        The quest stays where it was; resuming runs the revised design. Every version is kept."""
+        The quest stays where it was; resuming runs the revised design. Every version is kept.
+
+        Connects its own model client when the engine has none (a one-shot command), and closes it, and releases
+        a proxy provider it started, when it is done, as a quest run does."""
         request = (request or "").strip()
         if not request:
             raise ValueError("say what to change in the plan")
@@ -2937,10 +2940,21 @@ class Engine:
             raise FileNotFoundError(
                 f"{self.quest_id} has no plan.md yet: it has not reached the plan step",
             )
+        connected_here = self._client is None
+        if connected_here:
+            await self._connect_llm()
+        try:
+            return await self._rewrite_plan(request, path)
+        finally:
+            if connected_here and self._client is not None:
+                await self._client.aclose()
+                if self.config.provider.name in PROXY_PROVIDERS:
+                    await self.supervisor.release(self.config.provider.name)
+                self._client = None
+
+    async def _rewrite_plan(self, request: str, path: Path) -> dict[str, Any]:
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
-        if self._client is None:
-            await self._connect_llm()
         prompt = self._prompts["plan_revise"].substitute(
             topic=self.config.topic, plan_md=current, request=request,
         )
