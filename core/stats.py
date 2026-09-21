@@ -101,6 +101,21 @@ def wilson_interval(successes: float, trials: float, *, z: float = _Z95) -> tupl
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
+def wilson_half_width(successes: float, trials: float) -> float | None:
+    """Half the width of the Wilson interval, or ``None`` for impossible counts."""
+    ci = wilson_interval(successes, trials)
+    return None if ci is None else (ci[1] - ci[0]) / 2.0
+
+
+def trials_for_half_width(half_width: float, *, p: float = 0.5, z: float = _Z95) -> int | None:
+    """How many independent trials a proportion near ``p`` needs before its 95% interval is at most ``half_width`` wide on
+    each side (the normal approximation; ``p`` = 0.5 is the worst case and the safe default). ``None`` for a width that
+    is not between 0 and 1."""
+    if not isinstance(half_width, (int, float)) or isinstance(half_width, bool) or not 0.0 < half_width < 1.0:
+        return None
+    return int(math.ceil(round(z * z * p * (1.0 - p) / (half_width * half_width), 9)))
+
+
 def bootstrap_mean_interval(
     values: list[float], *, resamples: int = 2000, seed: int = 0, cap: int = 20000,
 ) -> tuple[float, float] | None:

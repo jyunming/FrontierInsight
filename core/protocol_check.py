@@ -55,7 +55,7 @@ _NUMERIC_CALLS = ("linspace", "logspace", "geomspace", "arange", "range")
 class Mismatch:
     """One way the script differs from the protocol."""
 
-    kind: str  # "grid", "runs" or "threshold"
+    kind: str  # "grid", "runs", "threshold" or "rng"
     name: str  # the axis, or the threshold, as the protocol names it
     expected: list[float]
     found: list[float] = field(default_factory=list)  # what the script holds under a matching name
@@ -77,6 +77,14 @@ class Mismatch:
             return (
                 f"the protocol fixes {self.name} at {want}; {self.where} is {_fmt(self.found)}"
                 + (f": it {' and '.join(parts)}" if parts else "")
+            )
+        if self.kind == "rng":
+            return (
+                f"the protocol's seed policy is independent random streams, but {self.where} builds its random generator "
+                f"from the seed alone, so every call restarts the same stream and the settings it is called for share "
+                f"their random numbers (derive the stream from the setting as well, for example "
+                f"np.random.SeedSequence([seed, setting index]), or declare common random numbers in the protocol's "
+                f"seed_policy and analyse the settings as paired)"
             )
         if self.kind == "runs":
             return (
@@ -192,6 +200,62 @@ class _Reader(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+_RNG_BUILDERS = {"default_rng", "RandomState", "Random", "seed", "manual_seed", "SeedSequence", "Generator"}
+_SHARED_STREAMS_RE = re.compile(
+    r"common random|paired|\bcrn\b|shared (random )?(stream|seed)|same (random )?(stream|seed)|coupled", re.IGNORECASE
+)
+
+
+def _names(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def rng_reuse(source: str) -> list[tuple[str, int]]:
+    """The functions of ``source`` that build a random generator from something that does not depend on their
+    arguments, and are called from a loop or from more than one place: ``(name, line)`` of the call that builds it.
+
+    Such a function restarts the same random stream on every call, so the settings it is called for draw the same random
+    numbers, which correlates their results without saying so (one stored run built ``default_rng(FI_REPLICATE_SEED)``
+    inside the function that simulates one setting, and called it for every setting). A generator built once, in a function
+    with no arguments, and passed on is the ordinary case and is not reported."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    call_sites: dict[str, int] = {}
+    in_loop: set[str] = set()
+
+    def visit(node: ast.AST, looped: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            child_looped = looped or isinstance(child, (ast.For, ast.While, ast.AsyncFor, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                call_sites[child.func.id] = call_sites.get(child.func.id, 0) + 1
+                if looped:
+                    in_loop.add(child.func.id)
+            visit(child, child_looped)
+
+    visit(tree, False)
+    out: list[tuple[str, int]] = []
+    for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        params = {a.arg for a in [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]} - {"self", "cls"}
+        if not params or (call_sites.get(fn.name, 0) < 2 and fn.name not in in_loop):
+            continue
+        dependent = set(params)
+        for stmt in ast.walk(fn):  # a local that is computed from an argument varies with the call
+            if isinstance(stmt, ast.Assign) and _names(stmt.value) & dependent:
+                dependent |= {t.id for t in stmt.targets if isinstance(t, ast.Name)}
+        for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+            func = call.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            if name not in _RNG_BUILDERS or not (call.args or call.keywords):
+                continue
+            used = set().union(*(_names(a) for a in [*call.args, *[k.value for k in call.keywords]]))
+            if not used & dependent:
+                out.append((fn.name, call.lineno))
+                break
+    return out
+
+
 def _read(scripts: dict[str, str]) -> tuple[list[_Found], list[_Found], set[float]]:
     lists: list[_Found] = []
     scalars: list[_Found] = []
@@ -276,6 +340,12 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
                 f"{first.name} in {first.script}, line {first.line}",
             ))
 
+    policy = str(protocol.get("seed_policy") or "")
+    if not _SHARED_STREAMS_RE.search(policy):
+        for script, source in scripts.items():
+            for fn_name, line in rng_reuse(source):
+                out.append(Mismatch("rng", fn_name, [], [], f"`{fn_name}` in {script}, line {line}"))
+
     thresholds = protocol.get("thresholds")
     for name, v in (thresholds.items() if isinstance(thresholds, dict) else []):
         if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -283,6 +353,58 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
             if not any(_has(numbers, form) for form in forms):
                 out.append(Mismatch("threshold", str(name), [float(v)]))
     return out
+
+
+_CLAIM_WORDS = re.compile(r"converg|scaling|scales|critical|threshold|transition|limit|asymptot|rate", re.IGNORECASE)
+
+
+def precision_notes(protocol: dict[str, Any] | None, seeds: int) -> list[str]:
+    """What the protocol's target precision needs, in trials, against the trials it plans: for the plan's
+    *Checks already made*. The trials behind one setting are the runs per setting times the seeds the engine runs."""
+    from .stats import trials_for_half_width, wilson_half_width
+
+    if not isinstance(protocol, dict):
+        return []
+    runs = protocol.get("runs_per_setting")
+    precision = protocol.get("precision")
+    target = precision.get("target_half_width") if isinstance(precision, dict) else None
+    if not isinstance(runs, (int, float)) or isinstance(runs, bool) or runs < 2:
+        return []
+    trials = int(runs) * max(1, int(seeds))
+    reach = wilson_half_width(trials / 2.0, trials)
+    if not isinstance(target, (int, float)) or isinstance(target, bool):
+        return [
+            f"The protocol fixes {int(runs)} runs per setting ({trials} trials over {max(1, int(seeds))} seed(s)) but no "
+            f"target precision: for a probability near 0.5 that is at best a 95% interval of about "
+            f"±{reach:.3f}. Say the width the claim needs in `precision.target_half_width`, and the runs follow from it."
+        ]
+    need = trials_for_half_width(float(target))
+    if need is not None and trials < need:
+        return [
+            f"The protocol targets a 95% half-width of ±{target:g}, which needs about {need} trials per setting for a "
+            f"probability near 0.5; {int(runs)} runs over {max(1, int(seeds))} seed(s) give {trials} (about ±{reach:.3f}). "
+            f"Raise the runs to about {-(-need // max(1, int(seeds)))} per seed, or widen the target."
+        ]
+    return []
+
+
+def grid_notes(design: dict[str, Any] | None) -> list[str]:
+    """An axis with too few values for the claim the design makes about it: for the plan's *Checks already made*."""
+    protocol = design.get("protocol") if isinstance(design, dict) else None
+    grid = protocol.get("grid") if isinstance(protocol, dict) else None
+    if not isinstance(grid, dict):
+        return []
+    text = " ".join(str((design or {}).get(k) or "") for k in ("hypothesis", "expected_outcome", "method"))
+    if not _CLAIM_WORDS.search(text):
+        return []
+    thin = [f"{axis} ({len(values)} values)" for axis, values in grid.items() if isinstance(values, list) and 1 < len(values) < 5]
+    if not thin:
+        return []
+    return [
+        "The design claims something about how a result changes with a parameter (convergence, scaling, a threshold), "
+        "but " + ", ".join(thin) + " has fewer than five values: a rate, a fit or a critical point cannot be told from "
+        "so few points. Add values, in particular near where the behaviour changes."
+    ]
 
 
 def oracle_notes(protocol: dict[str, Any] | None) -> list[str]:

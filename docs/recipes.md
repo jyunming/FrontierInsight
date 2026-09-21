@@ -319,6 +319,8 @@ The design block's `protocol` (the grid, the runs per setting, the thresholds) i
 
 The protocol's `oracles` are checks the script must pass before its main run (a closed form, a limiting case, an invariant, an exact small case): the script is run with `FI_ORACLE=1`, answers them with an `ORACLE_JSON` line, and a quest whose script does not pass stops before its sweep. Turn it down with `engine.oracle_check: warn` (record it and go on) or `off`.
 
+The protocol's `precision.target_half_width` says how tight a probability has to be; `plan.md` then says how many trials that needs against the ones planned, and after the run the analysis is told which probabilities did not reach it. Say in `seed_policy` whether settings draw independent streams (the default assumption) or common random numbers; a script that restarts one stream for every setting is sent back and stops the quest like any other difference from the protocol.
+
 A run whose own numerics warned (an overflow, a solver that did not converge, an argument that had no effect, a NaN in a result) is sent back like a failed one, and stops the quest if the repairs do not remove the warnings; `engine.numeric_warnings: warn` records them and goes on, `off` does not look. Resuming after the stop runs the script again if you changed it, and accepts the run as it is if you did not.
 
 ### Bootstrap a starter set of scientist skills
