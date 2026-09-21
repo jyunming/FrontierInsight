@@ -100,6 +100,11 @@ def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
             return None, f"`{key}` must be text"
     for key in _LIST_KEYS:
         out[key] = _as_list(out.get(key))
+    protocol = out.get("protocol")
+    if protocol is not None:
+        out["protocol"], why = normalize_protocol(protocol)
+        if out["protocol"] is None:
+            return None, why
     assertions = out.get("result_assertions")
     if assertions is None:
         out["result_assertions"] = []
@@ -116,6 +121,47 @@ def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
             low, high = item.get("min"), item.get("max")
             if low is not None and high is not None and low > high:
                 return None, f"result_assertions entry {index}: `min` is above `max`"
+    return out, None
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """``(protocol, None)`` when the experiment protocol block can be checked against a script, else ``(None, why)``.
+
+    The protocol fixes what an experiment is not allowed to change on its own (:mod:`core.protocol_check`): ``grid`` (each
+    parameter it sweeps, with every value), ``runs_per_setting``, ``thresholds``, and the prose ``seed_policy``,
+    ``ci_method`` and ``acceptance`` (what would count as support). Every key is optional, and keys beyond these are kept.
+    Strict about the numbers, which are what a check reads."""
+    if not isinstance(protocol, dict):
+        return None, "`protocol` must be a mapping (`grid`, `runs_per_setting`, `thresholds`, ...)"
+    out: dict[str, Any] = dict(protocol)
+    grid = out.get("grid")
+    if grid is not None:
+        if not isinstance(grid, dict):
+            return None, "`protocol.grid` must map each parameter to the list of values it takes"
+        fixed: dict[str, list[float]] = {}
+        for axis, values in grid.items():
+            if _number(values):
+                values = [values]
+            if not isinstance(values, list) or not values or not all(_number(v) for v in values):
+                return None, f"`protocol.grid.{axis}` must be a non-empty list of numbers"
+            fixed[str(axis)] = list(values)
+        out["grid"] = fixed
+    runs = out.get("runs_per_setting")
+    if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
+        return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
+    thresholds = out.get("thresholds")
+    if thresholds is not None:
+        if not isinstance(thresholds, dict) or not all(_number(v) for v in thresholds.values()):
+            return None, "`protocol.thresholds` must map each name to a number"
+    for key in ("seed_policy", "ci_method"):
+        if out.get(key) is not None and not isinstance(out[key], str):
+            return None, f"`protocol.{key}` must be text"
+    if out.get("acceptance") is not None:
+        out["acceptance"] = _as_list(out["acceptance"])
     return out, None
 
 

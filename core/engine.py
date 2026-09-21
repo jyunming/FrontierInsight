@@ -48,6 +48,7 @@ from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
+from . import protocol_check as _protocol
 from . import split_run as _split_run
 from . import stats as _stats
 from .config import (
@@ -734,7 +735,7 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
-                        if intr_value.get("plan_stage"):
+                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage"):
                             # The plan step wrote plan.md and stopped for the
                             # person to read and edit it. Same pause-exit as
                             # the pauses above; without this branch the payload
@@ -743,9 +744,10 @@ class Engine:
                             # page ask for clarify answers.
                             data_paused = True
                             self._log.info(
-                                "[FI] paused for the plan: read and edit %s "
+                                "[FI] paused for the %s: read and edit %s "
                                 "(or ask for a change with `--revise-plan`), "
                                 "then run `fi --resume %s`",
+                                "protocol" if intr_value.get("protocol_stage") else "plan",
                                 intr_value.get("plan_file", "plan.md"),
                                 self.quest_id,
                             )
@@ -2877,6 +2879,8 @@ class Engine:
             return {}
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
+        # What the topic sets and the protocol leaves out: said in the plan, where a person reads it before compute is spent.
+        audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit)
         path.write_text(body, encoding="utf-8")
@@ -4255,6 +4259,9 @@ class Engine:
         return {"implement_outline": outline}
 
     async def _node_implement(self, state: QuestState) -> QuestState:
+        kept = self._adopt_scripts_fixed_by_hand(state)
+        if kept is not None:
+            return kept
         outline = state.get("implement_outline") or {}
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
@@ -4378,7 +4385,191 @@ class Engine:
                 )
             else:
                 code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
+        if extracted:
+            code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps)
         return {"code": code, "deps": deps}
+
+    # ---- the protocol gate ---------------------------------------------------
+
+    def _protocol_of(self, state: QuestState) -> dict[str, Any] | None:
+        """The protocol the design carries, when there is an experiment to hold to it."""
+        if (
+            self.config.engine.protocol_check == "off"
+            or state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            return None
+        protocol = (state.get("design") or {}).get("protocol")
+        return protocol if isinstance(protocol, dict) and protocol else None
+
+    def _scripts_on_disk(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for name in (_split_run.SIMULATE_NAME, "experiment.py"):
+            path = self.quest_root / "code" / name
+            if path.is_file():
+                out[name] = path.read_text(encoding="utf-8")
+        return out
+
+    def _protocol_record(self, payload: dict[str, Any]) -> None:
+        try:
+            path = self.quest_root / "needs" / "PROTOCOL_CHECK.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass  # a record that cannot be written must never stop a quest
+
+    async def _enforce_protocol(
+        self, state: QuestState, code_path: Path, simulate_path: Path, code: str, deps: list[str],
+    ) -> tuple[str, list[str]]:
+        """Hold the script to the plan's protocol: repair a script that differs, up to
+        ``engine.protocol_repair_attempts`` times, and stop the quest (``block``) or warn (``warn``) if it still does.
+
+        The repair asks for one script at a time and keeps a rewrite only if it parses and the differences named for
+        that script are gone, so a repair never leaves a script worse than the one it had. Every attempt is recorded in
+        ``needs/PROTOCOL_CHECK.json``."""
+        protocol = self._protocol_of(state)
+        if protocol is None:
+            return code, deps
+        attempts: list[dict[str, Any]] = []
+        budget = int(self.config.engine.protocol_repair_attempts)
+        for attempt in range(budget + 1):
+            mismatches = _protocol.check(protocol, self._scripts_on_disk())
+            attempts.append({"attempt": attempt, "differences": [m.message() for m in mismatches]})
+            if not mismatches:
+                break
+            if attempt == budget:
+                break
+            self._log.warning(
+                "[protocol] the script differs from the plan's protocol (%d): %s; asking for a repair (%d of %d)",
+                len(mismatches), "; ".join(m.message() for m in mismatches), attempt + 1, budget,
+            )
+            for name in sorted({m.where.split(" in ")[-1].split(",")[0] for m in mismatches if m.where}) or ["experiment.py"]:
+                if name not in (_split_run.SIMULATE_NAME, "experiment.py"):
+                    name = "experiment.py"
+                path = simulate_path if name == _split_run.SIMULATE_NAME else code_path
+                if not path.is_file():
+                    continue
+                own = [m for m in mismatches if not m.where or name in m.where]
+                text, deps = await self._repair_script_for_protocol(state, path, path.read_text(encoding="utf-8"), deps, protocol, own)
+                if name == "experiment.py":
+                    code = text
+        final = _protocol.check(protocol, self._scripts_on_disk())
+        record = {
+            "status": "ok" if not final else ("warned" if self.config.engine.protocol_check == "warn" else "stopped"),
+            "attempts": attempts,
+            "differences": [m.message() for m in final],
+            "protocol": protocol,
+        }
+        self._protocol_record(record)
+        if not final:
+            self._log.info(
+                "[protocol] the script holds to the plan's protocol%s",
+                "" if len(attempts) == 1 else f" (after {len(attempts) - 1} repair(s))",
+            )
+            return code, deps
+        if self.config.engine.protocol_check == "warn":
+            self._log.warning("[protocol] the script still differs from the plan's protocol: %s", "; ".join(m.message() for m in final))
+            return code, deps
+        self._pause_for_protocol(final, deps)
+        return code, deps  # not reached: the pause exits the run
+
+    async def _repair_script_for_protocol(
+        self, state: QuestState, path: Path, code: str, deps: list[str],
+        protocol: dict[str, Any], mismatches: list[Any],
+    ) -> tuple[str, list[str]]:
+        """ONE repair of one script that contradicts the protocol. Kept only if it parses and no longer contradicts it."""
+        prompt = self._prompts["execute_reflect"].substitute(
+            previous_code=code,
+            returncode="(not run yet)",
+            stdout_tail=_protocol_directive(protocol, mismatches),
+            stderr_tail="",
+            duration_s="0.00",
+            figures_count="0",
+            result_json_present="no (not run yet)",
+            reflect_history_block=_format_reflect_history([]),
+            design_block=json.dumps(state.get("design") or {}, indent=2),
+            clarify_block=_format_clarify(state),
+        )
+        try:
+            text = await self._chat(prompt, node="implement_protocol")
+        except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
+            self._log.warning("[protocol] the repair call failed (%r); keeping %s as written", exc, path.name)
+            return code, deps
+        parsed: dict[str, Any] = {}
+        if _strip_outer_fence(text).lstrip().startswith("{"):
+            parsed = _parse_json_lenient(text, node="implement_protocol") or {}
+        new_code, new_deps = parsed.get("code"), _coerce_dep_list(parsed.get("deps"))
+        if not (isinstance(new_code, str) and new_code.strip()):
+            new_code, new_deps = _parse_implement_response(text)
+        try:
+            ast.parse(new_code)
+            usable = bool(new_code.strip())
+        except (SyntaxError, ValueError):
+            usable = False
+        scripts = {**self._scripts_on_disk(), path.name: new_code} if usable else {}
+        remaining = [m for m in _protocol.check(protocol, scripts) if not m.where or path.name in m.where] if usable else mismatches
+        if not usable or len(remaining) >= len(mismatches):
+            self._log.warning("[protocol] the repair of %s did not remove the differences; keeping it as written", path.name)
+            return code, deps
+        path.write_text(new_code, encoding="utf-8")
+        self._log.info(
+            "[protocol] rewrote %s (%d bytes): %d difference(s) left in it (%s)",
+            path.name, len(new_code), len(remaining), str(parsed.get("patch_summary") or "no summary")[:120],
+        )
+        return new_code, sorted({*deps, *new_deps})
+
+    def _pause_for_protocol(self, mismatches: list[Any], deps: list[str]) -> None:
+        """Stop for the person: the script still contradicts the plan after the repairs. They edit ``plan.md`` (the
+        protocol) or ``code/experiment.py`` and resume; a script that then agrees with the plan is used as it is."""
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "protocol_stop.json").write_text(
+                json.dumps({"deps": deps, "differences": [m.message() for m in mismatches]}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[protocol] couldn't write the stop record: %r", e)
+        steps = [
+            "The experiment's script differs from the protocol the plan fixed, and the repairs did not remove it: "
+            + "; ".join(m.message() for m in mismatches) + ".",
+            f"Either change the script (`{self.quest_root / 'code' / 'experiment.py'}`) to use those values, or, if the "
+            f"plan is what should change, edit the protocol in `{_plan.plan_path(self.quest_root)}` (or ask for a change: "
+            f"`--revise-plan`). Then resume: a script that agrees with the plan is used as it is; otherwise it is written again.",
+        ]
+        self._pause_for_human(
+            kind="protocol",
+            interaction="supply",
+            headline="the experiment does not follow the plan",
+            steps=steps,
+            payload={
+                "protocol_stage": True, "quest_id": self.quest_id,
+                "differences": [m.message() for m in mismatches],
+                "plan_file": str(_plan.plan_path(self.quest_root)),
+            },
+        )
+
+    def _adopt_scripts_fixed_by_hand(self, state: QuestState) -> QuestState | None:
+        """After a protocol stop, keep the scripts on disk when they now agree with the plan (a person edited them, or
+        the plan), instead of writing them again. ``None`` when the quest was not stopped for the protocol, or they
+        still differ (the model then writes the script again, told what differed)."""
+        marker = self.fi_dir / "protocol_stop.json"
+        if not marker.is_file():
+            return None
+        protocol = self._protocol_of(state)
+        scripts = self._scripts_on_disk()
+        if protocol is None or "experiment.py" not in scripts or _protocol.check(protocol, scripts):
+            marker.unlink(missing_ok=True)  # the script is written again: a later pass must not adopt the old one
+            return None
+        try:
+            deps = _coerce_dep_list(json.loads(marker.read_text(encoding="utf-8")).get("deps"))
+            marker.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            deps = []
+        deps = sorted({*deps, *_coerce_dep_list((state.get("design") or {}).get("dependencies"))})
+        self._log.info("[protocol] the script on disk now agrees with the plan's protocol; keeping it (not written again)")
+        self._protocol_record({"status": "ok", "adopted": "the script on disk after the stop", "protocol": protocol})
+        return {"code": scripts["experiment.py"], "deps": deps}
 
     async def _repair_ignored_replicate_seed(
         self, state: QuestState, code_path: Path, code: str, deps: list[str],
@@ -7174,6 +7365,14 @@ class Engine:
             asked = goal_coverage.asked_numbers(topic)
             asked_figures = goal_coverage.asked_figure_count(topic)
             found = goal_coverage.notes(topic, [source], state.get("result_json"), figures)
+            # The protocol was checked when the script was written; a repair after a failed run may have changed a
+            # constant since. Said here too, where the reviewer reads it.
+            protocol = self._protocol_of(state)
+            if protocol is not None:
+                found = found + [
+                    f"The script differs from the plan's protocol: {m.message()}"
+                    for m in _protocol.check(protocol, self._scripts_on_disk())
+                ]
         except Exception as e:  # noqa: BLE001 - never fail a quest over an advisory check
             self._log.warning("[goal_coverage] check failed (%s); skipping", e)
             return []
@@ -10244,6 +10443,19 @@ Before you design, read the Prior work above the way a reviewer would. Then add 
 }
 
 Name three to eight sources, and only ones that are listed above; if the Prior work holds little that bears on the topic, say that in `gap` instead of inventing sources. The design has to follow from the plan: the hypothesis answers the gap, and the method is what would show it. The person reading this may edit the design before it runs, so write each field so that it can be edited on its own.
+
+Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`). It fixes what the experiment may not change on its own; the code that is written next is checked against it, and a script that differs is sent back:
+
+"protocol": {
+  "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
+  "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
+  "thresholds": {"<name>": <value>},
+  "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
+  "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
+  "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"]
+}
+
+Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """
 
 _SPLIT_REPLY_REMINDER = """
@@ -11250,6 +11462,23 @@ def _unseeded_rng_directive(calls: list[tuple[int, str]]) -> str:
 # Stands where the traceback would be in the ``execute_reflect`` prompt, for the
 # one repair a script that ignores ``FI_REPLICATE_SEED`` is offered before it
 # has run (see ``Engine._repair_ignored_replicate_seed``).
+def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
+    """What stands where a traceback would in the repair request: the protocol the plan fixed and how the script differs."""
+    return (
+        "This script has NOT been run, and it has not failed: the account of a crash above does not apply. It "
+        "contradicts the experiment protocol that was fixed in the plan, and needs the changes below before it is "
+        "run, and no other.\n\n"
+        "The protocol:\n" + json.dumps(protocol, indent=2) + "\n\n"
+        "How the script differs from it:\n" + "\n".join(f"- {m.message()}" for m in mismatches) + "\n\n"
+        "Change exactly this: make the script use the protocol's values, every one of them, and none the protocol does "
+        "not name. Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT "
+        "and FI_REPLICATE_SEED, and the same final RESULT_JSON line. Do not shorten or simplify anything. If the "
+        "timeout makes the full protocol impossible, keep the protocol's values anyway and say so in `patch_summary`: "
+        "the person reading it decides, not this script.\n\n"
+        "Return the whole script in `code`, one sentence in `patch_summary`, and leave `give_up_reason` empty."
+    )
+
+
 _SEED_REPAIR_DIRECTIVE = (
     "This script has NOT been run, and it has not failed: the account of a crash "
     "above does not apply. It needs one change before it is run, and no other.\n\n"
