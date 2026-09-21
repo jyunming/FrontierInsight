@@ -85,6 +85,7 @@ import httpx
 import yaml
 
 from . import arxiv_gate as _gate
+from . import axon_http as _axon_http
 from . import source_failures as _sf
 from .config import KnowledgeConfig
 
@@ -3343,6 +3344,38 @@ def _axon_config_from(spec: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
+
+def _build_http_brain(cfg: KnowledgeConfig) -> Any:
+    """FI's brain over the running Axon service: find it, start it when it is down, wait for it to be ready."""
+    from . import axon_sidecar
+
+    if cfg.axon_config is not None:
+        _log.warning(
+            "knowledge.axon_config is not used with axon_mode: http; the running Axon service keeps the configuration it was "
+            "started with (set axon_mode: in_process to build Axon from this file)",
+        )
+    if os.environ.get("FI_NO_AXON_SIDECAR"):  # --no-axon-sidecar: use the service if it is up, never start one
+        status = axon_sidecar.axon_status()
+    else:
+        status = axon_sidecar.ensure_axon_up(
+            offline=cfg.offline, models_dir=cfg.models_dir, log=lambda m: _log.info("axon: %s", m),
+        )
+    if not status["running"]:
+        raise _axon_http.AxonUnavailable(
+            f"the Axon service is not running at {status['url']} and could not be started ({status['error'] or 'no reason given'})",
+        )
+    brain = _axon_http.AxonHTTPBrain(status["url"], FI_AXON_PROJECT)
+    deadline = time.monotonic() + 90.0
+    while True:  # the service answers before its brain has loaded; wait for it
+        try:
+            brain._active_project()  # noqa: SLF001 -- /health/ready is 200 only once the brain is up
+            break
+        except _axon_http.AxonUnavailable as e:
+            if time.monotonic() >= deadline:
+                raise _axon_http.AxonUnavailable(f"the Axon service at {status['url']} did not become ready: {e}") from None
+            time.sleep(1.0)
+    return brain
+
 class Knowledge:
     def __init__(self, cfg: KnowledgeConfig) -> None:
         self.cfg = cfg
@@ -3367,7 +3400,19 @@ class Knowledge:
                 _AXON_IMPORT_ERROR, cfg.external_fallback,
             )
         if self.enabled:
-            self._brain = self._build_brain(cfg)
+            try:
+                self._brain = self._build_brain(cfg)
+            except _axon_http.AxonUnavailable as e:
+                # No silent second Axon inside this process: two processes on one store are the crash Axon warns of, and
+                # "Axon everywhere, quietly" is what this mode replaced. The quest goes on without the knowledge base, and
+                # says why, where the quest's log and every surface show it.
+                _log.error(
+                    "the Axon knowledge base is not available and this quest runs without it: %s. Start it with "
+                    "`python -m axon.api`, or set knowledge.axon_mode: in_process to build Axon inside this process.", e,
+                )
+                self.enabled = False
+                self._brain = None
+        if self.enabled:
             self._retriever = AxonRetriever(brain=self._brain, top_k=cfg.top_k)
             if cfg.seed_source_catalog:
                 self._seed_source_catalog()
@@ -3471,6 +3516,8 @@ class Knowledge:
 
     @staticmethod
     def _build_brain(cfg: KnowledgeConfig) -> Any:
+        if cfg.axon_mode == "http":
+            return _build_http_brain(cfg)
         # Force offline / local-model loading BEFORE Axon constructs the
         # embedding model — otherwise transformers makes a network HEAD
         # check to huggingface.co that crashes on air-gapped machines.
