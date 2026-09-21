@@ -173,6 +173,26 @@
     </div>
   </section>
 
+  <!-- What the quest did, in order (.fi/audit.jsonl): nodes, checks, routes and the model's stated reasons. -->
+  <details id="trace-section" class="bg-surface-mid cyber-border p-6 rounded-xl">
+    <summary class="cursor-pointer flex flex-wrap items-baseline justify-between gap-2">
+      <h2 class="font-headline-md text-headline-md text-on-surface inline">Trace</h2>
+      <span id="trace-chain" class="font-label-sm text-label-sm text-outline uppercase"></span>
+    </summary>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-3">What ran, in order: each check's verdict, each route and the facts it read, and the reasons the model gave (marked <em>model claim</em> — its own account, not a check). Every event is chained to the one before it, so an edited or removed line shows here.</p>
+    <div class="flex flex-wrap items-center gap-3 my-3">
+      <label for="trace-detail" class="font-label-sm text-label-sm text-outline uppercase">Detail</label>
+      <select id="trace-detail" class="bg-surface-low border border-white/10 rounded px-2 py-1 font-code-md text-code-md text-on-surface">
+        <option value="summary">summary</option><option value="checks" selected>checks</option><option value="debug">debug</option>
+      </select>
+      <label for="trace-node" class="font-label-sm text-label-sm text-outline uppercase">Node</label>
+      <select id="trace-node" class="bg-surface-low border border-white/10 rounded px-2 py-1 font-code-md text-code-md text-on-surface"><option value="">all</option></select>
+      <span id="trace-count" class="text-on-surface-variant text-body-sm"></span>
+    </div>
+    <ol id="trace-list" class="flex flex-col gap-1 font-code-md text-code-md"></ol>
+    <p id="trace-empty" class="hidden text-on-surface-variant">No trace yet: nothing has run, the quest ran before the trace existed, or <code>engine.audit_trace</code> is off.</p>
+  </details>
+
   <!-- Bento Grid -->
   <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter">
     <!-- Tags (Col 1-4) -->
@@ -992,6 +1012,57 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       gaps.appendChild(line);
     }
   }
+
+  // ---- Trace (.fi/audit.jsonl) ----
+  // Loaded when the panel is opened, and again when the filters change. The wording of each line comes from the server, so
+  // this page, `launch.py --trace` and the chat say the same thing.
+  let traceNodesKey = '';
+  async function loadTrace() {
+    const detail = document.getElementById('trace-detail').value;
+    const node = document.getElementById('trace-node').value;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/trace?detail=${encodeURIComponent(detail)}&node=${encodeURIComponent(node)}`);
+    if (!res.ok) { document.getElementById('trace-count').textContent = `Could not load the trace (${res.status}).`; return; }
+    const data = await res.json();
+    const chain = document.getElementById('trace-chain');
+    chain.textContent = data.total ? data.chain.line : '';
+    chain.className = 'font-label-sm text-label-sm uppercase ' + (data.chain.ok ? 'text-outline' : 'text-status-warning');
+    const select = document.getElementById('trace-node');
+    const key = data.nodes.join(',');
+    if (key !== traceNodesKey) {
+      traceNodesKey = key;
+      select.replaceChildren(new Option('all', ''), ...data.nodes.map((n) => new Option(n, n)));
+      select.value = node;
+    }
+    document.getElementById('trace-empty').classList.toggle('hidden', data.total > 0);
+    document.getElementById('trace-count').textContent = data.total
+      ? `${data.shown} of ${data.total} events${data.truncated ? ' (the latest are shown)' : ''}` : '';
+    const list = document.getElementById('trace-list');
+    list.replaceChildren(...data.events.map((e) => {
+      const li = document.createElement('li');
+      li.className = 'flex gap-3 items-baseline';
+      const seq = document.createElement('span');
+      seq.className = 'text-outline shrink-0';
+      seq.textContent = `#${e.seq}`;
+      const time = document.createElement('span');
+      time.className = 'text-outline shrink-0';
+      time.textContent = String(e.ts || '').slice(11, 19);
+      const text = document.createElement('span');
+      const bad = e.kind === 'node_failed' || (e.kind === 'check_result' && !['ok', 'passed', 'skipped'].includes(String(e.status)));
+      text.className = bad ? 'text-status-warning' : 'text-on-surface';
+      text.textContent = e.description;
+      li.append(seq, time, text);
+      if (e.provenance && e.provenance !== 'deterministic') {
+        const badge = document.createElement('span');
+        badge.className = 'shrink-0 border border-white/20 rounded px-1 text-outline uppercase font-label-sm text-label-sm';
+        badge.textContent = e.provenance === 'model_claim' ? 'model claim' : 'provider commentary';
+        li.append(badge);
+      }
+      return li;
+    }));
+  }
+  document.getElementById('trace-section').addEventListener('toggle', (ev) => { if (ev.target.open) loadTrace(); });
+  document.getElementById('trace-detail').addEventListener('change', loadTrace);
+  document.getElementById('trace-node').addEventListener('change', loadTrace);
 
   let amendmentKey = '';
   function renderAmendment(am) {

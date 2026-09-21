@@ -42,8 +42,10 @@ HumanFeedbackCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
 
+from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import metric_spec as _metric_spec
@@ -480,6 +482,10 @@ class Engine:
         )
         self.knowledge = Knowledge(config.knowledge)
         self._log = _quest_logger(self.quest_id, self.fi_dir)
+        self.audit = _audit_log.AuditLog(self.fi_dir / "audit.jsonl", self.quest_id, enabled=config.engine.audit_trace)
+        self._audit_node = ""       # the node running now, for events written from inside it
+        self._audit_pause = ""      # the pause kind a node is stopping for
+        self._audit_seen: dict[str, str] = {}   # watched file -> sha256 last logged
         # Skills other agents installed are read where they are. Which folders
         # is this quest's own setting, held here and passed to every lookup, so
         # quests sharing a process (--fleet) never see one another's. The skill
@@ -581,6 +587,7 @@ class Engine:
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
+            self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
             # Which interpreter is running FI decides which packages it can
             # see; a `pip install` into a different one changes nothing here.
             self._log.info(
@@ -1185,6 +1192,153 @@ class Engine:
         state = dict((snap.values if snap else None) or {})
         return self._collect_artifacts(state)
 
+    # ---- audit trace (core/audit_log.py) ---------------------------------
+    #
+    # ``<quest>/.fi/audit.jsonl``: what ran, in order, with each check's verdict, each route's reasons and the model's own
+    # stated rationale (provenance ``model_claim``, never mixed with a check). A record, not a control: nothing here can stop a
+    # quest.
+
+    # Files whose bytes are worth a sha256 in the trace, hashed after every node and logged when they change.
+    _AUDIT_WATCHED = (
+        "plan.md", "code/simulate.py", "code/experiment.py", "needs/FROZEN_PROTOCOL.json", "paper/paper.md", "paper/paper.pdf",
+    )
+
+    def _audit(self, kind: str, *, node: str | None = None, provenance: str = _audit_log.DETERMINISTIC, **fields: Any) -> None:
+        try:
+            self.audit.append(kind, node=node or self._audit_node, provenance=provenance, **fields)
+        except Exception as e:  # noqa: BLE001 -- the trace is a record; it must never stop a quest
+            self._log.debug("[audit] could not record %s: %r", kind, e)
+
+    def _audit_artifacts(self, node: str) -> None:
+        for rel in self._AUDIT_WATCHED:
+            path = self.quest_root / rel
+            digest = _audit_log.file_sha256(path) if path.is_file() else None
+            if digest is None or self._audit_seen.get(rel) == digest:
+                continue
+            self._audit_seen[rel] = digest
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            self._audit("artifact_created", node=node, path=rel, sha256=digest, bytes=size)
+
+    def _audit_check(self, check: str, path: Path, *, status: str, summary: str = "", problems: Any = None) -> None:
+        """One check's verdict, with the record that holds the detail and its sha256."""
+        try:
+            rel = path.relative_to(self.quest_root).as_posix()
+        except ValueError:
+            rel = str(path)
+        found = [str(p) for p in problems] if isinstance(problems, (list, tuple)) else []
+        self._audit(
+            "check_result", check=check, status=status, summary=summary or (found[0] if found else ""),
+            problems=found[:5], record=rel, sha256=_audit_log.file_sha256(path),
+        )
+
+    def _audit_claims(self, node: str, out: Any) -> Any:
+        """Turn what a model said about why into ``model_claim`` events: the design's ``rationale`` (which is then dropped from
+        the design in the state, so the later prompts do not carry it) and a review's verdict and weaknesses."""
+        if not isinstance(out, dict):
+            return out
+        if node == "design" and isinstance(out.get("design"), dict) and "rationale" in out["design"]:
+            design = dict(out["design"])
+            why = design.pop("rationale")
+            if isinstance(why, dict):
+                for a in why.get("assumptions") or []:
+                    self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="assumption", claim=a)
+                for alt in why.get("alternatives_considered") or []:
+                    if isinstance(alt, dict):
+                        self._audit(
+                            "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="alternative",
+                            claim=alt.get("option", ""), decision=alt.get("decision", ""), reason=alt.get("reason", ""),
+                        )
+            out = {**out, "design": design}
+        if node == "review" and isinstance(out.get("review"), dict):
+            review = out["review"]
+            if review.get("verdict"):
+                self._audit(
+                    "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_verdict",
+                    claim=str(review.get("verdict")) + (f": {review['blocking']}" if review.get("blocking") else ""),
+                )
+            for w in review.get("weaknesses") or []:
+                self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w)
+        return out
+
+    def _audited(self, name: str, fn: Any) -> Any:
+        """``fn`` (a graph node) with its start, end, failure or pause in the audit trace. An interrupted node is run again
+        from its start when the quest resumes, so a second ``node_started`` after ``node_paused`` is what happened."""
+
+        @functools.wraps(fn)
+        async def wrapper(state: QuestState) -> Any:
+            self.audit.event_count()      # open the chain first: after a restart it says which node was waiting for a person
+            resumed = self.audit.paused_node == name
+            self._audit_node, self._audit_pause = name, ""
+            self._audit("node_started", node=name, iteration=state.get("iteration", 0), **({"resumed": True} if resumed else {}))
+            began = time.monotonic()
+            try:
+                out = await fn(state)
+            except GraphBubbleUp as e:
+                if isinstance(e, GraphInterrupt):
+                    self._audit("node_paused", node=name, pause=self._audit_pause)
+                raise
+            except asyncio.CancelledError:
+                self._audit("node_failed", node=name, error="cancelled")
+                raise
+            except Exception as e:  # noqa: BLE001 -- recorded, then raised again unchanged
+                self._audit("node_failed", node=name, error=f"{type(e).__name__}: {e}")
+                raise
+            out = self._audit_claims(name, out)
+            self._audit_artifacts(name)
+            self._audit(
+                "node_completed", node=name, duration_s=round(time.monotonic() - began, 2),
+                wrote=sorted(out) if isinstance(out, dict) else [],
+            )
+            return out
+
+        return wrapper
+
+    def _route_facts(self, source: str, state: QuestState) -> dict[str, Any]:
+        """The values a router read to choose, for the trace."""
+        review = state.get("review") or {}
+        result = state.get("exec_result") or {}
+        analysis = state.get("analysis") or {}
+        facts: dict[str, dict[str, Any]] = {
+            "design": {
+                "no_simulation": bool(state.get("no_simulation_resolved")), "survey_mode": bool(state.get("survey_mode_resolved")),
+            },
+            "execute_reflect": {
+                "returncode": result.get("returncode", 0), "has_result_json": bool(state.get("result_json")),
+                "attempt": state.get("exec_reflect_iter", 0), "gave_up": state.get("exec_give_up_reason") or "",
+                "patch_pending": bool(state.get("exec_patch_pending")),
+            },
+            "cross_check": {
+                "next_step": analysis.get("next_step", "publish"), "iteration": state.get("iteration", 0),
+                "max_iterations": self.config.engine.max_iterations, "findings_checked": len(state.get("cross_check") or []),
+            },
+            "evidence_gate": {k: v for k, v in (state.get("evidence_assessment") or {}).items() if isinstance(v, (str, int, float, bool))},
+            "review": {
+                "verdict": review.get("verdict", ""), "must_flag_hits": list(review.get("must_flag_hits") or []),
+                "iteration": state.get("iteration", 0), "max_iterations": self.config.engine.max_iterations,
+                "pauses_review": self.config.pauses.review,
+            },
+            "human_feedback": {"action": (state.get("human_feedback") or {}).get("action", "accept")},
+        }
+        return facts.get(source, {})
+
+    def _audited_route(self, source: str, fn: Any) -> Any:
+        """``fn`` (a conditional edge) with the route it chose and the facts it read in the audit trace."""
+
+        @functools.wraps(fn)
+        def wrapper(state: QuestState) -> str:
+            chosen = fn(state)
+            try:
+                facts = self._route_facts(source, state)
+            except Exception:  # noqa: BLE001 -- a record must not change a route
+                facts = {}
+            self._audit("route_decision", node=source, chosen=chosen, facts=facts)
+            return chosen
+
+        return wrapper
+
     # ---- graph topology --------------------------------------------------
 
     def _build_graph(self) -> StateGraph:
@@ -1194,13 +1348,13 @@ class Engine:
         # The QuestState TypedDict is the contract — keep field names
         # backwards-compatible if you add a graph here.
         g: StateGraph[QuestState] = StateGraph(QuestState)
-        g.add_node("clarify", self._node_clarify)
-        g.add_node("ideate", self._node_ideate)
-        g.add_node("literature", self._node_literature)
-        g.add_node("pause_after_literature", self._node_pause_after_literature)
-        g.add_node("select_skills", self._node_select_skills)
-        g.add_node("plan", self._node_plan)
-        g.add_node("design", self._node_design)
+        g.add_node("clarify", self._audited("clarify", self._node_clarify))
+        g.add_node("ideate", self._audited("ideate", self._node_ideate))
+        g.add_node("literature", self._audited("literature", self._node_literature))
+        g.add_node("pause_after_literature", self._audited("pause_after_literature", self._node_pause_after_literature))
+        g.add_node("select_skills", self._audited("select_skills", self._node_select_skills))
+        g.add_node("plan", self._audited("plan", self._node_plan))
+        g.add_node("design", self._audited("design", self._node_design))
         # design → implement_outline → implement → execute (two-stage
         # implement). The outline node produces a scaffold + function
         # signatures + constants + RESULT_JSON template, which the
@@ -1209,35 +1363,35 @@ class Engine:
         # before committing to a full ~200-line experiment.py. On a
         # pre-Phase-2 resume where ``implement_outline`` is empty, the
         # body node falls back to the legacy single-shot prompt.
-        g.add_node("implement_outline", self._node_implement_outline)
-        g.add_node("implement", self._node_implement)
-        g.add_node("execute", self._node_execute)
+        g.add_node("implement_outline", self._audited("implement_outline", self._node_implement_outline))
+        g.add_node("implement", self._audited("implement", self._node_implement))
+        g.add_node("execute", self._audited("execute", self._node_execute))
         # execute → execute_reflect (loops back to execute on failure)
-        g.add_node("execute_reflect", self._node_execute_reflect)
-        g.add_node("analyze", self._node_analyze)
+        g.add_node("execute_reflect", self._audited("execute_reflect", self._node_execute_reflect))
+        g.add_node("analyze", self._audited("analyze", self._node_analyze))
         # analyze → cross_check (always) → write OR design
-        g.add_node("cross_check", self._node_cross_check)
+        g.add_node("cross_check", self._audited("cross_check", self._node_cross_check))
         # evidence_gate sits on the cross_check → write happy path: it
         # weighs the assembled evidence and either proceeds to write or
         # sends the quest back for ONE bounded literature broaden. A
         # logged passthrough when engine.evidence_gate is off.
-        g.add_node("evidence_gate", self._node_evidence_gate)
-        g.add_node("write", self._node_write)
-        g.add_node("claim_check", self._node_claim_check)
-        g.add_node("review", self._node_review)
-        g.add_node("human_feedback", self._node_human_feedback)
+        g.add_node("evidence_gate", self._audited("evidence_gate", self._node_evidence_gate))
+        g.add_node("write", self._audited("write", self._node_write))
+        g.add_node("claim_check", self._audited("claim_check", self._node_claim_check))
+        g.add_node("review", self._audited("review", self._node_review))
+        g.add_node("human_feedback", self._audited("human_feedback", self._node_human_feedback))
         # no-simulation mode: design → auto_collect_data → wait_for_data
         # → (pause + resume) → data_load → analyze. All three new nodes
         # are conditional and only fire when
         # ``state.no_simulation_resolved`` is True.
-        g.add_node("auto_collect_data", self._node_auto_collect_data)
-        g.add_node("wait_for_data", self._node_wait_for_data)
-        g.add_node("data_load", self._node_data_load)
+        g.add_node("auto_collect_data", self._audited("auto_collect_data", self._node_auto_collect_data))
+        g.add_node("wait_for_data", self._audited("wait_for_data", self._node_wait_for_data))
+        g.add_node("data_load", self._audited("data_load", self._node_data_load))
         # no-simulation mode only: turn the collected web/data content into
         # figures so the paper/poster/slides aren't text-only. Passthrough
         # in the simulation path (which makes its own figures in execute).
-        g.add_node("web_plots", self._node_web_plots)
-        g.add_node("web_figures", self._node_web_figures)
+        g.add_node("web_plots", self._audited("web_plots", self._node_web_plots))
+        g.add_node("web_figures", self._audited("web_figures", self._node_web_figures))
 
         g.add_edge(START, "clarify")
         g.add_edge("clarify", "ideate")
@@ -1257,7 +1411,7 @@ class Engine:
         # then wait_for_data handles the pause-if-still-empty case).
         g.add_conditional_edges(
             "design",
-            self._route_after_design,
+            self._audited_route("design", self._route_after_design),
             {
                 # The route key stays ``implement`` for resume
                 # compatibility (the 609990 checkpoint pins
@@ -1280,7 +1434,7 @@ class Engine:
         g.add_edge("execute", "execute_reflect")
         g.add_conditional_edges(
             "execute_reflect",
-            self._route_after_execute_reflect,
+            self._audited_route("execute_reflect", self._route_after_execute_reflect),
             {"retry": "execute", "proceed": "analyze"},
         )
         # auto_collect_data: best-effort Axon retrieval that
@@ -1303,7 +1457,7 @@ class Engine:
         g.add_edge("analyze", "cross_check")
         g.add_conditional_edges(
             "cross_check",
-            self._route_after_cross_check,
+            self._audited_route("cross_check", self._route_after_cross_check),
             {
                 # The happy-path "write" label now lands on evidence_gate,
                 # which makes the real write-vs-broaden call.
@@ -1316,7 +1470,7 @@ class Engine:
         # back to literature for ONE bounded broaden pass.
         g.add_conditional_edges(
             "evidence_gate",
-            self._route_after_evidence_gate,
+            self._audited_route("evidence_gate", self._route_after_evidence_gate),
             {"write": "write", "broaden_lit": "literature"},
         )
         # write → claim_check → review. claim_check grounds each paper claim to
@@ -1325,7 +1479,7 @@ class Engine:
         g.add_edge("claim_check", "review")
         g.add_conditional_edges(
             "review",
-            self._route_after_review,
+            self._audited_route("review", self._route_after_review),
             {
                 "revise": "design",
                 # Every must-flag is a problem with the text: the experiment
@@ -1343,7 +1497,7 @@ class Engine:
         # callback returns: accept / reject → END, refine → design.
         g.add_conditional_edges(
             "human_feedback",
-            self._route_after_human_feedback,
+            self._audited_route("human_feedback", self._route_after_human_feedback),
             {"revise": "design", "done": END},
         )
         return g
@@ -2775,6 +2929,10 @@ class Engine:
     async def _audit_design(self, state: QuestState, design: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         """The second-pass methodology audit of a drafted design: ``(design, objections addressed)``."""
         iteration = state.get("iteration", 0)
+        # The design's ``rationale`` is the model's own account for the audit trace, not part of what the audit reviews or
+        # what its amended design must repeat (its reply shape does not list it): it is set aside here and put back after.
+        rationale = design.get("rationale")
+        design = {k: v for k, v in design.items() if k != "rationale"}
         # Second-pass methodology audit. The draft design just produced is
         # passed back to the LLM with a fixed checklist of common-but-fatal
         # design errors (circular evaluation, single-point eval, weak
@@ -2842,6 +3000,8 @@ class Engine:
             iteration, n_addressed,
         )
         self._record_design_critique(iteration, before, design, objections, failure)
+        if rationale is not None:
+            design = {**design, "rationale": rationale}
         return design, objections
 
     def _critique_summary(self) -> list[str]:
@@ -2886,6 +3046,16 @@ class Engine:
             history.append(entry)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(history, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            self._audit_check(
+                "design_self_critique", path, status=entry["status"],
+                summary="changed " + (", ".join(changed) or "nothing") if not failure else failure,
+            )
+            for o in entry["objections"]:
+                o = o if isinstance(o, dict) else {"objection": o}
+                self._audit(
+                    "model_claim", provenance=_audit_log.MODEL_CLAIM, topic=f"design_self_critique/{o.get('check', '')}".rstrip("/"),
+                    claim=o.get("objection", ""), fix=o.get("fix", ""),
+                )
         except (OSError, ValueError, TypeError) as e:
             self._log.debug("[design_self_critique] could not record the audit: %r", e)
 
@@ -3248,6 +3418,8 @@ class Engine:
         Returns whatever the resume sent (ANSWER pauses). SUPPLY pauses
         pause-exit: ``interrupt()`` raises ``GraphInterrupt`` and never returns.
         """
+        self._audit_pause = kind
+        self._audit("pause_requested", pause=kind, interaction=interaction, headline=headline)
         self._write_next_step(
             kind=kind, interaction=interaction, headline=headline, steps=steps,
         )
@@ -4595,6 +4767,7 @@ class Engine:
             path = self.quest_root / "needs" / "RUN_MANIFEST_CHECK.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+            self._audit_check("run_manifest", path, status=str(payload.get("status")), problems=payload.get("problems"))
         except OSError:
             pass  # a record that cannot be written must never stop a quest
 
@@ -4787,6 +4960,7 @@ class Engine:
             path = self.quest_root / "needs" / "PROTOCOL_CHECK.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            self._audit_check("protocol", path, status=str(payload.get("status")), problems=payload.get("differences"))
         except OSError:
             pass  # a record that cannot be written must never stop a quest
 
@@ -4941,6 +5115,7 @@ class Engine:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
             self._log.info("[evidence] %s", _evidence.summary_line(record))
+            self._audit_check("evidence", path, status=str(record.get("status")), summary=_evidence.summary_line(record))
             return record
         except Exception as e:  # noqa: BLE001 -- a report about the quest must never stall it
             self._log.warning("[evidence] could not assess the quest: %r", e)
@@ -4998,6 +5173,10 @@ class Engine:
             history.append({"warnings": [{"kind": w.kind, "text": w.text} for w in found], "mode": self.config.engine.numeric_warnings})
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
+            self._audit_check(
+                "numeric_warnings", path, status=self.config.engine.numeric_warnings,
+                problems=[f"{w.kind}: {w.text}" for w in found],
+            )
         except (OSError, ValueError):
             pass
         return [{"kind": w.kind, "text": w.text} for w in found]
@@ -5146,6 +5325,7 @@ class Engine:
             path = self.quest_root / "needs" / "ORACLE_CHECK.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+            self._audit_check("oracle", path, status=str(payload.get("status")), problems=payload.get("problems"))
         except OSError:
             pass  # a record that cannot be written must never stop a quest
 
