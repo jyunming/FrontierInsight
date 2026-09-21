@@ -66,8 +66,35 @@ FI's calls to a signed-in CLI are answer-only: `codex_cli` and `claude_cli` run 
 
 ---
 
+## Search first, simulate second
+
+Searching the literature and running the experiment are different jobs, and you usually want to read what the search found before any compute is spent on a simulation. Set one line and FI stops between the two:
+
+```yaml
+pauses:
+  supply: after_literature      # in the interview (--new, the web form, @fi /new): "Pause after literature"
+```
+
+```bash
+python launch.py --config quest.yaml     # step 1: search the web and the academic sources, save what it read, stop
+#   read outputs/<quest_id>/data/literature/ and NEXT_STEP.md; add papers to inputs/papers/, data to inputs/data/,
+#   your own simulation files to inputs/examples/ (execution.inputs), or edit the config
+python launch.py --resume <quest_id>     # step 2: skills, design, experiment, paper, with that literature in hand
+```
+
+Step 2 does not search again, and the papers you dropped in join what step 1 found, so the experiment is designed from a literature you have seen and added to. `--resume` is the quest page's *Resume* button on the web and `@fi /resume` in VSCode. What takes long can be separated in the same way:
+
+| Step | Turn it on | What happens |
+|---|---|---|
+| **Literature** | `pauses.supply: after_literature` | the quest stops once the literature is saved; `--resume` starts the experiment with it |
+| **Simulation** | `execution.background_jobs` | an HPC / cluster job is submitted and the quest pauses; `--watch` wakes it when the job is done |
+| **Analysis of the simulation** | `execution.split_analysis` | `simulate.py` writes raw files once, `experiment.py` analyses them; a repair or a review that flags the results reruns only the analysis |
+
+---
+
 ## Highlights
 
+- **Literature and simulation as separate steps** — stop after the literature search (`pauses.supply: after_literature`), read it and add your own papers and files, then `--resume` designs and runs the experiment with it in hand, without searching again; the simulation itself (`execution.background_jobs`) and its analysis (`execution.split_analysis`) can be split off the same way. See *Search first, simulate second* above.
 - **Whole loop, not just the LLM call** — ideate → literature → code → run → analyze → write → review, end to end, without you driving each step. It even fixes its own code when the experiment crashes, and redraws a figure whose legend sits on its own lines.
 - **Long simulations** — an experiment that runs as an HPC/cluster job (`execution.background_jobs`) is submitted by an idempotent driver script and the quest pauses cleanly; `--watch <quest>` (or the web button, or `@fi /watch`) re-checks it on a timer and resumes the quest when it is done, logging every check; the web button keeps showing whether the watcher is still running or, if it stopped, its exit code and last log line. Keep the simulation apart from its analysis (`execution.split_analysis: true`): `code/simulate.py` writes what it produced under `raw/seed<K>/`, and `code/experiment.py` reads those files, so an analysis that fails or that the review sends back is rewritten and run again against the raw files already on disk, and the simulation runs again only when its own script changed. Start from your own example files (`execution.inputs`), and require skills (`engine.skills_required`), including ones another agent installed (a skill that lives only in a folder the quest names in `engine.skills_dirs` is reviewed and approved with `python launch.py --config quest.yaml --approve-skill <name> --approve-as <you>`; under the Docker sandbox each one the quest uses is mounted read-only into the container).
 - **Built-in rigor** — an **evidence gate** weighs the assembled evidence before any paper is written; **claim grounding** traces every substantive claim to the experiment — every finding the run recorded reaches the check whole, along with the results branches those findings name — or to words it quotes from a cited source, and checks the quote is really there — however that source's PDF rendered its mathematics or spaced its words, so a quotation is not called unsupported over a subscript, a stacked fraction or a stray space in a word; a formula the stored text lost is not guessed at, and a quotation spanning one is not found (a draft whose citations could not be checked is not accepted); an optional **reviewer panel** (methodologist / statistician / devil's advocate) hard-flags fatal patterns.

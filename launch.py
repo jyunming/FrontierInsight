@@ -4841,6 +4841,11 @@ def _approve_all_skills(
         elif outcome == "untested":
             line += "  (no selftest.py; it can never be promoted)"
         print(line)
+        if outcome == "quarantined":
+            # The reason is the whole point of a FAIL line: without it the person has to run
+            # --approve-skill on that skill just to learn what failed.
+            for reason in [r.strip() for r in detail.splitlines() if r.strip()][-3:]:
+                print(f"         {reason[:200]}")
 
     print(
         f"\nApproved {len(tally['approved'])} as {who}. "
@@ -4848,6 +4853,12 @@ def _approve_all_skills(
         f"{len(tally['quarantined'])} failing self-test, "
         f"{len(tally['untested'])} without a self-test."
     )
+    if tally["quarantined"]:
+        print(
+            "A failing self-test usually means a package is missing or does not import on this Python. "
+            "The last lines of its output are shown above; all of it:  "
+            f"python launch.py --approve-skill {tally['quarantined'][0]} --approve-as <you>"
+        )
     if tally["needs_despite"]:
         print(
             "Read the findings before sweeping them:  "
