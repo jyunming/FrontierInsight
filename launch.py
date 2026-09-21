@@ -4577,6 +4577,43 @@ _MISSING_MODULE_RE = re.compile(
 )
 
 
+def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Install ``packages`` into this interpreter. Returns ``(installed, failed)``, where ``failed``
+    maps a package to the last thing pip said about it.
+
+    pip installs all or nothing: one package that cannot be built (no wheel for this Python, and no
+    compiler on a company laptop) fails the whole command and takes every other package with it. A bulk
+    approval that promised "skills whose dependency did not install will simply stay quarantined" then
+    left every one of them quarantined. A failed batch is therefore retried one package at a time, so
+    the ones that can be installed are.
+    """
+    import subprocess
+
+    if not packages:
+        return [], {}
+    if subprocess.run(
+        [sys.executable, "-m", "pip", "install", *packages], stdin=subprocess.DEVNULL,
+    ).returncode == 0:
+        return list(packages), {}
+    installed: list[str] = []
+    failed: dict[str, str] = {}
+    print(f"  pip could not install them together; trying {len(packages)} one at a time ...", flush=True)
+    for pkg in packages:
+        done = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", pkg],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        if done.returncode == 0:
+            installed.append(pkg)
+            print(f"  installed {pkg}", flush=True)
+            continue
+        lines = [line.strip() for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
+        errors = [line for line in lines if line.startswith("ERROR")]
+        failed[pkg] = (errors or lines or ["pip failed"])[-1][:200]
+        print(f"  could not install {pkg}: {failed[pkg]}", flush=True)
+    return installed, failed
+
+
 def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:
     """Pip package names this skill needs, best-effort.
 
@@ -4721,13 +4758,11 @@ def _approve_all_skills(
                     wanted.append(pkg)
         if wanted:
             print(f"Installing packages for quarantined skills: {' '.join(wanted)}")
-            rc = subprocess.run(
-                [sys.executable, "-m", "pip", "install", *wanted],
-            ).returncode
-            if rc != 0:
+            _installed, failed = _pip_install(wanted)
+            if failed:
                 print(
-                    "  pip reported a failure; continuing -- skills whose "
-                    "dependency did not install will simply stay quarantined.\n"
+                    f"  Not installed: {', '.join(failed)}. The skills that need them stay "
+                    "quarantined; the rest are unaffected.\n"
                 )
             print()
         else:

@@ -63,6 +63,14 @@ Usage:
     python scripts/import_scientist_skills.py --cache-dir /path/to/cache
     python scripts/import_scientist_skills.py --skip pymc,rdkit
     python scripts/import_scientist_skills.py --pip-install
+    python scripts/import_scientist_skills.py --offline        # use the clones already in the cache
+
+Fetching cannot hang: git is never allowed to ask for anything, a transfer that stalls is
+dropped, and a clone or pull still running after ``--git-timeout`` seconds (default 300) is
+stopped with everything it started. A repository that cannot be fetched is named at the end
+with the reason, its skills are skipped, and the rest are imported; the exit code is then 1.
+The default cache is ``.skill-sources/`` next to this script, or ``~/.frontier-insight/skill-sources``
+when that would sit inside a OneDrive folder (a sync client stalls git or locks its files).
 
 ``--pip-install`` additionally installs the underlying Python packages
 (pymc, astropy, rdkit, ...) into *this* interpreter's environment — a real,
@@ -76,9 +84,13 @@ from the pip line; check the skill's own SKILL.md compatibility section.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import signal
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -194,11 +206,122 @@ SKILLS: dict[str, tuple[str, str, list[str], bool]] = {
 ASSETS_DIR = Path(__file__).resolve().parent / "skill-assets" / "lieflat-charts"
 
 
-def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=True, **kw)
+# One clone or pull gets this long. A sparse, shallow clone of a large repository takes a few
+# minutes on a slow company link; a stalled connection would take for ever.
+GIT_TIMEOUT_S = 300
+# ``core.longpaths`` lifts Windows' 260-character limit for what git writes (a checkout under a
+# deep folder such as OneDrive's is otherwise one nested test fixture away from failing).
+GIT = ["git", "-c", "core.longpaths=true"]
 
 
-def _clone_or_refresh(url: str, dest: Path, sparse_paths: list[str] | None = None) -> None:
+class GitResult:
+    def __init__(self, returncode: int, output: str, timed_out: bool = False) -> None:
+        self.returncode = returncode
+        self.output = output
+        self.timed_out = timed_out
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0 and not self.timed_out
+
+    def reason(self) -> str:
+        if self.timed_out:
+            return "timed out"
+        lines = [line.strip() for line in self.output.strip().splitlines() if line.strip()]
+        # git names what went wrong on a "fatal:" or "error:" line, and may add advice after it.
+        for line in reversed(lines):
+            if line.lower().startswith(("fatal:", "error:")):
+                return line[:200]
+        return (lines[-1] if lines else f"exit code {self.returncode}")[:200]
+
+
+def _git_env() -> dict[str, str]:
+    """git must never wait for a person, and must give up on a transfer that has stalled."""
+    env = dict(os.environ)
+    env.update({
+        # A credential prompt, or a credential-manager window behind a console whose output is
+        # being captured, is a silent hang.
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
+        # A proxy that accepts the connection and then says nothing.
+        "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
+        "GIT_HTTP_LOW_SPEED_TIME": "60",
+    })
+    return env
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Stop ``proc`` and everything it started. Killing git alone leaves the helper it started
+    for the network (git-remote-https) running."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True, stdin=subprocess.DEVNULL,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _git(argv: list[str], *, timeout: float) -> GitResult:
+    """Run one git command that cannot hang.
+
+    Its output goes to a file, not a pipe: a pipe stays open for as long as any helper git started
+    is alive, so a run that had to be stopped could not even be read (``subprocess.run`` with
+    ``capture_output`` sat in ``communicate`` for ever, which is what a stalled ``git pull`` looked
+    like). It never asks for anything, and a command still running after ``timeout`` seconds is
+    stopped with everything it started."""
+    kwargs: dict = {} if os.name == "nt" else {"start_new_session": True}
+    timed_out = False
+    try:
+        with tempfile.TemporaryFile() as out:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                env=_git_env(), **kwargs,
+            )
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_tree(proc)
+                proc.wait()
+            out.seek(0)
+            text = out.read().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return GitResult(127, f"{argv[0]} was not found on PATH: install git, or put it on PATH")
+    return GitResult(-1 if timed_out else proc.returncode, text, timed_out)
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete a folder, including the read-only files git keeps under ``.git`` on Windows."""
+    def writable(func, name, _exc) -> None:
+        os.chmod(name, stat.S_IWRITE)
+        func(name)
+
+    shutil.rmtree(path, onerror=writable)
+
+
+def _default_cache_dir() -> Path:
+    """``.skill-sources/`` next to the repository, unless that sits inside a OneDrive folder: a sync
+    client that watches a git checkout stalls git or locks its files, and the folder's own path is
+    already most of Windows' 260 characters. Then ``~/.frontier-insight/skill-sources``, which
+    nothing syncs."""
+    inside = REPO_ROOT / ".skill-sources"
+    if any(part.lower().startswith("onedrive") for part in inside.resolve().parts):
+        return Path.home() / ".frontier-insight" / "skill-sources"
+    return inside
+
+
+def _clone_or_refresh(
+    url: str, dest: Path, sparse_paths: list[str] | None = None, *,
+    timeout: float = GIT_TIMEOUT_S, offline: bool = False,
+) -> tuple[bool, str]:
     """Clone (or refresh) a source repo, scoped to only the paths this
     script actually imports from it, via ``git sparse-checkout``.
 
@@ -212,33 +335,44 @@ def _clone_or_refresh(url: str, dest: Path, sparse_paths: list[str] | None = Non
     script imports -- an unrelated file blocking the whole clone.
     ``sparse_paths=None`` (lieflat-charts, small and taken whole) does a
     normal full clone.
+
+    Returns ``(usable, why_not)``: whether there is a clone to import from afterwards. A refresh
+    that fails keeps the clone that is already there. A first clone that fails is removed, so the
+    next run clones again instead of "refreshing" a folder with nothing checked out in it.
     """
-    if (dest / ".git").is_dir():
-        print(f"  refreshing {dest.name} ...")
-        try:
-            _run(["git", "-C", str(dest), "pull", "--ff-only"], capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            print(f"  (pull failed, using the existing clone as-is: {e})")
-        return
-    print(f"  cloning {url} -> {dest} ...")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
+    have = (dest / ".git").is_dir()
+    if offline:
+        if have:
+            print(f"  {dest.name}: offline, using the clone already here", flush=True)
+            return True, ""
+        return False, "not cloned yet, and --offline was given"
+    if have:
+        print(f"  refreshing {dest.name} ...", flush=True)
+        pulled = _git([*GIT, "-C", str(dest), "pull", "--ff-only"], timeout=timeout)
+        if not pulled.ok:
+            print(f"  ({dest.name}: pull failed, {pulled.reason()}; using the existing clone as-is)", flush=True)
         if sparse_paths:
-            _run(
-                ["git", "clone", "--depth", "1", "--filter=blob:none",
-                 "--sparse", url, str(dest)],
-                capture_output=True, text=True,
-            )
-            _run(
-                ["git", "-C", str(dest), "sparse-checkout", "set", *sparse_paths],
-                capture_output=True, text=True,
-            )
-        else:
-            _run(["git", "clone", "--depth", "1", url, str(dest)], capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"  FAILED: {e}")
-        if e.stderr:
-            print(f"  {e.stderr.strip()[-500:]}")
+            # A first run stopped between the clone and this step left a clone with nothing checked out.
+            scoped = _git([*GIT, "-C", str(dest), "sparse-checkout", "set", *sparse_paths], timeout=timeout)
+            if not scoped.ok and not all((dest / rel).exists() for rel in sparse_paths):
+                return False, f"its skill folders could not be checked out ({scoped.reason()})"
+        return True, ""
+    print(f"  cloning {url} -> {dest} ...", flush=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if sparse_paths:
+        cloned = _git(
+            [*GIT, "clone", "--depth", "1", "--filter=blob:none", "--sparse", url, str(dest)],
+            timeout=timeout,
+        )
+        if cloned.ok:
+            cloned = _git([*GIT, "-C", str(dest), "sparse-checkout", "set", *sparse_paths], timeout=timeout)
+    else:
+        cloned = _git([*GIT, "clone", "--depth", "1", url, str(dest)], timeout=timeout)
+    if not cloned.ok:
+        if dest.exists():
+            _remove_tree(dest)
+        return False, cloned.reason()
+    return True, ""
 
 
 def _prepare_lieflat(clone_dir: Path) -> None:
@@ -276,9 +410,19 @@ def _resolve_source(skill_dir: Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
-        "--cache-dir", default=str(REPO_ROOT / ".skill-sources"),
-        help="Where source repos are cloned (default: .skill-sources/ next to this script; "
-             "gitignored, not shipped).",
+        "--cache-dir", default=None,
+        help="Where source repos are cloned (default: .skill-sources/ next to this script, "
+             "gitignored, not shipped; ~/.frontier-insight/skill-sources when that would be "
+             "inside a OneDrive folder).",
+    )
+    ap.add_argument(
+        "--git-timeout", type=int, default=GIT_TIMEOUT_S, metavar="SECONDS",
+        help=f"Give up on one clone or pull after this long (default {GIT_TIMEOUT_S}).",
+    )
+    ap.add_argument(
+        "--offline", action="store_true",
+        help="Do not touch the network: import from the clones already in the cache "
+             "(clone a repository there yourself if git cannot reach it from this machine).",
     )
     ap.add_argument("--skip", default="", help="Comma-separated skill names to skip.")
     ap.add_argument(
@@ -288,7 +432,7 @@ def main() -> int:
     args = ap.parse_args()
 
     skip = {s.strip() for s in args.skip.split(",") if s.strip()}
-    cache_dir = Path(args.cache_dir).expanduser().resolve()
+    cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else _default_cache_dir()
 
     import launch  # noqa: E402  (path set up above)
 
@@ -314,8 +458,14 @@ def main() -> int:
             sparse_by_repo[repo_key].append(rel)
 
     needed_repo_keys = {repo_key for repo_key, *_ in SKILLS.values()}
-    print(f"Fetching {len(needed_repo_keys)} source repos ...")
+    print(f"Source repos are kept in {cache_dir}")
+    print(
+        f"{'Using the clones already there' if args.offline else 'Fetching'} "
+        f"{len(needed_repo_keys)} source repos ...",
+        flush=True,
+    )
     repo_dirs: dict[str, Path] = {}
+    unfetched: dict[str, str] = {}  # repo key -> why there is nothing to import from
     for key, url in REPOS.items():
         # Keyed on OUR internal repo key, not the URL's basename: two
         # different owners here both named their repo
@@ -326,14 +476,35 @@ def main() -> int:
         dest = cache_dir / key
         repo_dirs[key] = dest
         paths = sparse_by_repo.get(key, [])
-        _clone_or_refresh(url, dest, sparse_paths=(paths or None))
-    _prepare_lieflat(repo_dirs["lieflat"])
+        usable, why = _clone_or_refresh(
+            url, dest, sparse_paths=(paths or None), timeout=args.git_timeout, offline=args.offline,
+        )
+        if not usable:
+            unfetched[key] = why
+            print(f"  {key}: NOT FETCHED, {why}", flush=True)
+    if "lieflat" in repo_dirs and "lieflat" not in unfetched:
+        _prepare_lieflat(repo_dirs["lieflat"])
+    if unfetched:
+        print()
+        print(f"Could not fetch {len(unfetched)} of {len(REPOS)} source repos: {', '.join(unfetched)}.")
+        print("Their skills are skipped; everything else is imported. On a company network the usual causes are")
+        print("a proxy git does not know about (git config --global http.proxy http://host:port), a VPN that")
+        print("is off, an SSL-inspection certificate (git config --global http.sslBackend schannel), or a")
+        print("synced folder locking git's files (pass --cache-dir a folder nothing syncs). Or clone them")
+        print("yourself, from a machine or a shell that can reach GitHub, and run again with --offline:")
+        for key in unfetched:
+            print(f"  git -c core.longpaths=true clone --depth 1 {REPOS[key]} {cache_dir / key}")
     print()
 
     results: list[tuple[str, bool, bool, list[str]]] = []  # name, imported, needs_despite, pip_pkgs
+    not_attempted: list[str] = []
     for name, (repo_key, rel, pip_pkgs, needs_despite) in SKILLS.items():
         if name in skip:
             print(f"-- {name}: skipped")
+            continue
+        if repo_key in unfetched:
+            print(f"-- {name}: skipped (its source repo {repo_key} was not fetched)")
+            not_attempted.append(name)
             continue
         repo_dir = repo_dirs[repo_key]
         skill_dir = repo_dir / rel if rel else repo_dir
@@ -357,7 +528,10 @@ def main() -> int:
 
     if args.pip_install and all_pip:
         print(f"Installing underlying packages: {' '.join(all_pip)}")
-        subprocess.run([sys.executable, "-m", "pip", "install", *all_pip])
+        _installed, failed = launch._pip_install(all_pip)
+        if failed:
+            print(f"Could not install: {', '.join(failed)} (the reason is above). The skills that need them fail")
+            print("their self-test until they are installed; the rest are unaffected.")
         print()
     elif all_pip:
         print("Underlying packages not installed (pass --pip-install, or run yourself):")
@@ -376,8 +550,9 @@ def main() -> int:
     imported_count = sum(1 for _, ok, _, _ in results if ok)
     any_despite = any(nd for _, ok, nd, _ in results if ok)
     print(f"Imported {imported_count}/{len(results)}. Nothing above was approved.")
-    print("Replace <you> with the name of whoever actually reviewed the skills.
-")
+    if not_attempted:
+        print(f"Not attempted, because their source repo could not be fetched: {len(not_attempted)} skills.")
+    print("Replace <you> with the name of whoever actually reviewed the skills.\n")
     print("Review them, then approve in one go (installs missing packages first,")
     print("re-tests, and still refuses anything whose self-test fails):")
     despite_flag = " --despite-findings" if any_despite else ""
@@ -387,20 +562,17 @@ def main() -> int:
     )
     if any_despite:
         print(
-            "
-  (--despite-findings is included because some of these carry "
-            "high-severity
-   scan findings. Read them first: "
+            "\n  (--despite-findings is included because some of these carry "
+            "high-severity\n   scan findings. Read them first: "
             "python launch.py --scan-skill <name>)"
         )
-    print("
-Or one at a time:")
+    print("\nOr one at a time:")
     for name, imported, needs_despite, _ in results:
         if not imported:
             continue
         flag = " --despite-findings" if needs_despite else ""
         print(f"  python launch.py --approve-skill {name} --approve-as {approve_as}{flag}")
-    return 0
+    return 1 if unfetched else 0
 
 
 if __name__ == "__main__":

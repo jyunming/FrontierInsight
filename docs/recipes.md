@@ -215,7 +215,7 @@ python launch.py --approve-all-skills --approve-as <you> --pip-install
 
 Approves every skill that passes its gates, in one command. Useful after `scripts/import_scientist_skills.py`, which imports ~70 skills that would otherwise need ~70 individual approvals.
 
-`--pip-install` is what makes this more than a shell loop. A skill wrapping a library FI doesn't have installed fails its self-test and is **quarantined**, and a quarantined skill cannot be approved — so looping `--approve-skill` over a fresh import just refuses most of them. Bulk approval runs **install → re-test → approve** in that order: it collects the packages the quarantined skills need (from `pip_requires` in each skill's `provenance.json`, falling back to parsing `ModuleNotFoundError` out of the failing self-test), installs them in one pip call, then re-runs the gates.
+`--pip-install` is what makes this more than a shell loop. A skill wrapping a library FI doesn't have installed fails its self-test and is **quarantined**, and a quarantined skill cannot be approved — so looping `--approve-skill` over a fresh import just refuses most of them. Bulk approval runs **install → re-test → approve** in that order: it collects the packages the quarantined skills need (from `pip_requires` in each skill's `provenance.json`, falling back to parsing `ModuleNotFoundError` out of the failing self-test), installs them in one pip call, then re-runs the gates. pip installs all or nothing, so one package that cannot be built here (no wheel for this Python and no compiler, which is common on a company laptop) would fail the call and leave every skill quarantined; a failed call is therefore retried one package at a time, the packages that could not be installed are named with pip's reason, and only the skills that need them stay quarantined. `scripts/import_scientist_skills.py --pip-install` installs the same way.
 
 Installing into a possibly-shared interpreter is a real side effect, so it stays opt-in — without the flag the exact pip line is printed for you to run.
 
@@ -313,7 +313,7 @@ FI ships no skills — the discovery root is user state (`~/.frontier-insight/sk
 python scripts/import_scientist_skills.py
 ```
 
-Clones the source repos into `.skill-sources/` (gitignored — a cache, not something this repo ships), imports each skill, runs the static scan, and prints a summary. It does **not** approve anything — that stays an explicit, separate step, because approval binds to a person's judgment and a script doesn't get to make that call for you. It also does **not** install the underlying Python packages by default (pymc, astropy, rdkit, obspy, ...) — pass `--pip-install` to have it do that too:
+Clones the source repos into `.skill-sources/` (gitignored — a cache, not something this repo ships; `~/.frontier-insight/skill-sources` instead when the repository sits inside a OneDrive folder, because a sync client stalls git or locks its files), imports each skill, runs the static scan, and prints a summary. It does **not** approve anything — that stays an explicit, separate step, because approval binds to a person's judgment and a script doesn't get to make that call for you. It also does **not** install the underlying Python packages by default (pymc, astropy, rdkit, obspy, ...) — pass `--pip-install` to have it do that too:
 
 ```bash
 python scripts/import_scientist_skills.py --pip-install
@@ -321,7 +321,9 @@ python launch.py --scan-skill <name>       # read what the scanner found, for ea
 python launch.py --approve-skill <name> --approve-as <you>
 ```
 
-`--skip name1,name2` narrows the run to a subset; `--cache-dir PATH` points the source clones somewhere other than the default. Safe to re-run — an already-imported skill is left alone (re-importing over one would lapse its approval, so the importer refuses by default).
+`--skip name1,name2` narrows the run to a subset; `--cache-dir PATH` points the source clones somewhere other than the default.
+
+Fetching cannot hang. git is never allowed to ask for anything (no terminal prompt, no credential-manager window), a transfer that stalls is dropped, and a clone or pull still running after `--git-timeout SECONDS` (default 300) is stopped together with everything it started. A repository git cannot reach is named at the end with the reason and the usual causes on a company network (a proxy git does not know about, a VPN that is off, an SSL-inspection certificate, a synced folder), its skills are skipped, the rest are imported, and the exit code is 1. The message prints the `git clone` line to run by hand for each one; once the clones are in the cache, `--offline` imports from them without touching the network. A clone that was stopped before its skill folders were checked out is finished on the next run. Safe to re-run — an already-imported skill is left alone (re-importing over one would lapse its approval, so the importer refuses by default).
 
 A handful of the 69 need their selftest re-run once more before approving, or a closer look at what the static scanner flagged — none of that is scripted, deliberately (see the promotion gate above). The Skill Field Guide covers what was found reviewing this exact batch, if you want a worked example rather than starting cold.
 
