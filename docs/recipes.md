@@ -325,6 +325,8 @@ An amendment after the freeze: when a redesign asks to change the protocol the q
 
 A simulation's `run_manifest.json` (what it actually swept and ran) is compared with the frozen protocol after its first run; a difference sends `simulate.py` back once and then stops the quest with what differs. Fix `code/simulate.py` so that it runs the protocol's design and writes the manifest from what its loops did, then resume; `engine.run_manifest_check: warn` goes on with the difference recorded. `execution.split_failure: block` stops a quest whose code-writing reply does not hold both scripts instead of running it as one.
 
+The protocol's `metrics` say what each headline number estimates and how its observations depend on each other (`cluster`, `paired`); the engine chooses the estimator from them, computes the contrasts' p-values and adjusts each `family` with Holm. Declare them while the plan is a draft: `plan.md` says when a protocol with runs declares none, and after the freeze a change is an amendment.
+
 A run whose own numerics warned (an overflow, a solver that did not converge, an argument that had no effect, a NaN in a result) is sent back like a failed one, and stops the quest if the repairs do not remove the warnings; `engine.numeric_warnings: warn` records them and goes on, `off` does not look. Resuming after the stop runs the script again if you changed it, and accepts the run as it is if you did not.
 
 ### Run a quest on Moonshot's Kimi (or any OpenAI-compatible model that fixes its sampling)

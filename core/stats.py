@@ -175,3 +175,191 @@ def effect_magnitude(d: float | None) -> str:
 def bonferroni_alpha(n_comparisons: int, alpha: float = 0.05) -> float:
     """Bonferroni-corrected significance threshold for ``n`` comparisons."""
     return alpha / max(1, n_comparisons)
+
+
+# --- comparisons: the sampling distribution that goes with each estimator ---------------------------------------------------
+#
+# A contrast between two settings is judged with the distribution of the estimator it uses: a two-proportion test for
+# proportions from independent trials, a permutation or bootstrap distribution for means, a sign-flip permutation of the
+# per-pair differences when the settings shared their random numbers (the pairs are then not independent), and a bootstrap
+# over whole clusters when the observations inside a cluster are not independent of each other. Every resampling is seeded, so
+# the same data give the same interval and p-value.
+
+
+def _p_two_sided_normal(z: float) -> float:
+    return math.erfc(abs(z) / math.sqrt(2.0))
+
+
+def _rounds(n: int, resamples: int = 2000) -> int:
+    return resamples if n <= 2000 else max(200, resamples * 2000 // n)
+
+
+def _thin(vals: list[float], cap: int) -> list[float]:
+    if len(vals) <= cap:
+        return vals
+    step = len(vals) / cap
+    return [vals[int(i * step)] for i in range(cap)]
+
+
+def _clean(values: list[Any]) -> list[float]:
+    return [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+
+
+def _percentile_interval(samples: list[float]) -> tuple[float, float]:
+    samples = sorted(samples)
+    rounds = len(samples)
+    return samples[int(0.025 * (rounds - 1))], samples[int(math.ceil(0.975 * (rounds - 1)))]
+
+
+def two_proportion_test(k1: float, n1: float, k2: float, n2: float) -> dict[str, Any] | None:
+    """The difference of two proportions from independent trials (``k1`` of ``n1`` minus ``k2`` of ``n2``): Newcombe's hybrid
+    score 95% interval (built from the two Wilson intervals, so it behaves at 0 and 1) and the pooled two-sided z test.
+    ``None`` for impossible counts."""
+    a, b = wilson_interval(k1, n1), wilson_interval(k2, n2)
+    if a is None or b is None:
+        return None
+    p1, p2 = k1 / n1, k2 / n2
+    diff = p1 - p2
+    lower = diff - math.sqrt((p1 - a[0]) ** 2 + (b[1] - p2) ** 2)
+    upper = diff + math.sqrt((a[1] - p1) ** 2 + (p2 - b[0]) ** 2)
+    pooled = (k1 + k2) / (n1 + n2)
+    se = math.sqrt(pooled * (1.0 - pooled) * (1.0 / n1 + 1.0 / n2))
+    if se == 0.0:
+        p_value = 1.0 if diff == 0.0 else 0.0
+    else:
+        p_value = _p_two_sided_normal(diff / se)
+    return {"diff": diff, "ci_lower": lower, "ci_upper": upper, "p": p_value, "method": "two_proportion_z_newcombe"}
+
+
+def holm_adjust(p_values: list[float]) -> list[float]:
+    """Holm's step-down adjustment of a family of p-values: each adjusted value is at least as large as the raw one, the
+    adjusted values keep the order of the raw ones, and none exceeds 1. The family-wise error rate is held at the level
+    a single test would be judged at."""
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [1.0] * m
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, (m - rank) * p_values[i])
+        adjusted[i] = min(1.0, running)
+    return adjusted
+
+
+def paired_permutation_test(diffs: list[float], *, resamples: int = 4000, seed: int = 0, exact_up_to: int = 14) -> dict[str, Any] | None:
+    """The mean of per-pair differences (settings that shared their random numbers), with a sign-flip permutation p-value
+    (exact when at most ``exact_up_to`` pairs differ, otherwise ``resamples`` random flips) and a percentile bootstrap 95%
+    interval of the mean difference. ``None`` for fewer than 2 pairs."""
+    import itertools
+    import random
+
+    d = _thin(_clean(diffs), 20000)
+    n = len(d)
+    if n < 2:
+        return None
+    observed = sum(d) / n
+    nonzero = [x for x in d if x != 0.0]
+    rng = random.Random(seed)
+    if not nonzero:
+        p_value = 1.0
+    elif len(nonzero) <= exact_up_to:
+        total = extreme = 0
+        for signs in itertools.product((1.0, -1.0), repeat=len(nonzero)):
+            total += 1
+            if abs(sum(s * x for s, x in zip(signs, nonzero))) >= abs(sum(nonzero)) - 1e-12:
+                extreme += 1
+        p_value = extreme / total
+    else:
+        rounds = _rounds(len(nonzero), resamples)
+        hits = sum(
+            1 for _ in range(rounds)
+            if abs(sum(x if rng.random() < 0.5 else -x for x in nonzero)) >= abs(sum(nonzero)) - 1e-12
+        )
+        p_value = (hits + 1) / (rounds + 1)
+    rounds = _rounds(n)
+    means = [sum(d[rng.randrange(n)] for _ in range(n)) / n for _ in range(rounds)]
+    lo, hi = _percentile_interval(means)
+    return {"diff": observed, "ci_lower": lo, "ci_upper": hi, "p": p_value, "n_pairs": n, "method": "paired_permutation_bootstrap"}
+
+
+def two_sample_mean_test(a: list[float], b: list[float], *, resamples: int = 2000, seed: int = 0, cap: int = 5000) -> dict[str, Any] | None:
+    """The difference of two means from independent observations: a percentile bootstrap 95% interval and a two-sided
+    permutation p-value. ``None`` when either sample has fewer than 2 observations."""
+    import random
+
+    x, y = _thin(_clean(a), cap), _thin(_clean(b), cap)
+    if len(x) < 2 or len(y) < 2:
+        return None
+    rng = random.Random(seed)
+    observed = sum(x) / len(x) - sum(y) / len(y)
+    rounds = _rounds(len(x) + len(y), resamples)
+    boots = [
+        sum(x[rng.randrange(len(x))] for _ in range(len(x))) / len(x) - sum(y[rng.randrange(len(y))] for _ in range(len(y))) / len(y)
+        for _ in range(rounds)
+    ]
+    pool = x + y
+    hits = 0
+    for _ in range(rounds):
+        rng.shuffle(pool)
+        if abs(sum(pool[: len(x)]) / len(x) - sum(pool[len(x):]) / len(y)) >= abs(observed) - 1e-12:
+            hits += 1
+    lo, hi = _percentile_interval(boots)
+    return {"diff": observed, "ci_lower": lo, "ci_upper": hi, "p": (hits + 1) / (rounds + 1), "method": "bootstrap_permutation"}
+
+
+def _cluster_totals(values: list[float], clusters: list[Any]) -> list[tuple[float, int]] | None:
+    if len(values) != len(clusters):
+        return None
+    grouped: dict[Any, list[float]] = {}
+    for v, c in zip(values, clusters):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            continue
+        grouped.setdefault(c, []).append(float(v))
+    return [(sum(v), len(v)) for v in grouped.values()]
+
+
+def cluster_bootstrap_interval(values: list[float], clusters: list[Any], *, resamples: int = 2000, seed: int = 0) -> dict[str, Any] | None:
+    """The mean of observations that come in clusters (trials of one household, steps of one trajectory), with a percentile
+    bootstrap 95% interval from resampling WHOLE clusters: the observations of a cluster are not independent, so they do
+    not count as independent trials. ``None`` for mismatched lists or fewer than 2 clusters."""
+    import random
+
+    groups = _cluster_totals(values, clusters)
+    if not groups or len(groups) < 2:
+        return None
+    total, count = sum(s for s, _n in groups), sum(n for _s, n in groups)
+    rng = random.Random(seed)
+    g = len(groups)
+    rounds = _rounds(g)
+    means = []
+    for _ in range(rounds):
+        picks = [groups[rng.randrange(g)] for _ in range(g)]
+        c = sum(n for _s, n in picks)
+        means.append(sum(s for s, _n in picks) / c if c else 0.0)
+    lo, hi = _percentile_interval(means)
+    return {"mean": total / count, "ci_lower": lo, "ci_upper": hi, "n_clusters": g, "n_observations": count, "method": "cluster_bootstrap"}
+
+
+def cluster_bootstrap_difference(
+    a: list[float], a_clusters: list[Any], b: list[float], b_clusters: list[Any], *, resamples: int = 2000, seed: int = 0,
+) -> dict[str, Any] | None:
+    """The difference of two means of clustered observations from independent clusters: whole clusters of each group are
+    resampled; the interval is the percentile interval and the p-value the bootstrap two-sided sign p-value."""
+    import random
+
+    ga, gb = _cluster_totals(a, a_clusters), _cluster_totals(b, b_clusters)
+    if not ga or not gb or len(ga) < 2 or len(gb) < 2:
+        return None
+    observed = sum(s for s, _n in ga) / sum(n for _s, n in ga) - sum(s for s, _n in gb) / sum(n for _s, n in gb)
+    rng = random.Random(seed)
+    rounds = _rounds(len(ga) + len(gb))
+    diffs = []
+    for _ in range(rounds):
+        pa = [ga[rng.randrange(len(ga))] for _ in range(len(ga))]
+        pb = [gb[rng.randrange(len(gb))] for _ in range(len(gb))]
+        ca, cb = sum(n for _s, n in pa), sum(n for _s, n in pb)
+        diffs.append((sum(s for s, _n in pa) / ca if ca else 0.0) - (sum(s for s, _n in pb) / cb if cb else 0.0))
+    below = sum(1 for d in diffs if d <= 0.0)
+    above = sum(1 for d in diffs if d >= 0.0)
+    p_value = min(1.0, 2.0 * (min(below, above) + 1) / (rounds + 1))
+    lo, hi = _percentile_interval(diffs)
+    return {"diff": observed, "ci_lower": lo, "ci_upper": hi, "p": p_value, "method": "cluster_bootstrap"}

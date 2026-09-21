@@ -424,6 +424,23 @@ def oracle_notes(protocol: dict[str, Any] | None) -> list[str]:
     ]
 
 
+def metric_notes(protocol: dict[str, Any] | None) -> list[str]:
+    """What the plan says about the metrics the protocol declares (:mod:`core.metric_spec`)."""
+    if not isinstance(protocol, dict):
+        return []
+    metrics = protocol.get("metrics")
+    if isinstance(metrics, list) and metrics:
+        return []
+    if not isinstance(protocol.get("runs_per_setting"), (int, float)) and not isinstance(protocol.get("precision"), dict):
+        return []
+    return [
+        "The protocol declares no metric spec (`metrics`), so which estimator each headline number gets (independent trials or "
+        "clusters, paired or independent settings, a proportion or a mean) would be guessed from the names in RESULT_JSON; "
+        "declare each headline metric while the plan is a draft. The evidence level does not call the statistics adequate "
+        "while a metric is undeclared."
+    ]
+
+
 def failure_notes(protocol: dict[str, Any] | None) -> list[str]:
     """What the plan says about a trial that fails, when the protocol has runs to fail (:mod:`core.run_manifest`). Said before
     the freeze, where it can still be added: afterwards the only way to add it is an amendment."""
