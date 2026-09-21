@@ -45,6 +45,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from core.config import Config
+from core import plan as fi_plan
 from core.engine import Engine, _aggregate_cost_rows
 from core.provider import ProxySupervisor
 from generation._visual_check import report_summary
@@ -435,7 +436,7 @@ _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
 # `(unknown)` during the affected node's run, even though it's logging
 # normally — `_current_node_from_log` filters on this set.
 _KNOWN_NODES = frozenset({
-    "clarify", "ideate", "literature", "design", "design_self_critique",
+    "clarify", "ideate", "literature", "plan", "design", "design_self_critique",
     "implement_outline", "implement", "execute", "execute_reflect",
     "analyze", "cross_check", "evidence_gate", "write", "claim_check",
     "review", "human_feedback",
@@ -1164,6 +1165,122 @@ def make_app(
             "last_line": lines[-1] if lines else "",
             "log_tail": lines,
             "pending": (quest_root / ".fi" / "pending.json").is_file(),
+        })
+
+    def _plan_view(quest_root: Path) -> dict[str, Any]:
+        """plan.md as the quest page shows it: its text, why its design block cannot be read (if it cannot), and
+        the versions kept."""
+        path = fi_plan.plan_path(quest_root)
+        if not path.is_file():
+            return {"exists": False, "text": "", "design_error": "", "versions": []}
+        text = path.read_text(encoding="utf-8")
+        parsed = fi_plan.parse(text)
+        return {
+            "exists": True,
+            "text": text,
+            "design_error": parsed.error or "",
+            "versions": fi_plan.history(quest_root),
+        }
+
+    @app.get("/api/quests/{quest_id}/plan")
+    async def get_plan(quest_id: str) -> JSONResponse:
+        """The quest's ``plan.md`` (what the literature says, the gap, the design the experiment will run) with the
+        versions kept. Written by the plan step before the design; ``exists`` is false until then."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        return JSONResponse({"quest_id": quest_id, **_plan_view(quest_root)})
+
+    @app.put("/api/quests/{quest_id}/plan")
+    async def put_plan(quest_id: str, request: Request) -> JSONResponse:
+        """Save an edited ``plan.md``. Refused, with the reason, when its design block could not be read: that block
+        is what the experiment runs, so a file the design step cannot use is never written over a good one."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        path = fi_plan.plan_path(quest_root)
+        if not path.is_file():
+            raise HTTPException(404, "this quest has no plan.md yet: it has not reached the plan step")
+        body = await request.json()
+        text = body.get("text") if isinstance(body, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(400, "request body must contain {'text': '<the whole plan.md>'}")
+        if len(text) > 400_000:
+            raise HTTPException(413, "plan.md is over 400 KB")
+        parsed = fi_plan.parse(text)
+        if parsed.design is None:
+            raise HTTPException(400, f"not saved: {parsed.error}")
+        # What is on disk now, if a person edited it there since it was last recorded, is its own version.
+        fi_plan.note_edit(quest_root, path.read_text(encoding="utf-8"))
+        text = text.replace("\r\n", "\n")
+        path.write_text(text, encoding="utf-8")
+        fi_plan.note_edit(quest_root, text)
+        return JSONResponse({"quest_id": quest_id, "saved": True, **_plan_view(quest_root)})
+
+    @app.post("/api/quests/{quest_id}/plan/revise")
+    async def revise_plan(quest_id: str, request: Request) -> JSONResponse:
+        """Ask for a change to ``plan.md``: spawns ``launch.py --resume <id> --revise-plan "<request>"``, which has
+        the model rewrite the file (an unusable rewrite leaves it as it was) and runs nothing else. The web surface of
+        the CLI's ``--revise-plan``; ``GET`` on this path says how it went."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        yaml_path = quest_root / "config.yaml"
+        if not yaml_path.is_file():
+            raise HTTPException(
+                400, f"no config.yaml at {yaml_path}. Revising the plan needs the YAML that started the quest.",
+            )
+        if not fi_plan.plan_path(quest_root).is_file():
+            raise HTTPException(404, "this quest has no plan.md yet: it has not reached the plan step")
+        body = await request.json()
+        ask = str(body.get("request") or "").strip() if isinstance(body, dict) else ""
+        if not ask:
+            raise HTTPException(400, "say what to change in the plan")
+        if len(ask) > 4000:
+            raise HTTPException(413, "the request is over 4000 characters")
+        job_id = f"{quest_id}-plan"
+        running = app.state.launcher.job_state(job_id)
+        if running is not None and running["alive"]:
+            raise HTTPException(409, "the plan is already being rewritten; wait for it to finish")
+        from web.quest_launcher import QuestLauncherFull
+        try:
+            launched = app.state.launcher.launch_command(
+                argv_tail=["--config", str(yaml_path), "--resume", quest_id, "--revise-plan", ask],
+                job_id=job_id,
+            )
+        except QuestLauncherFull as e:
+            return JSONResponse(
+                {"error": "launcher at capacity", "detail": str(e), "retry_after_seconds": 30},
+                status_code=503, headers={"Retry-After": "30"},
+            )
+        return JSONResponse({"quest_id": quest_id, "pid": launched.pid, "revising": True})
+
+    @app.get("/api/quests/{quest_id}/plan/revise")
+    async def revise_plan_status(quest_id: str) -> JSONResponse:
+        """How the last ``POST .../plan/revise`` went: ``running``, ``exited`` (``returncode`` 0 means the plan was
+        rewritten; anything else left it as it was, and ``last_line`` says why), ``unknown`` (the web server was
+        restarted since) or ``not_started``."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        _resolve_quest_root(app.state.output_root, quest_id)
+        job_id = f"{quest_id}-plan"
+        launched = app.state.launcher.job_state(job_id)
+        log_path = (launched or {}).get("log_path") or (
+            app.state.output_root / "_jobs" / job_id / "launch.log"
+        )
+        lines = [
+            line.strip()[:400]
+            for line in _read_log_tail(log_path, n=200) if line.strip()
+        ][-5:]
+        returncode: int | None = None
+        if launched is not None:
+            state = "running" if launched["alive"] else "exited"
+            returncode = launched["returncode"]
+        else:
+            state = "unknown" if log_path.is_file() else "not_started"
+        return JSONResponse({
+            "quest_id": quest_id, "state": state, "returncode": returncode,
+            "last_line": lines[-1] if lines else "", "log_tail": lines,
         })
 
     @app.post("/api/quests/{quest_id}/generate")
