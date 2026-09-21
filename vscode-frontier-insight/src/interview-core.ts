@@ -89,6 +89,10 @@ export interface InterviewAnswers {
     // to pauses.plan; off (the default) emits nothing. Must stay in sync with
     // core/interview.py.
     pause_for_plan?: boolean;
+    // The top-level `rigor_profile` of the config: "default" (writes nothing, the default) or "research", which turns on
+    // together what a study needs before its result can be trusted (docs/rigor.md). Must stay in sync with
+    // core/interview.py:InterviewAnswers.rigor_profile.
+    rigor_profile?: "default" | "research";
     // Mid-quest stop so you can drop reference PDFs into inputs/papers/
     // and datasets into inputs/data/ before the engine continues, then
     // resume. Maps to pauses.supply via SUPPLY_TO_PAUSE; "never" (the
@@ -333,6 +337,10 @@ export function answersToYaml(answers: InterviewAnswers): string {
     // string field is the cheap, defensive fix.
     lines.push(`title: "${yamlEscape(answers.title)}"`);
     lines.push("");
+    if (answers.rigor_profile === "research") {
+        lines.push('rigor_profile: "research"');
+        lines.push("");
+    }
 
     lines.push("provider:");
     lines.push(`${indent}name: "vscode_extension"`);
@@ -409,7 +417,8 @@ export function answersToYaml(answers: InterviewAnswers): string {
         for (const persona of answers.review_panel) {
             lines.push(`${indent}${indent}- "${yamlEscape(persona)}"`);
         }
-    } else {
+    } else if (answers.rigor_profile !== "research") {
+        // An empty panel written beside the research profile would contradict it (the profile brings its own panel).
         lines.push(`${indent}review_panel: []`);
     }
     // Pin the interview's research-shaping answers into

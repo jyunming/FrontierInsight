@@ -245,3 +245,52 @@ async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
     assert "  page_limit: 4" in text.splitlines()
     cfg = Config.model_validate(yaml.safe_load(text))
     assert cfg.output.page_limit == 4 and resolve_page_limit(cfg) == 4
+
+
+@pytest.mark.asyncio
+async def test_run_new_writes_the_research_profile_the_user_picks_on_the_review_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The rigor profile is an advanced answer: 'a' shows it, its row number
+    picks it, and the draft that comes out is the research profile — which
+    must load (an empty review panel beside it would have been refused)."""
+    import re
+
+    from launch import _run_new
+    from core.provider import ProxySupervisor
+
+    async def fake_preflight(**_kw: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
+    tier1 = iter(["Rigor profile probe topic", "", "", "", "1", "1", "", ])
+    seen: list[str] = []
+    review_step = {"n": 0}
+
+    def fake_input(prompt: str = "") -> str:
+        if "Edit which?" not in prompt and review_step["n"] == 0:
+            return next(tier1, "")
+        seen.append(capsys.readouterr().out)
+        review_step["n"] += 1
+        if review_step["n"] == 1:
+            return "a"
+        if review_step["n"] == 2:
+            row = re.search(r"^\s*(\d+)\. Rigor profile", "".join(seen), re.M)
+            assert row, "the advanced view lists a 'Rigor profile' row"
+            return row.group(1)
+        if review_step["n"] == 3:
+            return "2"          # the picker: 1 = default, 2 = research
+        return ""               # launch
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    output_root = tmp_path / "outputs"
+    rc = await _run_new(
+        output_root=output_root, draft_only=True, vscode_bridge_port=0,
+        interactive=False, supervisor=ProxySupervisor(),
+    )
+    assert rc == 0
+    (draft,) = list((output_root / "_drafts").glob("*.yaml"))
+    text = draft.read_text(encoding="utf-8")
+    assert 'rigor_profile: "research"' in text.splitlines()
+    cfg = Config.model_validate(yaml.safe_load(text))
+    assert cfg.rigor_profile == "research" and cfg.pauses.plan == "ask"

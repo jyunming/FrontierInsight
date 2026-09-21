@@ -222,6 +222,7 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
     "web_research",
     "supply_papers",
     "pause_for_plan",
+    "rigor_profile",
     "audience",
     "knowledge_top_k",
     "knowledge_external_top_k",
@@ -602,6 +603,7 @@ export async function runInterview(
         supply_papers: true,
         // The plan is always written; stopping for it is opt-in (unattended runs).
         pause_for_plan: false,
+        rigor_profile: "default",
         ...authorLine,
         poster_size: "a1_portrait",
         // Blank: no set page limit (a limit the topic states still applies).
@@ -686,6 +688,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
     lines.push(`| Stop to read and edit the plan | ${a.pause_for_plan === true ? "yes (plan.md)" : "no"} |`);
+    lines.push(`| Rigor profile | ${a.rigor_profile === "research" ? "research (checks stop the quest)" : "default"} |`);
     lines.push(`| Pause for my papers / datasets | \`${a.pause_for_user_input ?? "never"}\` |`);
     lines.push(`| Multi-model ensemble | \`${a.ensemble_profile ?? "off"}\` |`);
     if ((a.ensemble_profile ?? "off") !== "off") {
@@ -832,6 +835,7 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Web research (download sources)", value: "web_research" },
             { label: "Supply paywalled papers", value: "supply_papers" },
             { label: "Stop to read and edit the plan", value: "pause_for_plan" },
+            { label: "Rigor profile", value: "rigor_profile" },
             { label: "Pause for my papers / datasets", value: "pause_for_user_input" },
             { label: "Paper audience", value: "audience" },
             { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
@@ -957,6 +961,18 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
                 { title: "Stop to read and edit the plan (plan.md)", ignoreFocusOut: true },
             );
             if (v) a.pause_for_plan = v.value;
+            return;
+        }
+        case "rigor_profile": {
+            // The top-level rigor_profile. Same wording as core/interview.py so the answer means the same on every surface.
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(circle-slash) Default — the checks run and are reported; a check can be turned down", value: "default" as const },
+                    { label: "$(shield) Research (recommended for a simulation study) — the plan waits for you, two scripts, every check stops the quest", value: "research" as const },
+                ],
+                { title: "Rigor profile", ignoreFocusOut: true },
+            );
+            if (v) a.rigor_profile = v.value;
             return;
         }
         case "pause_for_user_input": {
