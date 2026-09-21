@@ -356,6 +356,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "when set, still outranks that.",
     )
     mode.add_argument(
+        "--approve-amendment",
+        metavar="QUEST",
+        default="",
+        help="Approve the change to a quest's frozen protocol that it stopped to ask about (the request is in "
+             "needs/PROTOCOL_AMENDMENT_PENDING.json). QUEST is the quest id (looked up under --output-root) or its "
+             "folder. Pair with --approve-as. This is an act of its own: resuming without it keeps the frozen "
+             "protocol. Then resume the quest.",
+    )
+    mode.add_argument(
         "--approve-all-skills",
         action="store_true",
         help="Approve every skill that passes its gates, in one go. Still "
@@ -450,8 +459,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="WHO",
         default="",
         help="Who is approving (recorded in the ledger). Required with "
-             "--approve-skill: the gate exists so a person decides, so there "
-             "is no anonymous approver.",
+             "--approve-skill and --approve-amendment: the gate exists so a "
+             "person decides, so there is no anonymous approver.",
     )
     mode.add_argument(
         "--list-drafts",
@@ -2196,6 +2205,7 @@ async def main_async(args: argparse.Namespace) -> int:
         or getattr(args, "install_marp_from", None) is not None
         # Rewriting plan.md is one model call and makes no Axon call.
         or getattr(args, "revise_plan", None) is not None
+        or bool(getattr(args, "approve_amendment", ""))
     )
     if not args.no_axon_sidecar and not _axon_inert_modes:
         from core.axon_sidecar import ensure_axon_up
@@ -2252,6 +2262,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.list_drafts:
             return _list_drafts(args.output_root)
+
+        if args.approve_amendment:
+            return _approve_amendment(args.approve_amendment, args.approve_as, args.output_root)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -4882,6 +4895,22 @@ def _approve_all_skills(
             "Read the findings before sweeping them:  "
             f"python launch.py --scan-skill {tally['needs_despite'][0]}"
         )
+    return 0
+
+
+def _approve_amendment(quest: str, approved_by: str, output_root: Path) -> int:
+    """Record a person's approval of the protocol amendment a quest stopped to ask about."""
+    from core import frozen_protocol
+
+    root = next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)
+    if root is None:
+        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
+        return 1
+    ok, message = frozen_protocol.approve(root, approved_by, via="cli")
+    print(f"[FI] {message}")
+    if not ok:
+        return 2 if not (approved_by or "").strip() else 1
+    print(f"[FI] now resume the quest: python launch.py --config <its yaml> --resume {root.name}")
     return 0
 
 

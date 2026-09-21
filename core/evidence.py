@@ -24,6 +24,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import frozen_protocol as _frozen
+
 LEVELS = ("executed", "internally_consistent", "validated_against_oracle", "publication_ready")
 
 
@@ -76,10 +78,20 @@ def assess(
         gaps["internally_consistent"] += audit_gaps or ["the paper has not been checked against the results yet"]
 
     # validated against an oracle
-    design = state.get("design") or {}
-    protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    # The protocol the gates held the run to is the frozen one, and never the design in the state, which a redesign can
+    # leave without a protocol (a quest begun before the freeze existed has none frozen).
+    frozen = _frozen.load(quest_root)
+    if frozen is not None:
+        protocol = frozen.get("protocol") if isinstance(frozen.get("protocol"), dict) else None
+    else:
+        design = state.get("design") or {}
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
     validated = consistent
     problems = gaps["validated_against_oracle"]
+    if frozen is None and executed:
+        problems.append("the protocol was not frozen before the run (the quest began before the freeze existed): nothing shows the run was held to the protocol it started with")
+    if frozen is not None and frozen.get("problem"):
+        problems.append(str(frozen["problem"]))
     if protocol is None:
         problems.append("the plan fixes no protocol, so nothing held the experiment to the grid, runs and thresholds it was meant to use")
     else:
@@ -108,6 +120,11 @@ def assess(
     ready_gaps = gaps["publication_ready"]
     for name in precision_missed or []:
         ready_gaps.append(f"the target precision was not reached for {name}")
+    for amendment in _frozen.post_hoc(quest_root):
+        ready_gaps.append(
+            f"the protocol was amended after results were seen (amendment {amendment.get('n')}: "
+            f"{'; '.join(amendment.get('changes') or ['no listed change'])}); the paper must say so, and the earlier run is archived"
+        )
     review = state.get("review") or {}
     fi = quest_root / ".fi"
     if (fi / "human_review.json").is_file() and not (fi / "human_review_answer.json").is_file():

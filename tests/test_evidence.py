@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from core import evidence
+from core import evidence, frozen_protocol
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
@@ -22,9 +22,11 @@ ACCEPT = {"verdict": "accept", "must_flag_hits": []}
 
 
 def _quest(tmp_path: Path, *, audits: bool = True, protocol_status: str | None = None, oracle_status: str | None = None,
-          warnings: list[Any] | None = None) -> Path:
+          warnings: list[Any] | None = None, protocol: dict[str, Any] | None = PROTOCOL, freeze: bool = True) -> Path:
     root = tmp_path / "quest"
     (root / "needs").mkdir(parents=True)
+    if freeze:  # the protocol the run was held to is the frozen one (None: the study froze without one)
+        frozen_protocol.freeze(root, protocol, approved_by="test", source="plan.md")
     if audits:
         shutil.copytree(FIXTURE / "paper", root / "paper")
     if protocol_status:
@@ -54,7 +56,7 @@ def test_a_quest_that_has_not_run_has_only_the_first_gap(tmp_path: Path) -> None
 def test_the_run_of_the_audit_passed_every_check_it_had_and_is_still_only_internally_consistent(tmp_path: Path) -> None:
     """fr1 of the stored SIR runs: its number, statistics and provenance audits all passed, and nothing held it to a protocol
     or an oracle, so all that green said was that the paper copied what the script printed."""
-    got = evidence.assess(_quest(tmp_path), _state(design={"hypothesis": "h"}), settings=ON)
+    got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
     assert got["status"] == "internally_consistent" and got["next_level"] == "validated_against_oracle"
     assert got["levels"] == {"executed": True, "internally_consistent": True, "validated_against_oracle": False,
                              "publication_ready": False}
@@ -146,7 +148,7 @@ def test_a_level_needs_the_one_before_it(tmp_path: Path) -> None:
 
 
 def test_the_one_line_for_the_cli_and_the_chat(tmp_path: Path) -> None:
-    got = evidence.assess(_quest(tmp_path), _state(design={"hypothesis": "h"}), settings=ON)
+    got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
     line = evidence.summary_line(got)
     assert line.startswith("internally_consistent; to reach validated_against_oracle: the plan fixes no protocol")
     assert evidence.summary_line({"status": "publication_ready", "gaps": []}) == "publication_ready"
@@ -222,3 +224,41 @@ def test_the_quest_page_the_cli_summary_and_the_chat_carry_it() -> None:
     assert '"evidence": _read_json_or_none' in (root / "web" / "server.py").read_text(encoding="utf-8")
     assert 'summary["evidence"] = evidence' in (root / "launch.py").read_text(encoding="utf-8")
     assert "evidence: (.+)" in (root / "vscode-frontier-insight" / "src" / "extension.ts").read_text(encoding="utf-8")
+
+
+# --- the frozen protocol is what the level reads --------------------------------------------------------------------------
+
+
+def test_the_frozen_protocol_counts_even_when_the_design_in_the_state_has_none(tmp_path: Path) -> None:
+    """A redesign left the protocol out of the design in the state; the gates had held the run to the frozen one."""
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(design={"hypothesis": "redesigned, and no protocol"}), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is True
+
+
+def test_a_run_that_was_never_frozen_cannot_be_validated_and_says_why(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", freeze=False)
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is False
+    assert any("was not frozen before the run" in g for g in got["all_gaps"]["validated_against_oracle"])
+
+
+def test_an_edited_freeze_record_is_a_gap(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    path = frozen_protocol.frozen_path(root)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["protocol"]["runs_per_setting"] = 3
+    path.write_text(json.dumps(record), encoding="utf-8")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is False
+    assert any("does not match its own SHA-256" in g for g in got["all_gaps"]["validated_against_oracle"])
+
+
+def test_an_amendment_made_after_results_were_seen_keeps_it_from_publication_ready(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    pending = frozen_protocol.propose(root, {**PROTOCOL, "runs_per_setting": 600}, None, source="redesign", reason="more runs", results_seen=True)
+    frozen_protocol.approve(root, "Jun", via="test")
+    frozen_protocol.apply(root, pending, frozen_protocol.approval_for(root, pending), raw_root=root / "raw")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is True and got["levels"]["publication_ready"] is False
+    assert any("amended after results were seen" in g and "runs_per_setting" in g for g in got["all_gaps"]["publication_ready"])

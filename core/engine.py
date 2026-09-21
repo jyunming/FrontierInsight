@@ -45,6 +45,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from . import evidence as _evidence
+from . import frozen_protocol as _frozen
 from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
@@ -741,7 +742,7 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
-                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage") or intr_value.get("numeric_stage"):
+                        if intr_value.get("plan_stage") or intr_value.get("protocol_stage") or intr_value.get("oracle_stage") or intr_value.get("numeric_stage") or intr_value.get("amendment_stage"):
                             # The plan step wrote plan.md and stopped for the
                             # person to read and edit it. Same pause-exit as
                             # the pauses above; without this branch the payload
@@ -749,6 +750,15 @@ class Engine:
                             # left a clarify_questions.json that made the quest
                             # page ask for clarify answers.
                             data_paused = True
+                            if intr_value.get("amendment_stage"):
+                                self._log.info(
+                                    "[FI] paused for the protocol amendment: read %s, approve it with `--approve-amendment \"%s\" "
+                                    "--approve-as <you>`, then run `fi --resume %s` (resuming without approving keeps the "
+                                    "frozen protocol)",
+                                    intr_value.get("amendment_file", "needs/PROTOCOL_AMENDMENT_PENDING.json"),
+                                    self.quest_root, self.quest_id,
+                                )
+                                break
                             self._log.info(
                                 "[FI] paused for the %s: read and edit %s "
                                 "(or ask for a change with `--revise-plan`), "
@@ -2712,6 +2722,19 @@ class Engine:
                     f"honour every round below, not only the most recent) ---\n"
                     f"{blocks}\n"
                 ).strip()
+        frozen_protocol = _frozen.protocol_of(self.quest_root)
+        if frozen_protocol:
+            review_feedback = (
+                f"{review_feedback}\n\n"
+                "--- FROZEN PROTOCOL (fixed before the first full run; keep it) ---\n"
+                "Copy this `protocol` into your design unchanged. Do not change a grid value, the runs per setting, a "
+                "threshold, the precision target, the stream policy or an oracle to make a result come out differently. If "
+                "the redesign truly cannot be done under it, keep `protocol` as it is and add a `protocol_amendment` field: "
+                "{\"protocol\": <the complete amended protocol>, \"reason\": \"<one or two sentences: what to change and "
+                "why>\"}. A person then approves or refuses the amendment; if approved, the results seen so far are archived "
+                "and this study is described as amended after its results were known.\n"
+                f"{json.dumps(frozen_protocol, indent=2)}\n"
+            ).strip()
         return self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
@@ -3077,7 +3100,11 @@ class Engine:
         design: dict[str, Any] | None = None
         objections: Any = None
         plan_sha = ""
-        if iteration == 0 and not state.get("design"):
+        # A resume after an amendment request settles it first, and does not ask the model for another design.
+        settled = self._settle_pending_amendment(state)
+        if settled is not None:
+            design = settled
+        elif iteration == 0 and not state.get("design"):
             # The plan step wrote plan.md and, when asked, stopped for the person to read and edit it. Its design
             # block is the design, exactly: nothing is asked of the model again, and what a person changed runs.
             # Only when no design exists yet: every way back into this node after a result bumps ``iteration``,
@@ -3089,6 +3116,8 @@ class Engine:
             text = await self._chat(prompt, node="design")
             design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
             design, objections = await self._audit_design(state, design)
+            # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
+            design = self._hold_design_to_frozen(state, design)
 
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
@@ -4474,23 +4503,166 @@ class Engine:
     def _protocol_block(self, state: QuestState) -> dict[str, Any] | None:
         """The protocol to hold the experiment to, when there is an experiment.
 
-        On the first pass it is read from ``plan.md``, which is the source of truth for it: a person who edits the
-        protocol while the quest is stopped (or asks for a change) is heard at the next implement or execute, and not
-        only by the design step, which ran before. A later pass uses the design it made, or the plan's protocol if the
-        design has none."""
+        Once the protocol has been frozen (right before the first full run, ``core/frozen_protocol.py``) it is the frozen
+        record and nothing else: a later design that leaves the protocol out or changes it does not change what the gates
+        check. Before that it is the draft (:meth:`_draft_protocol`)."""
         if (
             state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
             or self.config.engine.analyze_local_first
         ):
             return None
+        if _frozen.load(self.quest_root) is not None:
+            return _frozen.protocol_of(self.quest_root)
+        return self._draft_protocol(state)
+
+    def _draft_protocol(self, state: QuestState) -> dict[str, Any] | None:
+        """The protocol before it is frozen: on the first pass it is read from ``plan.md``, which is the source of truth
+        for it (a person who edits the protocol while the quest is stopped, or asks for a change, is heard at the next
+        implement or execute); a later pass, which only happens for a quest that was never frozen (one begun before the
+        freeze existed), uses the design it made, or the plan's protocol when the design has none."""
         design = state.get("design") or {}
-        if int(state.get("iteration", 0) or 0) == 0:
-            planned, _why = _plan.load_design(self.quest_root)
-            if isinstance(planned, dict) and isinstance(planned.get("protocol"), dict) and planned["protocol"]:
-                return planned["protocol"]
+        planned, _why = _plan.load_design(self.quest_root)
+        planned_protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        planned_protocol = planned_protocol if isinstance(planned_protocol, dict) and planned_protocol else None
+        if int(state.get("iteration", 0) or 0) == 0 and planned_protocol:
+            return planned_protocol
         protocol = design.get("protocol")
-        return protocol if isinstance(protocol, dict) and protocol else None
+        if isinstance(protocol, dict) and protocol:
+            return protocol
+        return planned_protocol
+
+    def _freeze_protocol_if_due(self, state: QuestState) -> None:
+        """Freeze the protocol right before the first full run, after the oracle gate has settled it (an oracle the
+        engine added counts as part of it). A no-op once frozen. The record says who approved it: a person, when the
+        plan was held for them to read (``pauses.plan: ask``), and otherwise the engine on its own."""
+        if _frozen.load(self.quest_root) is not None:
+            return
+        protocol = self._draft_protocol(state)
+        mode = self.config.pauses.plan
+        approved_by = (
+            "human: the plan was held for the person to read and edit (pauses.plan=ask)"
+            if mode == "ask"
+            else f"auto: nobody approved this protocol before the run (pauses.plan={mode})"
+        )
+        iteration = int(state.get("iteration", 0) or 0)
+        source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
+        record = _frozen.freeze(self.quest_root, protocol, approved_by=approved_by, source=source)
+        self._log.info(
+            "[protocol] frozen before the first full run (%s, sha256 %s, run %s)%s",
+            record["source"], str(record["sha256"])[:12], record["run_id"],
+            "" if protocol else " -- there is no protocol: nothing holds the experiment to a grid, runs or thresholds",
+        )
+
+    def _warn_if_plan_diverges(self) -> None:
+        """Say so when ``plan.md`` no longer holds the protocol that is frozen: the frozen one is what the gates check, so an
+        edit of the file after the freeze changes nothing until it goes through an amendment."""
+        frozen = _frozen.load(self.quest_root)
+        if frozen is None:
+            return
+        planned, _why = _plan.load_design(self.quest_root)
+        protocol = planned.get("protocol") if isinstance(planned, dict) and isinstance(planned.get("protocol"), dict) else None
+        if protocol and _frozen.sha256(protocol) != frozen.get("sha256"):
+            self._log.warning(
+                "[protocol] the protocol in plan.md differs from the frozen protocol (%s); the frozen one is what runs. A "
+                "change is made by asking for it when the quest is refined, which stops for your approval.",
+                "; ".join(_frozen.diff(frozen.get("protocol"), protocol)[:3]) or "no listed difference",
+            )
+
+    def _raw_root(self) -> Path:
+        return _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
+
+    def _settle_pending_amendment(self, state: QuestState) -> dict[str, Any] | None:
+        """A resume after an amendment request: the design that asked for it, with the approved protocol when a person
+        approved that request and with the frozen one when they did not (resuming is not approving). ``None`` when no
+        request is waiting."""
+        pending = _frozen.load_pending(self.quest_root)
+        if pending is None:
+            return None
+        design = dict(pending.get("design") or {})
+        approval = _frozen.approval_for(self.quest_root, pending)
+        if approval is not None:
+            record = _frozen.apply(self.quest_root, pending, approval, raw_root=self._raw_root())
+            design["protocol"] = pending["proposed_protocol"]
+            self._log.warning(
+                "[protocol] amendment %d approved by %s (%s): %s%s",
+                record["n"], record["approved_by"],
+                "made after results were seen" if not record["prespecified"] else "before any result",
+                "; ".join(record["changes"]) or "no listed change",
+                f"; the earlier run is archived in {record['archived_to']}" if record.get("archived_to") else "",
+            )
+            return design
+        _frozen.decline(self.quest_root, pending)
+        frozen_protocol = _frozen.protocol_of(self.quest_root)
+        if frozen_protocol:
+            design["protocol"] = frozen_protocol
+        else:
+            design.pop("protocol", None)
+        self._log.warning(
+            "[protocol] the amendment request was resumed past without an approval; the frozen protocol stays: %s",
+            "; ".join(pending.get("changes") or []),
+        )
+        return design
+
+    def _hold_design_to_frozen(self, state: QuestState, design: dict[str, Any]) -> dict[str, Any]:
+        """A design made after the freeze keeps the frozen protocol: without one it gets it back, with the same one it is
+        left alone, and with a different one it is an amendment request, which stops the quest for a person."""
+        frozen = _frozen.load(self.quest_root)
+        if frozen is None or not isinstance(design, dict):
+            return design
+        request = design.get("protocol_amendment")
+        design = {k: v for k, v in design.items() if k != "protocol_amendment"}
+        asked = request.get("protocol") if isinstance(request, dict) and isinstance(request.get("protocol"), dict) else None
+        proposed = asked or (design.get("protocol") if isinstance(design.get("protocol"), dict) and design["protocol"] else None)
+        def _frozen_design() -> dict[str, Any]:
+            if frozen.get("protocol"):
+                return {**design, "protocol": frozen["protocol"]}
+            return {k: v for k, v in design.items() if k != "protocol"}
+
+        if proposed is None or _frozen.sha256(proposed) == frozen.get("sha256"):
+            # No protocol, or the frozen one: the frozen protocol is what the design carries.
+            return _frozen_design()
+        if asked is None:
+            # A protocol that differs without an amendment request: the design, or the methodology audit that amends it
+            # in place, rewrote it. That is not a request a person is asked about; the frozen protocol stands, and the
+            # log says what the design wanted.
+            self._log.warning(
+                "[protocol] the redesign changed the protocol without asking for an amendment (%s); the frozen protocol stands",
+                "; ".join(_frozen.diff(frozen.get("protocol"), proposed)[:4]) or "no listed difference",
+            )
+            return _frozen_design()
+        iteration = int(state.get("iteration", 0) or 0)
+        reason = str(request.get("reason") or "").strip() if isinstance(request, dict) else ""
+        reason = reason or f"the redesign at iteration {iteration} asked for this change without giving a reason"
+        design = {**design, "protocol": proposed}
+        pending = _frozen.propose(
+            self.quest_root, proposed, design, source=f"redesign at iteration {iteration}", reason=reason,
+            results_seen=iteration > 0 or bool(state.get("result_json")),
+        )
+        self._pause_for_amendment(pending)
+        return design  # not reached: the pause exits
+
+    def _pause_for_amendment(self, pending: dict[str, Any]) -> None:
+        changes = pending.get("changes") or []
+        steps = [
+            "The redesign changes the protocol that was frozen before the first full run: " + ("; ".join(changes) or "(no listed change)") + ".",
+            f"Read the request in `{_frozen.pending_path(self.quest_root)}`. To approve it: "
+            f"`python launch.py --approve-amendment \"{self.quest_root}\" --approve-as <you>` (the quest page in the web UI "
+            f"has an Approve button; in VSCode: `@fi /approve-amendment {self.quest_id}`), then resume. Resuming WITHOUT approving keeps "
+            "the frozen protocol and the study goes on with it.",
+            "An approved amendment made after results were seen archives this run under `archive/run_<n>/` and starts a new one, "
+            "and the paper says the change was made after the results were known.",
+        ]
+        self._pause_for_human(
+            kind="amendment",
+            interaction="supply",
+            headline="the redesign changes the frozen protocol",
+            steps=steps,
+            payload={
+                "amendment_stage": True, "quest_id": self.quest_id, "changes": changes,
+                "amendment_file": str(_frozen.pending_path(self.quest_root)),
+            },
+        )
 
     def _protocol_of(self, state: QuestState) -> dict[str, Any] | None:
         """The protocol the script is compared with (``engine.protocol_check`` not off)."""
@@ -4806,6 +4978,8 @@ class Engine:
             if not found or attempt == budget:
                 break
             if not oracles:
+                if _frozen.load(self.quest_root) is not None:
+                    break  # the protocol is frozen: an oracle can only come in through an amendment
                 self._log.warning("[oracle] %s; asking the plan for one (%d of %d)", found[0], attempt + 1, budget)
                 if not await self._declare_oracles():
                     break
@@ -4929,12 +5103,23 @@ class Engine:
             )
         except OSError as e:
             self._log.warning("[protocol] couldn't write the stop record: %r", e)
+        if _frozen.load(self.quest_root) is not None:
+            how = (
+                f"Change the script (`{self.quest_root / 'code' / 'experiment.py'}`) to use those values. The protocol is "
+                "frozen, so editing plan.md does not change it: a different protocol needs an amendment (ask for the change "
+                "when the quest is refined, then approve the request). Then resume: a script that agrees with the protocol "
+                "is used as it is; otherwise it is written again."
+            )
+        else:
+            how = (
+                f"Either change the script (`{self.quest_root / 'code' / 'experiment.py'}`) to use those values, or, if the "
+                f"plan is what should change, edit the protocol in `{_plan.plan_path(self.quest_root)}` (or ask for a change: "
+                f"`--revise-plan`). Then resume: a script that agrees with the plan is used as it is; otherwise it is written again."
+            )
         steps = [
             "The experiment's script differs from the protocol the plan fixed, and the repairs did not remove it: "
             + "; ".join(m.message() for m in mismatches) + ".",
-            f"Either change the script (`{self.quest_root / 'code' / 'experiment.py'}`) to use those values, or, if the "
-            f"plan is what should change, edit the protocol in `{_plan.plan_path(self.quest_root)}` (or ask for a change: "
-            f"`--revise-plan`). Then resume: a script that agrees with the plan is used as it is; otherwise it is written again.",
+            how,
         ]
         self._pause_for_human(
             kind="protocol",
@@ -5205,9 +5390,12 @@ class Engine:
                     warmup.returncode, warmup.stderr[-200:],
                 )
 
+        self._warn_if_plan_diverges()
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
+        # From here on the protocol is what the record says (core/frozen_protocol.py).
+        self._freeze_protocol_if_due(state)
 
         # Pilot pass: run the experiment small before running it for real.
         #
@@ -6885,6 +7073,9 @@ class Engine:
             state.get("evidence_assessment"),
             is_survey=bool(state.get("survey_mode_resolved")),
         )
+        amended = _frozen.disclosure(self.quest_root)
+        if amended:
+            evidence_note = f"{evidence_note}\n\n{amended}".strip()
         prompt = self._prompts["write"].substitute(
             persona_block=persona_block,
             topic=state["topic"],

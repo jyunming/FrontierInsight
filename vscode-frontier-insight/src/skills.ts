@@ -15,6 +15,7 @@
  * silently from a setting.
  */
 import { spawn } from "child_process";
+import { promises as fs } from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { rootsFromConfig } from "./roots-config";
@@ -572,4 +573,65 @@ export async function runTeachSkill(
     stream.markdown(
         `\`\`\`\n${(res.stdout || res.stderr).trim().slice(-2000)}\n\`\`\`\n`,
     );
+}
+
+/**
+ * `@fi /approve-amendment <quest_id>` — the human gate for a change to a quest's frozen protocol, in chat.
+ *
+ * The quest stops when its redesign asks to change the protocol that was frozen before the first full run. The request
+ * (what changes, why, whether results were already seen) is shown first, then the approver's name is asked for: typed,
+ * never filled in silently. Approving is an act of its own; resuming without it keeps the frozen protocol. The approval
+ * itself is written by the same `launch.py --approve-amendment` the CLI uses.
+ */
+export async function runApproveAmendment(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const questId = promptArgs.trim().split(/\s+/)[0] || "";
+    if (!questId) {
+        stream.markdown("Which quest? Example: `@fi /approve-amendment 1790003131-my-quest`\n");
+        return;
+    }
+    const env = resolveRepo(stream);
+    if (!env || token.isCancellationRequested) return;
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(env.workDir, outputDirSetting);
+
+    const pendingFile = path.join(outputsDir, questId, "needs", "PROTOCOL_AMENDMENT_PENDING.json");
+    let pending: any = null;
+    try {
+        pending = JSON.parse(await fs.readFile(pendingFile, "utf8"));
+    } catch {
+        stream.markdown(`No protocol amendment is waiting for approval in \`${pendingFile}\`.\n`);
+        return;
+    }
+    const changes: string[] = Array.isArray(pending.changes) ? pending.changes : [];
+    stream.markdown(
+        `**The redesign asks to change the frozen protocol of \`${questId}\`:**\n\n` +
+            (changes.length ? changes.map((c) => `- \`${c}\``).join("\n") : "- (no listed change)") +
+            `\n\n${pending.reason ? `Why: ${pending.reason}\n\n` : ""}` +
+            (pending.results_seen
+                ? "⚠️ The results of this run have already been seen. If you approve, this run is archived under `archive/`, a new run starts, and the paper says the change was made after the results were known.\n\n"
+                : ""),
+    );
+
+    const who = await vscode.window.showInputBox({
+        title: `Approve protocol amendment: ${questId}`,
+        prompt: "Enter your name. The approval is recorded against it.",
+        value: cfg.get<string>("approveAs") || "",
+        ignoreFocusOut: true,
+        validateInput: (v) => (v.trim() ? null : "An approval is attributed: there is no anonymous approver."),
+    });
+    if (!who || !who.trim()) {
+        stream.markdown("Not approved — no approver given. Resuming the quest keeps the frozen protocol.\n");
+        return;
+    }
+    const res = await runLaunch(env, ["--approve-amendment", questId, "--approve-as", who.trim(), "--output-root", outputsDir]);
+    if (res.code === 0) {
+        stream.markdown(`✅ Amendment approved as \`${who.trim()}\`.\n\nNow resume the quest to apply it: \`@fi /resume ${questId}\`.\n`);
+    } else {
+        stream.markdown(`Approval failed (exit ${res.code}):\n\n\`\`\`\n${(res.stdout || res.stderr).slice(-800)}\n\`\`\`\n`);
+    }
 }
