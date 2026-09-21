@@ -76,6 +76,14 @@ def test_ranges_dicts_and_loops_over_literals_are_read_as_the_axis() -> None:
     assert pc.check(proto, {"e.py": "dose_values = list(range(1, 5))\n"})[0].found == [1.0, 2.0, 3.0, 4.0]
 
 
+def test_a_list_named_after_the_axis_but_about_something_else_is_not_the_grid() -> None:
+    proto = {"grid": {"dose": [1.0, 2.0, 3.0]}}
+    code = "dose_values = [1.0, 2.0, 3.0]\ndose_response = [0.2, 0.5, 0.9, 0.95]\n"
+    assert pc.check(proto, {"e.py": code}) == []
+    assert pc.check(proto, {"e.py": "dose_values_full = [1.0, 2.0, 5.0]\n"})[0].found == [1.0, 2.0, 5.0]
+    assert pc.check(proto, {"e.py": "dose_response = [0.2, 0.5]\ndose_values = [1.0, 2.0, 3.0]\n"}) == []
+
+
 def test_a_list_is_matched_by_its_values_when_no_name_says_which_axis_it_is() -> None:
     found = pc.check({"grid": {"R0": [0.9, 1.5, 3.0]}}, {"e.py": "vals = [0.9, 1.5, 2.5]\n"})
     assert found and found[0].found == [0.9, 1.5, 2.5]

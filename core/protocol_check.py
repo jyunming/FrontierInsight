@@ -15,7 +15,8 @@ This module holds the parts that need no model and no engine state:
 A difference is reported only on evidence that a person would accept, because a difference stops the quest:
 
 * a **grid** axis is a list, a tuple, a numeric range or a ``for`` loop over literals that the script names after the axis
-  (``R0_LIST`` for ``R0``), or, when no name says so, that shares at least half its values with the axis. It differs when
+  (``R0_LIST`` or ``dose_values``, but not ``dose_response``), or, when no name says so, that shares at least half its
+  values with the axis. It differs when
   none of the matching lists holds exactly the protocol's values. A list assigned under ``if os.environ.get("FI_PILOT")``
   is the engine's smoke test, which discards its numbers, and is not read;
 * **runs per setting** differs when the script names counts of runs (``NUM_RUNS``, ``n_samples``, ``TRIALS``...) and none of
@@ -39,6 +40,12 @@ from .goal_coverage import _generated, _literal, asked_numbers, code_numbers
 _RUN_WORDS = {
     "runs", "run", "replicates", "replicate", "reps", "trials", "trial", "samples", "sample", "realizations",
     "realisations", "simulations", "simulation", "sims", "repeats",
+}
+# Words that make a name a list of the axis's values (R0_LIST, dose_values) rather than something else about it
+# (dose_response, temperature_history).
+_LIST_WORDS = {
+    "list", "values", "value", "vals", "grid", "range", "levels", "level", "set", "array", "arr", "points", "sweep",
+    "options", "settings", "candidates", "choices", "space", "axis", "all", "full", "main", "default",
 }
 _PILOT = "FI_PILOT"
 _NUMERIC_CALLS = ("linspace", "logspace", "geomspace", "arange", "range")
@@ -241,7 +248,11 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         if not want:
             continue
         axis_tokens = _tokens(str(axis))
-        named = [f for f in lists if axis_tokens and set(axis_tokens) <= set(_tokens(f.name))]
+        named = [
+            f for f in lists
+            if axis_tokens and set(axis_tokens) <= set(_tokens(f.name))
+            and set(_tokens(f.name)) - set(axis_tokens) <= _LIST_WORDS
+        ]
         candidates = named or [
             f for f in lists
             if len(f.values) >= 2 and sum(_has(f.values, v) for v in want) >= max(1, len(want) // 2)
