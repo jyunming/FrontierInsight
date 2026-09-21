@@ -4635,6 +4635,12 @@ _MISSING_MODULE_RE = re.compile(
 )
 
 
+def _python_line() -> str:
+    """The interpreter a skill install or self-test runs under, in one line. A failure on another machine is read from
+    a photo of the screen, and "which Python" is the first thing that decides whether a package can be installed."""
+    return f"Python {sys.version.split()[0]} at {sys.executable}"
+
+
 def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
     """Install ``packages`` into this interpreter. Returns ``(installed, failed)``, where ``failed``
     maps a package to the last thing pip said about it.
@@ -4655,7 +4661,7 @@ def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
         return list(packages), {}
     installed: list[str] = []
     failed: dict[str, str] = {}
-    print(f"  pip could not install them together; trying {len(packages)} one at a time ...", flush=True)
+    print(f"  pip could not install them together under {_python_line()}; trying {len(packages)} one at a time ...", flush=True)
     for pkg in packages:
         done = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", pkg],
@@ -4669,6 +4675,8 @@ def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
         errors = [line for line in lines if line.startswith("ERROR")]
         failed[pkg] = (errors or lines or ["pip failed"])[-1][:200]
         print(f"  could not install {pkg}: {failed[pkg]}", flush=True)
+        for line in lines[-6:]:  # what pip said just before it gave up (a Python it does not support, a build that failed)
+            print(f"      | {line[:200]}", flush=True)
     return installed, failed
 
 
@@ -4918,9 +4926,13 @@ def _approve_skill(
 
     state = evaluate(skill)
     if state.status is Status.QUARANTINED:
-        print(f"{name} fails its own selftest — not approving.")
+        print(f"{name} fails its own selftest under {_python_line()} — not approving.")
         if state.selftest_output:
             print(state.selftest_output)
+        wanted = _pip_names_for_skill(skill, state.selftest_output or "")
+        if wanted:
+            print(f"It needs {', '.join(wanted)}. To install into this interpreter: "
+                  f"{sys.executable} -m pip install {' '.join(wanted)}")
         return 1
     if state.status is Status.UNTESTED:
         print(f"{name} carries no selftest.py, so it can never be promoted. "
