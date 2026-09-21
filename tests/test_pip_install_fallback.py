@@ -118,3 +118,13 @@ def test_bulk_approval_names_what_could_not_be_installed_and_keeps_going(tmp_pat
 def test_the_import_script_uses_the_same_installer() -> None:
     script = (Path(__file__).resolve().parent.parent / "scripts" / "import_scientist_skills.py").read_text(encoding="utf-8")
     assert "launch._pip_install(all_pip)" in script
+
+
+def test_a_package_pip_cannot_install_is_reported_with_the_python_and_what_pip_said(monkeypatch, capsys) -> None:
+    import sys
+
+    monkeypatch.setattr(subprocess, "run", _Pip({"landlab"}, message="ERROR: Could not find a version that satisfies landlab"))
+    launch._pip_install(["landlab", "numpy"])
+    out = capsys.readouterr().out
+    assert f"under Python {sys.version.split()[0]} at {sys.executable}" in out
+    assert "| ERROR: Could not find a version that satisfies landlab" in out

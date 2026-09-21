@@ -272,3 +272,18 @@ def test_domains_is_not_a_mode() -> None:
         r"(\w+)\.add_argument\(\s*\n\s*\"--domains\"", inspect.getsource(launch)
     )
     assert m and m.group(1) == "p"
+
+
+def test_a_skill_that_fails_its_selftest_says_which_python_and_what_to_install(isolated_ledger, tmp_path, capsys) -> None:
+    """A failure on another machine is diagnosed from a photo of the screen: it must name the interpreter and the pip command."""
+    import sys
+
+    skill = tmp_path / "skills" / "needy"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# needy\n\nWhen to use it.\n", encoding="utf-8")
+    (skill / "selftest.py").write_text("import not_installed_anywhere_xyz\n", encoding="utf-8")
+    (skill / "provenance.json").write_text(json.dumps({"pip_requires": ["landlab==2.10.1"]}), encoding="utf-8")
+    assert launch._approve_skill("needy", "tester") == 1
+    out = capsys.readouterr().out
+    assert "fails its own selftest under Python " in out and sys.executable in out
+    assert f"{sys.executable} -m pip install landlab==2.10.1" in out
