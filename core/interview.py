@@ -231,7 +231,7 @@ REVIEW_PANELS: tuple[Choice, ...] = (
     Choice([], "Single reviewer (cheapest, no must-flag enforcement)",
            "1 LLM call per review pass. Loses the methodologist must-flag rules."),
     Choice(["methodologist", "statistician", "devil_advocate", "reproducibility"], "4-persona panel",
-           "Adds Reproducibility reviewer. ~5× the review cost."),
+           "Adds Reproducibility reviewer (seeds, raw data, the protocol; worth it for a stochastic simulation study). ~5× the review cost."),
 )
 
 

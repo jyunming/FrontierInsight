@@ -2763,6 +2763,8 @@ class Engine:
             draft_design=json.dumps(design, indent=2),
         )
         critique: dict[str, Any] = {}
+        failure = ""
+        before = json.loads(json.dumps(design, default=str))
         try:
             critique_text = await self._chat(
                 critique_prompt, node="design_self_critique",
@@ -2771,6 +2773,7 @@ class Engine:
                 critique_text, node="design_self_critique",
             ) or {}
         except Exception as e:  # noqa: BLE001 — see "Failure isolation" above
+            failure = f"the audit call or its reply could not be used: {e!r}"
             self._log.warning(
                 "[design_self_critique] chat/parse failed (%r); keeping "
                 "un-audited draft design", e,
@@ -2791,6 +2794,7 @@ class Engine:
             if draft_keys.issubset(amended_keys):
                 design = amended
             else:
+                failure = f"the amended design dropped the keys {sorted(draft_keys - amended_keys)}; the draft was kept"
                 self._log.warning(
                     "[design_self_critique] amended_design dropped keys "
                     "%s; keeping draft", sorted(draft_keys - amended_keys),
@@ -2800,7 +2804,53 @@ class Engine:
             "[design_self_critique] iteration=%d objections_addressed=%d",
             iteration, n_addressed,
         )
+        self._record_design_critique(iteration, before, design, objections, failure)
         return design, objections
+
+    def _critique_summary(self) -> list[str]:
+        """What the last methodology audit did, for the plan's *Checks already made*: which parts of the design it changed,
+        or that it did not run."""
+        try:
+            path = self.quest_root / "needs" / "DESIGN_CRITIQUE.json"
+            last = json.loads(path.read_text(encoding="utf-8"))[-1]
+        except (OSError, ValueError, IndexError, TypeError):
+            return []
+        if last.get("status") == "failed":
+            return [f"The methodology audit did not complete: {last.get('failure')} (see needs/DESIGN_CRITIQUE.json)."]
+        if last.get("changed_keys"):
+            return [
+                "The methodology audit amended the design: " + ", ".join(last["changed_keys"])
+                + " (before and after are in needs/DESIGN_CRITIQUE.json)."
+            ]
+        return []
+
+    def _record_design_critique(
+        self, iteration: int, before: dict[str, Any], after: dict[str, Any], objections: Any, failure: str,
+    ) -> None:
+        """Keep what the methodology audit said and did in ``needs/DESIGN_CRITIQUE.json``, one entry per pass: the
+        objections in full, the design before and after and the keys that changed, and whether the audit ran at all. Until
+        this existed only the number of objections reached the run log, so nobody could tell afterwards what the audit had
+        found or changed, and an audit that failed (it is advisory, and fails open) looked the same as one that found
+        nothing."""
+        try:
+            after_plain = json.loads(json.dumps(after, default=str))
+            changed = sorted(k for k in set(before) | set(after_plain) if before.get(k) != after_plain.get(k))
+            entry = {
+                "iteration": iteration,
+                "status": "failed" if failure else "ok",
+                "failure": failure,
+                "objections": objections if isinstance(objections, list) else [],
+                "changed_keys": changed,
+                "before": before,
+                "after": after_plain,
+            }
+            path = self.quest_root / "needs" / "DESIGN_CRITIQUE.json"
+            history = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+            history.append(entry)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(history, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except (OSError, ValueError, TypeError) as e:
+            self._log.debug("[design_self_critique] could not record the audit: %r", e)
 
     def _design_from_plan(self) -> tuple[dict[str, Any] | None, str]:
         """The design block of ``plan.md`` and its hash, or ``(None, "")`` when there is no plan or it cannot be read
@@ -2889,6 +2939,7 @@ class Engine:
             return {}
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
+        audit += self._critique_summary()
         # What the topic sets and the protocol leaves out: said in the plan, where a person reads it before compute is spent.
         audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))
         if isinstance(normalized.get("protocol"), dict):
