@@ -4277,7 +4277,7 @@ class Engine:
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
-                split_block=self._split_block(),
+                split_block=self._split_block(state),
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
@@ -4302,7 +4302,7 @@ class Engine:
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
-                split_block=self._split_block(),
+                split_block=self._split_block(state),
             )
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
@@ -4314,7 +4314,7 @@ class Engine:
                 "[implement] the review sent the experiment back over %r", rerun_for,
             )
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
-            if self.config.execution.split_analysis:
+            if self._split_on(state):
                 prompt += _SPLIT_RERUN_NOTE
         text = await self._chat(prompt, node="implement")
         # Two scripts (execution.split_analysis): the simulation, and the analysis, which
@@ -4322,7 +4322,7 @@ class Engine:
         # that does not hold both is asked for once more; if it still does not, the quest
         # runs as one script and says so, rather than stopping.
         simulate_code = ""
-        if self.config.execution.split_analysis:
+        if self._split_on(state):
             scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
             if scripts is None:
                 self._log.warning(
@@ -4711,8 +4711,8 @@ class Engine:
         # seed checks read.
         simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
         runner: Any = self.executor
-        split = self.config.execution.split_analysis and simulate_path.is_file()
-        if self.config.execution.split_analysis and not split:
+        split = self._split_on(state) and simulate_path.is_file()
+        if self._split_on(state) and not split:
             self._log.info(
                 "[execute] execution.split_analysis is on but this quest has no %s "
                 "(the code-writing step returned one script); running %s alone",
@@ -5409,7 +5409,7 @@ class Engine:
         # wrong, a figure that overlaps) rewrites experiment.py against the raw files that
         # are already on disk.
         simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
-        split = self.config.execution.split_analysis and simulate_path.is_file()
+        split = self._split_on(state) and simulate_path.is_file()
         repair_simulation = split and exec_result.get("failed_script") == _split_run.SIMULATE_NAME
         script_code = state.get("code") or ""
         if split:
@@ -5881,8 +5881,9 @@ class Engine:
             varying = {k: v for k, v in agg.items() if k not in constant}
             payload: dict[str, Any] = {
                 "result_json_seed_0": state.get("result_json") or {},
-                "replicates": replicates,
-                # Each metric carries mean/std/n/min/max + se + 95% CI bounds.
+                "replicates": _elide_value_lists(replicates),
+                # Each metric carries mean/std/n/min/max + se + 95% CI bounds, and ``ci_method``: what that
+                # interval is an interval of.
                 "aggregate_mean_std": varying,
                 "n_replicates": len(replicates),
             }
@@ -9076,10 +9077,28 @@ class Engine:
         or nothing when ``execution.background_jobs`` is off."""
         return _JOB_PROTOCOL if self.config.execution.background_jobs else ""
 
-    def _split_block(self) -> str:
+    def _split_on(self, state: QuestState) -> bool:
+        """Whether this quest keeps its simulation and its analysis in two scripts (``execution.split_analysis``).
+
+        ``true`` and ``false`` decide for every quest. ``auto`` decides from the design, so it is the same on every
+        call and after a resume: on for a stochastic study (:func:`core.split_run.design_is_stochastic`), off for a
+        background job, a study with no experiment and a run that only analyses data."""
+        mode = self.config.execution.split_analysis
+        if mode != "auto":
+            return bool(mode)
+        if (
+            self.config.execution.background_jobs
+            or state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            return False
+        return _split_run.design_is_stochastic(state.get("design") or {})
+
+    def _split_block(self, state: QuestState) -> str:
         """The two-script contract for the code-writing prompts, or nothing when
         ``execution.split_analysis`` is off."""
-        return _SPLIT_PROTOCOL if self.config.execution.split_analysis else ""
+        return _SPLIT_PROTOCOL if self._split_on(state) else ""
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
         """The experiment reported its job as pending. Record what is being
@@ -11620,8 +11639,106 @@ def _aggregate_result_json_replicates(
             # seed has no spread to estimate, so we don't fake an interval),
             # kept within the metric's declared or proportion bounds.
             **_stats.confidence_interval(vals, **_ci_bounds(key, vals, assertions or [])),
+            # What the interval above is an interval OF: the spread of this quantity across the seeds. With a few
+            # seeds that is a statement about batches, not about the number of trials behind each of them.
+            "ci_method": _CI_BETWEEN_SEEDS,
         }
+    _pool_evidence(out, replicates)
     return out
+
+
+_CI_BETWEEN_SEEDS = "t_between_seeds"
+_CI_WILSON = "wilson_pooled_counts"
+_CI_BOOTSTRAP = "bootstrap_pooled_values"
+_VALUES_POOL_CAP = 20000
+
+
+def _walk_paths(obj: Any, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
+    """The numeric scalars and the lists of numbers in a nested results mapping, keyed by their path."""
+    found: dict[tuple[str, ...], Any] = {}
+    if not isinstance(obj, dict):
+        return found
+    for k, v in obj.items():
+        if not prefix and k == "_seed":
+            continue
+        path = prefix + (str(k),)
+        if isinstance(v, dict):
+            found.update(_walk_paths(v, path))
+        elif isinstance(v, bool):
+            continue
+        elif isinstance(v, (int, float)):
+            found[path] = float(v)
+        elif isinstance(v, list) and v and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            found[path] = [float(x) for x in v]
+    return found
+
+
+def _pool_evidence(out: dict[str, dict[str, float | int]], replicates: list[dict[str, Any]]) -> None:
+    """Replace the between-seed interval of a metric by one that uses the trials, when the script gave them.
+
+    A probability that a script estimates from repeated trials is reported with its counts beside it,
+    ``<name>``, ``<name>_count`` and ``<name>_total``, and a mean over the trials that met a condition with the
+    observations behind it, ``<name>_values``. The engine ran the script once per seed, so each seed holds a share of
+    the trials: the shares are pooled, and the interval is a Wilson interval for the pooled counts, or a bootstrap
+    interval for the pooled values, instead of a t interval over the seeds' own estimates (three numbers, however many
+    trials there were). The mean becomes the pooled estimate, and the seeds' own mean and spread are kept as
+    ``batch_mean`` and ``batch_std``. A metric with no counts or values keeps the t interval, labelled as such."""
+    walked = [_walk_paths(r) for r in replicates]
+    if not walked:
+        return
+    for path, first in walked[0].items():
+        key = ".".join(path)
+        entry = out.get(key)
+        if entry is None or not isinstance(first, float):
+            continue
+        parent, name = path[:-1], path[-1]
+        count_path, total_path = parent + (f"{name}_count",), parent + (f"{name}_total",)
+        values_path = parent + (f"{name}_values",)
+        counts = [(w.get(count_path), w.get(total_path)) for w in walked]
+        if all(isinstance(c, float) and isinstance(t, float) for c, t in counts):
+            if all(c.is_integer() and t.is_integer() and 0 <= c <= t for c, t in counts):
+                k, n = sum(c for c, _t in counts), sum(t for _c, t in counts)
+                ci = _stats.wilson_interval(k, n)
+                if ci is not None and n > 0:
+                    p_hat = k / n
+                    entry.update({
+                        "batch_mean": entry["mean"], "batch_std": entry["std"],
+                        "mean": p_hat, "se": math.sqrt(p_hat * (1.0 - p_hat) / n),
+                        "ci_lower": ci[0], "ci_upper": ci[1],
+                        "n_trials": int(n), "n_successes": int(k), "ci_method": _CI_WILSON,
+                    })
+                    # The counts now live in the probability's own entry; a between-seed interval of the counts
+                    # themselves would only read as a second, wrong, uncertainty.
+                    out.pop(".".join(count_path), None)
+                    out.pop(".".join(total_path), None)
+            continue
+        lists = [w.get(values_path) for w in walked]
+        if all(isinstance(v, list) for v in lists):
+            pooled = [x for v in lists for x in v]
+            ci = _stats.bootstrap_mean_interval(pooled, cap=_VALUES_POOL_CAP)
+            if ci is not None:
+                entry.update({
+                    "batch_mean": entry["mean"], "batch_std": entry["std"],
+                    "mean": sum(pooled) / len(pooled),
+                    "ci_lower": ci[0], "ci_upper": ci[1],
+                    "n_values": len(pooled), "ci_method": _CI_BOOTSTRAP,
+                })
+
+
+def _elide_value_lists(obj: Any) -> Any:
+    """``obj`` with each long ``<name>_values`` list replaced by a note: the observations are pooled into the
+    aggregate's interval, and thousands of numbers per seed would crowd the analysis prompt."""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if str(k).endswith("_values") and isinstance(v, list) and len(v) > 20:
+                out[k] = f"<{len(v)} values, pooled in aggregate_mean_std>"
+            else:
+                out[k] = _elide_value_lists(v)
+        return out
+    if isinstance(obj, list):
+        return [_elide_value_lists(x) for x in obj]
+    return obj
 
 
 def _series_at(

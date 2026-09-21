@@ -287,7 +287,7 @@ python launch.py --config quest.yaml --watch <quest_id>   # re-checks on a timer
 
 ```yaml
 execution:
-  split_analysis: true
+  split_analysis: true               # auto (default) already does this for a stochastic design
   # raw_dir: "D:/big-disk/my-run"   # optional: where the raw files go (default: raw/ in the quest folder)
 engine:
   execute_replicates: 3

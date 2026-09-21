@@ -88,7 +88,7 @@ Step 2 does not search again, and the papers you dropped in join what step 1 fou
 |---|---|---|
 | **Literature** | `pauses.supply: after_literature` | the quest stops once the literature is saved; `--resume` starts the experiment with it |
 | **Simulation** | `execution.background_jobs` | an HPC / cluster job is submitted and the quest pauses; `--watch` wakes it when the job is done |
-| **Analysis of the simulation** | `execution.split_analysis` | `simulate.py` writes raw files once, `experiment.py` analyses them; a repair or a review that flags the results reruns only the analysis |
+| **Analysis of the simulation** | `execution.split_analysis` (`auto` by default: on for a stochastic design) | `simulate.py` writes raw files once, `experiment.py` analyses them; a repair or a review that flags the results reruns only the analysis |
 
 ---
 

@@ -1,5 +1,7 @@
 """Pure-stdlib statistical rigor for experiment results — confidence
-intervals, effect sizes (Cohen's d), and a multiple-comparison guard.
+intervals (a t interval over seeds, a Wilson interval for a proportion from
+counts, a bootstrap interval for a mean from pooled values), effect sizes
+(Cohen's d), and a multiple-comparison guard.
 
 No numpy / scipy: a small embedded two-sided 95% t-table covers small-n
 replication (the common case), falling back to the normal approximation for
@@ -79,6 +81,50 @@ def confidence_interval(
     if upper is not None:
         ci_upper = min(ci_upper, upper)
     return {"se": se, "ci_lower": ci_lower, "ci_upper": ci_upper}
+
+
+def wilson_interval(successes: float, trials: float, *, z: float = _Z95) -> tuple[float, float] | None:
+    """Wilson score 95% interval of a proportion estimated from ``successes`` out of ``trials`` independent
+    Bernoulli trials; ``None`` when there are no trials or the counts are impossible.
+
+    A t interval over a few batch proportions measures how much the batches moved, not how well the trials pin
+    the probability down: three batches of 300 runs give an interval of width set by three numbers, where the
+    900 trials behind them set a much tighter or looser one. The Wilson interval uses the trials, stays inside
+    [0, 1], and behaves at a proportion of 0 or 1, where the normal-approximation interval does not."""
+    if trials is None or successes is None or trials <= 0 or successes < 0 or successes > trials:
+        return None
+    n = float(trials)
+    p_hat = float(successes) / n
+    denom = 1.0 + z * z / n
+    centre = (p_hat + z * z / (2.0 * n)) / denom
+    half = z * math.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def bootstrap_mean_interval(
+    values: list[float], *, resamples: int = 2000, seed: int = 0, cap: int = 20000,
+) -> tuple[float, float] | None:
+    """Percentile-bootstrap 95% interval of the mean of ``values`` (the raw observations behind an average, pooled
+    over every batch), or ``None`` for fewer than 2 values.
+
+    Deterministic: the resampling is drawn from a generator seeded with ``seed`` so the same values always give the
+    same interval. More than ``cap`` values are thinned to ``cap`` evenly spaced ones first, and the number of
+    resamples drops with the size, so a very large pool costs a bounded time."""
+    import random
+
+    vals = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+    if len(vals) < 2:
+        return None
+    if len(vals) > cap:
+        step = len(vals) / cap
+        vals = [vals[int(i * step)] for i in range(cap)]
+    n = len(vals)
+    rounds = resamples if n <= 2000 else max(200, resamples * 2000 // n)
+    rng = random.Random(seed)
+    means = sorted(sum(vals[rng.randrange(n)] for _ in range(n)) / n for _ in range(rounds))
+    lo = means[int(0.025 * (rounds - 1))]
+    hi = means[int(math.ceil(0.975 * (rounds - 1)))]
+    return lo, hi
 
 
 def cohens_d(a: list[float], b: list[float]) -> float | None:

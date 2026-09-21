@@ -25,7 +25,7 @@ Respond with EXACTLY one fenced JSON block. No commentary before, no commentary 
   "constants": [
     {"name": "<NAME>", "value": "<literal value>", "source": "<paper citation / first-principles derivation / 'heuristic'>"}
   ],
-  "result_json_template": "<the EXACT shape RESULT_JSON should match, as a JSON literal. Includes by_<factor> stratification when applicable.>",
+  "result_json_template": "<the EXACT shape RESULT_JSON should match, as a JSON literal. Includes by_<factor> stratification when applicable. A probability estimated from repeated trials carries `<name>_count` and `<name>_total` (whole numbers: the runs that did, the runs there were) beside it.>",
   "deps": ["<pip-installable package name>", "..."]
 }
 ```

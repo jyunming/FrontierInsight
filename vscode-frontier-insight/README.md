@@ -312,7 +312,7 @@ A quest waiting on a background job (HPC / cluster, `execution.background_jobs`)
 
 It re-runs the quest's experiment script on a timer, shows every check in the chat, and resumes the quest when the job is done (`launch.py --watch`).
 
-A quest that sets `execution.split_analysis: true` in its YAML keeps the simulation (`code/simulate.py`, raw files under `raw/seed<K>/`) apart from its analysis (`code/experiment.py`): the chat's run log says which script ran, an analysis that fails or that the review sends back is rewritten and run again against the raw files already on disk, and the simulation runs again only when its own script changed. `execution.raw_dir` moves the raw files (a big disk, an HPC scratch area).
+A quest whose design is stochastic (or that sets `execution.split_analysis: true` in its YAML; the default `auto` decides from the design) keeps the simulation (`code/simulate.py`, raw files under `raw/seed<K>/`) apart from its analysis (`code/experiment.py`): the chat's run log says which script ran, an analysis that fails or that the review sends back is rewritten and run again against the raw files already on disk, and the simulation runs again only when its own script changed. `execution.raw_dir` moves the raw files (a big disk, an HPC scratch area).
 
 A resume regenerates only the outputs actually missing on disk — a `paper.pdf` /
 slides / poster / talk that already rendered is left untouched — so re-running to

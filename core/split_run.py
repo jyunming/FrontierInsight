@@ -303,6 +303,32 @@ def _annotated(result: ExecutionResult, note: str) -> ExecutionResult:
     )
 
 
+# Words that say a design draws random numbers: a stochastic simulation whose raw outcomes a later analysis needs.
+# "simulation" alone is not one (an ODE solve is a simulation and draws nothing).
+_STOCHASTIC_RE = re.compile(
+    r"\b(stochastic\w*|monte[- ]carlo|gillespie|mcmc|markov[- ]chain monte|random[- ]walks?|"
+    r"agent[- ]based|kinetic monte|langevin|brownian)\b",
+    re.IGNORECASE,
+)
+
+
+def design_is_stochastic(design: Any) -> bool:
+    """Whether a design is a stochastic study whose per-run outcomes are worth keeping: its protocol fixes at least
+    two runs per setting, or the words it describes itself with (hypothesis, method, expected outcome, variables)
+    name a random process."""
+    if not isinstance(design, dict):
+        return False
+    protocol = design.get("protocol")
+    runs = protocol.get("runs_per_setting") if isinstance(protocol, dict) else None
+    if isinstance(runs, (int, float)) and not isinstance(runs, bool) and runs >= 2:
+        return True
+    text = json.dumps(
+        {key: design.get(key) for key in ("hypothesis", "method", "expected_outcome", "variables")},
+        ensure_ascii=False, default=str,
+    )
+    return bool(_STOCHASTIC_RE.search(text))
+
+
 def listing(raw_dir: Path, *, limit: int = 40) -> str:
     """The raw files of one seed, one per line with its size, for the repair of an analysis
     that could not read them. Empty when there are none."""
