@@ -171,7 +171,9 @@ def _cfg(tmp_path: Path, **engine: Any) -> Config:
         topic="smoke-test topic for the protocol: R0 in {0.9, 1.5, 3.0}, 300 runs each",
         title="protocol-smoke",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, **engine),
+        # The oracle gate is not what these tests are about (their protocols declare none).
+        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True,
+                            **{"oracle_check": "off", **engine}),
         # One script: these tests fake a single-script reply, and a design with runs per setting would otherwise
         # switch the two-script format on (execution.split_analysis: auto).
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),

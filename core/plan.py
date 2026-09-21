@@ -160,6 +160,23 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     for key in ("seed_policy", "ci_method"):
         if out.get(key) is not None and not isinstance(out[key], str):
             return None, f"`protocol.{key}` must be text"
+    oracles = out.get("oracles")
+    if oracles is not None:
+        if isinstance(oracles, (str, dict)):
+            oracles = [oracles]
+        if not isinstance(oracles, list):
+            return None, "`protocol.oracles` must be a list of checks (each with a `name` and a `check`)"
+        fixed_oracles: list[dict[str, Any]] = []
+        for index, item in enumerate(oracles, start=1):
+            if isinstance(item, str) and item.strip():
+                item = {"name": item.strip(), "check": item.strip()}
+            if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+                return None, f"`protocol.oracles` entry {index} has no `name`"
+            for key in ("check", "kind"):
+                if item.get(key) is not None and not isinstance(item[key], str):
+                    return None, f"`protocol.oracles` entry {index}: `{key}` must be text"
+            fixed_oracles.append({**item, "name": str(item["name"]).strip()})
+        out["oracles"] = fixed_oracles
     if out.get("acceptance") is not None:
         out["acceptance"] = _as_list(out["acceptance"])
     return out, None
