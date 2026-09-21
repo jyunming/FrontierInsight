@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "skipped": false,
+  "skip_reason": null,
+  "paper_numbers_checked": 25,
+  "traceable_values": 694,
+  "untraceable_numbers": 0,
+  "findings": []
+}

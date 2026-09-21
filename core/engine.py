@@ -44,6 +44,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from . import evidence as _evidence
 from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
@@ -994,9 +995,11 @@ class Engine:
                 # the prior failure was recovered — leaving the file
                 # would mislead ("paused for data, but also failed?").
                 self._clear_stale_quest_failed_diagnostic()
+                self._write_evidence(final_state)
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
+            self._write_evidence(final_state)
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
@@ -4598,6 +4601,33 @@ class Engine:
             path.name, len(new_code), len(remaining), str(parsed.get("patch_summary") or "no summary")[:120],
         )
         return new_code, sorted({*deps, *new_deps})
+
+    def _write_evidence(self, state: QuestState) -> dict[str, Any] | None:
+        """Work out how much of the result has been checked against something other than itself
+        (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest."""
+        try:
+            missed: list[str] = []
+            replicates = state.get("result_json_replicates") or []
+            if len(replicates) > 1:
+                aggregate = _aggregate_result_json_replicates(replicates, assertions=_replicate_assertions(state))
+                self._annotate_precision(state, aggregate)
+                missed = [k for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
+            record = _evidence.assess(
+                self.quest_root, dict(state), precision_missed=missed,
+                settings={
+                    "protocol_check": self.config.engine.protocol_check,
+                    "oracle_check": self.config.engine.oracle_check,
+                    "numeric_warnings": self.config.engine.numeric_warnings,
+                },
+            )
+            path = self.quest_root / "needs" / "EVIDENCE.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            self._log.info("[evidence] %s", _evidence.summary_line(record))
+            return record
+        except Exception as e:  # noqa: BLE001 -- a report about the quest must never stall it
+            self._log.warning("[evidence] could not assess the quest: %r", e)
+            return None
 
     def _annotate_precision(self, state: QuestState, aggregate: dict[str, Any]) -> str:
         """For each probability with a pooled interval, its half-width, and whether the protocol's target was reached.

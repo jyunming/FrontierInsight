@@ -253,6 +253,14 @@ def _quest_output_status(quest_root: Path) -> dict[str, object]:
     }
 
 
+def _read_json_or_none(path: Path) -> Any:
+    """The JSON in ``path``, or ``None`` when there is none or it cannot be read."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _quest_pending(quest_root: Path) -> str | None:
     """The pause a quest is waiting on (its kind), or ``None`` when it isn't
     paused.
@@ -2127,6 +2135,8 @@ def make_app(
                 if paper_md.exists() else None
             ),
             "summary": summary,
+            # How much of the result has been checked against something other than itself (needs/EVIDENCE.json).
+            "evidence": _read_json_or_none(quest_root / "needs" / "EVIDENCE.json"),
             "source_failures": source_failures,
             # How each output's visual check went (.fi/visual_check.json).
             "visual_check": report_summary(quest_root),

@@ -1096,6 +1096,12 @@ async function runQuest(
                 stream.markdown(`  ⚠️ source failures: \`${failures[1]}\`\n\n`);
                 continue;
             }
+            // How much of the result has been checked against something other than itself.
+            const evidenceLine = line.match(/^\[FI\] evidence: (.+)$/);
+            if (evidenceLine) {
+                stream.markdown(`  🔎 evidence: \`${evidenceLine[1]}\`\n\n`);
+                continue;
+            }
             // Each check of a watched background job: the only monitor there is.
             const checked = line.match(/^\[watch\] (.+)$/);
             if (checked) {
