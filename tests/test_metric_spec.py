@@ -267,7 +267,7 @@ async def test_the_analysis_is_given_the_engines_estimates_and_contrasts_and_the
     analysis = [p for p in declared_prompts if _classify(p) == "Analysis"]
     assert analysis and '"spec_statistics"' in analysis[0] and '"two_proportion_z_newcombe"' in analysis[0] and '"p_holm"' in analysis[0]
     evidence = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    ready = evidence["all_gaps"].get("publication_ready", [])
+    ready = evidence["all_gaps"].get("statistically_adequate", [])
     assert not any("statistics are not shown to be adequate" in g for g in ready), ready
 
     guessed_prompts: list[str] = []
@@ -275,7 +275,7 @@ async def test_the_analysis_is_given_the_engines_estimates_and_contrasts_and_the
     other = Engine(_cfg(tmp_path / "guessed"))
     await other.run()
     assert not any('"spec_statistics"' in p for p in guessed_prompts if _classify(p) == "Analysis")
-    ready = json.loads((other.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))["all_gaps"]["publication_ready"]
+    ready = json.loads((other.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))["all_gaps"]["statistically_adequate"]
     assert any("statistics are not shown to be adequate" in g and "guessed from the names" in g for g in ready)
     assert "declares no metric spec" in (other.quest_root / "plan.md").read_text(encoding="utf-8")
 

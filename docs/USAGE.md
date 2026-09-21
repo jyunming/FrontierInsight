@@ -179,6 +179,13 @@ topic: |
 # slug derived from the topic.
 title: integrator-bakeoff
 
+# Optional: `research` turns on, together, what a study needs before its result can be trusted: the plan is held for you
+# to read (pauses.plan: ask), the simulation and its analysis stay in two scripts and a reply without both stops the quest
+# (execution.split_analysis: true, split_failure: block), the protocol / oracle / numeric-warning / run-manifest checks
+# stop the quest and cannot be turned off, and the cross-check verification and a review panel are on. A config that sets
+# one of those to the opposite is refused with the key named. Default: default (nothing changes). See docs/rigor.md.
+rigor_profile: default
+
 provider:
   name: vscode_extension           # see PROVIDERS.md
   model: gpt-5                     # global default

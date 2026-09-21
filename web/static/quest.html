@@ -952,15 +952,19 @@
   }
 
   const EVIDENCE_LEVELS = [
-    ['executed', 'Executed'], ['internally_consistent', 'Internally consistent'],
-    ['validated_against_oracle', 'Validated against an oracle'], ['publication_ready', 'Publication ready'],
+    ['executed', 'Executed'], ['internally_reconciled', 'Internally reconciled'],
+    ['protocol_runtime_matched', 'Protocol matched at runtime'], ['independently_validated', 'Independently validated'],
+    ['statistically_adequate', 'Statistically adequate'], ['publication_ready', 'Publication ready'],
   ];
   function renderEvidence(ev) {
     const banner = document.getElementById('evidence-banner');
     if (!ev || typeof ev !== 'object' || !ev.levels) { banner.classList.add('hidden'); return; }
     banner.classList.remove('hidden');
     const label = (EVIDENCE_LEVELS.find(([k]) => k === ev.status) || [null, 'Not executed'])[1];
-    document.getElementById('evidence-status').textContent = label;
+    document.getElementById('evidence-status').textContent = label + (ev.rigor_profile === 'research' ? ' (research profile)' : '');
+    // What each level guarantees, and what it does not, is the tooltip of its chip.
+    const byLevel = {};
+    for (const row of (ev.ladder || [])) byLevel[row.level] = row;
     const chips = document.getElementById('evidence-levels');
     chips.innerHTML = '';
     for (const [key, text] of EVIDENCE_LEVELS) {
@@ -969,6 +973,9 @@
       chip.className = 'font-label-sm text-label-sm px-3 py-1 rounded-full border ' +
         (ok ? 'border-status-success/40 text-status-success' : 'border-white/10 text-outline');
       chip.textContent = (ok ? '✓ ' : '○ ') + text;
+      const row = byLevel[key];
+      if (row) chip.title = `${row.assurance_claim}
+Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       chips.appendChild(chip);
     }
     const gaps = document.getElementById('evidence-gaps');
@@ -977,6 +984,11 @@
     for (const g of (ev.gaps || [])) {
       const line = document.createElement('div');
       line.textContent = (next ? next + ': ' : '') + g;
+      gaps.appendChild(line);
+    }
+    if (ev.legacy) {
+      const line = document.createElement('div');
+      line.textContent = ev.legacy;
       gaps.appendChild(line);
     }
   }
