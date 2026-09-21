@@ -75,6 +75,7 @@ interface HumanReviewRequest {
         must_flag_hits?: string[];
         numeric_oracle_warnings?: string[];
         figure_caption_warnings?: string[];
+        goal_coverage_notes?: string[];
         feedback_history?: Array<{ iteration?: number; text?: string }>;
         paper_md_path?: string;
     };
@@ -349,6 +350,13 @@ export class Bridge {
         const fw = snap.figure_caption_warnings || [];
         if (fw.length) {
             md += `- **Figure captions (sent to the reviewer):** ${fw
+                .map((w) => `\`${escapeMd(w)}\``)
+                .join(", ")}\n`;
+        }
+        // Numbers and figures the topic asked for that the experiment does not have.
+        const gc = snap.goal_coverage_notes || [];
+        if (gc.length) {
+            md += `- **Topic coverage (advisory, not blocking):** ${gc
                 .map((w) => `\`${escapeMd(w)}\``)
                 .join(", ")}\n`;
         }

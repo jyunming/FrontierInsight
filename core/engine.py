@@ -44,6 +44,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import stats as _stats
@@ -6840,6 +6841,66 @@ class Engine:
             out.extend(st.skill.assertions())
         return out
 
+    def _goal_coverage_notes(self, state: QuestState) -> list[str]:
+        """Advisory: what the experiment does differently from the numbers the
+        topic sets, one line each (:mod:`core.goal_coverage`).
+
+        A topic that names its settings (``R0 in {0.9, 1.5, 3.0}``), a count of
+        runs (``300 runs``) or a number of figures is compared with the
+        experiment's script, the keys of its results and the figures it drew.
+        Nothing here is a must-flag hit: a topic is prose, and sending the
+        experiment back costs a whole cycle. Writes ``paper/goal_coverage.json``
+        either way, so a clean run leaves evidence that the check ran and what it
+        looked at. Skipped for a study with no experiment and for a run with no results. Best-effort: a failure
+        here never touches the quest."""
+        if (
+            state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+            # A run with no results failed (one stored run's script was
+            # ``print("RESULT_JSON: {}")``), which other checks report; its numbers
+            # would only be listed as missing.
+            or not state.get("result_json")
+        ):
+            return []
+        topic = str(state.get("topic") or self.config.topic or "")
+        try:
+            source = (self.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+        try:
+            figures = len(state.get("figures") or [])
+            asked = goal_coverage.asked_numbers(topic)
+            asked_figures = goal_coverage.asked_figure_count(topic)
+            found = goal_coverage.notes(topic, [source], state.get("result_json"), figures)
+        except Exception as e:  # noqa: BLE001 - never fail a quest over an advisory check
+            self._log.warning("[goal_coverage] check failed (%s); skipping", e)
+            return []
+        try:
+            paper_dir = self.quest_root / "paper"
+            paper_dir.mkdir(parents=True, exist_ok=True)
+            (paper_dir / "goal_coverage.json").write_text(
+                json.dumps({
+                    "numbers_the_topic_sets": [a.value for a in asked],
+                    "figures_the_topic_asks_for": (
+                        {"count": asked_figures[0], "kind": asked_figures[1]} if asked_figures else None
+                    ),
+                    "figures_drawn": figures,
+                    "notes": found,
+                }, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            self._log.warning("[goal_coverage] could not write audit: %s", e)
+        for note in found:
+            self._log.warning("[goal_coverage] %s", note)
+        if not found:
+            self._log.info(
+                "[goal_coverage] %d number(s) the topic sets and %s checked against the experiment: nothing differs",
+                len(asked), "its figure count" if asked_figures else "no figure count",
+            )
+        return found
+
     def _numeric_oracle_hits(
         self, paper_md: str, state: QuestState,
     ) -> list[str]:
@@ -7522,6 +7583,11 @@ class Engine:
             figure_warnings = self._figure_caption_hits(paper_md, state)
             if figure_warnings:
                 review["figure_caption_warnings"] = figure_warnings
+            # Advisory too: numbers and figures the topic asked for that the
+            # experiment does not have. Shown to the human, never forced.
+            goal_notes = self._goal_coverage_notes(state)
+            if goal_notes:
+                review["goal_coverage_notes"] = goal_notes
             # Forced, unlike the advisory number check above: a statistic the
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
@@ -7680,6 +7746,9 @@ class Engine:
         figure_warnings = self._figure_caption_hits(paper_md, state)
         if figure_warnings:
             review["figure_caption_warnings"] = figure_warnings
+        goal_notes = self._goal_coverage_notes(state)
+        if goal_notes:
+            review["goal_coverage_notes"] = goal_notes
         # Forced, as on the single-reviewer path: a recomputed contradiction,
         # not a pattern match over prose.
         stat_hits = self._statistics_claim_hits(paper_md, state)
@@ -7785,6 +7854,9 @@ class Engine:
             # Captions that name a series their figure does not show; the
             # reviewer was asked to must-flag them.
             "figure_caption_warnings": review.get("figure_caption_warnings") or [],
+            # Advisory: numbers and figures the topic asked for that the
+            # experiment does not have (core/goal_coverage.py).
+            "goal_coverage_notes": review.get("goal_coverage_notes") or [],
             "rationale": review.get("rationale", ""),
             "paper_md_path": paper_md_path,
             # Accumulated user-feedback history across refine

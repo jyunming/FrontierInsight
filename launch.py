@@ -1343,6 +1343,11 @@ async def _cli_human_feedback_callback(
         print("  Suggestions  :")
         for s in suggestions[:5]:
             print(f"    - {s}")
+    coverage = snapshot.get("goal_coverage_notes") or []
+    if isinstance(coverage, list) and coverage:
+        print("  Topic coverage (advisory, not blocking):")
+        for c in coverage[:5]:
+            print(f"    - {c}")
     paper = snapshot.get("paper_md_path")
     if paper:
         print(f"  Paper        : {paper}")
