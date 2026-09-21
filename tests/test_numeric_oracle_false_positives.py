@@ -156,22 +156,22 @@ class TestConfidenceLevel:
     def test_the_bounds_of_the_interval_are_still_checked(self) -> None:
         """Only the level is cleared. The numbers the interval brackets are
         results, and a wrong one is still a near-miss."""
-        got = _flagged("It was 0.347 (95% CI 0.32-0.37).", {"p": 0.333})
+        got = _flagged("It was 0.347 (95% CI 0.32-0.37).", {"p": 0.3459})
         assert ("near_miss", 0.347) in got
         assert all(value != 95.0 for _kind, value in got)
 
     def test_a_percentage_result_is_not_a_level(self) -> None:
-        """``93% of runs`` is a measurement: a percent sign alone clears
-        nothing, so a mis-copied 93 against a stored 91 is still reported."""
-        got = _flagged("93% of runs converged.", {"converged_pct": 91.0})
-        assert ("near_miss", 93.0) in got
+        """``87% of runs`` is a measurement: a percent sign alone clears
+        nothing, so 87 against a stored 78 is still reported."""
+        got = _flagged("87% of runs converged.", {"converged_pct": 78.0})
+        assert ("transposed", 87.0) in got
 
     def test_empirical_coverage_is_not_a_level(self) -> None:
         """``94% of the intervals covered the truth`` is a coverage RESULT
         that merely names intervals; ``of`` between the two stops the level
         rule from reading it as a level."""
-        text = "94% of the confidence intervals covered the true value."
-        assert ("near_miss", 94.0) in _flagged(text, {"coverage_pct": 92.0})
+        text = "87% of the confidence intervals covered the true value."
+        assert ("transposed", 87.0) in _flagged(text, {"coverage_pct": 78.0})
 
 
 # --- a setting the run was given is not a result ----------------------------
@@ -203,36 +203,38 @@ class TestDeclaredSettings:
         # what the author expected, and the bounds on results, are not settings
         assert not ({28.0, 0.58, 0.9403, 0.97, 0.01} & got)
 
-    def test_a_setting_beside_an_unrelated_result_is_not_a_near_miss(self) -> None:
-        paper = "At R_0 = 1.5 the simulations gave a mean of 1.33."
-        results = {"mean_final_size": 1.33}
-        # without the settings the 1.5 is 11% from 1.33 and is reported
+    def test_a_setting_beside_a_result_one_digit_off_is_not_a_near_miss(self) -> None:
+        paper = "At R_0 = 1.50 the simulations converged."
+        results = {"mean_final_size": 1.4949}  # rounds to 1.49, one digit from the printed 1.50
+        # without the settings the 1.50 reads as a last-digit slip of 1.4949
         assert _flagged(paper, results) == [("near_miss", 1.5)]
         assert _flagged(paper, results, declared=no.declared_numbers(_DESIGN, "")) == []
 
     def test_the_topic_alone_declares_its_grid(self) -> None:
         declared = no.declared_numbers(None, "For R0 in {0.9, 1.5, 3.0} run 300 times.")
-        assert _flagged("At R_0 = 1.5 we saw 1.33.", {"m": 1.33}, declared=declared) == []
+        assert _flagged("At R_0 = 1.50 we converged.", {"m": 1.4949}) == [("near_miss", 1.5)]
+        assert _flagged("At R_0 = 1.50 we converged.", {"m": 1.4949}, declared=declared) == []
 
     def test_a_number_that_merely_resembles_a_setting_is_still_checked(self) -> None:
-        """Declared 1.5 clears 1.5 and 1.50, not 1.45 -- the paper's own
+        """Declared 1.5 clears 1.5 and 1.50, not 1.46 -- the paper's own
         precision decides."""
         declared = no.declared_numbers(_DESIGN, "")
-        assert ("near_miss", 1.45) in _flagged(
-            "The mean was 1.45.", {"m": 1.33}, declared=declared,
+        assert ("near_miss", 1.46) in _flagged(
+            "The mean was 1.46.", {"m": 1.4549}, declared=declared,
         )
 
     def test_a_prediction_printed_as_a_result_is_still_reported(self) -> None:
-        """The design's ``expected_outcome`` says 28 nm; the run measured 32.
-        A paper that prints 28 as the finding is the mistake this check is for,
-        so the design's predictions are not settings."""
+        """The design's ``expected_outcome`` says P(outbreak) about 0.58; the run
+        measured 0.5749, which rounds to 0.57. A paper that prints the prediction
+        as the finding is the mistake this check is for, so the design's
+        predictions are not settings."""
         declared = no.declared_numbers(_DESIGN, "")
         got = _flagged(
-            "The crossover pitch moved from 28 nm to 41 nm.",
-            {"crossover_pitch_nm": 32.0},
+            "The outbreak probability was 0.58.",
+            {"p_outbreak": 0.5749},
             declared=declared,
         )
-        assert ("near_miss", 28.0) in got
+        assert ("near_miss", 0.58) in got
 
     def test_a_transposition_of_a_setting_is_still_reported(self) -> None:
         """Same digits in another order is the signal least likely to be a
@@ -243,10 +245,10 @@ class TestDeclaredSettings:
         ]
 
     def test_no_settings_means_no_change(self) -> None:
-        assert _flagged("At R_0 = 1.5 we saw 1.33.", {"m": 1.33}, declared=None) == [
+        assert _flagged("At R_0 = 1.50 we converged.", {"m": 1.4949}, declared=None) == [
             ("near_miss", 1.5)
         ]
-        assert _flagged("At R_0 = 1.5 we saw 1.33.", {"m": 1.33}, declared=[]) == [
+        assert _flagged("At R_0 = 1.50 we converged.", {"m": 1.4949}, declared=[]) == [
             ("near_miss", 1.5)
         ]
 
@@ -273,10 +275,10 @@ class TestUnicodeMinus:
         assert _flagged(paper, {"p_lower": 0.0975}) == []
 
     def test_a_negative_number_is_still_checked_against_a_negative_result(self) -> None:
-        """The observed case: a CI bound of -0.114 beside a stored -0.1167.
-        Keeping the sign must not stop a genuine negative near-miss."""
+        """-0.1147 rounds to -0.115, and the paper prints -0.114. Keeping the
+        sign must not stop a genuine negative near-miss."""
         paper = f"The difference was {_MINUS}0.114 at N = 100."
-        assert _flagged(paper, {"diff": -0.1167}) == [("near_miss", -0.114)]
+        assert _flagged(paper, {"diff": -0.1147}) == [("near_miss", -0.114)]
 
 
 # --- a percentile rank is not its integer part ------------------------------

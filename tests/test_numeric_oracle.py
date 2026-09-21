@@ -42,15 +42,27 @@ def test_transposed_digits_are_caught() -> None:
 
 
 def test_near_miss_is_caught_with_its_path() -> None:
+    """A last-digit slip: 0.7912 rounds to 0.791, and the paper prints 0.792."""
     report = no.check(
-        "Contrast reached 0.812 under quadrupole illumination.",
-        {"metrics": {"contrast": {"quadrupole": 0.79}}},
+        "Contrast reached 0.792 under quadrupole illumination.",
+        {"metrics": {"contrast": {"quadrupole": 0.7912}}},
     )
     assert not report.ok
     f = report.findings[0]
     assert f.kind == "near_miss"
     assert f.result_path == "metrics.contrast.quadrupole"
     assert 0 < f.rel_error <= no.NEAR_REL
+
+
+def test_a_gap_that_is_not_a_last_digit_slip_is_silent() -> None:
+    """0.812 beside a stored 0.79 was a near-miss once: any number within a quarter
+    of a result. A result dictionary holds hundreds, so that reported nearly every
+    number a paper prints; it is now the last printed digit, and nothing wider."""
+    report = no.check(
+        "Contrast reached 0.812 under quadrupole illumination.",
+        {"metrics": {"contrast": {"quadrupole": 0.79}}},
+    )
+    assert report.ok
 
 
 def test_transposed_outranks_near_miss_in_the_report() -> None:

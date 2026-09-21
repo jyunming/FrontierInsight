@@ -62,10 +62,10 @@ def test_transcription_error_becomes_a_finding(tmp_path: Path) -> None:
 
 
 def test_a_near_miss_is_labelled_a_near_miss(tmp_path: Path) -> None:
-    """The second signal, under its own name — a gap the paper's own rounding
-    cannot explain, which is a different claim from digits swapped."""
-    rec = _Recorder(tmp_path, {"metrics": {"contrast": {"quadrupole": 0.79}}})
-    hits = rec.hits("Contrast reached 0.812 under quadrupole illumination.")
+    """The second signal, under its own name — a last digit the paper's own
+    rounding cannot explain, which is a different claim from digits swapped."""
+    rec = _Recorder(tmp_path, {"metrics": {"contrast": {"quadrupole": 0.7912}}})
+    hits = rec.hits("Contrast reached 0.792 under quadrupole illumination.")
     assert len(hits) == 1
     assert hits[0].startswith("near_miss:")
 
@@ -110,11 +110,11 @@ def test_a_trivial_reference_is_not_called_an_unverified_number(
 def test_a_setting_the_quest_gave_the_run_is_not_a_finding(tmp_path: Path) -> None:
     """``R_0 = 1.5`` is the paper quoting its own setup. The engine hands the
     oracle the design and the topic, so a number they state is not reported
-    as a near-miss of whatever result sits within 25% of it."""
-    paper = "At R_0 = 1.5 the simulations gave a mean of 1.33."
-    results = {"mean_final_size": 1.33}
+    as a near-miss of the result whose last digit it happens to sit beside."""
+    paper = "At R_0 = 1.50 the simulations ran 250 replicates."
+    results = {"mean_final_size": 1.4949}  # rounds to 1.49, one digit from the printed 1.50
 
-    # Nothing declares 1.5: it is 11% from the stored 1.33 and is reported.
+    # Nothing declares 1.5: it reads as a last-digit slip of 1.4949 and is reported.
     hits = _Recorder(tmp_path, results).hits(paper)
     assert len(hits) == 1 and hits[0].startswith("near_miss:") and "1.5" in hits[0]
 
@@ -134,10 +134,10 @@ def test_a_declared_prediction_does_not_hide_a_wrong_result(tmp_path: Path) -> N
     setup is declared, so a paper that prints the prediction is still caught."""
     design = {
         "variables": {"controls": ["dose 1.4"]},
-        "expected_outcome": "the crossover pitch shifts to 28 nm",
+        "expected_outcome": "the outbreak probability is 0.58",
     }
-    rec = _Recorder(tmp_path, {"crossover_pitch_nm": 32.0}, design=design)
-    hits = rec.hits("The crossover pitch shifts to 28 nm.")
+    rec = _Recorder(tmp_path, {"outbreak_probability": 0.5749}, design=design)
+    hits = rec.hits("The outbreak probability is 0.58.")
     assert len(hits) == 1 and hits[0].startswith("near_miss:")
 
 

@@ -23,9 +23,9 @@ costs a whole revision iteration because the finding is a blocking
 must-flag.
 
 Instead it looks for the *signature of a transcription error*: a paper
-number that sits **near** a real result without matching it, where the
-gap cannot be explained by rounding. A number far from every result is
-assumed to come from somewhere else and is ignored. A number that rounds
+number that is a **slip** of a real result -- its digits in another order, or
+its last digit one off the correct rounding. A number far from every result
+is assumed to come from somewhere else and is ignored. A number that rounds
 correctly is correct.
 
 Two signals, strongest first:
@@ -35,11 +35,47 @@ Two signals, strongest first:
     never a coincidence, and the classic way a number gets copied wrong.
 
 ``near_miss``
-    Within ``NEAR_REL`` of a result value but outside what rounding to
-    the paper's own precision would allow.
+    A last-digit slip: a result whose correct rounding to the
+    paper's own precision is one unit of the paper's last printed digit from
+    the number the paper prints (2.12 for 2.1259, which rounds to 2.13; 0.184
+    for 0.18346, which rounds to 0.183), for a number printed with at least
+    ``MIN_SLIP_DECIMALS`` decimals. That is the truncation, or the mistyped
+    last digit, that stored quests really contain.
 
 Both are reported with the JSON path they contradict, so the writer node
 gets told which number to fix rather than "something is wrong".
+
+Why ``near_miss`` is that narrow
+================================
+It used to be any number within ``NEAR_REL`` (25%) of a result. A result
+dictionary holds hundreds of numbers, so almost every number a paper prints is
+within a quarter of one: replayed over the 136 stored quests with results, the
+check made 197 of these findings in 59 quests (median 2, most 37), and most were
+not copying errors: confidence-interval bounds, hand-computed sums, settings,
+years, citation numbers, file counts, siblings in a list of similar values, and
+the theoretical values 0.333 and 0.667 read against the nearest result. A
+``near_miss`` is therefore a last-digit slip only. What remains is 20 findings in
+9 of those quests, and six rules keep the rest out:
+
+* a number inside a citation bracket (``[6, 15]``), which is a reference number;
+* a result whose name is an identifier or a count of files (``id``, ``index``,
+  ``seed``, ``year``, ``n_files``, ...);
+* a result the paper also prints correctly rounded, to two decimals or more,
+  somewhere else: the paper states that result right, so a number one digit off
+  beside it is another quantity (a sibling, a bound, a sum worked by hand). This
+  one takes the place of leaving out the elements of an array, which also left out
+  a slip stored quests really contain, in a nine-point sweep;
+* a repeating-decimal constant printed with three decimals or more (0.333, 0.667,
+  0.167, 0.143: 1/3, 2/3, 1/6, 1/7 ...), which is a theoretical value more often
+  than a measurement;
+* a result that is a shorter rounding of the number the paper prints (0.667
+  against a stored 0.67), read against that result only: a stored 0.2 must not
+  clear every number in [0.15, 0.25);
+* a setting the run was given (below), as before.
+
+A digit transposition is read against every result, and only the first rule (a
+citation number is not a measurement) applies to it: the same digits in another
+order is rarely a coincidence, wherever the result sits.
 
 Numbers that are not results are not compared
 =============================================
@@ -120,6 +156,24 @@ MIN_MAGNITUDE = 1e-9
 # little information to distinguish a transcription error from a rounded
 # quote. "about 2" vs 2.14 is not evidence of anything.
 MIN_SIG_DIGITS = 2
+
+# A ``near_miss`` is only a last-digit slip, and only for a number printed with at
+# least this many decimals: at one decimal or none the "last digit" is a whole unit
+# of a count or a ratio ("26 times" against 25), which says nothing about rounding.
+MIN_SLIP_DECIMALS = 2
+
+# A result named like one of these is an identifier, an index or a count of files,
+# not a quantity the paper reports, so a paper number near it is a coincidence.
+_IDENTIFIER_LEAF = re.compile(
+    r"(?:^|_)(?:id|ids|index|idx|seed|seeds|year|years|n_files|n_obs|n_observations|file|files)(?:_|$)",
+    re.IGNORECASE,
+)
+_ARRAY_INDEX = re.compile(r"\[\d+\]")
+# The denominators of the theoretical values a paper prints beside its results
+# (1/3 = 0.333, 2/3 = 0.667, 1/6 = 0.167, 1/7 = 0.143 ...): repeating decimals.
+_CONSTANT_DENOMINATORS = (3, 6, 7, 9, 11, 12)
+# ``[6, 15]`` and ``[3-5]``: reference numbers, not measurements.
+_CITATION_GROUP = re.compile(r"\[\s*\d+(?:\s*[,;–—-]\s*\d+)*\s*\]")
 
 # How many settings a reference quantity must span before "it is zero at every
 # one of them" means anything. Two points is a coincidence; a sweep is not.
@@ -289,6 +343,7 @@ class Finding:
     result_path: str
     context: str       # surrounding prose, trimmed
     rel_error: float
+    printed: str = ""  # the number as the paper wrote it ("2.12"), for a near_miss
 
     def describe(self) -> str:
         if self.kind == "trivial_reference":
@@ -300,12 +355,13 @@ class Finding:
                 f"looks like — check the bracket before the paper describes "
                 f"this as a limit"
             )
-        pct = self.rel_error * 100
-        lead = (
-            "digits transposed"
-            if self.kind == "transposed"
-            else f"off by {pct:.1f}%"
-        )
+        if self.kind == "transposed":
+            lead = "digits transposed"
+        elif self.printed:
+            decimals = _decimals_of_token(self.printed)
+            lead = f"rounds to {round(self.result_value, decimals):.{decimals}f}, not {self.printed}"
+        else:
+            lead = f"off by {self.rel_error * 100:.1f}%"
         return (
             f"paper says {_fmt(self.paper_value)} but "
             f"`{self.result_path}` = {_fmt(self.result_value)} ({lead}) "
@@ -510,6 +566,71 @@ def _is_declared(value: float, token: str, declared: list[float]) -> bool:
     return any(d == value or _rounds_to(value, d, token) for d in declared)
 
 
+def _decimals_of_token(token: str) -> int:
+    t = token.replace(",", "")
+    return len(t.split(".", 1)[1]) if "." in t else 0
+
+
+def _short_decimals(actual: float) -> int | None:
+    """How many decimals a stored result is written with, when it is a short number
+    (a rounding someone stored: 0.67), and ``None`` for a long one (0.6666666666)
+    or one in exponent notation."""
+    text = repr(float(actual))
+    if "e" in text.lower() or "." not in text:
+        return None
+    decimals = len(text.split(".", 1)[1])
+    return decimals if decimals <= 6 else None
+
+
+def _is_rounding_of(paper: float, actual: float, token: str) -> bool:
+    """True when ``actual`` is a shorter rounding of the number the paper prints:
+    0.67 stored and 0.667 printed. ``_rounds_to`` reads the other way round."""
+    shorter = _short_decimals(actual)
+    if shorter is None or shorter >= _decimals_of_token(token):
+        return False
+    return round(paper, shorter) == round(actual, shorter)
+
+
+def _is_eligible_near_result(path: str) -> bool:
+    """May a paper number be read as a slip of the result at ``path``? Not an
+    identifier, an index, a seed, a year or a count of files. An element of an
+    array is eligible: a slip stored quests really contain sits in a nine-point
+    sweep (``coherence_sweep.dipole_nils[8]``)."""
+    return not _IDENTIFIER_LEAF.search(_ARRAY_INDEX.sub("", path.rsplit(".", 1)[-1]))
+
+
+def _stated_correctly(actual: float, numbers: list[tuple[float, str, str]]) -> bool:
+    """Does the paper print ``actual`` correctly rounded, to ``MIN_SLIP_DECIMALS``
+    decimals or more, somewhere? Then it states that result right, and a number
+    beside it that is one digit off is another quantity: a sibling, a bound, a
+    sum worked by hand."""
+    return any(
+        _decimals_of_token(token) >= MIN_SLIP_DECIMALS and _rounds_to(value, actual, token)
+        for value, token, _ctx in numbers
+    )
+
+
+def _is_repeating_constant(value: float, token: str) -> bool:
+    """Is the number, printed with three decimals or more, a repeating-decimal
+    constant (0.333, 0.667, 0.167, 0.143)? That is a theoretical value more often
+    than a measurement, and it is compared with the result nearest to it."""
+    decimals = _decimals_of_token(token)
+    if decimals < 3:
+        return False
+    for q in _CONSTANT_DENOMINATORS:
+        p = round(value * q)
+        if p and math.gcd(abs(p), q) == 1 and round(p / q, decimals) == round(value, decimals):
+            return True
+    return False
+
+
+def _is_last_digit_slip(value: float, token: str, actual: float) -> bool:
+    """Is the paper's number one unit of its own last printed digit away from
+    ``actual`` correctly rounded to that precision (2.12 for 2.1259)?"""
+    decimals = _decimals_of_token(token)
+    return decimals >= MIN_SLIP_DECIMALS and abs(round(actual, decimals) - value) <= 1.01 * 10 ** -decimals
+
+
 # Report order: the self-contradiction first, then the classic copy error,
 # then the weaker distance signal.
 _KIND_RANK = {"trivial_reference": 0, "transposed": 1, "near_miss": 2}
@@ -543,35 +664,49 @@ def check(
     # shared extractor is called, and not inside it: ``number_provenance`` folds
     # it the same way in its own reading of the paper, so neither check's
     # findings depend on what the other does with the extractor.
-    numbers = extract_paper_numbers(paper_text.replace(_MINUS_SIGN, "-"))
+    # A citation bracket holds reference numbers, not measurements: taken out for
+    # this check only, since the extractor is shared with ``number_provenance``.
+    numbers = extract_paper_numbers(_CITATION_GROUP.sub(" ", paper_text.replace(_MINUS_SIGN, "-")))
     report.paper_numbers = len(numbers)
     settings = list(declared) if declared else []
 
     seen: set[tuple[float, str]] = set()
     for value, token, ctx in numbers:
-        best: tuple[float, str, float] | None = None  # (result, path, rel)
+        nearest: tuple[float, str, float] | None = None  # (result, path, rel), any result
+        eligible: tuple[float, str, float] | None = None  # the nearest one a near_miss may be read against
+        cleared = False
         for path, actual in results:
             if actual == value or _rounds_to(value, actual, token):
-                best = None
+                cleared = True
                 break  # an exact or correctly-rounded match clears it
             denom = max(abs(actual), abs(value))
             rel = abs(actual - value) / denom if denom else 0.0
-            if rel <= NEAR_REL and (best is None or rel < best[2]):
-                best = (actual, path, rel)
-        if best is None:
+            if rel <= NEAR_REL:
+                if nearest is None or rel < nearest[2]:
+                    nearest = (actual, path, rel)
+                if _is_eligible_near_result(path) and (eligible is None or rel < eligible[2]):
+                    eligible = (actual, path, rel)
+        if cleared or nearest is None:
             continue
 
-        actual, path, rel = best
+        actual, path, rel = nearest
+        if _digit_bag(value) and _digit_bag(value) == _digit_bag(actual):
+            kind = "transposed"
+        else:
+            # Only a last-digit slip, against a result the paper does not also state right,
+            # for a number that is not a theoretical constant or a setting the run was given.
+            kind = "near_miss"
+            if eligible is None:
+                continue
+            actual, path, rel = eligible
+            if not _is_last_digit_slip(value, token, actual) or _is_repeating_constant(value, token):
+                continue
+            if _is_rounding_of(value, actual, token) or _stated_correctly(actual, numbers):
+                continue
+            if settings and _is_declared(value, token, settings):
+                continue
         key = (value, path)
         if key in seen:
-            continue
-
-        kind = (
-            "transposed"
-            if _digit_bag(value) and _digit_bag(value) == _digit_bag(actual)
-            else "near_miss"
-        )
-        if kind == "near_miss" and settings and _is_declared(value, token, settings):
             continue
         seen.add(key)
         report.findings.append(
@@ -582,6 +717,7 @@ def check(
                 result_path=path,
                 context=ctx,
                 rel_error=rel,
+                printed=token if kind == "near_miss" else "",
             )
         )
 
