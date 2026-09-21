@@ -37,7 +37,9 @@ def test_the_run_that_changed_its_grid_is_caught_and_the_two_that_did_not_are_no
     assert pc.check(TOPIC_PROTOCOL, {"experiment.py": _real("fr1")}) == []
     assert pc.check(TOPIC_PROTOCOL, {"experiment.py": _real("fr2")}) == []
     found = pc.check(TOPIC_PROTOCOL, {"experiment.py": _real("fr3")})
-    assert {(m.kind, m.name) for m in found} == {("grid", "R0"), ("grid", "N")}
+    # fr3 also rebuilds its random stream for every setting (the protocol here states no seed policy, so independent streams
+    # are assumed): reported as its own difference.
+    assert {(m.kind, m.name) for m in found} == {("grid", "R0"), ("grid", "N"), ("rng", "run_stochastic_experiment")}
     r0 = next(m for m in found if m.name == "R0")
     assert r0.found == [0.8, 1.2, 2.0, 3.0] and "R0_LIST" in r0.where and "line 166" in r0.where
     assert "adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in r0.message()

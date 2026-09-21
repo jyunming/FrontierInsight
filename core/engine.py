@@ -2944,6 +2944,8 @@ class Engine:
         audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))
         if isinstance(normalized.get("protocol"), dict):
             audit += _protocol.oracle_notes(normalized.get("protocol"))
+            audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
+            audit += _protocol.grid_notes(normalized)
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit)
         path.write_text(body, encoding="utf-8")
@@ -4597,6 +4599,33 @@ class Engine:
         )
         return new_code, sorted({*deps, *new_deps})
 
+    def _annotate_precision(self, state: QuestState, aggregate: dict[str, Any]) -> str:
+        """For each probability with a pooled interval, its half-width, and whether the protocol's target was reached.
+        Returns a sentence for the analysis when a target was missed, else an empty string."""
+        protocol = self._protocol_block(state) or {}
+        precision = protocol.get("precision")
+        target = precision.get("target_half_width") if isinstance(precision, dict) else None
+        missed: list[str] = []
+        for key, entry in aggregate.items():
+            if not isinstance(entry, dict) or entry.get("ci_method") != _CI_WILSON:
+                continue
+            lo, hi = entry.get("ci_lower"), entry.get("ci_upper")
+            if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+                continue
+            entry["ci_half_width"] = (hi - lo) / 2.0
+            if isinstance(target, (int, float)) and not isinstance(target, bool):
+                entry["target_half_width"] = float(target)
+                entry["precision_reached"] = entry["ci_half_width"] <= float(target)
+                if not entry["precision_reached"]:
+                    missed.append(f"{key} (±{entry['ci_half_width']:.3f})")
+        if not missed:
+            return ""
+        return (
+            f"The protocol's target 95% half-width of ±{float(target):g} was not reached for {len(missed)} of the "
+            f"probabilities: {', '.join(missed[:6])}. Say so in the limitations and do not claim a precision the trials do "
+            f"not give."
+        )
+
     def _scan_numeric_warnings(self, state: QuestState, stderr: str, result_json: Any) -> list[dict[str, str]]:
         """The numeric warnings a run reported, as plain records for the state; logged and written to
         ``needs/NUMERIC_WARNINGS.json`` whatever ``engine.numeric_warnings`` says (unless it is ``off``)."""
@@ -6230,6 +6259,7 @@ class Engine:
             # dropped and counted; the per-seed JSON above still carries them.
             constant = {k for k, v in agg.items() if v.get("n", 0) > 1 and not v.get("std")}
             varying = {k: v for k, v in agg.items() if k not in constant}
+            precision_note = self._annotate_precision(state, varying)
             payload: dict[str, Any] = {
                 "result_json_seed_0": state.get("result_json") or {},
                 "replicates": _elide_value_lists(replicates),
@@ -6238,6 +6268,8 @@ class Engine:
                 "aggregate_mean_std": varying,
                 "n_replicates": len(replicates),
             }
+            if precision_note:
+                payload["precision_note"] = precision_note
             if constant:
                 payload["aggregate_note"] = (
                     f"{len(constant)} further metric(s) were identical across "
@@ -10823,8 +10855,11 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "seed_policy": "<how randomness is seeded: one independent stream per setting and run, or say why streams are shared>",
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
+  "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what is compared with what, on which small case>", "tolerance": "<how close counts as agreeing>"}]
 }
+
+`precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
 `oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. The script is run once with FI_ORACLE=1 to answer them before its main run, and a run whose checks do not pass never reaches the main sweep.
 

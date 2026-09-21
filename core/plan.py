@@ -160,6 +160,15 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     for key in ("seed_policy", "ci_method"):
         if out.get(key) is not None and not isinstance(out[key], str):
             return None, f"`protocol.{key}` must be text"
+    precision = out.get("precision")
+    if precision is not None:
+        if not isinstance(precision, dict) or not _number(precision.get("target_half_width")) or not (
+            0 < precision["target_half_width"] < 1
+        ):
+            return None, "`protocol.precision` must be a mapping with a `target_half_width` between 0 and 1 (for example 0.03)"
+        for key in ("metric", "reason"):
+            if precision.get(key) is not None and not isinstance(precision[key], str):
+                return None, f"`protocol.precision.{key}` must be text"
     oracles = out.get("oracles")
     if oracles is not None:
         if isinstance(oracles, (str, dict)):
