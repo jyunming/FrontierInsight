@@ -365,6 +365,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "protocol. Then resume the quest.",
     )
     mode.add_argument(
+        "--trace",
+        metavar="QUEST",
+        default="",
+        help="Show what a quest did, in order: each node, every check's verdict, each route with the facts it read, and "
+             "the reasons the model gave (labelled as its claims), from the quest's audit trace "
+             "(.fi/audit.jsonl); the hash chain is verified and the exit code is 1 when it is broken. QUEST is the quest "
+             "id (looked up under --output-root) or its folder. See --trace-node and --trace-detail.",
+    )
+    mode.add_argument(
         "--approve-all-skills",
         action="store_true",
         help="Approve every skill that passes its gates, in one go. Still "
@@ -452,6 +461,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "when a quest's topic looks related; an UNTAGGED skill is "
              "treated as general and is always a candidate. Tags route the "
              "catalogue and grant nothing.",
+    )
+    p.add_argument(
+        "--trace-node", metavar="NODE", default="",
+        help="With --trace: only the events of this node (design, execute, review, ...).",
+    )
+    p.add_argument(
+        "--trace-detail", choices=("summary", "checks", "debug"), default="checks",
+        help="With --trace: summary = nodes, pauses and routes; checks (default) = plus each check's verdict, the files "
+             "written and the model's stated reasons; debug = everything, node starts included.",
     )
     # Not a mode: it qualifies --approve-skill rather than standing alone.
     p.add_argument(
@@ -2206,6 +2224,7 @@ async def main_async(args: argparse.Namespace) -> int:
         # Rewriting plan.md is one model call and makes no Axon call.
         or getattr(args, "revise_plan", None) is not None
         or bool(getattr(args, "approve_amendment", ""))
+        or bool(getattr(args, "trace", ""))
     )
     if args.no_axon_sidecar:
         # The web server starts the service again for itself (web.server._ensure_axon_sidecar), and it reads the
@@ -2269,6 +2288,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.approve_amendment:
             return _approve_amendment(args.approve_amendment, args.approve_as, args.output_root)
+
+        if args.trace:
+            return _show_trace(args.trace, args.trace_node, args.trace_detail, args.output_root)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -4909,6 +4931,28 @@ def _approve_all_skills(
             f"python launch.py --scan-skill {tally['needs_despite'][0]}"
         )
     return 0
+
+
+def _show_trace(quest: str, node: str, detail: str, output_root: Path) -> int:
+    """Print a quest's audit trace (core/audit_log.py) and check its hash chain."""
+    from core import audit_log
+
+    root = next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)
+    if root is None:
+        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
+        return 1
+    path = root / ".fi" / "audit.jsonl"
+    events = audit_log.read(path)
+    if not events:
+        print(f"[FI] {root.name} has no audit trace (a quest run before it existed, or engine.audit_trace: false).")
+        return 1
+    shown = audit_log.select(events, node=node or None, detail=detail)
+    print(f"Audit trace of {root.name}: {len(events)} events" + (f", {len(shown)} shown" if len(shown) != len(events) else ""))
+    for line in audit_log.render(shown):
+        print("  " + line)
+    verdict = audit_log.verify(path)
+    print(f"[FI] {verdict.line()}")
+    return 0 if verdict.ok else 1
 
 
 def _approve_amendment(quest: str, approved_by: str, output_root: Path) -> int:

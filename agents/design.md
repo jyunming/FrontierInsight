@@ -43,8 +43,19 @@ Respond with a single JSON object, no prose, no markdown fence:
   "result_assertions": [
     {"path": "<result_json key, e.g. cd_nm>", "min": <number>, "max": <number>,
      "unit": "<nm | dimensionless | …>", "reason": "<why this range is physical>"}
-  ]
+  ],
+  "rationale": {
+    "assumptions": ["<what this design takes as given, e.g. trials are independent>", ...],
+    "alternatives_considered": [
+      {"option": "<a method or setting you weighed>", "decision": "selected | rejected", "reason": "<one sentence>"}
+    ]
+  }
 }
+
+**`rationale`** is your own account of why, kept in the quest's audit trace as *your stated
+reasoning* — recorded so a reader can argue with it, and never used by any check. At most four
+assumptions and four alternatives, only the ones that changed what you designed. Leave a list
+empty rather than pad it.
 
 **`result_assertions` — declare what the numbers may legally be.** You chose the
 working point, so you are the only stage that knows a normalised contrast cannot

@@ -83,7 +83,7 @@ On the web the quest page has a **Plan** panel; in VSCode use `@fi /plan <quest_
 
 ## How much can you trust the result?
 
-Each finished quest ends with an **evidence level**, from `executed` (it ran) up to `publication_ready` (every check passed and the review accepted it), and a plain sentence for what stands in the way of the next level. Nothing is called validated that was not checked, and a check that was turned off shows up as a gap. Set `rigor_profile: research` (the interview recommends it for a simulation study) to make the checks stop the quest instead of only reporting. How the checks work is in **[docs/rigor.md](docs/rigor.md)**.
+Each finished quest ends with an **evidence level**, from `executed` (it ran) up to `publication_ready` (every check passed and the review accepted it), and a plain sentence for what stands in the way of the next level. Nothing is called validated that was not checked, and a check that was turned off shows up as a gap. Set `rigor_profile: research` (the interview recommends it for a simulation study) to make the checks stop the quest instead of only reporting. How the checks work is in **[docs/rigor.md](docs/rigor.md)**; what a quest did, in order, is `python launch.py --trace <quest>` (**[docs/trace.md](docs/trace.md)**).
 
 ---
 
@@ -114,6 +114,7 @@ The long descriptions of each are in [docs/features.md](docs/features.md).
 ## Going deeper
 
 - **Rigor: how FI checks its own experiments** → [`docs/rigor.md`](docs/rigor.md)
+- **The trace: what a quest did, in order, and why** → [`docs/trace.md`](docs/trace.md)
 - **Recipes and how-tos** → [`docs/recipes.md`](docs/recipes.md)
 - **Every setting and flag** → [`docs/USAGE.md`](docs/USAGE.md)
 - **Full capability reference** → [`docs/capabilities.md`](docs/capabilities.md)

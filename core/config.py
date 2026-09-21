@@ -544,6 +544,9 @@ class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = Field(default=2, ge=0)
     review_loop: bool = True
+    # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
+    # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.
+    audit_trace: bool = True
     # Human-feedback gate. ``"after_review"`` (the default) pauses
     # the quest AFTER the review node fires and waits for the user
     # to accept / reject / refine the result before finalising. The

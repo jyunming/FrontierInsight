@@ -45,6 +45,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from core.config import Config
+from core import audit_log as fi_audit
 from core import evidence as fi_evidence
 from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
@@ -1212,6 +1213,25 @@ def make_app(
             "design_error": parsed.error or "",
             "versions": fi_plan.history(quest_root),
         }
+
+    @app.get("/api/quests/{quest_id}/trace")
+    async def get_trace(quest_id: str, node: str = "", detail: str = "checks", limit: int = 1000) -> JSONResponse:
+        """The quest's audit trace (``.fi/audit.jsonl``): the events to show for a node filter and a detail level, each with
+        the one-line description every surface uses, whether the hash chain is intact, and the nodes to filter by."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        if detail not in fi_audit.DETAILS:
+            raise HTTPException(400, f"detail must be one of {list(fi_audit.DETAILS)}; got {detail!r}")
+        path = _resolve_quest_root(app.state.output_root, quest_id) / ".fi" / "audit.jsonl"
+        events = fi_audit.read(path)
+        chosen = fi_audit.select(events, node=node or None, detail=detail)
+        limit = max(1, min(limit, 5000))
+        return JSONResponse({
+            "quest_id": quest_id, "total": len(events), "shown": len(chosen), "truncated": len(chosen) > limit,
+            "chain": {"ok": (v := fi_audit.verify(path)).ok, "line": v.line(), "bad_seq": v.bad_seq},
+            "nodes": sorted({str(e["node"]) for e in events if e.get("node")}),
+            "events": [{**e, "description": fi_audit.describe(e, tagged=False)} for e in chosen[-limit:]],
+        })
 
     @app.get("/api/quests/{quest_id}/amendment")
     async def get_amendment(quest_id: str) -> JSONResponse:
