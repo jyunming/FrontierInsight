@@ -7,6 +7,18 @@ GitHub Copilot subscription. **No third-party proxy, no scraped tokens
 — every LLM call goes through VSCode's sanctioned `vscode.lm` Language
 Model API.**
 
+## Start here
+
+Five steps, then everything below is reference you can look up when you need it.
+
+1. Install **GitHub Copilot Chat** in VSCode and sign in.
+2. Clone the FrontierInsight repo and install it into the Python the extension will use: `python -m pip install -e .` (that interpreter is the setting `frontierInsight.pythonPath`).
+3. Install this extension: build the `.vsix` and use *Install from VSIX...*, then reload the window (details in *One-time setup* below), or press **F5** in this folder to try it without installing.
+4. Open your project folder in VSCode. If FrontierInsight is somewhere else, set `frontierInsight.repoPath` to it.
+5. In Copilot Chat type **`@fi /new`** and answer the questions. When a quest stops for you (a `paused` message in the chat), read what it asks and continue with **`@fi /resume`**.
+
+The finished paper is in `outputs/<quest id>/paper/paper.md` in your project folder. Words you do not know are in the [glossary](../docs/glossary.md); a first run outside VSCode is in [first-quest.md](../docs/first-quest.md).
+
 ## What this is
 
 The Frontier Insight Python engine drives a 21-node async research
@@ -106,7 +118,7 @@ length.
 
 1. **Install GitHub Copilot Chat in VSCode** and sign in.
 2. **Clone the FrontierInsight repo** locally and install its Python
-   deps: `pip install -r requirements.txt`.
+   deps: `python -m pip install -e .`.
 3. **Build the extension and produce a `.vsix`**:
 
    ```bash

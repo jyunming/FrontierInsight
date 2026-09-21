@@ -119,8 +119,8 @@ def test_probe_is_documented_in_the_readme_and_the_capabilities_list() -> None:
     text = section[1].split("\n### ", 1)[0]
     for phrase in ("not proof", "countTokens", "2 per model", "no usage figures", "own token accounting"):
         assert phrase in text, f"the README's probe section does not say: {phrase!r}"
-    capabilities = (ROOT / "docs" / "capabilities.md").read_text(encoding="utf-8")
-    assert "`/probe [all]`" in capabilities, "docs/capabilities.md does not list /probe"
+    capabilities = (ROOT / "docs" / "capabilities-reference.md").read_text(encoding="utf-8")
+    assert "`/probe [all]`" in capabilities, "docs/capabilities-reference.md does not list /probe"
 
 
 def test_the_help_text_lists_probe(tmp_path: Path) -> None:

@@ -186,6 +186,6 @@ def test_the_rule_is_documented() -> None:
     from pathlib import Path
 
     repo = Path(__file__).resolve().parent.parent
-    assert "last-digit" in (repo / "docs" / "capabilities.md").read_text(encoding="utf-8")
+    assert "last-digit" in (repo / "docs" / "capabilities-reference.md").read_text(encoding="utf-8")
     assert "last-digit" in (repo / "docs" / "features.md").read_text(encoding="utf-8")
     assert no.MIN_SLIP_DECIMALS == 2

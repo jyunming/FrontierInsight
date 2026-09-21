@@ -62,7 +62,7 @@ from core.skills.base import Kind, Skill, SkillState
 #: 13k tokens, **once** per quest, against the ~93,000 **per pass**
 #: that blanket injection cost. Still an order of magnitude better, but the
 #: original "under a thousand tokens" claim no longer holds and has been
-#: corrected in ``docs/capabilities.md`` and ``dev/skill-selection-spec.md``.
+#: corrected in ``docs/capabilities-reference.md`` and ``dev/skill-selection-spec.md``.
 MAX_DESCRIPTION = 900
 MAX_SCOPE_LIMIT = 200
 

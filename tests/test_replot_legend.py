@@ -113,5 +113,5 @@ def test_a_two_panel_figure_keeps_a_legend_per_panel_and_saves(tmp_path: Path) -
 
 def test_the_legend_rule_is_documented_in_the_module_and_the_docs() -> None:
     repo = Path(__file__).resolve().parent.parent
-    assert "outside the axes" in (repo / "docs" / "capabilities.md").read_text(encoding="utf-8")
+    assert "outside the axes" in (repo / "docs" / "capabilities-reference.md").read_text(encoding="utf-8")
     assert rf.LEGEND_OUTSIDE_AT == 4

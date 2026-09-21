@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -66,6 +67,26 @@ def _check_mode(
         for a in chosen:
             if a.dest not in _SKILL_MODES_READING_CONFIG:
                 p.error(f"argument {a.option_strings[0]}: not allowed with argument --config")
+
+
+def _config_from_quest(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """``--resume ID`` (or ``--watch ID``) without ``--config``: use the ``config.yaml`` the quest saved in its own folder.
+
+    Every message that tells a person how to go on says ``fi --resume <id>``; that only works if the id is enough. ``ID``
+    is the quest's id (looked up under ``--output-root``) or its folder."""
+    quest = args.resume or args.watch
+    if not quest or args.config is not None:
+        return
+    root = next((c for c in (Path(quest), args.output_root / quest) if (c / "config.yaml").is_file()), None)
+    if root is None:
+        p.error(
+            f"no quest {quest!r} to go on with: looked for config.yaml in {Path(quest)} and {args.output_root / quest}. "
+            "Pass --config <its yaml>, or --output-root <the folder that holds the quest>."
+        )
+    args.config = root / "config.yaml"
+    if not args.resume:
+        return
+    args.resume = root.name
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -977,6 +998,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "sidecar isn't wanted.",
     )
     args = p.parse_args(argv)
+    _config_from_quest(p, args)
     _check_mode(p, mode._group_actions, args)
     # Env-var fallback for the bridge port. The VSCode extension can
     # expose ``FI_VSCODE_BRIDGE_PORT`` to a terminal session it spawns,
@@ -2488,6 +2510,12 @@ async def main_async(args: argparse.Namespace) -> int:
                           file=sys.stderr)
                     return 1
                 return await _watch_quest(cfg, args, supervisor)
+            if not (args.watch or args.emit):
+                from core.provider import missing_api_key
+
+                if (missing := missing_api_key(cfg.provider)) is not None:
+                    print(f"[FI] {missing}", file=sys.stderr)
+                    return 2
             if args.revise_plan is not None:
                 if not args.resume:
                     print("[FI] --revise-plan requires --resume <quest_id>",
@@ -5181,12 +5209,21 @@ def _force_utf8_streams() -> None:
             pass
 
 
+def _quiet_network_logs() -> None:
+    """One INFO line per HTTP request (``httpx``) buried the stage lines of a quest under a wall of URLs. They were never in
+    ``run.log`` (the quest's logger does not propagate); this only stops them reaching the console. A failed request is still a
+    WARNING and shows."""
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> int:
     # UTF-8 the console FIRST: argparse prints --help (arrows/em-dashes)
     # and exits inside parse_args(), before any other code runs, so a
     # cp1252 Windows console would crash on --help / --list-drafts unless
     # the streams are reconfigured up here.
     _force_utf8_streams()
+    _quiet_network_logs()
     # Load .env before anything reads the environment (KnowledgeConfig's
     # brave_api_key / openalex_api_key / semantic_scholar_api_key / offline
     # defaults resolve BRAVE_API_KEY / OPENALEX_API_KEY /
