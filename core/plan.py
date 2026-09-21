@@ -169,6 +169,14 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         for key in ("metric", "reason"):
             if precision.get(key) is not None and not isinstance(precision[key], str):
                 return None, f"`protocol.precision.{key}` must be text"
+    metrics = out.get("metrics")
+    if metrics is not None:
+        from . import metric_spec
+
+        fixed_metrics, why = metric_spec.normalize(metrics)
+        if fixed_metrics is None:
+            return None, why
+        out["metrics"] = fixed_metrics
     oracles = out.get("oracles")
     if oracles is not None:
         if isinstance(oracles, (str, dict)):

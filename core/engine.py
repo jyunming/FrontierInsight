@@ -46,6 +46,7 @@ from langgraph.types import Command, interrupt
 
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
+from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import goal_coverage
 from . import paper_patch
@@ -2993,6 +2994,7 @@ class Engine:
         if isinstance(normalized.get("protocol"), dict):
             audit += _protocol.oracle_notes(normalized.get("protocol"))
             audit += _protocol.failure_notes(normalized.get("protocol"))
+            audit += _protocol.metric_notes(normalized.get("protocol"))
             audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
             audit += _protocol.grid_notes(normalized)
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
@@ -4888,6 +4890,22 @@ class Engine:
         )
         return new_code, sorted({*deps, *new_deps})
 
+    def _comparison_stats(self, state: QuestState, replicates: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
+        """The per-stratum intervals and effect sizes over the batches (:func:`_result_comparison_stats`), and, when the protocol
+        declares metric specs, the engine's own estimates and contrasts with their p-values (``spec_statistics``,
+        :mod:`core.metric_spec`). The audits that compare the paper with the numbers read the same dictionary."""
+        out = _result_comparison_stats(replicates, **kw)
+        protocol = self._protocol_block(state)
+        if protocol is not None and len(replicates) >= 1 and _metric_spec.declared(protocol):
+            try:
+                spec = _metric_spec.statistics(replicates, protocol)
+            except Exception as e:  # noqa: BLE001 -- a report about the numbers must never stall the quest
+                self._log.warning("[stats] the metric specs' statistics could not be computed: %r", e)
+                spec = {}
+            if spec:
+                out = {**out, "spec_statistics": spec}
+        return out
+
     def _write_evidence(self, state: QuestState) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
         (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest."""
@@ -4898,8 +4916,19 @@ class Engine:
                 aggregate = _aggregate_result_json_replicates(replicates, assertions=_replicate_assertions(state))
                 self._annotate_precision(state, aggregate)
                 missed = [k for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
+            replicates_for_specs = state.get("result_json_replicates") or []
+            protocol_now = self._protocol_block(state)
+            try:
+                computed = (
+                    _metric_spec.statistics(replicates_for_specs, protocol_now)
+                    if replicates_for_specs and _metric_spec.declared(protocol_now) else None
+                )
+                statistics_gaps = _metric_spec.coverage_gaps(protocol_now, replicates_for_specs, computed) if replicates_for_specs else []
+            except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
+                self._log.warning("[evidence] the statistics coverage could not be worked out: %r", e)
+                statistics_gaps = []
             record = _evidence.assess(
-                self.quest_root, dict(state), precision_missed=missed,
+                self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
@@ -6683,7 +6712,7 @@ class Engine:
                 )
             # Per-stratum CIs + pairwise effect sizes + multiple-comparison
             # guard for any by_<factor> breakdowns (empty otherwise).
-            comparison_stats = _result_comparison_stats(replicates, assertions=assertions)
+            comparison_stats = self._comparison_stats(state, replicates, assertions=assertions)
             if comparison_stats:
                 payload["comparison_stats"] = comparison_stats
             if all_ds:
@@ -8303,10 +8332,8 @@ class Engine:
                 # Uncapped, unlike the analyze aggregate: "for ALL pairwise
                 # comparisons" is a claim about every comparison, and the
                 # cap of 24 hid 12 of the 36 one real quest made.
-                comparison_stats = _result_comparison_stats(
-                    replicates,
-                    max_effect_sizes=10**9,
-                    assertions=_replicate_assertions(state),
+                comparison_stats = self._comparison_stats(
+                    state, replicates, max_effect_sizes=10**9, assertions=_replicate_assertions(state),
                 )
             report = stat_claims.check(
                 paper_md,
@@ -8381,8 +8408,8 @@ class Engine:
                     replicates, assertions=assertions,
                 )
             if len(replicates) >= 2:
-                comparison_stats = _result_comparison_stats(
-                    replicates, max_effect_sizes=10**9, assertions=assertions,
+                comparison_stats = self._comparison_stats(
+                    state, replicates, max_effect_sizes=10**9, assertions=assertions,
                 )
             try:
                 config_dump: Any = self.config.model_dump(mode="json")
@@ -11270,6 +11297,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>"}],
   "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from>"}]
 }
 

@@ -55,7 +55,7 @@ def _audit_gaps(paper_dir: Path) -> tuple[bool, list[str]]:
 
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
-    settings: dict[str, str] | None = None,
+    settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
 ) -> dict[str, Any]:
     """The quest's evidence status and the gaps below the next level.
 
@@ -138,6 +138,8 @@ def assess(
     ready_gaps = gaps["publication_ready"]
     for name in precision_missed or []:
         ready_gaps.append(f"the target precision was not reached for {name}")
+    for gap in statistics_gaps or []:
+        ready_gaps.append(f"the statistics are not shown to be adequate: {gap}")
     for amendment in _frozen.post_hoc(quest_root):
         ready_gaps.append(
             f"the protocol was amended after results were seen (amendment {amendment.get('n')}: "
