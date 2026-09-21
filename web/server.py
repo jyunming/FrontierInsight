@@ -45,6 +45,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from core.config import Config
+from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
 from core.engine import Engine, _aggregate_cost_rows
 from core.provider import ProxySupervisor
@@ -250,6 +251,27 @@ def _quest_output_status(quest_root: Path) -> dict[str, object]:
         "available_artifacts": available,
         # paper_md is the source, not generatable on demand.
         "generatable_kinds": ["paper_pdf", "slides", "poster", "speech"],
+    }
+
+
+def _amendment_view(quest_root: Path) -> dict[str, Any]:
+    """What the quest page shows about the frozen protocol and any amendment waiting for a person."""
+    frozen = fi_frozen.load(quest_root)
+    pending = fi_frozen.load_pending(quest_root)
+    return {
+        "frozen": (
+            {k: frozen.get(k) for k in ("run_id", "sha256", "approved_by", "approved_at", "source", "amendments", "problem")}
+            if frozen else None
+        ),
+        "pending": (
+            {k: pending.get(k) for k in ("n", "changes", "reason", "source", "results_seen", "proposed_at")}
+            | {"approved": fi_frozen.approval_for(quest_root, pending) is not None}
+            if pending else None
+        ),
+        "amendments": [
+            {k: a.get(k) for k in ("n", "changes", "reason", "prespecified", "approved_by", "approved_at", "archived_to")}
+            for a in fi_frozen.amendments(quest_root)
+        ],
     }
 
 
@@ -1189,6 +1211,28 @@ def make_app(
             "design_error": parsed.error or "",
             "versions": fi_plan.history(quest_root),
         }
+
+    @app.get("/api/quests/{quest_id}/amendment")
+    async def get_amendment(quest_id: str) -> JSONResponse:
+        """The protocol amendment the quest stopped to ask about (what changes, why, whether results were seen), the
+        frozen protocol it would replace, and the amendments already made."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        return JSONResponse({"quest_id": quest_id, **_amendment_view(_resolve_quest_root(app.state.output_root, quest_id))})
+
+    @app.post("/api/quests/{quest_id}/amendment/approve")
+    async def approve_amendment(quest_id: str, request: Request) -> JSONResponse:
+        """A person approves the pending protocol amendment: an act of its own, not part of Resume (resuming without it
+        keeps the frozen protocol). The web surface of ``launch.py --approve-amendment``."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        body = await request.json()
+        who = str(body.get("who") or "").strip() if isinstance(body, dict) else ""
+        ok, message = fi_frozen.approve(quest_root, who, via="web")
+        if not ok:
+            raise HTTPException(400, message)
+        return JSONResponse({"quest_id": quest_id, "approved": True, "message": message, **_amendment_view(quest_root)})
 
     @app.get("/api/quests/{quest_id}/plan")
     async def get_plan(quest_id: str) -> JSONResponse:
@@ -2137,6 +2181,8 @@ def make_app(
             "summary": summary,
             # How much of the result has been checked against something other than itself (needs/EVIDENCE.json).
             "evidence": _read_json_or_none(quest_root / "needs" / "EVIDENCE.json"),
+            # The frozen protocol and any amendment waiting for a person (core/frozen_protocol.py).
+            "amendment": _amendment_view(quest_root),
             "source_failures": source_failures,
             # How each output's visual check went (.fi/visual_check.json).
             "visual_check": report_summary(quest_root),

@@ -67,6 +67,24 @@
     </div>
   </div>
 
+  <!-- A change to the frozen protocol that the quest stopped to ask about (needs/PROTOCOL_AMENDMENT_PENDING.json). -->
+  <div id="amendment-banner" class="hidden fi-banner fi-banner-warning">
+    <div class="font-body-md text-body-md text-on-surface flex flex-col gap-2 w-full">
+      <b>The redesign changes the frozen protocol</b>
+      <div id="amendment-frozen" class="text-on-surface-variant font-code-md text-code-md"></div>
+      <div id="amendment-changes" class="font-code-md text-code-md flex flex-col gap-0.5"></div>
+      <div id="amendment-reason" class="text-on-surface-variant"></div>
+      <div id="amendment-posthoc" class="text-status-warning hidden">The results of this run have already been seen. If you approve, this run is archived under <code class="font-code-md">archive/</code>, a new run starts, and the paper says the change was made after the results were known.</div>
+      <div class="flex flex-wrap items-center gap-2">
+        <label for="amendment-who" class="sr-only">Your name</label>
+        <input id="amendment-who" type="text" autocomplete="name" placeholder="Your name (recorded with the approval)" class="px-3 py-1 rounded cyber-border bg-transparent text-on-surface" />
+        <button id="amendment-approve" type="button" class="cyber-border px-3 py-1 rounded font-label-sm text-label-sm uppercase">Approve amendment</button>
+        <span id="amendment-status" class="text-on-surface-variant"></span>
+      </div>
+      <span class="text-on-surface-variant">Approving is separate from Resume: resuming without approving keeps the frozen protocol.</span>
+    </div>
+  </div>
+
   <!-- How much of the result has been checked against something other than itself (needs/EVIDENCE.json). -->
   <div id="evidence-banner" class="hidden fi-banner fi-banner-info">
     <div class="font-body-md text-body-md text-on-surface flex flex-col gap-2 w-full">
@@ -343,6 +361,7 @@
     renderSourceFailures(data.source_failures);
     renderVisualCheck(data.visual_check);
     renderEvidence(data.evidence);
+    renderAmendment(data.amendment);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -961,6 +980,43 @@
       gaps.appendChild(line);
     }
   }
+
+  let amendmentKey = '';
+  function renderAmendment(am) {
+    const banner = document.getElementById('amendment-banner');
+    const pending = am && am.pending;
+    if (!pending) { banner.classList.add('hidden'); amendmentKey = ''; return; }
+    banner.classList.remove('hidden');
+    const key = JSON.stringify(pending);
+    // The page is refreshed often: what the person is typing must not be rebuilt under them.
+    if (key === amendmentKey) return;
+    amendmentKey = key;
+    const frozen = am.frozen || {};
+    document.getElementById('amendment-frozen').textContent = frozen.run_id
+      ? `Frozen: ${frozen.run_id}, sha256 ${String(frozen.sha256 || '').slice(0, 12)}, ${frozen.approved_by || ''}` : '';
+    const changes = document.getElementById('amendment-changes');
+    changes.replaceChildren(...(pending.changes || []).map(c => { const d = document.createElement('div'); d.textContent = c; return d; }));
+    document.getElementById('amendment-reason').textContent = pending.reason ? `Why: ${pending.reason}` : '';
+    document.getElementById('amendment-posthoc').classList.toggle('hidden', !pending.results_seen);
+    document.getElementById('amendment-status').textContent = pending.approved ? 'Approved. Resume the quest to apply it.' : '';
+    try { const who = localStorage.getItem('fi_approver'); if (who && !document.getElementById('amendment-who').value) document.getElementById('amendment-who').value = who; } catch (e) { /* no storage */ }
+  }
+  async function approveAmendment() {
+    const who = document.getElementById('amendment-who').value.trim();
+    const status = document.getElementById('amendment-status');
+    if (!who) { status.textContent = 'Say who approves it: an approval is attributed.'; return; }
+    try { localStorage.setItem('fi_approver', who); } catch (e) { /* no storage */ }
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/amendment/approve`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({who}),
+      });
+      const body = await res.json();
+      status.textContent = res.ok ? 'Approved. Resume the quest to apply it.' : (body.detail || 'Could not approve.');
+    } catch (e) {
+      status.textContent = 'Could not reach the server.';
+    }
+  }
+  document.getElementById('amendment-approve').addEventListener('click', approveAmendment);
 
   function renderVisualCheck(vc) {
     const banner = document.getElementById('visual-check-banner');

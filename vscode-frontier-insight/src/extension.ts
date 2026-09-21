@@ -21,6 +21,7 @@ import * as path from "path";
 import { spawn } from "child_process";
 import {
     runApproveAllSkills,
+    runApproveAmendment,
     runApproveSkill,
     runImportSkill,
     runListSkills,
@@ -322,6 +323,12 @@ async function handleRequest(
         await runApproveSkill(prompt, stream, token);
         return;
     }
+    if (cmd === "approve-amendment") {
+        // A quest stopped to ask for a change to its frozen protocol: shows the request, asks who approves,
+        // and writes the approval (`launch.py --approve-amendment`). Resuming without it keeps the protocol.
+        await runApproveAmendment(prompt, stream, token);
+        return;
+    }
     if (cmd === "revoke-skill") {
         await runRevokeSkill(prompt, stream, token);
         return;
@@ -385,6 +392,7 @@ function helpText(): string {
         "- `@fi /skills [--config <quest.yaml>]` — list the skill library with each entry's promotion status, scan findings, and domain tags. Mirrors `python launch.py --skills`; `--config` also looks in the skill folders that quest names (`engine.skills_dirs`).",
         "- `@fi /scan-skill <name> [--config <quest.yaml>]` — statically review a skill before approving it: injection phrasing, hidden characters, network access, `eval`. Nothing is imported or run.",
         "- `@fi /approve-skill <name> [--config <quest.yaml>]` — approve a skill for use. Shows the review first, then asks who is approving; a high-severity finding needs an extra confirmation. Approval binds to that exact content.",
+        "- `@fi /approve-amendment <quest_id>` — approve the change to a quest's frozen protocol that it stopped to ask about. Shows what changes and why, asks who is approving, and records it; resuming the quest without approving keeps the frozen protocol. If the results had already been seen, the run is archived and the paper says the change was post-hoc.",
         "- `@fi /approve-all-skills` — approve every skill that passes its gates at once, optionally pip-installing what quarantined skills are missing first. Still asks who is approving; a failing self-test is still refused.",
         "- `@fi /revoke-skill <name> [--config <quest.yaml>]` — withdraw approval, returning the skill to proposed.",
         "- `@fi /import-skill [path]` — import a skill written for another agent (Agent Skills layout). Opens a picker with no path, then asks for optional domain tags.",

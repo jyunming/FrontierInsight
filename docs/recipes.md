@@ -321,6 +321,8 @@ The protocol's `oracles` are checks the script must pass before its main run (a 
 
 The protocol's `precision.target_half_width` says how tight a probability has to be; `plan.md` then says how many trials that needs against the ones planned, and after the run the analysis is told which probabilities did not reach it. Say in `seed_policy` whether settings draw independent streams (the default assumption) or common random numbers; a script that restarts one stream for every setting is sent back and stops the quest like any other difference from the protocol.
 
+An amendment after the freeze: when a redesign asks to change the protocol the quest stops with an *Action needed* message and `needs/PROTOCOL_AMENDMENT_PENDING.json`. Approve it with `python launch.py --approve-amendment <quest_id> --approve-as <you>` (or the quest page's Approve button, or `@fi /approve-amendment <quest_id>`), then resume; resuming without approving keeps the frozen protocol. See *the protocol is frozen* in the README for what an approval does to the earlier run.
+
 A run whose own numerics warned (an overflow, a solver that did not converge, an argument that had no effect, a NaN in a result) is sent back like a failed one, and stops the quest if the repairs do not remove the warnings; `engine.numeric_warnings: warn` records them and goes on, `off` does not look. Resuming after the stop runs the script again if you changed it, and accepts the run as it is if you did not.
 
 ### Run a quest on Moonshot's Kimi (or any OpenAI-compatible model that fixes its sampling)

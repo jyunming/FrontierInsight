@@ -118,6 +118,10 @@
             "description": "Approve a skill for use. Shows the static review first, then asks who is approving. Approval binds to that exact content. Add --config <quest.yaml> to reach a skill that lives in a folder only that quest names."
           },
           {
+            "name": "approve-amendment",
+            "description": "Approve the change to a quest's frozen protocol that it stopped to ask about. Shows what changes and why, asks who is approving. Resuming without approving keeps the frozen protocol."
+          },
+          {
             "name": "approve-all-skills",
             "description": "Approve every skill that passes its gates at once, optionally installing the Python packages quarantined skills are missing first. Still asks who is approving."
           },
