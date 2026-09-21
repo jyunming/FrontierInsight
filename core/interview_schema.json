@@ -433,7 +433,7 @@
             "reproducibility"
           ],
           "label": "4-persona panel",
-          "description": "Adds Reproducibility reviewer. ~5× the review cost."
+          "description": "Adds Reproducibility reviewer (seeds, raw data, the protocol; worth it for a stochastic simulation study). ~5× the review cost."
         }
       ],
       "placeholder": "",
@@ -1057,7 +1057,7 @@
         "reproducibility"
       ],
       "label": "4-persona panel",
-      "description": "Adds Reproducibility reviewer. ~5× the review cost."
+      "description": "Adds Reproducibility reviewer (seeds, raw data, the protocol; worth it for a stochastic simulation study). ~5× the review cost."
     }
   ],
   "audience_choices": [

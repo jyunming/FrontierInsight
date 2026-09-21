@@ -44,7 +44,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
 | `plan_revise` | 0 | One call per `--revise-plan` request (two if the first reply's design block cannot be read). |
 | `design` | 1 per later design pass | Runs again when the cross-check or the review sends the quest back; the first pass adopts the design block of `plan.md`. |
-| `design_self_critique` | 1 per design pass | Audits the drafted methodology. |
+| `design_self_critique` | 1 per design pass | Audits the drafted methodology against twelve checks (precision, the estimand and its interval, thresholds, random streams, convergence, an oracle, failed runs among them) and keeps what it found and changed in `needs/DESIGN_CRITIQUE.json`. |
 | `implement_outline` | 1 | |
 | `implement_oracle` | 0–2 | One repair per attempt (`engine.oracle_repair_attempts`), only when the script does not answer the plan's oracles when run with `FI_ORACLE=1` (`engine.oracle_check`); a protocol with no oracle first makes a `plan_revise` call to add one. None when the oracles pass or the plan has no protocol. |
 | `implement_protocol` | 0–2 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`); none when it agrees or the plan has no protocol. |
