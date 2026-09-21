@@ -2993,9 +2993,11 @@ class Engine:
         design: dict[str, Any] | None = None
         objections: Any = None
         plan_sha = ""
-        if iteration == 0:
+        if iteration == 0 and not state.get("design"):
             # The plan step wrote plan.md and, when asked, stopped for the person to read and edit it. Its design
             # block is the design, exactly: nothing is asked of the model again, and what a person changed runs.
+            # Only when no design exists yet: every way back into this node after a result bumps ``iteration``,
+            # and a design already in state must never be replaced by the plan on a repair or a refine.
             design, plan_sha = self._design_from_plan()
             objections = state.get("design_objections")
         if design is None:

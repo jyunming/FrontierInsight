@@ -408,3 +408,75 @@ async def test_a_hand_edit_before_a_request_is_kept_as_its_own_version(tmp_path:
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value=good)})()
     await eng.revise_plan("change the method")
     assert [r["by"] for r in plan.history(eng.quest_root)] == ["model", "user", "request"]
+
+
+@pytest.mark.asyncio
+async def test_a_design_already_in_state_is_never_replaced_by_the_plan(tmp_path: Path) -> None:
+    """Even at iteration 0: a re-entry after results (the analysis asked for a new experiment) must draft
+    from the diagnosis, not re-adopt the plan and run the same design again."""
+    eng = _engine(tmp_path, [json.dumps({**DESIGN, "hypothesis": "redesigned after the diagnosis"}), json.dumps({})])
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("OPC", EXTRA, DESIGN), encoding="utf-8")
+    state = {
+        "topic": "OPC", "iteration": 0, "design": DESIGN,
+        "analysis": {"next_step": "re_experiment", "summary": "units were wrong", "key_findings": []},
+    }
+    patch = await eng._node_design(state)
+    assert patch["design"]["hypothesis"] == "redesigned after the diagnosis"
+    assert eng._client.chat.await_count == 2
+
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_rewrite_builds_no_knowledge_layer_and_says_what_it_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--revise-plan`` is one model call on a markdown file: it must not load the knowledge layer (the embedding
+    model and indexes) for it, and it reports the new version and the way on."""
+    import launch
+    from core.provider import ProxySupervisor
+
+    built: list[bool] = []
+
+    class _Knowledge:
+        def __init__(self, cfg: Any) -> None:
+            built.append(bool(cfg.enabled))
+
+    monkeypatch.setattr("core.engine.Knowledge", _Knowledge)
+    cfg = _cfg(tmp_path)
+    cfg.knowledge = cfg.knowledge.model_copy(update={"enabled": True})
+    quest_id = "1700000000-opc-abcdef"
+    quest = cfg.output.output_dir / quest_id
+    quest.mkdir(parents=True)
+    text = plan.render("OPC", EXTRA, DESIGN)
+    plan.plan_path(quest).write_text(text, encoding="utf-8")
+    plan.record_version(quest, text, by="model")
+    revised = plan.render("OPC", EXTRA, {**DESIGN, "method": "a changed method"})
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return revised
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    rc = await launch._revise_plan_once(cfg, quest_id, "change the method", supervisor=ProxySupervisor())
+
+    assert rc == 0
+    assert built == [False], "the knowledge layer was built for a one-line rewrite"
+    assert plan.parse(plan.plan_path(quest).read_text(encoding="utf-8")).design["method"] == "a changed method"
+    out = capsys.readouterr().out
+    assert "plan revised (version 2)" in out and f"--resume {quest_id}" in out
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_rewrite_says_why_it_could_not(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import launch
+    from core.provider import ProxySupervisor
+
+    cfg = _cfg(tmp_path)
+    (cfg.output.output_dir / "1700000000-opc-abcdef").mkdir(parents=True)
+    rc = await launch._revise_plan_once(cfg, "1700000000-opc-abcdef", "anything", supervisor=ProxySupervisor())
+    assert rc == 1
+    assert "has no plan.md yet" in capsys.readouterr().err

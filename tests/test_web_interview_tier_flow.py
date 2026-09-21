@@ -242,6 +242,12 @@ def test_derive_tier3_seeds_reasoning_effort_default(html: str) -> None:
     assert "reasoning_effort: 'default'" in html
 
 
+def test_derive_tier3_seeds_the_pause_defaults(html: str) -> None:
+    """The advanced block showed "(unset)" for the pauses: seed them at the question defaults, which is what an
+    untouched form submits anyway."""
+    assert "supply_papers: true" in html and "pause_for_plan: false" in html
+
+
 def test_schema_offers_reasoning_effort_on_the_web_review_screen(tmp_path) -> None:  # type: ignore[no-untyped-def]
     from fastapi.testclient import TestClient
 

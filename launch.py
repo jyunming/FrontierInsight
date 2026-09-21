@@ -1734,6 +1734,9 @@ async def _revise_plan_once(
     cfg: Config, quest_id: str, request: str, *, supervisor: ProxySupervisor,
 ) -> int:
     """Rewrite one quest's plan.md as asked (``--revise-plan``) and say what changed. The quest is not run."""
+    # One model call and no retrieval: do not build the knowledge layer (the embedding model and vector indexes
+    # load in-process when it is on) just to rewrite a markdown file.
+    cfg.knowledge = cfg.knowledge.model_copy(update={"enabled": False})
     engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
     try:
         done = await engine.revise_plan(request)
@@ -2179,6 +2182,8 @@ async def main_async(args: argparse.Namespace) -> int:
         or getattr(args, "doctor", False)
         or getattr(args, "install_marp", False)
         or getattr(args, "install_marp_from", None) is not None
+        # Rewriting plan.md is one model call and makes no Axon call.
+        or getattr(args, "revise_plan", None) is not None
     )
     if not args.no_axon_sidecar and not _axon_inert_modes:
         from core.axon_sidecar import ensure_axon_up
