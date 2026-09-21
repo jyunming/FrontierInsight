@@ -46,6 +46,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `design` | 1 per later design pass | Runs again when the cross-check or the review sends the quest back; the first pass adopts the design block of `plan.md`. |
 | `design_self_critique` | 1 per design pass | Audits the drafted methodology. |
 | `implement_outline` | 1 | |
+| `implement_protocol` | 0–2 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`); none when it agrees or the plan has no protocol. |
 | `implement` | 1 per design pass | |
 | `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. |
 | `analyze` | 1 per design pass | |

@@ -52,13 +52,14 @@ class Mismatch:
     name: str  # the axis, or the threshold, as the protocol names it
     expected: list[float]
     found: list[float] = field(default_factory=list)  # what the script holds under a matching name
-    where: str = ""  # "R0_LIST in experiment.py, line 166"
+    where: str = ""  # "R0_LIST in experiment.py, line 166"; empty when the script holds no such list
+    missing: list[float] = field(default_factory=list)  # protocol values the script does not contain at all
 
     def message(self) -> str:
         want = _fmt(self.expected)
         if self.kind == "grid":
             if not self.found:
-                return f"the protocol fixes {self.name} at {want}, and the script contains no such list (missing {self.where})"
+                return f"the protocol fixes {self.name} at {want}, and the script contains no such list (missing {_fmt(self.missing)})"
             extra = [v for v in self.found if not _has(self.expected, v)]
             left_out = [v for v in self.expected if not _has(self.found, v)]
             parts = []
@@ -252,7 +253,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         else:
             absent = [v for v in want if not _has(numbers, v)]
             if absent:
-                out.append(Mismatch("grid", str(axis), want, [], _fmt(absent)))
+                out.append(Mismatch("grid", str(axis), want, [], "", absent))
 
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):

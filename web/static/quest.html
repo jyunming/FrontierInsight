@@ -313,7 +313,7 @@
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_action) {
-      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan' }[data.pending_action] || 'input';
+      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol' }[data.pending_action] || 'input';
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (${kind})</span>`;
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {

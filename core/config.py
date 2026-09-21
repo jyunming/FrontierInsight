@@ -666,6 +666,13 @@ class EngineConfig(BaseModel):
     # set 1 to opt out on a slow experiment, or higher when the measurement
     # is noisy.
     execute_replicates: int = Field(default=3, ge=1)
+    # What the experiment does when its script contradicts the protocol the plan fixed (the grid, the runs per
+    # setting, the thresholds; ``core/protocol_check.py``). ``block`` (default) sends the script back for up to
+    # ``protocol_repair_attempts`` repairs and, if it still differs, stops the quest for you to read and edit the
+    # plan or the script, then resume; ``warn`` only logs and records it; ``off`` does not look. Nothing is checked
+    # when the plan has no ``protocol`` block, or for a study with no experiment.
+    protocol_check: Literal["block", "warn", "off"] = "block"
+    protocol_repair_attempts: int = Field(default=2, ge=0, le=5)
     # How far apart consecutive replicates' seeds sit. Replicate i is handed
     # ``FI_REPLICATE_SEED = i * replicate_seed_stride``, so the seeds it can
     # derive occupy ``[i*stride, (i+1)*stride)`` and no two replicates reach
