@@ -275,6 +275,14 @@ SUPPLY_PAPERS_CHOICES: tuple[Choice, ...] = (
 )
 
 
+PAUSE_FOR_PLAN_CHOICES: tuple[Choice, ...] = (
+    Choice(False, "Don't stop (default)",
+           "The plan is written to plan.md in the quest folder, and the experiment is designed from it, but the quest does not wait. Choose this for an unattended run."),
+    Choice(True, "Stop to read and edit the plan",
+           "After the literature is in, the quest writes plan.md (what the literature says, the gap, the design) and stops. Edit the file, or ask for a change (--revise-plan, the quest page's Plan box, @fi /plan), then resume: the design block in the file is what runs."),
+)
+
+
 ENSEMBLE_PROFILES: tuple[Choice, ...] = (
     Choice("off", "Single model (default, cheapest)",
            "One LLM call per node. Cost baseline = 1×."),
@@ -631,6 +639,16 @@ QUESTIONS: tuple[Question, ...] = (
         tier=3,
     ),
     Question(
+        id="pause_for_plan",
+        label="Stop to read and edit the plan",
+        prompt="Every quest writes its plan (plan.md: what the literature says, the gap, the design the experiment will run) after the literature and before the experiment is designed. Stop there to read it and edit it, or ask for a change, before any compute is spent.",
+        kind="single",
+        choices=PAUSE_FOR_PLAN_CHOICES,
+        default=False,
+        mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
         id="comparative_baseline",
         label="Comparative baseline",
         prompt="What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
@@ -831,6 +849,8 @@ STAGE_INVALIDATION: dict[str, tuple[str, ...]] = {
     # reaches the paper (mirrors knowledge_top_k below).
     "web_research": ("literature", "write"),
     "supply_papers": ("literature",),
+    # The plan is written once, before design; the pause only decides whether the quest waits for it.
+    "pause_for_plan": (),
     # max_iterations is the design/review-loop hard cap. Lowering it
     # mid-quest just means the next review-revise iteration won't fire;
     # raising it gives the loop more attempts. Either way no node
@@ -1288,6 +1308,8 @@ class InterviewAnswers:
     # paper and write needs/WANTED_PAPERS.md so the user can drop the PDF
     # into inputs/papers/ and resume → ``pauses.papers``.
     supply_papers: bool = True
+    # Stop once plan.md is written, to read and edit it → ``pauses.plan``.
+    pause_for_plan: bool = False
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1565,6 +1587,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         lines.append(f"{indent}supply: {json.dumps(_supply)}")
     # Written either way: the engine default is on, so "off" must be explicit.
     lines.append(f"{indent}papers: {'true' if answers.supply_papers else 'false'}")
+    if answers.pause_for_plan:
+        lines.append(f"{indent}plan: \"ask\"")
     lines.append("")
 
     lines.append("execution:")

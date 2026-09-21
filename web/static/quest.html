@@ -520,15 +520,18 @@
     const preview = document.getElementById('plan-preview');
     preview.innerHTML = window.fi_renderMarkdown ? window.fi_renderMarkdown(planText) : escapeHtml(planText);
   }
-  async function refreshPlan() {
-    if (planBusy || planEditing || document.hidden) return;
+  let planLoaded = false;
+  async function refreshPlan(force) {
+    // Once loaded, a background tab does not keep asking; the first look happens whatever the tab is doing.
+    if (planBusy || planEditing || (document.hidden && planLoaded && !force)) return;
     planBusy = true;
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/plan`);
-      if (res.ok) renderPlan(await res.json());
+      if (res.ok) { renderPlan(await res.json()); planLoaded = true; }
     } catch (e) { /* the next tick asks again */ }
     finally { planBusy = false; }
   }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPlan(); });
   function planStartEdit() {
     planEditing = true;
     const ed = document.getElementById('plan-editor');
@@ -603,7 +606,7 @@
       if (d.state === 'exited' && d.returncode === 0) {
         document.getElementById('plan-request').value = '';
         planStatus('plan-revise-status', 'The plan was rewritten. Read it, ask again, or press Resume.', false);
-        refreshPlan();
+        refreshPlan(true);
       } else {
         planStatus('plan-revise-status', 'The plan is unchanged: ' + (d.last_line || 'the rewrite did not finish.'), true);
       }

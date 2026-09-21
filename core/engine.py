@@ -734,6 +734,22 @@ class Engine:
                                 papers_dir, self.quest_id,
                             )
                             break
+                        if intr_value.get("plan_stage"):
+                            # The plan step wrote plan.md and stopped for the
+                            # person to read and edit it. Same pause-exit as
+                            # the pauses above; without this branch the payload
+                            # fell through to the clarify handling below and
+                            # left a clarify_questions.json that made the quest
+                            # page ask for clarify answers.
+                            data_paused = True
+                            self._log.info(
+                                "[FI] paused for the plan: read and edit %s "
+                                "(or ask for a change with `--revise-plan`), "
+                                "then run `fi --resume %s`",
+                                intr_value.get("plan_file", "plan.md"),
+                                self.quest_id,
+                            )
+                            break
                         # human_feedback node raised `interrupt(...)`.
                         # Three resolution paths, in order:
                         #   1. ``--auto-accept-on-pass`` AND the paper

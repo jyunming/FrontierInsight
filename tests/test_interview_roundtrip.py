@@ -297,3 +297,33 @@ def test_new_quests_fetch_full_text_and_pause_for_paywalled_papers_by_default():
         (Path(__file__).resolve().parent.parent / "core" / "interview_schema.json").read_text(encoding="utf-8"))
     question = _find_question(schema, "supply_papers")
     assert question is not None and question["default"] is True
+
+
+def test_stopping_for_the_plan_reaches_the_config_and_off_writes_nothing(tmp_path: Path):
+    """pauses.plan defaults to off, so only "stop" is written; both survive the trip through Config."""
+    ans = _full_answers()
+    assert ans.pause_for_plan is False
+    assert "plan:" not in answers_to_yaml(ans, frontend="cli").split("pauses:")[1].split("execution:")[0]
+    assert _load(tmp_path, ans).pauses.plan == "off"
+    ans.pause_for_plan = True
+    assert '  plan: "ask"' in answers_to_yaml(ans, frontend="cli").splitlines()
+    assert _load(tmp_path, ans).pauses.plan == "ask"
+
+
+def test_update_keeps_the_plan_pause_and_can_turn_it_off(tmp_path: Path):
+    from dataclasses import replace
+
+    from core.interview_update import load_current_answers, rewrite_yaml_with_new_answers
+
+    quest = tmp_path / "quest"
+    quest.mkdir()
+    ans = _full_answers()
+    ans.pause_for_plan = True
+    (quest / "config.yaml").write_text(answers_to_yaml(ans, frontend="cli"), encoding="utf-8")
+
+    current, _yaml_path, raw = load_current_answers(quest)
+    assert current.pause_for_plan is True
+    (quest / "config.yaml").write_text(
+        rewrite_yaml_with_new_answers(raw, replace(current, pause_for_plan=False)), encoding="utf-8",
+    )
+    assert Config.from_yaml(quest / "config.yaml").pauses.plan == "off"

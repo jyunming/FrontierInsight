@@ -71,7 +71,7 @@ def test_declared_chat_commands_are_all_routed(tmp_path: Path) -> None:
 
 
 def test_without_a_workspace_the_commands_say_what_is_missing(tmp_path: Path) -> None:
-    got = _run(tmp_path, commands=["watch", "resume", "skills"], workspace=None, settings={})
+    got = _run(tmp_path, commands=["watch", "resume", "plan", "skills"], workspace=None, settings={})
     for cmd, reply in got["replies"].items():
         assert "No workspace open" in reply, (cmd, reply)
 
@@ -106,3 +106,33 @@ def test_a_workspace_that_is_not_fi_and_names_no_fi_folder_is_told_how_to_fix_it
     got = _run(tmp_path, commands=["resume"], workspace=str(folders["project"]), settings={})
     assert "no `launch.py`" in got["replies"]["resume"]
     assert "frontierInsight.repoPath" in got["replies"]["resume"]
+
+
+def test_plan_lists_only_quests_that_have_written_a_plan(tmp_path: Path, folders) -> None:
+    quest = folders["project"] / "outputs" / "1700000000-x-abcdef"
+    (quest / ".fi").mkdir(parents=True)
+    (quest / ".fi" / "state.sqlite").write_bytes(b"")
+    got = _run(
+        tmp_path, commands=["plan"], workspace=str(folders["project"]),
+        settings={"repoPath": str(folders["fi"])},
+    )
+    assert "has a plan yet" in got["replies"]["plan"]
+
+
+def test_plan_with_a_quest_id_opens_plan_md_and_says_how_to_change_it_and_run_it(
+    tmp_path: Path, folders,
+) -> None:
+    quest_id = "1700000000-x-abcdef"
+    quest = folders["project"] / "outputs" / quest_id
+    (quest / ".fi").mkdir(parents=True)
+    (quest / ".fi" / "state.sqlite").write_bytes(b"")
+    (quest / "config.yaml").write_text("topic: x\n", encoding="utf-8")
+    (quest / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    got = _run(
+        tmp_path, commands=["plan"], workspace=str(folders["project"]),
+        settings={"repoPath": str(folders["fi"])}, prompts={"plan": quest_id},
+    )
+    reply = got["replies"]["plan"]
+    assert f"@fi /plan {quest_id} <what to change>" in reply
+    assert f"@fi /resume {quest_id}" in reply
+    assert got["opened"] == [str(quest / "plan.md")], "the file is opened for editing"

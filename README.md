@@ -92,9 +92,33 @@ Step 2 does not search again, and the papers you dropped in join what step 1 fou
 
 ---
 
+## Read and change the plan before it runs
+
+After the literature is in and before the experiment is designed, every quest writes **`plan.md`** in its folder: what the literature says (each source named), the gap the experiment addresses, the success criteria, the risks, what the quest will not do, and, in a block at the end, the design itself: hypothesis, variables, method, planned figures, dependencies and result bounds. That block is the design, used exactly as written, so what you edit is what runs, and nothing re-derives it from the prose above it.
+
+The file is always written. The quest only waits for you when you ask it to:
+
+```yaml
+pauses:
+  plan: ask      # in the interview (--new, the web form, @fi /new): "Stop to read and edit the plan"
+```
+
+```bash
+python launch.py --config quest.yaml                    # searches, writes plan.md, stops
+#   read outputs/<quest_id>/plan.md, then either edit it in any editor,
+#   or ask for a change and let FI rewrite it (repeat as often as you like):
+python launch.py --config outputs/<quest_id>/config.yaml --resume <quest_id> --revise-plan "use CD error, not EPE, as the metric"
+python launch.py --config outputs/<quest_id>/config.yaml --resume <quest_id>    # run the plan as it now reads
+```
+
+On the web, the quest page has a **Plan** panel: read it, *Edit the plan* and save, or type a change and press *Rewrite the plan*, then *Resume*. In VSCode, `@fi /plan <quest_id>` opens the file beside the chat, `@fi /plan <quest_id> <what to change>` rewrites it, and `@fi /resume <quest_id>` runs it. A rewrite whose design block cannot be read is refused and leaves the file as it was; a file you saved by hand with an unreadable block stops the quest again with the reason instead of being guessed at. Every version is kept in `.fi/plan_versions/`, listed in `needs/PLAN_HISTORY.json` with who wrote it (the model, your request, or you), and the first entry of `needs/DESIGN_HISTORY.json` names the hash of the plan it came from.
+
+---
+
 ## Highlights
 
 - **Literature and simulation as separate steps** — stop after the literature search (`pauses.supply: after_literature`), read it and add your own papers and files, then `--resume` designs and runs the experiment with it in hand, without searching again; the simulation itself (`execution.background_jobs`) and its analysis (`execution.split_analysis`) can be split off the same way. See *Search first, simulate second* above.
+- **A plan you can read, edit and re-ask** — every quest writes `plan.md` (what the literature says, the gap, the design) before the experiment is designed; edit it or ask for a change, then resume, and the design block in the file is what runs. See *Read and change the plan before it runs* above.
 - **Whole loop, not just the LLM call** — ideate → literature → code → run → analyze → write → review, end to end, without you driving each step. It even fixes its own code when the experiment crashes, and redraws a figure whose legend sits on its own lines.
 - **Long simulations** — an experiment that runs as an HPC/cluster job (`execution.background_jobs`) is submitted by an idempotent driver script and the quest pauses cleanly; `--watch <quest>` (or the web button, or `@fi /watch`) re-checks it on a timer and resumes the quest when it is done, logging every check; the web button keeps showing whether the watcher is still running or, if it stopped, its exit code and last log line. Keep the simulation apart from its analysis (`execution.split_analysis: true`): `code/simulate.py` writes what it produced under `raw/seed<K>/`, and `code/experiment.py` reads those files, so an analysis that fails or that the review sends back is rewritten and run again against the raw files already on disk, and the simulation runs again only when its own script changed. Start from your own example files (`execution.inputs`), and require skills (`engine.skills_required`), including ones another agent installed (a skill that lives only in a folder the quest names in `engine.skills_dirs` is reviewed and approved with `python launch.py --config quest.yaml --approve-skill <name> --approve-as <you>`; under the Docker sandbox each one the quest uses is mounted read-only into the container).
 - **Built-in rigor** — an **evidence gate** weighs the assembled evidence before any paper is written; **claim grounding** traces every substantive claim to the experiment — every finding the run recorded reaches the check whole, along with the results branches those findings name — or to words it quotes from a cited source, and checks the quote is really there — however that source's PDF rendered its mathematics or spaced its words, so a quotation is not called unsupported over a subscript, a stacked fraction or a stray space in a word; a formula the stored text lost is not guessed at, and a quotation spanning one is not found (a draft whose citations could not be checked is not accepted); an optional **reviewer panel** (methodologist / statistician / devil's advocate) hard-flags fatal patterns.

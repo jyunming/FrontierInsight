@@ -17,6 +17,7 @@ const deep = () =>
   });
 
 const participants = [];
+const opened = [];
 const vscodeMock = new Proxy(
   {
     __esModule: true,
@@ -32,12 +33,18 @@ const vscodeMock = new Proxy(
       showInformationMessage: async () => undefined,
       showWarningMessage: async () => undefined,
       showErrorMessage: async () => undefined,
+      showQuickPick: async (items) => items[0],
+      showTextDocument: async (doc) => {
+        opened.push(doc.path);
+      },
     },
     workspace: {
       getConfiguration: () => ({ get: (k, d) => (k in arg.settings ? arg.settings[k] : d) }),
       workspaceFolders: arg.workspace ? [{ uri: { fsPath: arg.workspace } }] : undefined,
       onDidChangeConfiguration: () => ({ dispose: noop }),
+      openTextDocument: async (uri) => ({ path: uri.fsPath }),
     },
+    ViewColumn: { Beside: 2 },
     ThemeIcon: class {
       constructor(id) {
         this.id = id;
@@ -65,13 +72,14 @@ Module._load = function (request, ...rest) {
     const said = [];
     const stream = new Proxy({ markdown: (m) => said.push(String(m)) }, { get: (t, p) => (p in t ? t[p] : noop) });
     await participants[0].fn(
-      { command: cmd, prompt: "", model: { family: "x", vendor: "y", id: "z" } },
+      { command: cmd, prompt: (arg.prompts && arg.prompts[cmd]) || "", model: { family: "x", vendor: "y", id: "z" } },
       {},
       stream,
       { isCancellationRequested: false, onCancellationRequested: noop },
     );
     out.replies[cmd] = said.join(" ");
   }
+  out.opened = opened;
   ext.deactivate();
   process.stdout.write(JSON.stringify(out));
   process.exit(0);

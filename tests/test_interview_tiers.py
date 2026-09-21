@@ -196,6 +196,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "supply_papers",
+        "pause_for_plan",
         "comparative_baseline",
         "success_metric",
         "budget",

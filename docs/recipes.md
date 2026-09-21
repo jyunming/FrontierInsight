@@ -180,6 +180,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 | **clarify** (start) | ANSWER | confirm the research setup | `pauses.clarify: ask` |
 | **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below) | `pauses.papers: true` (the default; `false` turns it off) |
 | **after the literature** | SUPPLY | the literature is saved; add papers, files or change the config, then the experiment is designed with it in hand (no second search) | `pauses.supply: after_literature` |
+| **the plan** | SUPPLY | read `plan.md` (what the literature says, the gap, the design), edit it or ask for a change (`--revise-plan`); the design block in it is what runs | `pauses.plan: ask` |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` \| `all` |
 | **gather data** (no-sim) | SUPPLY | drop a dataset to analyse | automatic in no-simulation mode |
 | **review** (end) | ANSWER | accept / reject / refine the result | `pauses.review: ask` (default) |
@@ -304,6 +305,15 @@ pauses:
 ```
 
 The design and the code are written from what the files show, combined with the skills the quest selects, to make a new simulation rather than re-run yours. The experiment reads them from the folder in the `FI_INPUT_DIR` environment variable. Drop more files into `<quest>/inputs/examples/` while the quest is paused (or use the *Example files* control on the quest page) and `--resume`.
+
+### Read and change the plan before the experiment runs
+
+```yaml
+pauses:
+  plan: ask
+```
+
+The quest writes `<quest>/plan.md` after the literature and stops. Edit it (the block under *The design (used as written)* is the design, exactly), or ask for a change: `python launch.py --config <quest>/config.yaml --resume <quest_id> --revise-plan "compare against a random-forest baseline as well"`. The old version is kept in `.fi/plan_versions/`. Repeat until it says what you want, then `--resume <quest_id>` (the quest page's *Resume*, `@fi /resume`). Leave `pauses.plan` at `off` for unattended runs: the file is still written, the quest just does not wait.
 
 ### Bootstrap a starter set of scientist skills
 

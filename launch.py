@@ -3085,6 +3085,7 @@ async def _run_new(
         knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
         web_research=bool(derived.get("web_research", True)),
         supply_papers=bool(advanced.get("supply_papers", True)),
+        pause_for_plan=bool(advanced.get("pause_for_plan", False)),
         # ensemble_profile is a tier-1 question, so the pick is in
         # ``partial``; ``advanced`` only holds tier-3 slots.
         ensemble_profile=str(

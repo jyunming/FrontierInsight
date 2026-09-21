@@ -219,3 +219,15 @@ def test_vscode_interview_asks_the_newly_reachable_questions() -> None:
     # pause_for_user_input is a tier-2 default.
     assert '{ label: "Pause for my papers / datasets", value: "pause_for_user_input" }' in ts
     assert 'case "pause_for_user_input"' in ts
+
+
+def test_vscode_emitter_writes_the_plan_pause_only_when_asked(tmp_path: Path) -> None:
+    yaml_text, cfg = _emit(tmp_path, pause_for_plan=True)
+    assert '  plan: "ask"' in yaml_text.splitlines()
+    assert cfg.pauses.plan == "ask"
+    yaml_text, cfg = _emit(tmp_path, pause_for_plan=False)
+    assert "plan:" not in yaml_text.split("pauses:")[1].split("execution:")[0]
+    assert cfg.pauses.plan == "off"
+    ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
+    assert '{ label: "Stop to read and edit the plan", value: "pause_for_plan" }' in ts
+    assert 'case "pause_for_plan"' in ts

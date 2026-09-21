@@ -51,3 +51,46 @@ def test_the_inline_script_parses(tmp_path: Path, page: str, index: int, body: s
 def test_there_are_scripts_to_check() -> None:
     names = {page for page, _i, _b, _m in _inline_scripts()}
     assert {"skills.html", "quest.html", "index.html"} <= names
+
+
+_MD_DRIVER = """
+global.window = {};
+require(process.argv[2]);
+const cases = JSON.parse(process.argv[3]);
+console.log(JSON.stringify(cases.map((c) => window.fi_renderMarkdown(c))));
+"""
+
+
+def _render(tmp_path: Path, *texts: str) -> list[str]:
+    import json
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("needs node")
+    driver = tmp_path / "md_driver.js"
+    driver.write_text(_MD_DRIVER, encoding="utf-8")
+    done = subprocess.run(
+        [node, str(driver), str(STATIC / "md_lite.js"), json.dumps(list(texts))],
+        capture_output=True, text=True, timeout=60, encoding="utf-8",
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_md_lite_escapes_a_code_span_once(tmp_path: Path) -> None:
+    """``python launch.py --resume <id> --revise-plan "..."`` in backticks showed as ``&lt;id&gt;`` and ``&quot;``:
+    the text was escaped, then escaped again inside the code span."""
+    (html,) = _render(tmp_path, 'Run `x --resume <id> --ask "b" & c` now')
+    assert "<code>x --resume &lt;id&gt; --ask &quot;b&quot; &amp; c</code>" in html
+    assert "&amp;lt;" not in html and "&amp;quot;" not in html and "&amp;amp;" not in html
+
+
+def test_md_lite_keeps_an_ampersand_in_a_link_url_and_still_escapes_markup(tmp_path: Path) -> None:
+    (html,) = _render(tmp_path, "[R&D](https://example.org/?a=1&b=2) <script>alert(1)</script>")
+    assert '<a href="https://example.org/?a=1&amp;b=2">R&amp;D</a>' in html
+    assert "<script>" not in html and "&lt;script&gt;" in html
+
+
+def test_md_lite_never_links_a_script_url(tmp_path: Path) -> None:
+    (html,) = _render(tmp_path, "[x](javascript:alert(1)) and ![y](data:text/html,hi)")
+    assert "href=" not in html and "src=" not in html

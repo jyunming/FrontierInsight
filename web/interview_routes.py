@@ -297,6 +297,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             knowledge_external_top_k=new_answers.knowledge_external_top_k,
             web_research=new_answers.web_research,
             supply_papers=new_answers.supply_papers,
+            pause_for_plan=new_answers.pause_for_plan,
             ensemble_profile=new_answers.ensemble_profile,
             ensemble_models=new_answers.ensemble_models,
             max_iterations=new_answers.max_iterations,
@@ -454,6 +455,11 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         raise TypeError(
             f"supply_papers must be bool, got {type(supply_papers).__name__}"
         )
+    pause_for_plan = body.get("pause_for_plan", False)
+    if not isinstance(pause_for_plan, bool):
+        raise TypeError(
+            f"pause_for_plan must be bool, got {type(pause_for_plan).__name__}"
+        )
     # survey_mode: optional bool (default off). A literature/history synthesis
     # with no experiment and no dataset — implies no_simulation at runtime.
     survey_mode = body.get("survey_mode", False)
@@ -519,6 +525,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         knowledge_external_top_k=external_top_k,
         web_research=web_research,
         supply_papers=supply_papers,
+        pause_for_plan=pause_for_plan,
         ensemble_profile=ensemble_profile,
         ensemble_models=", ".join(named_models),
         max_iterations=max_iterations,
