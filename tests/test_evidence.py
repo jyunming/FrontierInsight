@@ -22,13 +22,16 @@ ACCEPT = {"verdict": "accept", "must_flag_hits": []}
 
 
 def _quest(tmp_path: Path, *, audits: bool = True, protocol_status: str | None = None, oracle_status: str | None = None,
-          warnings: list[Any] | None = None, protocol: dict[str, Any] | None = PROTOCOL, freeze: bool = True) -> Path:
+          warnings: list[Any] | None = None, protocol: dict[str, Any] | None = PROTOCOL, freeze: bool = True,
+          manifest_status: str | None = "ok") -> Path:
     root = tmp_path / "quest"
     (root / "needs").mkdir(parents=True)
     if freeze:  # the protocol the run was held to is the frozen one (None: the study froze without one)
         frozen_protocol.freeze(root, protocol, approved_by="test", source="plan.md")
     if audits:
         shutil.copytree(FIXTURE / "paper", root / "paper")
+    if manifest_status and (protocol_status or oracle_status):  # a run whose gates passed also matched its manifest
+        (root / "needs" / "RUN_MANIFEST_CHECK.json").write_text(json.dumps({"status": manifest_status}), encoding="utf-8")
     if protocol_status:
         (root / "needs" / "PROTOCOL_CHECK.json").write_text(json.dumps({"status": protocol_status}), encoding="utf-8")
     if oracle_status:
@@ -43,7 +46,7 @@ def _state(**over: Any) -> dict[str, Any]:
             "review": ACCEPT, **over}
 
 
-ON = {"protocol_check": "block", "oracle_check": "block", "numeric_warnings": "block"}
+ON = {"protocol_check": "block", "oracle_check": "block", "numeric_warnings": "block", "run_manifest_check": "block"}
 
 
 def test_a_quest_that_has_not_run_has_only_the_first_gap(tmp_path: Path) -> None:
@@ -262,3 +265,50 @@ def test_an_amendment_made_after_results_were_seen_keeps_it_from_publication_rea
     got = evidence.assess(root, _state(), settings=ON)
     assert got["levels"]["validated_against_oracle"] is True and got["levels"]["publication_ready"] is False
     assert any("amended after results were seen" in g and "runs_per_setting" in g for g in got["all_gaps"]["publication_ready"])
+
+
+# --- the run manifest ------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status, expect", [
+    ("single_script", "ran as one script, which writes no run manifest"),
+    ("differs", "run manifest check: differs"),
+    ("stopped", "run manifest check: stopped"),
+    ("differs_in_replicates", "run manifest check: differs_in_replicates"),
+    (None, "run manifest check: not run"),
+])
+def test_a_run_not_shown_to_match_its_manifest_cannot_be_validated(tmp_path: Path, status, expect) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", manifest_status=status)
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is False
+    assert any(expect in g for g in got["all_gaps"]["validated_against_oracle"]), got["all_gaps"]
+
+
+def test_switching_the_manifest_check_off_is_a_gap_not_a_pass(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(), settings={**ON, "run_manifest_check": "off"})
+    assert any("run manifest check was turned off" in g for g in got["all_gaps"]["validated_against_oracle"])
+
+
+def test_a_protocol_with_nothing_a_manifest_can_be_compared_with_does_not_ask_for_one(tmp_path: Path) -> None:
+    only_oracles = {"oracles": [{"name": "closed form"}]}
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", protocol=only_oracles, manifest_status=None)
+    got = evidence.assess(root, _state(design={"hypothesis": "h", "protocol": only_oracles}), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is True
+
+
+def test_a_study_that_needs_no_manifest_is_not_asked_for_one(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", manifest_status="not_applicable")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is True
+
+
+def test_a_failed_trial_the_protocol_has_no_policy_for_is_a_gap_of_the_evidence_level(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    (root / "needs" / "RUN_MANIFEST_CHECK.json").write_text(json.dumps({"status": "ok", "failed_trials": 3}), encoding="utf-8")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is False
+    assert any("3 trial(s) failed" in g and "failure_policy" in g for g in got["all_gaps"]["validated_against_oracle"])
+    frozen_with_policy = _quest(tmp_path / "b", protocol_status="ok", oracle_status="ok", protocol={**PROTOCOL, "failure_policy": "counted as failures"})
+    (frozen_with_policy / "needs" / "RUN_MANIFEST_CHECK.json").write_text(json.dumps({"status": "ok", "failed_trials": 3}), encoding="utf-8")
+    assert evidence.assess(frozen_with_policy, _state(), settings=ON)["levels"]["validated_against_oracle"] is True

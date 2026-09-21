@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import run_manifest as _run_manifest
 
 LEVELS = ("executed", "internally_consistent", "validated_against_oracle", "publication_ready")
 
@@ -101,6 +102,21 @@ def assess(
         elif not isinstance(protocol_record, dict) or protocol_record.get("status") != "ok":
             status = protocol_record.get("status") if isinstance(protocol_record, dict) else "not run"
             problems.append(f"the script was not shown to follow the protocol (protocol check: {status})")
+    if settings.get("run_manifest_check") == "off":
+        problems.append("the run manifest check was turned off")
+    elif protocol is not None and _run_manifest.checkable(protocol):
+        manifest_record = _json(needs / "RUN_MANIFEST_CHECK.json")
+        status = manifest_record.get("status") if isinstance(manifest_record, dict) else None
+        if status == "single_script":
+            problems.append("the quest ran as one script, which writes no run manifest: nothing shows the run did what the protocol fixed (execution.split_analysis)")
+        elif status == "not_applicable":
+            pass  # a deterministic study runs as one script and has no per-trial outcomes to record
+        elif status != "ok":
+            problems.append(f"the run was not shown to have done what the protocol fixed (run manifest check: {status or 'not run'})")
+        elif int((manifest_record or {}).get("failed_trials") or 0) and not str(protocol.get("failure_policy") or "").strip():
+            problems.append(
+                f"{manifest_record['failed_trials']} trial(s) failed, and the protocol does not say how a failed trial is treated (failure_policy)"
+            )
     oracle_record = _json(needs / "ORACLE_CHECK.json")
     if settings.get("oracle_check") == "off":
         problems.append("the oracle check was turned off")
