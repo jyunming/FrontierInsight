@@ -411,7 +411,12 @@ def oracle_notes(protocol: dict[str, Any] | None) -> list[str]:
     """What the plan says about the oracles its protocol declares (:mod:`core.oracle_check`)."""
     oracles = protocol.get("oracles") if isinstance(protocol, dict) else None
     if isinstance(oracles, list) and oracles:
-        return []
+        from . import oracle_check
+
+        return [
+            f"{line[0].upper()}{line[1:]}; add them while the plan is a draft (after the freeze only an amendment can)."
+            for line in oracle_check.unjudgeable(oracle_check.declared(protocol))
+        ]
     return [
         "The protocol declares no oracle, so nothing independent of the script's own numbers will check that they are "
         "right; the run stops before its main sweep until one is declared (a closed form, a limiting case, an invariant "

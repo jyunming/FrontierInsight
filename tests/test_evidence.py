@@ -35,7 +35,7 @@ def _quest(tmp_path: Path, *, audits: bool = True, protocol_status: str | None =
     if protocol_status:
         (root / "needs" / "PROTOCOL_CHECK.json").write_text(json.dumps({"status": protocol_status}), encoding="utf-8")
     if oracle_status:
-        (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": oracle_status}), encoding="utf-8")
+        (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": oracle_status, "judged_by": "engine"}), encoding="utf-8")
     if warnings is not None:
         (root / "needs" / "NUMERIC_WARNINGS.json").write_text(json.dumps(warnings), encoding="utf-8")
     return root
@@ -195,7 +195,7 @@ async def test_a_quest_that_held_to_a_protocol_and_passed_an_oracle_reaches_vali
     ok_script = (
         "import os, json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
         "if os.environ.get('FI_ORACLE') == '1':\n"
-        "    print('ORACLE_JSON: ' + json.dumps({'checks': [{'name': 'closed form', 'passed': True}]}))\n    raise SystemExit(0)\n"
+        "    print('ORACLE_JSON: ' + json.dumps({'checks': [{'name': 'closed form', 'value': 1.0}]}))\n    raise SystemExit(0)\n"
         "os.makedirs('figures', exist_ok=True)\nplt.figure(); plt.plot([0, 1], [0, 1]); plt.savefig('figures/result.png', dpi=72)\n"
         "print('RESULT_JSON: {\"score\": 0.987}')\n"
     )
@@ -205,7 +205,7 @@ async def test_a_quest_that_held_to_a_protocol_and_passed_an_oracle_reaches_vali
         kind = _classify(prompt)
         if kind == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
-            body["protocol"] = {"oracles": [{"name": "closed form", "check": "x"}]}
+            body["protocol"] = {"oracles": [{"name": "closed form", "check": "x", "expected": 1.0, "tolerance": 0.05}]}
             return json.dumps(body)
         if kind == "Implementation":
             return json.dumps({"code": ok_script, "deps": ["matplotlib"]})
@@ -312,3 +312,11 @@ def test_a_failed_trial_the_protocol_has_no_policy_for_is_a_gap_of_the_evidence_
     frozen_with_policy = _quest(tmp_path / "b", protocol_status="ok", oracle_status="ok", protocol={**PROTOCOL, "failure_policy": "counted as failures"})
     (frozen_with_policy / "needs" / "RUN_MANIFEST_CHECK.json").write_text(json.dumps({"status": "ok", "failed_trials": 3}), encoding="utf-8")
     assert evidence.assess(frozen_with_policy, _state(), settings=ON)["levels"]["validated_against_oracle"] is True
+
+
+def test_an_oracle_verdict_the_script_wrote_itself_is_not_independent_evidence(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["levels"]["validated_against_oracle"] is False
+    assert any("the script's own" in g for g in got["all_gaps"]["validated_against_oracle"])

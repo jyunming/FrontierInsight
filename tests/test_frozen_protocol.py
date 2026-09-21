@@ -13,7 +13,7 @@ from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, 
 from core.engine import Engine
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 
-ORACLE = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size against the closed form", "tolerance": 0.05}
+ORACLE = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size against the closed form", "expected": 1.0, "tolerance": 0.05}
 P1 = {"runs_per_setting": 300, "seed_policy": "an independent stream per setting", "oracles": [ORACLE]}
 P2 = {"runs_per_setting": 500, "seed_policy": "common random numbers across settings", "oracles": [ORACLE]}
 

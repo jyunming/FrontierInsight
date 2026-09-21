@@ -123,6 +123,8 @@ def assess(
     elif protocol is not None and (not isinstance(oracle_record, dict) or oracle_record.get("status") != "ok"):
         status = oracle_record.get("status") if isinstance(oracle_record, dict) else "not run"
         problems.append(f"the script did not pass an independent oracle (oracle check: {status})")
+    elif protocol is not None and oracle_record.get("judged_by") != "engine":
+        problems.append("the oracle verdict is the script's own (this quest began before the engine judged oracles): it is not independent evidence")
     warnings = _json(needs / "NUMERIC_WARNINGS.json")
     if state.get("numeric_warnings_accepted"):
         problems.append("the run's numeric warnings were accepted as they were (see needs/NUMERIC_WARNINGS.json)")
