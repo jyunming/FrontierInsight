@@ -5060,9 +5060,10 @@ class Engine:
         for attempt in range(budget + 1):
             protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
             oracles = _oracle.declared(protocol)
+            incomplete = _oracle.unjudgeable(oracles)  # the engine judges: an oracle with no numbers to judge by is not run
             reported: dict[str, Any] | None = None
             returncode, timed_out = 0, False
-            if oracles:
+            if oracles and not incomplete:
                 try:
                     ran = await self.executor.execute(
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
@@ -5073,18 +5074,20 @@ class Engine:
                     returncode, stderr_tail = -1, repr(e)
                 if reported is None and returncode not in (0, -1):
                     self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail)
-            found = _oracle.problems(oracles, reported, returncode, timed_out)
+            found = incomplete or _oracle.problems(oracles, reported, returncode, timed_out)
             attempts.append({
                 "attempt": attempt, "oracles": [o["name"] for o in oracles], "problems": found,
                 "checks": (reported or {}).get("checks"),
+                # What the engine made of each: the script's value against the protocol's expected value and tolerance.
+                "judged": _oracle.judged(oracles, reported) if reported is not None else [],
             })
             if not found or attempt == budget:
                 break
-            if not oracles:
+            if not oracles or incomplete:
                 if _frozen.load(self.quest_root) is not None:
                     break  # the protocol is frozen: an oracle can only come in through an amendment
                 self._log.warning("[oracle] %s; asking the plan for one (%d of %d)", found[0], attempt + 1, budget)
-                if not await self._declare_oracles():
+                if not await self._declare_oracles(incomplete or None):
                     break
                 continue
             self._log.warning(
@@ -5095,7 +5098,7 @@ class Engine:
             if text is not None and seed_path.name == "experiment.py":
                 new_code = text
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
-        self._oracle_record({"status": status, "attempts": attempts, "problems": found})
+        self._oracle_record({"status": status, "judged_by": "engine", "attempts": attempts, "problems": found})
         if not found:
             self._log.info(
                 "[oracle] %d oracle(s) passed before the main run%s", len(attempts[-1]["oracles"]),
@@ -5116,15 +5119,27 @@ class Engine:
         except OSError:
             pass  # a record that cannot be written must never stop a quest
 
-    async def _declare_oracles(self) -> bool:
-        """Ask for the plan to be rewritten with at least one oracle in its protocol; ``False`` when it cannot be."""
-        request = (
+    async def _declare_oracles(self, incomplete: list[str] | None = None) -> bool:
+        """Ask for the plan to be rewritten with at least one oracle in its protocol (or, with ``incomplete``, with the numbers
+        the declared ones lack); ``False`` when it cannot be."""
+        if incomplete:
+            request = (
+                "These declared oracles cannot be judged by the engine: " + " ".join(incomplete) + " Give each of them a numeric "
+                "`expected` (worked out from the closed form, the limit or the invariant; 0 for an invariant's worst violation or for the difference between two implementations) and "
+                "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0). Change nothing else."
+            )
+        else:
+            request = (
             "The protocol declares no oracle. Add `oracles` to the protocol block of the design: at least one check "
             "that does not rely on the script's own numbers being right (a closed form the simulation must reproduce, a "
             "limiting case with a known answer, a conservation law or invariant every run must satisfy, a small case whose "
             "exact answer can be computed another way, or a second independent implementation). Each entry has a `name`, a "
-            "`kind`, a `check` saying what is compared with what on which small case, and a `tolerance`. Change nothing else."
-        )
+            "`kind`, a `check` saying what the script measures on which small case, a NUMERIC `expected` (the value the "
+            "measurement must agree with, worked out here from the closed form, the limit or the invariant; 0 for an "
+            "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
+            "`tolerance_mode` (`absolute`, the default, or `relative`) and a `reference` saying where the expected value comes "
+            "from. The engine judges the script's measurement against these numbers. Change nothing else."
+            )
         try:
             await self.revise_plan(request)
         except (FileNotFoundError, ValueError) as e:
@@ -11255,7 +11270,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
-  "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what is compared with what, on which small case>", "tolerance": "<how close counts as agreeing>"}]
+  "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from>"}]
 }
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.

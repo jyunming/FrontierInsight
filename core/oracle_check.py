@@ -8,23 +8,30 @@ script did not produce: a closed form, a limiting case, an invariant that must h
 known, or a second implementation.
 
 The plan's protocol therefore declares its **oracles** (``protocol.oracles``: a ``name``, a ``check`` that says what is
-compared with what, and optionally a ``kind`` and a ``tolerance``), and the script is written to answer them. When the
-environment variable ``FI_ORACLE`` is ``1`` the script does not run its sweep: it runs the declared checks, each on a small
-fast case, prints one line
+compared with what, a numeric ``expected`` and ``tolerance`` that the check is judged by, optionally a ``tolerance_mode``
+(``absolute``, the default, or ``relative``), a ``kind`` and the ``reference`` the expected value comes from), and the script is
+written to *measure* them. When the environment variable ``FI_ORACLE`` is ``1`` the script does not run its sweep: it computes
+the value of each declared check on a small fast case, prints one line
 
-    ORACLE_JSON: {"checks": [{"name": "...", "passed": true, "value": 0.98, "expected": 1.0, "tolerance": 0.05}]}
+    ORACLE_JSON: {"checks": [{"name": "...", "value": 0.98, "diagnostics": {"solver_success": true}}]}
 
-and exits 0 when every check passed, 1 when one did not. The engine runs it that way before the pilot and the main run, and
-this module reads the answer. It needs no model and no engine state; the engine decides what to do about a problem (ask for a
-repair, then stop the quest).
+and exits 0. **The engine judges**: it takes ``expected`` and ``tolerance`` from the (frozen) protocol, never from the script,
+and computes ``abs(value - expected) <= tolerance`` (or ``tolerance * abs(expected)``) itself. A ``passed`` the script prints,
+and any ``expected`` or ``tolerance`` it prints, are not read as a verdict: a script that writes its own pass/fail, its own
+expected value and its own tolerance can always be made to pass, which is what an oracle is for not being. (A script that
+reports a check as failed itself is still a problem.) For an invariant (conservation, monotonicity) the value is the worst
+violation observed and the expected value is 0.
 
-A **problem** is any of: the design declares no oracle; the script printed no ``ORACLE_JSON`` line; a declared oracle does not
-appear among the checks; a check reports ``passed`` other than true; the script exited non-zero.
+A **problem** is any of: the design declares no oracle; a declared oracle fixes no numeric ``expected`` and ``tolerance`` (the
+engine cannot judge it); the script printed no ``ORACLE_JSON`` line; a declared oracle does not appear among the checks or
+reports no finite numeric ``value``; the value is outside the tolerance; the script reports the check as failed itself; the
+script exited non-zero.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -60,6 +67,63 @@ def _fmt(value: Any) -> str:
     return f"{value:g}" if isinstance(value, float) else str(value)
 
 
+def _num(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def limit_of(oracle: dict[str, Any]) -> tuple[float | None, float | None, str]:
+    """``(expected, limit, mode)`` an oracle is judged by: ``limit`` is the largest difference from ``expected`` that counts as
+    agreeing (``None`` when the oracle cannot be judged: no numeric expected or tolerance, or a relative tolerance around 0)."""
+    expected, tolerance = _num(oracle.get("expected")), _num(oracle.get("tolerance"))
+    mode = "relative" if str(oracle.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
+    if expected is None or tolerance is None or tolerance < 0:
+        return None, None, mode
+    if mode == "relative":
+        if expected == 0:
+            return expected, None, mode
+        return expected, tolerance * abs(expected), mode
+    return expected, tolerance, mode
+
+
+def unjudgeable(oracles: list[dict[str, Any]]) -> list[str]:
+    """The declared oracles the engine cannot judge, one sentence each: they fix no numeric ``expected`` and ``tolerance``."""
+    out: list[str] = []
+    for oracle in oracles:
+        expected, limit, mode = limit_of(oracle)
+        name = str(oracle["name"]).strip()
+        if limit is None and expected is not None and mode == "relative":
+            out.append(f"the oracle {name!r} has a relative tolerance around an expected value of 0 (use an absolute tolerance)")
+        elif limit is None:
+            out.append(
+                f"the oracle {name!r} fixes no numeric `expected` and `tolerance` in the protocol, so the engine cannot judge it "
+                "(the script's own pass/fail is not evidence)"
+            )
+    return out
+
+
+def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """What the engine made of each declared oracle: its value as the script reported it, what the protocol expects and allows,
+    and the verdict computed here. For the record in ``needs/ORACLE_CHECK.json``."""
+    checks = (reported or {}).get("checks")
+    by_name = {str(c.get("name") or "").strip().lower(): c for c in checks if isinstance(c, dict)} if isinstance(checks, list) else {}
+    out: list[dict[str, Any]] = []
+    for oracle in oracles:
+        name = str(oracle["name"]).strip()
+        check = by_name.get(name.lower())
+        expected, limit, mode = limit_of(oracle)
+        value = _num(check.get("value")) if check else None
+        verdict = None if (value is None or limit is None) else abs(value - expected) <= limit  # type: ignore[operator]
+        out.append({
+            "name": name, "value": value, "expected": expected, "tolerance": oracle.get("tolerance"), "mode": mode,
+            "limit": limit, "passed_by_engine": verdict, "script_said": (check or {}).get("passed"),
+        })
+    return out
+
+
 def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, returncode: int, timed_out: bool = False) -> list[str]:
     """What is wrong with the oracle run, one sentence each; empty when every declared oracle ran and passed."""
     if not oracles:
@@ -81,13 +145,22 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
     for oracle in oracles:
         name = str(oracle["name"]).strip()
         check = by_name.get(name.lower())
+        expected, limit, mode = limit_of(oracle)
         if check is None:
             out.append(f"the declared oracle {name!r} was not checked (the script reported: {', '.join(sorted(by_name)) or 'nothing'})")
-        elif check.get("passed") is not True:
-            detail = ", ".join(
-                f"{key} {_fmt(check[key])}" for key in ("value", "expected", "tolerance") if key in check
-            )
-            out.append(f"the oracle {name!r} failed" + (f" ({detail})" if detail else ""))
+        elif limit is None:
+            out.append(unjudgeable([oracle])[0])
+        elif _num(check.get("value")) is None:
+            out.append(f"the oracle {name!r} reported no finite numeric `value` (it reported {check.get('value')!r}): the script measures, the engine judges")
+        else:
+            value = _num(check.get("value"))
+            if abs(value - expected) > limit:  # type: ignore[operator]
+                out.append(
+                    f"the oracle {name!r} failed: the script measured {_fmt(value)}, the protocol expects {_fmt(expected)} "
+                    f"within {_fmt(limit)} ({mode} tolerance {_fmt(_num(oracle.get('tolerance')))})"
+                )
+            elif check.get("passed") is False:
+                out.append(f"the oracle {name!r} is within its tolerance, but the script reports the check as failed itself: find out why")
     if not out and returncode != 0:
         out.append(f"every declared oracle passed, but the script exited with code {returncode}")
     return out
@@ -101,13 +174,15 @@ def directive(oracles: list[dict[str, Any]], found: list[str]) -> str:
         "oracles, and that check did not pass. The account of a crash above does not apply.\n\n"
         "The oracles the design declares (independent of the script's own numbers):\n" + declared_block + "\n\n"
         "What went wrong:\n" + "\n".join(f"- {p}" for p in found) + "\n\n"
-        "The contract: when FI_ORACLE is 1 the script must NOT run its sweep. It runs each declared oracle check on a small, "
-        "fast case (seconds), prints ONE line `ORACLE_JSON: {\"checks\": [{\"name\": <the declared name>, \"passed\": true or "
-        "false, \"value\": ..., \"expected\": ..., \"tolerance\": ...}, ...]}` and exits 0 if every check passed, 1 if not.\n\n"
-        "If a check FAILED, find out which is wrong before changing anything: the simulator or estimator (fix it) or the check "
-        "itself (fix the check), and say which in `patch_summary`. Never make a check pass by loosening its tolerance, "
-        "skipping it or hard-coding its result: a check the script can always pass is not an oracle. If the checks were "
-        "missing, add them for every declared oracle.\n\n"
+        "The contract: when FI_ORACLE is 1 the script must NOT run its sweep. It MEASURES each declared oracle on a small, fast "
+        "case (seconds) and prints ONE line `ORACLE_JSON: {\"checks\": [{\"name\": <the declared name>, \"value\": <the "
+        "number it measured>, \"diagnostics\": {...}}, ...]}`, then exits 0. It does NOT decide pass or fail and it does not "
+        "state the expected value or the tolerance: the engine judges the value against the `expected` and `tolerance` the "
+        "protocol fixes above (for an invariant the value is the worst violation observed, and the expected value is 0).\n\n"
+        "If a value is outside its tolerance, find out which is wrong before changing anything: the simulator or estimator (fix "
+        "it) or the way the value is measured (fix that), and say which in `patch_summary`. Never make a check pass by "
+        "measuring something else, skipping it or hard-coding its value: a check the script can always pass is not an oracle. If "
+        "the checks were missing, add them for every declared oracle.\n\n"
         "Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT and "
         "FI_REPLICATE_SEED, and the same final RESULT_JSON line. Return the whole script in `code`, one sentence in "
         "`patch_summary`, and leave `give_up_reason` empty."

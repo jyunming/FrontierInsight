@@ -15,7 +15,7 @@ from core.config import (
 from core.engine import Engine
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 
-ORACLE = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size against the root of the final-size relation", "tolerance": 0.05}
+ORACLE = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size against the root of the final-size relation", "expected": 1.0, "tolerance": 0.05}
 
 
 # --- reading an oracle run ---------------------------------------------------------------------------------------------
@@ -48,10 +48,14 @@ def test_a_run_with_every_declared_oracle_passing_has_no_problem() -> None:
     (None, 1, False, "printed no `ORACLE_JSON:` line"),
     (None, 0, True, "did not finish the oracle checks in time"),
     ({"checks": []}, 0, False, "was not checked"),
-    ({"checks": [{"name": ORACLE["name"], "passed": False, "value": 0.5, "expected": 1.0, "tolerance": 0.05}]}, 1, False,
-     "failed (value 0.5, expected 1, tolerance 0.05)"),
-    ({"checks": [{"name": ORACLE["name"], "passed": "yes"}]}, 0, False, "failed"),
-    ({"checks": [{"name": ORACLE["name"], "passed": True}]}, 3, False, "exited with code 3"),
+    ({"checks": [{"name": ORACLE["name"], "value": 0.5}]}, 1, False,
+     "failed: the script measured 0.5, the protocol expects 1 within 0.05"),
+    ({"checks": [{"name": ORACLE["name"], "passed": True, "value": 0.5}]}, 0, False, "failed: the script measured 0.5"),
+    ({"checks": [{"name": ORACLE["name"], "passed": True}]}, 0, False, "reported no finite numeric `value`"),
+    ({"checks": [{"name": ORACLE["name"], "value": "0.99"}]}, 0, False, "reported no finite numeric `value`"),
+    ({"checks": [{"name": ORACLE["name"], "value": float("nan")}]}, 0, False, "reported no finite numeric `value`"),
+    ({"checks": [{"name": ORACLE["name"], "value": 0.99, "passed": False}]}, 0, False, "reports the check as failed itself"),
+    ({"checks": [{"name": ORACLE["name"], "value": 1.0}]}, 3, False, "exited with code 3"),
 ])
 def test_what_is_wrong_with_an_oracle_run_is_named(reported, returncode, timed_out, expect) -> None:
     found = oc.problems([ORACLE], reported, returncode, timed_out)
@@ -65,7 +69,8 @@ def test_a_protocol_with_no_oracle_is_a_problem_of_its_own() -> None:
 
 def test_the_repair_request_carries_the_oracles_the_problems_and_the_contract() -> None:
     text = oc.directive([ORACLE], ["the oracle 'x' failed (value 0.5)"])
-    for needle in (ORACLE["name"], "the oracle 'x' failed", "FI_ORACLE=1", "ORACLE_JSON", "Never make a check pass by loosening"):
+    for needle in (ORACLE["name"], "the oracle 'x' failed", "FI_ORACLE=1", "ORACLE_JSON", "Never make a check pass by measuring something else",
+                   "the engine judges", "does NOT decide pass or fail"):
         assert needle in text, needle
 
 
@@ -82,6 +87,10 @@ def test_oracles_in_the_protocol_are_checked_for_shape_and_kept() -> None:
 
 
 @pytest.mark.parametrize("bad, why", [
+    ({"oracles": [{"name": "a", "expected": [1, 2]}]}, "`expected` must be a number"),
+    ({"oracles": [{"name": "a", "tolerance": {"x": 1}}]}, "`tolerance` must be a number"),
+    ({"oracles": [{"name": "a", "tolerance_mode": "fuzzy"}]}, "`tolerance_mode` must be"),
+    ({"oracles": [{"name": "a", "reference": 3}]}, "`reference` must be text"),
     ({"oracles": 3}, "list of checks"),
     ({"oracles": [{"check": "x"}]}, "no `name`"),
     ({"oracles": [{"name": "a", "check": 5}]}, "`check` must be text"),
@@ -89,6 +98,50 @@ def test_oracles_in_the_protocol_are_checked_for_shape_and_kept() -> None:
 def test_oracles_that_could_not_be_answered_are_refused(bad: dict[str, Any], why: str) -> None:
     design, error = plan.normalize_design({"hypothesis": "h", "protocol": bad})
     assert design is None and why in (error or "")
+
+
+def test_a_value_is_judged_against_the_protocols_numbers_and_never_against_the_scripts_own() -> None:
+    lying = oc.parse(_line([{"name": ORACLE["name"], "passed": True, "value": 0.5, "expected": 0.5, "tolerance": 10.0}]))
+    found = oc.problems([ORACLE], lying, 0)
+    assert len(found) == 1 and "measured 0.5, the protocol expects 1 within 0.05" in found[0], found
+    inside = oc.parse(_line([{"name": ORACLE["name"], "value": 1.04, "expected": 7, "tolerance": 0.001}]))
+    assert oc.problems([ORACLE], inside, 0) == []
+
+
+def test_a_relative_tolerance_scales_with_the_expected_value_and_is_refused_around_zero() -> None:
+    relative = {"name": "a", "expected": 200.0, "tolerance": 0.01, "tolerance_mode": "relative"}
+    assert oc.limit_of(relative) == (200.0, 2.0, "relative")
+    assert oc.problems([relative], {"checks": [{"name": "a", "value": 201.5}]}, 0) == []
+    assert "measured 203" in oc.problems([relative], {"checks": [{"name": "a", "value": 203.0}]}, 0)[0]
+    around_zero = {"name": "inv", "expected": 0, "tolerance": 0.1, "tolerance_mode": "relative"}
+    assert "relative tolerance around an expected value of 0" in oc.unjudgeable([around_zero])[0]
+    invariant = {"name": "inv", "kind": "invariant", "expected": 0, "tolerance": 1e-9}
+    assert oc.problems([invariant], {"checks": [{"name": "inv", "value": 2e-12}]}, 0) == []
+    assert oc.problems([invariant], {"checks": [{"name": "inv", "value": 3e-6}]}, 0)
+
+
+@pytest.mark.parametrize("oracle", [
+    {"name": "a"}, {"name": "a", "check": "x", "tolerance": 0.1}, {"name": "a", "expected": 1.0},
+    {"name": "a", "expected": "about one", "tolerance": "small"}, {"name": "a", "expected": 1.0, "tolerance": -0.1},
+    {"name": "a", "expected": float("inf"), "tolerance": 0.1},
+])
+def test_an_oracle_with_no_numbers_to_judge_by_is_not_run_and_is_named(oracle) -> None:
+    assert len(oc.unjudgeable([oracle])) == 1 and "cannot judge it" in oc.unjudgeable([oracle])[0]
+    assert oc.unjudgeable([ORACLE]) == []
+
+
+def test_what_the_engine_made_of_each_check_is_recorded() -> None:
+    reported = oc.parse(_line([{"name": ORACLE["name"], "passed": True, "value": 0.5}]))
+    (row,) = oc.judged([ORACLE], reported)
+    assert row["value"] == 0.5 and row["expected"] == 1.0 and row["limit"] == 0.05 and row["passed_by_engine"] is False
+    assert row["script_said"] is True
+    assert oc.judged([ORACLE], None)[0]["passed_by_engine"] is None
+
+
+def test_the_plan_says_when_an_oracle_has_no_numbers_the_engine_can_judge_by() -> None:
+    notes = pc.oracle_notes({"oracles": [{"name": "closed form", "check": "x"}]})
+    assert len(notes) == 1 and "cannot judge it" in notes[0] and "while the plan is a draft" in notes[0]
+    assert pc.oracle_notes({"oracles": [ORACLE]}) == []
 
 
 def test_the_plan_says_when_its_protocol_declares_no_oracle() -> None:
@@ -217,7 +270,7 @@ async def test_a_failing_oracle_stops_the_quest_before_the_main_run_and_a_fixed_
     descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
     assert descriptor["kind"] == "oracle" and descriptor["interaction"] == "supply"
     text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "the oracle 'final size closed form' failed (value 0.5, expected 1, tolerance 0.05)" in text
+    assert "the oracle 'final size closed form' failed: the script measured 0.5, the protocol expects 1 within 0.05" in text
     assert _record(first)["status"] == "stopped"
     assert not list((first.quest_root / "figures").glob("*.png")), "the main run must not have started"
     assert not (first.quest_root / "paper" / "paper.md").exists()
@@ -324,4 +377,62 @@ def test_the_code_writing_prompts_give_the_oracle_contract() -> None:
     agents = Path(__file__).resolve().parent.parent / "agents"
     for name in ("implement.md", "implement_body.md"):
         text = (agents / name).read_text(encoding="utf-8")
-        assert "FI_ORACLE" in text and "ORACLE_JSON" in text and "Never make a check pass by loosening" in text, name
+        assert "FI_ORACLE" in text and "ORACLE_JSON" in text and "Never make a check pass by measuring something else" in text, name
+        assert "do NOT print pass/fail" in text and "the engine judges" in text, name
+
+
+_LYING = _HEAD + """\
+if os.environ.get("FI_ORACLE") == "1":
+    print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "final size closed form", "passed": True, "value": 0.5, "expected": 0.5, "tolerance": 10.0}]}))
+    raise SystemExit(0)
+""" + _TAIL
+
+
+@pytest.mark.asyncio
+async def test_a_script_that_declares_its_own_pass_expected_value_and_tolerance_is_still_judged_by_the_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The script prints passed: true beside its own expected value and a tolerance wide enough to pass anything; the engine
+    reads the value only, and holds it to the protocol's numbers."""
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_LYING, repair=_LYING, protocol=protocol))
+    engine = Engine(_cfg(tmp_path))
+    await engine.run()
+    record = _record(engine)
+    assert record["status"] == "stopped" and record["judged_by"] == "engine"
+    last = record["attempts"][-1]
+    assert last["judged"][0]["passed_by_engine"] is False and last["judged"][0]["script_said"] is True
+    assert "the script measured 0.5, the protocol expects 1 within 0.05" in last["problems"][0]
+    assert not (engine.quest_root / "paper" / "paper.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_with_no_numbers_is_completed_in_the_plan_before_anything_is_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    prompts: list[str] = []
+    bare = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size", "tolerance": "small"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        prompts.append(prompt)
+        if "You are revising the plan" in prompt:
+            calls.append("PlanRevise")
+            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            design = plan.parse(current).design
+            design["protocol"] = {**design["protocol"], "oracles": [ORACLE]}
+            return plan.render("smoke", {}, design)
+        return await _fake(calls, implement=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and calls.count("PlanRevise") == 1
+    asked = [p for p in prompts if "cannot be judged by the engine" in p]
+    assert asked and "numeric `expected`" in asked[0]
+    record = _record(engine)
+    assert record["status"] == "ok" and "cannot judge it" in record["attempts"][0]["problems"][0]
+    assert record["attempts"][0]["judged"] == [], "an oracle the engine cannot judge is not run"
+    assert record["attempts"][1]["judged"][0]["passed_by_engine"] is True

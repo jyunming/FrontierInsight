@@ -181,9 +181,15 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
                 item = {"name": item.strip(), "check": item.strip()}
             if not isinstance(item, dict) or not str(item.get("name") or "").strip():
                 return None, f"`protocol.oracles` entry {index} has no `name`"
-            for key in ("check", "kind"):
+            for key in ("check", "kind", "reference"):
                 if item.get(key) is not None and not isinstance(item[key], str):
                     return None, f"`protocol.oracles` entry {index}: `{key}` must be text"
+            for key in ("expected", "tolerance"):
+                if isinstance(item.get(key), (dict, list, bool)):
+                    return None, f"`protocol.oracles` entry {index}: `{key}` must be a number (the engine judges the script's value against it)"
+            mode = item.get("tolerance_mode")
+            if mode is not None and str(mode).strip().lower() not in ("absolute", "relative"):
+                return None, f"`protocol.oracles` entry {index}: `tolerance_mode` must be `absolute` or `relative`"
             fixed_oracles.append({**item, "name": str(item["name"]).strip()})
         out["oracles"] = fixed_oracles
     if out.get("acceptance") is not None:
