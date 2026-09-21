@@ -17,6 +17,14 @@ the CLI has no default and the VSCode box is never auto-submitted.
 ``--despite-findings``: approving past a flagged network call is often
 correct, but it has to be a decision rather than a click-through.
 
+**A quest's own skill folders are reachable through** ``?config=<path to its YAML>``,
+on the listing, the review, the approval and the revocation: the same thing the
+command line's ``--config`` does. A skill that lives only in a folder a quest's
+``engine.skills_dirs`` names is then listed, reviewed and approved here too. It
+changes only where skills are looked for; what is shown, what is refused and
+what is recorded are the same. Bulk approval takes no config, as on the command
+line.
+
 The dashboard binds to 127.0.0.1 by default. That is the only thing standing
 between this route and anyone who can reach the port — there is no auth layer
 — so a deployment that changes the bind address is choosing to expose skill
@@ -36,10 +44,35 @@ from fastapi.responses import HTMLResponse, JSONResponse
 _log = logging.getLogger("fi.web.skills")
 
 
-def _states(run_tests: bool) -> list[dict[str, Any]]:
+def _states(run_tests: bool, folders: Any = None) -> list[dict[str, Any]]:
     from core.skills import discover, evaluate
 
-    return [evaluate(s, run_test=run_tests, defer_scan=True).to_dict() for s in discover()]
+    dirs = folders.dirs if folders else None
+    return [
+        evaluate(s, run_test=run_tests, defer_scan=True).to_dict()
+        for s in discover(external_dirs=dirs)
+    ]
+
+
+async def _folders(config: str) -> Any:
+    """The skill folders the quest config at ``config`` names (what ``launch.py
+    --config`` reads), or ``None`` without one.
+
+    A config that cannot be read is a 400 carrying the same one line the command
+    line prints, so the page can show it beside the field."""
+    text = (config or "").strip()
+    if not text:
+        return None
+    import launch
+
+    try:
+        return await asyncio.to_thread(launch._SkillFolders.load, Path(text).expanduser())
+    except launch._QuestConfigError as e:
+        raise HTTPException(400, f"config {text}: {e}") from e
+
+
+def _dirs(folders: Any) -> Any:
+    return folders.dirs if folders else None
 
 
 def register_skills_routes(app: FastAPI) -> None:
@@ -54,26 +87,31 @@ def register_skills_routes(app: FastAPI) -> None:
         return HTMLResponse(page.read_text(encoding="utf-8"))
 
     @app.get("/api/skills")
-    async def list_skills(run_selftests: bool = False) -> JSONResponse:
+    async def list_skills(run_selftests: bool = False, config: str = "") -> JSONResponse:
         """The library.
 
         Self-tests are off by default: each may take up to 120 seconds, so a
         real library would hang the page. The response says which it was, so
         the UI can show "as last recorded" rather than implying it verified
         anything.
+
+        ``config`` is a quest YAML whose ``engine.skills_dirs`` are looked in as
+        well (the command line's ``--config``).
         """
+        folders = await _folders(config)
         try:
-            rows = await asyncio.to_thread(_states, run_selftests)
+            rows = await asyncio.to_thread(_states, run_selftests, folders)
         except Exception as e:  # noqa: BLE001
             _log.warning("skills listing failed: %s", e)
             raise HTTPException(500, f"could not read the skill library: {e}")
         return JSONResponse({"skills": rows, "selftests_run": run_selftests})
 
     @app.get("/api/skills/{name}/scan")
-    async def scan_skill(name: str) -> JSONResponse:
+    async def scan_skill(name: str, config: str = "") -> JSONResponse:
         from core.skills import discover, scan
 
-        skill = next((s for s in discover() if s.name == name), None)
+        folders = await _folders(config)
+        skill = next((s for s in discover(external_dirs=_dirs(folders)) if s.name == name), None)
         if skill is None:
             raise HTTPException(404, f"no skill named {name}")
         found = await asyncio.to_thread(scan.scan, skill)
@@ -92,7 +130,7 @@ def register_skills_routes(app: FastAPI) -> None:
         })
 
     @app.post("/api/skills/{name}/approve")
-    async def approve_skill(name: str, request: Request) -> JSONResponse:
+    async def approve_skill(name: str, request: Request, config: str = "") -> JSONResponse:
         body = await request.json()
         who = str(body.get("approved_by") or "").strip()
         despite = bool(body.get("despite_findings"))
@@ -107,7 +145,8 @@ def register_skills_routes(app: FastAPI) -> None:
         from core.skills import approval, discover, evaluate, scan
         from core.skills.base import Status
 
-        skill = next((s for s in discover() if s.name == name), None)
+        folders = await _folders(config)
+        skill = next((s for s in discover(external_dirs=_dirs(folders)) if s.name == name), None)
         if skill is None:
             raise HTTPException(404, f"no skill named {name}")
 
@@ -230,10 +269,12 @@ def register_skills_routes(app: FastAPI) -> None:
         })
 
     @app.post("/api/skills/{name}/revoke")
-    async def revoke_skill(name: str) -> JSONResponse:
+    async def revoke_skill(name: str, config: str = "") -> JSONResponse:
         from core.skills import approval, discover
 
-        skill = next((s for s in await asyncio.to_thread(discover) if s.name == name), None)
+        folders = await _folders(config)
+        found = await asyncio.to_thread(discover, external_dirs=_dirs(folders))
+        skill = next((s for s in found if s.name == name), None)
         removed = await asyncio.to_thread(
             approval.revoke, skill.ledger_name if skill else name,
         )

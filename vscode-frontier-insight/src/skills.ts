@@ -18,6 +18,7 @@ import { spawn } from "child_process";
 import * as path from "path";
 import * as vscode from "vscode";
 import { rootsFromConfig } from "./roots-config";
+import { configArgs, configHint, splitSkillArgs } from "./skill-args";
 
 export interface SkillRow {
     name: string;
@@ -102,7 +103,8 @@ function parseJsonLoose(stdout: string): any | null {
 }
 
 /**
- * `@fi /skills` — the library, and why each entry is or is not usable.
+ * `@fi /skills [--config <quest.yaml>]` — the library, and why each entry is or is not usable.
+ * `--config` adds the skill folders that quest's YAML names, as it does on the command line.
  *
  * Self-tests are deliberately **not** run: each may take up to 120 seconds,
  * so a real library would leave the panel silent for minutes. The output says
@@ -111,9 +113,15 @@ function parseJsonLoose(stdout: string): any | null {
  * than a slow listing.
  */
 export async function runListSkills(
+    promptArgs: string,
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
+    const { config, error } = splitSkillArgs(promptArgs);
+    if (error) {
+        stream.markdown(error + "\n");
+        return;
+    }
     const env = resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
@@ -122,6 +130,7 @@ export async function runListSkills(
         "--skills",
         "--json",
         "--no-run-selftests",
+        ...configArgs(config),
     ]);
     const data = parseJsonLoose(res.stdout);
     if (!data) {
@@ -165,7 +174,7 @@ export async function runListSkills(
         stream.markdown(
             `⚠️ **${flagged.length} skill(s) with high-severity scan findings:** ` +
                 flagged.map((s) => `\`${s.name}\``).join(", ") +
-                " — review with `@fi /scan-skill <name>` before approving.\n\n",
+                ` — review with \`@fi /scan-skill <name>${configHint(config)}\` before approving.\n\n`,
         );
     }
     const generated = rows.filter((s) => s.selftest_generated);
@@ -177,7 +186,8 @@ export async function runListSkills(
         );
     }
     stream.markdown(
-        "Next: `@fi /scan-skill <name>` to review one, `@fi /approve-skill <name>` to approve it.\n",
+        `Next: \`@fi /scan-skill <name>${configHint(config)}\` to review one, ` +
+            `\`@fi /approve-skill <name>${configHint(config)}\` to approve it.\n`,
     );
 }
 
@@ -187,7 +197,12 @@ export async function runScanSkill(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const name = promptArgs.trim().split(/\s+/)[0] || "";
+    const { rest, config, error } = splitSkillArgs(promptArgs);
+    if (error) {
+        stream.markdown(error + "\n");
+        return;
+    }
+    const name = rest.split(/\s+/)[0] || "";
     if (!name) {
         stream.markdown(
             "Which skill? Example: `@fi /scan-skill uncertainty-and-units`\n",
@@ -202,11 +217,12 @@ export async function runScanSkill(
         "--scan-skill",
         name,
         "--json",
+        ...configArgs(config),
     ]);
     const data = parseJsonLoose(res.stdout);
     if (!data || data.error) {
         stream.markdown(
-            `${data?.error ?? "Scan failed"} — run \`@fi /skills\` to see what is installed.\n`,
+            `${data?.error ?? (res.stderr.trim() || "Scan failed")} — run \`@fi /skills${configHint(config)}\` to see what is installed.\n`,
         );
         return;
     }
@@ -250,7 +266,12 @@ export async function runApproveSkill(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const name = promptArgs.trim().split(/\s+/)[0] || "";
+    const { rest, config, error } = splitSkillArgs(promptArgs);
+    if (error) {
+        stream.markdown(error + "\n");
+        return;
+    }
+    const name = rest.split(/\s+/)[0] || "";
     if (!name) {
         stream.markdown(
             "Which skill? Example: `@fi /approve-skill uncertainty-and-units`\n",
@@ -264,10 +285,13 @@ export async function runApproveSkill(
         "--scan-skill",
         name,
         "--json",
+        ...configArgs(config),
     ]);
     const scan = parseJsonLoose(scanRes.stdout);
     if (!scan || scan.error) {
-        stream.markdown(`${scan?.error ?? "No such skill"} — run \`@fi /skills\`.\n`);
+        stream.markdown(
+            `${scan?.error ?? (scanRes.stderr.trim() || "No such skill")} — run \`@fi /skills${configHint(config)}\`.\n`,
+        );
         return;
     }
     const highs = (scan.findings ?? []).filter((f: any) => f.severity === "high");
@@ -312,7 +336,7 @@ export async function runApproveSkill(
         }
     }
 
-    const args = ["--approve-skill", name, "--approve-as", who.trim()];
+    const args = ["--approve-skill", name, "--approve-as", who.trim(), ...configArgs(config)];
     if (highs.length) args.push("--despite-findings");
     const res = await runLaunch(env, args);
     if (res.code === 0) {
@@ -426,13 +450,18 @@ export async function runApproveAllSkills(
     }
 }
 
-/** `@fi /revoke-skill <name>` — withdraw approval, returning it to proposed. */
+/** `@fi /revoke-skill <name> [--config <quest.yaml>]` — withdraw approval, returning it to proposed. */
 export async function runRevokeSkill(
     promptArgs: string,
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const name = promptArgs.trim().split(/\s+/)[0] || "";
+    const { rest, config, error } = splitSkillArgs(promptArgs);
+    if (error) {
+        stream.markdown(error + "\n");
+        return;
+    }
+    const name = rest.split(/\s+/)[0] || "";
     if (!name) {
         stream.markdown("Which skill? Example: `@fi /revoke-skill <name>`\n");
         return;
@@ -440,7 +469,7 @@ export async function runRevokeSkill(
     const env = resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
-    const res = await runLaunch(env, ["--revoke-skill", name]);
+    const res = await runLaunch(env, ["--revoke-skill", name, ...configArgs(config)]);
     stream.markdown(
         `\`\`\`\n${(res.stdout || res.stderr).trim().slice(-600)}\n\`\`\`\n`,
     );
