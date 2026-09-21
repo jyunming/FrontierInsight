@@ -446,6 +446,7 @@ PauseForUserInput = Literal[
 # by Config's root validator, so existing YAML keeps working.
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
+PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
@@ -485,6 +486,12 @@ class PausesConfig(BaseModel):
     #   the first draft) · "both" (before_build + before_review, as it always
     #   was) · "all" (all three).
     supply: SupplyPause = "never"
+    # Stop after the plan step has written ``plan.md`` (what the literature says, the gap, the hypothesis,
+    # the experiment's design, what would count as support), so you can read it and edit it, or ask for a
+    # change (``--revise-plan``), before compute is spent. ``--resume`` then runs the design that is in the
+    # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
+    # not wait for you, so unattended and fleet runs are not held up.
+    plan: PlanPause = "off"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
     review: ReviewPause = "ask"
@@ -517,6 +524,12 @@ class PausesConfig(BaseModel):
     @classmethod
     def _norm_supply(cls, v: Any) -> Any:
         return _SUPPLY_ALIASES.get(v, v)
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _norm_plan(cls, v: Any) -> Any:
+        # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
+        return "off" if v is False else v
 
 
 class EngineConfig(BaseModel):

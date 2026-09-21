@@ -611,6 +611,9 @@
       budget: '',
       knowledge_external_top_k: compReview ? 30 : 20,
       max_iterations: 2,
+      // The two pauses: the review screen showed "(unset)" for them. Mirror the question defaults.
+      supply_papers: true,
+      pause_for_plan: false,
       poster_size: 'a1_portrait',
       // provider.reasoning_effort — 'default' writes nothing (mirrors the
       // question default in core/interview.py).

@@ -230,6 +230,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         # Default True, matching the engine: a config that never set the paper
         # pause runs with it on, so --update must not write it back as off.
         supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
+        pause_for_plan=(pauses.get("plan") == "ask"),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
         ensemble_models=ensemble_models,
@@ -336,6 +337,7 @@ def rewrite_yaml_with_new_answers(
         ("knowledge", "top_k"), ("knowledge", "external_top_k"),
         # Unified pauses section is fully interview-managed.
         ("pauses", "clarify"), ("pauses", "supply"), ("pauses", "papers"),
+        ("pauses", "plan"),
         # Strip legacy pause flags so a stale copy in `raw` can't silently
         # override the freshly-emitted `pauses:` block (e.g. re-enabling a
         # pause the user just turned off).
@@ -592,6 +594,7 @@ async def run_update_flow(
         ),
         web_research=bool(new_partial.get("web_research", current.web_research)),
         supply_papers=bool(new_partial.get("supply_papers", current.supply_papers)),
+        pause_for_plan=bool(new_partial.get("pause_for_plan", current.pause_for_plan)),
         ensemble_profile=str(new_partial.get(
             "ensemble_profile", current.ensemble_profile,
         )),

@@ -84,6 +84,11 @@ export interface InterviewAnswers {
     // inputs/papers/ and resume. Maps to pauses.papers.
     // On by default (the engine default). Must stay in sync with core/interview.py.
     supply_papers?: boolean;
+    // Stop once plan.md is written (what the literature says, the gap, the design the
+    // experiment will run) so it can be read and edited before compute is spent. Maps
+    // to pauses.plan; off (the default) emits nothing. Must stay in sync with
+    // core/interview.py.
+    pause_for_plan?: boolean;
     // Mid-quest stop so you can drop reference PDFs into inputs/papers/
     // and datasets into inputs/data/ before the engine continues, then
     // resume. Maps to pauses.supply via SUPPLY_TO_PAUSE; "never" (the
@@ -209,7 +214,7 @@ export const LIGHT_NODES: readonly string[] = [
  */
 export const OTHER_NODES: readonly string[] = [
     "clarify", "ideate", "ideate_reflect", "literature_query", "literature_foundational",
-    "design", "design_self_critique", "implement_outline", "implement", "execute_reflect",
+    "plan", "plan_revise", "design", "design_self_critique", "implement_outline", "implement", "execute_reflect",
     "analyze", "write", "claim_check", "review", "speech",
 ];
 
@@ -439,6 +444,9 @@ export function answersToYaml(answers: InterviewAnswers): string {
     }
     // Written either way: the engine default is on, so "off" must be explicit.
     lines.push(`${indent}papers: ${answers.supply_papers === false ? "false" : "true"}`);
+    if (answers.pause_for_plan === true) {
+        lines.push(`${indent}plan: "ask"`);
+    }
     lines.push("");
 
     lines.push("execution:");

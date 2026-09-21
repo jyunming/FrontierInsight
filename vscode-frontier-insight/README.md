@@ -301,6 +301,8 @@ You can also pass the quest_id directly:
 
 A quest can also be run in two steps, the literature first and the experiment second: set `pauses.supply: after_literature` in its YAML, or answer *Pause after literature* in the `@fi /new` interview. The quest stops once the literature is saved (`data/literature/`, and `NEXT_STEP.md` says what to do); add papers to `inputs/papers/`, data to `inputs/data/` or your own simulation files to `inputs/examples/`, then `@fi /resume <quest_id>` runs skills, design and the experiment with that literature in hand, without searching again.
 
+Every quest writes `plan.md` (what the literature says, the gap, the design the experiment will run) after the literature and before the design. Set `pauses.plan: ask`, or answer *Stop to read and edit the plan* in the `@fi /new` interview (advanced), and the quest stops once it is written. `@fi /plan <quest_id>` opens the file beside the chat: edit it (the design block at the end is used exactly as written), or ask for a change with `@fi /plan <quest_id> <what to change>` and the plan is rewritten and reopened; repeat, then `@fi /resume <quest_id>` runs it.
+
 A quest waiting on a background job (HPC / cluster, `execution.background_jobs`) pauses cleanly and can be woken automatically:
 
 ```

@@ -221,6 +221,7 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
     "knowledge_enabled",
     "web_research",
     "supply_papers",
+    "pause_for_plan",
     "audience",
     "knowledge_top_k",
     "knowledge_external_top_k",
@@ -599,6 +600,8 @@ export async function runInterview(
         web_research: true,
         // Pause for paywalled papers on by default (the engine default).
         supply_papers: true,
+        // The plan is always written; stopping for it is opt-in (unattended runs).
+        pause_for_plan: false,
         ...authorLine,
         poster_size: "a1_portrait",
         // Blank: no set page limit (a limit the topic states still applies).
@@ -682,6 +685,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
+    lines.push(`| Stop to read and edit the plan | ${a.pause_for_plan === true ? "yes (plan.md)" : "no"} |`);
     lines.push(`| Pause for my papers / datasets | \`${a.pause_for_user_input ?? "never"}\` |`);
     lines.push(`| Multi-model ensemble | \`${a.ensemble_profile ?? "off"}\` |`);
     if ((a.ensemble_profile ?? "off") !== "off") {
@@ -827,6 +831,7 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
             { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
             { label: "Web research (download sources)", value: "web_research" },
             { label: "Supply paywalled papers", value: "supply_papers" },
+            { label: "Stop to read and edit the plan", value: "pause_for_plan" },
             { label: "Pause for my papers / datasets", value: "pause_for_user_input" },
             { label: "Paper audience", value: "audience" },
             { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
@@ -938,6 +943,20 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
                 { title: "Supply paywalled papers (pause → drop PDFs into inputs/papers/)", ignoreFocusOut: true },
             );
             if (v) a.supply_papers = v.value;
+            return;
+        }
+        case "pause_for_plan": {
+            // Maps to pauses.plan. Same wording as core/interview.py so the answer means the same
+            // thing on every surface. The plan is written either way; this only decides whether the
+            // quest waits for you to read and edit it (`@fi /plan <id>`), then `@fi /resume <id>`.
+            const v = await vscode.window.showQuickPick(
+                [
+                    { label: "$(circle-slash) Don't stop (default) — plan.md is written, the quest goes on", value: false },
+                    { label: "$(notebook) Stop to read and edit the plan — then @fi /resume", value: true },
+                ],
+                { title: "Stop to read and edit the plan (plan.md)", ignoreFocusOut: true },
+            );
+            if (v) a.pause_for_plan = v.value;
             return;
         }
         case "pause_for_user_input": {

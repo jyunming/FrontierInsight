@@ -867,6 +867,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "the existing paper.md + figures. E.g. a markdown-only quest can "
              "produce a PDF: --resume <id> --config <yaml> --emit paper_pdf.",
     )
+    p.add_argument(
+        "--revise-plan",
+        type=str,
+        default=None,
+        metavar="REQUEST",
+        help="Rewrite a quest's plan.md as you ask, WITHOUT running anything else. "
+             "Pass the change here and the quest via --resume <quest_id> "
+             "--config <yaml>; the model rewrites the file (the design block "
+             "must stay readable, or the file is left as it was), the old version "
+             "is kept in .fi/plan_versions/, and the quest stays where it was. "
+             "Repeat until the plan says what you want, then --resume <quest_id> "
+             "to run it. E.g. --resume <id> --config <yaml> "
+             "--revise-plan \"use CD error, not EPE, as the metric\".",
+    )
     # One-shot human-review decision for a quest paused at the review gate.
     # Saves hand-editing .fi/human_review_answer.json: just resume with the
     # decision, e.g. `--resume <id> --accept`.
@@ -1716,6 +1730,27 @@ async def _emit_one(
     return 1
 
 
+async def _revise_plan_once(
+    cfg: Config, quest_id: str, request: str, *, supervisor: ProxySupervisor,
+) -> int:
+    """Rewrite one quest's plan.md as asked (``--revise-plan``) and say what changed. The quest is not run."""
+    # One model call and no retrieval: do not build the knowledge layer (the embedding model and vector indexes
+    # load in-process when it is on) just to rewrite a markdown file.
+    cfg.knowledge = cfg.knowledge.model_copy(update={"enabled": False})
+    engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
+    try:
+        done = await engine.revise_plan(request)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[FI] cannot revise the plan: {e}", file=sys.stderr)
+        return 1
+    print(f"[FI] plan revised (version {done['version']}): {done['path']}")
+    print(
+        "[FI] read it, edit it, or ask again with --revise-plan; "
+        f"when it says what you want: python launch.py --config <yaml> --resume {quest_id}"
+    )
+    return 0
+
+
 def _visual_check_line(report: dict) -> str:
     """One line for the CLI and the VSCode chat: how an output was checked
     and what the check found."""
@@ -2147,6 +2182,8 @@ async def main_async(args: argparse.Namespace) -> int:
         or getattr(args, "doctor", False)
         or getattr(args, "install_marp", False)
         or getattr(args, "install_marp_from", None) is not None
+        # Rewriting plan.md is one model call and makes no Axon call.
+        or getattr(args, "revise_plan", None) is not None
     )
     if not args.no_axon_sidecar and not _axon_inert_modes:
         from core.axon_sidecar import ensure_axon_up
@@ -2400,6 +2437,14 @@ async def main_async(args: argparse.Namespace) -> int:
                           file=sys.stderr)
                     return 1
                 return await _watch_quest(cfg, args, supervisor)
+            if args.revise_plan is not None:
+                if not args.resume:
+                    print("[FI] --revise-plan requires --resume <quest_id>",
+                          file=sys.stderr)
+                    return 2
+                return await _revise_plan_once(
+                    cfg, args.resume, args.revise_plan, supervisor=supervisor,
+                )
             if args.emit:
                 if not args.resume:
                     print("[FI] --emit requires --resume <quest_id>",
@@ -3045,6 +3090,7 @@ async def _run_new(
         knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
         web_research=bool(derived.get("web_research", True)),
         supply_papers=bool(advanced.get("supply_papers", True)),
+        pause_for_plan=bool(advanced.get("pause_for_plan", False)),
         # ensemble_profile is a tier-1 question, so the pick is in
         # ``partial``; ``advanced`` only holds tier-3 slots.
         ensemble_profile=str(

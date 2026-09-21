@@ -239,6 +239,13 @@ async function handleRequest(
         await runResume(prompt, stream, token, userPickedModel, /*watch*/ true);
         return;
     }
+    if (cmd === "plan") {
+        // The quest's plan.md: opens it to read and edit, or (with words after the
+        // quest id) has the model rewrite it as asked. Mirrors `launch.py --revise-plan`
+        // and the web quest page's Plan panel.
+        await runResume(prompt, stream, token, userPickedModel, /*watch*/ false, /*plan*/ true);
+        return;
+    }
     if (cmd === "generate") {
         await runGenerate(prompt, stream, token);
         return;
@@ -421,6 +428,7 @@ async function runResume(
     token: vscode.CancellationToken,
     userPickedModel: vscode.LanguageModelChat,
     watch = false,
+    plan = false,
 ): Promise<void> {
     if (token.isCancellationRequested) return;
 
@@ -462,6 +470,8 @@ async function runResume(
             if (!stat.isFile()) return;
             // /watch is for quests waiting on a background job only.
             if (watch) await fsPromises.stat(path.join(questDir, ".fi", "pending.json"));
+            // /plan is for quests that have written their plan (plan.md).
+            if (plan) await fsPromises.stat(path.join(questDir, "plan.md"));
             candidates.push({
                 questId: entry.name, questDir, mtimeMs: stat.mtimeMs,
             });
@@ -471,7 +481,9 @@ async function runResume(
     }));
     if (candidates.length === 0) {
         stream.markdown(
-            watch
+            plan
+                ? `❌ No quest under \`${outputsDir}\` has a plan yet (none has \`plan.md\`). The plan is written after the literature and before the experiment is designed.`
+                : watch
                 ? `❌ No quest under \`${outputsDir}\` is waiting on a background job (none has \`.fi/pending.json\`).`
                 : `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Run \`@fi /new\` to start one.`,
         );
@@ -488,6 +500,8 @@ async function runResume(
     const firstToken = rawArg.split(/\s+/)[0] || "";
     // Also strip surrounding quotes a user might paste from a log line.
     const sanitized = firstToken.replace(/^["']+|["']+$/g, "");
+    // /plan <quest_id> <what to change>: the words after the id are the request.
+    const planRequest = plan ? rawArg.slice(firstToken.length).trim() : "";
     let chosenId = sanitized;
     if (!chosenId) {
         const picks = candidates.map((c) => ({
@@ -496,7 +510,9 @@ async function runResume(
             questId: c.questId,
         }));
         const picked = await vscode.window.showQuickPick(picks, {
-            placeHolder: "Pick a quest to resume (most recent first)",
+            placeHolder: plan
+                ? "Pick a quest whose plan to open (most recent first)"
+                : "Pick a quest to resume (most recent first)",
             matchOnDescription: true,
         });
         if (!picked) return;   // user hit Esc
@@ -563,6 +579,36 @@ async function runResume(
     }
 
     const relYaml = path.relative(workDir, yamlPath).split(path.sep).join("/");
+    if (plan) {
+        const planPath = path.join(outputsDir, chosenId, "plan.md");
+        if (!planRequest) {
+            // No request: open the file. Editing it is editing the design that will run.
+            stream.markdown(
+                `📋 The plan of \`${chosenId}\` is \`${path.relative(workDir, planPath).split(path.sep).join("/")}\`. ` +
+                `I opened it beside the chat.\n\n` +
+                `- **Edit it** and save: the block under *The design (used as written)* is what runs, exactly.\n` +
+                `- **Or ask for a change**: \`@fi /plan ${chosenId} <what to change>\` rewrites it.\n` +
+                `- **When it says what you want**: \`@fi /resume ${chosenId}\`.\n`,
+            );
+            try {
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
+                await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+            } catch {
+                stream.markdown(`(Could not open it in the editor; open \`${planPath}\` yourself.)\n`);
+            }
+            return;
+        }
+        stream.markdown(
+            `✏️ Rewriting the plan of \`${chosenId}\` as you asked: “${planRequest}”\n\n` +
+            `📝 Using config: \`${relYaml}\`\n\n` +
+            `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n`,
+        );
+        await runQuest(
+            relYaml, /*fleet*/ false, stream, token, userPickedModel,
+            /*resumeQuestId*/ chosenId, /*watch*/ false, /*revisePlan*/ planRequest,
+        );
+        return;
+    }
     stream.markdown(
         watch
             ? `👁 Watching quest \`${chosenId}\`: its experiment script is re-run on a timer and the quest resumes when the job is done.\n\n` +
@@ -929,6 +975,7 @@ async function runQuest(
     userPickedModel: vscode.LanguageModelChat,
     resumeQuestId?: string,
     watch = false,
+    revisePlan?: string,
 ): Promise<void> {
     const paths = promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
@@ -987,6 +1034,8 @@ async function runQuest(
             // --watch re-checks the background job on a timer and resumes the
             // quest itself when it is done; --resume resumes right away.
             argv.push(watch ? "--watch" : "--resume", resumeQuestId);
+            // --revise-plan rewrites plan.md and runs nothing else; the words are one argument.
+            if (revisePlan) argv.push("--revise-plan", revisePlan);
         }
     }
 
@@ -1065,7 +1114,21 @@ async function runQuest(
     if (result.kind === "spawn-error") return;
     const exitCode = result.code;
 
-    if (exitCode === 0) {
+    if (exitCode === 0 && revisePlan && resumeQuestId) {
+        const outDirSetting = cfg.get<string>("outputDir") || "outputs";
+        const planPath = path.join(
+            path.isAbsolute(outDirSetting) ? outDirSetting : path.join(workDir, outDirSetting),
+            resumeQuestId, "plan.md",
+        );
+        stream.markdown(
+            `\n✅ The plan was rewritten (the old version is kept in \`.fi/plan_versions/\`). ` +
+            `Read it: \`@fi /plan ${resumeQuestId}\`. Ask again, edit it yourself, or run it: \`@fi /resume ${resumeQuestId}\`.\n`,
+        );
+        try {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
+            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+        } catch { /* the message above names the command that opens it */ }
+    } else if (exitCode === 0) {
         stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
         const outputsDir = path.isAbsolute(outDirSetting)

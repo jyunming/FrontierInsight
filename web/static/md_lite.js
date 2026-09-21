@@ -33,24 +33,27 @@
   }
 
   function renderInline(s) {
-    // Order matters: code spans first so their content is escaped
-    // verbatim and not subject to **bold** etc.
+    // Every caller passes text that ``esc`` has already escaped, so nothing
+    // below escapes it again: a second pass turned ``<a>`` in a code span into
+    // ``&amp;lt;a&amp;gt;`` and a ``&`` in a link's URL into ``&amp;amp;``.
+    // Order matters: code spans first so their content is kept verbatim and
+    // not subject to **bold** etc.
     s = s.replace(/`([^`\n]+)`/g, (m, code) =>
-      `<code>${esc(code)}</code>`);
+      `<code>${code}</code>`);
     // Images ![alt](url) — only safe schemes; unsafe → render the
     // alt text only so the link doesn't ship as a clickable script.
     s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
       const safe = safeUrl(url);
       return safe
-        ? `<img alt="${esc(alt)}" src="${esc(safe)}" style="max-width:100%">`
-        : esc(alt);
+        ? `<img alt="${alt}" src="${safe}" style="max-width:100%">`
+        : alt;
     });
     // Links [text](url) — same restriction.
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) => {
       const safe = safeUrl(url);
       return safe
-        ? `<a href="${esc(safe)}">${esc(text)}</a>`
-        : esc(text);
+        ? `<a href="${safe}">${text}</a>`
+        : text;
     });
     // Bold **text**
     s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');

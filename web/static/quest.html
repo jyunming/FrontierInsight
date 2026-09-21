@@ -93,6 +93,11 @@
         <button id="watch-btn" onclick="watchQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Watch automatically</button>
         <span id="next-step-results-status" class="text-on-surface-variant text-body-sm"></span>
       </div>
+      <!-- PLAN pause: the plan is written; read it, edit it or ask for a change below, then Resume. -->
+      <div id="next-step-plan" class="hidden flex flex-wrap items-center gap-3">
+        <button onclick="document.getElementById('plan-section').scrollIntoView({ behavior: 'smooth', block: 'start' })" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Go to the plan ↓</button>
+        <button onclick="resumeQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume with this plan</button>
+      </div>
       <!-- SUPPLY pauses: drop files straight into the named folder(s) + Resume. -->
       <div id="next-step-supply" class="hidden flex flex-wrap items-center gap-3">
         <input id="next-step-file" type="file" multiple class="text-on-surface text-body-sm"/>
@@ -110,6 +115,32 @@
       </div>
     </div>
   </div>
+
+  <!-- The plan (plan.md): written after the literature and before the experiment is designed. -->
+  <section id="plan-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h2 class="font-headline-md text-headline-md text-on-surface">Plan</h2>
+      <span id="plan-version" class="font-label-sm text-label-sm text-outline uppercase"></span>
+    </div>
+    <p class="font-body-md text-body-md text-on-surface-variant">What the literature says, the gap, and the design the experiment will run. The design block at the end is used exactly as written: edit it here or ask for a change, then resume the quest.</p>
+    <div id="plan-error" class="hidden fi-banner fi-banner-error"><span id="plan-error-text" class="text-on-surface-variant"></span></div>
+    <div id="plan-preview" class="fi-md-body"></div>
+    <textarea id="plan-editor" rows="28" spellcheck="false" class="hidden w-full bg-surface-low border border-white/10 rounded p-4 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none min-h-[400px]"></textarea>
+    <div class="flex flex-wrap items-center gap-3">
+      <button id="plan-edit-btn" onclick="planStartEdit()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Edit the plan</button>
+      <button id="plan-save-btn" onclick="planSave()" class="hidden cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Save</button>
+      <button id="plan-cancel-btn" onclick="planCancelEdit()" class="hidden cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Cancel</button>
+      <span id="plan-edit-status" class="text-on-surface-variant text-body-sm"></span>
+    </div>
+    <div class="flex flex-col gap-2 pt-4 border-t border-white/5">
+      <label for="plan-request" class="font-label-sm text-label-sm text-outline uppercase">Or ask for a change</label>
+      <textarea id="plan-request" rows="3" class="w-full bg-surface-low border border-white/10 rounded p-3 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none" placeholder="e.g. use CD error, not EPE, as the main metric, and add a sweep over dose"></textarea>
+      <div class="flex flex-wrap items-center gap-3">
+        <button id="plan-revise-btn" onclick="planRevise()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Rewrite the plan</button>
+        <span id="plan-revise-status" class="text-on-surface-variant text-body-sm"></span>
+      </div>
+    </div>
+  </section>
 
   <!-- Bento Grid -->
   <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter">
@@ -282,7 +313,7 @@
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_action) {
-      const kind = { papers: 'papers', supply: 'files', data: 'data' }[data.pending_action] || 'input';
+      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan' }[data.pending_action] || 'input';
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (${kind})</span>`;
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {
@@ -386,6 +417,7 @@
     refreshFiles();
     refreshWantedPapers();
     refreshNextStep();
+    refreshPlan();
     window.__fi_last_data = data;
     renderOutputs(data);
     // A paused quest wrote a summary but isn't finished — don't treat it as
@@ -438,6 +470,8 @@
       nextStepTargets = data.upload_targets || [];
       const resultsEl = document.getElementById('next-step-results');
       if (resultsEl) resultsEl.classList.toggle('hidden', data.kind !== 'results');
+      const planEl = document.getElementById('next-step-plan');
+      if (planEl) planEl.classList.toggle('hidden', data.kind !== 'plan');
       if (data.interaction === 'answer') {
         answerEl.classList.remove('hidden');
         supplyEl.classList.add('hidden');
@@ -454,6 +488,129 @@
       const exEl = document.getElementById('next-step-examples');
       if (exEl) exEl.classList.toggle('hidden', !(data.interaction === 'supply' && data.kind === 'supply'));
     } catch (e) { banner.classList.add('hidden'); resultsPaused = false; }
+  }
+
+  // ---- the plan (plan.md) ---------------------------------------------------------
+  let planText = '';
+  let planEditing = false;
+  let planRevising = false;
+  let planBusy = false;
+
+  function planStatus(id, text, warn) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('text-status-warning', !!warn);
+    el.classList.toggle('text-on-surface-variant', !warn);
+  }
+  function renderPlan(d) {
+    const section = document.getElementById('plan-section');
+    if (!d.exists) { section.classList.add('hidden'); section.classList.remove('flex'); return; }
+    section.classList.remove('hidden'); section.classList.add('flex');
+    const errEl = document.getElementById('plan-error');
+    errEl.classList.toggle('hidden', !d.design_error);
+    document.getElementById('plan-error-text').textContent = d.design_error
+      ? 'The design block cannot be read: ' + d.design_error + '. The quest will stop until it is fixed.' : '';
+    const last = (d.versions || [])[(d.versions || []).length - 1];
+    const who = { model: 'written by FI', request: 'rewritten on your request', user: 'edited by you' };
+    document.getElementById('plan-version').textContent = last
+      ? 'Version ' + last.version + ' · ' + (who[last.by] || last.by) : '';
+    if (planEditing) return;          // never replace what someone is typing
+    planText = d.text || '';
+    const preview = document.getElementById('plan-preview');
+    preview.innerHTML = window.fi_renderMarkdown ? window.fi_renderMarkdown(planText) : escapeHtml(planText);
+  }
+  let planLoaded = false;
+  async function refreshPlan(force) {
+    // Once loaded, a background tab does not keep asking; the first look happens whatever the tab is doing.
+    if (planBusy || planEditing || (document.hidden && planLoaded && !force)) return;
+    planBusy = true;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/plan`);
+      if (res.ok) { renderPlan(await res.json()); planLoaded = true; }
+    } catch (e) { /* the next tick asks again */ }
+    finally { planBusy = false; }
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPlan(); });
+  function planStartEdit() {
+    planEditing = true;
+    const ed = document.getElementById('plan-editor');
+    ed.value = planText;
+    ed.classList.remove('hidden');
+    document.getElementById('plan-preview').classList.add('hidden');
+    document.getElementById('plan-edit-btn').classList.add('hidden');
+    document.getElementById('plan-save-btn').classList.remove('hidden');
+    document.getElementById('plan-cancel-btn').classList.remove('hidden');
+    planStatus('plan-edit-status', '', false);
+  }
+  function planStopEdit() {
+    planEditing = false;
+    document.getElementById('plan-editor').classList.add('hidden');
+    document.getElementById('plan-preview').classList.remove('hidden');
+    document.getElementById('plan-edit-btn').classList.remove('hidden');
+    document.getElementById('plan-save-btn').classList.add('hidden');
+    document.getElementById('plan-cancel-btn').classList.add('hidden');
+  }
+  function planCancelEdit() { planStopEdit(); planStatus('plan-edit-status', '', false); refreshPlan(); }
+  async function planSave() {
+    const text = document.getElementById('plan-editor').value;
+    planStatus('plan-edit-status', 'Saving…', false);
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/plan`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        let why = '';
+        try { why = (await res.json()).detail || ''; } catch (e) { /* not JSON */ }
+        planStatus('plan-edit-status', why || ('Not saved (' + res.status + ').'), true);
+        return;
+      }
+      planStopEdit();
+      renderPlan(await res.json());
+      planStatus('plan-edit-status', 'Saved. Press Resume to run this plan.', false);
+    } catch (e) { planStatus('plan-edit-status', 'Not saved: ' + e, true); }
+  }
+  async function planRevise() {
+    const box = document.getElementById('plan-request');
+    const request = box.value.trim();
+    if (!request) { planStatus('plan-revise-status', 'Say what to change first.', true); return; }
+    if (planEditing) { planStatus('plan-revise-status', 'Save or cancel your edit first.', true); return; }
+    planStatus('plan-revise-status', 'Asking the model to rewrite the plan…', false);
+    document.getElementById('plan-revise-btn').disabled = true;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/plan/revise`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request }),
+      });
+      if (!res.ok) {
+        let why = '';
+        try { why = (await res.json()).detail || ''; } catch (e) { /* not JSON */ }
+        planStatus('plan-revise-status', why || ('Could not start (' + res.status + ').'), true);
+        document.getElementById('plan-revise-btn').disabled = false;
+        return;
+      }
+      planRevising = true;
+      setTimeout(pollPlanRevise, 2000);
+    } catch (e) {
+      planStatus('plan-revise-status', 'Could not start: ' + e, true);
+      document.getElementById('plan-revise-btn').disabled = false;
+    }
+  }
+  async function pollPlanRevise() {
+    if (!planRevising) return;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/plan/revise`);
+      const d = res.ok ? await res.json() : { state: 'running' };
+      if (d.state === 'running') { setTimeout(pollPlanRevise, 2000); return; }
+      planRevising = false;
+      document.getElementById('plan-revise-btn').disabled = false;
+      if (d.state === 'exited' && d.returncode === 0) {
+        document.getElementById('plan-request').value = '';
+        planStatus('plan-revise-status', 'The plan was rewritten. Read it, ask again, or press Resume.', false);
+        refreshPlan(true);
+      } else {
+        planStatus('plan-revise-status', 'The plan is unchanged: ' + (d.last_line || 'the rewrite did not finish.'), true);
+      }
+    } catch (e) { setTimeout(pollPlanRevise, 3000); }
   }
 
   async function uploadExamples() {

@@ -16,6 +16,8 @@ commands:
 | `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~23–28 × N quests |
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
+| `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the design) beside the chat to read and edit. | **0** |
+| `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
 | `@fi /proposal <topic>` | Pre-quest planning doc. Writes both a markdown proposal and a companion YAML under `outputs/_drafts/`. Use to scope a research question BEFORE committing compute to a full quest. | **1** |
 | `@fi /analyze <data-path> <topic>` | No-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory; the engine routes `auto_collect_data → wait_for_data → data_load → analyze → write → review`. Inverse of `/proposal` — when you already have the dataset and just want a paper analyzing it. | **~6** |
@@ -39,7 +41,9 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
 | `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
-| `design` | 1 per design pass | Runs again when the cross-check or the review sends the quest back. |
+| `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
+| `plan_revise` | 0 | One call per `--revise-plan` request (two if the first reply's design block cannot be read). |
+| `design` | 1 per later design pass | Runs again when the cross-check or the review sends the quest back; the first pass adopts the design block of `plan.md`. |
 | `design_self_critique` | 1 per design pass | Audits the drafted methodology. |
 | `implement_outline` | 1 | |
 | `implement` | 1 per design pass | |

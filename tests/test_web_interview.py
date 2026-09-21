@@ -625,3 +625,21 @@ def test_loopback_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> Non
         caplog.clear()
         _warn_if_non_loopback(host)
         assert caplog.records == [], f"unexpected warning for {host}"
+
+
+def test_submit_carries_the_plan_pause_and_refuses_a_non_bool(tmp_path: Path) -> None:
+    """The web interview's "stop to read and edit the plan" answer reaches pauses.plan; left out it is off."""
+    from core.config import Config
+
+    client = _client(tmp_path)
+    body = _ok_answers_payload()
+    body["pause_for_plan"] = True
+    res = client.post("/api/interview/submit", json=body)
+    assert res.status_code == 200, res.text
+    assert Config.from_yaml(Path(res.json()["yaml_path"])).pauses.plan == "ask"
+
+    res = client.post("/api/interview/submit", json=_ok_answers_payload())
+    assert Config.from_yaml(Path(res.json()["yaml_path"])).pauses.plan == "off"
+
+    body["pause_for_plan"] = "yes"
+    assert client.post("/api/interview/submit", json=body).status_code == 400

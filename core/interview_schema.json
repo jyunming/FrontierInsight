@@ -607,6 +607,34 @@
       "tier": 3
     },
     {
+      "id": "pause_for_plan",
+      "label": "Stop to read and edit the plan",
+      "prompt": "Every quest writes its plan (plan.md: what the literature says, the gap, the design the experiment will run) after the literature and before the experiment is designed. Stop there to read it and edit it, or ask for a change, before any compute is spent.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "Don't stop (default)",
+          "description": "The plan is written to plan.md in the quest folder, and the experiment is designed from it, but the quest does not wait. Choose this for an unattended run."
+        },
+        {
+          "value": true,
+          "label": "Stop to read and edit the plan",
+          "description": "After the literature is in, the quest writes plan.md (what the literature says, the gap, the design) and stops. Edit the file, or ask for a change (--revise-plan, the quest page's Plan box, @fi /plan), then resume: the design block in the file is what runs."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": true,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "comparative_baseline",
       "label": "Comparative baseline",
       "prompt": "What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",
@@ -1270,6 +1298,7 @@
     "page_limit",
     "paper_format",
     "paper_style",
+    "pause_for_plan",
     "pause_for_user_input",
     "poster_size",
     "reasoning_effort",
@@ -1319,6 +1348,7 @@
     "supply_papers": [
       "literature"
     ],
+    "pause_for_plan": [],
     "max_iterations": [],
     "audience": [
       "write"

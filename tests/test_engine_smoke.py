@@ -690,3 +690,178 @@ async def test_after_literature_pause_then_resume_does_not_search_again(
     assert "Experiment Design" in calls
     path = dump_state(second.quest_root)
     assert "->  pause_after_literature" in path and "->  select_skills" in path
+
+
+# ---------------------------------------------------------------------------
+# The plan step (plan.md), through the real graph and a real checkpoint
+# ---------------------------------------------------------------------------
+
+
+def _plan_fake_chat(calls: list[str], design_prompts: list[str] | None = None, plan_text: dict | None = None):
+    """A fake model that answers the design prompt with a design plus the ``plan`` prose, as asked."""
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        calls.append(kind)
+        if kind == "Experiment Design":
+            if design_prompts is not None:
+                design_prompts.append(prompt)
+            body = json.loads(_FAKE_RESPONSES["design"])
+            if "Also write the plan" in prompt:
+                body["plan"] = {
+                    "in_short": "A toy plot of y=x^2.",
+                    "literature": [{"source": "Smith 2020", "says": "y grows with x"}],
+                    "gap": "Nobody has plotted it here.",
+                    "success_criteria": ["the curve is monotonic"],
+                    "risks": ["too easy"],
+                    "out_of_scope": ["anything real"],
+                }
+            return json.dumps(body)
+        if plan_text is not None and "You are revising the plan" in prompt:
+            return plan_text["reply"]
+        return _fake_response_for(prompt)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_the_plan_is_written_and_the_quest_goes_on_unless_asked_to_stop(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import plan
+    from core.state_dump import dump_state
+
+    calls: list[str] = []
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _plan_fake_chat(calls, prompts))
+
+    engine = Engine(smoke_config)
+    artifacts = await engine.run()
+
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    text = plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    assert "A toy plot of y=x^2." in text and "**Smith 2020**: y grows with x" in text
+    assert plan.parse(text).design["hypothesis"] == "fake hypothesis"
+    # One design call in all, made by the plan step; the design step used the file and asked nothing.
+    assert len(prompts) == 1 and "Also write the plan" in prompts[0]
+    assert artifacts.raw_state["design"]["hypothesis"] == "fake hypothesis"
+    history = json.loads((engine.quest_root / "needs" / "DESIGN_HISTORY.json").read_text(encoding="utf-8"))
+    assert history[0]["plan_sha256"] == plan.sha256(text)
+    path = dump_state(engine.quest_root)
+    assert "->  plan" in path and "->  design" in path
+    assert not (engine.fi_dir / "paused_at_plan.flag").exists()
+
+
+@pytest.mark.asyncio
+async def test_stop_for_the_plan_then_edit_then_resume_runs_what_was_edited(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole loop a person goes through: the quest stops with the plan written, they change the design
+    block, and the quest that resumes runs their design, not the model's."""
+    from core import plan
+    from core.state_dump import dump_state
+
+    cfg = smoke_config.model_copy(update={
+        "pauses": smoke_config.pauses.model_copy(update={"plan": "ask"}),
+    })
+    calls: list[str] = []
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _plan_fake_chat(calls, prompts))
+
+    first = Engine(cfg)
+    await first.run()
+    log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[plan] paused" in log
+    # It is its own kind of stop: not mistaken for a clarify pause, which would leave questions for the
+    # quest page to ask (found by running the real CLI, which said "paused for clarify").
+    assert "[FI] paused for the plan" in log and "paused for clarify" not in log
+    assert not (first.fi_dir / "clarify_questions.json").exists()
+    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert descriptor["kind"] == "plan" and descriptor["interaction"] == "supply"
+    assert "plan.md" in (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    stopped = dump_state(first.quest_root)
+    assert "  design " not in stopped, "the design must not exist before the resume"
+    assert not (first.quest_root / "paper" / "paper.md").exists()
+
+    path = plan.plan_path(first.quest_root)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("hypothesis: fake hypothesis", "hypothesis: the person's own hypothesis"),
+        encoding="utf-8",
+    )
+
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await second.run()
+
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    assert artifacts.raw_state["design"]["hypothesis"] == "the person's own hypothesis"
+    assert len(prompts) == 1, "the model was asked for the design once, before the person read it"
+    assert [r["by"] for r in plan.history(second.quest_root)] == ["model", "user"]
+    history = json.loads((second.quest_root / "needs" / "DESIGN_HISTORY.json").read_text(encoding="utf-8"))
+    assert history[0]["plan_sha256"] == plan.sha256(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_cannot_be_read_stops_the_resume_and_says_why(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import plan
+
+    cfg = smoke_config.model_copy(update={
+        "pauses": smoke_config.pauses.model_copy(update={"plan": "ask"}),
+    })
+    monkeypatch.setattr("core.engine.LLMClient.chat", _plan_fake_chat([]))
+    first = Engine(cfg)
+    await first.run()
+    path = plan.plan_path(first.quest_root)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("hypothesis: fake hypothesis", "hypothesis: [fake"), encoding="utf-8",
+    )
+
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await second.run()
+
+    assert artifacts.paper_md is None or not artifacts.paper_md.exists(), "an unreadable plan must not run"
+    log = (second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "plan.md cannot be read" in log
+    assert "not valid YAML" in (second.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+
+    # Fixed, it goes on.
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("hypothesis: [fake", "hypothesis: fixed by hand"), encoding="utf-8",
+    )
+    third = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await third.run()
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    assert artifacts.raw_state["design"]["hypothesis"] == "fixed by hand"
+
+
+@pytest.mark.asyncio
+async def test_asking_for_a_change_rewrites_the_plan_and_the_resume_runs_the_rewrite(
+    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--revise-plan`` on a stopped quest: a fresh engine connects its own model client, rewrites the file, and
+    the next resume runs the rewritten design."""
+    from core import plan
+
+    cfg = smoke_config.model_copy(update={
+        "pauses": smoke_config.pauses.model_copy(update={"plan": "ask"}),
+    })
+    reply: dict[str, str] = {}
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _plan_fake_chat(calls, plan_text=reply))
+    first = Engine(cfg)
+    await first.run()
+    path = plan.plan_path(first.quest_root)
+    revised = path.read_text(encoding="utf-8").replace("hypothesis: fake hypothesis", "hypothesis: rewritten on request")
+    reply["reply"] = revised
+
+    reviser = Engine(cfg, resume_quest_id=first.quest_id)
+    done = await reviser.revise_plan("state the hypothesis differently")
+
+    assert done["version"] == 2
+    assert [r["by"] for r in plan.history(first.quest_root)] == ["model", "request"]
+
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await second.run()
+    assert artifacts.raw_state["design"]["hypothesis"] == "rewritten on request"

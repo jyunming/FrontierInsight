@@ -54,6 +54,10 @@
             "description": "Wake a quest that is waiting on a background job (HPC / cluster; execution.background_jobs). Re-runs its experiment script on a timer, shows every check, and resumes the quest when the job is done. With no arg, shows a picker. Mirrors `launch.py --watch` and the web Watch button."
           },
           {
+            "name": "plan",
+            "description": "Read, edit or rewrite a quest's plan.md: what the literature says, the gap, and the design the experiment will run. With a quest_id it opens the file (edit it: the design block is used exactly as written); with words after the id it has the model rewrite the plan as you ask. Then @fi /resume runs it. Mirrors `launch.py --revise-plan` and the web Plan panel."
+          },
+          {
             "name": "generate",
             "description": "Generate one more output format (PDF / slides / poster / talk script) for an already-finished quest WITHOUT re-running the research. Pick the quest + format, or pass them: @fi /generate <quest_id> paper_pdf. Mirrors `launch.py --emit` and the web Outputs panel."
           },

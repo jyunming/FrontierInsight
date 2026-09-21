@@ -47,6 +47,7 @@ from langgraph.types import Command, interrupt
 from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
+from . import plan as _plan
 from . import split_run as _split_run
 from . import stats as _stats
 from .config import (
@@ -586,41 +587,7 @@ class Engine:
             await asyncio.to_thread(self._stage_example_inputs)
             await self.executor.setup(self.quest_root)
 
-            endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
-            self._log.info(
-                "provider %s -> %s (%s)",
-                self.config.provider.name, endpoint.base_url, endpoint.model,
-            )
-            self._client = LLMClient(
-                endpoint,
-                timeout_s=self.config.provider.http_timeout_s,
-                cli_timeout_s=self.config.provider.cli_timeout_s,
-                cli_inactivity_timeout_s=(
-                    self.config.provider.cli_inactivity_timeout_s
-                ),
-                node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
-                node_http_timeout_s=self.config.provider.node_http_timeout_s,
-                node_model_fallbacks=(
-                    self.config.provider.node_model_fallbacks
-                ),
-                max_prompt_chars=self.config.provider.max_prompt_chars,
-                heartbeat_cb=self._llm_heartbeat,
-            )
-            # Wrap in a fallback chain so a single provider's outage doesn't
-            # forfeit the quest. No-op (unwrapped) when no fallback configured.
-            if self.config.provider.fallback:
-                specs = [
-                    (name, self._make_fallback_factory(name))
-                    for name in self.config.provider.fallback
-                ]
-                self._client = FallbackLLMClient(
-                    self._client, specs, log=self._log,
-                )
-                self._log.info(
-                    "provider fallback chain: %s -> %s",
-                    self.config.provider.name,
-                    " -> ".join(self.config.provider.fallback),
-                )
+            await self._connect_llm()
 
             checkpoint_path = self.fi_dir / "state.sqlite"
             try:
@@ -765,6 +732,22 @@ class Engine:
                                 "[FI] paused for user papers: drop PDFs into "
                                 "%s then run `fi --resume %s`",
                                 papers_dir, self.quest_id,
+                            )
+                            break
+                        if intr_value.get("plan_stage"):
+                            # The plan step wrote plan.md and stopped for the
+                            # person to read and edit it. Same pause-exit as
+                            # the pauses above; without this branch the payload
+                            # fell through to the clarify handling below and
+                            # left a clarify_questions.json that made the quest
+                            # page ask for clarify answers.
+                            data_paused = True
+                            self._log.info(
+                                "[FI] paused for the plan: read and edit %s "
+                                "(or ask for a change with `--revise-plan`), "
+                                "then run `fi --resume %s`",
+                                intr_value.get("plan_file", "plan.md"),
+                                self.quest_id,
                             )
                             break
                         # human_feedback node raised `interrupt(...)`.
@@ -1183,6 +1166,7 @@ class Engine:
         g.add_node("literature", self._node_literature)
         g.add_node("pause_after_literature", self._node_pause_after_literature)
         g.add_node("select_skills", self._node_select_skills)
+        g.add_node("plan", self._node_plan)
         g.add_node("design", self._node_design)
         # design → implement_outline → implement → execute (two-stage
         # implement). The outline node produces a scaffold + function
@@ -1233,7 +1217,8 @@ class Engine:
         # rather than searching again.
         g.add_edge("literature", "pause_after_literature")
         g.add_edge("pause_after_literature", "select_skills")
-        g.add_edge("select_skills", "design")
+        g.add_edge("select_skills", "plan")
+        g.add_edge("plan", "design")
         # design → implement (normal sim path) OR auto_collect_data
         # (no-simulation, agent attempts auto-collect via Axon first
         # then wait_for_data handles the pause-if-still-empty case).
@@ -2654,15 +2639,10 @@ class Engine:
             "literature_queries": queries,
         }
 
-    async def _node_design(self, state: QuestState) -> QuestState:
-        if self.config.engine.analyze_local_first:
-            # --analyze: no experiment to design — the data already exists.
-            # Passthrough; routing keys on no_simulation_resolved (set by
-            # clarify), so an empty design still flows to data_load.
-            self._log.info("[design] analyze_local_first — no experiment design")
-            return {}
+    def _design_prompt(self, state: QuestState) -> str:
+        """The design prompt for this state: the topic, the chosen direction, the literature, the
+        clarifications, the skills and example files, and, on a later pass, what the review and the person said."""
         iteration = state.get("iteration", 0)
-        self._log.info("[design] iteration=%d", iteration)
         review_feedback = ""
         if iteration > 0:
             review_feedback = json.dumps(state.get("review", {}), indent=2)
@@ -2717,7 +2697,7 @@ class Engine:
                     f"honour every round below, not only the most recent) ---\n"
                     f"{blocks}\n"
                 ).strip()
-        prompt = self._prompts["design"].substitute(
+        return self._prompts["design"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
             # The full excerpts, as analyze and write get. At 800 characters a
@@ -2742,9 +2722,10 @@ class Engine:
                 else ""
             ),
         )
-        text = await self._chat(prompt, node="design")
-        design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
 
+    async def _audit_design(self, state: QuestState, design: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        """The second-pass methodology audit of a drafted design: ``(design, objections addressed)``."""
+        iteration = state.get("iteration", 0)
         # Second-pass methodology audit. The draft design just produced is
         # passed back to the LLM with a fixed checklist of common-but-fatal
         # design errors (circular evaluation, single-point eval, weak
@@ -2807,6 +2788,223 @@ class Engine:
             "[design_self_critique] iteration=%d objections_addressed=%d",
             iteration, n_addressed,
         )
+        return design, objections
+
+    def _design_from_plan(self) -> tuple[dict[str, Any] | None, str]:
+        """The design block of ``plan.md`` and its hash, or ``(None, "")`` when there is no plan or it cannot be read
+        (the plan step stops the quest on an unreadable one; this only guards a resume that skipped it)."""
+        path = _plan.plan_path(self.quest_root)
+        if not path.is_file():
+            return None, ""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] plan.md could not be read (%r); designing from the topic", e)
+            return None, ""
+        parsed = _plan.parse(text)
+        if parsed.design is None:
+            self._log.warning("[design] plan.md cannot be used (%s); designing from the topic", parsed.error)
+            return None, ""
+        sha = _plan.sha256(text)
+        self._log.info("[design] using the design block of plan.md (sha256 %s)", sha[:12])
+        return parsed.design, sha
+
+    def _pause_for_plan(self, *, error: str = "") -> None:
+        """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
+        supply pauses), unless the file cannot be read: then every resume stops again, with the reason."""
+        marker = self.fi_dir / "paused_at_plan.flag"
+        if not error and marker.is_file():
+            return
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text("plan", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't write pause marker %s: %r", marker, e)
+        path = _plan.plan_path(self.quest_root)
+        steps = [
+            *([f"`plan.md` could not be used: {error}. Fix it, then resume."] if error else []),
+            f"Read `plan.md` in the quest folder ({path}): what the literature says, the gap, and the design the "
+            "experiment will run.",
+            f"Edit it. The block under \u201c{_plan.DESIGN_HEADING}\u201d is the design, exactly: what it says is what runs. "
+            "The prose above it is for you and for the paper's methods.",
+            "Or ask for a change and let FI rewrite it: "
+            f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
+            "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
+        ]
+        self._pause_for_human(
+            kind="plan",
+            interaction="supply",
+            headline="read and edit the plan" if not error else "plan.md cannot be read",
+            steps=steps,
+            payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": error},
+        )
+
+    async def _node_plan(self, state: QuestState) -> QuestState:
+        """Review the literature and write the plan (``plan.md``) before the experiment is designed.
+
+        The design prompt gets the plan directive appended, so one call returns the design and the prose around it;
+        the methodology audit runs on the design; ``plan.md`` is written; and, with ``pauses.plan: ask``, the quest
+        stops for the person. A ``plan.md`` that is already there (a resume, or one the person wrote) is not written
+        over: it is read, and an unreadable one stops the quest again with the reason. Later passes of the design
+        (a revise after results) do not come back here."""
+        if self.config.engine.analyze_local_first:
+            return {}
+        if int(state.get("iteration", 0) or 0) > 0:
+            return {}
+        path = _plan.plan_path(self.quest_root)
+        ask = self.config.pauses.plan == "ask"
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            if _plan.note_edit(self.quest_root, text) is not None:
+                self._log.info("[plan] plan.md was edited on disk; keeping that version")
+            parsed = _plan.parse(text)
+            if parsed.design is None:
+                self._pause_for_plan(error=parsed.error or "no design")
+                return {}
+            if ask:
+                self._pause_for_plan()
+            return {}
+
+        prompt = self._design_prompt(state) + _PLAN_DIRECTIVE
+        text = await self._chat(prompt, node="plan")
+        obj = _parse_json_lenient(text) or {}
+        extra = obj.pop("plan", None) if isinstance(obj, dict) else None
+        design = obj if isinstance(obj, dict) and obj else {"hypothesis": "(parse failed)", "dependencies": []}
+        design, objections = await self._audit_design(state, design)
+        normalized, why = _plan.normalize_design(design)
+        if normalized is None:
+            self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
+            return {}
+        audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
+                 for item in (objections if isinstance(objections, list) else [])]
+        body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
+                            normalized, audit)
+        path.write_text(body, encoding="utf-8")
+        _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
+        self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
+                       len((extra or {}).get("literature") or []) if isinstance(extra, dict) else 0, len(audit))
+        if ask:
+            self._pause_for_plan()
+        return {"design_objections": objections} if isinstance(objections, list) else {}
+
+    async def _connect_llm(self) -> None:
+        """Resolve the provider and build the LLM client (with its fallback chain), as a quest run does."""
+        endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
+        self._log.info(
+            "provider %s -> %s (%s)",
+            self.config.provider.name, endpoint.base_url, endpoint.model,
+        )
+        self._client = LLMClient(
+            endpoint,
+            timeout_s=self.config.provider.http_timeout_s,
+            cli_timeout_s=self.config.provider.cli_timeout_s,
+            cli_inactivity_timeout_s=(
+                self.config.provider.cli_inactivity_timeout_s
+            ),
+            node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
+            node_http_timeout_s=self.config.provider.node_http_timeout_s,
+            node_model_fallbacks=(
+                self.config.provider.node_model_fallbacks
+            ),
+            max_prompt_chars=self.config.provider.max_prompt_chars,
+            heartbeat_cb=self._llm_heartbeat,
+        )
+        # Wrap in a fallback chain so a single provider's outage doesn't
+        # forfeit the quest. No-op (unwrapped) when no fallback configured.
+        if self.config.provider.fallback:
+            specs = [
+                (name, self._make_fallback_factory(name))
+                for name in self.config.provider.fallback
+            ]
+            self._client = FallbackLLMClient(
+                self._client, specs, log=self._log,
+            )
+            self._log.info(
+                "provider fallback chain: %s -> %s",
+                self.config.provider.name,
+                " -> ".join(self.config.provider.fallback),
+            )
+
+    async def revise_plan(self, request: str) -> dict[str, Any]:
+        """Rewrite ``plan.md`` as the person asked (``--revise-plan``): the whole file goes to the model with the
+        request, and the reply replaces it only if its design block can be used (one retry with the reason).
+        The quest stays where it was; resuming runs the revised design. Every version is kept.
+
+        Connects its own model client when the engine has none (a one-shot command), and closes it, and releases
+        a proxy provider it started, when it is done, as a quest run does."""
+        request = (request or "").strip()
+        if not request:
+            raise ValueError("say what to change in the plan")
+        path = _plan.plan_path(self.quest_root)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{self.quest_id} has no plan.md yet: it has not reached the plan step",
+            )
+        connected_here = self._client is None
+        if connected_here:
+            await self._connect_llm()
+        try:
+            return await self._rewrite_plan(request, path)
+        finally:
+            if connected_here and self._client is not None:
+                await self._client.aclose()
+                if self.config.provider.name in PROXY_PROVIDERS:
+                    await self.supervisor.release(self.config.provider.name)
+                self._client = None
+
+    async def _rewrite_plan(self, request: str, path: Path) -> dict[str, Any]:
+        current = path.read_text(encoding="utf-8")
+        _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
+        prompt = self._prompts["plan_revise"].substitute(
+            topic=self.config.topic, plan_md=current, request=request,
+        )
+        why = ""
+        revised = ""
+        for _attempt in (1, 2):
+            reply = await self._chat(
+                prompt + (
+                    f"\n\n## Your last reply could not be used\nThe design block: {why}. "
+                    "Return the whole file again, with that fixed.\n" if why else ""
+                ),
+                node="plan_revise",
+            )
+            revised = _plan.strip_outer_fence(reply)
+            parsed = _plan.parse(revised)
+            if parsed.design is not None:
+                why = ""
+                break
+            why = parsed.error or "no design"
+        if why:
+            raise ValueError(f"the revised plan could not be used ({why}); plan.md is unchanged")
+        path.write_text(revised, encoding="utf-8")
+        entry = _plan.record_version(self.quest_root, revised, by="request", note=request[:300])
+        self._log.info("[plan] revised on request: version %d", entry["version"])
+        return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
+
+    async def _node_design(self, state: QuestState) -> QuestState:
+        if self.config.engine.analyze_local_first:
+            # --analyze: no experiment to design — the data already exists.
+            # Passthrough; routing keys on no_simulation_resolved (set by
+            # clarify), so an empty design still flows to data_load.
+            self._log.info("[design] analyze_local_first — no experiment design")
+            return {}
+        iteration = state.get("iteration", 0)
+        self._log.info("[design] iteration=%d", iteration)
+        design: dict[str, Any] | None = None
+        objections: Any = None
+        plan_sha = ""
+        if iteration == 0 and not state.get("design"):
+            # The plan step wrote plan.md and, when asked, stopped for the person to read and edit it. Its design
+            # block is the design, exactly: nothing is asked of the model again, and what a person changed runs.
+            # Only when no design exists yet: every way back into this node after a result bumps ``iteration``,
+            # and a design already in state must never be replaced by the plan on a repair or a refine.
+            design, plan_sha = self._design_from_plan()
+            objections = state.get("design_objections")
+        if design is None:
+            prompt = self._design_prompt(state)
+            text = await self._chat(prompt, node="design")
+            design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
+            design, objections = await self._audit_design(state, design)
 
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
@@ -2820,7 +3018,7 @@ class Engine:
         # back here. Nothing is blocked -- the record exists so the revision is
         # auditable rather than invisible.
         out["design_history"] = _append_design_revision(
-            state, design, self.quest_root, self._log,
+            state, design, self.quest_root, self._log, plan_sha,
         )
         # Range assertions contributed by the trusted skills this quest may
         # call. Stashed in state because ``_assertion_violations`` is a
@@ -9152,6 +9350,7 @@ def _load_prompts() -> dict[str, string.Template]:
     names = (
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
+        "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "implement",                        # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
@@ -10027,6 +10226,24 @@ This quest keeps the simulation and its analysis apart, so an analysis mistake n
 **experiment.py** is the analysis. It reads ONLY from that same folder, `pathlib.Path(os.environ["FI_RAW_DIR"])` (it never imports or calls simulate.py and never runs the simulation), computes the summary statistics, draws the figures into `figures/` and prints the `RESULT_JSON: {...}` last line, exactly as the rules above ask of the experiment: the figure rules, the stratification rule and the no-clamping rule are its rules. It is run once per seed straight after simulate.py, so it must be quick and deterministic.
 
 If an outline is given, it describes the whole experiment as one program: put its simulation functions in simulate.py and its statistics, figure and `RESULT_JSON` functions in experiment.py, keep every name and signature, and let the two meet only through the files in `FI_RAW_DIR`.
+"""
+
+_PLAN_DIRECTIVE = """
+
+## Also write the plan (added to the design; it replaces nothing above)
+
+Before you design, read the Prior work above the way a reviewer would. Then add ONE more key, `plan`, to the JSON object you return, next to the design fields:
+
+"plan": {
+  "in_short": "<two or three sentences: what this quest will find out, and how>",
+  "literature": [{"source": "<the title, or the [n], of a source listed above>", "says": "<what it establishes that bears on this topic>"}],
+  "gap": "<what the literature leaves open, or where it disagrees, that this experiment addresses>",
+  "success_criteria": ["<what result would support the hypothesis, and what would count against it>"],
+  "risks": ["<how this could go wrong or mislead>"],
+  "out_of_scope": ["<what this quest will not do>"]
+}
+
+Name three to eight sources, and only ones that are listed above; if the Prior work holds little that bears on the topic, say that in `gap` instead of inventing sources. The design has to follow from the plan: the hypothesis answers the gap, and the method is what would show it. The person reading this may edit the design before it runs, so write each field so that it can be edited on its own.
 """
 
 _SPLIT_REPLY_REMINDER = """
@@ -13675,7 +13892,7 @@ _ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
 
 
 def _append_design_revision(
-    state: "QuestState", design: dict, quest_root: Path, log: logging.Logger,
+    state: "QuestState", design: dict, quest_root: Path, log: logging.Logger, plan_sha: str = "",
 ) -> list[dict[str, Any]]:
     """Record this version of the design, returning the full history.
 
@@ -13695,6 +13912,8 @@ def _append_design_revision(
 
     if not prior:
         reason = "initial design, before any result existed"
+        if plan_sha:
+            reason = f"initial design, taken from plan.md (sha256 {plan_sha[:12]}) before any result existed"
     else:
         analysis = state.get("analysis") or {}
         next_step = str(analysis.get("next_step") or "").strip()
@@ -13714,6 +13933,8 @@ def _append_design_revision(
         "reason": reason,
         "hypothesis": hypothesis[:600],
     }
+    if plan_sha:
+        entry["plan_sha256"] = plan_sha
     history = prior + [entry]
 
     if entry["post_hoc"]:

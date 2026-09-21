@@ -910,7 +910,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     g = engine._build_graph()
 
     expected_nodes = {
-        "clarify", "ideate", "literature", "select_skills", "design",
+        "clarify", "ideate", "literature", "select_skills", "plan", "design",
         "implement", "execute", "analyze", "write", "review",
     }
     assert expected_nodes.issubset(set(g.nodes))
@@ -930,7 +930,10 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # for a stop there, so a resume starts after the search, not inside it.
     assert ("literature", "pause_after_literature") in plain_edges
     assert ("pause_after_literature", "select_skills") in plain_edges
-    assert ("select_skills", "design") in plain_edges
+    # `plan` sits between select_skills and design: it reads the literature and writes plan.md, whose design
+    # block the design step then adopts.
+    assert ("select_skills", "plan") in plain_edges
+    assert ("plan", "design") in plain_edges
     assert ("implement", "execute") in plain_edges
     # `execute → execute_reflect` replaces the old `execute → analyze`
     # edge, plus a conditional `execute_reflect → execute | analyze`.
