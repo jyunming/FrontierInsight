@@ -8868,6 +8868,9 @@ class Engine:
                 "api_key_env": None,
                 "node_model_fallbacks": {},
                 "fallback": [],
+                # Sampling settings belong to the primary's model, not to a fallback's.
+                "fixed_temperature": None,
+                "extra_body": {},
             })
             ep = await resolve_endpoint_async(derived, self.supervisor)
             self._log.info(

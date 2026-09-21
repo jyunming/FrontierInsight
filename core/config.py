@@ -108,6 +108,14 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+    # Some OpenAI-compatible models fix their own sampling and answer any other request with HTTP 400 (Moonshot's Kimi
+    # K2.6 and K3: "only 1 is allowed" with thinking on, "only 0.6" with it off). ``fixed_temperature`` is sent on every
+    # call of an HTTP provider in place of the temperature FI picks per node (0 for the deciding nodes, 0.2 for the
+    # others); ``extra_body`` is merged into every request body (Kimi's ``{"thinking": {"type": "disabled"}}`` turns its
+    # reasoning off, which cuts the tokens of a short reply from about 32 to about 4). Neither applies to a CLI provider
+    # or to the VSCode bridge, and neither is passed on to a fallback provider.
+    fixed_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
     # Ordered provider names to fall back to when the primary provider
     # terminally fails a chat call (after its own in-provider retries) —
     # e.g. ``["codex_cli", "gemini_cli"]``. Empty (default) keeps the
