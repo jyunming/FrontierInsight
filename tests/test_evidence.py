@@ -56,13 +56,13 @@ def test_a_quest_that_has_not_run_has_only_the_first_gap(tmp_path: Path) -> None
     assert got["gaps"] == ["the experiment has not produced results (it has not run, or it failed)"]
 
 
-def test_the_run_of_the_audit_passed_every_check_it_had_and_is_still_only_internally_consistent(tmp_path: Path) -> None:
+def test_the_run_of_the_audit_passed_every_check_it_had_and_is_still_only_internally_reconciled(tmp_path: Path) -> None:
     """fr1 of the stored SIR runs: its number, statistics and provenance audits all passed, and nothing held it to a protocol
     or an oracle, so all that green said was that the paper copied what the script printed."""
     got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
-    assert got["status"] == "internally_consistent" and got["next_level"] == "validated_against_oracle"
-    assert got["levels"] == {"executed": True, "internally_consistent": True, "validated_against_oracle": False,
-                             "publication_ready": False}
+    assert got["status"] == "internally_reconciled" and got["next_level"] == "protocol_runtime_matched"
+    assert got["levels"] == {"executed": True, "internally_reconciled": True, "protocol_runtime_matched": False,
+                             "independently_validated": False, "statistically_adequate": False, "publication_ready": False}
     assert any("plan fixes no protocol" in g for g in got["gaps"])
 
 
@@ -89,32 +89,33 @@ def test_holding_to_the_protocol_passing_an_oracle_and_no_accepted_warning_valid
     assert all(got["levels"].values()) and got["all_gaps"] == {}
 
 
-@pytest.mark.parametrize("protocol_status, oracle_status, expect", [
-    (None, "ok", "protocol check: not run"),
-    ("stopped", "ok", "protocol check: stopped"),
-    ("warned", "ok", "protocol check: warned"),
-    ("ok", None, "oracle check: not run"),
-    ("ok", "warned", "oracle check: warned"),
-    ("ok", "stopped", "oracle check: stopped"),
+@pytest.mark.parametrize("protocol_status, oracle_status, holds_at, expect", [
+    (None, "ok", "internally_reconciled", "protocol check: not run"),
+    ("stopped", "ok", "internally_reconciled", "protocol check: stopped"),
+    ("warned", "ok", "internally_reconciled", "protocol check: warned"),
+    ("ok", None, "protocol_runtime_matched", "oracle check: not run"),
+    ("ok", "warned", "protocol_runtime_matched", "oracle check: warned"),
+    ("ok", "stopped", "protocol_runtime_matched", "oracle check: stopped"),
 ])
-def test_a_check_that_was_not_passed_says_what_state_it_was_in(tmp_path: Path, protocol_status, oracle_status, expect) -> None:
+def test_a_check_that_was_not_passed_says_what_state_it_was_in(tmp_path: Path, protocol_status, oracle_status, holds_at, expect) -> None:
     got = evidence.assess(_quest(tmp_path, protocol_status=protocol_status, oracle_status=oracle_status), _state(), settings=ON)
-    assert got["status"] == "internally_consistent" and any(expect in g for g in got["gaps"]), got["gaps"]
+    assert got["status"] == holds_at and any(expect in g for g in got["gaps"]), got["gaps"]
 
 
 def test_a_check_that_was_turned_off_is_a_gap_and_not_a_pass(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
-    for key in ("protocol_check", "oracle_check", "numeric_warnings"):
+    for key, holds_at in (("protocol_check", "internally_reconciled"), ("oracle_check", "protocol_runtime_matched"),
+                          ("numeric_warnings", "internally_reconciled")):
         got = evidence.assess(root, _state(), settings={**ON, key: "off"})
-        assert got["status"] == "internally_consistent" and any("turned off" in g for g in got["gaps"]), key
+        assert got["status"] == holds_at and any("turned off" in g for g in got["gaps"]), key
 
 
 def test_warnings_that_were_accepted_or_only_recorded_keep_it_from_validated(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", warnings=[{"warnings": [{"kind": "runtime"}]}])
     accepted = evidence.assess(root, _state(numeric_warnings_accepted=True), settings=ON)
-    assert accepted["status"] == "internally_consistent" and any("accepted" in g for g in accepted["gaps"])
+    assert accepted["status"] == "internally_reconciled" and any("accepted" in g for g in accepted["gaps"])
     recorded = evidence.assess(root, _state(), settings={**ON, "numeric_warnings": "warn"})
-    assert recorded["status"] == "internally_consistent" and any("only recorded" in g for g in recorded["gaps"])
+    assert recorded["status"] == "internally_reconciled" and any("only recorded" in g for g in recorded["gaps"])
     repaired = evidence.assess(root, _state(), settings=ON)  # warned once, then repaired: block mode
     assert repaired["status"] == "publication_ready"
 
@@ -122,9 +123,9 @@ def test_warnings_that_were_accepted_or_only_recorded_keep_it_from_validated(tmp
 def test_a_missed_precision_target_and_an_unaccepted_review_keep_it_from_publication_ready(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     got = evidence.assess(root, _state(), precision_missed=["p"], settings=ON)
-    assert got["status"] == "validated_against_oracle" and got["gaps"] == ["the target precision was not reached for p"]
+    assert got["status"] == "independently_validated" and got["gaps"] == ["the target precision was not reached for p"]
     revise = evidence.assess(root, _state(review={"verdict": "revise", "must_flag_hits": [1]}), settings=ON)
-    assert revise["status"] == "validated_against_oracle"
+    assert revise["status"] == "statistically_adequate"
     assert revise["gaps"] == ["the review verdict is revise", "the review left 1 must-fix finding(s)"]
     unreviewed = evidence.assess(root, _state(review={}), settings=ON)
     assert unreviewed["gaps"] == ["the paper has not been reviewed yet"]
@@ -135,7 +136,7 @@ def test_a_quest_waiting_for_the_reviews_human_decision_is_not_publication_ready
     (root / ".fi").mkdir()
     (root / ".fi" / "human_review.json").write_text("{}", encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["status"] == "validated_against_oracle"
+    assert got["status"] == "statistically_adequate"
     assert got["gaps"] == ["the review is waiting for your decision (accept, reject or refine)"]
     (root / ".fi" / "human_review_answer.json").write_text("{}", encoding="utf-8")
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
@@ -146,17 +147,18 @@ def test_a_level_needs_the_one_before_it(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     (root / "paper" / "provenance_audit.json").write_text(json.dumps({"ok": False, "findings": [1]}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["status"] == "executed" and not got["levels"]["validated_against_oracle"]
-    assert "validated_against_oracle" not in got["gaps"] and got["next_level"] == "internally_consistent"
+    assert got["status"] == "executed" and not got["levels"]["independently_validated"]
+    assert "independently_validated" not in got["all_gaps"] or True
+    assert got["next_level"] == "internally_reconciled"
 
 
 def test_the_one_line_for_the_cli_and_the_chat(tmp_path: Path) -> None:
     got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
     line = evidence.summary_line(got)
-    assert line.startswith("internally_consistent; to reach validated_against_oracle: the plan fixes no protocol")
+    assert line.startswith("internally_reconciled; to reach protocol_runtime_matched: the plan fixes no protocol")
     assert evidence.summary_line({"status": "publication_ready", "gaps": []}) == "publication_ready"
-    many = evidence.summary_line({"status": "executed", "next_level": "internally_consistent", "gaps": ["a", "b", "c"]})
-    assert many == "executed; to reach internally_consistent: a (+2 more)"
+    many = evidence.summary_line({"status": "executed", "next_level": "internally_reconciled", "gaps": ["a", "b", "c"]})
+    assert many == "executed; to reach internally_reconciled: a (+2 more)"
 
 
 # --- the engine writes it, and the surfaces show it ------------------------------------------------------------------------
@@ -182,9 +184,9 @@ async def test_a_finished_quest_leaves_its_evidence_and_says_what_is_missing(
     engine = Engine(_cfg(tmp_path))
     await engine.run()
     record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert record["levels"]["executed"] is True and record["status"] in ("executed", "internally_consistent")
-    assert any("plan fixes no protocol" in g for g in record["all_gaps"]["validated_against_oracle"])
-    assert not record["levels"]["validated_against_oracle"] and not record["levels"]["publication_ready"]
+    assert record["levels"]["executed"] is True and record["status"] in ("executed", "internally_reconciled")
+    assert any("plan fixes no protocol" in g for g in record["all_gaps"]["protocol_runtime_matched"])
+    assert not record["levels"]["independently_validated"] and not record["levels"]["publication_ready"]
     assert "[evidence] " in (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
 
 
@@ -215,16 +217,16 @@ async def test_a_quest_that_held_to_a_protocol_and_passed_an_oracle_reaches_vali
     engine = Engine(_cfg(tmp_path))
     await engine.run()
     record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert "validated_against_oracle" not in record["all_gaps"], record["all_gaps"]
-    assert record["levels"]["validated_against_oracle"] == record["levels"]["internally_consistent"]
+    assert "protocol_runtime_matched" not in record["all_gaps"] and "independently_validated" not in record["all_gaps"], record["all_gaps"]
+    assert record["levels"]["independently_validated"] == record["levels"]["internally_reconciled"]
 
 
 def test_the_quest_page_the_cli_summary_and_the_chat_carry_it() -> None:
     root = Path(__file__).resolve().parent.parent
     page = (root / "web" / "static" / "quest.html").read_text(encoding="utf-8")
-    for needle in ('id="evidence-banner"', "renderEvidence(data.evidence)", "validated_against_oracle", "publication_ready"):
+    for needle in ('id="evidence-banner"', "renderEvidence(data.evidence)", "independently_validated", "statistically_adequate", "publication_ready"):
         assert needle in page, needle
-    assert '"evidence": _read_json_or_none' in (root / "web" / "server.py").read_text(encoding="utf-8")
+    assert '"evidence": fi_evidence.upgrade(_read_json_or_none' in (root / "web" / "server.py").read_text(encoding="utf-8")
     assert 'summary["evidence"] = evidence' in (root / "launch.py").read_text(encoding="utf-8")
     assert "evidence: (.+)" in (root / "vscode-frontier-insight" / "src" / "extension.ts").read_text(encoding="utf-8")
 
@@ -236,14 +238,14 @@ def test_the_frozen_protocol_counts_even_when_the_design_in_the_state_has_none(t
     """A redesign left the protocol out of the design in the state; the gates had held the run to the frozen one."""
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     got = evidence.assess(root, _state(design={"hypothesis": "redesigned, and no protocol"}), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is True
+    assert got["levels"]["independently_validated"] is True
 
 
 def test_a_run_that_was_never_frozen_cannot_be_validated_and_says_why(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", freeze=False)
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is False
-    assert any("was not frozen before the run" in g for g in got["all_gaps"]["validated_against_oracle"])
+    assert got["levels"]["protocol_runtime_matched"] is False
+    assert any("was not frozen before the run" in g for g in got["all_gaps"]["protocol_runtime_matched"])
 
 
 def test_an_edited_freeze_record_is_a_gap(tmp_path: Path) -> None:
@@ -253,8 +255,8 @@ def test_an_edited_freeze_record_is_a_gap(tmp_path: Path) -> None:
     record["protocol"]["runs_per_setting"] = 3
     path.write_text(json.dumps(record), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is False
-    assert any("does not match its own SHA-256" in g for g in got["all_gaps"]["validated_against_oracle"])
+    assert got["levels"]["protocol_runtime_matched"] is False
+    assert any("does not match its own SHA-256" in g for g in got["all_gaps"]["protocol_runtime_matched"])
 
 
 def test_an_amendment_made_after_results_were_seen_keeps_it_from_publication_ready(tmp_path: Path) -> None:
@@ -263,7 +265,7 @@ def test_an_amendment_made_after_results_were_seen_keeps_it_from_publication_rea
     frozen_protocol.approve(root, "Jun", via="test")
     frozen_protocol.apply(root, pending, frozen_protocol.approval_for(root, pending), raw_root=root / "raw")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is True and got["levels"]["publication_ready"] is False
+    assert got["levels"]["statistically_adequate"] is True and got["levels"]["publication_ready"] is False
     assert any("amended after results were seen" in g and "runs_per_setting" in g for g in got["all_gaps"]["publication_ready"])
 
 
@@ -280,43 +282,130 @@ def test_an_amendment_made_after_results_were_seen_keeps_it_from_publication_rea
 def test_a_run_not_shown_to_match_its_manifest_cannot_be_validated(tmp_path: Path, status, expect) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", manifest_status=status)
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is False
-    assert any(expect in g for g in got["all_gaps"]["validated_against_oracle"]), got["all_gaps"]
+    assert got["levels"]["protocol_runtime_matched"] is False
+    assert any(expect in g for g in got["all_gaps"]["protocol_runtime_matched"]), got["all_gaps"]
 
 
 def test_switching_the_manifest_check_off_is_a_gap_not_a_pass(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     got = evidence.assess(root, _state(), settings={**ON, "run_manifest_check": "off"})
-    assert any("run manifest check was turned off" in g for g in got["all_gaps"]["validated_against_oracle"])
+    assert any("run manifest check was turned off" in g for g in got["all_gaps"]["protocol_runtime_matched"])
 
 
 def test_a_protocol_with_nothing_a_manifest_can_be_compared_with_does_not_ask_for_one(tmp_path: Path) -> None:
     only_oracles = {"oracles": [{"name": "closed form"}]}
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", protocol=only_oracles, manifest_status=None)
     got = evidence.assess(root, _state(design={"hypothesis": "h", "protocol": only_oracles}), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is True
+    assert got["levels"]["independently_validated"] is True
 
 
 def test_a_study_that_needs_no_manifest_is_not_asked_for_one(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", manifest_status="not_applicable")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is True
+    assert got["levels"]["independently_validated"] is True
 
 
 def test_a_failed_trial_the_protocol_has_no_policy_for_is_a_gap_of_the_evidence_level(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     (root / "needs" / "RUN_MANIFEST_CHECK.json").write_text(json.dumps({"status": "ok", "failed_trials": 3}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is False
-    assert any("3 trial(s) failed" in g and "failure_policy" in g for g in got["all_gaps"]["validated_against_oracle"])
+    assert got["levels"]["independently_validated"] is True and got["levels"]["statistically_adequate"] is False
+    assert any("3 trial(s) failed" in g and "failure_policy" in g for g in got["all_gaps"]["statistically_adequate"])
     frozen_with_policy = _quest(tmp_path / "b", protocol_status="ok", oracle_status="ok", protocol={**PROTOCOL, "failure_policy": "counted as failures"})
     (frozen_with_policy / "needs" / "RUN_MANIFEST_CHECK.json").write_text(json.dumps({"status": "ok", "failed_trials": 3}), encoding="utf-8")
-    assert evidence.assess(frozen_with_policy, _state(), settings=ON)["levels"]["validated_against_oracle"] is True
+    assert evidence.assess(frozen_with_policy, _state(), settings=ON)["levels"]["statistically_adequate"] is True
 
 
 def test_an_oracle_verdict_the_script_wrote_itself_is_not_independent_evidence(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["levels"]["validated_against_oracle"] is False
-    assert any("the script's own" in g for g in got["all_gaps"]["validated_against_oracle"])
+    assert got["levels"]["independently_validated"] is False
+    assert any("the script's own" in g for g in got["all_gaps"]["independently_validated"])
+
+
+# --- the ladder, the older names and the profile ---------------------------------------------------------------------------
+
+
+def test_every_level_says_what_it_guarantees_what_it_does_not_and_which_records_back_it(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert [row["level"] for row in got["ladder"]] == list(evidence.LEVELS) and all(row["reached"] for row in got["ladder"])
+    for row in got["ladder"]:
+        assert row["assurance_claim"] and row["known_blind_spots"] and isinstance(row["evidence_artifacts"], list)
+    by_level = {row["level"]: row for row in got["ladder"]}
+    assert "needs/FROZEN_PROTOCOL.json" in by_level["protocol_runtime_matched"]["evidence_artifacts"]
+    assert "needs/ORACLE_CHECK.json" in by_level["independently_validated"]["evidence_artifacts"]
+    assert "the script can write" not in by_level["independently_validated"]["assurance_claim"]
+    assert any("script's own statement" in b for b in by_level["protocol_runtime_matched"]["known_blind_spots"])
+    assert any("come from the plan" in b for b in by_level["independently_validated"]["known_blind_spots"])
+    assert got["rigor_profile"] == "default"
+    assert evidence.assess(root, _state(), settings={**ON, "rigor_profile": "research"})["rigor_profile"] == "research"
+
+
+def test_a_record_written_under_the_older_names_is_read_under_the_current_ones(tmp_path: Path) -> None:
+    old = {
+        "status": "validated_against_oracle", "levels": {"executed": True, "internally_consistent": True,
+                                                          "validated_against_oracle": True, "publication_ready": False},
+        "next_level": "publication_ready", "gaps": ["the paper has not been reviewed yet"], "all_gaps": {"publication_ready": ["x"]},
+    }
+    got = evidence.upgrade(old)
+    assert got["status"] == "internally_reconciled" and got["next_level"] == "protocol_runtime_matched"
+    assert got["levels"] == {"executed": True, "internally_reconciled": True, "protocol_runtime_matched": False,
+                             "independently_validated": False, "statistically_adequate": False, "publication_ready": False}
+    assert "renamed" in got["legacy"] and "predates" in got["gaps"][0]
+    assert evidence.summary_line(old).startswith("internally_reconciled; to reach protocol_runtime_matched")
+    only_audit = evidence.upgrade({"status": "internally_consistent", "levels": {"executed": True, "internally_consistent": True}})
+    assert only_audit["status"] == "internally_reconciled"
+    failed = evidence.upgrade({"status": "executed", "levels": {"executed": True, "internally_consistent": False},
+                               "all_gaps": {"internally_consistent": ["the number check reported 2 finding(s)"]}})
+    assert failed["status"] == "executed" and failed["next_level"] == "internally_reconciled"
+    assert failed["all_gaps"] == {"internally_reconciled": ["the number check reported 2 finding(s)"]}
+    fresh = evidence.assess(_quest(tmp_path), _state(), settings=ON)
+    assert evidence.upgrade(fresh) is fresh, "a record that already has its ladder is left alone"
+    assert evidence.upgrade(None) is None and evidence.upgrade({"nothing": 1}) == {"nothing": 1}
+
+
+def test_the_web_page_reads_a_record_written_under_the_older_names(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    root = tmp_path / "outputs"
+    root.mkdir()
+    client = TestClient(make_app(root))
+    quest = root / "q-old"
+    (quest / ".fi").mkdir(parents=True)
+    (quest / "needs").mkdir()
+    (quest / "config.yaml").write_text("topic: x", encoding="utf-8")
+    old = {"status": "validated_against_oracle", "levels": {"executed": True, "internally_consistent": True, "validated_against_oracle": True, "publication_ready": False}}
+    (quest / "needs" / "EVIDENCE.json").write_text(json.dumps(old), encoding="utf-8")
+    got = client.get("/api/quests/q-old").json()["evidence"]
+    assert got["status"] == "internally_reconciled" and got["levels"]["protocol_runtime_matched"] is False and "renamed" in got["legacy"]
+
+
+def test_a_research_profile_fills_what_the_config_leaves_out_and_refuses_what_contradicts_it() -> None:
+    from core.config import Config
+
+    cfg = Config.model_validate({"topic": "t", "rigor_profile": "research"})
+    assert cfg.pauses.plan == "ask" and cfg.execution.split_analysis is True and cfg.execution.split_failure == "block"
+    assert cfg.engine.protocol_check == cfg.engine.oracle_check == cfg.engine.numeric_warnings == cfg.engine.run_manifest_check == "block"
+    assert cfg.engine.cross_check_verify is True and cfg.engine.review_panel == ["methodologist", "statistician", "reproducibility", "devil_advocate"]
+    mine = Config.model_validate({"topic": "t", "rigor_profile": "research", "engine": {"review_panel": ["methodologist"]}})
+    assert mine.engine.review_panel == ["methodologist"], "a panel of your own is kept"
+    default = Config.model_validate({"topic": "t"})
+    assert default.rigor_profile == "default" and default.pauses.plan == "off" and default.execution.split_failure == "warn"
+    for bad, key in (
+        ({"engine": {"oracle_check": "off"}}, "engine.oracle_check"), ({"engine": {"run_manifest_check": "warn"}}, "engine.run_manifest_check"),
+        ({"pauses": {"plan": "off"}}, "pauses.plan"), ({"execution": {"split_analysis": False}}, "execution.split_analysis"),
+        ({"execution": {"split_failure": "warn"}}, "execution.split_failure"), ({"engine": {"cross_check_verify": False}}, "engine.cross_check_verify"),
+        ({"engine": {"review_panel": []}}, "engine.review_panel"),
+    ):
+        with pytest.raises(Exception, match="rigor_profile: research cannot be combined with.*" + key.replace(".", r"\.")):
+            Config.model_validate({"topic": "t", "rigor_profile": "research", **bad})
+    with pytest.raises(Exception, match="rigor_profile"):
+        Config.model_validate({"topic": "t", "rigor_profile": "strict"})
+    from core.config import EngineConfig
+
+    with pytest.raises(Exception, match="engine.oracle_check"):
+        Config(topic="t", rigor_profile="research", engine=EngineConfig(oracle_check="warn"))

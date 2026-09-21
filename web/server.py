@@ -45,6 +45,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from core.config import Config
+from core import evidence as fi_evidence
 from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
 from core.engine import Engine, _aggregate_cost_rows
@@ -2180,7 +2181,7 @@ def make_app(
             ),
             "summary": summary,
             # How much of the result has been checked against something other than itself (needs/EVIDENCE.json).
-            "evidence": _read_json_or_none(quest_root / "needs" / "EVIDENCE.json"),
+            "evidence": fi_evidence.upgrade(_read_json_or_none(quest_root / "needs" / "EVIDENCE.json")),
             # The frozen protocol and any amendment waiting for a person (core/frozen_protocol.py).
             "amendment": _amendment_view(quest_root),
             "source_failures": source_failures,

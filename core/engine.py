@@ -4934,6 +4934,7 @@ class Engine:
                     "oracle_check": self.config.engine.oracle_check,
                     "numeric_warnings": self.config.engine.numeric_warnings,
                     "run_manifest_check": self.config.engine.run_manifest_check,
+                    "rigor_profile": self.config.rigor_profile,
                 },
             )
             path = self.quest_root / "needs" / "EVIDENCE.json"

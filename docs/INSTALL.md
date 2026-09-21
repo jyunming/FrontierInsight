@@ -375,3 +375,7 @@ it to PATH and re-open your shell.
 **`fi --install-tectonic` fails with a SHA-256 mismatch** — the release was retagged, or you hit a network MITM. Confirm by retrying. If it persists, file an issue.
 
 **The VSCode extension doesn't show in Copilot Chat** — VSCode caches participants. Run `Developer: Reload Window` from the Command Palette.
+
+## Optional tools, in one place
+
+- *Optional:* a LaTeX engine (MiKTeX / TeX Live, or the no-admin `--install-tectonic`) for typeset PDFs; **with no LaTeX**, any Chromium browser (Edge/Chrome) is enough — FI renders a Computer-Modern-styled PDF that matches the LaTeX look. `--install-marp` adds `slides.html` / `slides.pdf` without npm. LibreOffice lets the visual check screenshot `slides.pptx` too. Run `--doctor` to see what this machine has. To see what a quest held on a machine where files cannot be copied off it, `--dump-state <quest dir>` prints `.fi/state.sqlite` as text (every state key with a preview, and the path the quest took node by node).

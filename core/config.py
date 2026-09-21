@@ -1483,6 +1483,18 @@ class OutputConfig(BaseModel):
         return _expand(v)
 
 
+# What ``rigor_profile: research`` sets, section by section (see ``Config.rigor_profile``).
+_RESEARCH_PROFILE: dict[str, dict[str, Any]] = {
+    "pauses": {"plan": "ask"},
+    "execution": {"split_analysis": True, "split_failure": "block"},
+    "engine": {
+        "protocol_check": "block", "oracle_check": "block", "numeric_warnings": "block", "run_manifest_check": "block",
+        "cross_check_verify": True,
+        "review_panel": ["methodologist", "statistician", "reproducibility", "devil_advocate"],
+    },
+}
+
+
 class Config(BaseModel):
     topic: str
     title: str | None = None
@@ -1493,6 +1505,49 @@ class Config(BaseModel):
     pauses: PausesConfig = Field(default_factory=PausesConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     extra_directives: str = ""
+    # ``research`` turns on, together, what a study needs before its result can be trusted (``_RESEARCH_PROFILE``): the plan
+    # is held for you to read before the protocol is frozen, the simulation and its analysis are kept in two scripts (a reply
+    # without both stops the quest instead of running as one), the protocol, oracle, numeric-warning and run-manifest checks
+    # stop the quest and cannot be turned off, and the cross-check verification and the review panel are on. Settings the
+    # profile does not name are left as they are. A config that sets one of these to the opposite is refused, naming the key:
+    # the profile is a guarantee, and a later line of YAML must not take it apart quietly. ``default``: nothing changes.
+    rigor_profile: Literal["default", "research"] = "default"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_rigor_profile(cls, data: Any) -> Any:
+        """Fill in what ``rigor_profile: research`` sets where the config is silent, and refuse what contradicts it."""
+        if not isinstance(data, dict) or data.get("rigor_profile") != "research":
+            return data
+        data = dict(data)
+        conflicts: list[str] = []
+        for section, wanted in _RESEARCH_PROFILE.items():
+            block = data.get(section)
+            if isinstance(block, BaseModel):  # built in code: what it holds is what it says
+                for key, value in wanted.items():
+                    have = getattr(block, key, None)
+                    if key == "review_panel":
+                        if not have:
+                            conflicts.append(f"{section}.{key} (the profile needs a review panel; it is empty)")
+                    elif have != value:
+                        conflicts.append(f"{section}.{key} is {have!r}, the profile needs {value!r}")
+                continue
+            block = dict(block or {})
+            for key, value in wanted.items():
+                if key not in block or block[key] is None:
+                    block[key] = list(value) if isinstance(value, list) else value
+                elif key == "review_panel":
+                    if not block[key]:
+                        conflicts.append(f"{section}.{key} is empty, the profile needs a review panel")
+                elif block[key] != value and not (isinstance(value, bool) and str(block[key]).strip().lower() == str(value).lower()):
+                    conflicts.append(f"{section}.{key} is {block[key]!r}, the profile needs {value!r}")
+            data[section] = block
+        if conflicts:
+            raise ValueError(
+                "rigor_profile: research cannot be combined with " + "; ".join(conflicts)
+                + ". Remove those lines, or use the default profile."
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod

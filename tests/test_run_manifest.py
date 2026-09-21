@@ -252,7 +252,7 @@ async def test_a_quest_that_runs_as_one_script_says_it_has_no_manifest(tmp_path:
     assert artifacts.paper_md is not None
     assert _record(engine)["status"] == "single_script"
     evidence = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert any("writes no run manifest" in g for g in evidence["all_gaps"].get("validated_against_oracle", []))
+    assert any("writes no run manifest" in g for g in evidence["all_gaps"].get("protocol_runtime_matched", []))
 
 
 @pytest.mark.asyncio
@@ -392,7 +392,7 @@ async def test_a_deterministic_study_that_runs_as_one_script_needs_no_manifest(t
     artifacts = await engine.run()
     assert artifacts.paper_md is not None and _record(engine)["status"] == "not_applicable"
     evidence = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert not any("run manifest" in g or "writes no run manifest" in g for g in evidence["all_gaps"].get("validated_against_oracle", []))
+    assert not any("run manifest" in g or "writes no run manifest" in g for g in evidence["all_gaps"].get("protocol_runtime_matched", []))
 
 
 def test_a_comment_that_names_result_json_is_not_a_simulation_that_publishes() -> None:

@@ -422,5 +422,5 @@ def test_the_critique_reads_both_scripts(tmp_path: Path) -> None:
 
 def test_the_switch_is_documented_where_a_person_looks() -> None:
     repo = Path(__file__).resolve().parent.parent
-    for rel in ("README.md", "docs/capabilities.md", "docs/USAGE.md", "docs/recipes.md", "vscode-frontier-insight/README.md"):
+    for rel in ("docs/features.md", "docs/capabilities.md", "docs/USAGE.md", "docs/recipes.md", "vscode-frontier-insight/README.md"):
         assert "split_analysis" in (repo / rel).read_text(encoding="utf-8"), rel

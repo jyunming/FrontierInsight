@@ -9,9 +9,40 @@
 
 <br clear="left"/>
 
-Frontier Insight (FI) is an automated research assistant. You give it a research question; it runs a multi-stage pipeline — **clarify → literature → design → experiment _(or gather data)_ → analyze → evidence gate → write → claim-check → review** — and hands back a paper with everything that produced it. The only thing it needs from outside is an LLM provider: an OpenAI / Anthropic / Gemini API key, your **GitHub Copilot** subscription, or local **Ollama**.
+Frontier Insight (FI) is an automated research assistant. You give it a research question; it reads the literature, designs and runs an experiment (or analyses data you supply), writes the paper, checks its own claims against the results and reviews the draft. It also tells you, at the end, **how much of the result was actually checked**, not only that a paper came out.
 
-Same engine, **three ways to drive it**: the command line, a local **web UI**, or a **VSCode** chat extension (`@fi`).
+One engine, **three ways to drive it**: the command line, a local **web UI**, or a **VSCode** chat extension (`@fi`).
+
+---
+
+## Quickstart (about 5 minutes)
+
+```bash
+git clone https://github.com/jyunming/FrontierInsight
+cd FrontierInsight
+pip install -r requirements.txt
+
+# 1. pick one LLM provider (table below), then
+# 2. run the bundled example (three numerical integrators on a damped oscillator, ~3 minutes):
+python launch.py --config examples/integrator_bakeoff/config.yaml
+```
+
+Open `outputs/<quest_id>/paper/paper.md`: that is your paper. The bundled example needs no data and no setup beyond a provider.
+
+**Pick one LLM provider** — whichever you already have:
+
+| You have… | Set `provider.name` to |
+|---|---|
+| GitHub Copilot, or any model VSCode already has | `vscode_extension` (use the `@fi` chat in VSCode) |
+| An API key | `openai` / `gemini` |
+| A signed-in CLI (`claude login`, `codex login`) | `claude_cli` / `codex_cli` |
+| Nothing, offline | `ollama` (local, free) |
+
+Setup, cost and the billing model of each provider are in [docs/PROVIDERS.md](docs/PROVIDERS.md) and [docs/recipes.md](docs/recipes.md).
+
+**Prefer to be walked through it?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions and writes the `config.yaml` for you.
+
+**Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 
 ---
 
@@ -20,162 +51,82 @@ Same engine, **three ways to drive it**: the command line, a local **web UI**, o
 After one quest, `outputs/<quest_id>/` contains:
 
 ```
-paper/paper.md            the finished paper (abstract, keywords and IMRAD, or essay/report/brief/whitepaper)
-paper.pdf                 typeset PDF — via LaTeX, or a LaTeX-free HTML fallback
-paper/references.bib      cited papers as BibTeX + CSL-JSON (drop into Zotero / a LaTeX flow)
-paper/further_reading.bib the web pages the paper drew on, listed apart from its References
-paper/CLAIMS.md           claim-grounding ledger: each claim → experiment / citation / unsupported
+paper/paper.md            the finished paper (abstract, keywords, sections)
+paper.pdf                 typeset PDF (LaTeX, or a LaTeX-free HTML fallback)
+paper/references.bib      cited papers as BibTeX + CSL-JSON (Zotero / LaTeX ready)
+paper/CLAIMS.md           each claim traced to the experiment, a citation, or marked unsupported
 figures/*.png             every plot the experiment produced
-code/experiment.py        the exact code that ran (re-runnable from .fi/requirements.lock.txt)
-slides.* · poster.* · talk.md    optional deck, poster, and speech
-data/literature/*         the web + academic sources the quest actually read
+code/experiment.py        the exact code that ran (re-runnable)
+plan.md                   what the literature says, the gap, and the design that ran
+needs/EVIDENCE.json       how much of the result was checked (see below)
+slides.* · poster.* · talk.md    optional deck, poster and speech
 ```
 
 ---
 
-## Quickstart (~5 minutes)
+## Look at the plan before anything runs
 
-```bash
-git clone https://github.com/jyunming/FrontierInsight
-cd FrontierInsight
-pip install -r requirements.txt
-
-# Configure one LLM provider (see below), then run the example quest:
-python launch.py --config examples/integrator_bakeoff/config.yaml
-```
-
-That runs a tiny example (three numerical integrators on a damped oscillator, ~3 min) and writes a paper to `outputs/`. Open `outputs/<quest_id>/paper/paper.md` — that's it.
-
-**Pick one LLM provider** — whichever you already have:
-
-| You have… | Use | Set `provider.name` |
-|---|---|---|
-| GitHub Copilot | the VSCode extension (`@fi`) — sanctioned `vscode.lm` API | `vscode_extension` |
-| Any model your VSCode already has | the same extension — it lists every model VSCode exposes, not only Copilot's (an Ollama server, a BYOK endpoint) | `vscode_extension` |
-| An API key | OpenAI / Gemini over HTTP | `openai` / `gemini` |
-| A signed-in CLI | `claude login` / `codex login` | `claude_cli` / `codex_cli` |
-| Nothing / offline | local Ollama (free) | `ollama` |
-
-Full setup, cost trade-offs, and the billing model per provider are in **[docs/recipes.md](docs/recipes.md)** and **[docs/PROVIDERS.md](docs/PROVIDERS.md)**.
-
-How hard the model reasons is `provider.reasoning_effort` (`minimal` … `max`). Unset, FI sends nothing and each provider keeps its own default — a local Ollama model then does not think at all. How each provider takes the level is in [PROVIDERS.md](docs/PROVIDERS.md#reasoning-effort).
-
-FI's calls to a signed-in CLI are answer-only: `codex_cli` and `claude_cli` run with web search, shell and code execution, MCP servers, skills, plugins and memory turned off, and every CLI call starts in a new, empty temporary directory that is removed when the call ends. `codex_cli` does not read `~/.codex/config.toml`, so custom model providers and profiles defined there are not used — the model comes from `provider.model` and the effort from `provider.reasoning_effort`. `antigravity_cli`, `copilot_cli` and `gemini_cli` still have their tools on. Details in [PROVIDERS.md](docs/PROVIDERS.md#answer-only-cli-calls).
-
-**Prefer to be walked through it?** `python launch.py --new` (CLI) or `@fi /new` (VSCode) runs an interview and builds the `config.yaml` for you. It ends with an optional author line (name, affiliation, email, project link) that the paper, slides and poster print.
-
----
-
-## Search first, simulate second
-
-Searching the literature and running the experiment are different jobs, and you usually want to read what the search found before any compute is spent on a simulation. Set one line and FI stops between the two:
+Every quest writes **`plan.md`** before the experiment is designed. Ask FI to stop there so you can read it, edit it, or ask for a change:
 
 ```yaml
 pauses:
-  supply: after_literature      # in the interview (--new, the web form, @fi /new): "Pause after literature"
+  plan: ask      # or answer "Stop to read and edit the plan" in the interview
 ```
 
 ```bash
-python launch.py --config quest.yaml     # step 1: search the web and the academic sources, save what it read, stop
-#   read outputs/<quest_id>/data/literature/ and NEXT_STEP.md; add papers to inputs/papers/, data to inputs/data/,
-#   your own simulation files to inputs/examples/ (execution.inputs), or edit the config
-python launch.py --resume <quest_id>     # step 2: skills, design, experiment, paper, with that literature in hand
+python launch.py --config quest.yaml                                   # searches, writes plan.md, stops
+python launch.py --config outputs/<id>/config.yaml --resume <id> --revise-plan "use CD error as the metric"
+python launch.py --config outputs/<id>/config.yaml --resume <id>       # run the plan as it now reads
 ```
 
-Step 2 does not search again, and the papers you dropped in join what step 1 found, so the experiment is designed from a literature you have seen and added to. `--resume` is the quest page's *Resume* button on the web and `@fi /resume` in VSCode. What takes long can be separated in the same way:
+On the web the quest page has a **Plan** panel; in VSCode use `@fi /plan <quest_id>`. You can also stop after the literature search (`pauses.supply: after_literature`) to read the sources and add your own papers before any compute is spent.
 
-| Step | Turn it on | What happens |
-|---|---|---|
-| **Literature** | `pauses.supply: after_literature` | the quest stops once the literature is saved; `--resume` starts the experiment with it |
-| **Simulation** | `execution.background_jobs` | an HPC / cluster job is submitted and the quest pauses; `--watch` wakes it when the job is done |
-| **Analysis of the simulation** | `execution.split_analysis` (`auto` by default: on for a stochastic design) | `simulate.py` writes raw files once, `experiment.py` analyses them; a repair or a review that flags the results reruns only the analysis |
+## How much can you trust the result?
 
----
-
-## Read and change the plan before it runs
-
-After the literature is in and before the experiment is designed, every quest writes **`plan.md`** in its folder: what the literature says (each source named), the gap the experiment addresses, the success criteria, the risks, what the quest will not do, and, in a block at the end, the design itself: hypothesis, variables, method, planned figures, dependencies and result bounds. That block is the design, used exactly as written, so what you edit is what runs, and nothing re-derives it from the prose above it.
-
-The file is always written. The quest only waits for you when you ask it to:
-
-```yaml
-pauses:
-  plan: ask      # in the interview (--new, the web form, @fi /new): "Stop to read and edit the plan"
-```
-
-```bash
-python launch.py --config quest.yaml                    # searches, writes plan.md, stops
-#   read outputs/<quest_id>/plan.md, then either edit it in any editor,
-#   or ask for a change and let FI rewrite it (repeat as often as you like):
-python launch.py --config outputs/<quest_id>/config.yaml --resume <quest_id> --revise-plan "use CD error, not EPE, as the metric"
-python launch.py --config outputs/<quest_id>/config.yaml --resume <quest_id>    # run the plan as it now reads
-```
-
-The design block can also carry a **`protocol`**: the grid the experiment sweeps (each parameter with every value), the runs per setting, the thresholds, how randomness is seeded, how uncertainty is estimated and what would count as support. The topic's own numbers (a set in braces, a count of runs) have to appear in it, and `plan.md` says under *Checks already made* which ones do not. When the experiment's script is written it is compared with the protocol: a script that sweeps other values than the plan fixed (say `R0 = [0.8, 1.2, 2.0, 3.0]` for a topic that asked for `{0.9, 1.5, 3.0}`) is sent back for up to two repairs, and if it still differs the quest stops with what differs (`engine.protocol_check: block`, the default; `warn` only records it, `off` does not look). Edit the script or the plan, then resume: a script that now agrees with the plan is used as it is.
-
-The protocol also declares **oracles**: checks that do not rely on the script's own numbers being right (a closed form the simulation must reproduce, a limiting case with a known answer, an invariant every run must satisfy, a small case whose exact answer is known, a second implementation). Each oracle carries the numbers it is judged by (a numeric `expected` and `tolerance`, optionally `tolerance_mode: relative`, and the `reference` the expected value comes from). Before the pilot and the main run, the script is run once with `FI_ORACLE=1`, in which it *measures* each check and prints its `value` in an `ORACLE_JSON` line, and **the engine judges**: it compares the value with the protocol's expected value and tolerance itself, and ignores any pass/fail, expected value or tolerance the script prints (a script that decides its own verdict can always pass; it is still a problem when the script reports a check as failed). An oracle with no numbers to be judged by is not run: before the freeze the plan is rewritten to give it some, after it only an amendment can. A protocol with no oracle first has the plan rewritten with one, a check that is missing, has no finite value or is outside its tolerance is sent back for up to two repairs, and if it still does not pass the quest stops before its main sweep (`engine.oracle_check: block`, the default; `warn` records it, `off` does not look). A person who edits the protocol in `plan.md` while the quest is stopped is heard at the next resume.
-
-The protocol also carries the **precision** the claim needs (`precision.target_half_width`), and the runs follow from it: `plan.md` says how many trials a probability near 0.5 needs for that width (about 1068 for ±0.03, 385 for ±0.05) against the trials the protocol plans, and the analysis is told, after the run, which probabilities did not reach the target. A script that rebuilds its random generator from the seed alone inside a function it calls for every setting (so the settings share their random numbers) is treated like any other difference from the protocol's independent-streams policy: sent back, then the quest stops. `plan.md` also says when a parameter the design makes a claim about (convergence, scaling, a threshold) has fewer than five values.
-
-A run that exits 0 and prints its results can still have been told by its own numerics that something is wrong (an overflow, an invalid value or a division by zero in NumPy, a solver that did not converge, an argument that had no effect, a NaN or an infinity in a result). Those warnings are read from the run and sent back through the same repairs as a failed run; if they remain when the repairs are spent the quest stops (`engine.numeric_warnings: block`, the default; `warn` records them, `off` does not look), and a resume runs the script again if you changed it, or accepts the run with its warnings on record if you did not.
-
-**The protocol is frozen before the first full run.** Until then the protocol in `plan.md` is a draft (you may edit it, and the engine may add an oracle to it); right before the first full run it is frozen into `needs/FROZEN_PROTOCOL.json` with its SHA-256, who approved it (you, when the plan was held for you with `pauses.plan: ask`, otherwise the engine on its own) and when. From then on every gate, and the evidence level, reads that record and never the mutable design, so a redesign after the review that leaves the protocol out cannot make the gates see nothing, and editing the protocol in `plan.md` after the freeze changes nothing (the log says the two differ). A redesign that wants a different protocol asks for an *amendment*: the quest stops (`needs/PROTOCOL_AMENDMENT_PENDING.json` says what changes and why) until a person approves it as an act of its own: `python launch.py --approve-amendment <quest_id> --approve-as <you>`, the Approve button on the quest page, or `@fi /approve-amendment <quest_id>` in VSCode. Resuming without approving keeps the frozen protocol. An approved amendment writes `needs/PROTOCOL_AMENDMENT_<n>.json`, freezes a new version and starts a new run; if the results had already been seen, the old run (raw outcomes, code, paper, evidence) is archived under `archive/run_<n>/` first, the amendment is recorded as not pre-specified, the paper is told to say so, and the evidence level names it as a gap of `publication_ready`.
-
-**What the simulation says it did is compared with the protocol after the run.** The static protocol check reads the source, so a constant that is never used, a loop that runs 30 times under `NUM_RUNS = 300` or a grid a helper overrides pass it. In the two-script layout `simulate.py` also writes `run_manifest.json` into its raw-data folder (the grid it really swept, the trials it attempted and completed in every setting, the failed trials, the thresholds it used, `"schema": "fi.run-manifest/v1"`), and after the first run FI compares it with the frozen protocol: a missing setting, another run count, a threshold that differs, or a failure that was dropped instead of listed (or that the protocol does not say how to treat: `failure_policy`) sends `simulate.py` back once (`engine.run_manifest_repair_attempts`) and then stops the quest with what differs (`engine.run_manifest_check: block`, the default; `warn` records it, `off` does not look). The other seeds' manifests are checked too and a difference is recorded. A stochastic quest that runs as one script writes no manifest, which the evidence level names as a gap (a deterministic one needs none). `execution.split_failure: block` makes a reply without both scripts, or scripts that break the contract (the analysis imports the simulation, the simulation prints `RESULT_JSON` or draws figures), stop the quest instead of running it as one script. Every check is in `needs/RUN_MANIFEST_CHECK.json`.
-
-**Each headline number says what it estimates.** The protocol declares `metrics` (a *metric spec* per number: `id` = the name the script uses in `RESULT_JSON`, `estimand`, `kind` proportion or mean, `unit`, `cluster` for observations that come in clusters, `paired` when trial *i* of every setting used the same random numbers, and the `family` a multiplicity correction covers), shown in `plan.md` where you can edit it and frozen with the rest of the protocol. The engine picks the estimator from the spec and not from the names in `RESULT_JSON`: Wilson for pooled counts, a bootstrap for a mean, a cluster bootstrap over whole clusters, and for a contrast between two settings a two-proportion test, a bootstrap with a permutation p-value, or a sign-flip permutation of the per-pair differences; the p-values of a family are Holm-adjusted together, and `analyze` is told to quote those and never to judge significance from overlapping intervals. A paired design over clusters, or a design whose data the script did not give (`<name>_values`, `<name>_clusters`), is reported as unsupported. A metric with counts or values and no spec keeps the old guess, is listed as undeclared, and the evidence level does not call the statistics adequate while there is one.
-
-A finished quest also says **how much of its result has been checked against something other than itself** (`needs/EVIDENCE.json`, a line in the run summary, a banner on the quest page and a `[FI] evidence:` line in VSCode). There are four levels, each needing the one before: `executed` (the experiment ran and printed results), `internally_consistent` (the audits that compare the paper with those results found nothing: the paper says what the script printed), `validated_against_oracle` (the script was held to the plan's protocol, passed the oracles the protocol declares and no numeric warning was accepted) and `publication_ready` (every precision target was reached and the review accepted the paper with no must-fix finding). `gaps` lists, one sentence each, what stands between the quest and the next level; a check that was switched off (`engine.protocol_check`, `oracle_check`, `numeric_warnings` set to `off`) is named there, so a quest cannot reach a level by not looking.
-
-On the web, the quest page has a **Plan** panel: read it, *Edit the plan* and save, or type a change and press *Rewrite the plan*, then *Resume*. In VSCode, `@fi /plan <quest_id>` opens the file beside the chat, `@fi /plan <quest_id> <what to change>` rewrites it, and `@fi /resume <quest_id>` runs it. A rewrite whose design block cannot be read is refused and leaves the file as it was; a file you saved by hand with an unreadable block stops the quest again with the reason instead of being guessed at. Every version is kept in `.fi/plan_versions/`, listed in `needs/PLAN_HISTORY.json` with who wrote it (the model, your request, or you), and the first entry of `needs/DESIGN_HISTORY.json` names the hash of the plan it came from.
+Each finished quest ends with an **evidence level**, from `executed` (it ran) up to `publication_ready` (every check passed and the review accepted it), and a plain sentence for what stands in the way of the next level. Nothing is called validated that was not checked, and a check that was turned off shows up as a gap. Set `rigor_profile: research` to make the checks stop the quest instead of only reporting. How the checks work is in **[docs/rigor.md](docs/rigor.md)**.
 
 ---
 
 ## Highlights
 
-- **Literature and simulation as separate steps** — stop after the literature search (`pauses.supply: after_literature`), read it and add your own papers and files, then `--resume` designs and runs the experiment with it in hand, without searching again; the simulation itself (`execution.background_jobs`) and its analysis (`execution.split_analysis`) can be split off the same way. See *Search first, simulate second* above.
-- **A plan you can read, edit and re-ask** — every quest writes `plan.md` (what the literature says, the gap, the design) before the experiment is designed; edit it or ask for a change, then resume, and the design block in the file is what runs. See *Read and change the plan before it runs* above.
-- **Whole loop, not just the LLM call** — ideate → literature → code → run → analyze → write → review, end to end, without you driving each step. It even fixes its own code when the experiment crashes, and redraws a figure whose legend sits on its own lines.
-- **Long simulations** — an experiment that runs as an HPC/cluster job (`execution.background_jobs`) is submitted by an idempotent driver script and the quest pauses cleanly; `--watch <quest>` (or the web button, or `@fi /watch`) re-checks it on a timer and resumes the quest when it is done, logging every check; the web button keeps showing whether the watcher is still running or, if it stopped, its exit code and last log line. Keep the simulation apart from its analysis (`execution.split_analysis: true`): `code/simulate.py` writes what it produced under `raw/seed<K>/`, and `code/experiment.py` reads those files, so an analysis that fails or that the review sends back is rewritten and run again against the raw files already on disk, and the simulation runs again only when its own script changed. Start from your own example files (`execution.inputs`), and require skills (`engine.skills_required`), including ones another agent installed (a skill that lives only in a folder the quest names in `engine.skills_dirs` is reviewed and approved with `python launch.py --config quest.yaml --approve-skill <name> --approve-as <you>`; under the Docker sandbox each one the quest uses is mounted read-only into the container).
-- **Built-in rigor** — an **evidence gate** weighs the assembled evidence before any paper is written; **claim grounding** traces every substantive claim to the experiment — every finding the run recorded reaches the check whole, along with the results branches those findings name — or to words it quotes from a cited source, and checks the quote is really there — however that source's PDF rendered its mathematics or spaced its words, so a quotation is not called unsupported over a subscript, a stacked fraction or a stray space in a word; a formula the stored text lost is not guessed at, and a quotation spanning one is not found (a draft whose citations could not be checked is not accepted); an optional **reviewer panel** (methodologist / statistician / devil's advocate) hard-flags fatal patterns.
-- **Checks that aren't just another LLM** — most guardrails in tools like this end in a language model reading text, which cannot catch a number copied wrong. FI adds four that are arithmetic: a **numeric oracle** comparing the paper's figures against what the run actually computed (a digit transposition, and a last-digit slip such as 2.12 printed for a stored 2.1259, are reported for a human to judge, not auto-enforced — a regex over prose will always have an opinion about a DOI, and a wrong rewrite costs more than a flagged number), a **statistics check** asking the question neither of those asks — not "does this number match a result?" but "is it the *quantity* the paper says it is?", which is how a correct number still ships a wrong sentence: an effect-size claim made "for all pairwise comparisons" is re-derived from every comparison the run supports, a p-value that is really the Bonferroni threshold `0.05/n` is named as one, an interval labelled "exact binomial" that is really the spread across the seeds is caught, a figure's y-axis limit printed as a bin count is traced back to the axis it came from, and a probability of the epidemic dying out that is really the probability of an outbreak is reported with its complement — every one of them a recomputation against the run's own replicates, so the check says nothing unless it can name the contradiction, and because the numbers are right and only the words are wrong it sends the paper back to be written again and never re-runs the experiment over a mislabel, a **number-provenance check** asking the question the other two skip — not "does this number match a result?" nor "is it the quantity it claims to be?" but *where did this number come from at all?*, because a paper's wrong figure is often not a near-miss of a right one but a value nothing in the run ever produced: every number the paper prints must trace to something the run can account for — a value the experiment computed, one of its across-seed aggregates (the mean and interval a paper actually reports, which no single seed holds), a count of what the results contain, a number the design or the configuration set, or arithmetic the paper writes out — and one that traces to none of them sends the paper back to be rewritten, with rounding, truncation, percentages and complements all accepted, and with numbers written too imprecisely to carry provenance ("3 seeds", "R0 = 1.5", "95% CI"), years, version numbers, random seeds and citation markers never asked to trace anywhere, so that across the stored benchmark papers it flags only ones whose numbers were independently judged wrong, while a run that recorded no results at all is left alone entirely, and a **plausibility gate** enforcing the range and unit bounds the design declared — so a unit error, a sign flip, a diverging value the script capped to look in range, or one quantity sitting exactly on a bound in several settings (the mark of a trivial answer) goes back for repair instead of into a paper — while a zero that is simply correct does not, because below a threshold where nothing can happen, nothing happening is the result: a sweep reported under two groupings counts each cell once, a zero below the critical point is recognised as the prediction rather than a fault, and zeros confined to one level of one coordinate are read as a regime — and neither does a result that lands exactly on a maximum the design itself worked out for the run, which is the prediction arriving where the design said it would: a number equal to its bound to within a part in a billion is *on* that bound rather than past it, and sitting on a bound counts as evidence of a trivial answer only for a bound something broken could return by accident — nothing, everything, or a constant the script writes down, like the endpoint of a root finder's bracket — unless the quantity never leaves that bound at any setting of the sweep, which is the trivial answer whatever the bound. The oracle carries one more signal that reads no prose at all: a reference value — a deterministic limit, a theoretical prediction — that comes out as exactly 0 at *every* point of the sweep meant to vary it is the signature of a root finder returning the trivial root on its bracket endpoint, which is how a flat line of zeros ends up in a figure captioned as convergence to that limit. Each figure also carries a record of what it actually draws, so a caption describing how a line changes when the figure draws it flat, or calling a line flat when the figure draws it varying (found by the line's exact label, and measured on SIR figures only), goes back to the reviewer, and a figure the design planned and the run drew that a draft leaves out is put back into the paper as soon as that draft is written — captioned from the same record and placed beside the paragraph that already discusses it, and never carried past the reference list to print among the references — so a finished paper never discusses a figure it does not show, no review round is spent restoring one, and nothing is lost when a draft drops a figure on the last round; the reviewer's own check for a missing figure stays in place behind it. With several seeds, a line figure is drawn again as their mean, shaded with its 95% confidence interval, and the numeric oracle accepts the mean and its interval. Those seeds are FI's to choose — every run gets one, the first included — and they are spaced far enough apart that no two runs can draw the same ones, because a script derives a seed per trial from the base it is handed and bases a few integers apart had three runs of one quest repeating most of each other's trials while the spread across them was printed as a confidence interval. A script that never names its seed is sent back once, right after it is written, to read it (one extra model call, spent only then); and when the experiment still turns out never to read its seed at all, so that every replicate was the same run over again, FI reads that off the script's own source and reports a single measurement rather than an interval over copies. **A script that reads the seed and then draws from the operating system anyway is sent back by the same call.** Naming the variable is not obeying it: a run that seeds one generator from the variable and builds another with no seed at all has replicates that differ, so an aggregate is published and nothing looks wrong, while the seed reached none of the randomness and no run can be reproduced -- seeding numpy's legacy global does not reach a Generator made by `default_rng`, and one graded quest did exactly that, ninety lines apart, for 300 trajectories a cell. FI finds those generators in the script's syntax, names the lines in the request, and keeps the repair only if every generator is seeded afterwards; a generator a function builds only when its caller passed none is left alone. If the repair does not land, the run still happens and the log says the numbers cannot be reproduced. A fifth piece of advice compares the topic with the experiment: a topic that names its settings (`R0 in {0.9, 1.5, 3.0}`, `300 runs`) or a number of figures is checked against the script, the keys of its results and the figures drawn, and every difference is listed for you (in the review panel, `run.log` and `paper/goal_coverage.json`) without sending anything back: on the graded SIR runs that finds the grid one run changed on its own and the five figures another drew for a topic that asked for three.
-- **Fixes what was flagged, not the whole paper** — when a review names passages (a claim nothing backs, a caption that describes what its figure does not show, a number or a statistic the run does not account for), the writer is given the earlier draft and only those passages and returns edits; FI applies each one only where its text occurs exactly once and leaves every other word, number, figure and citation of the paper as it was, then rebuilds the source lists from the edited text. Writing the whole paper again added new unsupported sentences, scrambled citation numbers and once dropped the figures, so it is kept for the reviews that need it (a paper over its page limit, a study that was run again) and as the fallback when the edits cannot be applied; `run.log` says which one a round took and why.
-- **Keeps what it learns** — an optional **skill** lets a quest call tested simulation code instead of re-deriving the physics every run. FI ships none: skills are what it picks up working with you, on your machine, not a library that arrives with the install. A skill ships its own self-test and its own valid-range assertions, and becomes usable only when that test passes *and* you approve that exact content — editing it lapses the approval, so an unattended run can never adopt capability nobody signed off on. A self-test that passed is not re-run by later quests until the skill, the Python interpreter or an installed package changes (the record is `~/.frontier-insight/skill_selftest_cache.json`; deleting it forces every test to run once more), a failing one runs every time, and the tests that do run, run in parallel without stalling the web dashboard. Each quest picks the skills that fit its topic rather than carrying the whole library, and sends each only where it is used — a writing skill to the writer, the rest to the experiment — so the library can grow without the prompts growing with it (the experiment's outline reads a summary of each, and only the step that writes the calls gets the full text; the analysis of an experiment's results reads the titles of the sources, not their text); `--why-skills "<topic>"` shows you that choice before you run anything. You teach it one either way round: `--teach-skill --from <module>` drafts a skill from a library you already have installed, and `--import-skill` takes one written for another agent — the envelope is the [Agent Skills](https://agentskills.io/) layout, so those transfer unchanged. Neither shortcut skips the gate: an imported skill still needs a self-test and your signature before any quest can use it. Since a skill's instructions go into a prompt and its self-test gets executed, `--scan-skill` reviews one statically first — injection phrasing, hidden characters, network access, `eval` — without importing or running anything. It shows you the lines; it never decides for you, and it never tells you a skill is safe — though a high-severity finding does stop the approval until you say `--despite-findings`. Because FI is not tied to one field, the catalogue is layered: untagged skills are general and always offered, while ones tagged with a domain join only when the topic looks related. All of it works in all three interfaces — `@fi /skills` in VSCode, a `/skills` page in the web dashboard, and `--skills` on the command line — and in all three a skill kept only in a folder a quest's YAML names is reached by giving that YAML (`--config quest.yaml`, `@fi /skills --config quest.yaml`, the page's *Quest config* field). Starting from an empty library? `scripts/import_scientist_skills.py` sources a curated set of 69 scientist-workflow skills, from 11 real upstream repositories (it never hangs on a slow or blocked network: a repository git cannot reach is named with the reason and skipped, and `--offline` imports from clones you made by hand), to import — see [docs/recipes.md](docs/recipes.md#bootstrap-a-starter-set-of-scientist-skills), which also covers moving an already-approved library to another machine.
-- **Three research modes** — run a real Python experiment on FI's own Python (or in a per-quest venv or Docker if you opt in); a **no-simulation** path that analyses data you supply (or that FI auto-collects from the web + dataset adapters) for market, policy, or archival topics; *or* a **survey** path — a descriptive history / overview synthesised purely from the literature, with no experiment and no dataset, for "history of X" / "evolution of X" topics.
-- **Knows the literature** — academic **and** open-web research, with real citations exported as BibTeX / CSL-JSON, and figures derived from web-collected data. Academic search keeps citable records only (papers, plus books and chapters for topics without an experiment) and includes keyless open-access sources for the humanities and social sciences. Each literature pass searches three keyword facets of the topic, adds the foundational papers and textbooks a keyword search misses (up to eight named by the model, looked up by title or, when the model's title matches nothing, by author and year, plus the works the retrieved papers cite most), and screens every source for citability; the writer is asked to cite the foundational works that bear on the paper (the original paper for a method it uses, the standard textbook for the field), and the reviewer is shown, as advice, the ones it leaves out; FI writes the source lists itself: the papers the text cites become the numbered References, in the order the text first cites them, and the web pages are listed under Further reading. The writer's prior-work block marks a retrieved work whose stored text is only its title or a short book blurb (`[title only]`, `[short blurb only]`) and tells the writer to cite it only to say the work exists or for what its own title states, never for a finding, a number or a mechanism; the work stays in the list, and a sentence the paper builds only on such a title-only record, saying more than the title does, is marked unsupported by the claim check whatever the model made of it. A page a site keeps behind a bot wall is retried in a headless browser, and those renders take turns — one at a time, because each drives its own browser process over a pipe and several at once can break it, ending the run outright instead of costing one source. The rest of the fetching stays parallel.
-- **Figures a slide can be read from** — a figure is shown at a fraction of the width it was drawn at, so the house figure style's text is 1.5 times its first size and a figure is capped at three panels in a row (a prompt: its effect is not measured). The deck gives each figure a slide of its own, title and one lead line, and its discussion on the next. The visual check then measures each figure's tick labels on the slide (the size they were drawn at, times how much smaller the slide draws the figure) and sends a deck back, at most twice, when they come out under 8 pt; the References slide is set at 18 pt. This is the engine's, so the CLI, the web UI and the VSCode chat get it alike.
-- **Keeps to a page limit** — a topic that says "≤ 4 pages" (or a Page limit typed among the advanced answers of the `--new` / `--update` interview, the web form or `@fi /new`, written as `output.page_limit: 4`) gets a tighter paper layout (2 cm margins and smaller reference lists) and a word budget for the writer. Each draft is rendered and its pages counted while the quest runs, and a draft over the limit is written again, shorter, with the page count and about how many words to cut: at most twice, without using the iteration budget. When the overflow is only FI's own Further reading list, the body is not rewritten: the list's last entries are dropped, one at a time from the end, until the PDF fits (no model call; an entry the text cites is never dropped, and a paper whose body alone is over the limit is left to the rewrite). When the body is a few sentences over (about 400 words or fewer), the model is first asked which sentences of the background and discussion to take out instead of writing the paper again: the engine decides what may go (never the Abstract, Methods or Results, a sentence that says what the paper does or finds, one with a number stated nowhere else, or a source's only citation), renders the result, and falls back to the rewrite when it does not fit. A paper without a limit is laid out and written as before.
-- **Three interfaces, one engine** — CLI, web UI, and VSCode chat all drive the same pipeline; every feature works in all three.
-- **Runs on locked-down machines** — no-admin LaTeX (`--install-tectonic`), *or* a **LaTeX-free HTML/Chromium PDF fallback** that needs only pandoc + a browser and matches the LaTeX look.
-- **Survives flaky providers** — a single provider outage no longer forfeits a finished quest: an optional **provider fallback chain** with per-provider **circuit breakers**, retry classification that skips doomed 4xx / quota errors, fail-open review gates, VSCode-bridge reconnect, and fleet backpressure (`FI_MAX_CONCURRENT_LLM_CALLS`) keep long runs and fleets moving. Gates run at temperature 0 so routing is reproducible, and a `--resume` completes only the outputs still missing.
-- **Cross-quest memory** — `/digest`, `/portfolio`, `/critique`, `/proposal` accumulate over weeks via the optional Axon knowledge layer, so FI remembers what you tried last month; each accepted paper is indexed with the keywords its writer picked. FI talks to the Axon service that is already running (started for you when it is not) instead of building an Axon inside every process; the service's active project is switched to FI's `frontier-insight` for one operation and back, and if the service cannot be reached the quest runs without the knowledge base and its log says why (`knowledge.axon_mode: in_process` keeps the old behaviour).
+- **The whole loop** — ideate, literature, code, run, analyze, write, review, without you driving each step; it fixes its own code when the experiment fails.
+- **Real literature** — academic and open-web sources, with citations exported as BibTeX / CSL-JSON.
+- **Checks that are not just another LLM** — a number in the paper is compared with the number the run computed; a claim is traced to the experiment or marked unsupported.
+- **A plan you control** — read, edit or re-ask before compute is spent; later changes to the plan need your approval.
+- **Fixes what was flagged, not the whole paper** — a review that names passages gets those passages fixed.
+- **Three research modes** — run a Python experiment, analyse data you supply, or write a literature survey.
+- **Three interfaces, one engine** — CLI, web UI and VSCode drive the same pipeline; every feature works in all three.
+- **Runs on locked-down machines** — no-admin LaTeX or a LaTeX-free PDF path; a provider fallback chain for flaky providers.
+- **Remembers across quests** — an optional knowledge layer (Axon) keeps what you tried last month.
+
+The long descriptions of each are in [docs/features.md](docs/features.md).
 
 ---
 
 ## Requirements
 
-- **Python 3.11+** — Windows / macOS / Linux, no WSL needed.
-- **One LLM provider** — Copilot (VSCode), an OpenAI / Anthropic / Gemini key, a signed-in CLI, or local Ollama.
-- **Nothing else for `slides.pptx`** — the deck is rendered in-process (its formulas as native PowerPoint equations), and `pandoc` now installs as a wheel alongside FI, so `paper.pdf` needs no system package either.
-- *Optional:* a LaTeX engine (MiKTeX / TeX Live, or the no-admin `--install-tectonic`) for typeset PDFs; **with no LaTeX**, any Chromium browser (Edge/Chrome) is enough — FI renders a Computer-Modern-styled PDF that matches the LaTeX look. `--install-marp` adds `slides.html` / `slides.pdf` without npm. LibreOffice lets the visual check screenshot `slides.pptx` too. Run `--doctor` to see what this machine has. To see what a quest held on a machine where files cannot be copied off it, `--dump-state <quest dir>` prints `.fi/state.sqlite` as text (every state key with a preview, and the path the quest took node by node).
-- *Optional:* `pip install axon` for the knowledge layer (literature retrieval + cross-quest memory).
+- **Python 3.11+**, on Windows, macOS or Linux.
+- **One LLM provider** (see above).
+- Optional: a LaTeX engine (or any Chromium browser) for typeset PDFs, and `pip install axon` for the knowledge layer. `python launch.py --doctor` shows what this machine has; the details are in [docs/INSTALL.md](docs/INSTALL.md).
 
 ---
 
 ## Going deeper
 
-- **Recipes & detailed how-to** → [`docs/recipes.md`](docs/recipes.md) — provider setup, the interview, writing your own quest, the human-in-the-loop pauses, and ~30 task recipes.
-- **YAML schema & every flag** → [`docs/USAGE.md`](docs/USAGE.md)
-- **Full capability reference** (the 21-node graph, every field) → [`docs/capabilities.md`](docs/capabilities.md)
-- **Providers, cost & ToS standing** → [`docs/PROVIDERS.md`](docs/PROVIDERS.md)
-- **Architecture & extension points** → [`docs/architecture.md`](docs/architecture.md)
-- **Install troubleshooting** (standard / no-admin / locked-down) → [`docs/INSTALL.md`](docs/INSTALL.md)
+- **Rigor: how FI checks its own experiments** → [`docs/rigor.md`](docs/rigor.md)
+- **Recipes and how-tos** → [`docs/recipes.md`](docs/recipes.md)
+- **Every setting and flag** → [`docs/USAGE.md`](docs/USAGE.md)
+- **Full capability reference** → [`docs/capabilities.md`](docs/capabilities.md)
+- **Feature tour** → [`docs/features.md`](docs/features.md)
+- **Providers, cost and terms of use** → [`docs/PROVIDERS.md`](docs/PROVIDERS.md)
+- **Architecture and extension points** → [`docs/architecture.md`](docs/architecture.md)
+- **Install troubleshooting** → [`docs/INSTALL.md`](docs/INSTALL.md)
 - **Contributing** → [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ---
 
 ## License
 
-Apache 2.0 — see [`LICENSE`](LICENSE). Contributions welcome via PR.
+Apache 2.0, see [`LICENSE`](LICENSE). Contributions welcome via PR.
 
-**Copilot, honestly:** only `vscode_extension` is sanctioned — it uses VSCode's official `vscode.lm.*` Language Model API. The standalone Copilot CLI is agentic (it won't run as an FI backend), and any reverse-engineered Copilot proxy is against the acceptable-use policy in spirit; FI warns when you select those. For headless runs use `claude_cli` / `codex_cli` or a direct API key. Details in [`docs/recipes.md`](docs/recipes.md).
+**Copilot, honestly:** only `vscode_extension` is sanctioned (VSCode's official `vscode.lm.*` API). The standalone Copilot CLI is agentic and will not run as an FI backend, and any reverse-engineered Copilot proxy is against the acceptable-use policy in spirit; FI warns when you select those. For headless runs use `claude_cli` / `codex_cli` or an API key.
