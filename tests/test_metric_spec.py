@@ -76,32 +76,44 @@ def test_clusters_are_resampled_whole_so_correlated_observations_do_not_count_as
 # --- the spec's shape ---------------------------------------------------------------------------------------------------------
 
 
+_ESTIMAND_UNIT = {"estimand": "P(outbreak | R0, N)", "unit": "trajectory"}
+
+
 def test_a_metric_spec_is_checked_for_shape() -> None:
-    good, why = ms.normalize([{"id": "p", "kind": "Proportion", "cluster": True, "paired": False, "family": "R0 contrasts"}])
-    assert why is None and good == [{"id": "p", "kind": "proportion", "cluster": True, "paired": False, "family": "R0 contrasts"}]
-    assert ms.normalize({"id": "p", "kind": "mean"})[0] == [{"id": "p", "kind": "mean"}]
+    good, why = ms.normalize([{"id": "p", "kind": "Proportion", "cluster": True, "paired": False, "family": "R0 contrasts", **_ESTIMAND_UNIT}])
+    assert why is None and good == [{"id": "p", "kind": "proportion", "cluster": True, "paired": False, "family": "R0 contrasts", **_ESTIMAND_UNIT}]
+    assert ms.normalize({"id": "p", "kind": "mean", **_ESTIMAND_UNIT})[0] == [{"id": "p", "kind": "mean", **_ESTIMAND_UNIT}]
     for bad, expect in [
         ("nope", "list of metric specs"), ([{"kind": "mean"}], "no `id`"), ([{"id": "p"}], "`kind` must be"),
-        ([{"id": "p", "kind": "median"}], "`kind` must be"), ([{"id": "p", "kind": "mean"}, {"id": "p", "kind": "mean"}], "twice"),
-        ([{"id": "p", "kind": "mean", "paired": "yes"}], "`paired` must be"), ([{"id": "p", "kind": "mean", "cluster": 3}], "`cluster` must be"),
-        ([{"id": "p", "kind": "mean", "estimand": 5}], "`estimand` must be text"),
+        ([{"id": "p", "kind": "median"}], "`kind` must be"),
+        ([{"id": "p", "kind": "mean", **_ESTIMAND_UNIT}, {"id": "p", "kind": "mean", **_ESTIMAND_UNIT}], "twice"),
+        ([{"id": "p", "kind": "mean", **_ESTIMAND_UNIT, "paired": "yes"}], "`paired` must be"),
+        ([{"id": "p", "kind": "mean", **_ESTIMAND_UNIT, "cluster": 3}], "`cluster` must be"),
+        ([{"id": "p", "kind": "mean", "unit": "trajectory"}], "needs `estimand`"),
+        ([{"id": "p", "kind": "mean", "estimand": "P(x)"}], "needs `unit`"),
+        ([{"id": "p", "kind": "mean", "estimand": 5, "unit": "trajectory"}], "needs `estimand`"),
+        ([{"id": "p", "kind": "mean", "estimand": "  ", "unit": "trajectory"}], "needs `estimand`"),
+        ([{"id": "p", "kind": "mean", "estimand": "P(x)", "unit": 5}], "needs `unit`"),
+        ([{"id": "p", "kind": "mean", "estimand": "P(x)", "unit": "  "}], "needs `unit`"),
     ]:
         assert expect in (ms.normalize(bad)[1] or ""), bad
 
 
 def test_the_protocol_keeps_and_refuses_metrics_like_its_other_keys() -> None:
-    design, error = plan.normalize_design({"hypothesis": "h", "protocol": {"metrics": [{"id": "p", "kind": "proportion"}]}})
-    assert error is None and design["protocol"]["metrics"] == [{"id": "p", "kind": "proportion"}]
+    design, error = plan.normalize_design({"hypothesis": "h", "protocol": {"metrics": [{"id": "p", "kind": "proportion", **_ESTIMAND_UNIT}]}})
+    assert error is None and design["protocol"]["metrics"] == [{"id": "p", "kind": "proportion", **_ESTIMAND_UNIT}]
     assert plan.parse(plan.render("t", {}, design)).design["protocol"]["metrics"] == design["protocol"]["metrics"]
     refused, why = plan.normalize_design({"hypothesis": "h", "protocol": {"metrics": [{"id": "p", "kind": "guess"}]}})
     assert refused is None and "`kind` must be" in why
+    no_estimand, why2 = plan.normalize_design({"hypothesis": "h", "protocol": {"metrics": [{"id": "p", "kind": "mean"}]}})
+    assert no_estimand is None and "needs `estimand`" in why2
 
 
 def test_the_plan_says_when_a_protocol_with_runs_declares_no_metric() -> None:
     from core import protocol_check as pc
 
     assert "declares no metric spec" in pc.metric_notes({"runs_per_setting": 300})[0]
-    assert pc.metric_notes({"runs_per_setting": 300, "metrics": [{"id": "p", "kind": "mean"}]}) == []
+    assert pc.metric_notes({"runs_per_setting": 300, "metrics": [{"id": "p", "kind": "mean", **_ESTIMAND_UNIT}]}) == []
     assert pc.metric_notes({"grid": {"a": [1]}}) == [] and pc.metric_notes(None) == []
 
 
@@ -116,7 +128,7 @@ def _seeds(counts: dict[str, tuple[int, int]], n_seeds: int = 3, total: int = 30
     ]
 
 
-PROTO = {"metrics": [{"id": "outbreak_probability", "kind": "proportion", "family": "R0"}]}
+PROTO = {"metrics": [{"id": "outbreak_probability", "kind": "proportion", "family": "R0", **_ESTIMAND_UNIT}]}
 
 
 def test_a_proportion_from_counts_gets_wilson_and_a_two_proportion_contrast_with_holm() -> None:
@@ -139,10 +151,10 @@ def test_the_p_values_of_a_family_are_corrected_together_and_not_with_other_fami
         for k, (count, count2) in {"a": (60, 80), "b": (90, 81)}.items():
             node[k] = {"x": count / 300, "x_count": count + s, "x_total": 300, "y": count2 / 300, "y_count": count2 + s, "y_total": 300}
         reps.append({"_seed": s, "by_g": node})
-    proto = {"metrics": [{"id": "x", "kind": "proportion", "family": "F1"}, {"id": "y", "kind": "proportion", "family": "F2"}]}
+    proto = {"metrics": [{"id": "x", "kind": "proportion", "family": "F1", **_ESTIMAND_UNIT}, {"id": "y", "kind": "proportion", "family": "F2", **_ESTIMAND_UNIT}]}
     out = ms.statistics(reps, proto)
     assert {c["metric"]: c["comparisons_in_family"] for c in out["contrasts"]} == {"x": 1, "y": 1}
-    single = {"metrics": [{"id": "x", "kind": "proportion", "family": "same"}, {"id": "y", "kind": "proportion", "family": "same"}]}
+    single = {"metrics": [{"id": "x", "kind": "proportion", "family": "same", **_ESTIMAND_UNIT}, {"id": "y", "kind": "proportion", "family": "same", **_ESTIMAND_UNIT}]}
     together = ms.statistics(reps, single)
     assert {c["comparisons_in_family"] for c in together["contrasts"]} == {2}
     assert together["contrasts"][0]["p_holm"] >= out["contrasts"][0]["p_holm"]
@@ -164,8 +176,8 @@ def test_a_paired_mean_is_compared_pair_by_pair_and_an_unpaired_one_is_not() -> 
     base = [rng.gauss(0, 1) for _ in range(60)]
     shifted = [x + 0.3 + rng.gauss(0, 0.05) for x in base]  # the same random numbers plus a small consistent shift
     reps = _values_reps(shifted, base)
-    paired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True}]})
-    unpaired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": False}]})
+    paired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    unpaired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": False, **_ESTIMAND_UNIT}]})
     (cp,), (cu,) = paired["contrasts"], unpaired["contrasts"]
     assert cp["method"] == "paired_permutation_bootstrap" and cu["method"] == "bootstrap_permutation"
     assert cp["p"] < 0.001 and cu["p"] > cp["p"], "pairing removes the shared noise: the same shift is far clearer"
@@ -176,22 +188,22 @@ def test_a_cluster_design_uses_the_clusters_and_says_what_it_lacks() -> None:
     rng = random.Random(5)
     a = [float(rng.random() < 0.5) for _ in range(100)]
     reps = _values_reps(a, [0.0] * 100, clusters=True)
-    spec = {"metrics": [{"id": "m", "kind": "proportion", "cluster": True}]}
+    spec = {"metrics": [{"id": "m", "kind": "proportion", "cluster": True, **_ESTIMAND_UNIT}]}
     out = ms.statistics(reps, spec)
     assert out["estimates"]["by_g.a.m"]["estimator"] == "cluster_bootstrap" and out["estimates"]["by_g.a.m"]["n_clusters"] == 40
     assert out["contrasts"][0]["method"] == "cluster_bootstrap"
     no_clusters = ms.statistics(_values_reps(a, a), spec)
     assert no_clusters["estimates"] == {} and "cluster design needs" in no_clusters["unsupported"][0]["reason"]
-    both = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "proportion", "cluster": True, "paired": True}]})
+    both = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "proportion", "cluster": True, "paired": True, **_ESTIMAND_UNIT}]})
     assert any("paired design over clusters is not supported" in u["reason"] for u in both["unsupported"])
     unequal = _values_reps([1.0, 0.0, 1.0], [1.0, 0.0])
-    uneq = ms.statistics(unequal, {"metrics": [{"id": "m", "kind": "mean", "paired": True}]})
+    uneq = ms.statistics(unequal, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert "same number of trials" in uneq["unsupported"][0]["reason"]
 
 
 def test_a_metric_that_is_not_in_the_results_and_one_that_no_spec_covers_are_said() -> None:
     reps = _seeds({"1.5": (60, 0), "3.0": (120, 0)})
-    missing = ms.statistics(reps, {"metrics": [{"id": "final_size", "kind": "mean"}]})
+    missing = ms.statistics(reps, {"metrics": [{"id": "final_size", "kind": "mean", **_ESTIMAND_UNIT}]})
     assert missing["unsupported"][0]["reason"] == "`final_size` does not appear in the results"
     assert ms.undeclared(reps, []) == ["outbreak_probability"] and ms.undeclared(reps, ms.declared(PROTO)) == []
     only_values = [{"_seed": 0, "cost_values": [1.0, 2.0]}]
@@ -205,7 +217,7 @@ def test_what_keeps_the_statistics_from_being_adequate_is_named() -> None:
     assert ms.coverage_gaps({}, [{"_seed": 0, "score": 1.0}], None) == [], "a result with nothing whose estimator matters has nothing to declare"
     covered = ms.statistics(reps, PROTO)
     assert ms.coverage_gaps(PROTO, reps, covered) == []
-    partial = {"metrics": [{"id": "other", "kind": "mean"}]}
+    partial = {"metrics": [{"id": "other", "kind": "mean", **_ESTIMAND_UNIT}]}
     got = ms.coverage_gaps(partial, reps, ms.statistics(reps, partial))
     assert any("no metric spec covers outbreak_probability" in g for g in got) and any("could not be made" in g for g in got)
 
@@ -259,7 +271,7 @@ async def test_the_analysis_is_given_the_engines_estimates_and_contrasts_and_the
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     declared_prompts: list[str] = []
-    protocol = {"runs_per_setting": 300, "metrics": [{"id": "outbreak_probability", "kind": "proportion", "family": "R0 contrasts"}]}
+    protocol = {"runs_per_setting": 300, "metrics": [{"id": "outbreak_probability", "kind": "proportion", "family": "R0 contrasts", **_ESTIMAND_UNIT}]}
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(declared_prompts, protocol))
     engine = Engine(_cfg(tmp_path / "declared"))
     artifacts = await engine.run()

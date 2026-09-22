@@ -11,10 +11,13 @@ The plan's protocol therefore declares ``metrics``. Each is a **MetricSpec**::
     {"id": "outbreak_probability", "estimand": "P(outbreak | R0, N)", "kind": "proportion",
      "unit": "trajectory", "cluster": null, "paired": false, "family": "R0 contrasts"}
 
-``id`` is the name the script uses for the number in ``RESULT_JSON``, at any depth. ``kind`` is ``proportion`` (a probability from
-trials that succeed or fail) or ``mean``. ``cluster`` names a list in ``RESULT_JSON`` aligned with the values that gives each
-observation's cluster (``true`` means ``<id>_clusters``). ``paired`` says trial *i* of every setting used the same random numbers,
-so the settings are compared trial by trial. ``family`` is the set of comparisons a multiplicity correction covers.
+``id`` is the name the script uses for the number in ``RESULT_JSON``, at any depth. ``estimand`` and ``unit`` are required text:
+what the number actually estimates, and what one independent observation is -- a spec that only names an estimator (``kind``)
+without saying what it is an estimator *of* is refused, the same as a protocol missing any other thing a gate needs. ``kind`` is
+``proportion`` (a probability from trials that succeed or fail) or ``mean``. ``cluster`` names a list in ``RESULT_JSON`` aligned
+with the values that gives each observation's cluster (``true`` means ``<id>_clusters``). ``paired`` says trial *i* of every
+setting used the same random numbers, so the settings are compared trial by trial. ``family`` is the set of comparisons a
+multiplicity correction covers.
 
 The engine dispatches only to estimators it has, and states which one it used:
 
@@ -65,9 +68,17 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         kind = str(item.get("kind") or "").strip().lower()
         if kind not in KINDS:
             return None, f"`protocol.metrics` entry `{ident}`: `kind` must be `proportion` or `mean`"
-        for key in ("estimand", "unit", "family"):
-            if item.get(key) is not None and not isinstance(item[key], str):
-                return None, f"`protocol.metrics` entry `{ident}`: `{key}` must be text"
+        # `estimand` and `unit` are what make a spec say what the number actually is (a probability of what,
+        # over what population) rather than just which estimator function to call -- required, the same as
+        # every other gate here (a config missing what protocol_check/oracle_check need is refused, not
+        # silently guessed at).
+        for key in ("estimand", "unit"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                what = "what this number estimates" if key == "estimand" else "what one independent observation is"
+                return None, f"`protocol.metrics` entry `{ident}` needs `{key}` (text saying {what})"
+        if item.get("family") is not None and not isinstance(item["family"], str):
+            return None, f"`protocol.metrics` entry `{ident}`: `family` must be text"
         cluster = item.get("cluster")
         if cluster is not None and not isinstance(cluster, (bool, str)):
             return None, f"`protocol.metrics` entry `{ident}`: `cluster` must be true, false, or the name of the list that holds each observation's cluster"
