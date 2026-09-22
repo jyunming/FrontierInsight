@@ -1047,10 +1047,13 @@ async function runQuest(
         }
     }
 
-    // 3. Spawn Python.
+    // 3. Spawn Python. FI_SKIP_BOOTSTRAP: every spawn in this file sets it, so a missing dependency on
+    // `frontierInsight.pythonPath` surfaces as this file's own diagnostic (which names that setting) rather
+    // than launch.py's CLI-only self-bootstrap silently creating and switching to a different `.venv/` the
+    // user never configured here.
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     // Keep a rolling tail of stderr so we can surface the actual
@@ -1391,7 +1394,7 @@ async function runSummarize(
 
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrTail: string[] = [];
@@ -1529,7 +1532,7 @@ async function runDigest(
 
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrTail: string[] = [];
@@ -1633,7 +1636,7 @@ async function runPortfolio(
 
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrTail: string[] = [];
@@ -1760,7 +1763,7 @@ async function runCritique(
 
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrTail: string[] = [];
@@ -2127,7 +2130,7 @@ async function runProposal(
 
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrTail: string[] = [];
@@ -2284,7 +2287,7 @@ async function runAnalyze(
 
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrTail: string[] = [];

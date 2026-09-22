@@ -75,7 +75,7 @@ function runLaunch(
         // so skills kept in the project (`.claude/skills` and the like) are found too.
         const child = spawn(env.python, [path.join(env.repo, "launch.py"), ...args], {
             cwd: env.workDir,
-            env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+            env: { ...process.env, PYTHONIOENCODING: "utf-8", FI_SKIP_BOOTSTRAP: "1" },
         });
         let stdout = "";
         let stderr = "";

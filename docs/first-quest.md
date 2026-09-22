@@ -12,12 +12,9 @@ A **quest** is one run: you give FI a research question, it gives you back a fol
 ```bash
 git clone https://github.com/jyunming/FrontierInsight
 cd FrontierInsight
-python -m venv .venv
-.venv\Scripts\activate          # macOS / Linux: source .venv/bin/activate   (PowerShell: .venv\Scripts\Activate.ps1)
-pip install -e .
 ```
 
-`pip install -e .` also gives you the `fi` command (the same as `python launch.py`). Optional extras (LaTeX for typeset PDFs, the knowledge layer) are in [INSTALL.md](INSTALL.md); you do not need them for this page.
+That's it — nothing to `pip install` yet. The first time you run FI (step 4), it asks once to set up its own `.venv/` (usually 30-90s) and continues straight into the quest; every run after that skips straight past it. This page writes every command as `python launch.py`, which always works, whether or not you've activated a venv. Prefer to install it yourself first? `python -m venv .venv`, activate it (`.venv\Scripts\activate`, macOS/Linux `source .venv/bin/activate`), `pip install -e .` — that also gives you `fi` as a shorter name for the same command, once that venv is activated. Optional extras (LaTeX for typeset PDFs, the knowledge layer) are in [INSTALL.md](INSTALL.md); you do not need them for this page.
 
 ## 3. Tell FI which model to use
 
@@ -32,7 +29,7 @@ Using another provider? Open `examples/integrator_bakeoff/config.yaml` and chang
 ## 4. Run the bundled example
 
 ```bash
-fi --config examples/integrator_bakeoff/config.yaml
+python launch.py --config examples/integrator_bakeoff/config.yaml
 ```
 
 It compares three numerical integrators on a damped oscillator, so it needs no data. It takes a while, and the screen shows one line for each stage as it starts — not the internal detail behind it (that goes only into `.fi/run.log` in the quest folder, for when you want it). Lines beginning with `[<quest id>]` are FI's own; the stages, in order:
@@ -58,20 +55,20 @@ When it ends, the folder `outputs/<quest id>/` holds:
 
 The last line the run prints is a plain sentence saying how far the result was checked and what stands between it and the next level, for example `evidence: The number, statistics and provenance audits found the paper faithful to what the script printed. Next: ...`. **A paper is not a verified result**: the levels are explained in [rigor.md](rigor.md), and every word FI uses is in the [glossary](glossary.md).
 
-Want to see what happened, in order? `fi --trace <quest id>` ([trace.md](trace.md)).
+Want to see what happened, in order? `python launch.py --trace <quest id>` ([trace.md](trace.md)).
 
 ## 6. If it stops
 
-- **`paused`**: FI is asking for you, not failing. Read `outputs/<quest id>/NEXT_STEP.md`: it says what to do (for example, download a few paywalled papers, or accept the paper). Then continue with `fi --resume <quest id>`. The bundled example is set not to stop; your own quests stop for paywalled papers and for your review of the result unless you turn that off (`pauses:` in the YAML).
+- **`paused`**: FI is asking for you, not failing. Read `outputs/<quest id>/NEXT_STEP.md`: it says what to do (for example, download a few paywalled papers, or accept the paper). Then continue with `python launch.py --resume <quest id>` (it finds that quest's own saved config; no `--config` needed). The bundled example is set not to stop; your own quests stop for paywalled papers and for your review of the result unless you turn that off (`pauses:` in the YAML).
 - **`failed`**: `outputs/<quest id>/quest_failed.md` names the step and what went wrong; the full log is `.fi/run.log` in the same folder.
 - **A `401`**: the key is wrong for the provider in the YAML.
 
 ## 7. Your own question
 
 ```bash
-fi --new
+python launch.py --new
 ```
 
-asks a few questions (topic, kind of paper, how deep, which model) and writes the config. The same questions are in the web form (`fi --serve`, then http://127.0.0.1:8765) and in VSCode (`@fi /new`). To read and change the plan before anything runs, answer *Stop to read and edit the plan* (advanced): the quest stops after `plan.md` is written, and `fi --resume <quest id>` runs it.
+asks a few questions (topic, kind of paper, how deep, which model) and writes the config. The same questions are in the web form (`python launch.py --serve`, then http://127.0.0.1:8765) and in VSCode (`@fi /new`). To read and change the plan before anything runs, answer *Stop to read and edit the plan* (advanced): the quest stops after `plan.md` is written, and `python launch.py --resume <quest id>` runs it.
 
 Next: the [glossary](glossary.md) for the words, [rigor.md](rigor.md) for how FI checks its own experiments, [USAGE.md](USAGE.md) for every setting.

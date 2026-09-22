@@ -17,20 +17,18 @@ One engine, **three ways to drive it**: the command line, a local **web UI**, or
 
 ## Quickstart
 
-You need **Python 3.11 or newer** and a language model FI can talk to (an API key, a signed-in CLI, or VSCode Copilot).
+You need **Python 3.11 or newer** and a language model FI can talk to (an API key, a signed-in CLI, or VSCode Copilot). Nothing else — FI sets up its own Python environment the first time it runs.
 
 ```bash
 git clone https://github.com/jyunming/FrontierInsight
 cd FrontierInsight
-python -m venv .venv
-.venv\Scripts\activate            # macOS / Linux: source .venv/bin/activate   (PowerShell: .venv\Scripts\Activate.ps1)
-pip install -e .
-
 export OPENAI_API_KEY=sk-...       # Windows PowerShell: $env:OPENAI_API_KEY = "sk-..."
-fi --config examples/integrator_bakeoff/config.yaml
+python launch.py --config examples/integrator_bakeoff/config.yaml
 ```
 
-That runs the bundled example (three numerical integrators on a damped oscillator). It needs no data. It takes a while (it searches the literature, writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (`fi` is the same command as `python launch.py`.)
+The first run asks once to install its own packages into `.venv/` (usually 30-90s), then continues straight into the quest; every run after that skips straight past it, and a later `git pull` that adds a new dependency is caught and installed the same way, automatically. Prefer to do it yourself first? `python -m venv .venv`, activate it, `pip install -e .` — FI sees that and does nothing further.
+
+That runs the bundled example (three numerical integrators on a damped oscillator). It needs no data. It takes a while (it searches the literature, writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (Once set up, `fi` from an activated `.venv` is the same command as `python launch.py`.)
 
 **Not using OpenAI?** Change `provider: name:` at the top of the example's YAML:
 
@@ -41,9 +39,9 @@ That runs the bundled example (three numerical integrators on a damped oscillato
 | A signed-in CLI (`claude login`, `codex login`) | `claude_cli` / `codex_cli` |
 | Nothing, offline | `ollama` (local, free) |
 
-If a key is missing FI says which variable before it starts anything. If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `fi --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
+If a key is missing FI says which variable before it starts anything. If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
-**Prefer to be asked?** `fi --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions and writes the config for you. **Web UI:** `fi --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
+**Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions and writes the config for you. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 
 ---
 

@@ -2,6 +2,8 @@
 
 One page, in plain words. Every item links to where it is described in full: the long, exhaustive catalogue is [capabilities-reference.md](capabilities-reference.md) (search it when you need the exact setting), and every setting is in [USAGE.md](USAGE.md). New here? Start with [your first quest](first-quest.md).
 
+`git clone` then `python launch.py --config ...` is enough on its own — no `pip install` step first. A missing package asks once to set itself up (usually 30-90s), then every run after that skips straight past it, and a later update that adds a new one is caught and fixed the same way, automatically. [Details](capabilities-reference.md#getting-started)
+
 ## The research loop
 
 FI runs a topic through: ideate, literature search, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. What you see while it runs — the CLI console, the web page's **Progress** panel, VS Code's chat — is one plain line per stage, not the internal log behind it (`.fi/run.log` in the quest folder keeps everything). [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
