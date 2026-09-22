@@ -8,8 +8,7 @@ Every quest writes ``<quest_root>/.fi/audit.jsonl``, one JSON object per line:
 * ``kind``: what happened (see :data:`KINDS`);
 * ``provenance``: **who says so**. ``deterministic`` is something the engine measured or decided by code (a node started, a
   check passed, a route was taken). ``model_claim`` is the model's own account of why (assumptions, options it weighed);
-  it is recorded because it can be argued with, and it is never a check result. ``provider_commentary`` is text a model
-  provider showed while it was thinking; it is not a complete or reliable account and nothing reads it as evidence.
+  it is recorded because it can be argued with, and it is never a check result.
 
 The trace is a record, not a control: a failure to write it never stops a quest (:meth:`AuditLog.append` swallows ``OSError``
 and says so once in the quest log).
@@ -34,8 +33,7 @@ GENESIS = "0" * 64
 
 DETERMINISTIC = "deterministic"
 MODEL_CLAIM = "model_claim"
-PROVIDER_COMMENTARY = "provider_commentary"
-PROVENANCES = (DETERMINISTIC, MODEL_CLAIM, PROVIDER_COMMENTARY)
+PROVENANCES = (DETERMINISTIC, MODEL_CLAIM)
 
 KINDS = (
     "quest_started",      # the engine began (or resumed) a run
@@ -48,7 +46,6 @@ KINDS = (
     "artifact_created",   # a file the quest wrote, with its sha256
     "check_result",       # one check's verdict (protocol, oracle, run manifest, numeric warnings, evidence, design audit)
     "model_claim",        # the model's own rationale (provenance model_claim)
-    "thinking_fragment",  # a provider's thinking commentary (provenance provider_commentary)
     "audit_repair",       # a torn last line was dropped when the file was reopened
 )
 
@@ -314,7 +311,7 @@ def verify(path: Path) -> Verification:
 DETAILS = ("summary", "checks", "debug")
 
 # What each detail level shows. ``summary``: the shape of the run and every decision. ``checks``: plus each check's verdict,
-# the artifacts and the model's stated reasons. ``debug``: everything, including provider commentary and each node's start.
+# the artifacts and the model's stated reasons. ``debug``: everything, including each node's start.
 _SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair"}
 _CHECK_KINDS = _SUMMARY_KINDS | {"check_result", "artifact_created", "model_claim"}
 
@@ -335,12 +332,12 @@ def select(events: Iterable[dict[str, Any]], *, node: str | None = None, detail:
 
 
 def _tag(e: dict[str, Any]) -> str:
-    return {"model_claim": " [model claim]", "provider_commentary": " [provider commentary, not evidence]"}.get(str(e.get("provenance")), "")
+    return {"model_claim": " [model claim]"}.get(str(e.get("provenance")), "")
 
 
 def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
-    """One line for an event, the same words on every surface. ``tagged`` ends a model's claim or a provider's commentary with
-    what it is; a page that shows that as a badge asks for it without."""
+    """One line for an event, the same words on every surface. ``tagged`` ends a model's claim with what it is;
+    a page that shows that as a badge asks for it without."""
     kind, node = str(e.get("kind")), e.get("node")
     tag = _tag if tagged else (lambda _e: "")
     where = f"{node}: " if node else ""
@@ -365,8 +362,6 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         return f"{where}check {e.get('check')}: {e.get('status')}" + (f" - {e.get('summary')}" if e.get("summary") else "")
     if kind == "model_claim":
         return f"{where}{e.get('topic', 'rationale')}: {e.get('claim', '')}{tag(e)}"
-    if kind == "thinking_fragment":
-        return f"{where}{e.get('text', '')}{tag(e)}"
     if kind == "audit_repair":
         return f"a torn last line ({e.get('dropped_bytes')} bytes) was dropped"
     if kind == "quest_started":

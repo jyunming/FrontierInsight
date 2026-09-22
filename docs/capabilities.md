@@ -21,7 +21,7 @@ FI runs a topic through: ideate, literature search, a written plan, experiment d
 
 ## What happened, in order
 
-Every quest keeps an ordered, tamper-evident diary of its steps, checks and routes, including what the model said about why (marked as its own claim). `fi --trace <quest id>`, or the **Trace** panel on the quest page. [trace.md](trace.md)
+Every quest keeps an ordered, tamper-evident diary of its steps, checks and routes, including what the model said about why (marked as its own claim). `fi --trace <quest id>`, the **Trace** panel on the quest page, or `@fi /trace <quest id>` in VSCode. [trace.md](trace.md)
 
 ## You in the loop
 

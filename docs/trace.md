@@ -14,7 +14,7 @@ python launch.py --trace <quest> --trace-node design           # only one step
 python launch.py --trace <quest> --trace-detail summary        # just the shape: steps, stops, routes (or: checks, debug)
 ```
 
-On the web, open a quest and expand **Trace** (same detail and step filters). The list reads the same as the command.
+On the web, open a quest and expand **Trace** (same detail and step filters). The list reads the same as the command. In VSCode, `@fi /trace <quest_id> [--node <name>] [--detail summary|checks|debug]` prints the same lines in chat.
 
 ## How to read a line
 
