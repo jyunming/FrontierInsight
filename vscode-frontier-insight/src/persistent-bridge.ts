@@ -17,8 +17,8 @@
  *
  * Scope is deliberately narrow: it handles ``lm_request`` only.
  * The dashboard has its own clarify panel, log stream, and progress
- * UI, so ``clarify_request`` / ``quest_event`` from a --serve quest
- * never flow through this bridge.
+ * UI, so ``clarify_request`` from a --serve quest never flows
+ * through this bridge.
  */
 import * as vscode from "vscode";
 import * as fs from "fs";

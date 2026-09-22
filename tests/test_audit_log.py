@@ -128,21 +128,34 @@ def test_a_field_cannot_overwrite_the_chain_fields(tmp_path: Path) -> None:
 # --- presenting ---------------------------------------------------------------------------------------------------------
 
 
+def test_a_trace_file_written_before_thinking_fragment_was_retired_still_renders_safely() -> None:
+    # `kind`/`provenance` are not validated against KINDS/PROVENANCES at write time (they are the
+    # vocabulary real callers use, not an enforced schema), so a trace file written before
+    # thinking_fragment/provider_commentary were retired still has them on disk; nothing rewrites
+    # old files, so describe()/_tag() must degrade to a plain fallback for those, not crash.
+    legacy_event = {
+        "seq": 1, "kind": "thinking_fragment", "node": "design",
+        "provenance": "provider_commentary", "text": "hmm",
+    }
+    assert al.describe(legacy_event) == "design: thinking_fragment"  # kind fallback: f"{where}{kind}"
+    assert al._tag(legacy_event) == ""  # provenance fallback: unrecognized tag is silently empty, not KeyError
+
+
 def test_detail_levels_and_the_node_filter(tmp_path: Path) -> None:
     log = _log(tmp_path)
     log.append("node_started", node="design")
     log.append("model_claim", node="design", provenance=al.MODEL_CLAIM, topic="assumption", claim="trials are independent")
     log.append("check_result", node="design", check="protocol", status="ok")
-    log.append("thinking_fragment", node="design", provenance=al.PROVIDER_COMMENTARY, text="hmm")
     log.append("node_completed", node="design", duration_s=2.0, wrote=["design"])
     log.append("route_decision", node="review", chosen="done", facts={"verdict": "accept"})
     events = al.read(log.path)
     kinds = lambda **kw: [e["kind"] for e in al.select(events, **kw)]  # noqa: E731
     assert kinds(detail="summary") == ["node_completed", "route_decision"]
     assert kinds(detail="checks") == ["model_claim", "check_result", "node_completed", "route_decision"]
-    assert len(kinds(detail="debug")) == 6 and kinds(detail="debug", node="review") == ["route_decision"]
+    assert len(kinds(detail="debug")) == 5 and kinds(detail="debug", node="review") == ["route_decision"]
+    assert "node_started" not in kinds(detail="checks") and "node_started" in kinds(detail="debug")
     text = "\n".join(al.render(events))
-    assert "[model claim]" in text and "[provider commentary, not evidence]" in text and "next is done because verdict=accept" in text
+    assert "[model claim]" in text and "next is done because verdict=accept" in text
 
 
 # --- what the engine writes ---------------------------------------------------------------------------------------------

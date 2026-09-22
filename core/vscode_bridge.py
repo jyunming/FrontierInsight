@@ -15,10 +15,6 @@ Python → extension::
     {"type":"lm_request","id":<int>,"node":"<name>","messages":[...],
      "model_hint":"<optional>","temperature":<float>}
     {"type":"clarify_request","id":<int>,"questions":{...}}
-    {"type":"quest_event","event":"node_started","node":"<name>",
-     "quest_id":"<id>"}
-    {"type":"quest_event","event":"quest_done","quest_id":"<id>",
-     "paper_path":"<path>"}
 
 Extension → Python::
 
@@ -275,15 +271,6 @@ class VSCodeBridgeClient:
         if not isinstance(result, dict):
             raise BridgeError(f"human_review response was not a dict: {result!r}")
         return result
-
-    async def emit_event(self, event: str, **fields: Any) -> None:
-        """Push a one-way ``quest_event`` to the extension for UI
-        rendering. Best-effort: bridge failures here are logged but
-        not raised (an offline UI shouldn't crash the engine)."""
-        try:
-            await self._send({"type": "quest_event", "event": event, **fields})
-        except BridgeError as e:
-            _log.info("emit_event(%s) failed: %s", event, e)
 
     async def _send(self, obj: dict[str, Any]) -> None:
         if self._writer is None:

@@ -7,7 +7,6 @@
  *
  *   Python → extension:
  *     {type:"lm_request", id, node, messages, model_hint, temperature}
- *     {type:"quest_event", event, ...}
  *
  *   Extension → Python:
  *     {type:"lm_chunk",  id, delta}
@@ -81,13 +80,7 @@ interface HumanReviewRequest {
     };
 }
 
-interface QuestEvent {
-    type: "quest_event";
-    event: string;
-    [key: string]: unknown;
-}
-
-type IncomingMessage = LmRequest | ClarifyRequest | HumanReviewRequest | QuestEvent;
+type IncomingMessage = LmRequest | ClarifyRequest | HumanReviewRequest;
 
 export interface BridgeOptions {
     progress: vscode.ChatResponseStream;
@@ -242,8 +235,6 @@ export class Bridge {
             await this.handleClarifyRequest(msg);
         } else if (msg.type === "human_review_request") {
             await this.handleHumanReviewRequest(msg);
-        } else if (msg.type === "quest_event") {
-            this.handleQuestEvent(msg);
         }
     }
 
@@ -657,34 +648,6 @@ export class Bridge {
                 id: req.id,
                 error: msg,
             });
-        }
-    }
-
-    private handleQuestEvent(ev: QuestEvent): void {
-        // Render quest-level milestones in the chat panel.
-        if (ev.event === "node_started") {
-            this.opts.progress.markdown(`  → **${ev.node}**\n\n`);
-        } else if (ev.event === "quest_done") {
-            this.opts.progress.markdown(
-                `\n✅ Quest finished. Paper: \`${ev.paper_path}\`\n`,
-            );
-        } else if (ev.event === "quest_failed") {
-            this.opts.progress.markdown(
-                `\n❌ Quest failed: ${ev.reason}\n`,
-            );
-        } else if (ev.event === "node_heartbeat") {
-            // The engine emits one of these every ~30 s during a
-            // long-running LLM call (e.g. Sonnet 4.6 extended-thinking
-            // spans where there's no visible output for minutes).
-            // Surfacing it here keeps the chat panel from looking
-            // frozen during a legitimate-but-slow node — same parity
-            // as the web dashboard's elapsed/idle chip.
-            const elapsed = typeof ev.elapsed_s === "number"
-                ? Math.round(ev.elapsed_s) : 0;
-            const phase = ev.phase || "waiting";
-            this.opts.progress.markdown(
-                `    \`${ev.node}\` — ${phase}, ${elapsed}s elapsed\n`,
-            );
         }
     }
 
