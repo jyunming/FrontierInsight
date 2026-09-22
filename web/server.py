@@ -49,7 +49,7 @@ from core import audit_log as fi_audit
 from core import evidence as fi_evidence
 from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
-from core.engine import Engine, _aggregate_cost_rows
+from core.engine import PROGRESS_LOG_NAME, Engine, _aggregate_cost_rows
 from core.provider import ProxySupervisor
 from generation._visual_check import report_summary
 
@@ -2249,22 +2249,31 @@ def make_app(
             "launcher_started_at": launcher_status.get("started_at"),
         })
 
+    def _progress_or_run_log(quest_id: str) -> Path:
+        """The curated view of the quest — a fixed set of one-line stage updates (`core/engine.py:STAGE_PROGRESS`) — or
+        the full internal `run.log` for a quest run before that file existed (or one that never wrote a single line
+        to it, e.g. it failed before its first node started)."""
+        fi_dir = _resolve_quest_root(app.state.output_root, quest_id) / ".fi"
+        progress_path = fi_dir / PROGRESS_LOG_NAME
+        return progress_path if progress_path.is_file() else fi_dir / "run.log"
+
     @app.get("/api/quests/{quest_id}/log")
     async def get_log(quest_id: str, n: int = 200) -> JSONResponse:
-        log_path = _resolve_quest_root(app.state.output_root, quest_id) / ".fi" / "run.log"
-        return JSONResponse({"lines": _read_log_tail(log_path, n=n)})
+        return JSONResponse({"lines": _read_log_tail(_progress_or_run_log(quest_id), n=n)})
 
     @app.get("/api/quests/{quest_id}/log/stream")
     async def stream_log(quest_id: str) -> StreamingResponse:
-        log_path = _resolve_quest_root(app.state.output_root, quest_id) / ".fi" / "run.log"
-
         async def gen():
             offset = 0
-            # Wait briefly for the file to exist on cold start.
+            # Wait briefly for the file to exist on cold start; re-resolved on every attempt, since `progress.log` and
+            # `run.log` are created together (`core/engine.py:_quest_logger`, right when the Engine is constructed) —
+            # deciding once, before either exists, would otherwise lock this connection onto `run.log` for good.
+            log_path = _progress_or_run_log(quest_id)
             for _ in range(30):
                 if log_path.exists():
                     break
                 await asyncio.sleep(0.2)
+                log_path = _progress_or_run_log(quest_id)
             if log_path.exists():
                 offset = log_path.stat().st_size
                 # Send the existing tail first.

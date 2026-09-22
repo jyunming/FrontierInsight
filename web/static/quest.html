@@ -309,10 +309,12 @@
     </div>
   </section>
 
-  <!-- SSE Log -->
+  <!-- SSE Log: the curated view (a fixed, short list of plain-English stage lines — core/engine.py:STAGE_PROGRESS),
+       not the full internal log. That full log is `.fi/run.log` in the quest's own folder, on disk, for anyone who wants it. -->
   <section id="log-section" class="flex flex-col">
-    <h3 class="font-label-sm text-label-sm text-outline uppercase mb-2 pl-2">System Log</h3>
+    <h3 class="font-label-sm text-label-sm text-outline uppercase mb-2 pl-2">Progress</h3>
     <pre id="log" class="bg-[#090909] border border-white/10 rounded-xl p-4 font-code-md text-code-md h-64 overflow-y-auto relative shadow-[inset_0_0_40px_rgba(0,0,0,0.8)] text-on-surface-variant whitespace-pre-wrap"></pre>
+    <p class="text-outline text-body-sm mt-1 pl-2">The full internal log is <code class="font-code-md">.fi/run.log</code> in the quest's folder.</p>
   </section>
 
 </main>

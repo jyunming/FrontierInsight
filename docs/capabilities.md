@@ -4,7 +4,7 @@ One page, in plain words. Every item links to where it is described in full: the
 
 ## The research loop
 
-FI runs a topic through: ideate, literature search, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
+FI runs a topic through: ideate, literature search, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. What you see while it runs — the CLI console, the web page's **Progress** panel, VS Code's chat — is one plain line per stage, not the internal log behind it (`.fi/run.log` in the quest folder keeps everything). [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
 
 ## Checking its own experiments
 

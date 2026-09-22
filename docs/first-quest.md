@@ -35,7 +35,7 @@ Using another provider? Open `examples/integrator_bakeoff/config.yaml` and chang
 fi --config examples/integrator_bakeoff/config.yaml
 ```
 
-It compares three numerical integrators on a damped oscillator, so it needs no data. It takes a while, and the screen shows each stage as it starts. Lines beginning with `[<quest id>]` are FI's own; the stages, in order:
+It compares three numerical integrators on a damped oscillator, so it needs no data. It takes a while, and the screen shows one line for each stage as it starts — not the internal detail behind it (that goes only into `.fi/run.log` in the quest folder, for when you want it). Lines beginning with `[<quest id>]` are FI's own; the stages, in order:
 
 | Stage | What it is doing |
 |---|---|
