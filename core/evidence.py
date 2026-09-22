@@ -193,12 +193,23 @@ def assess(
         elif status != "ok":
             matched_gaps.append(f"the run was not shown to have done what the protocol fixed (run manifest check: {status or 'not run'})")
     warnings = _json(needs / "NUMERIC_WARNINGS.json")
-    if state.get("numeric_warnings_accepted"):
+    last_warning_entry = warnings[-1] if isinstance(warnings, list) and warnings else None
+    if isinstance(last_warning_entry, dict) and "error" in last_warning_entry:
+        # The scanner crashed rather than running cleanly: this is never a pass, whatever engine.numeric_warnings says —
+        # "off" and "warn" are choices about a check that ran; a crash means the run's numerics were never checked at all.
+        matched_gaps.append("the numeric-warning scanner failed to run, so whether the run's numerics are sound is unknown (see needs/NUMERIC_WARNINGS.json)")
+    elif state.get("numeric_warnings_accepted"):
         matched_gaps.append("the run's numeric warnings were accepted as they were (see needs/NUMERIC_WARNINGS.json)")
     elif settings.get("numeric_warnings") == "off":
         matched_gaps.append("the numeric-warning check was turned off")
     elif isinstance(warnings, list) and warnings and settings.get("numeric_warnings") == "warn":
         matched_gaps.append("the run's numerics warned and the check only recorded it (engine.numeric_warnings: warn)")
+    environment = _json(needs / "ENVIRONMENT.json")
+    if isinstance(environment, dict) and environment.get("isolated") is False:
+        matched_gaps.append(
+            "the run shared its Python environment with other quests (execution.shared_interpreter / "
+            "system_site_packages); a package installed for a different quest could have affected this one (see needs/ENVIRONMENT.json)"
+        )
     matched = reconciled and not matched_gaps
 
     # independently validated

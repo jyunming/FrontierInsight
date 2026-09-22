@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -192,11 +193,14 @@ def test_the_technical_form_keeps_the_level_identifiers(tmp_path: Path) -> None:
 # --- the engine writes it, and the surfaces show it ------------------------------------------------------------------------
 
 
-def _cfg(tmp_path: Path) -> Config:
+def _cfg(tmp_path: Path, *, isolated: bool = False) -> Config:
     return Config(
         topic="smoke topic for evidence", title="evidence-smoke", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1, pilot_run=False),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
+        execution=ExecutionConfig(
+            sandbox="venv", timeout_s=120, split_analysis=False,
+            **({"shared_interpreter": False, "system_site_packages": False} if isolated else {}),
+        ),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
     )
 
@@ -242,7 +246,7 @@ async def test_a_quest_that_held_to_a_protocol_and_passed_an_oracle_reaches_vali
         return _fake_response_for(prompt)
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-    engine = Engine(_cfg(tmp_path))
+    engine = Engine(_cfg(tmp_path, isolated=True))
     await engine.run()
     record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
     assert "protocol_runtime_matched" not in record["all_gaps"] and "independently_validated" not in record["all_gaps"], record["all_gaps"]
@@ -420,8 +424,15 @@ def test_a_research_profile_fills_what_the_config_leaves_out_and_refuses_what_co
     assert cfg.pauses.plan == "ask" and cfg.execution.split_analysis is True and cfg.execution.split_failure == "block"
     assert cfg.engine.protocol_check == cfg.engine.oracle_check == cfg.engine.numeric_warnings == cfg.engine.run_manifest_check == "block"
     assert cfg.engine.cross_check_verify is True and cfg.engine.review_panel == ["methodologist", "statistician", "reproducibility", "devil_advocate"]
-    mine = Config.model_validate({"topic": "t", "rigor_profile": "research", "engine": {"review_panel": ["methodologist"]}})
-    assert mine.engine.review_panel == ["methodologist"], "a panel of your own is kept"
+    # A panel of your own is kept only when it still covers the roles the profile actually needs (the audit's P1-3: a
+    # single reviewer, or one missing statistician/reproducibility, must not silently pass as satisfying "research").
+    mine = Config.model_validate({
+        "topic": "t", "rigor_profile": "research",
+        "engine": {"review_panel": ["methodologist", "statistician", "reproducibility", "skeptic"]},
+    })
+    assert mine.engine.review_panel == ["methodologist", "statistician", "reproducibility", "skeptic"], "a panel of your own is kept, roles and all"
+    with pytest.raises(Exception, match="rigor_profile: research cannot be combined with.*engine\.review_panel"):
+        Config.model_validate({"topic": "t", "rigor_profile": "research", "engine": {"review_panel": ["methodologist"]}})
     default = Config.model_validate({"topic": "t"})
     assert default.rigor_profile == "default" and default.pauses.plan == "off" and default.execution.split_failure == "warn"
     for bad, key in (
@@ -438,3 +449,98 @@ def test_a_research_profile_fills_what_the_config_leaves_out_and_refuses_what_co
 
     with pytest.raises(Exception, match="engine.oracle_check"):
         Config(topic="t", rigor_profile="research", engine=EngineConfig(oracle_check="warn"))
+
+
+# --- the run's own environment (P1-2) --------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_shared_environment_is_recorded_and_named_as_a_gap_an_isolated_one_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    shared = Engine(_cfg(tmp_path / "shared"))
+    await shared.run()
+    record = json.loads((shared.quest_root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
+    assert record["isolated"] is False and record["shared_interpreter"] is True
+    assert record["python"] and record["executable"] and record["platform"]
+    # Either a real, non-empty package list, or an explicit error — never a silent empty list standing in for "unknown"
+    # (this codebase's own dev machine reproduces the real bypass: `pip freeze` there exits non-zero with empty stdout).
+    if "packages_error" in record:
+        assert "packages" not in record
+    else:
+        assert record["packages"], "pip freeze succeeded with no error and no packages: implausible, check for a silent failure"
+    evidence = json.loads((shared.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
+    assert any("shared its Python environment" in g for g in evidence["all_gaps"]["protocol_runtime_matched"])
+
+    alone = Engine(_cfg(tmp_path / "alone", isolated=True))
+    await alone.run()
+    record = json.loads((alone.quest_root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
+    assert record["isolated"] is True
+    evidence = json.loads((alone.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
+    assert not any("shared its Python environment" in g for g in evidence["all_gaps"].get("protocol_runtime_matched", []))
+
+
+@pytest.mark.asyncio
+async def test_a_pip_freeze_failure_does_not_stop_the_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    real_exec = asyncio.create_subprocess_exec
+
+    async def flaky_exec(*args, **kw):
+        if "pip" in args and "freeze" in args:
+            raise OSError("no such interpreter")
+        return await real_exec(*args, **kw)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", flaky_exec)
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    record = json.loads((engine.quest_root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
+    assert "packages_error" in record and "packages" not in record
+
+
+@pytest.mark.asyncio
+async def test_a_hung_pip_freeze_is_killed_instead_of_leaked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``pip freeze`` that never returns must not become a background process nothing ever cleans up: the
+    timeout only cancels FI's own wait, and the child process it was waiting on keeps running unless FI kills
+    it itself."""
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    real_exec = asyncio.create_subprocess_exec
+    killed = {"called": False, "waited": False}
+
+    class HungProc:
+        returncode = None
+
+        async def communicate(self):
+            # Stands in for `asyncio.wait_for` timing out on a real hang: whatever raises it, the
+            # code under test must react to a TimeoutError by killing the process it was waiting on.
+            raise asyncio.TimeoutError()
+
+        def kill(self):
+            killed["called"] = True
+
+        async def wait(self):
+            killed["waited"] = True
+
+    async def hangs_on_freeze(*args, **kw):
+        if "pip" in args and "freeze" in args:
+            return HungProc()
+        return await real_exec(*args, **kw)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", hangs_on_freeze)
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert killed == {"called": True, "waited": True}
+    record = json.loads((engine.quest_root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
+    assert "packages_error" in record and "TimeoutError" in record["packages_error"]

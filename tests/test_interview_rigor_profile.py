@@ -54,6 +54,28 @@ def test_an_empty_review_panel_does_not_contradict_the_profile(tmp_path: Path) -
     assert "review_panel" not in text and cfg.engine.review_panel == PANEL
 
 
+def test_the_smart_default_panel_is_completed_but_a_custom_one_is_left_for_config_to_refuse(tmp_path: Path) -> None:
+    """The interview's own smart default is the 3-persona panel (no reproducibility) — the same panel offered
+    since before the research profile existed. Beside ``rigor_profile: research`` that combination would fail
+    Config's own validator (a hand-edited YAML with the same gap correctly stops the quest); the interview
+    completes it instead, since the person never chose to leave reproducibility off, the smart default did.
+    A panel that does not match that exact preset (round-tripped from ``--update``, say) is written as given
+    and, if still incomplete, refused by Config with the role named — completing a choice the person actually
+    made, rather than one the smart default made for them, would take the decision away without saying so."""
+    three_persona = ["methodologist", "statistician", "devil_advocate"]
+    answers = replace(_full_answers(), review_panel=three_persona, rigor_profile="research", pause_for_plan=False)
+    (tmp_path / "e").mkdir()
+    _text, cfg = _cfg(tmp_path / "e", answers)
+    assert cfg.engine.review_panel == [*three_persona, "reproducibility"]
+    _yaml_text, cfg = _emit(tmp_path, rigor_profile="research", review_panel=three_persona)
+    assert cfg.engine.review_panel == [*three_persona, "reproducibility"]
+    # A custom panel — even one a person built by adding to the same three roles — is not the exact smart
+    # default the interview offers, so it is written as given and left to Config's own refusal.
+    (tmp_path / "f").mkdir()
+    with pytest.raises(Exception, match="review_panel.*profile needs reproducibility"):
+        _cfg(tmp_path / "f", replace(answers, review_panel=[*three_persona, "skeptic"]))
+
+
 def test_the_profile_survives_an_update_of_the_other_answers(tmp_path: Path) -> None:
     from core.interview_update import load_current_answers, rewrite_yaml_with_new_answers
 

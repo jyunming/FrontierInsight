@@ -142,6 +142,15 @@ export interface InterviewAnswers {
  */
 export const ENSEMBLE_MIN_MODELS = 2;
 
+/** The three roles ``rigor_profile: research`` requires present on a review panel — must match
+ * ``REQUIRED_REVIEW_ROLES`` in core/config.py. ``devil_advocate`` is not required. */
+export const REQUIRED_REVIEW_ROLES: readonly string[] = ["methodologist", "statistician", "reproducibility"];
+
+/** The interview's smart-default review panel (the "3-persona panel" quick-pick choice in
+ * interview.ts) — predates the research profile's role requirement above, so it is missing
+ * ``reproducibility``. Must match ``REVIEW_PANELS[0].value`` in core/interview.py. */
+export const SMART_DEFAULT_REVIEW_PANEL: readonly string[] = ["methodologist", "statistician", "devil_advocate"];
+
 /**
  * The model ids the user named for an ensemble: comma / semicolon / newline
  * separated. Order kept, blanks and repeats dropped. Mirrors
@@ -413,8 +422,19 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}cross_check_per_finding_k: 0`);
     lines.push(`${indent}enable_analyze_reroute: false`);
     if (answers.review_panel.length > 0) {
+        let panel = answers.review_panel;
+        const isSmartDefault =
+            panel.length === SMART_DEFAULT_REVIEW_PANEL.length &&
+            panel.every((role, i) => role === SMART_DEFAULT_REVIEW_PANEL[i]);
+        if (answers.rigor_profile === "research" && isSmartDefault) {
+            // Mirrors core/interview.py:answers_to_yaml — the smart default predates the research
+            // profile's role requirement; complete it here rather than writing a config the engine
+            // would refuse. A custom panel (not this exact preset) is written as given and, if still
+            // incomplete, refused by Config with the role named, same as any other hand-edited config.
+            panel = [...panel, ...REQUIRED_REVIEW_ROLES.filter((r) => !panel.includes(r))];
+        }
         lines.push(`${indent}review_panel:`);
-        for (const persona of answers.review_panel) {
+        for (const persona of panel) {
             lines.push(`${indent}${indent}- "${yamlEscape(persona)}"`);
         }
     } else if (answers.rigor_profile !== "research") {
