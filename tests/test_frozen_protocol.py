@@ -427,3 +427,73 @@ async def test_the_stop_message_names_the_quest_folder_so_the_command_can_be_pas
     text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
     log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert f'--approve-amendment "{engine.quest_root}"' in text and f'--approve-amendment "{engine.quest_root}"' in log
+
+
+# --- a hand-edited frozen record (P0-3) -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_record_edited_by_hand_blocks_the_quest_until_a_person_approves_restoring_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real bypass: `needs/FROZEN_PROTOCOL.json` no longer matches its own hash, which `load()` already reported as a
+    `problem` — but every gate read the edited content anyway. It must instead block, under every profile, and recover
+    only from the version saved right when the protocol was locked, approved the same way any other change to it is."""
+    prompts: list[str] = []
+    engine_box: dict[str, Any] = {}
+    tampered: dict[str, bool] = {"once": False}
+
+    def _tamper() -> None:
+        path = fp.frozen_path(engine_box["engine"].quest_root)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["protocol"]["runs_per_setting"] = 999999  # edited by hand; the sha256 field is left as it was
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+    base = _fake(prompts, second_design={})
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        reply = await base(self, messages, **kw)
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "Experiment Design" and "Apply this checklist" not in prompt:
+            if sum(1 for p in prompts if _classify(p) == "Experiment Design") == 2 and not tampered["once"]:
+                tampered["once"] = True
+                _tamper()
+        return reply
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    first = Engine(_cfg(tmp_path))
+    engine_box["engine"] = first
+    await first.run()  # pauses at the redesign (iteration 1); iteration 0 already wrote a paper.md, which is expected
+
+    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert descriptor["kind"] == "amendment"
+    pending = fp.load_pending(first.quest_root)
+    assert pending["source"] == fp.TAMPER_SOURCE and pending["proposed_protocol"] == P1 and pending["results_seen"] is False
+    text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "changed after it was locked" in text and "--approve-amendment" in text and "does not go on" in text
+    log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[amendment] paused" in log
+    on_disk = json.loads(fp.frozen_path(first.quest_root).read_text(encoding="utf-8"))
+    assert on_disk["protocol"]["runs_per_setting"] == 999999, "nothing is silently fixed without an approval"
+
+    # Resuming without approving does not go on (unlike a declined ordinary amendment): it pauses again, the same way.
+    cfg = _cfg(tmp_path)
+    unapproved = Engine(cfg, resume_quest_id=first.quest_id)
+    engine_box["engine"] = unapproved
+    await unapproved.run()
+    assert fp.load_pending(unapproved.quest_root)["source"] == fp.TAMPER_SOURCE
+    assert not fp.approval_path(unapproved.quest_root).exists()
+
+    ok, message = fp.approve(unapproved.quest_root, "the auditor", via="test")
+    assert ok and "restor" not in message  # approve() itself doesn't know the domain; it just names the request
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    engine_box["engine"] = second
+    artifacts = await second.run()
+    assert artifacts.paper_md is not None
+    record = _frozen(second)
+    assert record["protocol"]["runs_per_setting"] == 300 and record["version"] == 2, "restored, not the tampered content"
+    assert not fp.pending_path(second.quest_root).exists() and not fp.approval_path(second.quest_root).exists()
+    amend = fp.amendments(second.quest_root)
+    assert len(amend) == 1 and amend[0]["source"] == fp.TAMPER_SOURCE and amend[0]["prespecified"] is True
+    assert (artifacts.raw_state["design"] or {}).get("protocol", {}).get("runs_per_setting") == 300
+

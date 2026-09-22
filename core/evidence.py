@@ -97,19 +97,37 @@ def _json(path: Path) -> Any:
 
 
 def _audit_gaps(paper_dir: Path) -> tuple[bool, list[str]]:
-    """Whether the paper-vs-results audits that ran all passed, and what they found."""
-    ran = 0
+    """Whether the paper-vs-results audits all ran and passed, and what they found.
+
+    Each of the three writes its report even when it finds nothing (a clean run leaves evidence the check ran), and marks
+    itself ``skipped`` when there was nothing for it to check (a survey with no numeric results, say) — that is a legitimate
+    outcome, not a gap. A report missing altogether means its check never ran (it crashed before it could write one): when
+    none of the three ran, that is simply a quest that has not reached this stage yet, said once, plainly; when only SOME
+    are missing, that is the suspicious pattern (one audit's clean report standing in for two that never ran), named for
+    each one that is missing.
+    """
+    ran = present = 0
     gaps: list[str] = []
+    missing: list[str] = []
     for name, label in (("numeric_audit", "the number check"), ("statistics_audit", "the statistics check"),
                         ("provenance_audit", "the provenance check")):
         report = _json(paper_dir / f"{name}.json")
-        if not isinstance(report, dict) or report.get("skipped"):
+        if not isinstance(report, dict):
+            missing.append(label)
+            continue
+        present += 1
+        if report.get("skipped"):
             continue
         ran += 1
         if report.get("ok") is False:
             findings = report.get("findings") or []
             gaps.append(f"{label} reported {len(findings)} finding(s)")
-    return ran > 0 and not gaps, gaps
+    if missing:
+        if present == 0:
+            gaps.append("the paper has not been checked against the results yet")
+        else:
+            gaps.extend(f"{label} did not run, or its report could not be read" for label in missing)
+    return ran > 0 and not gaps and not missing, gaps
 
 
 def assess(
@@ -297,10 +315,20 @@ def upgrade(record: Any) -> Any:
     return upgraded
 
 
-def summary_line(record: dict[str, Any]) -> str:
-    """One line for the CLI and the VSCode chat."""
+_NOT_EXECUTED_CLAIM = "The experiment has not produced results (it has not run, or it failed)."
+
+
+def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
+    """One plain sentence for the CLI and the VSCode chat: what was shown, then what stands in the way of more — never the
+    six level identifiers themselves (a scientist reading this after a run should not have to look up what
+    ``internally_reconciled`` means). ``technical=True`` returns the old compact ``<level>; to reach <level>: <gap>`` form,
+    for the record kept on disk and for anything reading a level name back out of this line."""
     record = upgrade(record)
     status = str(record.get("status") or "not_executed")
     gaps = record.get("gaps") or []
-    tail = f"; to reach {record.get('next_level')}: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
-    return f"{status}{tail}"
+    if technical:
+        tail = f"; to reach {record.get('next_level')}: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
+        return f"{status}{tail}"
+    claim = INFO.get(status, {}).get("assurance_claim") or _NOT_EXECUTED_CLAIM
+    tail = f" Next: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
+    return f"{claim}{tail}"

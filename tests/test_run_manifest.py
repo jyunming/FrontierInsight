@@ -55,7 +55,7 @@ def test_a_run_count_that_differs_in_any_setting_is_a_shortfall() -> None:
     assert any("ran another number (R0=1.5: 30)" in f for f in found)
     assert any("no attempted trials per cell" in f for f in rm.problems(PROTOCOL, _manifest(attempted_per_cell={})))
     fewer_cells = _manifest(attempted_per_cell={"R0=0.9": 300}, successful_per_cell={"R0=0.9": 300})
-    assert any("grid has 3 settings; the run reports 1" in f for f in rm.problems(PROTOCOL, fewer_cells))
+    assert any("grid has 3 setting(s) exactly" in f for f in rm.problems(PROTOCOL, fewer_cells))
 
 
 def test_a_failed_trial_must_be_listed_and_the_protocol_must_say_how_failures_are_treated() -> None:
@@ -327,13 +327,71 @@ async def test_the_other_seeds_are_checked_and_a_replicate_that_was_never_run_is
     assert "was not written" in record["seeds"]["1"][0]
 
 
-def test_an_axis_the_protocol_does_not_list_does_not_make_the_setting_count_a_difference() -> None:
+def test_an_axis_the_protocol_does_not_list_is_a_difference_that_needs_an_amendment() -> None:
+    """Sweeping an axis the protocol never fixed is a wider study than the one that was frozen, and it must be reached
+    through an amendment, not accepted silently because every listed axis still looks fine."""
     swept_more = _manifest(
         realized_grid={"R0": [0.9, 1.5, 3.0], "N": [100, 1000, 5000]},
         attempted_per_cell={f"R0={r},N={n}": 300 for r in (0.9, 1.5, 3.0) for n in (100, 1000, 5000)},
         successful_per_cell={f"R0={r},N={n}": 300 for r in (0.9, 1.5, 3.0) for n in (100, 1000, 5000)},
     )
-    assert rm.problems(PROTOCOL, swept_more) == []
+    found = rm.problems(PROTOCOL, swept_more)
+    assert any("sweeps N" in f and "amendment" in f for f in found)
+
+
+def test_a_cell_key_that_names_a_value_or_axis_outside_the_grid_is_a_difference() -> None:
+    """The bypass a real quest could hit: cell keys that do not exactly match the protocol's own Cartesian product still
+    passed before, because the checker only compared axis VALUES (via realized_grid) and a raw cell COUNT, never the cells
+    themselves."""
+    wrong_keys = _manifest(attempted_per_cell={"foo": 300, "bar": 300, "baz": 300}, successful_per_cell={"foo": 300, "bar": 300, "baz": 300})
+    found = rm.problems(PROTOCOL, wrong_keys)
+    assert any("does not look like" in f for f in found)
+
+    bad_value = _manifest(
+        attempted_per_cell={"R0=0.9": 300, "R0=1.5": 300, "R0=99": 300}, successful_per_cell={"R0=0.9": 300, "R0=1.5": 300, "R0=99": 300},
+    )
+    found = rm.problems(PROTOCOL, bad_value)
+    assert any("R0=99" in f and "the protocol's grid for R0 is" in f for f in found)
+
+    grid2 = {**PROTOCOL, "grid": {"R0": [0.9, 1.5], "N": [10, 20]}}
+    missing_axis = _manifest(
+        realized_grid={"R0": [0.9, 1.5], "N": [10, 20]},
+        attempted_per_cell={"R0=0.9": 300, "R0=1.5": 300}, successful_per_cell={"R0=0.9": 300, "R0=1.5": 300},
+    )
+    found = rm.problems(grid2, missing_axis)
+    assert any("is missing N" in f for f in found)
+
+    # Number formatting drift (a float re-serialized) is not a real difference: the value still matches the protocol's.
+    formatted = _manifest(
+        attempted_per_cell={"R0=0.9": 300, "R0=1.5000000001": 300, "R0=3.0": 300},
+        successful_per_cell={"R0=0.9": 300, "R0=1.5000000001": 300, "R0=3.0": 300},
+    )
+    assert rm.problems(PROTOCOL, formatted) == []
+
+
+def test_two_cell_keys_for_the_same_setting_is_a_difference() -> None:
+    dup = _manifest(
+        attempted_per_cell={"R0=0.9": 150, "R0=0.900000000001": 150, "R0=1.5": 300, "R0=3.0": 300},
+        successful_per_cell={"R0=0.9": 150, "R0=0.900000000001": 150, "R0=1.5": 300, "R0=3.0": 300},
+    )
+    found = rm.problems(PROTOCOL, dup)
+    assert any("more than one cell key names the same setting" in f for f in found)
+
+
+def test_a_failed_trial_needs_a_valid_cell_a_trial_id_and_a_reason() -> None:
+    ok = {"R0=0.9": 300, "R0=1.5": 297, "R0=3.0": 300}
+    listed = [
+        {"cell": "R0=1.5", "trial": 0, "reason": ""}, {"cell": "nope", "trial": 1, "reason": "solver"},
+        {"cell": "R0=1.5", "reason": "solver"},
+    ]
+    found = rm.problems(PROTOCOL, _manifest(successful_per_cell=ok, failed_trials=listed))
+    assert any("has no `reason`" in f for f in found)
+    assert any("names no valid cell" in f for f in found)
+    assert any("has no `trial` id" in f for f in found)
+
+    dup_trial = [{"cell": "R0=1.5", "trial": 0, "reason": "solver"}, {"cell": "R0=1.5", "trial": 0, "reason": "solver again"}, {"cell": "R0=1.5", "trial": 1, "reason": "solver"}]
+    found = rm.problems(PROTOCOL, _manifest(successful_per_cell=ok, failed_trials=dup_trial))
+    assert any("same cell and trial id twice" in f for f in found)
 
 
 def test_a_protocol_with_runs_but_no_failure_policy_is_told_so_before_the_freeze() -> None:

@@ -161,6 +161,25 @@ def load_pending(quest_root: Path) -> dict[str, Any] | None:
     return pending if isinstance(pending, dict) and pending.get("proposed_sha256") else None
 
 
+TAMPER_SOURCE = "the saved protocol file no longer matches its own checksum"
+
+
+def propose_tamper_recovery(quest_root: Path, frozen: dict[str, Any]) -> dict[str, Any]:
+    """``needs/FROZEN_PROTOCOL.json`` was edited after it was locked (:func:`load` found ``problem``): propose restoring
+    the version saved into ``protocol_versions/`` right when it was locked, which nothing since has touched. This goes
+    through the same approval act as any other change to the frozen protocol — restoring it is still a change a person
+    must say yes to, not something the engine does for itself."""
+    version = int(frozen.get("version", 1) or 1)
+    saved = _read(_needs(quest_root) / "protocol_versions" / f"v{version}.json")
+    restored = saved.get("protocol") if isinstance(saved, dict) else None
+    restored = restored if isinstance(restored, dict) and restored else None
+    return propose(
+        quest_root, restored, {}, source=TAMPER_SOURCE,
+        reason="needs/FROZEN_PROTOCOL.json does not match its own SHA-256; restoring what was saved when it was locked",
+        results_seen=False,
+    )
+
+
 def propose(
     quest_root: Path, proposed_protocol: dict[str, Any], design: dict[str, Any] | None, *,
     source: str, reason: str, results_seen: bool,

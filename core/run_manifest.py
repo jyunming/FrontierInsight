@@ -17,11 +17,13 @@ from __future__ import annotations
 import json
 import math
 import re
+from itertools import product
 from pathlib import Path
 from typing import Any
 
 SCHEMA = "fi.run-manifest/v1"
 NAME = "run_manifest.json"
+_NO_MATCH = object()  # a cell key's value that names none of the protocol's own values for that axis
 
 
 def read(raw_dir: Path) -> tuple[dict[str, Any] | None, str]:
@@ -73,8 +75,92 @@ def checkable(protocol: dict[str, Any] | None) -> bool:
     )
 
 
+def _coerce_number(raw: str) -> Any:
+    """A cell key's value as the number it names, when it is one (``"0.9"`` -> ``0.9``); the string itself otherwise."""
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
+def _match_grid_value(raw: str, allowed: list[Any]) -> Any:
+    """The value in ``allowed`` that a cell key's ``raw`` text names (matched numerically, so ``"0.9"`` finds ``0.9`` and a
+    ``0.9`` written back with float rounding still finds it), or :data:`_NO_MATCH`."""
+    for v in allowed:
+        if isinstance(v, str) and raw == v:
+            return v
+    number = _num(_coerce_number(raw))
+    if number is not None:
+        for v in allowed:
+            vn = _num(v)
+            if vn is not None and math.isclose(vn, number, rel_tol=1e-9, abs_tol=1e-12):
+                return v
+    return _NO_MATCH
+
+
+def _parse_cell(key: Any) -> dict[str, str] | None:
+    """``"R0=0.9,N=100"`` -> ``{"R0": "0.9", "N": "100"}``. ``None`` when ``key`` is not a string shaped that way, or
+    names the same axis twice."""
+    if not isinstance(key, str) or not key:
+        return None
+    parsed: dict[str, str] = {}
+    for part in key.split(","):
+        if "=" not in part:
+            return None
+        axis, _, value = part.partition("=")
+        axis = axis.strip()
+        if not axis or axis in parsed:
+            return None
+        parsed[axis] = value.strip()
+    return parsed
+
+
+def _canonicalize_cell(key: Any, grid: dict[str, list[Any]]) -> tuple[frozenset[tuple[str, Any]] | None, str | None]:
+    """The setting a manifest's cell key names, as a hashable set of ``(axis, the protocol's own value object)`` pairs so
+    two keys for the same setting compare equal regardless of key order or number formatting — or ``(None, why)`` when the
+    key cannot be placed in the protocol's grid at all (the identity check :func:`problems` needs before it trusts any
+    count against it)."""
+    parsed = _parse_cell(key)
+    if parsed is None:
+        return None, f"cell key {key!r} does not look like `axis=value[,axis=value...]`"
+    grid_axes, key_axes = set(grid), set(parsed)
+    if key_axes != grid_axes:
+        parts = []
+        if missing := sorted(grid_axes - key_axes):
+            parts.append(f"is missing {', '.join(missing)}")
+        if extra := sorted(key_axes - grid_axes):
+            parts.append(f"names {', '.join(extra)}, which the protocol's grid does not have")
+        return None, f"cell key {key!r} {' and '.join(parts)}"
+    canon: list[tuple[str, Any]] = []
+    for axis, raw in parsed.items():
+        matched = _match_grid_value(raw, grid[axis])
+        if matched is _NO_MATCH:
+            return None, f"cell key {key!r} sets {axis}={raw!r}, and the protocol's grid for {axis} is {_fmt(grid[axis])}"
+        canon.append((axis, matched))
+    return frozenset(canon), None
+
+
+def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
+    """Every setting the protocol's grid names — its full Cartesian product, canonically keyed the same way
+    :func:`_canonicalize_cell` keys a manifest's cells, so the two sets can be compared for exact equality."""
+    axes = list(grid.items())
+    return {frozenset(zip((a for a, _ in axes), combo)) for combo in product(*(v for _, v in axes))}
+
+
 def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "") -> list[str]:
-    """How the run differs from the protocol, one sentence each; empty when the manifest matches it."""
+    """How the run differs from the protocol, one sentence each; empty when the manifest matches it.
+
+    A cell (a setting the grid names) is identified by parsing its key and snapping each axis's value to the protocol's own
+    value object (:func:`_canonicalize_cell`), never by comparing key strings: a key naming an axis the protocol does not
+    have, missing one it does, or naming a value outside the protocol's list for an axis is a difference on its own, and the
+    run's cells must then match the protocol's full Cartesian product exactly — sweeping one axis or value beyond the
+    protocol is not absorbed as "extra", it is the same kind of difference as leaving one out. Reaching a wider grid this
+    way is always available: ask for it as a protocol amendment.
+    """
     if manifest is None:
         return [why or f"{NAME} is missing"]
     out: list[str] = []
@@ -95,24 +181,53 @@ def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str
         if left_out or extra:
             parts = ([f"leaves out {_fmt(left_out)}"] if left_out else []) + ([f"adds {_fmt(extra)}"] if extra else [])
             out.append(f"the protocol fixes {axis} at {_fmt(want)}; the run swept {_fmt(got)}: it {' and '.join(parts)}")
+    if grid and (extra_axes := sorted(set(realized) - set(grid))):
+        out.append(
+            f"the run's realized_grid sweeps {', '.join(extra_axes)}, which the protocol's grid does not fix: "
+            "an axis beyond the protocol needs a protocol amendment, not a wider run"
+        )
 
     runs = _num(protocol.get("runs_per_setting"))
     attempted = manifest.get("attempted_per_cell")
+    cells_trustworthy = False
+    if grid and isinstance(attempted, dict) and attempted:
+        canon_of: dict[str, frozenset[tuple[str, Any]]] = {}
+        raw_of: dict[frozenset[tuple[str, Any]], list[str]] = {}
+        cell_errors: list[str] = []
+        for raw_key in attempted:
+            canon, err = _canonicalize_cell(raw_key, grid)
+            if err:
+                cell_errors.append(err)
+                continue
+            canon_of[raw_key] = canon
+            raw_of.setdefault(canon, []).append(raw_key)
+        if cell_errors:
+            out.extend(cell_errors[:4])
+            if len(cell_errors) > 4:
+                out.append(f"...and {len(cell_errors) - 4} more cell key(s) that do not fit the protocol's grid")
+        if duplicates := {c: ks for c, ks in raw_of.items() if len(ks) > 1}:
+            shown = "; ".join(f"{ks[0]!r} and {ks[1]!r} name the same setting" for ks in list(duplicates.values())[:3])
+            out.append(f"more than one cell key names the same setting ({shown})")
+        cells_trustworthy = not cell_errors and not duplicates
+        if cells_trustworthy:
+            all_cells = _all_cells(grid)
+            covered = set(canon_of.values())
+            if covered != all_cells:
+                out.append(
+                    f"the protocol's grid has {len(all_cells)} setting(s) exactly ({_fmt_cells(all_cells)}); "
+                    f"the run's cells are {_fmt_cells(covered)}"
+                )
     if runs is not None:
         if not isinstance(attempted, dict) or not attempted:
             out.append(f"the protocol fixes {runs:g} runs per setting, and the run reports no attempted trials per cell (`attempted_per_cell`)")
-        else:
-            cells = 1
-            for values in grid.values():
-                cells *= len(values) if isinstance(values, list) and values else 1
-            # Only when the run swept nothing the protocol does not list: another axis multiplies the settings.
-            if grid and set(realized) <= set(grid) and len(attempted) != cells:
-                out.append(f"the protocol's grid has {cells} settings; the run reports {len(attempted)}")
+        elif not grid or cells_trustworthy:
             short = {c: n for c, n in attempted.items() if _num(n) is None or not math.isclose(float(n), runs)}
             if short:
                 shown = ", ".join(f"{c}: {n}" for c, n in list(short.items())[:4])
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
 
+    listed = manifest.get("failed_trials")
+    listed = listed if isinstance(listed, list) else []
     if isinstance(attempted, dict) and attempted:
         completed = manifest.get("successful_per_cell")
         completed = completed if isinstance(completed, dict) else {}
@@ -125,10 +240,31 @@ def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str
                 break
             if total is not None and done is not None:
                 lost += int(total - done)
-        listed = manifest.get("failed_trials")
-        listed = listed if isinstance(listed, list) else []
         if lost and len(listed) != lost:
             out.append(f"{lost} trial(s) did not complete, and the run lists {len(listed)} of them (`failed_trials`): a failure must be listed, not dropped")
+
+    if listed and (not grid or cells_trustworthy):
+        seen: set[tuple[Any, Any]] = set()
+        bad: list[str] = []
+        for i, entry in enumerate(listed):
+            if not isinstance(entry, dict):
+                bad.append(f"failed_trials[{i}] is not an object")
+                continue
+            cell = entry.get("cell")
+            if not isinstance(cell, str) or (grid and _canonicalize_cell(cell, grid)[0] is None):
+                bad.append(f"failed_trials[{i}] names no valid cell of the protocol's grid ({cell!r})")
+            if "trial" not in entry:
+                bad.append(f"failed_trials[{i}] has no `trial` id")
+            elif (cell, entry["trial"]) in seen:
+                bad.append(f"failed_trials names the same cell and trial id twice ({cell!r}, {entry['trial']!r})")
+            else:
+                seen.add((cell, entry["trial"]))
+            if not str(entry.get("reason") or "").strip():
+                bad.append(f"failed_trials[{i}] has no `reason`")
+        if bad:
+            out.extend(bad[:4])
+            if len(bad) > 4:
+                out.append(f"...and {len(bad) - 4} more problem(s) in `failed_trials`")
 
     thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
     used = manifest.get("thresholds_used")
@@ -139,6 +275,17 @@ def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str
         elif not _same(value, used[name]):
             out.append(f"the protocol fixes the threshold {name} = {value}; the run used {used[name]}")
     return out
+
+
+def _fmt_cells(cells: set[frozenset[tuple[str, Any]]]) -> str:
+    """A short, deterministic description of a set of canonical cells, for a difference message."""
+    def render(cell: frozenset[tuple[str, Any]]) -> str:
+        return ",".join(f"{a}={v:g}" if isinstance(v, float) else f"{a}={v}" for a, v in sorted(cell))
+
+    shown = sorted(render(c) for c in cells)
+    if len(shown) <= 6:
+        return f"{{{', '.join(shown)}}} ({len(shown)})"
+    return f"{{{', '.join(shown[:6])}, ...}} ({len(shown)})"
 
 
 def failure_count(manifest: dict[str, Any] | None) -> int:
