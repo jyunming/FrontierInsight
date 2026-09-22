@@ -350,7 +350,7 @@ def test_ingest_help_text_does_not_reference_knowledge_enabled(
     from launch import parse_args
 
     with pytest.raises(SystemExit):
-        parse_args(["--help"])
+        parse_args(["--help-all"])
     help_text = capsys.readouterr().out
     # Locate the --ingest section.
     assert "--ingest" in help_text

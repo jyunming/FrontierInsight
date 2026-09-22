@@ -293,6 +293,8 @@ is the index.
 
 ### CLI tools
 
+Everything from `--summarize` down to `--install-tectonic-from` below also has a friendlier spelling, `fi tools <name>` (e.g. `fi tools digest --days 7`) — the two are the exact same flag; `fi tools --help` lists them, and `fi --help-all` still shows the full flag form with every qualifier. `--config`, `--new`, `--serve`, `--resume`, `--update`, `--trace`, `--skills` and the skill-approval flags stay at the top level (`fi --help`), since most quests use one of those.
+
 - **`--serve`** — local web UI; honours `FI_VSCODE_BRIDGE_PORT` env var for routing LLM calls through Copilot when launched from a VSCode terminal. Refuses `provider=vscode_extension` quests when no bridge is wired (400 at submit).
 - **`--resume <quest_id>`** — re-enter the LangGraph from the last checkpointed node when a prior run died mid-pipeline.
 - **`--fleet <yaml> ...`** — bounded concurrency, ref-counted proxies (per-provider locks so one provider's proxy warmup doesn't block others), `--memory-cap-mb` (a below-baseline cap is disabled with a warning, never deadlocked on), per-quest construction-failure isolation, and an optional process-wide LLM-call cap via `FI_MAX_CONCURRENT_LLM_CALLS`. `viztracer --profile` is single-quest only (rejected with `--fleet`).
