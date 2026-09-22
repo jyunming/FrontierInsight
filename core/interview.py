@@ -39,6 +39,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from core.config import REQUIRED_REVIEW_ROLES
+
 
 # ---------------------------------------------------------------------------
 # Question schema
@@ -1570,8 +1572,20 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         lines.append(f"{indent}enable_analyze_reroute: false")
 
     if answers.review_panel:
+        panel = list(answers.review_panel)
+        if answers.rigor_profile == "research" and panel == list(REVIEW_PANELS[0].value):
+            # The interview offers exactly three panels (``REVIEW_PANELS``); this is the smart default
+            # (3 personas), which predates the research profile's requirement (methodologist, statistician,
+            # reproducibility) and would otherwise be written out as a panel that contradicts the profile it
+            # sits beside. Complete it here, silently, since nobody chose to leave reproducibility off — the
+            # smart default did, before the profile existed. This narrow match is deliberate: a genuinely
+            # custom panel (round-tripped from ``--update`` on an existing quest, say) is written as given,
+            # and if it still lacks a required role, Config refuses it with the role named, the same as any
+            # other hand-edited config — completing an explicit, non-default choice without saying so would
+            # take away a decision the person actually made.
+            panel = [*panel, *[r for r in REQUIRED_REVIEW_ROLES if r not in panel]]
         lines.append(f"{indent}review_panel:")
-        for persona in answers.review_panel:
+        for persona in panel:
             lines.append(f"{indent}{indent}- {json.dumps(persona)}")
     elif answers.rigor_profile != "research":
         # An empty panel written beside the research profile would contradict it (the profile brings its own panel).

@@ -1486,6 +1486,12 @@ class OutputConfig(BaseModel):
         return _expand(v)
 
 
+# The panel roles the research profile needs present, whatever panel a config supplies of its own — a single reviewer,
+# or one missing the roles that actually do the methodology/statistics/reproducibility reading, does not stand in for
+# them just by being a non-empty list. ``devil_advocate`` is not required: it's the one role a study can reasonably run
+# without and still have the three that matter.
+REQUIRED_REVIEW_ROLES: tuple[str, ...] = ("methodologist", "statistician", "reproducibility")
+
 # What ``rigor_profile: research`` sets, section by section (see ``Config.rigor_profile``).
 _RESEARCH_PROFILE: dict[str, dict[str, Any]] = {
     "pauses": {"plan": "ask"},
@@ -1530,8 +1536,9 @@ class Config(BaseModel):
                 for key, value in wanted.items():
                     have = getattr(block, key, None)
                     if key == "review_panel":
-                        if not have:
-                            conflicts.append(f"{section}.{key} (the profile needs a review panel; it is empty)")
+                        missing = [r for r in REQUIRED_REVIEW_ROLES if r not in (have or [])]
+                        if missing:
+                            conflicts.append(f"{section}.{key} is {have!r}, and the profile needs {', '.join(missing)} on it")
                     elif have != value:
                         conflicts.append(f"{section}.{key} is {have!r}, the profile needs {value!r}")
                 continue
@@ -1540,8 +1547,9 @@ class Config(BaseModel):
                 if key not in block or block[key] is None:
                     block[key] = list(value) if isinstance(value, list) else value
                 elif key == "review_panel":
-                    if not block[key]:
-                        conflicts.append(f"{section}.{key} is empty, the profile needs a review panel")
+                    missing = [r for r in REQUIRED_REVIEW_ROLES if r not in (block[key] or [])]
+                    if missing:
+                        conflicts.append(f"{section}.{key} is {block[key]!r}, and the profile needs {', '.join(missing)} on it")
                 elif block[key] != value and not (isinstance(value, bool) and str(block[key]).strip().lower() == str(value).lower()):
                     conflicts.append(f"{section}.{key} is {block[key]!r}, the profile needs {value!r}")
             data[section] = block

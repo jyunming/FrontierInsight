@@ -222,3 +222,64 @@ def test_the_dashboard_and_the_quest_page_name_the_numeric_stop() -> None:
     static = Path(__file__).resolve().parent.parent / "web" / "static"
     for page in ("index.html", "quest.html"):
         assert "numeric: 'numeric'" in (static / page).read_text(encoding="utf-8"), page
+
+
+@pytest.mark.asyncio
+async def test_a_scanner_that_crashes_is_recorded_as_unknown_not_as_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real bypass (the re-audit's P1-1): before this fix, a scan that raised returned `[]` exactly like a scan
+    that ran and found nothing, and nothing was ever written to disk to tell the two apart."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_QUIET, repair=_QUIET))
+    monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+
+    record = _recorded(engine)
+    assert record[-1] == {"error": "RuntimeError('boom')", "mode": "block"}
+
+    from core import evidence
+
+    got = evidence.assess(engine.quest_root, artifacts.raw_state, settings={"numeric_warnings": "block"})
+    assert not got["levels"]["protocol_runtime_matched"]
+    assert any("scanner failed to run" in g for g in got["all_gaps"]["protocol_runtime_matched"])
+
+
+def test_a_crash_followed_by_a_clean_scan_clears_the_gap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scanner crash on one run must not read as "still unknown" forever: a repair that made the scan itself
+    run clean again (as opposed to fixing the warnings it found) has to say so, or the stale crash entry would
+    outlive it and permanently gap a quest whose numerics were, in the end, actually checked."""
+    from core import evidence
+
+    engine = Engine(_cfg(tmp_path))
+    monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert engine._scan_numeric_warnings({}, "", None) == []
+    assert _recorded(engine)[-1] == {"error": "RuntimeError('boom')", "mode": "block"}
+    got = evidence.assess(engine.quest_root, {}, settings={"numeric_warnings": "block"})
+    assert any("scanner failed to run" in g for g in got["all_gaps"]["protocol_runtime_matched"])
+
+    monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: [])
+    assert engine._scan_numeric_warnings({}, "", None) == []
+    record = _recorded(engine)
+    assert record[-1] == {"warnings": [], "mode": "block"}, "the crash must not stay the last word once a scan actually ran clean"
+    assert record[0] == {"error": "RuntimeError('boom')", "mode": "block"}, "the crash itself stays on record"
+    got = evidence.assess(engine.quest_root, {}, settings={"numeric_warnings": "block"})
+    assert not any("scanner failed to run" in g for g in got["all_gaps"]["protocol_runtime_matched"])
+
+
+def test_a_clean_scan_after_warnings_were_found_does_not_add_a_synthetic_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean scan following an earlier crash is news (above); a clean scan following earlier WARNINGS is not —
+    the repair-loop tests elsewhere read the recorded history as exactly what was found, with no "and now it's
+    fine" entries added on top for every successful repair."""
+    engine = Engine(_cfg(tmp_path))
+    monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: [nw.NumericWarning("ignored_argument", "abs_tol")])
+    assert len(engine._scan_numeric_warnings({}, "", None)) == 1
+    assert len(_recorded(engine)) == 1
+
+    monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: [])
+    assert engine._scan_numeric_warnings({}, "", None) == []
+    assert len(_recorded(engine)) == 1, "a clean scan after warnings (not a crash) adds nothing"

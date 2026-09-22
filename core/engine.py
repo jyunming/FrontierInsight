@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import shutil
 import string
@@ -644,6 +645,7 @@ class Engine:
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
             await self.executor.setup(self.quest_root)
+            await self._record_environment()
 
             await self._connect_llm()
 
@@ -5267,8 +5269,36 @@ class Engine:
             found = _numeric.scan(stderr, result_json)
         except Exception as e:  # noqa: BLE001 -- a defect in the scan must never stall a quest
             self._log.warning("[numeric] the warning scan failed (%r); skipping", e)
+            # A scanner that crashed is not the same as one that ran and found nothing: the first means the run's
+            # numerics were never actually checked. Recorded so the evidence level can tell the two apart (a crash that
+            # went unrecorded here previously read exactly like a clean scan — the audit's P1-1).
+            try:
+                path = self.quest_root / "needs" / "NUMERIC_WARNINGS.json"
+                history = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+                history.append({"error": repr(e), "mode": self.config.engine.numeric_warnings})
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
+                self._audit_check("numeric_warnings", path, status="error", summary=repr(e))
+            except (OSError, ValueError):
+                pass
             return []
         if not found:
+            # A clean scan writes nothing when there is no history yet (a run with nothing to report leaves no
+            # trace file at all). But when the file already ends on a scanner crash, this clean scan is itself
+            # news: without it, that stale ``{"error": ...}`` would stay the last entry forever, and
+            # ``core/evidence.py`` reads the last entry to decide whether the numerics were ever actually
+            # checked — a later clean scan must be able to say so. A clean scan after WARNINGS (not a crash)
+            # stays silent, unchanged: the repair-loop tests below need the recorded history of what was found,
+            # not a synthetic "and then it was fine" entry for every successful repair.
+            path = self.quest_root / "needs" / "NUMERIC_WARNINGS.json"
+            if path.is_file():
+                try:
+                    history = json.loads(path.read_text(encoding="utf-8"))
+                    if history and isinstance(history[-1], dict) and "error" in history[-1]:
+                        history.append({"warnings": [], "mode": self.config.engine.numeric_warnings})
+                        path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
+                except (OSError, ValueError, IndexError):
+                    pass
             return []
         for w in found:
             self._log.warning("[numeric] %s", w.describe())
@@ -10178,6 +10208,65 @@ class Engine:
         from core.example_inputs import stage_inputs
 
         stage_inputs(sources, self.quest_root, self._log)
+
+    async def _record_environment(self) -> None:
+        """The interpreter, platform and installed packages this quest's experiment actually runs on, and whether
+        that environment is this quest's own or shared with every other quest on the machine.
+
+        Not enforced — ``execution.shared_interpreter`` / ``system_site_packages`` are left as the earlier decision
+        keeps them (a previous quest's `pip install` CAN affect this run) — but recorded, so a result can be
+        reproduced from the exact package list it ran on, and so the evidence level can say plainly when it wasn't
+        isolated rather than being silent about it (the re-audit's P1-2). Best-effort throughout: a diagnostic that
+        cannot be written must never stop a quest.
+        """
+        isolated = self.config.execution.sandbox == "docker" or not (
+            self.config.execution.shared_interpreter or self.config.execution.system_site_packages
+        )
+        record: dict[str, Any] = {
+            "python": sys.version, "executable": sys.executable, "platform": platform.platform(),
+            "sandbox": self.config.execution.sandbox,
+            "shared_interpreter": self.config.execution.shared_interpreter,
+            "system_site_packages": self.config.execution.system_site_packages,
+            "isolated": isolated,
+        }
+        try:
+            py = self.executor.python_path(self.quest_root)
+            proc = await asyncio.create_subprocess_exec(
+                str(py), "-m", "pip", "freeze",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                # ``wait_for`` cancels the ``communicate()`` coroutine on timeout, but that does not
+                # touch the child process itself — left alone, a hung `pip freeze` leaks a background
+                # process for the rest of the machine's uptime. Kill it before re-raising to the outer
+                # handler below, which records the timeout as ``packages_error``.
+                proc.kill()
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+                raise
+            if proc.returncode != 0:
+                # The returncode is not optional to check: pip can exit non-zero with EMPTY stdout (a real case,
+                # found on this codebase's own dev machine — a corrupted dist-info makes `pip freeze` crash there),
+                # which would otherwise look exactly like "confirmed zero packages" instead of "unknown."
+                record["packages_error"] = f"pip freeze exited {proc.returncode}: {err.decode('utf-8', 'replace')[-500:]}"
+            else:
+                record["packages"] = sorted(out.decode("utf-8", "replace").splitlines())
+        except Exception as e:  # noqa: BLE001 -- a diagnostic must never stall a quest
+            record["packages_error"] = repr(e)
+        try:
+            path = self.quest_root / "needs" / "ENVIRONMENT.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            self._audit_check(
+                "environment", path, status="isolated" if isolated else "shared",
+                summary="" if isolated else "shared_interpreter/system_site_packages: another quest's packages could affect this run",
+            )
+        except OSError:
+            pass
 
     def _job_block(self) -> str:
         """The background-job contract for the design and code-writing prompts,
