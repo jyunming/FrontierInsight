@@ -890,6 +890,54 @@
       "tier": 3
     },
     {
+      "id": "provider_base_url",
+      "label": "Custom endpoint (base_url)",
+      "prompt": "Only for openai/codex/gemini/ollama/vllm: the base URL of an OpenAI-compatible endpoint other than that provider's own default (a self-hosted vLLM server, a corporate gateway, or a third-party model reached the OpenAI-compatible way, such as Moonshot's Kimi at https://api.moonshot.ai/v1). Leave blank to use the provider's own default endpoint.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "https://api.moonshot.ai/v1",
+      "default": "",
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
+      "id": "provider_api_key_env",
+      "label": "Key environment variable",
+      "prompt": "Only when the key for the endpoint above is not in that provider's usual variable (OPENAI_API_KEY, GEMINI_API_KEY, ...): the name of the environment variable (or a line in your .env file) FI should read instead. Leave blank to use the provider's own conventional name.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "MOONSHOT_API_KEY",
+      "default": "",
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
+      "id": "provider_fixed_temperature",
+      "label": "Fixed temperature",
+      "prompt": "Only for a model that answers just one temperature and rejects any other with HTTP 400 (Moonshot's Kimi K2.6 / K3: 0.6 with thinking off, 1 with it on). When set, sent on every call in place of FI's own per-node temperatures. Leave blank to use FI's defaults.",
+      "kind": "text",
+      "choices": [],
+      "placeholder": "0.6",
+      "default": "",
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3
+    },
+    {
       "id": "page_limit",
       "label": "Page limit",
       "prompt": "The most pages paper.pdf may take, as a whole number. Leave blank (or type none) for no set limit; a limit the topic states, such as '≤ 4 pages', still applies. With a limit the paper gets a tighter layout and the writer a word budget, and each draft is rendered and its pages counted: a draft over the limit is written again, shorter, at most twice.",

@@ -3302,8 +3302,8 @@ async def _run_new(
     # imports its own (smart_defaults + model_choices_for).
     from core.interview import (
         QUESTIONS, InterviewAnswers, answers_to_yaml,
-        derive_tier2, derive_tier3, parse_page_limit_answer, preflight_clarify,
-        questions_for_tier, slugify,
+        derive_tier2, derive_tier3, parse_fixed_temperature_answer, parse_page_limit_answer,
+        preflight_clarify, questions_for_tier, slugify,
     )
 
     # Choice labels include em-dashes / arrows / Unicode math. Windows
@@ -3418,6 +3418,16 @@ async def _run_new(
                 except ValueError as e:
                     print(f"    ({e}; the page limit is unchanged)")
                     continue
+            if row["id"] == "provider_fixed_temperature":
+                # Validated here, not just at YAML-emission time: without this, a typo survives
+                # the review screen silently and answers_to_yaml's own parse (unhandled here)
+                # raises ValueError well after the interview is otherwise done, taking the whole
+                # session down with it instead of just this one field's edit.
+                try:
+                    parse_fixed_temperature_answer(new_val)
+                except ValueError as e:
+                    print(f"    ({e}; the fixed temperature is unchanged)")
+                    continue
             if row["tier"] == 2:
                 derived[row["id"]] = new_val
             else:
@@ -3447,6 +3457,9 @@ async def _run_new(
         knowledge_enabled=bool(derived["knowledge_enabled"]),
         provider=str(partial.get("provider", "openai")),
         provider_model=str(partial.get("provider_model")) if partial.get("provider_model") else None,
+        provider_base_url=str(advanced.get("provider_base_url") or ""),
+        provider_api_key_env=str(advanced.get("provider_api_key_env") or ""),
+        provider_fixed_temperature=str(advanced.get("provider_fixed_temperature") or ""),
         audience=str(derived.get("audience", "external")),
         knowledge_top_k=int(derived.get("knowledge_top_k", 8) or 8),
         knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),

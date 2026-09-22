@@ -785,7 +785,36 @@ def test_quest_and_compare_pages_mark_a_total_that_counts_only_the_priced_calls(
     assert "$${totalCost.toFixed(4)}${costNote}" in quest
     compare = (static / "compare.html").read_text(encoding="utf-8")
     assert "costPartialNote(cost.summary)" in compare
-    assert "Cost: $${cost.total.toFixed(4)}${escapeHtml(costNote)}" in compare
+    assert "Cost: $${(cost.total || 0).toFixed(4)}${escapeHtml(costNote)}" in compare
+
+
+def test_quest_and_compare_pages_say_unknown_not_zero_when_nothing_is_priced() -> None:
+    """A quest that used ONLY a model with no listed price (Moonshot's Kimi, a local vLLM
+    server, ...) must not show a confident "$0.0000" — that reads as free, not unknown. Regression
+    guard for both the naive `r.cost_usd || 0` (quest.html's own per-row aggregation) and
+    `(records).reduce((s, r) => s + (r.cost_usd || 0), 0)` (compare.html re-deriving instead of
+    reading the server's already-correct `summary.total_cost_usd`) coercions that caused it."""
+    static = Path(__file__).resolve().parent.parent / "web" / "static"
+    quest = (static / "quest.html").read_text(encoding="utf-8")
+    assert "typeof r.cost_usd === 'number'" in quest
+    assert "cost unknown" in quest
+    assert "r.cost_usd || 0" not in quest
+    compare = (static / "compare.html").read_text(encoding="utf-8")
+    assert "summary.total_cost_usd" in compare
+    assert "cost.total === null" in compare
+    assert "Cost: unknown (no listed price)" in compare
+    assert "(r.cost_usd || 0)" not in compare
+
+
+def test_compare_page_shows_zero_not_unknown_for_a_quest_with_no_calls_at_all() -> None:
+    """A quest that failed before ever reaching a provider has 0 calls, not 0 PRICED calls out of
+    some real total -- "$0.0000" is simply correct there, not a false claim the way it is for a
+    quest that made real (unpriced) calls. The "unknown" wording must be gated on `cost.calls > 0`,
+    not fire just because `cost.total` happens to be null (an empty-records quest is null too)."""
+    static = Path(__file__).resolve().parent.parent / "web" / "static"
+    compare = (static / "compare.html").read_text(encoding="utf-8")
+    assert "cost.total === null && cost.calls > 0" in compare
+    assert "summary.total_requests" in compare
 
 
 def test_execute_edit_disabled_by_default(

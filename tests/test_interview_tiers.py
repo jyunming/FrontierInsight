@@ -192,7 +192,11 @@ def test_tier3_covers_the_advanced_fields() -> None:
     design-revise loop hard cap; ``node_models`` is the per-node model
     override (comma-separated node:model pairs, empty by default).
     ``ensemble_profile`` was promoted out of tier-3 to tier-1 so the
-    cost multiplier sits with provider/model."""
+    cost multiplier sits with provider/model. ``provider_base_url`` /
+    ``provider_api_key_env`` / ``provider_fixed_temperature`` are the
+    HTTP-direct-transport connection overrides (a custom OpenAI-compatible
+    endpoint, its key variable, a model-mandated fixed temperature) — CLI/
+    serve only, same as ``provider``/``provider_model`` in tier 1."""
     ids = [q.id for q in questions_for_tier(3, "cli")]
     assert set(ids) == {
         "supply_papers",
@@ -208,6 +212,9 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "node_models",
         "reasoning_effort",
         "page_limit",
+        "provider_base_url",
+        "provider_api_key_env",
+        "provider_fixed_temperature",
     }
 
 

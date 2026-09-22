@@ -237,6 +237,37 @@ def test_page_limit_answers_that_are_refused(raw):  # noqa: ANN001
     assert parse_page_limit_answer(raw, on_error=seen.append) is None and len(seen) == 1
 
 
+def test_fixed_temperature_reaches_the_provider_config_and_blank_writes_nothing(tmp_path: Path):
+    ans = _full_answers()
+    ans.provider_fixed_temperature = "0.6"
+    assert "  fixed_temperature: 0.6" in answers_to_yaml(ans, frontend="cli").splitlines()
+    cfg = _load(tmp_path, ans)
+    assert cfg.provider.fixed_temperature == 0.6
+    ans.provider_fixed_temperature = ""
+    assert "fixed_temperature:" not in answers_to_yaml(ans, frontend="cli")
+    assert _load(tmp_path, ans).provider.fixed_temperature is None
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, None), ("", None), ("  ", None),
+    ("0.6", 0.6), (" 0.6 ", 0.6), ("1", 1.0), (1, 1.0), (0.6, 0.6), ("+0.6", 0.6),
+])
+def test_fixed_temperature_answers_that_are_accepted(raw, expected):  # noqa: ANN001
+    from core.interview import parse_fixed_temperature_answer
+
+    assert parse_fixed_temperature_answer(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["abc", "1.2.3", "1,2", "0.6 degrees", True, [0.6]])
+def test_fixed_temperature_answers_that_are_refused(raw):  # noqa: ANN001
+    from core.interview import parse_fixed_temperature_answer
+
+    with pytest.raises(ValueError):
+        parse_fixed_temperature_answer(raw)
+    seen: list[str] = []
+    assert parse_fixed_temperature_answer(raw, on_error=seen.append) is None and len(seen) == 1
+
+
 def test_update_keeps_the_page_limit_and_clearing_it_removes_it(tmp_path: Path):
     """--update loads the limit from the quest's YAML and keeps it; clearing it
     drops the key rather than merging the old limit back, and re-runs the

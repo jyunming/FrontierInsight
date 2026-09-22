@@ -770,6 +770,39 @@ QUESTIONS: tuple[Question, ...] = (
         tier=3,
     ),
     Question(
+        id="provider_base_url",
+        label="Custom endpoint (base_url)",
+        prompt="Only for openai/codex/gemini/ollama/vllm: the base URL of an OpenAI-compatible endpoint other than that provider's own default (a self-hosted vLLM server, a corporate gateway, or a third-party model reached the OpenAI-compatible way, such as Moonshot's Kimi at https://api.moonshot.ai/v1). Leave blank to use the provider's own default endpoint.",
+        kind="text",
+        default="",
+        placeholder="https://api.moonshot.ai/v1",
+        mid_quest_editable=False,
+        frontends=("cli", "serve"),
+        tier=3,
+    ),
+    Question(
+        id="provider_api_key_env",
+        label="Key environment variable",
+        prompt="Only when the key for the endpoint above is not in that provider's usual variable (OPENAI_API_KEY, GEMINI_API_KEY, ...): the name of the environment variable (or a line in your .env file) FI should read instead. Leave blank to use the provider's own conventional name.",
+        kind="text",
+        default="",
+        placeholder="MOONSHOT_API_KEY",
+        mid_quest_editable=False,
+        frontends=("cli", "serve"),
+        tier=3,
+    ),
+    Question(
+        id="provider_fixed_temperature",
+        label="Fixed temperature",
+        prompt="Only for a model that answers just one temperature and rejects any other with HTTP 400 (Moonshot's Kimi K2.6 / K3: 0.6 with thinking off, 1 with it on). When set, sent on every call in place of FI's own per-node temperatures. Leave blank to use FI's defaults.",
+        kind="text",
+        default="",
+        placeholder="0.6",
+        mid_quest_editable=False,
+        frontends=("cli", "serve"),
+        tier=3,
+    ),
+    Question(
         id="page_limit",
         label="Page limit",
         prompt="The most pages paper.pdf may take, as a whole number. Leave blank (or type none) for no set limit; a limit the topic states, such as '≤ 4 pages', still applies. With a limit the paper gets a tighter layout and the writer a word budget, and each draft is rendered and its pages counted: a draft over the limit is written again, shorter, at most twice.",
@@ -1295,6 +1328,16 @@ class InterviewAnswers:
     # CLI / serve only — VSCode pins ``vscode_extension`` silently.
     provider: str = "vscode_extension"
     provider_model: str | None = None
+    # HTTP-direct providers (openai/codex/gemini/ollama/vllm) only, and only when the endpoint or
+    # key differ from that provider's own default: an OpenAI-compatible proxy or gateway (a
+    # self-hosted vLLM server, Moonshot's Kimi, a corporate gateway), an env var other than the
+    # provider's conventional one, or a model that rejects the per-node temperatures FI would
+    # otherwise send. Blank (the default) leaves all three unset, matching today's behavior for
+    # every quest that doesn't need them. Emitted into ``provider.base_url`` / ``api_key_env`` /
+    # ``fixed_temperature`` exactly as ``docs/USAGE.md``'s schema documents them.
+    provider_base_url: str = ""
+    provider_api_key_env: str = ""
+    provider_fixed_temperature: str = ""
     max_iterations: int = 2
     # Audience for the published paper. "external" drops FI-internal
     # cross-quest memory from the References section; "internal"
@@ -1397,6 +1440,32 @@ def parse_page_limit_answer(
         bad(f"page_limit must be at least 1; got {number}")
         return None
     return number
+
+
+def parse_fixed_temperature_answer(
+    value: Any, *, on_error: Callable[[str], None] | None = None,
+) -> float | None:
+    """The ``provider_fixed_temperature`` answer as a float, or ``None`` when blank.
+
+    Unlike ``parse_node_models_answer``, a bad value here is not silently dropped: the model this
+    field exists for (Kimi K2.6 / K3) answers HTTP 400 to any temperature but the one or two it
+    accepts, so a typo that silently emitted nothing would surface as a cryptic provider error deep
+    into a quest instead of here, at config-generation time, where it is a one-line fix."""
+    def bad(message: str) -> None:
+        if on_error is None:
+            raise ValueError(message)
+        on_error(message)
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        bad(f"provider_fixed_temperature must be a number, or blank to leave it unset; got {value!r}")
+        return None
 
 
 def parse_node_models_answer(raw: str) -> dict[str, str]:
@@ -1513,6 +1582,16 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     lines.append(f"{indent}name: {json.dumps(answers.provider)}")
     if answers.provider_model:
         lines.append(f"{indent}model: {json.dumps(answers.provider_model)}")
+    # HTTP-direct transports only, and only when set: an endpoint or key env var other than the
+    # provider's own default, or a fixed temperature a picky model demands. Blank (the default for
+    # every quest that doesn't need them) emits nothing.
+    if answers.provider_base_url.strip():
+        lines.append(f"{indent}base_url: {json.dumps(answers.provider_base_url.strip())}")
+    if answers.provider_api_key_env.strip():
+        lines.append(f"{indent}api_key_env: {json.dumps(answers.provider_api_key_env.strip())}")
+    fixed_temperature = parse_fixed_temperature_answer(answers.provider_fixed_temperature)
+    if fixed_temperature is not None:
+        lines.append(f"{indent}fixed_temperature: {fixed_temperature}")
     # Multi-model ensemble preset. Only emit when the user picked
     # something non-"off"; otherwise leave the engine on its
     # single-model path (no regression for default quests).

@@ -23,6 +23,7 @@ import shutil
 import string
 import sys
 import time
+import traceback
 import unicodedata
 import uuid
 
@@ -10055,6 +10056,14 @@ class Engine:
         # whitespace (newlines, tabs, runs of spaces) to a single
         # space before truncating to 200 chars.
         topic_one_line = " ".join(self.config.topic.split())[:200]
+        # ``format_exception_only`` (not a bare f"{type}: {exc}") so a note an LLM call attached
+        # via ``Exception.add_note`` — provider/transport/model/node context, and, for an
+        # HTTP auth failure, which key looked wrong — reaches this file. Without it, a note the
+        # codebase already writes to every provider-call exception was silently dropped here and
+        # only ever reached a full ``run.log`` traceback (a 401 read as a bare, unexplained
+        # ``HTTPStatusError``, with the note that would have named the likely key sitting one
+        # frame away, unread).
+        what_broke = "".join(traceback.format_exception_only(type(exc), exc)).rstrip("\n")
         body = (
             f"# Quest failed before producing a paper\n"
             f"\n"
@@ -10067,7 +10076,7 @@ class Engine:
             f"## What broke\n"
             f"\n"
             f"```\n"
-            f"{type(exc).__name__}: {exc}\n"
+            f"{what_broke}\n"
             f"```\n"
             f"\n"
             f"## Last ~80 lines of `.fi/run.log`\n"

@@ -19,12 +19,14 @@
 
 <main class="flex-grow w-full max-w-max-width mx-auto px-margin-mobile md:px-margin-desktop py-section-gap relative">
 
-  <!-- Sticky Progress Pill -->
+  <!-- Sticky Progress Pill: a static reminder of the question count while scrolling. Not a live
+       "you are here" tracker — the form is one scrollable page, not a paginated wizard, so there is
+       no single "current" question to report; a fixed fraction like "1 of N" was never true. -->
   <div id="progress-pill" class="hidden fixed top-24 right-margin-mobile md:right-margin-desktop z-40">
     <div class="bg-surface-high border border-white/10 rounded-full px-4 py-2 flex items-center gap-2 shadow-[0_0_40px_rgba(195,192,255,0.1)] backdrop-blur-md">
       <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
       <span class="font-label-sm text-label-sm uppercase text-on-surface tracking-wider">
-        Question <span id="progress-current">1</span> of <span id="progress-total">6</span>
+        <span id="progress-total">12</span> questions
       </span>
     </div>
   </div>
@@ -142,7 +144,9 @@
       }
     } else {
       title.textContent = 'New Research Quest';
-      subtitle.textContent = 'Six questions, then a review of the auto-derived defaults. Edit anything before you launch.';
+      // No fixed count here (the schema has grown before and will again) — the progress pill names
+      // the real count once the form renders.
+      subtitle.textContent = 'A few questions, then a review of the auto-derived defaults. Edit anything before you launch.';
       // Show the proposal-draft picker for new quests (skip on update flow).
       loadDrafts();
     }
@@ -697,7 +701,7 @@
         ${tier1.map((q) => `
           <div>
             <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">${escapeHtml(q.label)}</dt>
-            <dd class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(formatReviewValue(pendingAnswers[q.id]))}</dd>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(formatReviewValue(pendingAnswers[q.id], q))}</dd>
           </div>
         `).join('')}
       </dl>
@@ -754,7 +758,7 @@
       <div class="flex items-center justify-between gap-4 py-2 border-b border-white/5 last:border-0" id="review-row-${q.id}">
         <div class="flex-grow min-w-0">
           <div class="font-body-md text-body-md text-on-surface">${escapeHtml(q.label)}</div>
-          <div class="font-code-md text-code-md text-on-surface-variant truncate" id="review-val-${q.id}">${escapeHtml(formatReviewValue(value))}</div>
+          <div class="font-code-md text-code-md text-on-surface-variant truncate" id="review-val-${q.id}">${escapeHtml(formatReviewValue(value, q))}</div>
         </div>
         <button type="button" onclick="editReviewField('${q.id}')" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 flex-shrink-0">
           <span class="material-symbols-outlined text-[16px]">edit</span> Edit
@@ -764,8 +768,16 @@
     `;
   }
 
-  function formatReviewValue(v) {
+  // ``q`` is optional so a caller with no question in hand still gets a safe fallback, but every real
+  // call site below has one and should pass it: a single-choice question's ``choices`` carry the label
+  // written for exactly this ("Computational — a Python script can produce the data", not a bare
+  // ``false``); skipping it is how a "Research approach" row once showed the word "false".
+  function formatReviewValue(v, q) {
     if (v === null || v === undefined) return '(unset)';
+    if (q && Array.isArray(q.choices)) {
+      const choice = q.choices.find((c) => c.value === v);
+      if (choice) return choice.label;
+    }
     if (typeof v === 'boolean') return v ? 'true' : 'false';
     if (Array.isArray(v)) return v.length ? `[${v.join(', ')}]` : '(none)';
     if (v === '') return '(empty)';
@@ -823,7 +835,8 @@
       return;
     }
     pendingAnswers[id] = value;
-    document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value);
+    const savedQ = schema.questions.find((x) => x.id === id);
+    document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value, savedQ);
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
   };
 

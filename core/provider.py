@@ -2770,6 +2770,9 @@ class LLMClient:
             # output on Python >=3.11 (our minimum).
             try:
                 e.add_note(self._error_note(node=node, model=model))
+                auth_note = self._auth_error_note(e)
+                if auth_note:
+                    e.add_note(auth_note)
             except AttributeError:  # pragma: no cover — needs Py<3.11
                 pass
             raise
@@ -2790,6 +2793,33 @@ class LLMClient:
         if node:
             parts.append(f"node={node}")
         return "[FI] " + ", ".join(parts)
+
+    def _auth_error_note(self, exc: BaseException) -> str | None:
+        """A plain-language guess at an HTTP 401/403/402, or ``None`` for anything else.
+
+        ``missing_api_key`` catches the key being unset entirely, before a single request goes
+        out. This is the other half: the key IS set, but the provider rejected it (revoked,
+        wrong account, no access to this model, quota/credit exhausted) — the exact case that
+        used to surface as a bare, unexplained ``HTTPStatusError``. Same status-code set
+        ``_is_fatal_provider_error`` treats as fatal (opens the circuit breaker immediately, no
+        retry budget wasted); this is the message half of that same classification."""
+        if not isinstance(exc, httpx.HTTPStatusError):
+            return None
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status not in (401, 403, 402):
+            return None
+        provider = self.endpoint.provider_name or self.endpoint.transport
+        if status == 402:
+            return (
+                f"[FI] HTTP {status}: {provider} reports payment/quota exhausted for this key — "
+                f"check billing/credits on the provider's dashboard, or set a different key."
+            )
+        return (
+            f"[FI] HTTP {status}: {provider} did not accept the API key FI sent. Check the "
+            f"environment variable it read the key from (your config's provider.api_key_env, or "
+            f"that provider's own default — see docs/PROVIDERS.md) for a revoked, wrong-account, "
+            f"or model-unauthorized key."
+        )
 
     def _trim_messages(
         self, messages: list[dict[str, str]], *, node: str = "",

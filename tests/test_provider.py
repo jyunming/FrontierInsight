@@ -526,6 +526,67 @@ async def test_chat_error_includes_provider_and_node_in_note():
     assert "node=implement" in full
 
 
+@pytest.mark.parametrize(
+    "status,expect",
+    [
+        (401, "did not accept the API key"),
+        (403, "did not accept the API key"),
+        (402, "payment/quota exhausted"),
+    ],
+)
+async def test_chat_error_note_explains_a_401_403_or_402(status: int, expect: str) -> None:
+    """``missing_api_key`` catches the key being unset before any request goes out. This is the
+    other half: the key IS set but the provider rejected it (revoked, wrong account, no access to
+    this model, quota exhausted) — the one case that used to reach quest_failed.md as a bare,
+    unexplained ``HTTPStatusError``, since a note is not part of ``str(exc)``."""
+    import httpx
+
+    ep = ResolvedEndpoint(
+        base_url="https://api.openai.com/v1", model="gpt-5",
+        api_key="sk-test", provider_name="openai",
+    )
+    bad = MagicMock()
+    bad.status_code = status
+    bad.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            f"{status} error", request=MagicMock(), response=bad,
+        )
+    )
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(return_value=bad)
+    client = LLMClient(ep, http=fake_http)
+
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        await client.chat([{"role": "user", "content": "x"}])
+    notes = " ".join(getattr(ei.value, "__notes__", None) or [])
+    assert f"HTTP {status}" in notes and expect in notes, notes
+    assert "openai" in notes
+
+
+async def test_chat_error_note_says_nothing_extra_for_an_ordinary_5xx() -> None:
+    """A transient 502/503 is not an auth/quota problem — no second note, and retrying is still
+    the right call (``_retry_http_error`` already handles that separately)."""
+    import httpx
+
+    ep = ResolvedEndpoint(
+        base_url="https://api.openai.com/v1", model="gpt-5",
+        api_key="sk-test", provider_name="openai",
+    )
+    bad = MagicMock()
+    bad.status_code = 502
+    bad.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("502 Bad Gateway", request=MagicMock(), response=bad)
+    )
+    fake_http = MagicMock()
+    fake_http.post = AsyncMock(return_value=bad)
+    client = LLMClient(ep, http=fake_http)
+
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        await client.chat([{"role": "user", "content": "x"}])
+    notes = getattr(ei.value, "__notes__", None) or []
+    assert not any("did not accept the API key" in n or "payment/quota" in n for n in notes), notes
+
+
 async def test_chat_error_note_uses_model_override_when_passed():
     """When the caller passes per-call ``model=...`` for per-node
     model routing, the error note should reflect the EFFECTIVE model

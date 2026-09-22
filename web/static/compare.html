@@ -114,10 +114,19 @@
                        : verdict === 'revise' ? 'text-status-warning' : 'text-on-surface-variant';
       const icon = verdict === 'accept' || verdict === 'complete' ? 'check_circle'
                   : verdict === 'revise' ? 'warning' : 'help';
+      // ``cost.total`` is null when nothing this quest called has a listed price
+      // (core/provider.py::estimate_cost_usd returns None, not a guessed 0) — show that plainly
+      // instead of a confident "$0.0000" that reads as free. A quest with zero calls at all
+      // (failed before ever reaching a provider) is a different, unremarkable case: $0.0000 is
+      // simply correct there, not a false claim, so the "unknown" wording is reserved for calls
+      // > 0.
+      const costText = cost.total === null && cost.calls > 0
+        ? 'Cost: unknown (no listed price)'
+        : `Cost: $${(cost.total || 0).toFixed(4)}${escapeHtml(costNote)}`;
       meta.innerHTML = `
         <span class="${pillColor} flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">${icon}</span> ${escapeHtml(verdict)}</span>
         <span>•</span><span>Score: ${escapeHtml(String(score))}</span>
-        <span>•</span><span${costNote ? ' title="The dollar figure counts only the calls whose model has a listed price; the others are not in it, so the real cost is higher."' : ''}>Cost: $${cost.total.toFixed(4)}${escapeHtml(costNote)}</span>
+        <span>•</span><span${costNote ? ' title="The dollar figure counts only the calls whose model has a listed price; the others are not in it, so the real cost is higher."' : ''}>${costText}</span>
       `;
       if (data.paper_preview && window.fi_renderMarkdown) {
         paper.innerHTML = window.fi_renderMarkdown(data.paper_preview);
@@ -130,11 +139,17 @@
   async function fetchCost(qid) {
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(qid)}/cost`);
-      if (!res.ok) return { total: 0, summary: null };
+      if (!res.ok) return { total: null, calls: 0, summary: null };
       const data = await res.json();
-      const total = (data.records || []).reduce((s, r) => s + (r.cost_usd || 0), 0);
-      return { total, summary: data.summary || null };
-    } catch (_) { return { total: 0, summary: null }; }
+      const summary = data.summary || null;
+      const calls = summary ? summary.total_requests : (data.records || []).length;
+      // The server already worked out whether any call was priced (null total when none was,
+      // never a guessed 0) — read that instead of re-deriving it here and losing the distinction.
+      const total = summary
+        ? summary.total_cost_usd
+        : (data.records || []).reduce((s, r) => (typeof r.cost_usd === 'number' ? s + r.cost_usd : s), null);
+      return { total, calls, summary };
+    } catch (_) { return { total: null, calls: 0, summary: null }; }
   }
 
   // A quest that mixes priced and unpriced models has a dollar total that counts
