@@ -23,7 +23,7 @@ semiconductor-physics scope, inferred from the quest YAMLs in the working tree
 `litho_paper_workflow_proof`). That put ~77 life-science skills in a
 "wrong domain" tier.
 
-**FI is domain-general.** The user's correction: 「我不想限縮我們是半導體物理研究」.
+**FI is domain-general.** The user's correction: "I don't want to limit us to semiconductor physics research."
 There is no domain filter. Those YAMLs are current work, not scope.
 
 ---
