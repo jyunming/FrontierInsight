@@ -161,7 +161,7 @@ length.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine, and the one quest code runs on. Install FI's dependencies into this same interpreter (`<that python> -m pip install -e .`); a plain `pip` may belong to a different Python. `run.log` starts with `[env] python=<path>` so you can see which one ran. Use a venv path if you don't want FI cluttering your global packages. |
+| `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine, and the one quest code runs on. Install FI's dependencies into this same interpreter (`<that python> -m pip install -e .`); a plain `pip` may belong to a different Python. `run.log` starts with `[env] python=<path>` so you can see which one ran. Use a venv path if you don't want FI cluttering your global packages. The CLI's own self-setup (`python launch.py` creating a `.venv/` on a missing dependency) is off for every command this extension runs, so a missing dependency here is always this setting to fix, not a different environment appearing on its own. |
 | `frontierInsight.repoPath` | `""` | Absolute path to the FrontierInsight folder (the one containing `launch.py`). Leave empty when the open workspace IS that folder. |
 | `frontierInsight.workingDir` | `""` | The folder quests run in. Defaults to the open workspace folder (FI's own folder when that is the workspace). Relative values are resolved against the workspace. |
 | `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to the working folder, or absolute). |

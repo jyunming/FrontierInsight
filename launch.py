@@ -32,17 +32,186 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Make sibling packages importable when launched as a script.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_REPO_ROOT))
 
-from core.config import Config
-from core.engine import Engine, QuestArtifacts, write_cost_summary
-from core.provider import ProxySupervisor
-from core.skills import ExternalSkillDirs
-from generation.paper import PaperGenerator
-from generation.poster import PosterGenerator
-from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
-from generation.slides import SlideGenerator
-from generation.speech import SpeechGenerator
+
+def _venv_python(venv_dir: Path) -> Path:
+    """Where a venv's own interpreter lives -- ``Scripts/python.exe`` on Windows, ``bin/python`` on POSIX
+    (mirrors ``core/execution.py::VenvExecutor.python_path``, which does the same for a quest's own venv)."""
+    return venv_dir / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+
+
+def _relaunch(python: Path, argv_rest: list[str]) -> None:
+    """Re-run this same command under a different interpreter -- the one place that actually replaces (POSIX)
+    or waits for and mirrors the exit code of (Windows) the running process. Never returns.
+
+    ``os.execv`` on Windows does not replace the process the way POSIX execve does: the CRT's own emulation
+    returns control to whatever spawned THIS process, reporting exit code 0 unconditionally, while the
+    "replacement" runs on as a separate process -- a caller waiting on the real outcome (a CI step checking
+    the exit code, a script testing ``%ERRORLEVEL%``) would see success immediately no matter what the
+    relaunched command actually does. So there: spawn it as a genuine child instead, inheriting this
+    process's stdio directly (the user sees it exactly as if it had continued in place), wait for it, and
+    exit with its real code -- Ctrl-C during that wait reaches both processes; the child's own handler
+    already turns that into the conventional 130, so this one does too rather than dumping a traceback about
+    the wait being interrupted.
+    """
+    import subprocess
+
+    argv = [str(python), str(Path(__file__).resolve()), *argv_rest]
+    if sys.platform.startswith("win"):
+        try:
+            raise SystemExit(subprocess.run(argv).returncode)
+        except KeyboardInterrupt:
+            raise SystemExit(130) from None
+    os.execv(str(python), argv)
+
+
+def _same_interpreter(a: Path, b: Path) -> bool:
+    """Is ``a`` *this exact venv's own entry point* -- not merely a different venv that happens to share the
+    same underlying interpreter. Deliberately does NOT follow symlinks (``os.path.samefile`` and
+    ``Path.resolve()`` both do): on POSIX, a venv's ``bin/python`` is normally a symlink chain ending at the
+    base interpreter (``bin/python -> python3 -> /usr/bin/python3.12``), so two entirely unrelated venvs built
+    from the same base Python resolve to the identical real file and would incorrectly compare equal --
+    confirmed on a real Ubuntu venv pair (``os.path.samefile`` returns ``True`` for two fresh, distinct
+    venvs). Comparing the given paths themselves, case- and separator-normalized only, is what "the same venv
+    entry point" actually means here."""
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def _bootstrap_or_reraise(exc: ImportError) -> None:
+    """Reached only when one of FI's own dependencies just failed to import below. Offers to install into --
+    and, in one case, silently just switch to -- an interpreter that has them, so ``git clone && python
+    launch.py ...`` works on a bare Python with nothing pre-installed, and a later ``git pull`` that adds a
+    new dependency is caught and fixed the same way the next time FI runs, not just the very first time.
+
+    Which interpreter, and how much this run notices, depends on what was already running:
+
+    - **A venv or conda env you activated yourself** (``VIRTUAL_ENV`` or ``CONDA_DEFAULT_ENV`` set -- the
+      marker an activation script sets, not merely "this interpreter happens to be a venv": FI's own
+      ``.venv/`` is never activated, only ever run by its absolute path, so a relaunch into it does not
+      itself set either one and does not get mistaken for a person's own environment on its next failure)
+      that happens to be missing something: installed into, in place -- never a switch to a different
+      environment you did not choose (a bare ``.venv/`` at the repo root would otherwise silently steal every
+      later run from a deliberately-activated environment, GPU-enabled conda env included, the moment it
+      lacked one package).
+    - **Plain system Python**, with ``.venv/`` from an earlier bootstrap already there and already complete:
+      silently relaunched into it, no banner, no prompt, no reinstall -- this is the *entire* cost of every
+      invocation through system Python after the first, not the full ask-and-install dance repeating forever
+      (the first version of this feature got exactly that wrong: every single later run through system
+      Python re-asked and re-ran ``pip install -e .`` -- a ~5s no-op each time, but still on every run, and
+      still an unwanted prompt in a real terminal -- which is precisely what "only the first" rules out).
+    - **Plain system Python with no ``.venv/`` yet, or one that turns out to still be missing something even
+      after the silent relaunch above** (``.venv/`` exists but is stale — a ``git pull`` added a dependency):
+      the full flow — a status line, ``[Y/n]`` when there's a person to ask, create the venv if needed,
+      ``pip install -e .``, relaunch.
+
+    Stdlib-only: this function runs in the exact interpreter that just failed the import above, so it must
+    not import anything it might itself be trying to install.
+
+    Re-raises ``exc`` unchanged (today's behavior: a plain traceback) when bootstrapping doesn't apply at all
+    -- ``FI_SKIP_BOOTSTRAP`` is set, or this is an installed package with no ``pyproject.toml`` alongside it
+    to install from -- a person declined the prompt, or a bootstrap was already attempted once in this same
+    command (a repeat failure right after a successful install means it did not actually fix it -- looping
+    would not either).
+    """
+    repo_root = _REPO_ROOT
+    pyproject = repo_root / "pyproject.toml"
+    if os.environ.get("FI_SKIP_BOOTSTRAP") or not pyproject.is_file():
+        raise exc
+    fi_venv_python = _venv_python(repo_root / ".venv")
+    in_own_venv = _same_interpreter(Path(sys.executable), fi_venv_python) if fi_venv_python.exists() else False
+    activated_elsewhere = bool(os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_DEFAULT_ENV"))
+
+    if (
+        not activated_elsewhere
+        and not in_own_venv
+        and fi_venv_python.exists()
+        and not os.environ.get("FI_BOOTSTRAPPED")
+    ):
+        try:
+            _relaunch(fi_venv_python, sys.argv[1:])
+            return  # _relaunch never actually returns on a real OS (POSIX truly replaces the process;
+            # Windows raises SystemExit) -- this line only matters for a mocked os.execv in a test, which,
+            # unlike the real one, does return, straight into the ask+install flow below otherwise.
+        except OSError:
+            pass  # .venv/'s own python exists but won't run (corrupted, deleted mid-way) -- fall through
+            # to the normal flow below, which recreates it the same as if it had never existed
+
+    if os.environ.get("FI_BOOTSTRAPPED"):
+        raise exc
+    target = Path(sys.executable) if activated_elsewhere else fi_venv_python
+    activate = r".venv\Scripts\activate" if sys.platform.startswith("win") else "source .venv/bin/activate"
+
+    # print() is block-buffered once stdout isn't a terminal (redirected to a file, piped, or CI's captured
+    # log): every message below needs flush=True, or it would sit in Python's own buffer -- appearing only
+    # much later, out of order with the subprocess output interleaved between them, or, on POSIX where the
+    # re-launch below genuinely replaces this process, lost outright (there is no process left afterward to
+    # flush it).
+    def _say(line: str = "") -> None:
+        print(line, flush=True)
+
+    def _manual_steps() -> None:
+        _say("[FI] Set it up yourself, then re-run:")
+        if target != Path(sys.executable):
+            _say("[FI]   python -m venv .venv")
+            _say(f"[FI]   {activate}")
+        _say(f"[FI]   {target} -m pip install -e .")
+
+    _say(f"[FI] Missing a dependency ({exc}).")
+    if target == Path(sys.executable):
+        _say(f"[FI] Installing into the active environment ({target}) -- this happens once, and again only "
+             f"when a dependency is added or changed.")
+    else:
+        _say(f"[FI] {'Updating' if fi_venv_python.exists() else 'Setting up'} the Python environment in .venv/ "
+             f"(usually 30-90s; this happens once, and again only when a dependency is added or changed).")
+    if sys.stdin.isatty():
+        try:
+            answer = input("[FI] Install now? [Y/n] ").strip().lower()
+        except EOFError:
+            # ``isatty()`` says yes but there was nothing to read anyway -- on Windows, redirecting stdin to
+            # NUL (a common way a service, a scheduled task, or a script says "no input coming") still reports
+            # as a TTY, unlike POSIX's /dev/null. No answer ever arrived either way, which is exactly the
+            # no-one-to-ask case the non-interactive branch below already handles -- treat it the same, not as
+            # a decline, or the exact automation this feature is for would be the one case that refuses to run.
+            answer = ""
+        except KeyboardInterrupt:
+            _say()
+            answer = "n"  # Ctrl-C is a real person, deliberately stopping this
+        if answer not in ("", "y", "yes"):
+            _say("[FI] Skipped.")
+            _manual_steps()
+            raise SystemExit(1)
+    # Not a TTY (CI, a piped command) -- there is no one to ask, so proceed. This is the same operation the
+    # README already tells a person to run by hand; it touches only the active environment, or this
+    # checkout's own .venv/ -- never a venv or conda env you activated for something else.
+    import subprocess
+    try:
+        if target != Path(sys.executable) and not target.exists():
+            subprocess.run([sys.executable, "-m", "venv", str(target.parent.parent)], check=True)
+        subprocess.run([str(target), "-m", "pip", "install", "-q", "-e", str(repo_root)], check=True)
+    except (subprocess.CalledProcessError, OSError) as install_exc:
+        _say(f"[FI] Setup failed ({install_exc}).")
+        _manual_steps()
+        raise SystemExit(1) from install_exc
+    _say("[FI] Done. Continuing...")
+    os.environ["FI_BOOTSTRAPPED"] = "1"
+    _relaunch(target, sys.argv[1:])
+
+
+try:
+    from core.config import Config
+    from core.engine import Engine, QuestArtifacts, write_cost_summary
+    from core.provider import ProxySupervisor
+    from core.skills import ExternalSkillDirs
+    from generation.paper import PaperGenerator
+    from generation.poster import PosterGenerator
+    from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
+    from generation.slides import SlideGenerator
+    from generation.speech import SpeechGenerator
+except ImportError as _missing_dependency:
+    _bootstrap_or_reraise(_missing_dependency)
+    raise  # unreachable: a successful bootstrap re-execs and never returns here
 
 
 #: The modes that read ``--config`` for the skill folders it names instead of
