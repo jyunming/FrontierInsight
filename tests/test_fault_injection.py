@@ -19,8 +19,10 @@ per fault, with what still isn't caught -- that table is the actual PR-5 deliver
 it found wasn't there yet:
 
 * a script that NAMES ``FI_REPLICATE_SEED`` (so the source-scan heuristic can't rule it out) but never actually uses
-  the value is still called deterministic (below) -- the ``_script_reads_replicate_seed`` docstring already names
-  this as an accepted blind spot of a source-scan heuristic; this locks that prose claim to a reproducible fact.
+  the value used to be called deterministic (below) -- P1-5, fixed: the runtime decision now also asks
+  ``replicate_seed_reaches_rng`` (an AST check that traces whether the value actually flows into an RNG-seeding
+  call), not merely whether the string appears; both the closed blind spot and the honest case it must not weaken
+  are covered.
 * the design self-critique prompt's report cap (P1-4, still open) -- an ``xfail`` so closing it is forced to show up
   here as an XPASS, not silently.
 * a cluster array that IS present but the wrong length -- a different fault than the missing-array case above, with
@@ -93,18 +95,42 @@ SEED_NAMED_BUT_DISCARDED_SCRIPT = (
 
 
 @pytest.mark.asyncio
-async def test_a_script_that_names_but_discards_the_replicate_seed_is_still_called_deterministic(tmp_path: Path) -> None:
-    """The blind spot is real, not just prose. A script whose seed is hardcoded is indistinguishable, by a source
-    scan, from one that genuinely computes the same answer every time once it merely mentions the variable name
-    somewhere -- a comment, an unused read, anything the substring search cannot tell from real use."""
+async def test_a_script_that_names_but_discards_the_replicate_seed_is_no_longer_called_deterministic(tmp_path: Path) -> None:
+    """P1-5, fixed. A source scan that only asks "does the string FI_REPLICATE_SEED appear" cannot tell a script
+    that hardcodes its seed from one that genuinely computes the same answer every time -- both merely mention the
+    variable name. The runtime decision now also asks ``replicate_seed_reaches_rng``: does that value actually flow
+    into a call that seeds a generator. It does not here (the RNG is seeded from a hardcoded constant instead), so
+    agreement between seeds 0 and 1 is now treated the same as "never reads the seed at all" -- one run repeated,
+    not evidence of determinism."""
     eng = _engine(tmp_path, replicates=5, script=SEED_NAMED_BUT_DISCARDED_SCRIPT)
     eng.executor.execute = AsyncMock(return_value=_er(_rj('{"rmse": 0.25}')))  # type: ignore[method-assign]
     patch = await eng._node_execute({"deps": []})
 
-    assert eng.executor.execute.await_count == 2, "one extra run settles it, same as the honest case"
-    assert patch["result_json_deterministic"] is True, "the documented blind spot: named-but-unused reads as genuine"
+    assert eng.executor.execute.await_count == 2, "one extra run settles it, same as before"
+    assert patch["result_json_deterministic"] is False, "no longer fooled: the seed never reaches a generator"
+    assert patch["result_json_replicate_seed_ignored"] is True
+    assert not patch.get("result_json_replicates"), "one run repeated is not replicates, same as the seed-truly-ignored case"
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_seeded_script_is_still_called_deterministic(tmp_path: Path) -> None:
+    """Do not weaken the honest case while closing the blind spot: a script whose seed value really does reach the
+    generator (an ODE integration seeded from FI_REPLICATE_SEED that happens to compute the same answer regardless)
+    keeps exactly its previous behaviour."""
+    script = (
+        "import os\n"
+        "import numpy as np\n"
+        "seed = int(os.environ.get('FI_REPLICATE_SEED', 0))\n"
+        "def main() -> None:\n"
+        "    rng = np.random.default_rng(seed)\n"
+        "    print(rng.random())\n"
+    )
+    eng = _engine(tmp_path, replicates=5, script=script)
+    eng.executor.execute = AsyncMock(return_value=_er(_rj('{"rmse": 0.25}')))  # type: ignore[method-assign]
+    patch = await eng._node_execute({"deps": []})
+
+    assert patch["result_json_deterministic"] is True
     assert patch["result_json_replicate_seed_ignored"] is False
-    # Downstream consequence: no error bars are reported, exactly as if this were a legitimately deterministic ODE.
     assert len(patch["result_json_replicates"]) == 2
 
 

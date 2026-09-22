@@ -6074,11 +6074,17 @@ class Engine:
         )
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
-        # Whether the script can respond to the seed at all, and whether it
-        # hands any of its randomness to a generator the seed cannot reach.
-        # Both read once from the source that is about to run.
+        # Whether the script can respond to the seed at all, whether it hands
+        # any of its randomness to a generator the seed cannot reach, and
+        # (distinct from just naming the variable) whether that value
+        # actually flows into a call that seeds a generator -- a script can
+        # name FI_REPLICATE_SEED, read it into an unused variable, and still
+        # seed every generator from a hardcoded constant; that is not
+        # "responding to the seed" even though it mentions it. All three read
+        # once from the source that is about to run.
         reads_seed = _script_reads_replicate_seed(seed_path)
         unseeded_rng = _unseeded_rng_calls(seed_path)
+        seed_reaches_rng = _replicate_seed_reaches_rng(seed_path)
         seed_ignored = False
         replicates_ran = False
         primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
@@ -6167,7 +6173,7 @@ class Engine:
                     # not samples anything may be averaged over. Its own source
                     # says which case this is.
                     if seed == 1 and rep_rj == result_json:
-                        if reads_seed:
+                        if reads_seed and seed_reaches_rng:
                             deterministic = True
                             if replicates_n > 2:
                                 self._log.info(
@@ -6176,6 +6182,22 @@ class Engine:
                                     "skipping the remaining %d replicate(s)",
                                     replicates_n - 2,
                                 )
+                        elif reads_seed:
+                            # Named but not obeyed: it reads FI_REPLICATE_SEED (so it is not the
+                            # "never reads it" case below), but that value reaches no generator this
+                            # script seeds -- a hardcoded constant, or a value read into a name that
+                            # is never used. Agreement between the two runs proves nothing about the
+                            # experiment; it is one run repeated, exactly like the case below.
+                            seed_ignored = True
+                            self._log.warning(
+                                "[execute] seeds 0 and 1 produced identical results, and although "
+                                "%s reads FI_REPLICATE_SEED, that value never reaches a generator it "
+                                "seeds -- so this is one run repeated, not %d samples. No aggregate, "
+                                "standard error or confidence interval will be reported over them: "
+                                "the quest stands on a single measurement. Skipping the remaining "
+                                "%d replicate(s).",
+                                seed_path.name, replicates_n, max(0, replicates_n - 2),
+                            )
                         else:
                             seed_ignored = True
                             self._log.warning(
@@ -12652,6 +12674,144 @@ def _unseeded_rng_calls(code_path: Path) -> list[tuple[int, str]]:
         return unseeded_rng_calls(code_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return []
+
+
+def _is_os_environ(node: ast.AST) -> bool:
+    """``os.environ`` (however imported) or a bare ``environ`` from ``from os import environ``."""
+    return _dotted_name(node) == "os.environ" or (isinstance(node, ast.Name) and node.id == "environ")
+
+
+def _is_replicate_seed_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "FI_REPLICATE_SEED"
+
+
+def _reads_replicate_env(expr: ast.AST) -> bool:
+    """Whether this expression subtree reads ``FI_REPLICATE_SEED`` straight out of the environment:
+    ``os.environ["FI_REPLICATE_SEED"]``, ``os.environ.get("FI_REPLICATE_SEED", ...)``,
+    ``os.getenv("FI_REPLICATE_SEED", ...)`` (however ``os`` or ``getenv`` were imported), under any wrapping
+    (``int(...)``, ``str(...)``, a default via ``or``)."""
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Subscript) and _is_os_environ(node.value):
+            key = node.slice.value if isinstance(node.slice, ast.Index) else node.slice  # py3.8 ast.Index compat
+            if _is_replicate_seed_literal(key):
+                return True
+        elif isinstance(node, ast.Call):
+            func = node.func
+            is_environ_get = isinstance(func, ast.Attribute) and func.attr == "get" and _is_os_environ(func.value)
+            is_getenv = (isinstance(func, ast.Attribute) and func.attr == "getenv" and _dotted_name(func.value) == "os") or (
+                isinstance(func, ast.Name) and func.id == "getenv"
+            )
+            if (is_environ_get or is_getenv) and node.args and _is_replicate_seed_literal(node.args[0]):
+                return True
+    return False
+
+
+def _mark_seeded_targets(target: ast.AST, value: ast.AST, seeded: set[str]) -> None:
+    """Add every plain name ``target`` binds a value that reads ``FI_REPLICATE_SEED`` to. A tuple/list target
+    (``seed, label = os.environ.get(...), "run"``) is matched element-by-element against a tuple/list value of the
+    same length, so only the elements that actually read the environment are marked -- not every name the
+    assignment happens to bind. Anything less literal on the value side (unpacking a call's return value, say)
+    cannot be matched this way and is silently skipped, the same "cannot confirm, so do not grant" stance as
+    everywhere else in this pair of checks."""
+    if isinstance(target, ast.Name):
+        if _reads_replicate_env(value):
+            seeded.add(target.id)
+    elif (
+        isinstance(target, (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(target.elts) == len(value.elts)
+    ):
+        for t_el, v_el in zip(target.elts, value.elts):
+            _mark_seeded_targets(t_el, v_el, seeded)
+
+
+def _names_seeded_from_replicate_env(tree: ast.Module) -> set[str]:
+    """Every variable name whose value comes straight from reading ``FI_REPLICATE_SEED``, so a later reference to
+    that name can be recognised as carrying the seed even through a plain reassignment (``seed = ...; s = seed``
+    is not followed further — one hop is what every script that reads the seed correctly needs)."""
+    seeded: set[str] = set()
+    for node in ast.walk(tree):
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign) and node.value is not None:
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for t in targets:
+            _mark_seeded_targets(t, value, seeded)
+    return seeded
+
+
+def replicate_seed_reaches_rng(code: str) -> bool:
+    """Whether the value ``FI_REPLICATE_SEED`` names actually flows into EVERY call this file makes that seeds a
+    random generator -- not merely whether the string ``FI_REPLICATE_SEED`` appears in the file at all, and not
+    merely whether it reaches at least one of several.
+
+    ``_script_reads_replicate_seed`` is a plain substring search, and its own docstring names the blind spot this
+    closes: a script that reads the variable into an unused name, or reads it and seeds a generator from an
+    unrelated hardcoded constant instead, passes that search and is then indistinguishable from a script that
+    genuinely computes the same answer every time -- the runtime comparison (two seeds, identical output) can only
+    call both "deterministic". This walks every call this file's ``_rng_aliases``/``_UNSEEDED_RNG_FACTORIES`` would
+    recognise as seeding a generator (a factory call's first positional argument, or its ``seed=``/``entropy=``
+    keyword; a bare ``.seed(x)`` reseed, or an unseeded reseed/factory call, which cannot connect by construction)
+    and asks whether that seed expression itself reads the environment variable directly, or names a variable this
+    file assigned straight from it, ONE hop back (an assignment inside a helper function the seed reaches only as a
+    parameter is not followed, and such a call counts as not connecting).
+
+    Every recognised call must connect, not just one: a script that correctly seeds one generator from
+    ``FI_REPLICATE_SEED`` and a SECOND from a hardcoded constant, using the second for the randomness that actually
+    matters, would pass an "any one connects" version of this check while its real result stays disconnected from
+    the seed. Requiring all of them is the conservative direction to be wrong in -- a legitimate script whose seed
+    reaches its generator through something this cannot trace (the indirect-parameter case above; two independent
+    generators for two genuinely unrelated purposes) is treated as "does not reach", which downstream costs an
+    error bar it earned, not a false claim of determinism it did not.
+
+    A script with NO such call at all (a purely numerical method -- an ODE solve, say -- that reads the seed but
+    has nothing to seed) reports ``True``: there is no randomness for the value to be disconnected from, so this
+    check has nothing to say and the runtime comparison's old "it reads the seed" reasoning still applies. A file
+    that does not parse also reports ``True`` -- silence is not evidence of the fault, matching
+    ``unseeded_rng_calls``'s own stance on both.
+    """
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return True
+    seeded_names = _names_seeded_from_replicate_env(tree)
+    modules, names = _rng_aliases(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            dotted = _dotted_name(func)
+            if not dotted or dotted.split(".")[0] not in modules:
+                continue
+            if func.attr not in _UNSEEDED_RNG_FACTORIES and func.attr != "seed":
+                continue
+        elif isinstance(func, ast.Name) and func.id in names:
+            pass
+        else:
+            continue
+        seed_arg = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg in ("seed", "entropy")), None,
+        )
+        connects = seed_arg is not None and (
+            _reads_replicate_env(seed_arg)
+            or any(isinstance(n, ast.Name) and n.id in seeded_names for n in ast.walk(seed_arg))
+        )
+        if not connects:
+            return False
+    return True  # every call seen connected (or there were none to see)
+
+
+def _replicate_seed_reaches_rng(code_path: Path) -> bool:
+    """``replicate_seed_reaches_rng`` for a file. An unreadable one gets the benefit of the doubt for the same
+    reason ``_script_reads_replicate_seed`` does: silence is not evidence of a fault."""
+    try:
+        return replicate_seed_reaches_rng(code_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return True
 
 
 def _unseeded_rng_directive(calls: list[tuple[int, str]]) -> str:
