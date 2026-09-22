@@ -111,23 +111,23 @@ async def test_a_script_that_names_but_discards_the_replicate_seed_is_still_call
 # --- P1-4: the self-critique checklist's report cap has no code behind it -----------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="P1-4: the prompt caps reported findings below its own mandatory checklist size")
-def test_design_self_critique_caps_reported_findings_below_its_own_mandatory_checklist_size() -> None:
-    """The prompt's own text asks for at most 5 reported findings against a 12-item MANDATORY checklist ("if any
-    apply, you MUST patch them") -- so an applicable finding can go unpatched with nothing in the design, the
-    record, or a test noticing. ``strict=True``: the day the cap phrase is gone (raised to match the checklist, or
-    removed so every applicable item is reported) this assertion starts passing, which XPASSes and fails the suite
-    -- forcing the fix to be noticed here, not just in the prompt diff."""
+def test_design_self_critique_does_not_cap_reported_findings_below_its_own_mandatory_checklist_size() -> None:
+    """P1-4, fixed: the prompt used to ask for at most 5 reported findings against a 12-item MANDATORY checklist
+    ("if any apply, you MUST patch them"), so an applicable finding could go unpatched with nothing in the design,
+    the record, or a test noticing. It now asks for every applicable item, no numeric ceiling. This was an
+    ``xfail(strict=True)`` before the fix landed; kept as a plain regression now that it has, so a re-introduced cap
+    fails here immediately rather than needing the xfail machinery re-added."""
     text = (AGENTS_DIR / "design_self_critique.md").read_text(encoding="utf-8")
     checklist_items = re.findall(r"^\d+\.\s+\*\*", text, flags=re.MULTILINE)
     assert len(checklist_items) >= 10, "the checklist section moved or was renamed; re-read before trusting this test"
-    cap = re.search(r"at most (\d+)", text)
-    # `cap is None` (the phrase removed outright) must count as FIXED, same as a cap raised to cover every item --
-    # not as "the pattern this test looks for is gone, so nothing to report" (an `assert cap is not None` here would
-    # itself raise, which a strict xfail cannot tell apart from the real finding, so the fix would go unnoticed).
+    # Catches the phrasings a numeric cap would plausibly use, not only the exact wording this bug had.
+    cap = re.search(r"(?:at most|up to|no more than|a maximum of|limit(?:ed)? to)\s+(\d+)", text, flags=re.IGNORECASE)
     capped = cap is not None and int(cap.group(1)) < len(checklist_items)
     assert not capped, (
         f"prompt caps reported findings at {cap.group(1) if cap else '?'} against a {len(checklist_items)}-item MANDATORY checklist"
+    )
+    assert "the most likely" not in text.lower(), (
+        "\"the most likely\" objections reads as a top-K instruction even without a numeric cap alongside it"
     )
 
 

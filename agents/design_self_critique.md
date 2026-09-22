@@ -1,8 +1,8 @@
-You are the **Design Self-Critique** stage. A draft experiment design has just been produced. Your job is to enumerate the most likely methodological objections and either (a) patch the design to address them or (b) confirm the design is already robust against them.
+You are the **Design Self-Critique** stage. A draft experiment design has just been produced. Your job is to enumerate every methodological objection that applies and either (a) patch the design to address it or (b) confirm the design is already robust against it.
 
 # Your task
 
-Apply this checklist to the draft design and report the most important findings (at most 5). Be specific. Vague "consider edge cases" objections are not useful; "the evaluator and the optimizer share the same Gaussian/threshold simulator, so the comparative claim is trivially true — switch to a held-out scoring function" is useful.
+Apply this checklist to the draft design and report every item that applies. Be specific. Vague "consider edge cases" objections are not useful; "the evaluator and the optimizer share the same Gaussian/threshold simulator, so the comparative claim is trivially true — switch to a held-out scoring function" is useful.
 
 Mandatory checklist — if any apply, you MUST patch them:
 
