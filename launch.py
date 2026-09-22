@@ -5215,6 +5215,16 @@ def _quiet_network_logs() -> None:
     WARNING and shows."""
     for name in ("httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
+    # The support modules (skill discovery, Axon's sidecar, the provider transports, ...) log under "fi.*", a SEPARATE
+    # hierarchy from the per-quest "frontier_insight.<id>" logger (core/engine.py:_quest_logger) — this quiets them the
+    # same way, everywhere, not just during a quest. Nothing here is lost: skill notes are also `python launch.py
+    # --skills`'s whole job, and a failure anywhere still logs a WARNING, which shows.
+    logging.getLogger("fi").setLevel(logging.WARNING)
+    # A few modules that are not per-quest (a shared pip-install lock, a legacy-config note) log under plain
+    # "frontier_insight.*" names — e.g. "frontier_insight.config", "frontier_insight.execution" — which sits ABOVE the
+    # per-quest "frontier_insight.<id>" logger in the hierarchy but never overrides it: `_quest_logger` always calls
+    # `logger.setLevel(logging.INFO)` on the quest's own logger, and an explicit level always wins over an inherited one.
+    logging.getLogger("frontier_insight").setLevel(logging.WARNING)
 
 
 def main() -> int:

@@ -93,6 +93,44 @@ from .provider import (
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
+# ---- what a person watching a quest sees by default -------------------------------------------------------------------
+#
+# The engine logs hundreds of internal lines per quest (a skill that failed its self-test, a reply that needed a repair,
+# an internal decision's raw fields) — real, useful for debugging, and unreadable to someone who did not write this code.
+# `run.log` in the quest folder keeps every one of them, unfiltered, always. What a person watching the quest sees while
+# it runs — the CLI console, the web page's live log, and VS Code's chat — is instead a short, fixed set of one-line
+# stage updates, marked with `progress=True` on the log record and picked out by `_ProgressOnly` below. A stage not in
+# this map (an internal passthrough, e.g. `pause_after_literature`) simply has no line: silence there is correct, not a
+# gap. `PROGRESS_LOG_NAME` is a second file with only these lines, for the web page and for `--progress <quest_id>`.
+STAGE_PROGRESS: dict[str, str] = {
+    "clarify": "Checking the setup.",
+    "ideate": "Choosing the angle to take.",
+    "literature": "Searching the literature.",
+    "select_skills": "Choosing which tools to use.",
+    "plan": "Writing the plan.",
+    "design": "Designing the experiment.",
+    "implement_outline": "Writing the code.",
+    "implement": "Writing the code.",
+    "execute": "Running the experiment.",
+    "analyze": "Analyzing the results.",
+    "cross_check": "Checking the results against the literature.",
+    "write": "Writing the paper.",
+    "claim_check": "Checking every claim against the evidence.",
+    "review": "Reviewing the paper.",
+    "auto_collect_data": "Looking for data.",
+    "data_load": "Loading the data.",
+}
+PROGRESS_LOG_NAME = "progress.log"
+
+
+class _ProgressOnly(logging.Filter):
+    """Lets through only the log records :meth:`Engine._progress` marked — the short list above, plus the handful of
+    one-off events (a pause, the final evidence line) that are rare and important enough to earn a place beside them.
+    Everything else (the great majority of what the engine logs) still reaches ``run.log``, just not this handler."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return bool(getattr(record, "progress", False))
+
 _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
 
 # Under the Docker sandbox, the skills mounted into the experiment's container
@@ -486,6 +524,7 @@ class Engine:
         self._audit_node = ""       # the node running now, for events written from inside it
         self._audit_pause = ""      # the pause kind a node is stopping for
         self._audit_seen: dict[str, str] = {}   # watched file -> sha256 last logged
+        self._last_progress = ""    # the last curated progress line, so a re-entered node does not repeat itself
         # Skills other agents installed are read where they are. Which folders
         # is this quest's own setting, held here and passed to every lookup, so
         # quests sharing a process (--fleet) never see one another's. The skill
@@ -1263,6 +1302,20 @@ class Engine:
                 self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w)
         return out
 
+    def _progress(self, text: str) -> None:
+        """One line for whoever is watching the quest, not debugging it: the CLI console, VS Code's chat, and the web
+        page's live log show only lines logged this way (``core/engine.py:STAGE_PROGRESS``, ``_ProgressOnly``); a repeat
+        of the same line (a node re-entered after a pause, say) is silently dropped rather than shown twice."""
+        if text == self._last_progress:
+            return
+        self._last_progress = text
+        self._log.info(text, extra={"progress": True})
+
+    def _progress_stage(self, node: str) -> None:
+        phrase = STAGE_PROGRESS.get(node)
+        if phrase:
+            self._progress(f"[{node}] {phrase}")
+
     def _audited(self, name: str, fn: Any) -> Any:
         """``fn`` (a graph node) with its start, end, failure or pause in the audit trace. An interrupted node is run again
         from its start when the quest resumes, so a second ``node_started`` after ``node_paused`` is what happened."""
@@ -1273,6 +1326,7 @@ class Engine:
             resumed = self.audit.paused_node == name
             self._audit_node, self._audit_pause = name, ""
             self._audit("node_started", node=name, iteration=state.get("iteration", 0), **({"resumed": True} if resumed else {}))
+            self._progress_stage(name)
             began = time.monotonic()
             try:
                 out = await fn(state)
@@ -3445,6 +3499,7 @@ class Engine:
         except OSError as e:
             self._log.debug("[%s] pause.json write failed: %r", kind, e)
         self._log.info("[%s] paused — %s", kind, headline)
+        self._progress(f"Waiting for you: {headline}")
         return interrupt({**payload, "pause": descriptor})
 
     def _pause_stage_enabled(self, stage: str) -> bool:
@@ -5164,6 +5219,7 @@ class Engine:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
             self._log.info("[evidence] %s", _evidence.summary_line(record, technical=True))
+            self._progress(f"[evidence] {_evidence.summary_line(record)}")
             self._audit_check("evidence", path, status=str(record.get("status")), summary=_evidence.summary_line(record))
             return record
         except Exception as e:  # noqa: BLE001 -- a report about the quest must never stall it
@@ -15826,8 +15882,15 @@ def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:
     fh = logging.FileHandler(target_log_path, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(fh)
+    # The curated view (STAGE_PROGRESS, `Engine._progress`): a second, much shorter file the web page's live log reads by
+    # default, and a second console handler filtered to the same lines. `run.log` above still gets everything, unfiltered.
+    pfh = logging.FileHandler((fi_dir / PROGRESS_LOG_NAME).resolve(), encoding="utf-8")
+    pfh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    pfh.addFilter(_ProgressOnly())
+    logger.addHandler(pfh)
     sh = logging.StreamHandler()
     sh.setFormatter(logging.Formatter(f"[{quest_id[:24]}] %(message)s"))
+    sh.addFilter(_ProgressOnly())
     logger.addHandler(sh)
     return logger
 

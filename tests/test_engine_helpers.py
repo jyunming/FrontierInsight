@@ -1484,11 +1484,11 @@ def test_quest_logger_releases_file_handler_on_close(tmp_path: Path) -> None:
     fi_dir = tmp_path / ".fi"
     logger = _quest_logger("test-quest-lifecycle-aabbcc", fi_dir)
 
-    # FileHandler was added.
+    # A FileHandler was added for run.log AND one for the curated progress.log (core/engine.py:PROGRESS_LOG_NAME).
     file_handlers = [
         h for h in logger.handlers if isinstance(h, logging.FileHandler)
     ]
-    assert len(file_handlers) == 1
+    assert len(file_handlers) == 2
     handler = file_handlers[0]
     # ``logging.FileHandler`` opens the file eagerly at construction
     # (delay=False by default), so handler.stream is already an open
@@ -1501,7 +1501,7 @@ def test_quest_logger_releases_file_handler_on_close(tmp_path: Path) -> None:
     # Close it.
     _close_quest_logger("test-quest-lifecycle-aabbcc")
 
-    # Handler is gone from the logger.
+    # Both handlers are gone from the logger.
     assert not any(
         isinstance(h, logging.FileHandler) for h in logger.handlers
     ), f"FileHandler still attached: {logger.handlers!r}"
@@ -1536,11 +1536,11 @@ def test_quest_logger_can_be_reopened_after_dir_recreate(tmp_path: Path) -> None
     logger2 = _quest_logger(qid, fi_dir_2)
     logging.getLogger(f"frontier_insight.{qid}").info("second run")
 
-    # The handler MUST point at the new path, not the deleted one.
+    # The handlers MUST point at the new paths, not the deleted ones (run.log AND the curated progress.log).
     file_handlers = [
         h for h in logger2.handlers if isinstance(h, logging.FileHandler)
     ]
-    assert len(file_handlers) == 1
+    assert len(file_handlers) == 2
     assert Path(file_handlers[0].baseFilename).resolve() == (
         fi_dir_2 / "run.log"
     ).resolve(), (
@@ -1548,6 +1548,8 @@ def test_quest_logger_can_be_reopened_after_dir_recreate(tmp_path: Path) -> None
         f"{file_handlers[0].baseFilename!r} — should have pointed at "
         f"{(fi_dir_2 / 'run.log')!r}"
     )
+    from core.engine import PROGRESS_LOG_NAME
+    assert Path(file_handlers[1].baseFilename).resolve() == (fi_dir_2 / PROGRESS_LOG_NAME).resolve()
 
     # And the second run.log actually got written.
     assert (fi_dir_2 / "run.log").exists()

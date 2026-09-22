@@ -109,3 +109,23 @@ def test_the_console_is_not_a_wall_of_request_urls() -> None:
     logging.getLogger("httpx").setLevel(logging.INFO)
     launch._quiet_network_logs()
     assert logging.getLogger("httpx").level == logging.WARNING and logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_support_modules_are_quiet_but_a_running_quest_still_logs_at_info(tmp_path: Path) -> None:
+    """`fi.skills`, `frontier_insight.execution` and the like are not per-quest work; a real quest's own logger
+    (`frontier_insight.<id>`, `core/engine.py:_quest_logger`) always sets its own level and must not be caught by this."""
+    import logging
+
+    import launch
+    from core.engine import _close_quest_logger, _quest_logger
+
+    launch._quiet_network_logs()
+    assert logging.getLogger("fi").getEffectiveLevel() == logging.WARNING
+    assert logging.getLogger("fi.skills").getEffectiveLevel() == logging.WARNING
+    assert logging.getLogger("frontier_insight.config").getEffectiveLevel() == logging.WARNING
+
+    quest_logger = _quest_logger("test-still-logs-at-info", tmp_path / ".fi")
+    try:
+        assert quest_logger.getEffectiveLevel() == logging.INFO, "the quiet-down must never reach a running quest's own logger"
+    finally:
+        _close_quest_logger("test-still-logs-at-info")
