@@ -5,10 +5,15 @@ Single quest:
 
 Fleet:
     python launch.py --fleet a.yaml b.yaml c.yaml --max-concurrent 4
+    # or: python launch.py tools fleet a.yaml b.yaml c.yaml --max-concurrent 4
 
 Optional fleet hardening:
     --memory-cap-mb 4096   throttle new starts when RSS approaches the cap
     --profile              dump a per-quest viztracer trace if viztracer is installed
+
+`python launch.py --help` shows the handful of commands most quests need; `fi tools --help` lists the
+rarer one-shot utilities (a weekly digest, a cross-quest portfolio, an adversarial critique, ...), and
+`--help-all` shows every flag, old and new spellings both working identically.
 """
 
 from __future__ import annotations
@@ -69,6 +74,98 @@ def _check_mode(
                 p.error(f"argument {a.option_strings[0]}: not allowed with argument --config")
 
 
+#: ``fi tools <name> ...`` -> the existing flag it stands for. The rest of the words on the command line pass through
+#: unchanged (a value right after the subcommand name lands exactly where that flag already expects one, and a flag's
+#: own qualifiers — ``--digest-provider``, ``--critique-model``, ...  — keep their names). Nothing here changes what a
+#: flag does or removes it: ``--digest`` still works on its own, same as always. This only gives the ~15 report /
+#: portfolio / one-shot utilities their own place, one level down from the handful of commands most quests need
+#: (``--config``, ``--new``, ``--serve``, ``--resume``, ...), which is what ``fi --help`` now shows by default.
+_TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
+    "summarize": ("--summarize", "Summarize a folder of mixed content into one report. `fi tools summarize <folder>`."),
+    "digest": ("--digest", "A weekly project-manager digest across your quests. `fi tools digest [--days N]`."),
+    "portfolio": ("--portfolio", "A cross-quest synthesis, all time. `fi tools portfolio`."),
+    "critique": ("--critique", "An adversarial second-pass review of a finished quest. `fi tools critique <quest_id>`."),
+    "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
+    "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
+    "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
+    "fleet": ("--fleet", "Run several quests at once. `fi tools fleet <quest.yaml>...`."),
+    "dump-state": ("--dump-state", "Print a quest's saved state, for debugging. `fi tools dump-state <quest_dir>`."),
+    "list-drafts": ("--list-drafts", "List proposal drafts `fi tools proposal` wrote. `fi tools list-drafts`."),
+    "export-models": ("--export-models", "Download the knowledge-layer models for an air-gapped machine. `fi tools export-models <dir>`."),
+    "install-tectonic": ("--install-tectonic", "Install the LaTeX binary paper.pdf needs. `fi tools install-tectonic`."),
+    "install-tectonic-from": ("--install-tectonic-from", "... from a local archive, no network or admin needed. `fi tools install-tectonic-from <path>`."),
+    "install-marp": ("--install-marp", "Install the Marp CLI so slides render without Node. `fi tools install-marp`."),
+    "install-marp-from": ("--install-marp-from", "... from a local archive, no network needed. `fi tools install-marp-from <path>`."),
+}
+
+
+def _tools_help() -> str:
+    lines = ["fi tools <name> [args] — less common, one-shot commands. Each also still works as its own top-level flag",
+             "(`fi --digest` is the same as `fi tools digest`); see `fi --help-all` for every flag and qualifier.", ""]
+    width = max(len(n) for n in _TOOL_SUBCOMMANDS)
+    for name, (_flag, summary) in _TOOL_SUBCOMMANDS.items():
+        lines.append(f"  {name:<{width}}  {summary}")
+    return "\n".join(lines)
+
+
+def _expand_tools_argv(argv: list[str]) -> list[str]:
+    """``["tools", "digest", "--days", "7"]`` -> ``["--digest", "--days", "7"]``; anything after the subcommand name
+    passes through untouched, landing exactly where the flag it now follows already expects it. ``tools`` must be the
+    first word (a global flag before it, e.g. ``fi --output-root X tools digest``, is not recognized — put it after,
+    same as any other flag next to ``--digest``): a subcommand that could appear anywhere would have to out-guess
+    argparse about which of the words around it are flag values, which is not worth it for an alternate spelling."""
+    if not argv or argv[0] != "tools":
+        return argv
+    rest = argv[1:]
+    if not rest or rest[0] in ("-h", "--help"):
+        print(_tools_help())
+        raise SystemExit(0)
+    if rest[0] == "--help-all":  # `fi tools --help-all` names no tool; it means the same as `fi --help-all`
+        return ["--help-all"]
+    name, tail = rest[0], rest[1:]
+    found = _TOOL_SUBCOMMANDS.get(name)
+    if found is None:
+        print(f"fi tools: no tool named {name!r}.\n")
+        print(_tools_help())
+        raise SystemExit(2)
+    if any(t in ("-h", "--help") for t in tail):
+        # The short help knows nothing about a tool's own qualifiers (`--digest-provider`, ...); --help-all does.
+        return ["--help-all"]
+    return [found[0], *tail]
+
+
+_SHORT_HELP = """\
+usage: fi [-h] [--help-all] --config CONFIG | --new | --update QUEST_ID | --serve | --resume QUEST_ID |
+          --watch QUEST_ID | --trace QUEST_ID | --skills | tools <name> ...
+
+Run a research quest end to end: literature, an experiment, the paper, and the checks that hold it to what
+it found. `fi --help-all` lists every flag; `fi tools --help` lists the less common one-shot commands
+(a weekly digest, a cross-quest portfolio, an adversarial critique, ...).
+
+Run a quest
+  --config CONFIG        YAML for one quest. Also resumes / updates / traces it with the flags below.
+  --new                  Answer a few questions and write the YAML for you (also: the web form, `@fi /new`).
+  --serve                Local web UI at http://127.0.0.1:8765.
+
+While a quest is running, or after
+  --resume QUEST_ID      Continue a quest that paused or stopped mid-run.
+  --watch QUEST_ID       Wait for a quest's background job (HPC / a cluster) and continue it when it is done.
+  --trace QUEST_ID       Print what a quest did, in order, and check nothing in its record was edited.
+  --update QUEST_ID      Re-open the setup questions for a running quest's editable answers.
+  --approve-amendment QUEST_ID   Approve a change to a quest's frozen protocol that it stopped to ask about.
+
+Skills (what FI has learned about driving one piece of software on this machine)
+  --skills               List them, and whether each is approved.
+  --approve-skill NAME   Approve one, after --approve-as <you>.
+  --doctor               What this machine has (LaTeX, a knowledge layer, ...) for FI to use.
+
+Less common
+  tools <name>           A weekly digest, a cross-quest portfolio, an adversarial critique, and more:
+                          `fi tools --help` for the list.
+  --help-all             Every flag, including each tool's own provider / model / ensemble options.
+"""
+
+
 def _config_from_quest(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """``--resume ID`` (or ``--watch ID``) without ``--config``: use the ``config.yaml`` the quest saved in its own folder.
 
@@ -90,9 +187,17 @@ def _config_from_quest(p: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    argv = _expand_tools_argv(argv)   # `tools <name> ...` -> the flag it stands for; everything else is unchanged
     p = argparse.ArgumentParser(
         prog="frontier-insight",
         description="End-to-end automated research pipeline.",
+        add_help=False,   # -h / --help print the short list below, not argparse's generated wall of every flag
+    )
+    p.add_argument("-h", "--help", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--help-all", action="store_true",
+        help="Every flag and qualifier, including each tool's own provider / model / ensemble options.",
     )
     # Exactly one mode is required, and that is checked once the arguments are
     # parsed (see ``_check_mode``), not by argparse: a required, exclusive group
@@ -997,6 +1102,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "with AXON_API_BASE. Pass this in CI / tests where the "
              "sidecar isn't wanted.",
     )
+    # A request for help wins over everything else, including a typo elsewhere on the same command line — the
+    # standard Unix convention, and the reason this is a raw scan of argv rather than an ``args.help`` check after
+    # ``p.parse_args()`` returns: argparse itself would refuse an unrecognized flag before ever reaching that check.
+    if "-h" in argv or "--help" in argv:
+        print(_SHORT_HELP)
+        raise SystemExit(0)
+    if "--help-all" in argv:
+        p.print_help()
+        raise SystemExit(0)
     args = p.parse_args(argv)
     _config_from_quest(p, args)
     _check_mode(p, mode._group_actions, args)
