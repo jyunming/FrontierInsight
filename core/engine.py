@@ -4705,8 +4705,10 @@ class Engine:
             or self.config.engine.analyze_local_first
         ):
             return None
-        if _frozen.load(self.quest_root) is not None:
-            return _frozen.protocol_of(self.quest_root)
+        frozen = self._resolved_frozen()
+        if frozen is not None:
+            protocol = frozen.get("protocol")
+            return protocol if isinstance(protocol, dict) and protocol else None
         return self._draft_protocol(state)
 
     def _draft_protocol(self, state: QuestState) -> dict[str, Any] | None:
@@ -4852,9 +4854,14 @@ class Engine:
     def _settle_pending_amendment(self, state: QuestState) -> dict[str, Any] | None:
         """A resume after an amendment request: the design that asked for it, with the approved protocol when a person
         approved that request and with the frozen one when they did not (resuming is not approving). ``None`` when no
-        request is waiting."""
+        request is waiting.
+
+        A tamper-recovery request (:attr:`_frozen.TAMPER_SOURCE`) is left alone here: resuming without approving it must
+        keep the quest blocked, not fall back to "the frozen one" the way a declined ordinary amendment does — the frozen
+        record is exactly what is not trusted. :meth:`_resolved_frozen` (through ``_hold_design_to_frozen`` /
+        ``_protocol_block``) is what settles it."""
         pending = _frozen.load_pending(self.quest_root)
-        if pending is None:
+        if pending is None or pending.get("source") == _frozen.TAMPER_SOURCE:
             return None
         design = dict(pending.get("design") or {})
         approval = _frozen.approval_for(self.quest_root, pending)
@@ -4884,7 +4891,7 @@ class Engine:
     def _hold_design_to_frozen(self, state: QuestState, design: dict[str, Any]) -> dict[str, Any]:
         """A design made after the freeze keeps the frozen protocol: without one it gets it back, with the same one it is
         left alone, and with a different one it is an amendment request, which stops the quest for a person."""
-        frozen = _frozen.load(self.quest_root)
+        frozen = self._resolved_frozen()
         if frozen is None or not isinstance(design, dict):
             return design
         request = design.get("protocol_amendment")
@@ -4937,6 +4944,48 @@ class Engine:
             steps=steps,
             payload={
                 "amendment_stage": True, "quest_id": self.quest_id, "changes": changes,
+                "amendment_file": str(_frozen.pending_path(self.quest_root)),
+            },
+        )
+
+    def _resolved_frozen(self) -> dict[str, Any] | None:
+        """The frozen record, guaranteed untampered — never the raw ``needs/FROZEN_PROTOCOL.json`` a person (or a bug)
+        could have edited by hand. A record whose hash no longer matches its own content stops the quest here, under
+        every profile, until a person approves restoring the version saved right when it was locked
+        (``core/frozen_protocol.py:propose_tamper_recovery``, the same approval act as any other change to the frozen
+        protocol). Unlike a declined amendment, resuming without approving does not go on: an untrustworthy file has
+        nothing safe to fall back to."""
+        frozen = _frozen.load(self.quest_root)
+        if frozen is None or not frozen.get("problem"):
+            return frozen
+        pending = _frozen.load_pending(self.quest_root)
+        if pending is None or pending.get("source") != _frozen.TAMPER_SOURCE:
+            pending = _frozen.propose_tamper_recovery(self.quest_root, frozen)
+        approval = _frozen.approval_for(self.quest_root, pending)
+        if approval is None:
+            self._pause_for_tamper(pending)
+            return None  # not reached: the pause exits
+        record = _frozen.apply(self.quest_root, pending, approval, raw_root=self._raw_root())
+        self._log.warning(
+            "[protocol] restored the version saved when the protocol was locked, approved by %s (the saved file no "
+            "longer matched its own checksum)", record["approved_by"],
+        )
+        return _frozen.load(self.quest_root)
+
+    def _pause_for_tamper(self, pending: dict[str, Any]) -> None:
+        self._pause_for_human(
+            kind="amendment",
+            interaction="supply",
+            headline="the saved protocol file was changed after it was locked",
+            steps=[
+                "`needs/FROZEN_PROTOCOL.json` no longer matches its own checksum, so it may not say what was actually "
+                "agreed when the protocol was locked. The experiment does not run against a file that might have been edited by hand.",
+                f"To restore the version saved right when it was locked: `python launch.py --approve-amendment \"{self.quest_root}\" "
+                f"--approve-as <you>` (the quest page's Approve button; in VSCode: `@fi /approve-amendment {self.quest_id}`), then resume.",
+                "Resuming WITHOUT approving does not go on: the quest stays paused here until the restore is approved.",
+            ],
+            payload={
+                "amendment_stage": True, "quest_id": self.quest_id, "changes": pending.get("changes") or [],
                 "amendment_file": str(_frozen.pending_path(self.quest_root)),
             },
         )
@@ -5114,7 +5163,7 @@ class Engine:
             path = self.quest_root / "needs" / "EVIDENCE.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-            self._log.info("[evidence] %s", _evidence.summary_line(record))
+            self._log.info("[evidence] %s", _evidence.summary_line(record, technical=True))
             self._audit_check("evidence", path, status=str(record.get("status")), summary=_evidence.summary_line(record))
             return record
         except Exception as e:  # noqa: BLE001 -- a report about the quest must never stall it

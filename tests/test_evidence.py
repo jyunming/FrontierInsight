@@ -75,6 +75,19 @@ def test_an_audit_that_found_something_keeps_the_quest_at_executed(tmp_path: Pat
     assert empty["status"] == "executed" and empty["gaps"] == ["the paper has not been checked against the results yet"]
 
 
+def test_one_clean_audit_does_not_stand_in_for_the_other_two_never_having_run(tmp_path: Path) -> None:
+    """The counterexample a paper could actually hit: only `numeric_audit.json` was ever written (the statistics and
+    provenance checks crashed before they could write theirs), and that alone must not read as 'all three passed.'"""
+    root = _quest(tmp_path, audits=False)
+    (root / "paper").mkdir(parents=True)
+    (root / "paper" / "numeric_audit.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "executed", got
+    assert any("the statistics check did not run" in g for g in got["gaps"])
+    assert any("the provenance check did not run" in g for g in got["gaps"])
+    assert "numeric" not in " ".join(got["gaps"]), "the one check that did run is not itself a gap"
+
+
 def test_a_skipped_audit_is_not_a_pass_and_not_a_failure(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     for name in ("numeric_audit", "statistics_audit", "provenance_audit"):
@@ -152,12 +165,27 @@ def test_a_level_needs_the_one_before_it(tmp_path: Path) -> None:
     assert got["next_level"] == "internally_reconciled"
 
 
-def test_the_one_line_for_the_cli_and_the_chat(tmp_path: Path) -> None:
+def test_the_one_line_for_the_cli_and_the_chat_is_plain_english_by_default(tmp_path: Path) -> None:
+    """A scientist reading the last line of a run should never have to look up what a level's name means: the default line
+    is the level's own plain-language claim, not the six-way identifier."""
     got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
     line = evidence.summary_line(got)
-    assert line.startswith("internally_reconciled; to reach protocol_runtime_matched: the plan fixes no protocol")
-    assert evidence.summary_line({"status": "publication_ready", "gaps": []}) == "publication_ready"
+    assert line.startswith("The number, statistics and provenance audits found the paper faithful")
+    assert "internally_reconciled" not in line and "protocol_runtime_matched" not in line
+    assert "Next: the plan fixes no protocol" in line
+    assert evidence.summary_line({"status": "publication_ready", "gaps": []}).startswith("The review accepted the paper")
     many = evidence.summary_line({"status": "executed", "next_level": "internally_reconciled", "gaps": ["a", "b", "c"]})
+    assert many.startswith("The experiment ran to the end") and many.endswith("Next: a (+2 more)")
+    assert evidence.summary_line({"status": "not_executed", "gaps": []}) == evidence._NOT_EXECUTED_CLAIM
+
+
+def test_the_technical_form_keeps_the_level_identifiers(tmp_path: Path) -> None:
+    """The old compact form is kept, opt-in, for run.log and anything that reads a level name back out of the line."""
+    got = evidence.assess(_quest(tmp_path, protocol=None), _state(design={"hypothesis": "h"}), settings=ON)
+    line = evidence.summary_line(got, technical=True)
+    assert line.startswith("internally_reconciled; to reach protocol_runtime_matched: the plan fixes no protocol")
+    assert evidence.summary_line({"status": "publication_ready", "gaps": []}, technical=True) == "publication_ready"
+    many = evidence.summary_line({"status": "executed", "next_level": "internally_reconciled", "gaps": ["a", "b", "c"]}, technical=True)
     assert many == "executed; to reach internally_reconciled: a (+2 more)"
 
 
@@ -354,7 +382,8 @@ def test_a_record_written_under_the_older_names_is_read_under_the_current_ones(t
     assert got["levels"] == {"executed": True, "internally_reconciled": True, "protocol_runtime_matched": False,
                              "independently_validated": False, "statistically_adequate": False, "publication_ready": False}
     assert "renamed" in got["legacy"] and "predates" in got["gaps"][0]
-    assert evidence.summary_line(old).startswith("internally_reconciled; to reach protocol_runtime_matched")
+    assert evidence.summary_line(old, technical=True).startswith("internally_reconciled; to reach protocol_runtime_matched")
+    assert evidence.summary_line(old).startswith("The number, statistics and provenance audits found the paper faithful")
     only_audit = evidence.upgrade({"status": "internally_consistent", "levels": {"executed": True, "internally_consistent": True}})
     assert only_audit["status"] == "internally_reconciled"
     failed = evidence.upgrade({"status": "executed", "levels": {"executed": True, "internally_consistent": False},

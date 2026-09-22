@@ -56,7 +56,7 @@ When it ends, the folder `outputs/<quest id>/` holds:
 - `code/` — the exact code that ran; `figures/` — every plot;
 - `needs/EVIDENCE.json` — how far the result was checked.
 
-The last line the run prints is the evidence level, for example `evidence: internally_reconciled; to reach protocol_runtime_matched: ...`. It says what was checked and what stands between this result and the next level. **A paper is not a verified result**: the levels are explained in [rigor.md](rigor.md), and every word FI uses is in the [glossary](glossary.md).
+The last line the run prints is a plain sentence saying how far the result was checked and what stands between it and the next level, for example `evidence: The number, statistics and provenance audits found the paper faithful to what the script printed. Next: ...`. **A paper is not a verified result**: the levels are explained in [rigor.md](rigor.md), and every word FI uses is in the [glossary](glossary.md).
 
 Want to see what happened, in order? `fi --trace <quest id>` ([trace.md](trace.md)).
 
