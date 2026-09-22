@@ -28,7 +28,7 @@ from core.config import (
 )
 from core.engine import (
     Engine, _aggregate_result_json_replicates, _replicate_env,
-    _replicate_seed_count, _script_reads_replicate_seed, unseeded_rng_calls,
+    _replicate_seed_count, _script_reads_replicate_seed, replicate_seed_reaches_rng, unseeded_rng_calls,
 )
 
 # The fixtures' scripts are never executed (the executor is mocked); they are
@@ -525,6 +525,97 @@ def test_a_generator_built_without_a_seed_is_found(code: str, line: int) -> None
 ])
 def test_a_reproducible_script_is_left_alone(code: str) -> None:
     assert unseeded_rng_calls(code) == []
+
+
+# --- P1-5: does FI_REPLICATE_SEED actually flow into a seeding call, not merely appear in the file -----------------
+
+
+def test_a_seed_read_directly_into_the_generator_reaches_it() -> None:
+    code = "import numpy as np\nimport os\nrng = np.random.default_rng(int(os.environ.get('FI_REPLICATE_SEED', 0)))\n"
+    assert replicate_seed_reaches_rng(code) is True
+
+
+def test_a_seed_read_into_a_variable_and_then_passed_reaches_it() -> None:
+    code = (
+        "import numpy as np\nimport os\n"
+        "seed = int(os.environ.get('FI_REPLICATE_SEED', 0))\n"
+        "rng = np.random.default_rng(seed)\n"
+    )
+    assert replicate_seed_reaches_rng(code) is True
+
+
+def test_a_seed_read_via_os_getenv_or_a_subscript_reaches_it() -> None:
+    assert replicate_seed_reaches_rng(
+        "import numpy as np\nimport os\nrng = np.random.default_rng(int(os.getenv('FI_REPLICATE_SEED', '0')))\n",
+    ) is True
+    assert replicate_seed_reaches_rng(
+        "import numpy as np\nimport os\nrng = np.random.default_rng(int(os.environ['FI_REPLICATE_SEED']))\n",
+    ) is True
+
+
+def test_a_seed_read_and_used_only_to_reseed_the_legacy_global_reaches_it() -> None:
+    code = "import numpy as np\nimport os\nnp.random.seed(int(os.environ.get('FI_REPLICATE_SEED', 0)))\n"
+    assert replicate_seed_reaches_rng(code) is True
+
+
+def test_a_seed_read_into_an_unused_name_does_not_reach_a_hardcoded_generator() -> None:
+    """The exact blind spot P1-5 closes: the file mentions FI_REPLICATE_SEED (so
+    ``_script_reads_replicate_seed`` cannot rule it out), but the value never reaches the generator that is
+    actually seeded -- from a hardcoded constant instead."""
+    code = (
+        "import numpy as np\nimport os\n"
+        "_unused = os.environ.get('FI_REPLICATE_SEED')\n"
+        "RNG_SEED = 20260917\n"
+        "rng = np.random.default_rng(RNG_SEED)\n"
+    )
+    assert replicate_seed_reaches_rng(code) is False
+
+
+def test_a_seed_reaching_one_generator_and_a_decoy_hardcoded_generator_does_not_pass() -> None:
+    """The reviewed loophole a lenient "any one connects" version would have: a script that correctly seeds ONE
+    generator from FI_REPLICATE_SEED and a SECOND, unused for anything but decoration, from a hardcoded constant,
+    while the actual measured randomness comes from a THIRD generator seeded the same hardcoded way. Every
+    recognised call must connect, not just one, or this script would read as reproducible when its real result
+    is not."""
+    code = (
+        "import numpy as np\nimport os\n"
+        "seed = int(os.environ.get('FI_REPLICATE_SEED', 0))\n"
+        "decoy = np.random.default_rng(seed)  # correctly seeded, never used for anything that matters\n"
+        "RNG_SEED = 20260917\n"
+        "rng = np.random.default_rng(RNG_SEED)  # this is what the measured result actually comes from\n"
+    )
+    assert replicate_seed_reaches_rng(code) is False
+
+
+def test_a_seed_split_across_a_tuple_assignment_is_still_tracked() -> None:
+    """``seed, label = int(os.environ.get('FI_REPLICATE_SEED', 0)), "run"`` binds two names at once; only the one
+    whose element of the tuple actually reads the environment is marked, not both."""
+    code = (
+        "import numpy as np\nimport os\n"
+        "seed, label = int(os.environ.get('FI_REPLICATE_SEED', 0)), 'run'\n"
+        "rng = np.random.default_rng(seed)\n"
+    )
+    assert replicate_seed_reaches_rng(code) is True
+    # `label` was NOT seeded from the environment; a generator seeded from it must not be granted either.
+    mislabelled = code.replace("np.random.default_rng(seed)", "np.random.default_rng(label)")
+    assert replicate_seed_reaches_rng(mislabelled) is False
+
+
+def test_a_script_that_never_names_the_seed_at_all_does_not_reach_it() -> None:
+    assert replicate_seed_reaches_rng(TERRA_SHAPED_SCRIPT) is False
+
+
+def test_a_script_with_no_rng_call_at_all_has_nothing_to_be_disconnected_from() -> None:
+    """A purely numerical script (an ODE solve, say) that reads the seed but seeds nothing -- there is no
+    randomness for the value to reach, so this check has nothing to say and defers to the old "it reads the seed"
+    reasoning. FAKE_SEEDED_SCRIPT is exactly this shape: it is the fixture several tests below build a real
+    ``Engine`` run around and expect ``result_json_deterministic`` to still be settled by ``reads_seed`` alone."""
+    assert replicate_seed_reaches_rng(FAKE_SEEDED_SCRIPT) is True
+
+
+def test_an_unreadable_script_gets_the_benefit_of_the_doubt_here_too(tmp_path: Path) -> None:
+    from core.engine import _replicate_seed_reaches_rng
+    assert _replicate_seed_reaches_rng(tmp_path / "does_not_exist.py") is True
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
