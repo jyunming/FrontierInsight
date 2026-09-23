@@ -5746,6 +5746,34 @@ class Engine:
                     "repeat one run, so the quest will be reported as a single "
                     "measurement with no confidence interval", why,
                 )
+            if self.config.rigor_profile == "research":
+                # The re-audit's P1-3: this repair failing never blocked the quest, so a research-grade
+                # run could still finish on results nobody could reproduce (or a single measurement
+                # reported as if it were replicated). Fail closed here instead -- pause re-enters this
+                # whole node on resume, so fixing the script by hand (or accepting the risk by dropping
+                # the profile) and resuming tries again from scratch.
+                self._pause_for_human(
+                    kind="replicate_seed_unrepairable",
+                    interaction="supply",
+                    headline=(
+                        "the script's randomness cannot be traced to FI_REPLICATE_SEED, and "
+                        "rigor_profile: research requires it before running"
+                    ),
+                    steps=[
+                        f"What the repair could not fix: {why}",
+                        (
+                            "The replicates would not be reproducible from a rerun"
+                            if reads_seed else
+                            "Every replicate would repeat the same run, reported as if it had a confidence interval"
+                        ),
+                        f"Check {code_path.name} (in code/) -- it must seed every random generator it "
+                        "builds from FI_REPLICATE_SEED, and nowhere else.",
+                        "Fix the script by hand and resume to try the repair again, or drop rigor_profile "
+                        "to \"default\" for this quest to proceed unblocked -- but that gives up the "
+                        "research-grade guarantee.",
+                    ],
+                    payload={"why": why, "reads_seed": reads_seed},
+                )
             return code, deps
         code_path.write_text(new_code, encoding="utf-8")
         self._log.info(
@@ -5756,6 +5784,16 @@ class Engine:
         return new_code, sorted({*deps, *new_deps})
 
     async def _node_execute(self, state: QuestState) -> QuestState:
+        # Unconditional tamper check (the re-audit's P1-6): every other frozen-protocol reader
+        # (_protocol_of, _run_manifest_problems, the oracle gate) returns early -- skipping
+        # _resolved_frozen() entirely -- when ITS OWN check is configured "off", so a hand-edited
+        # needs/FROZEN_PROTOCOL.json went completely unvalidated whenever protocol_check,
+        # oracle_check and run_manifest_check were all off. This call happens regardless of any of
+        # those flags, before the script that would run against that file: it pauses (does not
+        # return) if the file was tampered with and restoring it has not been approved. It is also
+        # what protects a `--resume` that continues straight into execute without design re-running
+        # (design's own tamper check, in `_hold_design_to_frozen`, only fires when design executes).
+        self._resolved_frozen()
         # Docker sandbox: the selected, approved external skills are mounted
         # read-only in every container this node starts (a thread: resolving
         # the skills can run their self-tests).
@@ -10357,11 +10395,13 @@ class Engine:
         """The interpreter, platform and installed packages this quest's experiment actually runs on, and whether
         that environment is this quest's own or shared with every other quest on the machine.
 
-        Not enforced — ``execution.shared_interpreter`` / ``system_site_packages`` are left as the earlier decision
-        keeps them (a previous quest's `pip install` CAN affect this run) — but recorded, so a result can be
-        reproduced from the exact package list it ran on, and so the evidence level can say plainly when it wasn't
-        isolated rather than being silent about it (the re-audit's P1-2). Best-effort throughout: a diagnostic that
-        cannot be written must never stop a quest.
+        ``rigor_profile: research`` now forces isolation (``execution.shared_interpreter`` / ``system_site_packages``
+        both false, or ``sandbox: docker``) — the re-audit's P1-1 fix. The default profile still leaves those as the
+        earlier decision keeps them (a previous quest's `pip install` CAN affect this run); this method records
+        which is true either way, so a result can be reproduced from the exact package list it ran on, and so the
+        evidence level can say plainly when it wasn't isolated rather than being silent about it (the original
+        re-audit's P1-2 finding). Best-effort throughout: a diagnostic that cannot be written must never stop a
+        quest.
         """
         isolated = self.config.execution.sandbox == "docker" or not (
             self.config.execution.shared_interpreter or self.config.execution.system_site_packages
