@@ -10,6 +10,28 @@ protocol. A disagreement is a difference the run itself reports, not one a searc
 The manifest is the script's own statement: it shows that the run says it matched the protocol, and a script can write anything.
 What it adds over the lint is that a run which contradicts the protocol can no longer pass by containing the right constants, and
 that a mismatch is a difference between two records, which the engine can act on without reading code.
+
+**The trial counts don't have to be self-reported.** ``simulate.py`` also appends one real line per trial, as it finishes,
+to ``trial_ledger.jsonl`` (:func:`read_ledger`) in the same folder; :func:`manifest_from_ledger` derives the count fields
+from those lines instead of trusting a summary. Two designs considered and rejected for this, so a future change doesn't
+re-litigate them without new information:
+
+* **One subprocess per trial**, so the engine itself drives every trial instead of the script looping internally. This is
+  what a literal reading of "the engine assigns each trial" suggests, and it is the most rigorous option in principle —
+  but measured against a realistic script (one that imports numpy, the floor for anything in this codebase), a single
+  subprocess spawn costs roughly 130ms; at ``runs_per_setting: 300`` across even a small grid that is minutes of pure
+  process-spawn overhead added to quests that complete in seconds today. Not viable for FI's actual workload shape.
+* **An RNG "fingerprint"** — the engine assigns each trial a seed, and the script must report a hash of the RNG's first
+  few draws from that seed, which the engine re-derives and checks. This looks like independent verification, but it
+  is not: a fingerprint computed purely from a known seed requires no real trial computation to produce, so it is exactly
+  as cheap to fabricate 300 of them as it is to verify them. It would not have caught the concrete bypass this exists
+  for.
+
+What ships instead trades a weaker guarantee for something actually enforceable: the engine counts real, appended lines,
+so lying about a trial count now costs writing that many lines (and, per the ``result_json`` check below, that many real
+per-trial values downstream) rather than one number. It does not prove any single trial's SCIENCE is correct — no
+mechanism here re-executes the simulation — the same limit every other gate in this codebase already lives with (the
+oracle check proves agreement with a closed form the plan declared, not that the simulator is right).
 """
 
 from __future__ import annotations
@@ -23,7 +45,117 @@ from typing import Any
 
 SCHEMA = "fi.run-manifest/v1"
 NAME = "run_manifest.json"
+LEDGER_NAME = "trial_ledger.jsonl"
 _NO_MATCH = object()  # a cell key's value that names none of the protocol's own values for that axis
+
+
+def read_ledger(raw_dir: Path) -> tuple[list[dict[str, Any]] | None, str]:
+    """The per-trial ledger a simulation appended to in ``raw_dir`` (one JSON object per line: ``{"cell": "<axis=value,...>",
+    "trial": <id>, "status": "ok"|"failed", "reason": "<only for failed>"}``), or ``(None, why)``.
+
+    Where this exists, :func:`manifest_from_ledger` derives the trial counts from it instead of trusting a self-reported
+    summary: a script can still write anything into ``run_manifest.json`` (see the module docstring), but it cannot make
+    the engine COUNT trials it never appended a line for."""
+    path = raw_dir / LEDGER_NAME
+    if not path.is_file():
+        return None, f"{LEDGER_NAME} was not written into the folder FI_RAW_DIR names"
+    rows: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return None, f"{LEDGER_NAME} could not be read ({e})"
+    for i, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            return None, f"{LEDGER_NAME} line {i} is not valid JSON"
+        if not isinstance(row, dict):
+            return None, f"{LEDGER_NAME} line {i} is not a JSON object"
+        rows.append(row)
+    return rows, ""
+
+
+def _norm_trial(trial: Any) -> Any:
+    """A trial id in one canonical form, so ``1`` (an int, the usual case) and ``"1"`` (a string) name the same trial
+    for dedup — a script that replays a trial under the other JSON type must not slip past the duplicate check."""
+    if isinstance(trial, bool):
+        return trial
+    if isinstance(trial, int):
+        return trial
+    if isinstance(trial, float):
+        return int(trial) if trial.is_integer() else trial
+    if isinstance(trial, str):
+        try:
+            return int(trial)
+        except ValueError:
+            pass
+        try:
+            f = float(trial)
+            return int(f) if f.is_integer() else f
+        except ValueError:
+            pass
+    return trial
+
+
+def manifest_from_ledger(
+    protocol: dict[str, Any], ledger: list[dict[str, Any]], thresholds_used: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """``(manifest, problems)`` — the manifest a ledger of real per-trial rows implies, standing in for the fields a
+    script would otherwise self-report (``realized_grid``, ``attempted_per_cell``, ``successful_per_cell``,
+    ``failed_trials``): each is counted from ledger rows the engine can see, not read from a summary the script wrote.
+    ``thresholds_used`` still comes from the caller (a ledger row has no natural place for a run-wide setting).
+
+    ``problems`` names what's wrong with the ledger ITSELF, before the derived manifest is even compared with the
+    protocol (:func:`problems` does that part): a row naming no cell the protocol's grid has, one missing ``trial`` or
+    ``status``, or two rows claiming the same (cell, trial) — the exact "duplicate id" / "replayed trial" and
+    "out-of-protocol cell" shapes a script's self-report could otherwise hide."""
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    row_problems: list[str] = []
+    attempted: dict[str, int] = {}
+    successful: dict[str, int] = {}
+    failed: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any]] = set()
+    realized: dict[str, set[Any]] = {axis: set() for axis in grid}
+    for i, row in enumerate(ledger):
+        cell_key = row.get("cell")
+        canon, err = _canonicalize_cell(cell_key, grid) if grid else (None, None)
+        if grid and err:
+            row_problems.append(f"ledger row {i}: {err}")
+            continue
+        display = cell_key if isinstance(cell_key, str) else repr(cell_key)
+        if "trial" not in row:
+            row_problems.append(f"ledger row {i} (cell {display!r}) has no `trial` id")
+            continue
+        trial = row["trial"]
+        dedup_key = (canon if canon is not None else display, _norm_trial(trial))
+        if dedup_key in seen:
+            row_problems.append(f"more than one ledger row claims cell {display!r}, trial {trial!r}")
+            continue
+        seen.add(dedup_key)
+        status = str(row.get("status") or "").strip().lower()
+        if status not in ("ok", "failed"):
+            row_problems.append(f"ledger row {i} (cell {display!r}, trial {trial!r}) has no `status` of \"ok\" or \"failed\"")
+            continue
+        attempted[display] = attempted.get(display, 0) + 1
+        if status == "ok":
+            successful[display] = successful.get(display, 0) + 1
+        else:
+            failed.append({"cell": display, "trial": trial, "reason": str(row.get("reason") or "").strip() or "(no reason given)"})
+        if canon is not None:
+            for axis, value in canon:
+                realized[axis].add(value)
+    manifest = {
+        "schema": SCHEMA,
+        "realized_grid": {axis: sorted(values, key=lambda v: (isinstance(v, str), v)) for axis, values in realized.items()},
+        "attempted_per_cell": attempted,
+        "successful_per_cell": successful,
+        "failed_trials": failed,
+        "thresholds_used": dict(thresholds_used or {}),
+    }
+    return manifest, row_problems
 
 
 def read(raw_dir: Path) -> tuple[dict[str, Any] | None, str]:
@@ -151,7 +283,32 @@ def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
     return {frozenset(zip((a for a, _ in axes), combo)) for combo in product(*(v for _, v in axes))}
 
 
-def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "") -> list[str]:
+def _total_values_reported(result_json: Any, metric_id: str) -> int:
+    """The total length of every list found anywhere in ``result_json`` under a key named ``f"{metric_id}_values"`` — the
+    real per-trial numbers the analysis actually had to work with, regardless of which setting held them."""
+    key = f"{metric_id}_values"
+    total = 0
+
+    def walk(node: Any) -> None:
+        nonlocal total
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == key and isinstance(v, list):
+                    total += sum(1 for x in v if isinstance(x, (int, float)) and not isinstance(x, bool))
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(result_json)
+    return total
+
+
+def problems(
+    protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "",
+    result_json: dict[str, Any] | None = None,
+) -> list[str]:
     """How the run differs from the protocol, one sentence each; empty when the manifest matches it.
 
     A cell (a setting the grid names) is identified by parsing its key and snapping each axis's value to the protocol's own
@@ -160,6 +317,15 @@ def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str
     run's cells must then match the protocol's full Cartesian product exactly — sweeping one axis or value beyond the
     protocol is not absorbed as "extra", it is the same kind of difference as leaving one out. Reaching a wider grid this
     way is always available: ask for it as a protocol amendment.
+
+    ``result_json`` (the same seed's own analysis output, when the caller has it) backs the trial counts against data the
+    analysis actually used: a manifest can claim any ``attempted_per_cell`` it likes (:mod:`core.run_manifest`'s own
+    docstring says so), but a `kind: "mean"` metric's `<id>_values` array is real per-trial numbers the paper's statistics
+    are computed from, so a manifest whose claimed trial count is not backed by anywhere near that many real values is
+    caught here, independent of whatever the manifest's own summary says. This does not prove every individual trial is
+    genuine (a script could still fabricate that many values) — it raises the bar from writing one number to fabricating
+    that much of the data the paper stands on, which is the same kind of commitment the rest of the evidence ladder relies
+    on rather than a cryptographic guarantee.
     """
     if manifest is None:
         return [why or f"{NAME} is missing"]
@@ -225,6 +391,28 @@ def problems(protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str
             if short:
                 shown = ", ".join(f"{c}: {n}" for c, n in list(short.items())[:4])
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
+        if result_json is not None and grid:
+            # The baseline is trials the manifest itself says SUCCEEDED, not the protocol's raw runs_per_setting x
+            # cells: a design with a genuine, declared failure rate (failed_trials, a failure_policy) legitimately
+            # has fewer real values than the nominal total, and that is not fabrication. A low threshold (rather
+            # than requiring an exact match) leaves room for a metric that, by the design's own nature, only
+            # applies to a subset of cells (e.g. a "time to extinction" that only exists where an outbreak
+            # happened) -- this check is aimed at the audit's own example (10 real trials, 300 claimed), not at
+            # flagging every partial or conditional metric.
+            successful = manifest.get("successful_per_cell")
+            successful = successful if isinstance(successful, dict) else {}
+            expected_total = sum(_num(n) or 0 for n in successful.values()) or runs * len(_all_cells(grid))
+            for spec in protocol.get("metrics") or []:
+                if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id"):
+                    continue
+                got = _total_values_reported(result_json, str(spec["id"]))
+                if got < expected_total * 0.5:
+                    out.append(
+                        f"the manifest reports {expected_total:g} successful trial(s) in total, but the metric "
+                        f"`{spec['id']}` only has {got} real "
+                        "per-trial value(s) in this run's own analysis output — the claimed trial count is not "
+                        "backed by the data the analysis actually used"
+                    )
 
     listed = manifest.get("failed_trials")
     listed = listed if isinstance(listed, list) else []
@@ -305,8 +493,12 @@ def failure_count(manifest: dict[str, Any] | None) -> int:
 
 
 def contract() -> str:
-    """The part of the two-script directive that asks ``simulate.py`` for the manifest."""
+    """The part of the two-script directive that asks ``simulate.py`` for the manifest and the per-trial ledger."""
     return (
+        f"**{LEDGER_NAME}.** As EACH trial finishes (not at the end), append one line to `{LEDGER_NAME}` in the same "
+        'folder: a single JSON object, `{"cell": "<parameter>=<value>,<parameter>=<value>", "trial": <number>, '
+        '"status": "ok" | "failed", "reason": "<only when failed>"}`, then flush. This is the record FI actually counts '
+        "trials from — one real line per trial, written as it happens, not a total computed afterwards. "
         "**run_manifest.json.** When it has finished, simulate.py also writes `run_manifest.json` into the same folder, "
         "as JSON, saying what it ACTUALLY ran (not what it meant to run): "
         '{"schema": "fi.run-manifest/v1", "realized_grid": {"<parameter>": [<every value it swept>]}, '
@@ -314,22 +506,25 @@ def contract() -> str:
         '"successful_per_cell": {"<same keys>": <trials that completed>}, '
         '"failed_trials": [{"cell": "<same key>", "trial": <number>, "reason": "<short>"}], '
         '"thresholds_used": {"<name>": <value>}}. '
-        "Build it from what the loops did (count in the loop, not from a constant declared above it), list EVERY trial that "
-        "failed (a solver that did not converge, an exception) instead of dropping it, and read the grid, the run count and "
-        "the thresholds it uses from ONE place in the script, so the manifest and the simulation cannot disagree. "
+        "Build both from what the loops did (count in the loop, not from a constant declared above it), list EVERY "
+        "trial that failed (a solver that did not converge, an exception) instead of dropping it, and read the grid, "
+        "the run count and the thresholds it uses from ONE place in the script, so the two files and the simulation "
+        "cannot disagree. "
     )
 
 
 def directive(found: list[str], protocol: dict[str, Any]) -> str:
     """What stands where a traceback would in the repair request."""
     return (
-        "This run finished, but its run_manifest.json does not match the frozen protocol:\n"
+        "This run finished, but what it actually did does not match the frozen protocol:\n"
         + "\n".join(f"- {line}" for line in found[:8])
         + "\n\nThe frozen protocol (it cannot change here):\n"
         + json.dumps({k: protocol.get(k) for k in ("grid", "runs_per_setting", "thresholds", "failure_policy") if protocol.get(k) is not None}, separators=(",", ":"))
-        + "\n\nRewrite simulate.py so that it runs EXACTLY that design and writes run_manifest.json from what its loops did "
-        "(realized_grid, attempted_per_cell, successful_per_cell, failed_trials, thresholds_used, schema `fi.run-manifest/v1`). "
-        "Do not edit the manifest to say what the protocol says: change what the simulation does. Keep everything else."
+        + f"\n\nRewrite simulate.py so that it runs EXACTLY that design: appends one real line to `{LEDGER_NAME}` as EACH "
+        "trial finishes (cell, trial, status, and reason when failed), and writes run_manifest.json from what its loops "
+        "did (realized_grid, attempted_per_cell, successful_per_cell, failed_trials, thresholds_used, schema "
+        "`fi.run-manifest/v1`). Do not edit either file to say what the protocol says: change what the simulation does "
+        f"— FI counts trials from `{LEDGER_NAME}`'s own lines, not from a number written beside it. Keep everything else."
     )
 
 

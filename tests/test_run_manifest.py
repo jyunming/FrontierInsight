@@ -32,6 +32,53 @@ def test_a_manifest_that_says_what_the_protocol_fixed_has_no_difference() -> Non
     assert rm.problems(PROTOCOL, _manifest()) == []
 
 
+# --- the claimed trial count against the real per-trial values a mean metric reports -------------------------------
+
+
+_MEAN_PROTOCOL = {**PROTOCOL, "metrics": [{"id": "final_size", "kind": "mean", "estimand": "x", "unit": "y"}]}
+
+
+def _result_json_with(n_per_cell: int) -> dict[str, Any]:
+    """A real result_json shaped like the audit's own bypass example: attempted_per_cell can claim
+    anything, but this is what the analysis actually had to work with."""
+    return {"by_R0": {str(r): {"final_size_values": [0.1] * n_per_cell} for r in (0.9, 1.5, 3.0)}}
+
+
+def test_a_manifest_reports_300_but_the_analysis_only_has_10_real_values_is_caught() -> None:
+    """The audit's own concrete bypass: a script that ran 10 trials writes attempted_per_cell=300 by
+    copying the protocol. Without a real result to check against this passed; with it, it does not."""
+    found = rm.problems(_MEAN_PROTOCOL, _manifest(), result_json=_result_json_with(10))
+    assert any("not backed by the data the analysis actually used" in f for f in found), found
+
+
+def test_a_manifest_backed_by_enough_real_values_is_not_flagged() -> None:
+    found = rm.problems(_MEAN_PROTOCOL, _manifest(), result_json=_result_json_with(300))
+    assert found == []
+
+
+def test_the_value_count_check_is_a_noop_without_a_mean_metric_or_a_result(tmp_path: Path) -> None:  # noqa: ARG001
+    # No result_json at all: unchanged from before this check existed.
+    assert rm.problems(_MEAN_PROTOCOL, _manifest()) == []
+    # A result_json, but the protocol names no mean-kind metric: nothing to check against.
+    assert rm.problems(PROTOCOL, _manifest(), result_json=_result_json_with(10)) == []
+
+
+def test_a_declared_failure_rate_is_not_mistaken_for_fabrication() -> None:
+    """A design with a genuine ~15% solver-divergence rate, correctly excluding failed trials from
+    its value arrays, must not trip the value-count check -- the baseline is trials the manifest
+    says SUCCEEDED (255 here), not the protocol's raw 300, and 255 real values back that exactly."""
+    cells = {"R0=0.9": 255, "R0=1.5": 300, "R0=3.0": 300}
+    manifest = _manifest(successful_per_cell=cells, failed_trials=[
+        {"cell": "R0=0.9", "trial": i, "reason": "solver diverged"} for i in range(45)
+    ])
+    result_json = {"by_R0": {
+        "0.9": {"final_size_values": [0.1] * 255}, "1.5": {"final_size_values": [0.1] * 300},
+        "3.0": {"final_size_values": [0.1] * 300},
+    }}
+    found = rm.problems({**_MEAN_PROTOCOL, "failure_policy": "excluded from the pooled estimate"}, manifest, result_json=result_json)
+    assert found == []
+
+
 def test_reading_says_why_a_manifest_cannot_be_used(tmp_path: Path) -> None:
     assert rm.read(tmp_path)[0] is None and "was not written" in rm.read(tmp_path)[1]
     (tmp_path / rm.NAME).write_text("{not json", encoding="utf-8")
@@ -114,6 +161,31 @@ for r0 in R0_LIST:
 SIM_OK = _SIM.replace("__RUNS__", "NUM_RUNS")
 SIM_SHORT = _SIM.replace("__RUNS__", "30")  # the constant says 300 and the loop runs 30: no lint finds it
 SIM_NO_MANIFEST = SIM_OK.split("(raw / \"run_manifest.json\")")[0]
+
+# Runs 10 real trials per cell, appends a real trial_ledger.jsonl line for each one, then writes a
+# run_manifest.json that LIES about it (claims 300 attempted/successful) -- the audit's own bypass,
+# through the real graph: does the engine trust the ledger's 10 real lines, or the lying summary's 300?
+SIM_LEDGER_LIES_IN_SUMMARY = """\
+import json, os, pathlib
+R0_LIST = [0.9, 1.5, 3.0]
+raw = pathlib.Path(os.environ["FI_RAW_DIR"])
+raw.mkdir(parents=True, exist_ok=True)
+ledger = open(raw / "trial_ledger.jsonl", "a")
+done = {}
+for r0 in R0_LIST:
+    key = f"R0={r0}"
+    done[key] = 0
+    for i in range(10):  # really only 10 trials per cell
+        ledger.write(json.dumps({"cell": key, "trial": i, "status": "ok"}) + "\\n")
+        done[key] += 1
+ledger.close()
+(raw / "outcomes.json").write_text(json.dumps(done))
+lie = {r0: 300 for r0 in [f"R0={r}" for r in R0_LIST]}
+(raw / "run_manifest.json").write_text(json.dumps({
+    "schema": "fi.run-manifest/v1", "realized_grid": {"R0": R0_LIST}, "attempted_per_cell": lie,
+    "successful_per_cell": lie, "failed_trials": [], "thresholds_used": {"outbreak": OUTBREAK_THRESHOLD},
+}))
+""".replace("raw.mkdir(parents=True, exist_ok=True)\n", "raw.mkdir(parents=True, exist_ok=True)\nOUTBREAK_THRESHOLD = 0.1\n")
 ANALYSIS = """\
 import json, os, pathlib
 import matplotlib
@@ -175,6 +247,26 @@ async def test_a_simulation_whose_manifest_matches_the_protocol_passes(tmp_path:
     assert artifacts.paper_md is not None
     assert _record(engine)["status"] == "ok" and "ExecuteReflect" not in calls
     assert (engine.quest_root / "raw" / "seed0" / "run_manifest.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_lying_run_manifest_is_overruled_by_the_real_ledger_through_the_real_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not a unit test of manifest_from_ledger() in isolation -- this exercises
+    Engine._run_manifest_problems itself: a script that ran 10 real trials per cell (a real
+    trial_ledger.jsonl says so) but writes run_manifest.json claiming 300 (the audit's own bypass)
+    must be caught by the actual engine wiring, not just by the pure function it calls."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_reply(SIM_LEDGER_LIES_IN_SUMMARY)))
+    engine = Engine(_cfg(tmp_path, engine={"run_manifest_check": "warn"}))  # warn: inspect the record without a repair loop
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    record = _record(engine)
+    assert record["status"] == "warned"
+    assert any("ran another number" in p and "R0=0.9: 10" in p for p in record["problems"]), record["problems"]
+    ledger_path = engine.quest_root / "raw" / "seed0" / "trial_ledger.jsonl"
+    assert ledger_path.is_file() and len(ledger_path.read_text(encoding="utf-8").splitlines()) == 30
 
 
 @pytest.mark.asyncio
@@ -456,3 +548,104 @@ async def test_a_deterministic_study_that_runs_as_one_script_needs_no_manifest(t
 def test_a_comment_that_names_result_json_is_not_a_simulation_that_publishes() -> None:
     assert rm.split_lint({"simulate.py": "# results are printed by the analysis, never RESULT_JSON here\nx = 1"}) == []
     assert rm.split_lint({"experiment.py": "import subprocess\nsubprocess.run(['python', 'simulate.py'])"})
+
+
+# --- the per-trial ledger: the engine counts real rows instead of trusting a self-reported summary -----------------
+
+
+def _ledger_rows(n_per_cell: int, *, cells: tuple[float, ...] = (0.9, 1.5, 3.0)) -> list[dict[str, Any]]:
+    return [
+        {"cell": f"R0={r}", "trial": t, "status": "ok"}
+        for r in cells for t in range(n_per_cell)
+    ]
+
+
+def test_reading_a_ledger_that_is_not_there_says_why(tmp_path: Path) -> None:
+    rows, why = rm.read_ledger(tmp_path)
+    assert rows is None and "was not written" in why
+
+
+def test_reading_a_ledger_parses_one_json_object_per_line(tmp_path: Path) -> None:
+    (tmp_path / rm.LEDGER_NAME).write_text(
+        '{"cell": "R0=0.9", "trial": 0, "status": "ok"}\n\n{"cell": "R0=0.9", "trial": 1, "status": "ok"}\n',
+        encoding="utf-8",
+    )
+    rows, why = rm.read_ledger(tmp_path)
+    assert why == "" and len(rows) == 2 and rows[1]["trial"] == 1
+
+
+def test_reading_a_ledger_with_a_bad_line_fails_with_the_line_number(tmp_path: Path) -> None:
+    (tmp_path / rm.LEDGER_NAME).write_text('{"cell": "R0=0.9", "trial": 0, "status": "ok"}\nnot json\n', encoding="utf-8")
+    rows, why = rm.read_ledger(tmp_path)
+    assert rows is None and "line 2" in why
+
+
+def test_a_lying_summary_is_ignored_once_a_real_ledger_backs_the_counts() -> None:
+    """The audit's own bypass, closed: the script can still write ANY attempted_per_cell it likes into
+    run_manifest.json, but manifest_from_ledger never reads that field at all -- it counts real ledger rows."""
+    ledger = _ledger_rows(300)
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, ledger, thresholds_used={"outbreak": 0.1})
+    assert problems_ == []
+    assert derived["attempted_per_cell"] == {"R0=0.9": 300, "R0=1.5": 300, "R0=3.0": 300}
+    assert rm.problems(PROTOCOL, derived) == []
+
+
+def test_a_script_that_ran_10_and_claims_300_is_caught_because_only_10_rows_exist() -> None:
+    """The concrete audit example: attempted_per_cell=300 in run_manifest.json is simply never consulted;
+    the ledger only has 10 real rows per cell, so that is what attempted_per_cell derives to."""
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, _ledger_rows(10))
+    assert problems_ == []
+    found = rm.problems(PROTOCOL, derived)
+    assert any("ran another number" in f for f in found), found
+
+
+def test_a_duplicate_trial_id_is_named_not_silently_merged() -> None:
+    ledger = _ledger_rows(2) + [{"cell": "R0=0.9", "trial": 0, "status": "ok"}]  # replays trial 0
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, ledger)
+    assert any("more than one ledger row claims" in p and "trial 0" in p for p in problems_), problems_
+    # The replayed row does not count twice.
+    assert derived["attempted_per_cell"]["R0=0.9"] == 2
+
+
+def test_a_replayed_trial_id_under_a_different_json_type_is_still_caught() -> None:
+    """A script could try to dodge the duplicate check by resubmitting the same trial as a string
+    the second time (`0` then `"0"`) -- these must be recognised as the same trial, not two."""
+    ledger = _ledger_rows(2) + [{"cell": "R0=0.9", "trial": "0", "status": "ok"}]
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, ledger)
+    assert any("more than one ledger row claims" in p for p in problems_), problems_
+    assert derived["attempted_per_cell"]["R0=0.9"] == 2
+
+
+def test_a_ledger_row_outside_the_protocols_grid_is_named_not_folded_in() -> None:
+    ledger = _ledger_rows(300) + [{"cell": "R0=99", "trial": 0, "status": "ok"}]
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, ledger)
+    assert any("R0=99" in p for p in problems_), problems_
+    assert "R0=99" not in derived["attempted_per_cell"]
+
+
+def test_a_dropped_trial_with_no_failure_entry_is_a_shortfall() -> None:
+    """A trial the script silently never ran (not even recorded as failed) shows up as a plain count
+    shortfall against runs_per_setting, the same as any other missing trial."""
+    rows = _ledger_rows(300)
+    del rows[0]  # one R0=0.9 trial never appended a ledger line at all
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, rows)
+    assert problems_ == []
+    found = rm.problems(PROTOCOL, derived)
+    assert any("R0=0.9: 299" in f for f in found), found
+
+
+def test_a_ledger_row_with_no_recognised_status_is_named() -> None:
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, [{"cell": "R0=0.9", "trial": 0, "status": "maybe"}])
+    assert any("no `status`" in p for p in problems_), problems_
+    assert derived["attempted_per_cell"] == {}
+
+
+def test_a_failed_ledger_row_is_counted_attempted_but_not_successful() -> None:
+    rows = _ledger_rows(300, cells=(1.5, 3.0)) + _ledger_rows(299, cells=(0.9,))
+    rows += [{"cell": "R0=0.9", "trial": 299, "status": "failed", "reason": "solver diverged"}]
+    derived, problems_ = rm.manifest_from_ledger(PROTOCOL, rows, thresholds_used={"outbreak": 0.1})
+    assert problems_ == []
+    assert derived["attempted_per_cell"]["R0=0.9"] == 300
+    assert derived["successful_per_cell"]["R0=0.9"] == 299
+    assert derived["failed_trials"] == [{"cell": "R0=0.9", "trial": 299, "reason": "solver diverged"}]
+    assert rm.problems({**PROTOCOL, "failure_policy": "excluded from the pooled estimate"}, derived) == []

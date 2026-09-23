@@ -4846,8 +4846,28 @@ class Engine:
             return ("single_script" if _split_run.design_is_stochastic(state.get("design")) else "not_applicable"), []
         if result.returncode != 0:
             return "not_run", []
-        manifest, why = _run_manifest.read(_split_run.raw_dir_for(self._raw_root(), 0))
-        found = _run_manifest.problems(protocol, manifest, why)
+        raw_dir = _split_run.raw_dir_for(self._raw_root(), 0)
+        # The same seed's own analysis output, so a claimed trial count can be checked against the real per-trial
+        # values the analysis had to work with, not just against the manifest's own other fields.
+        result_json = _extract_result_json(getattr(result, "stdout", "") or "")
+        # v2: a per-trial ledger, when the script kept one, is counted by the engine instead of trusting a
+        # self-reported summary -- the ledger row problems (an out-of-protocol cell, a duplicate trial id, a row
+        # missing its status) come first, since those are wrong before the derived manifest is even compared with
+        # the protocol. thresholds_used has no natural home in a ledger row, so it still comes from run_manifest.json
+        # when the script also wrote one.
+        ledger, ledger_why = _run_manifest.read_ledger(raw_dir)
+        if ledger is not None:
+            legacy, legacy_why = _run_manifest.read(raw_dir)
+            thresholds_used = (legacy or {}).get("thresholds_used") if isinstance(legacy, dict) else None
+            manifest, row_problems = _run_manifest.manifest_from_ledger(protocol, ledger, thresholds_used)
+            # The two-script contract asks for BOTH files; a ledger with no run_manifest.json at all is
+            # still a contract break, not something the ledger's own presence excuses.
+            if legacy is None:
+                row_problems = [f"run_manifest.json: {legacy_why}", *row_problems]
+            found = row_problems + _run_manifest.problems(protocol, manifest, result_json=result_json)
+        else:
+            manifest, why = _run_manifest.read(raw_dir)
+            found = _run_manifest.problems(protocol, manifest, why, result_json=result_json)
         self._manifest_failed_trials = _run_manifest.failure_count(manifest)
         return ("differs" if found else "ok"), found
 
