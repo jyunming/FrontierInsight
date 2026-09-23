@@ -5473,7 +5473,19 @@ class Engine:
         if protocol is None:
             return None
         stride = max(1, int(self.config.engine.replicate_seed_stride))
-        env = {**_replicate_env(exec_env, 0, stride), "FI_ORACLE": "1"}
+        # A two-script quest's simulate.py reads FI_RAW_DIR unconditionally at module level (the split-experiment
+        # directive's own example: ``raw = pathlib.Path(os.environ["FI_RAW_DIR"])``) — Python runs that line on
+        # import regardless of which branch the script takes, so it fires during this oracle pre-check too, well
+        # before FI_ORACLE is even read. Without a real value here every such script crashed with
+        # ``KeyError: 'FI_RAW_DIR'`` before printing ORACLE_JSON, and the resulting stderr (a bare KeyError, nothing
+        # about oracles) sent oracle_repair_attempts chasing the wrong problem. A dedicated, disposable folder — never
+        # a real seed's raw dir — keeps this pre-check honest without the prompt needing to special-case it.
+        oracle_raw_dir = self._raw_root() / "oracle_check"
+        oracle_raw_dir.mkdir(parents=True, exist_ok=True)
+        env = {
+            **_replicate_env(exec_env, 0, stride), "FI_ORACLE": "1",
+            _split_run.RAW_DIR_ENV: _split_run.env_value(oracle_raw_dir, self.quest_root),
+        }
         timeout = max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
         budget = int(self.config.engine.oracle_repair_attempts)
         attempts: list[dict[str, Any]] = []
