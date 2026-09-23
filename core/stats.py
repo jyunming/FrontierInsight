@@ -130,12 +130,14 @@ def bootstrap_mean_interval(
     vals = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
     if len(vals) < 2:
         return None
+    rng = random.Random(seed)
     if len(vals) > cap:
-        step = len(vals) / cap
-        vals = [vals[int(i * step)] for i in range(cap)]
+        # A random sample, not every Nth row in whatever order the values arrived: rows a script writes in run
+        # order (early trials first, or ordered by some difficulty/setting the loop swept) would otherwise bias
+        # a stride toward whichever positions the stride happens to land on.
+        vals = rng.sample(vals, cap)
     n = len(vals)
     rounds = resamples if n <= 2000 else max(200, resamples * 2000 // n)
-    rng = random.Random(seed)
     means = sorted(sum(vals[rng.randrange(n)] for _ in range(n)) / n for _ in range(rounds))
     lo = means[int(0.025 * (rounds - 1))]
     hi = means[int(math.ceil(0.975 * (rounds - 1)))]
@@ -194,11 +196,19 @@ def _rounds(n: int, resamples: int = 2000) -> int:
     return resamples if n <= 2000 else max(200, resamples * 2000 // n)
 
 
-def _thin(vals: list[float], cap: int) -> list[float]:
+def _thin(vals: list[float], cap: int, *, rng: Any) -> list[float]:
+    """A random (from the caller's own RNG, so reproducible) sample of ``cap`` values, not every Nth one in
+    whatever order they arrived: rows a script writes in run order (early trials first, or ordered by a swept
+    setting) would otherwise bias a stride toward whichever positions it happens to land on.
+
+    Takes the caller's ``random.Random`` instance, not a seed of its own: two SEPARATE ``Random(seed)`` objects
+    built from the same seed value are not independent of each other (their underlying bit streams are
+    identical), so a caller that thins with one seeded generator and then resamples with a second one seeded the
+    same way is not drawing two independent random choices. One generator, consumed sequentially by whoever
+    calls this, avoids the question entirely."""
     if len(vals) <= cap:
         return vals
-    step = len(vals) / cap
-    return [vals[int(i * step)] for i in range(cap)]
+    return rng.sample(vals, cap)
 
 
 def _clean(values: list[Any]) -> list[float]:
@@ -252,13 +262,13 @@ def paired_permutation_test(diffs: list[float], *, resamples: int = 4000, seed: 
     import itertools
     import random
 
-    d = _thin(_clean(diffs), 20000)
+    rng = random.Random(seed)
+    d = _thin(_clean(diffs), 20000, rng=rng)
     n = len(d)
     if n < 2:
         return None
     observed = sum(d) / n
     nonzero = [x for x in d if x != 0.0]
-    rng = random.Random(seed)
     if not nonzero:
         p_value = 1.0
     elif len(nonzero) <= exact_up_to:
@@ -286,10 +296,10 @@ def two_sample_mean_test(a: list[float], b: list[float], *, resamples: int = 200
     permutation p-value. ``None`` when either sample has fewer than 2 observations."""
     import random
 
-    x, y = _thin(_clean(a), cap), _thin(_clean(b), cap)
+    rng = random.Random(seed)
+    x, y = _thin(_clean(a), cap, rng=rng), _thin(_clean(b), cap, rng=rng)
     if len(x) < 2 or len(y) < 2:
         return None
-    rng = random.Random(seed)
     observed = sum(x) / len(x) - sum(y) / len(y)
     rounds = _rounds(len(x) + len(y), resamples)
     boots = [

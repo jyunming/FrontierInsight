@@ -142,6 +142,48 @@ def test_a_proportion_from_counts_gets_wilson_and_a_two_proportion_contrast_with
     assert strong["method"] == "two_proportion_z_newcombe" and strong["significant_after_holm"] is True and strong["comparisons_in_family"] == 3
     assert weak["p"] > 0.5 and weak["significant_after_holm"] is False
     assert all(c["p_holm"] >= c["p"] for c in out["contrasts"])
+    assert all(c["prespecified"] is False for c in out["contrasts"]), "no protocol.contrasts given: every pair, unmarked"
+
+
+def test_a_prespecified_contrast_list_computes_only_those_pairs() -> None:
+    reps = _seeds({"1.5": (60, 0), "3.0": (120, 0), "6.0": (121, 0)})
+    proto = {**PROTO, "contrasts": [{"metric": "outbreak_probability", "a": "1.5", "b": "3.0"}]}
+    out = ms.statistics(reps, proto)
+    assert len(out["contrasts"]) == 1
+    (c,) = out["contrasts"]
+    assert {c["a"], c["b"]} == {"1.5", "3.0"} and c["prespecified"] is True
+    assert c["comparisons_in_family"] == 1, "the un-asked-for pairs are not silently in the same family"
+    assert out["contrasts_prespecified"] is True
+    # The un-asked-for pairs are skipped outright -- not reported as unsupported (nothing is wrong with them).
+    assert out["unsupported"] == []
+
+
+def test_a_prespecified_list_for_a_different_metric_leaves_this_ones_pairwise_untouched() -> None:
+    reps = _seeds({"1.5": (60, 0), "3.0": (120, 0), "6.0": (121, 0)})
+    proto = {**PROTO, "metrics": [*PROTO["metrics"], {"id": "some_other_metric", "kind": "mean", **_ESTIMAND_UNIT}],
+             "contrasts": [{"metric": "some_other_metric", "a": "1.5", "b": "3.0"}]}
+    out = ms.statistics(reps, proto)
+    assert len(out["contrasts"]) == 3 and out["contrasts_prespecified"] is False
+
+
+def test_a_prespecified_pair_naming_no_real_setting_is_named_not_silently_zero() -> None:
+    """A typo in `a`/`b` (e.g. "1.05" for "1.5") would otherwise silently filter out every real pair
+    and produce zero contrasts for the metric, with nothing saying why."""
+    reps = _seeds({"1.5": (60, 0), "3.0": (120, 0)})
+    proto = {**PROTO, "contrasts": [{"metric": "outbreak_probability", "a": "1.05", "b": "3.0"}]}
+    out = ms.statistics(reps, proto)
+    assert out["contrasts"] == []
+    assert any("no setting in the results matches both sides" in u["reason"] for u in out["unsupported"])
+
+
+def test_a_prespecified_contrast_naming_an_unknown_metric_id_is_named() -> None:
+    """A typo in `metric` (e.g. "outbrek_probability") would otherwise be silently ignored, and every
+    real metric would fall back to all-pairwise indistinguishably from a protocol that simply chose
+    not to prespecify anything."""
+    reps = _seeds({"1.5": (60, 0), "3.0": (120, 0)})
+    proto = {**PROTO, "contrasts": [{"metric": "outbrek_probability", "a": "1.5", "b": "3.0"}]}
+    out = ms.statistics(reps, proto)
+    assert any("matches none of the protocol's declared metric specs" in u["reason"] for u in out["unsupported"])
 
 
 def test_the_p_values_of_a_family_are_corrected_together_and_not_with_other_families() -> None:
@@ -182,6 +224,75 @@ def test_a_paired_mean_is_compared_pair_by_pair_and_an_unpaired_one_is_not() -> 
     assert cp["method"] == "paired_permutation_bootstrap" and cu["method"] == "bootstrap_permutation"
     assert cp["p"] < 0.001 and cu["p"] > cp["p"], "pairing removes the shared noise: the same shift is far clearer"
     assert cp["diff"] == pytest.approx(0.3, abs=0.05)
+    assert cp["paired_id_verified"] is False, "no `m_pair_id` was given, so this falls back to position order"
+
+
+def test_a_paired_design_with_pair_ids_joins_by_id_even_when_the_order_differs() -> None:
+    """The bug a shuffled `_values` order would cause without a pair_id join: trial i of one setting must be
+    matched to the SAME trial of the other, not to whatever sits at position i."""
+    base = [1.0, 2.0, 3.0, 4.0, 5.0]
+    shifted = [x + 0.3 for x in base]
+    # setting "a" keeps run order; setting "b" reports the same trials shuffled -- a real script might, e.g., if
+    # it iterates a dict keyed by trial id rather than a list.
+    reps = [{
+        "_seed": s,
+        "by_g": {
+            "a": {"m_values": list(shifted), "m_pair_id": [0, 1, 2, 3, 4]},
+            "b": {"m_values": [base[4], base[0], base[1], base[2], base[3]], "m_pair_id": [4, 0, 1, 2, 3]},
+        },
+    } for s in range(2)]
+    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    (c,) = out["contrasts"]
+    assert c["paired_id_verified"] is True
+    # `diff` (mean(a) - mean(b)) is invariant to how the two settings are matched up -- sum(a) - sum(b) does not
+    # care about pairing order, so it is NOT a real check of the join. What DOES depend on correct pairing is the
+    # per-pair variance: joined by id, every pair's difference is exactly 0.3 (zero variance -> a near-point
+    # interval); joined by the shuffled list position instead, the differences would range from -3.7 to 1.3 (wide
+    # variance) even though their sum is unchanged. A wide interval here would mean the join fell back to
+    # position despite paired_id_verified saying otherwise.
+    assert c["diff"] == pytest.approx(0.3, abs=1e-9)
+    assert c["ci_upper"] - c["ci_lower"] < 0.01, (c["ci_lower"], c["ci_upper"])
+
+
+def test_a_paired_design_whose_pair_ids_disagree_between_settings_is_refused() -> None:
+    reps = [{
+        "_seed": s,
+        "by_g": {
+            "a": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 2]},
+            "b": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 99]},  # 99 names a trial "a" never reported
+        },
+    } for s in range(2)]
+    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    assert out["contrasts"] == []
+    assert any("names different trials" in u["reason"] for u in out["unsupported"])
+
+
+def test_a_pair_id_repeated_within_one_settings_own_seed_is_refused_not_silently_dropped() -> None:
+    """`dict(zip(pair_id, values))` would silently keep only the LAST value for a repeated id,
+    dropping a real observation with no error -- this must be refused instead."""
+    reps = [{
+        "_seed": s,
+        "by_g": {
+            "a": {"m_values": [10.0, 20.0, 30.0], "m_pair_id": [0, 0, 1]},  # id 0 used twice
+            "b": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 2]},
+        },
+    } for s in range(2)]
+    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    assert out["contrasts"] == []
+    assert any("malformed" in u["reason"] for u in out["unsupported"])
+
+
+def test_a_pair_id_given_by_only_one_setting_is_refused_not_silently_positional() -> None:
+    reps = [{
+        "_seed": s,
+        "by_g": {
+            "a": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 2]},
+            "b": {"m_values": [1.0, 2.0, 3.0]},  # no pair_id at all
+        },
+    } for s in range(2)]
+    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    assert out["contrasts"] == []
+    assert any("only one setting" in u["reason"] for u in out["unsupported"])
 
 
 def test_a_cluster_design_uses_the_clusters_and_says_what_it_lacks() -> None:
@@ -215,8 +326,12 @@ def test_what_keeps_the_statistics_from_being_adequate_is_named() -> None:
     reps = _seeds({"1.5": (60, 0), "3.0": (120, 0)})
     assert "guessed from the names" in ms.coverage_gaps({}, reps, None)[0]
     assert ms.coverage_gaps({}, [{"_seed": 0, "score": 1.0}], None) == [], "a result with nothing whose estimator matters has nothing to declare"
-    covered = ms.statistics(reps, PROTO)
-    assert ms.coverage_gaps(PROTO, reps, covered) == []
+    with_contrasts = {**PROTO, "contrasts": [{"metric": "outbreak_probability", "a": "1.5", "b": "3.0"}]}
+    covered = ms.statistics(reps, with_contrasts)
+    assert ms.coverage_gaps(with_contrasts, reps, covered) == []
+    # PROTO itself names no prespecified contrasts, so its one pairwise comparison is a gap of its own.
+    unspecified = ms.coverage_gaps(PROTO, reps, ms.statistics(reps, PROTO))
+    assert any("no prespecified contrasts" in g for g in unspecified)
     partial = {"metrics": [{"id": "other", "kind": "mean", **_ESTIMAND_UNIT}]}
     got = ms.coverage_gaps(partial, reps, ms.statistics(reps, partial))
     assert any("no metric spec covers outbreak_probability" in g for g in got) and any("could not be made" in g for g in got)
@@ -280,7 +395,11 @@ async def test_the_analysis_is_given_the_engines_estimates_and_contrasts_and_the
     assert analysis and '"spec_statistics"' in analysis[0] and '"two_proportion_z_newcombe"' in analysis[0] and '"p_holm"' in analysis[0]
     evidence = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
     ready = evidence["all_gaps"].get("statistically_adequate", [])
-    assert not any("statistics are not shown to be adequate" in g for g in ready), ready
+    # This fixture's protocol declares a metric spec but no protocol.contrasts, so the one new,
+    # separate gap that names is expected (covered on its own in test_metric_spec.py); nothing else
+    # (a guessed estimator, an unsupported contrast) should be there alongside it.
+    assert not any("guessed" in g or "could not be made" in g for g in ready), ready
+    assert any("no prespecified contrasts" in g for g in ready), ready
 
     guessed_prompts: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(guessed_prompts, {"runs_per_setting": 300}))
