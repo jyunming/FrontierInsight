@@ -158,6 +158,7 @@ def _settings(replicates: list[dict[str, Any]], spec: dict[str, Any]) -> dict[tu
                 "count": w.get(parent + (f"{ident}_count",)), "total": w.get(parent + (f"{ident}_total",)),
                 "values": _numbers(w.get(parent + (f"{ident}_values",))),
                 "clusters": w.get(parent + (cluster_key,)) if cluster_key else None,
+                "pair_id": w.get(parent + (f"{ident}_pair_id",)),
             })
         out[parent] = {"per_seed": per_seed}
     return out
@@ -191,6 +192,26 @@ def _pooled(setting: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
             out["problem"] = out["problem"] or f"a cluster design needs `{spec['id']}_values` and `{_cluster_key(spec)}` in every seed"
     if spec.get("paired") and out["values"] is None:
         out["problem"] = out["problem"] or f"a paired design needs `{spec['id']}_values` (one value per trial, the same trials in every setting) in every seed"
+    if spec.get("paired") and out["values"] is not None:
+        # An explicit `<id>_pair_id` per seed lets the contrast JOIN trial i of one setting to trial i of the
+        # other by the id the script gave them, instead of trusting that both settings' lists happen to be in
+        # the same order (a script that iterates a dict, or reorders for its own reasons, would otherwise
+        # silently mismatch pairs and still produce a p-value). Three states, not two: no pair_id anywhere
+        # (None -- legitimate, falls back to position); a well-formed pair_id in every seed with no id
+        # repeated within a single seed's own list (the list itself, usable for the join); or pair_id given
+        # but malformed somewhere -- wrong length, or an id that appears twice in the SAME seed's list (which
+        # would let `dict(zip(ids, values))` silently drop a real observation) -- "invalid", a sentinel
+        # distinct from None so a partially/incorrectly supplied pair_id is refused, not silently ignored.
+        lists = [r["pair_id"] for r in rows]
+        if all(x is None for x in lists):
+            out["by_seed_pair_id"] = None
+        elif all(
+            isinstance(x, list) and len(x) == len(r["values"]) and len(set(x)) == len(x)
+            for x, r in zip(lists, rows)
+        ):
+            out["by_seed_pair_id"] = lists
+        else:
+            out["by_seed_pair_id"] = "invalid"
     return out
 
 
@@ -225,12 +246,28 @@ def _contrast(a: dict[str, Any], b: dict[str, Any], spec: dict[str, Any]) -> tup
     if paired and clustered:
         return None, "a paired design over clusters is not supported"
     if paired:
+        ids_a, ids_b = a.get("by_seed_pair_id"), b.get("by_seed_pair_id")
+        if ids_a == "invalid" or ids_b == "invalid":
+            return None, "a paired design's `<id>_pair_id` was given but is malformed (wrong length, or repeats an id within one setting's own seed)"
+        if (ids_a is None) != (ids_b is None):
+            return None, "a paired design's `<id>_pair_id` was given by only one setting; both settings must give it, or neither"
         diffs: list[float] = []
-        for va, vb in zip(a["by_seed"], b["by_seed"]):
-            if len(va) != len(vb):
-                return None, "a paired design needs the same number of trials in both settings in every seed"
-            diffs.extend(x - y for x, y in zip(va, vb))
-        return _stats.paired_permutation_test(diffs), None
+        id_verified = ids_a is not None  # both None or both valid lists, by the checks above
+        if id_verified:
+            for sa, pa, sb, pb in zip(a["by_seed"], ids_a, b["by_seed"], ids_b):
+                if set(pa) != set(pb):
+                    return None, "a paired design's `<id>_pair_id` names different trials in the two settings in the same seed"
+                by_id_a, by_id_b = dict(zip(pa, sa)), dict(zip(pb, sb))
+                diffs.extend(by_id_a[pid] - by_id_b[pid] for pid in pa)
+        else:
+            for va, vb in zip(a["by_seed"], b["by_seed"]):
+                if len(va) != len(vb):
+                    return None, "a paired design needs the same number of trials in both settings in every seed"
+                diffs.extend(x - y for x, y in zip(va, vb))
+        result = _stats.paired_permutation_test(diffs)
+        if result is not None:
+            result["paired_id_verified"] = id_verified
+        return result, None
     if clustered:
         return _stats.cluster_bootstrap_difference(a["values"], a["clusters"], b["values"], b["clusters"]), None
     if proportion:
@@ -247,6 +284,8 @@ def statistics(replicates: list[dict[str, Any]], protocol: dict[str, Any] | None
     estimates: dict[str, dict[str, Any]] = {}
     contrasts: list[dict[str, Any]] = []
     unsupported: list[dict[str, str]] = []
+    declared_contrasts = protocol.get("contrasts") if isinstance(protocol, dict) and isinstance(protocol.get("contrasts"), list) else []
+    any_prespecified = False
     for spec in specs:
         settings = _settings(replicates, spec)
         if not settings:
@@ -260,6 +299,19 @@ def statistics(replicates: list[dict[str, Any]], protocol: dict[str, Any] | None
                 unsupported.append({"id": label, "reason": p["problem"] or "too few observations for an interval"})
             else:
                 estimates[label] = {**est, "kind": spec["kind"], "cluster": _cluster_key(spec), "paired": bool(spec.get("paired"))}
+        # A protocol may prespecify exactly which pairs to compare (protocol.contrasts:
+        # [{"metric": <id>, "a": <setting>, "b": <setting>}, ...]) instead of leaving every
+        # pairwise comparison of a factor's settings to be generated after the fact -- the audit's
+        # point that an unplanned contrast set inflates the family (and lets a post-hoc "significant"
+        # pair be picked from many) rather than testing what was decided before the results were
+        # seen. Falls back to every pairwise comparison when the protocol names none for this metric.
+        wanted = {
+            frozenset((str(c.get("a")), str(c.get("b"))))
+            for c in declared_contrasts if isinstance(c, dict) and c.get("metric") == spec["id"]
+        }
+        prespecified = bool(wanted)
+        any_prespecified = any_prespecified or prespecified
+        matched_wanted: set[frozenset[str]] = set()
         groups: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
         for path in pooled:
             if path:
@@ -268,15 +320,38 @@ def statistics(replicates: list[dict[str, Any]], protocol: dict[str, Any] | None
             members.sort()
             for i in range(len(members)):
                 for j in range(i + 1, len(members)):
+                    a_label, b_label = members[i][-1], members[j][-1]
+                    pair = frozenset((a_label, b_label))
+                    if prespecified and pair not in wanted:
+                        continue
+                    matched_wanted.add(pair)
                     result, why = _contrast(pooled[members[i]], pooled[members[j]], spec)
-                    tag = f"{'.'.join(factor)}: {members[i][-1]} vs {members[j][-1]}"
+                    tag = f"{'.'.join(factor)}: {a_label} vs {b_label}"
                     if result is None:
                         unsupported.append({"id": f"{spec['id']} {tag}", "reason": why or "too few observations"})
                         continue
                     contrasts.append({
-                        "metric": spec["id"], "factor": ".".join(factor), "a": members[i][-1], "b": members[j][-1],
-                        "family": str(spec.get("family") or DEFAULT_FAMILY), **result,
+                        "metric": spec["id"], "factor": ".".join(factor), "a": a_label, "b": b_label,
+                        "family": str(spec.get("family") or DEFAULT_FAMILY), "prespecified": prespecified, **result,
                     })
+        # A prespecified pair that names no real setting at all (a typo in `a`/`b`) would otherwise silently
+        # produce zero contrasts with nothing to say why -- named here instead of failing quietly.
+        for pair in wanted - matched_wanted:
+            unsupported.append({
+                "id": f"{spec['id']} {' vs '.join(sorted(pair))}",
+                "reason": "protocol.contrasts names this pair, but no setting in the results matches both sides of it",
+            })
+    # A protocol.contrasts entry naming a metric id that matches none of the declared specs (a typo, e.g.
+    # "outbrek_probability") would otherwise be silently ignored -- every real metric would then fall back to
+    # all-pairwise with `contrasts_prespecified: false`, indistinguishable from a protocol that simply chose not
+    # to prespecify anything for it.
+    known_ids = {s["id"] for s in specs}
+    for c in declared_contrasts:
+        if isinstance(c, dict) and c.get("metric") is not None and c.get("metric") not in known_ids:
+            unsupported.append({
+                "id": f"protocol.contrasts: {c.get('metric')!r}",
+                "reason": "names a metric id that matches none of the protocol's declared metric specs",
+            })
     families: dict[str, list[int]] = {}
     for idx, c in enumerate(contrasts):
         families.setdefault(c["family"], []).append(idx)
@@ -292,6 +367,7 @@ def statistics(replicates: list[dict[str, Any]], protocol: dict[str, Any] | None
         "contrasts": contrasts,
         "unsupported": unsupported,
         "undeclared": undeclared(replicates, specs),
+        "contrasts_prespecified": any_prespecified,
     }
 
 
@@ -311,4 +387,9 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
     if computed.get("unsupported"):
         first = computed["unsupported"][0]
         gaps.append(f"{len(computed['unsupported'])} estimate(s) or contrast(s) could not be made (first: {first['id']}: {first['reason']})")
+    if computed.get("contrasts") and not computed.get("contrasts_prespecified"):
+        gaps.append(
+            "the protocol names no prespecified contrasts, so every pairwise comparison of each factor's settings was "
+            "computed after the fact (protocol.contrasts can fix the comparisons before the results are seen)"
+        )
     return gaps
