@@ -174,3 +174,30 @@ no literature step writes instead, and a gate verdict of `insufficient`/`broaden
 (before, only `unknown` was); the oracle repair gets the run's stderr, and plan rewrites, script rewrites and an
 unanswered repair call are counted apart. A third round on the fixed main is the measure of whether these were what
 stood between a real quest and its paper.
+
+## Third round (next day): `kimi-k3` on the second round's fixes
+
+Same four topics, main at the second round's fixes. 454,941 tokens, **$3.55** (67.14 → 63.59). None of the second
+round's FI stops came back, and for the first time a quest wrote its paper: the SIR quest ran through analysis,
+evidence gate, write and the review panel, and stopped at the human review. That paper rests on a failed experiment,
+and the gates said so (evidence gate `insufficient`, review `revise` with an unsupported claim flagged) rather than
+letting it read as a result. Most of what stopped the quests this time was the model's own plan, correctly held to:
+
+| Shape | Tokens | Got to | Stopped by |
+|---|---|---|---|
+| SIR | 170,493 | write, review panel, human review | model: its protocol grid put an analysis-only axis (`threshold_fraction`) beside R0, so the trial ledger's cells did not match (the manifest check was right). **FI:** the three `execute_reflect` repairs that followed each saw only the first 8000 characters of the 15,706-character analysis while being asked for the whole script back; one returned a helper cut off mid-name, and the run never produced numbers |
+| Clustered | 115,585 | oracle gate | model: its oracle checks did not finish in the pre-check's time (each should be a small, fast case) |
+| Deterministic | 87,370 | oracle gate | model: Velocity-Verlet energy drift 2.5e-05 against a declared tolerance of 1e-06 — the same too-tight tolerance in all three rounds. FI deliberately cannot loosen a declared tolerance on its own (that would empty the oracle); a person decides |
+| Paired | 81,493 | protocol check | model: its grid gave a range as two values (`poly_id: [0, 199]`). **FI:** both protocol repair calls timed out and counted as spent, and the unplaced difference was sent to `experiment.py`, not `simulate.py` |
+
+Fixed together (each with a test that fails on the old code): `execute_reflect` shows the whole script; a protocol
+repair call that got no answer is tried once more, uncounted; a difference that names no script goes to
+`simulate.py` in a two-script quest; and the default per-node timeouts now give every node whose reply is a whole
+script or the whole plan (`implement_oracle`, `implement_protocol`, `plan`, `plan_revise`) execute_reflect's budget.
+The timeouts in all three rounds were on those four nodes, left at the 120 s base: a retry starts the answer over, so
+four tries ended each call after 8 minutes with nothing. This is not specific to Kimi.
+
+What the three rounds leave: FI's gates held every time (no false number reached a paper as a result). The stops
+that remain are mostly the model writing a plan it cannot keep — tolerances tighter than its method, a range written
+as two grid values, an analysis parameter written as a simulation axis, oracle checks that are not small. Those are
+quality-of-plan questions for the design and oracle prompts, or for a person at the plan pause, not gate bugs.

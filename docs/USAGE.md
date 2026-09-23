@@ -47,7 +47,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `design_self_critique` | 1 per design pass | Audits the drafted methodology against twelve checks (precision, the estimand and its interval, thresholds, random streams, convergence, an oracle, failed runs among them) and keeps what it found and changed in `needs/DESIGN_CRITIQUE.json`. |
 | `implement_outline` | 1 | |
 | `implement_oracle` | 0–3 | One repair per attempt (`engine.oracle_repair_attempts`), only when the script does not answer the plan's oracles when run with `FI_ORACLE=1` (`engine.oracle_check`), plus one retry of a repair call that got no answer (a provider timeout); a protocol with no oracle, or one without numbers, first makes `plan_revise` calls (up to the same number, counted apart). None when the oracles pass or the plan has no protocol. |
-| `implement_protocol` | 0–2 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`); none when it agrees or the plan has no protocol. |
+| `implement_protocol` | 0–3 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`), plus one retry of a repair call that got no answer (a provider timeout); none when it agrees or the plan has no protocol. |
 | `implement` | 1 per design pass | |
 | `execute_reflect` | 0–3 | Only when the experiment fails; capped by `engine.exec_reflect_max_iterations`. Also when the finished run's manifest differs from the frozen protocol (`engine.run_manifest_check`, `engine.run_manifest_repair_attempts`). |
 | `analyze` | 1 per design pass | |
