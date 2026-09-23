@@ -436,3 +436,76 @@ async def test_an_oracle_with_no_numbers_is_completed_in_the_plan_before_anythin
     assert record["status"] == "ok" and "cannot judge it" in record["attempts"][0]["problems"][0]
     assert record["attempts"][0]["judged"] == [], "an oracle the engine cannot judge is not run"
     assert record["attempts"][1]["judged"][0]["passed_by_engine"] is True
+
+
+# --- the gate under execution.split_analysis: true (a real quest's own generated code, not a fixture) -----------------
+
+# Every real two-script quest's simulate.py reads FI_RAW_DIR unconditionally at module level -- the split-experiment
+# directive's own worked example does exactly this (core/engine.py: ``raw = pathlib.Path(os.environ["FI_RAW_DIR"])``;
+# tests/test_split_analysis.py's own SIMULATE fixture follows the same shape). Python runs that line on import
+# regardless of which branch the script takes, so it fires during the oracle pre-check too -- discovered on a real
+# live-quest campaign (2026-09-23) where 2 of 4 real Kimi-authored quests crashed with a bare KeyError before ever
+# reaching their oracle logic, every declared oracle repair attempt exhausted trying to fix "the oracle mode" when
+# the actual bug was this module-level read having no value to read during the pre-check.
+_SPLIT_SIMULATE_HEAD = """\
+import json, os, pathlib
+raw = pathlib.Path(os.environ["FI_RAW_DIR"])
+raw.mkdir(parents=True, exist_ok=True)
+"""
+_SPLIT_SIMULATE_PASSING = _SPLIT_SIMULATE_HEAD + """\
+if os.environ.get("FI_ORACLE") == "1":
+    print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "final size closed form", "passed": True, "value": 0.99, "expected": 1.0, "tolerance": 0.05}]}))
+    raise SystemExit(0)
+seed = int(os.environ.get("FI_REPLICATE_SEED", "0"))
+(raw / "values.json").write_text(json.dumps({"values": [seed + 1.0]}))
+"""
+_SPLIT_ANALYSIS = """\
+import json, os, pathlib
+raw = pathlib.Path(os.environ["FI_RAW_DIR"])
+data = json.loads((raw / "values.json").read_text())
+print("RESULT_JSON: " + json.dumps({"score": sum(data["values"])}))
+"""
+
+
+def _split_reply(sim: str, ana: str) -> str:
+    return f"```python\n# file: simulate.py\n{sim}\n```\n```python\n# file: experiment.py\n{ana}\n```\nDEPS: numpy\n"
+
+
+@pytest.mark.asyncio
+async def test_a_two_script_oracle_check_gets_a_real_raw_dir_not_a_keyerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact shape a real quest's own generated simulate.py takes under ``execution.split_analysis: true``: it
+    reads ``FI_RAW_DIR`` before it ever checks ``FI_ORACLE``. Without a real value for that variable during the
+    oracle pre-check, this is indistinguishable from a script that never implemented its oracles at all -- the
+    engine can't tell "crashed on an unrelated KeyError" from "ignored the oracle request," and asks for a repair
+    that can never fix the actual problem."""
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        calls.append(kind)
+        if kind == "Experiment Design":
+            body = json.loads(_FAKE_RESPONSES["design"])
+            body["protocol"] = protocol
+            return json.dumps(body)
+        if kind == "Implementation":
+            return _split_reply(_SPLIT_SIMULATE_PASSING, _SPLIT_ANALYSIS)
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    cfg = Config(
+        topic="split oracle smoke", title="split-oracle-smoke", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1, pilot_run=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    artifacts = await engine.run()
+
+    assert artifacts.paper_md is not None
+    record = _record(engine)
+    assert record["status"] == "ok" and len(record["attempts"]) == 1, record
+    assert "OracleRepair" not in calls, "the module-level FI_RAW_DIR read must not look like an unanswered oracle request"
