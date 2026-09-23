@@ -5164,6 +5164,10 @@ class Engine:
             return code, deps
         attempts: list[dict[str, Any]] = []
         budget = int(self.config.engine.protocol_repair_attempts)
+        # A difference with no place named (the script holds no such list at all) belongs where the design's loops are:
+        # simulate.py in a two-script quest. Sending it to experiment.py asked the analysis to add a grid it never runs.
+        unplaced_to = _split_run.SIMULATE_NAME if simulate_path.is_file() else "experiment.py"
+        call_failures_left = 1  # a repair call that got no answer (a provider timeout) is tried again, once, uncounted
         for attempt in range(budget + 1):
             mismatches = _protocol.check(protocol, self._scripts_on_disk())
             attempts.append({"attempt": attempt, "differences": [m.message() for m in mismatches]})
@@ -5175,14 +5179,19 @@ class Engine:
                 "[protocol] the script differs from the plan's protocol (%d): %s; asking for a repair (%d of %d)",
                 len(mismatches), "; ".join(m.message() for m in mismatches), attempt + 1, budget,
             )
-            for name in sorted({m.where.split(" in ")[-1].split(",")[0] for m in mismatches if m.where}) or ["experiment.py"]:
-                if name not in (_split_run.SIMULATE_NAME, "experiment.py"):
-                    name = "experiment.py"
+            names = {m.where.split(" in ")[-1].split(",")[0] for m in mismatches if m.where}
+            names = {n if n in (_split_run.SIMULATE_NAME, "experiment.py") else "experiment.py" for n in names}
+            if any(not m.where for m in mismatches):
+                names.add(unplaced_to)
+            for name in sorted(names):
                 path = simulate_path if name == _split_run.SIMULATE_NAME else code_path
                 if not path.is_file():
                     continue
-                own = [m for m in mismatches if not m.where or name in m.where]
-                text, deps = await self._repair_script_for_protocol(state, path, path.read_text(encoding="utf-8"), deps, protocol, own)
+                own = [m for m in mismatches if (name in m.where if m.where else name == unplaced_to)]
+                text, deps, call_failed = await self._repair_script_for_protocol(state, path, path.read_text(encoding="utf-8"), deps, protocol, own)
+                if call_failed and call_failures_left > 0:
+                    call_failures_left -= 1
+                    text, deps, _ = await self._repair_script_for_protocol(state, path, path.read_text(encoding="utf-8"), deps, protocol, own)
                 if name == "experiment.py":
                     code = text
         final = _protocol.check(protocol, self._scripts_on_disk())
@@ -5208,8 +5217,9 @@ class Engine:
     async def _repair_script_for_protocol(
         self, state: QuestState, path: Path, code: str, deps: list[str],
         protocol: dict[str, Any], mismatches: list[Any],
-    ) -> tuple[str, list[str]]:
-        """ONE repair of one script that contradicts the protocol. Kept only if it parses and no longer contradicts it."""
+    ) -> tuple[str, list[str], bool]:
+        """ONE repair of one script that contradicts the protocol: ``(code, deps, the repair call itself failed)``. Kept
+        only if it parses and no longer contradicts it."""
         prompt = self._prompts["execute_reflect"].substitute(
             previous_code=code,
             returncode="(not run yet)",
@@ -5226,7 +5236,7 @@ class Engine:
             text = await self._chat(prompt, node="implement_protocol")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             self._log.warning("[protocol] the repair call failed (%r); keeping %s as written", exc, path.name)
-            return code, deps
+            return code, deps, True
         parsed: dict[str, Any] = {}
         if _strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _parse_json_lenient(text, node="implement_protocol") or {}
@@ -5242,13 +5252,13 @@ class Engine:
         remaining = [m for m in _protocol.check(protocol, scripts) if not m.where or path.name in m.where] if usable else mismatches
         if not usable or len(remaining) >= len(mismatches):
             self._log.warning("[protocol] the repair of %s did not remove the differences; keeping it as written", path.name)
-            return code, deps
+            return code, deps, False
         path.write_text(new_code, encoding="utf-8")
         self._log.info(
             "[protocol] rewrote %s (%d bytes): %d difference(s) left in it (%s)",
             path.name, len(new_code), len(remaining), str(parsed.get("patch_summary") or "no summary")[:120],
         )
-        return new_code, sorted({*deps, *new_deps})
+        return new_code, sorted({*deps, *new_deps}), False
 
     def _comparison_stats(self, state: QuestState, replicates: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
         """The per-stratum intervals and effect sizes over the batches (:func:`_result_comparison_stats`), and, when the protocol
@@ -6750,9 +6760,10 @@ class Engine:
         # The one round the redraw gets, spent whatever the model answers.
         spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
         prompt = self._prompts["execute_reflect"].substitute(
-            # Whole for a redraw: it returns the script, and a script cut at the
-            # limit would lose its tail.
-            previous_code=script_code if overlaps else script_code[:8000],
+            # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
+            # has to make up the rest. A live kimi-k3 quest's 15,706-character analysis was repaired three times from
+            # its first half; one repair came back with a helper cut off mid-name, and the run never recovered.
+            previous_code=script_code,
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
             stderr_tail=exec_result.get("stderr_tail", "")[:2000],

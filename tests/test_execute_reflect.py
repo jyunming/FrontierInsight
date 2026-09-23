@@ -123,6 +123,30 @@ async def test_reflect_patches_code_and_advances_iter(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_repair_is_shown_the_whole_script_not_its_first_8000_characters(tmp_path: Path) -> None:
+    """The reply is the full corrected script, so the model must see all of it. A live kimi-k3 quest's 15,706-character
+    analysis was repaired from its first 8000 characters, three times; one reply came back with a helper cut off."""
+    eng = Engine(_mk_cfg(tmp_path))
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
+    long_code = "x = 1\n" + "# padding\n" * 1500 + "def the_tail_the_crash_is_in():\n    return 1 / 0\n"
+    assert len(long_code) > 15000
+    chat_mock = AsyncMock(return_value=json.dumps({"code": "print('RESULT_JSON: {}')\n", "deps": [], "patch_summary": "fixed"}))
+    eng._client = type("Stub", (), {"chat": chat_mock})()
+    state = {
+        "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": "ZeroDivisionError in the_tail_the_crash_is_in"},
+        "result_json": None,
+        "code": long_code,
+        "design": {"hypothesis": "h"},
+        "deps": [],
+    }
+    await eng._node_execute_reflect(state)
+
+    prompt = chat_mock.await_args.args[0][-1]["content"]
+    assert "def the_tail_the_crash_is_in():" in prompt
+
+
+@pytest.mark.asyncio
 async def test_reflect_records_give_up_reason(tmp_path: Path) -> None:
     """LLM emits `give_up_reason` → record it; the routing function
     will then send the graph to analyze with the broken state."""

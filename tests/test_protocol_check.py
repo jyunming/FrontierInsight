@@ -372,6 +372,63 @@ def test_the_review_notes_carry_a_difference_that_appeared_after_the_script_was_
     assert not any("differs from the plan's protocol" in n for n in engine._goal_coverage_notes(state))
 
 
+# --- two scripts: which one a repair goes to, and a repair call that never answered (live kimi-k3 quests) ------------
+
+_SIM_WITHOUT_GRID = "import json, os\nseeds = int(os.environ.get('FI_REPLICATE_SEED', 0))\nprint(seeds)\n"
+_SIM_WITH_GRID = "R0_LIST = [0.9, 1.5, 3.0]\n" + _SIM_WITHOUT_GRID
+_ANALYSIS_ONLY = "import json\nprint('RESULT_JSON: ' + json.dumps({'ok': 1}))\n"
+
+
+def _two_script_engine(tmp_path: Path, **engine_over: Any) -> tuple[Engine, dict[str, Any], list[str]]:
+    engine = Engine(_cfg(tmp_path, **engine_over))
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text(_SIM_WITHOUT_GRID, encoding="utf-8")
+    (code / "experiment.py").write_text(_ANALYSIS_ONLY, encoding="utf-8")
+    state = {"topic": engine.config.topic, "design": {"hypothesis": "h", "protocol": {"grid": {"R0": [0.9, 1.5, 3.0]}}}}
+    return engine, state, []
+
+
+@pytest.mark.asyncio
+async def test_a_difference_with_no_place_goes_to_the_simulation_in_a_two_script_quest(tmp_path: Path) -> None:
+    """"the protocol fixes R0 at [...], and the script contains no such list" names no script; the grid's loops are in
+    simulate.py, and a live quest's repair of it went to experiment.py instead."""
+    engine, state, repaired = _two_script_engine(tmp_path)
+
+    async def fake_chat(prompt: str, node: str | None = None) -> str:
+        repaired.append("simulate" if "FI_REPLICATE_SEED" in prompt else "analysis")
+        return json.dumps({"code": _SIM_WITH_GRID, "deps": [], "patch_summary": "added the grid"})
+
+    engine._chat = fake_chat  # type: ignore[method-assign]
+    code = engine.quest_root / "code"
+    await engine._enforce_protocol(state, code / "experiment.py", code / "simulate.py", _ANALYSIS_ONLY, [])
+    assert repaired == ["simulate"]
+    assert "R0_LIST" in (code / "simulate.py").read_text(encoding="utf-8")
+    assert (code / "experiment.py").read_text(encoding="utf-8") == _ANALYSIS_ONLY
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_repair_call_that_never_answered_is_tried_again_not_counted(tmp_path: Path) -> None:
+    """Both of a live quest's protocol repairs timed out at the provider and the quest stopped with its one real chance
+    at a repair never taken. With one repair allowed, a call that raised is tried once more."""
+    engine, state, calls = _two_script_engine(tmp_path, protocol_repair_attempts=1)
+
+    async def fake_chat(prompt: str, node: str | None = None) -> str:
+        calls.append(node or "")
+        if len(calls) == 1:
+            raise TimeoutError("the provider never answered")
+        return json.dumps({"code": _SIM_WITH_GRID, "deps": [], "patch_summary": "added the grid"})
+
+    engine._chat = fake_chat  # type: ignore[method-assign]
+    paused: dict[str, Any] = {}
+    engine._pause_for_human = lambda **kw: paused.update(kw)  # type: ignore[method-assign]
+    code = engine.quest_root / "code"
+    await engine._enforce_protocol(state, code / "experiment.py", code / "simulate.py", _ANALYSIS_ONLY, [])
+    assert calls == ["implement_protocol", "implement_protocol"]
+    assert not paused, "the retried repair fixed it: no stop"
+    assert json.loads((engine.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))["status"] == "ok"
+
+
 def test_the_dashboard_and_the_quest_page_name_the_protocol_stop() -> None:
     static = Path(__file__).resolve().parent.parent / "web" / "static"
     for page in ("index.html", "quest.html"):

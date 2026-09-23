@@ -371,8 +371,12 @@ def test_the_repair_node_has_a_timeout_that_fits_a_whole_script() -> None:
     """A full-script rewrite on a slow provider outruns the 300 s CLI default,
     and a call killed at that wall is killed again on each retry."""
     cfg = ProviderConfig(name="codex_cli")
-    assert cfg.node_cli_timeout_s["implement_seed"] >= cfg.node_cli_timeout_s["execute_reflect"]
-    assert cfg.node_http_timeout_s["implement_seed"] >= cfg.node_http_timeout_s["execute_reflect"]
+    # Every node whose reply is a whole script (or the whole plan) gets execute_reflect's budget: a live kimi-k3 campaign
+    # timed out four times on the ones this table had left at the base (implement_oracle, implement_protocol, plan,
+    # plan_revise).
+    for node in ("implement_seed", "implement_oracle", "implement_protocol", "plan", "plan_revise"):
+        assert cfg.node_cli_timeout_s[node] >= cfg.node_cli_timeout_s["execute_reflect"], node
+        assert cfg.node_http_timeout_s[node] >= cfg.node_http_timeout_s["execute_reflect"], node
 
 
 # --- the other shape: it reads the seed, and the seed reaches nothing ---------------

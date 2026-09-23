@@ -185,6 +185,13 @@ class ProviderConfig(BaseModel):
             "write": 600.0,
             "execute_reflect": 600.0,
             "implement_seed": 600.0,
+            # The other repairs that return a whole script, and the plan step (the design plus the prose around it) and
+            # its rewrite: at the 120 s base, a live kimi-k3 campaign timed out on each of them four times, and every
+            # retry starts the answer over, so four tries ended the call after 8 minutes with nothing.
+            "implement_oracle": 600.0,
+            "implement_protocol": 600.0,
+            "plan": 600.0,
+            "plan_revise": 600.0,
             "design_self_critique": 600.0,
             "analyze": 300.0,
         }
@@ -226,6 +233,12 @@ class ProviderConfig(BaseModel):
             "execute_reflect": 900.0,
             # Returns the whole script again, like execute_reflect does.
             "implement_seed": 900.0,
+            # So do these two repairs; the plan step and its rewrite return the design and its prose (see the HTTP
+            # table above for what timed out without them).
+            "implement_oracle": 900.0,
+            "implement_protocol": 900.0,
+            "plan": 900.0,
+            "plan_revise": 900.0,
             "design_self_critique": 900.0,
             # web_plots writes a short matplotlib script — it should be
             # quick. A tight ceiling kills a stuck codex_cli call fast
