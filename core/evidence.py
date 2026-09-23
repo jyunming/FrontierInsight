@@ -54,7 +54,15 @@ INFO: dict[str, dict[str, Any]] = {
             "says it swept the fixed grid, ran the fixed number of trials in every setting and used the fixed thresholds; no "
             "numeric warning was accepted."
         ),
-        "known_blind_spots": ["The manifest is the script's own statement: a script can write a manifest that says what the protocol says."],
+        "known_blind_spots": [
+            "When the script keeps a per-trial ledger (trial_ledger.jsonl), the trial counts (realized_grid, "
+            "attempted_per_cell, successful_per_cell, failed_trials) are derived by the engine from its real lines, not "
+            "read from the script's own summary. Without a ledger, those fields are still the script's own statement, "
+            "as before. Either way, a claimed trial count is also cross-checked against the real per-trial values a "
+            "`kind: \"mean\"` metric reports (core/run_manifest.py's result_json check) — but a script that fabricates "
+            "the ledger rows AND the metric's per-trial values together, consistently, is not caught by either "
+            "mechanism; no check here re-executes the science itself.",
+        ],
         "artifacts": ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_CHECK.json", "needs/RUN_MANIFEST_CHECK.json", "needs/NUMERIC_WARNINGS.json"],
     },
     "independently_validated": {
