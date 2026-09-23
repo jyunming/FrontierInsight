@@ -63,6 +63,21 @@ def test_the_value_count_check_is_a_noop_without_a_mean_metric_or_a_result(tmp_p
     assert rm.problems(PROTOCOL, _manifest(), result_json=_result_json_with(10)) == []
 
 
+def test_an_analysis_that_lists_no_values_is_the_analysis_to_fix_not_the_simulation() -> None:
+    """A live kimi-k3 quest's experiment.py printed no `<metric>_values` at all, while simulate.py had saved every final
+    size on disk; the difference sent simulate.py back, and its rewrite broke the oracle checks it had passed. No list at
+    all is the analysis's; a list far shorter than the claim is still the audit's fabrication case, the simulation's."""
+    no_list = {"by_R0": {str(r): {"final_size_mean": 0.3} for r in (0.9, 1.5, 3.0)}}
+    found = rm.problems(_MEAN_PROTOCOL, _manifest(), result_json=no_list)
+    assert len(found) == 1 and "has no `final_size_values` list at all" in found[0], found
+    assert rm.analysis_output_problems(_MEAN_PROTOCOL, _manifest(), no_list) == found
+    short = _result_json_with(10)
+    assert rm.problems(_MEAN_PROTOCOL, _manifest(), result_json=short)
+    assert rm.analysis_output_problems(_MEAN_PROTOCOL, _manifest(), short) == [], "10 real values against 300 claimed stays the simulation's"
+    assert rm.analysis_output_problems(_MEAN_PROTOCOL, None, no_list) == []
+    assert "experiment.py (not simulate.py)" in rm.analysis_directive(found)
+
+
 def test_a_declared_failure_rate_is_not_mistaken_for_fabrication() -> None:
     """A design with a genuine ~15% solver-divergence rate, correctly excluding failed trials from
     its value arrays, must not trip the value-count check -- the baseline is trials the manifest
@@ -287,6 +302,49 @@ async def test_a_loop_that_runs_fewer_trials_than_its_constant_says_is_sent_back
     assert "[run_manifest] the run differs from the frozen protocol (1)" in log and "ran another number" in log
     assert "sending simulate.py back (1 of 1)" in log
     assert "NUM_RUNS" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
+ANALYSIS_WITH_VALUES = ANALYSIS.replace(
+    "'cells': len(done)}", "'cells': len(done), 'final_size_values': [0.1] * sum(done.values())}",
+)
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_that_prints_no_values_is_sent_back_alone_and_the_simulation_is_left_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the real graph: the simulation did everything the protocol fixed; only the analysis left out the per-trial
+    values of a mean metric. experiment.py is the script repaired (against the raw files already on disk), and
+    simulate.py is not touched -- a live quest's rewrite of it broke the oracle checks it had passed."""
+    calls: list[str] = []
+    prompts: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        calls.append(kind)
+        prompts.append(prompt)
+        if kind == "Experiment Design":
+            body = json.loads(_FAKE_RESPONSES["design"])
+            body["protocol"] = _MEAN_PROTOCOL
+            return json.dumps(body)
+        if kind == "Implementation":
+            return _reply(SIM_OK, ANALYSIS)
+        if kind == "ExecuteReflect":
+            return json.dumps({"code": ANALYSIS_WITH_VALUES, "deps": [], "patch_summary": "lists the values"})
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and calls.count("ExecuteReflect") == 1
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "has no `final_size_values` list at all" in log and "sending experiment.py back (1 of 1)" in log
+    reflect = next(p for p in prompts if _classify(p) == "ExecuteReflect")
+    assert "Rewrite experiment.py (not simulate.py)" in reflect
+    assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").strip() == SIM_OK.strip()
+    assert "final_size_values" in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+    assert _record(engine)["status"] == "ok"
 
 
 @pytest.mark.asyncio

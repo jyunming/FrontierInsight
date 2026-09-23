@@ -509,3 +509,68 @@ async def test_a_two_script_oracle_check_gets_a_real_raw_dir_not_a_keyerror(
     record = _record(engine)
     assert record["status"] == "ok" and len(record["attempts"]) == 1, record
     assert "OracleRepair" not in calls, "the module-level FI_RAW_DIR read must not look like an unanswered oracle request"
+
+
+# --- what a repair is told, and what uses one up (two live kimi-k3 quests) ----------------------------------------------
+
+_CRASHING = _HEAD + """\
+if os.environ.get("FI_ORACLE") == "1":
+    raise TypeError("Put.__init__() got an unexpected keyword argument 'priority'")
+""" + _TAIL
+
+
+@pytest.mark.asyncio
+async def test_a_repair_sees_the_crash_and_a_call_that_never_answered_does_not_use_it_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live quest's script crashed inside simpy; the repair was told only "printed no ORACLE_JSON line", and the one
+    repair left timed out at the provider and was counted as spent. With one repair allowed: the traceback reaches the
+    repair, and the timed-out call is tried again instead of ending the quest."""
+    calls: list[str] = []
+    repair_prompts: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    inner = _fake(calls, implement=_CRASHING, repair=_PASSING, protocol=protocol)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
+            repair_prompts.append(prompt)
+            if len(repair_prompts) == 1:
+                raise TimeoutError("the provider never answered")
+        return await inner(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert len(repair_prompts) == 2
+    assert "unexpected keyword argument 'priority'" in repair_prompts[0], "the repair must be shown the crash"
+    record = _record(engine)
+    assert record["status"] == "ok" and len(record["attempts"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_completing_the_plan_does_not_use_up_the_scripts_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live quest needed its plan completed (an oracle with no numbers), then its FI_ORACLE branch added, and had
+    nothing left for the problem after that. With one of each allowed, both happen."""
+    calls: list[str] = []
+    bare = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size", "tolerance": "small"}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if "You are revising the plan" in prompt:
+            calls.append("PlanRevise")
+            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            design = plan.parse(current).design
+            design["protocol"] = {**design["protocol"], "oracles": [ORACLE]}
+            return plan.render("smoke", {}, design)
+        return await _fake(calls, implement=_UNAWARE, repair=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert calls.count("PlanRevise") == 1 and calls.count("OracleRepair") == 1
+    assert _record(engine)["status"] == "ok"

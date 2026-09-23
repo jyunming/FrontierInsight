@@ -25,6 +25,7 @@ from core.engine import (
     _ANALYZE_RESULT_JSON_BUDGET_CHARS,
     _compact_result_json_block,
     _extract_result_json,
+    _format_evidence_note,
     _new_quest_id,
     _parse_implement_response,
     _parse_json_lenient,
@@ -632,6 +633,9 @@ async def test_evidence_gate_broaden_is_bounded(
     even though the verdict is still 'broaden' — it can't spin. One source,
     so the model answers rather than the no-source rule."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+    # Retrieval on: a broaden only means something when the literature step can bring sources back (the test below
+    # covers retrieval off). The engine builds no knowledge layer for a unit test, so the flag is set on the config.
+    engine.config.knowledge.enabled = True
 
     async def fake_chat(prompt, node=None):  # noqa: ANN001
         return '{"verdict": "broaden", "rationale": "thin", "gaps": ["more data"]}'
@@ -649,6 +653,42 @@ async def test_evidence_gate_broaden_is_bounded(
         {"topic": "t", "literature": one, "evidence_broaden_count": 1})
     assert p2["evidence_assessment"]["route"] == "write"
     assert "evidence_broaden_count" not in p2
+
+
+def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: Path) -> None:
+    """A live two-script quest stopped on a difference "in simulate.py, line 242", and the stop told the person to change
+    experiment.py."""
+    from core.protocol_check import Mismatch
+
+    engine = Engine(_route_config(tmp_path, review_loop=False, max_iterations=1))
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, Any] = {}
+    engine._pause_for_human = lambda **kw: seen.update(kw)  # type: ignore[method-assign]
+    engine._pause_for_protocol([Mismatch("runs", "runs_per_setting", [200.0], [50.0], "N_RUNS in simulate.py, line 7")], [])
+    how = seen["steps"][1]
+    assert str(engine.quest_root / "code" / "simulate.py") in how
+    assert "experiment.py" not in how
+
+
+async def test_evidence_gate_broaden_with_retrieval_off_writes_and_keeps_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With retrieval off there is no literature step to broaden: a live kimi-k3 quest's model-decided broaden sent it
+    back to redesign after its results were seen, changing its hypothesis and discarding a complete first run. The route
+    is write; the verdict and gaps stay recorded, so the writer frames its limits and the evidence level names the gap."""
+    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
+    assert engine.config.knowledge.enabled is False
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["on-topic sources"]}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "evidence_broaden_count": 0})
+    assessment = patch["evidence_assessment"]
+    assert assessment["route"] == "write"
+    assert assessment["verdict"] == "broaden" and assessment["gaps"] == ["on-topic sources"]
+    assert "evidence_broaden_count" not in patch
+    assert "on-topic sources" in _format_evidence_note(assessment, is_survey=False)
 
 
 async def test_analyze_local_first_skips_framing_nodes(tmp_path: Path) -> None:

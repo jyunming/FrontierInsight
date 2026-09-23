@@ -145,3 +145,32 @@ experiment directive's own example teaches, and the same shape all four real que
 Confirmed failing against the pre-fix code and passing against the fix (see Finding 1). No other engine code
 changed; `docs/audits/16_live_red_team_campaign.md` (this file) and the four real quest folders under
 `C:\dev\fi_redteam\outputs\` (not committed — real quest output, per `outputs/**` being git-ignored) are the record.
+
+## Second round (same day): `kimi-k3`, after the Finding-1 fix
+
+The user asked for a rerun: "we can't even finish a quest, so how do we know whether there are problems." Same four
+topics, `kimi-k3` (the key's stronger model; it takes the same `fixed_temperature: 0.6` and `thinking: disabled` as
+k2.6 — `kimi-k2.7-code` accepts only temperature 1 with thinking on, which one provider-wide `extra_body` cannot mix
+with k2.6 in one quest), from main at the fix above. 515,089 tokens, **$3.76** (account balance 71.42 → 67.66, read
+before and after — `cost_usd` in `cost.jsonl` is empty because FI has no Kimi price table).
+
+k3 went further: two quests passed their oracles and ran the full simulation, and the paired one produced results,
+analysed and cross-checked them. None reached a paper, and **half of what stopped them was FI's own**, fixed in the
+PR that adds this section:
+
+| Shape | Tokens | Got to | Stopped by |
+|---|---|---|---|
+| Paired | 206,358 | full run, analysis, cross-check, evidence gate | **FI:** the gate (model-decided) said *broaden* with retrieval off; the loop redesigned after results were seen (hypothesis changed, flagged as post hoc), rewrote the code, then **FI:** the protocol check read a tally `n_runs = 0` (later `+= 2`) as "0 runs per setting", and the stop message named `experiment.py` for a difference in `simulate.py` |
+| SIR | 114,834 | oracles passed (1 repair), full simulation | **FI:** `experiment.py` printed no `<metric>_values`; the run-manifest difference always sent `simulate.py` back, and that rewrite broke the oracles it had passed. (Also the model's: a closed-form scalar declared as a `mean` metric, which can never have per-trial values) |
+| Deterministic | 99,151 | oracle gate | the model's: Velocity-Verlet one-step error 8.28e-05 against a tolerance of 5e-05 it declared itself — the same too-tight-tolerance shape as round one. **FI:** its plan completion and FI_ORACLE fix used both repairs before this showed |
+| Clustered | 94,746 | oracle gate | the model's: `simpy` `Put.__init__() got an unexpected keyword argument 'priority'`. **FI:** the repair was never shown that traceback (`stderr_tail=""`), and the one repair that might have fixed it timed out at the provider and was counted as spent. (Earlier a plan-revise call timed out after ~8 min and ended the run loudly with `quest_failed.md`; it resumed) |
+
+Fixed together (one PR, each with a test that fails on the old code): the manifest routes a mean metric with no
+`<id>_values` list to `experiment.py` (a short list is still the simulation's, the audit's fabrication case); stop
+messages name the script the difference is in; the protocol check no longer reads a count of zero as a run count
+(an external review of the first draft, which skipped every name the script adds to, found it would miss a real
+wrong setting that is also incremented somewhere); a broaden with
+no literature step writes instead, and a gate verdict of `insufficient`/`broaden` is now a `publication_ready` gap
+(before, only `unknown` was); the oracle repair gets the run's stderr, and plan rewrites, script rewrites and an
+unanswered repair call are counted apart. A third round on the fixed main is the measure of whether these were what
+stood between a real quest and its paper.

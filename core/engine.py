@@ -4892,6 +4892,7 @@ class Engine:
         """``(status, differences)`` of the finished first run: what its manifest says against the frozen protocol.
         Statuses other than ``ok`` and ``differs`` say why nothing was compared."""
         self._manifest_failed_trials = 0
+        self._manifest_analysis_problems: list[str] = []
         if self.config.engine.run_manifest_check == "off":
             return "off", []
         protocol = self._protocol_block(state)
@@ -4926,6 +4927,7 @@ class Engine:
             manifest, why = _run_manifest.read(raw_dir)
             found = _run_manifest.problems(protocol, manifest, why, result_json=result_json)
         self._manifest_failed_trials = _run_manifest.failure_count(manifest)
+        self._manifest_analysis_problems = _run_manifest.analysis_output_problems(protocol, manifest, result_json)
         return ("differs" if found else "ok"), found
 
     def _check_replicate_manifests(self, state: QuestState, split: bool, replicates: int) -> None:
@@ -5488,26 +5490,33 @@ class Engine:
         }
         timeout = max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
         budget = int(self.config.engine.oracle_repair_attempts)
+        # Three things can use up a turn here, and they are counted apart: a plan rewrite (an oracle missing, or given
+        # no numbers), a rewrite of the script, and a repair call that never got an answer (a provider timeout). Counted
+        # together, a quest that first needed its plan completed, then its FI_ORACLE branch added, had no repair left
+        # for the numerical problem that only showed once the checks finally ran.
+        plans_left, repairs_left, call_failures_left = budget, budget, 1
         attempts: list[dict[str, Any]] = []
         found: list[str] = []
         new_code: str | None = None
-        for attempt in range(budget + 1):
+        attempt = 0
+        while True:
             protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
             oracles = _oracle.declared(protocol)
             incomplete = _oracle.unjudgeable(oracles)  # the engine judges: an oracle with no numbers to judge by is not run
             reported: dict[str, Any] | None = None
             returncode, timed_out = 0, False
+            stderr_tail = ""
             if oracles and not incomplete:
                 try:
                     ran = await self.executor.execute(
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
                     )
                     reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
-                    stderr_tail = (ran.stderr or "")[-300:]
+                    stderr_tail = (ran.stderr or "")[-2000:]
                 except Exception as e:  # noqa: BLE001 -- an oracle run that cannot start is a problem to report
                     returncode, stderr_tail = -1, repr(e)
                 if reported is None and returncode not in (0, -1):
-                    self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail)
+                    self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail[-300:])
             found = incomplete or _oracle.problems(oracles, reported, returncode, timed_out)
             attempts.append({
                 "attempt": attempt, "oracles": [o["name"] for o in oracles], "problems": found,
@@ -5515,20 +5524,28 @@ class Engine:
                 # What the engine made of each: the script's value against the protocol's expected value and tolerance.
                 "judged": _oracle.judged(oracles, reported) if reported is not None else [],
             })
-            if not found or attempt == budget:
+            attempt += 1
+            if not found:
                 break
             if not oracles or incomplete:
-                if _frozen.load(self.quest_root) is not None:
-                    break  # the protocol is frozen: an oracle can only come in through an amendment
-                self._log.warning("[oracle] %s; asking the plan for one (%d of %d)", found[0], attempt + 1, budget)
+                if _frozen.load(self.quest_root) is not None or plans_left == 0:
+                    break  # a frozen protocol takes an oracle only through an amendment
+                self._log.warning("[oracle] %s; asking the plan for one (%d of %d)", found[0], budget - plans_left + 1, budget)
+                plans_left -= 1
                 if not await self._declare_oracles(incomplete or None):
                     break
                 continue
+            if repairs_left == 0:
+                break
             self._log.warning(
                 "[oracle] %d problem(s): %s; asking for a repair (%d of %d)",
-                len(found), "; ".join(found), attempt + 1, budget,
+                len(found), "; ".join(found), budget - repairs_left + 1, budget,
             )
-            text = await self._repair_script_for_oracle(state, seed_path, oracles, found)
+            text, call_failed = await self._repair_script_for_oracle(state, seed_path, oracles, found, stderr_tail)
+            if call_failed and call_failures_left > 0:
+                call_failures_left -= 1  # no answer came back: the script was not rewritten, so the repair is not spent
+            else:
+                repairs_left -= 1
             if text is not None and seed_path.name == "experiment.py":
                 new_code = text
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
@@ -5583,15 +5600,18 @@ class Engine:
         return True
 
     async def _repair_script_for_oracle(
-        self, state: QuestState, path: Path, oracles: list[dict[str, Any]], found: list[str],
-    ) -> str | None:
-        """ONE repair of the script for its oracle checks. Kept only if it parses and now mentions FI_ORACLE."""
+        self, state: QuestState, path: Path, oracles: list[dict[str, Any]], found: list[str], stderr_tail: str = "",
+    ) -> tuple[str | None, bool]:
+        """ONE repair of the script for its oracle checks: ``(new code or None, the repair call itself failed)``. Kept only
+        if it parses and now mentions FI_ORACLE. The oracle run's own stderr goes with it: "printed no ORACLE_JSON line"
+        says only that the script failed, and a repair asked without the traceback rewrote the oracle branch while the
+        crash was elsewhere (a module-level read, a library call) and stayed."""
         code = path.read_text(encoding="utf-8")
         prompt = self._prompts["execute_reflect"].substitute(
             previous_code=code,
             returncode="(the oracle run did not pass)",
             stdout_tail=_oracle.directive(oracles, found),
-            stderr_tail="",
+            stderr_tail=stderr_tail,
             duration_s="0.00",
             figures_count="0",
             result_json_present="no (not run yet)",
@@ -5603,7 +5623,7 @@ class Engine:
             text = await self._chat(prompt, node="implement_oracle")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             self._log.warning("[oracle] the repair call failed (%r); keeping %s as written", exc, path.name)
-            return None
+            return None, True
         parsed: dict[str, Any] = {}
         if _strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _parse_json_lenient(text, node="implement_oracle") or {}
@@ -5617,13 +5637,13 @@ class Engine:
             usable = False
         if not usable:
             self._log.warning("[oracle] the repair of %s is not usable (it must parse and honour FI_ORACLE); keeping it as written", path.name)
-            return None
+            return None, False
         path.write_text(new_code, encoding="utf-8")
         self._log.info(
             "[oracle] rewrote %s (%d bytes): %s", path.name, len(new_code),
             str(parsed.get("patch_summary") or "no summary")[:160],
         )
-        return new_code
+        return new_code, False
 
     def _pause_for_oracle(self, found: list[str], seed_path: Path) -> None:
         """Stop before the main sweep: the oracles did not pass after the repairs."""
@@ -5647,7 +5667,7 @@ class Engine:
 
     def _pause_for_protocol(self, mismatches: list[Any], deps: list[str]) -> None:
         """Stop for the person: the script still contradicts the plan after the repairs. They edit ``plan.md`` (the
-        protocol) or ``code/experiment.py`` and resume; a script that then agrees with the plan is used as it is."""
+        protocol) or the script the differences name and resume; a script that then agrees with the plan is used as it is."""
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / "protocol_stop.json").write_text(
@@ -5656,16 +5676,23 @@ class Engine:
             )
         except OSError as e:
             self._log.warning("[protocol] couldn't write the stop record: %r", e)
+        # Name the script each difference was found in (``Mismatch.where`` reads "n_runs in simulate.py, line 242"): a
+        # two-script quest's differences are usually in simulate.py, and a stop that said "change experiment.py" sent the
+        # person to the wrong file.
+        named = sorted({m.group(1) for d in mismatches if (m := re.search(r" in ([\w.\-]+\.py), line ", str(getattr(d, "where", ""))))})
+        if not named:
+            named = [p.name for p in (self.quest_root / "code" / _split_run.SIMULATE_NAME, self.quest_root / "code" / "experiment.py") if p.is_file()] or ["experiment.py"]
+        scripts = ", ".join(f"`{self.quest_root / 'code' / n}`" for n in named)
         if _frozen.load(self.quest_root) is not None:
             how = (
-                f"Change the script (`{self.quest_root / 'code' / 'experiment.py'}`) to use those values. The protocol is "
+                f"Change the script ({scripts}) to use those values. The protocol is "
                 "frozen, so editing plan.md does not change it: a different protocol needs an amendment (ask for the change "
                 "when the quest is refined, then approve the request). Then resume: a script that agrees with the protocol "
                 "is used as it is; otherwise it is written again."
             )
         else:
             how = (
-                f"Either change the script (`{self.quest_root / 'code' / 'experiment.py'}`) to use those values, or, if the "
+                f"Either change the script ({scripts}) to use those values, or, if the "
                 f"plan is what should change, edit the protocol in `{_plan.plan_path(self.quest_root)}` (or ask for a change: "
                 f"`--revise-plan`). Then resume: a script that agrees with the plan is used as it is; otherwise it is written again."
             )
@@ -6128,18 +6155,22 @@ class Engine:
             elif manifest_attempts < budget:
                 manifest_status = "repairing"
                 manifest_attempts_next = manifest_attempts + 1
+                # Only what the analysis failed to print is the analysis's to fix; anything else (the simulation swept
+                # another grid, a claimed count its own values do not back) sends simulate.py back, as it always did.
+                analysis_only = set(manifest_found) <= set(self._manifest_analysis_problems)
+                to_fix = _split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME
                 self._log.warning(
-                    "[run_manifest] the run differs from the frozen protocol (%d): %s; sending simulate.py back (%d of %d)",
-                    len(manifest_found), "; ".join(manifest_found), manifest_attempts_next, budget,
+                    "[run_manifest] the run differs from the frozen protocol (%d): %s; sending %s back (%d of %d)",
+                    len(manifest_found), "; ".join(manifest_found), to_fix, manifest_attempts_next, budget,
                 )
                 # The rejected run's numbers must not reach the analysis if the repair gives up: no RESULT_JSON line, no figures.
                 kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
-                result = ExecutionResult(
-                    1, kept,
-                    (result.stderr or "") + "\n[FI] " + _run_manifest.directive(manifest_found, self._protocol_block(state) or {}),
-                    result.duration_s, result.timed_out,
+                why = (
+                    _run_manifest.analysis_directive(manifest_found) if analysis_only
+                    else _run_manifest.directive(manifest_found, self._protocol_block(state) or {})
                 )
-                failed_script = _split_run.SIMULATE_NAME
+                result = ExecutionResult(1, kept, (result.stderr or "") + "\n[FI] " + why, result.duration_s, result.timed_out)
+                failed_script = to_fix
                 self._clear_stale_figures()
             else:
                 manifest_status = "stopped"
@@ -6152,15 +6183,28 @@ class Engine:
                 manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")
             except OSError:
                 pass
+            if set(manifest_found) <= set(self._manifest_analysis_problems):
+                headline = "the analysis does not report the values the protocol's metrics need"
+                fix = (
+                    f"Change `{self.quest_root / 'code' / _split_run.ANALYSIS_NAME}` so that its RESULT_JSON lists the per-trial "
+                    "values (`<metric>_values`, read from the raw files) each mean metric above is computed from, then resume. "
+                    "If a metric is not a mean over trials at all (a closed-form value), the protocol declared it wrongly: that "
+                    "needs an amendment. Set `engine.run_manifest_check: warn` to go on with the difference recorded."
+                )
+            else:
+                headline = "the simulation does not do what the protocol fixed"
+                fix = (
+                    f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that it runs the protocol's design and writes the "
+                    "manifest from what its loops did, then resume. (The protocol is frozen: a different design needs an amendment.) "
+                    "Set `engine.run_manifest_check: warn` to go on with the difference recorded."
+                )
             self._pause_for_contract(
                 kind="manifest",
-                headline="the simulation does not do what the protocol fixed",
+                headline=headline,
                 steps=[
                     "The run's own manifest (`run_manifest.json` in its raw-data folder) differs from the frozen protocol, and the "
                     "repairs did not remove it: " + "; ".join(manifest_found) + ".",
-                    f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that it runs the protocol's design and writes the "
-                    "manifest from what its loops did, then resume. (The protocol is frozen: a different design needs an amendment.) "
-                    "Set `engine.run_manifest_check: warn` to go on with the difference recorded.",
+                    fix,
                 ],
                 problems=manifest_found,
             )
@@ -7720,11 +7764,19 @@ class Engine:
                 failure = f"the gate's reply named no recognised verdict: {parsed!r}"[:300]
             verdict = "sufficient"  # keeps existing routing (write, not broaden)
         broadened = int(state.get("evidence_broaden_count", 0) or 0)
+        # A broaden goes back through the literature step for more sources. With retrieval off (or --analyze, where
+        # that step is skipped) nothing can come back, and the loop only redesigned the experiment after its results
+        # were seen: a live quest threw away a complete first run and changed its hypothesis that way. The verdict
+        # stands (the writer is told the evidence is thin, and the evidence level names it as a gap); the route is write.
+        can_broaden = self.config.knowledge.enabled and not self.config.engine.analyze_local_first
         will_broaden = (
             status == "ok"
             and verdict == "broaden"
+            and can_broaden
             and broadened < self.config.engine.evidence_gate_max_broaden
         )
+        if status == "ok" and verdict == "broaden" and not can_broaden:
+            self._log.info("[evidence_gate] broaden asked, but there is no literature step to broaden (retrieval is off); writing with the gap recorded")
         assessment = {
             "verdict": verdict,
             "status": status,

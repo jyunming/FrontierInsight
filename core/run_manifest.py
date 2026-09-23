@@ -305,6 +305,79 @@ def _total_values_reported(result_json: Any, metric_id: str) -> int:
     return total
 
 
+def _values_listed(result_json: Any, metric_id: str) -> bool:
+    """Whether ``result_json`` holds a ``f"{metric_id}_values"`` list anywhere at all (an empty one counts)."""
+    key = f"{metric_id}_values"
+
+    def walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            return any((k == key and isinstance(v, list)) or walk(v) for k, v in node.items())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(result_json)
+
+
+def _value_count_findings(
+    protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any,
+) -> list[tuple[str, bool]]:
+    """``(sentence, the analysis listed no values at all)`` for each `kind: "mean"` metric whose claimed trial count is
+    not backed by the per-trial values the analysis printed.
+
+    The two shapes point at different scripts. A `<id>_values` list that exists but is far shorter than the count claimed
+    is the audit's own fabrication case (10 real trials, 300 claimed): the simulation is sent back. No such list at all
+    is the analysis not printing what the contract asks of it, while the simulation's raw files may hold every trial
+    (a live quest's did: 100 final sizes per setting on disk, and the rewrite of simulate.py this used to ask for broke
+    the oracle checks it had passed). That one is the analysis's to fix."""
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    runs = _num(protocol.get("runs_per_setting"))
+    if result_json is None or not grid or runs is None:
+        return []
+    # The baseline is trials the manifest itself says SUCCEEDED, not the protocol's raw runs_per_setting x cells: a
+    # design with a genuine, declared failure rate (failed_trials, a failure_policy) legitimately has fewer real values
+    # than the nominal total, and that is not fabrication. A low threshold (rather than requiring an exact match) leaves
+    # room for a metric that, by the design's own nature, only applies to a subset of cells (e.g. a "time to extinction"
+    # that only exists where an outbreak happened) -- this check is aimed at the audit's own example (10 real trials,
+    # 300 claimed), not at flagging every partial or conditional metric.
+    successful = manifest.get("successful_per_cell")
+    successful = successful if isinstance(successful, dict) else {}
+    expected_total = sum(_num(n) or 0 for n in successful.values()) or runs * len(_all_cells(grid))
+    out: list[tuple[str, bool]] = []
+    for spec in protocol.get("metrics") or []:
+        if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id"):
+            continue
+        metric = str(spec["id"])
+        if not _values_listed(result_json, metric):
+            out.append((
+                f"the metric `{metric}` is a mean over {expected_total:g} successful trial(s), but the analysis's "
+                f"RESULT_JSON has no `{metric}_values` list at all — the analysis must print the per-trial values it "
+                "averaged, so the claimed trial count can be checked against them",
+                True,
+            ))
+            continue
+        got = _total_values_reported(result_json, metric)
+        if got < expected_total * 0.5:
+            out.append((
+                f"the manifest reports {expected_total:g} successful trial(s) in total, but the metric "
+                f"`{metric}` only has {got} real "
+                "per-trial value(s) in this run's own analysis output — the claimed trial count is not "
+                "backed by the data the analysis actually used",
+                False,
+            ))
+    return out
+
+
+def analysis_output_problems(
+    protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any,
+) -> list[str]:
+    """The differences :func:`problems` reports that are the analysis's to fix, not the simulation's: a mean metric the
+    analysis printed no per-trial values for. The caller sends experiment.py back for these, simulate.py for the rest."""
+    if not isinstance(manifest, dict):
+        return []
+    return [sentence for sentence, analysis in _value_count_findings(protocol, manifest, result_json) if analysis]
+
+
 def problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "",
     result_json: dict[str, Any] | None = None,
@@ -391,28 +464,7 @@ def problems(
             if short:
                 shown = ", ".join(f"{c}: {n}" for c, n in list(short.items())[:4])
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
-        if result_json is not None and grid:
-            # The baseline is trials the manifest itself says SUCCEEDED, not the protocol's raw runs_per_setting x
-            # cells: a design with a genuine, declared failure rate (failed_trials, a failure_policy) legitimately
-            # has fewer real values than the nominal total, and that is not fabrication. A low threshold (rather
-            # than requiring an exact match) leaves room for a metric that, by the design's own nature, only
-            # applies to a subset of cells (e.g. a "time to extinction" that only exists where an outbreak
-            # happened) -- this check is aimed at the audit's own example (10 real trials, 300 claimed), not at
-            # flagging every partial or conditional metric.
-            successful = manifest.get("successful_per_cell")
-            successful = successful if isinstance(successful, dict) else {}
-            expected_total = sum(_num(n) or 0 for n in successful.values()) or runs * len(_all_cells(grid))
-            for spec in protocol.get("metrics") or []:
-                if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id"):
-                    continue
-                got = _total_values_reported(result_json, str(spec["id"]))
-                if got < expected_total * 0.5:
-                    out.append(
-                        f"the manifest reports {expected_total:g} successful trial(s) in total, but the metric "
-                        f"`{spec['id']}` only has {got} real "
-                        "per-trial value(s) in this run's own analysis output — the claimed trial count is not "
-                        "backed by the data the analysis actually used"
-                    )
+        out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json))
 
     listed = manifest.get("failed_trials")
     listed = listed if isinstance(listed, list) else []
@@ -525,6 +577,19 @@ def directive(found: list[str], protocol: dict[str, Any]) -> str:
         "did (realized_grid, attempted_per_cell, successful_per_cell, failed_trials, thresholds_used, schema "
         "`fi.run-manifest/v1`). Do not edit either file to say what the protocol says: change what the simulation does "
         f"— FI counts trials from `{LEDGER_NAME}`'s own lines, not from a number written beside it. Keep everything else."
+    )
+
+
+def analysis_directive(found: list[str]) -> str:
+    """The repair request for :func:`analysis_output_problems`: the simulation stands, the analysis must print its values."""
+    return (
+        "This run finished, and the simulation's raw files stand, but the analysis did not print what the contract asks:\n"
+        + "\n".join(f"- {line}" for line in found[:8])
+        + "\n\nRewrite experiment.py (not simulate.py) so that, for each of those metrics, RESULT_JSON carries a "
+        "`<metric>_values` list: the per-trial values, read from the raw files, that the metric's mean is computed from "
+        "(per setting when the metric is reported per setting). Do not invent values: every number must come from the raw "
+        "files. A metric that is not a mean over trials at all (a closed-form or deterministic value) has no per-trial "
+        "values to list; say so plainly in the analysis rather than printing a made-up list. Keep everything else."
     )
 
 
