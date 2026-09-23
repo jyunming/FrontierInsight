@@ -108,6 +108,8 @@ _FAKE_RESPONSES = {
         "limitations": ["toy data"],
     }),
     "write": "# fake-paper\n\nMethods. Results. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n",
+    "claim_check": json.dumps({"claims": [], "summary": "no substantive claims found"}),
+    "evidence_gate": json.dumps({"verdict": "sufficient", "rationale": "fake: evidence looks fine", "gaps": []}),
     "review": json.dumps({
         "verdict": "accept",
         "score": 4,
@@ -133,6 +135,10 @@ def _classify(prompt: str) -> str:
         return "ExecuteReflect"
     if "Cross-Paper Check" in head:
         return "CrossCheck"
+    if "Claim Grounding" in head:
+        return "ClaimCheck"
+    if "Evidence Gate" in head:
+        return "EvidenceGate"
     for tag in ("Ideation", "Experiment Design", "Implementation", "Analysis", "Writing", "Review"):
         if tag in head:
             return tag
@@ -151,6 +157,8 @@ def _fake_response_for(prompt: str) -> str:
         "Analysis": _FAKE_RESPONSES["analyze"],
         "CrossCheck": _FAKE_RESPONSES["cross_check"],
         "Writing": _FAKE_RESPONSES["write"],
+        "ClaimCheck": _FAKE_RESPONSES["claim_check"],
+        "EvidenceGate": _FAKE_RESPONSES["evidence_gate"],
         "Review": _FAKE_RESPONSES["review"],
     }.get(head, "{}")
 

@@ -558,7 +558,8 @@ async def test_evidence_gate_fails_open_on_unparseable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-JSON / invalid-verdict response must NOT block the quest —
-    the gate defaults to a 'sufficient' verdict that routes to write."""
+    routing still defaults to write — but must NOT be recorded as a real
+    "sufficient" judgement either: status is "unknown", not ok."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
 
     async def fake_chat(prompt, node=None):  # noqa: ANN001
@@ -569,6 +570,58 @@ async def test_evidence_gate_fails_open_on_unparseable(
         {"topic": "t", "literature": [{"content": "x"}], "analysis": {}})
     assert patch["evidence_assessment"]["verdict"] == "sufficient"
     assert patch["evidence_assessment"]["route"] == "write"
+    assert patch["evidence_assessment"]["status"] == "unknown"
+    assert patch["evidence_assessment"]["failure"]
+
+
+async def test_evidence_gate_unknown_pauses_under_research_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same unparseable reply must PAUSE (not silently write) when the
+    quest is rigor_profile: research — an unresolved unknown gate is not
+    something that profile lets through."""
+    cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
+    cfg = cfg.model_copy(update={"rigor_profile": "research"})
+    engine = Engine(cfg)
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        return "the evidence looks fine to me"
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    paused = {}
+
+    def fake_pause(self, **kwargs):  # noqa: ANN001
+        paused.update(kwargs)
+        raise RuntimeError("paused")
+
+    monkeypatch.setattr(Engine, "_pause_for_human", fake_pause)
+    with pytest.raises(RuntimeError, match="paused"):
+        await engine._node_evidence_gate(
+            {"topic": "t", "literature": [{"content": "x"}], "analysis": {}})
+    assert paused["kind"] == "evidence_gate_unknown"
+    assert paused["interaction"] == "supply"
+
+
+async def test_evidence_gate_ok_does_not_pause_under_research_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely parseable verdict never pauses, research profile or not."""
+    cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
+    cfg = cfg.model_copy(update={"rigor_profile": "research"})
+    engine = Engine(cfg)
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        return '{"verdict": "sufficient", "rationale": "fine", "gaps": []}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+
+    def fail_if_paused(self, **kwargs):  # noqa: ANN001
+        raise AssertionError("must not pause on a real verdict")
+
+    monkeypatch.setattr(Engine, "_pause_for_human", fail_if_paused)
+    patch = await engine._node_evidence_gate(
+        {"topic": "t", "literature": [{"content": "x"}], "analysis": {}})
+    assert patch["evidence_assessment"]["status"] == "ok"
 
 
 async def test_evidence_gate_broaden_is_bounded(

@@ -497,3 +497,59 @@ async def test_a_frozen_record_edited_by_hand_blocks_the_quest_until_a_person_ap
     assert len(amend) == 1 and amend[0]["source"] == fp.TAMPER_SOURCE and amend[0]["prespecified"] is True
     assert (artifacts.raw_state["design"] or {}).get("protocol", {}).get("runs_per_setting") == 300
 
+
+# --- evidence_gate's own "supply" pause (unrelated to the frozen protocol, but this file already has
+# the real-graph + fake-LLM infrastructure the other pause/resume tests above use, and test_audit_log.py
+# already borrows it for an unrelated concern too) ------------------------------------------------------
+
+
+async def test_an_unknown_evidence_gate_under_research_profile_pauses_then_retries_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real graph proof, not a mocked ``_pause_for_human``: an unparseable evidence-gate reply under
+    rigor_profile: research genuinely pauses the quest via LangGraph's own interrupt(), and --resume
+    (a fresh Engine with resume_quest_id, exactly like the tamper-recovery test above) re-enters the
+    SAME node and retries the call — proceeding once it succeeds. A reviewer flagged the risk that
+    LangGraph might resume execution "after" the interrupt() call instead of re-running the node from
+    the top, which would mean the retry never actually happens; the tamper-recovery test above already
+    proves resume-without-fix pauses again through the real graph (not a fake interrupt), and this test
+    proves the matching positive case: resume-WITH-a-fix proceeds, because the call was genuinely
+    retried, not skipped."""
+    calls = {"evidence_gate": 0}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "EvidenceGate":
+            calls["evidence_gate"] += 1
+            if calls["evidence_gate"] <= 2:
+                return "not json at all"  # garbage the first two calls: status becomes unknown
+            return json.dumps({"verdict": "sufficient", "rationale": "fine now", "gaps": []})
+        # Everything else gets the plain "accept, no revise" default -- this test is about the
+        # evidence_gate pause in isolation, not the redesign loop _fake() also drives.
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    cfg = _cfg(tmp_path).model_copy(update={"rigor_profile": "research"})
+
+    first = Engine(cfg)
+    await first.run()
+    assert calls["evidence_gate"] == 1, "must have tried the gate exactly once before pausing"
+    assert not (first.quest_root / "paper" / "paper.md").exists(), "must pause before write, not after"
+    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert descriptor["kind"] == "evidence_gate_unknown" and descriptor["interaction"] == "supply"
+
+    # Resume without anything having changed: the SAME node re-enters and pauses again (this half of
+    # the proof already has a sibling above, for the tamper case; kept here too as a tight bracket
+    # around the positive case just below, on this exact pause).
+    still_broken = Engine(cfg, resume_quest_id=first.quest_id)
+    await still_broken.run()
+    assert calls["evidence_gate"] == 2, "resume must retry the call, not skip it"
+    assert not (still_broken.quest_root / "paper" / "paper.md").exists()
+
+    # Resume again: this time the call succeeds. The retry was real, so the quest proceeds to write.
+    fixed = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await fixed.run()
+    assert calls["evidence_gate"] == 3
+    assert artifacts.paper_md is not None
+    assert artifacts.raw_state["evidence_assessment"]["status"] == "ok"
+

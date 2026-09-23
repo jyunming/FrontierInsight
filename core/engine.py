@@ -7454,11 +7454,19 @@ class Engine:
         """Weigh the assembled evidence against the research question
         BEFORE writing. Returns a verdict the writer (and router) act on.
 
-        Fails OPEN — when the flag is off, or anything goes wrong, the
-        node is a passthrough and routing defaults to ``write`` (the
-        downstream review + claim_check still guard quality). The only
-        action it can take that changes control flow is ONE bounded
-        ``broaden_lit`` re-entry (capped by ``evidence_gate_max_broaden``).
+        When the flag is off, the node is a passthrough. When the gate
+        itself cannot be evaluated (provider failure, an unparseable
+        reply), routing still defaults to ``write`` — a broken gate call
+        must never forfeit the quest's output — but the assessment is
+        recorded with ``status: "unknown"``, never ``"sufficient"``: the
+        two are not the same claim, and ``core.evidence`` reads the
+        difference (an "unknown" gate is a publication-ready gap on every
+        profile). Under ``rigor_profile: research`` an unknown status
+        additionally pauses the quest for a human to resolve or accept
+        the risk, rather than silently writing on unverified evidence.
+        The only action a genuinely-decided gate can take that changes
+        control flow is ONE bounded ``broaden_lit`` re-entry (capped by
+        ``evidence_gate_max_broaden``).
         """
         if not self.config.engine.evidence_gate:
             return {}
@@ -7568,19 +7576,32 @@ class Engine:
                 text = await self._chat(prompt, node="evidence_gate")
                 parsed = _parse_json_lenient(text, node="evidence_gate") or {}
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
+            status = "unknown"
+            failure = f"{type(e).__name__}: {e}"[:300]
             self._log.warning(
-                "[evidence_gate] assessment failed (%r); failing open to write", e,
+                "[evidence_gate] assessment failed (%r); routing to write with "
+                "status=unknown (not sufficient)", e,
             )
+        else:
+            status, failure = "ok", ""
         verdict = str(parsed.get("verdict") or "").strip().lower()
         if verdict not in ("sufficient", "broaden", "insufficient"):
-            verdict = "sufficient"  # fail-open
+            if status == "ok":
+                # The call succeeded but the reply named no recognised verdict —
+                # equally unknown as a raised exception, not a silent "sufficient".
+                status = "unknown"
+                failure = f"the gate's reply named no recognised verdict: {parsed!r}"[:300]
+            verdict = "sufficient"  # keeps existing routing (write, not broaden)
         broadened = int(state.get("evidence_broaden_count", 0) or 0)
         will_broaden = (
-            verdict == "broaden"
+            status == "ok"
+            and verdict == "broaden"
             and broadened < self.config.engine.evidence_gate_max_broaden
         )
         assessment = {
             "verdict": verdict,
+            "status": status,
+            "failure": failure,
             "route": "broaden_lit" if will_broaden else "write",
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
@@ -7589,12 +7610,32 @@ class Engine:
             "decided_by": decided_by,
         }
         self._log.info(
-            "[evidence_gate] verdict=%s route=%s decided=%s type=%s policy=%s "
+            "[evidence_gate] verdict=%s status=%s route=%s decided=%s type=%s policy=%s "
             "(sources=%d, findings=%d, supporting=%d, broadened=%d)",
-            verdict, assessment["route"], decided_by, protocol.topic_type,
+            verdict, status, assessment["route"], decided_by, protocol.topic_type,
             protocol.source_policy, n_sources, n_findings,
             n_supporting, broadened,
         )
+        if status == "unknown" and self.config.rigor_profile == "research":
+            # A required gate this profile promises is unknown, not passed.
+            # Stop for a human rather than write on unverified evidence — the
+            # pause re-enters this whole node on resume, so a transient
+            # provider failure just needs a retry; a persistent one needs the
+            # person to either fix it or knowingly drop rigor_profile.
+            self._pause_for_human(
+                kind="evidence_gate_unknown",
+                interaction="supply",
+                headline="The evidence gate could not be evaluated, and rigor_profile: research requires it before writing.",
+                steps=[
+                    f"What failed: {failure or 'no usable reply from the gate call'}.",
+                    "Check .fi/run.log for the [evidence_gate] entry — this is usually a provider outage, "
+                    "a rate limit, or a reply the gate could not parse.",
+                    "Fix the underlying issue if there is one, then resume: the gate is tried again from scratch.",
+                    "If you're confident the evidence is fine as it stands, you can drop rigor_profile to "
+                    "\"default\" for this quest to proceed unblocked — but that gives up the research-grade guarantee.",
+                ],
+                payload={"assessment": assessment},
+            )
         patch: QuestState = {
             "evidence_assessment": assessment,
             "research_protocol": protocol.model_dump(),
@@ -7920,6 +7961,11 @@ class Engine:
             )
             return {"claim_grounding": {}, "claim_check_failed": reason}
         parsed = _parse_json_lenient(text) or {}
+        # A reply that parses as JSON but never names a "claims" list at all is
+        # not the same thing as one that names an EMPTY list — the former is
+        # the model failing to answer in the expected shape, the latter is it
+        # genuinely reporting nothing to check. Only the latter is a clean 0.
+        parsed_ok = isinstance(parsed, dict) and isinstance(parsed.get("claims"), list)
         raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
         n_refs = len(refs)
         claims: list[dict[str, Any]] = []
@@ -7972,19 +8018,37 @@ class Engine:
                 "[claim_check] %d claim(s) rest on a source held as its title only; marked unsupported", held,
             )
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
+        # A paper with a real body that yields zero claims is suspicious, not
+        # clean: the check almost certainly missed something rather than the
+        # paper genuinely making no substantive claims. Thresholded on the
+        # BODY text actually sent (not the raw file), so a short abstract-only
+        # draft isn't flagged for having little to check.
+        suspicious_empty = parsed_ok and not claims and len(paper_text) > 2000
+        failed = ""
+        if not parsed_ok:
+            failed = f"the grounding reply did not name a claims list: {str(parsed)[:200]!r}"
+        elif suspicious_empty:
+            failed = f"0 claims were extracted from a {len(paper_text)}-character paper body"
         grounding = {
             "claims": claims,
             "summary": str(parsed.get("summary") or "").strip(),
             "total": len(claims),
             "grounded": len(claims) - len(unsupported),
             "unsupported": unsupported,
+            "status": "unknown" if failed else "ok",
         }
-        self._log.info(
-            "[claim_check] %d/%d claims grounded (%d unsupported)",
-            grounding["grounded"], grounding["total"], len(unsupported),
-        )
+        if failed:
+            self._log.warning(
+                "[claim_check] %s; the review will mark this draft's citations unchecked",
+                failed,
+            )
+        else:
+            self._log.info(
+                "[claim_check] %d/%d claims grounded (%d unsupported)",
+                grounding["grounded"], grounding["total"], len(unsupported),
+            )
         self._write_claims_ledger(grounding)
-        return {"claim_grounding": grounding, "claim_check_failed": ""}
+        return {"claim_grounding": grounding, "claim_check_failed": failed}
 
     async def _node_select_skills(self, state: QuestState) -> QuestState:
         """Pick which skills this quest carries.
@@ -9201,15 +9265,32 @@ class Engine:
             # path below already uses, and the pattern applied to claim_check).
             try:
                 text = await self._chat(base_prompt, node="review")
+                call_ok = True
             except Exception as e:
                 self._log.warning(
                     "[review] review call failed (%s); accepting the paper "
                     "as-is so its outputs still render", e,
                 )
-                text = ""
-            review = _parse_json_lenient(text) or {
-                "verdict": "accept", "score": 3, "suggestions": [],
-            }
+                text, call_ok = "", False
+            parsed_review = _parse_json_lenient(text) if call_ok else None
+            # A reply that parses as JSON but never names a "verdict" at all
+            # (a real case, not hypothetical: a reply shaped like
+            # {"comment": "..."}) is exactly as unusable as no reply — checked
+            # explicitly rather than trusting "the dict is non-empty", which a
+            # provider that answers off-format would still satisfy.
+            verdict_named = (
+                isinstance(parsed_review, dict)
+                and isinstance(parsed_review.get("verdict"), str)
+                and bool(parsed_review["verdict"].strip())
+            )
+            review = parsed_review if verdict_named else {"verdict": "accept", "score": 3, "suggestions": []}
+            # A fabricated "accept" (call failed, reply didn't parse, or parsed
+            # but named no verdict) is a flow decision, not a review outcome:
+            # it must not read as "the reviewer accepted this paper" to
+            # anything checking evidence status. ``verdict`` stays "accept" so
+            # routing/output rendering are unaffected; ``status`` is the field
+            # evidence.py reads.
+            review["status"] = "ok" if verdict_named else "unreviewed"
             mfh = review.get("must_flag_hits") or []
             if not isinstance(mfh, list):
                 mfh = []
@@ -9313,20 +9394,25 @@ class Engine:
                 return {"persona": name, "verdict": "accept", "score": 3,
                         "strengths": [], "weaknesses": [],
                         "suggestions": [], "blocking": "",
-                        "error": str(e)}
+                        "must_flag_hits": [], "status": "error", "error": str(e)}
             prompt = f"{prefix}\n\n{base_prompt}"
             try:
                 text = await self._chat(prompt, node=f"review_panel.{name}")
+                call_ok = True
             except Exception as e:
                 self._log.warning(
                     "[review] panelist %s failed (%s); recording a neutral "
                     "accept for this persona", name, e,
                 )
-                text = ""
-            parsed = _parse_json_lenient(text) or {}
+                text, call_ok = "", False
+            parsed = (_parse_json_lenient(text) if call_ok else None) or {}
             mfh = parsed.get("must_flag_hits") or []
             if not isinstance(mfh, list):
                 mfh = []
+            # A reply that parses but names no "verdict" at all (e.g.
+            # {"comment": "..."}) is exactly as unusable as no reply — a
+            # non-empty dict alone is not proof the persona actually answered.
+            verdict_named = isinstance(parsed.get("verdict"), str) and bool(parsed["verdict"].strip())
             return {
                 "persona": name,
                 "verdict": parsed.get("verdict") or "accept",
@@ -9336,6 +9422,10 @@ class Engine:
                 "suggestions": parsed.get("suggestions") or [],
                 "blocking": parsed.get("blocking") or "",
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
+                # "accept" above is the flow decision (never abort the quest for
+                # a broken persona); "status" is the receipt evidence.py reads
+                # to tell a real accept from a fabricated one.
+                "status": "ok" if verdict_named else "error",
             }
 
         # return_exceptions=True is defense in depth: run_persona already
@@ -9359,11 +9449,14 @@ class Engine:
             self._log.warning(
                 "[review] all panelists failed; accepting the paper as-is",
             )
+            # One receipt per required role, all marked failed — not just the
+            # first — so evidence.py can name exactly which required roles
+            # never produced a real review.
             panel_results = [{
-                "persona": panel_names[0], "verdict": "accept", "score": 3,
+                "persona": name, "verdict": "accept", "score": 3,
                 "strengths": [], "weaknesses": [], "suggestions": [],
-                "blocking": "", "must_flag_hits": [],
-            }]
+                "blocking": "", "must_flag_hits": [], "status": "error",
+            } for name in panel_names]
         agg = _aggregate_panel_reviews(list(panel_results))
 
         # Moderator call — best effort for the rationale + suggestion
@@ -13537,7 +13630,19 @@ def _format_evidence_note(
     source-only framing for surveys. (The broaden *routing* still ran, so a
     survey that broadened simply gathered more sources.)"""
     ev = evidence_assessment or {}
-    if is_survey or ev.get("verdict") not in ("insufficient", "broaden"):
+    if is_survey:
+        return ""
+    if ev.get("status") == "unknown":
+        # The gate itself could not be evaluated (provider/parse failure) —
+        # a distinct claim from "judged thin": nobody actually judged it.
+        return (
+            "**Evidence note (pre-write evidence gate).** The evidence gate could "
+            "not be evaluated before this draft (a technical failure, not a "
+            "judgement) — whether the assembled evidence is sufficient for this "
+            "research question is UNKNOWN, not confirmed. Do not claim or imply "
+            "the evidence was checked and found adequate.\n"
+        )
+    if ev.get("verdict") not in ("insufficient", "broaden"):
         return ""
     gaps = "; ".join(ev.get("gaps") or [])
     return (
