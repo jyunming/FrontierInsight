@@ -62,6 +62,31 @@ def test_the_runs_per_setting_are_read_from_a_count_the_script_names() -> None:
     assert pc.check({"runs_per_setting": 300}, {"experiment.py": "steps = 100\n"}) == []
 
 
+def test_a_tally_the_script_adds_to_is_not_read_as_its_runs_per_setting() -> None:
+    """A live kimi-k3 quest stopped on "the protocol fixes 200 runs per setting; the script sets 0 (n_runs in simulate.py,
+    line 242)": ``n_runs = 0`` was the counter its oracle check started at and then did ``n_runs += 2`` on."""
+    tally = (
+        "def oracle_batch(polys):\n"
+        "    n_runs = 0\n"
+        "    for p in polys:\n"
+        "        n_runs += 2\n"
+        "    return n_runs\n"
+    )
+    assert pc.check({"runs_per_setting": 200}, {"simulate.py": tally}) == []
+    # A count of zero runs is never a design, whatever it is called.
+    assert pc.check({"runs_per_setting": 200}, {"simulate.py": "N_RUNS = 0\n"}) == []
+    # The real setting is still read, and a wrong one still caught.
+    found = pc.check({"runs_per_setting": 200}, {"simulate.py": "N_RUNS = 50\n" + tally})
+    assert [(m.kind, m.found, m.where) for m in found] == [("runs", [50.0], "N_RUNS in simulate.py, line 1")]
+    # ...even when that same name is also added to somewhere (an external review of the first draft of this fix, which
+    # skipped every name the script adds to, found it would miss exactly this).
+    found = pc.check({"runs_per_setting": 200}, {"simulate.py": "N_RUNS = 30\ndef more():\n    global N_RUNS\n    N_RUNS += 1\n"})
+    assert [(m.kind, m.found) for m in found] == [("runs", [30.0])]
+    # Only zero is skipped: a negative count is a wrong setting like any other (the second review pass found `> 0` let
+    # it through).
+    assert [(m.kind, m.found) for m in pc.check({"runs_per_setting": 200}, {"simulate.py": "N_RUNS = -5\n"})] == [("runs", [-5.0])]
+
+
 def test_a_threshold_is_missing_only_when_its_value_appears_nowhere() -> None:
     proto = {"thresholds": {"major": 0.05}}
     assert pc.check(proto, {"experiment.py": "cut = 0.10\n"})[0].kind == "threshold"

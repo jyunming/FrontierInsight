@@ -295,6 +295,11 @@ def assess(
     gate = state.get("evidence_assessment") or {}
     if gate.get("status") == "unknown":
         ready_gaps.append(f"the evidence gate could not be evaluated ({gate.get('failure') or 'no usable reply'})")
+    elif gate.get("verdict") in ("insufficient", "broaden"):
+        # The gate judged the evidence thin and the paper was written on it anyway (the broaden budget was spent, or
+        # there was no literature step to broaden). The writer is told to frame its limits; the level must say so too.
+        gaps_named = "; ".join(str(g) for g in gate.get("gaps") or []) or "none named"
+        ready_gaps.append(f"the evidence gate judged the evidence {gate['verdict']} and the paper was written on it (gaps: {gaps_named})")
     critique_history = _json(needs / "DESIGN_CRITIQUE.json")
     critique_last = critique_history[-1] if isinstance(critique_history, list) and critique_history else None
     if isinstance(critique_last, dict) and critique_last.get("status") == "failed":

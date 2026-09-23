@@ -174,6 +174,19 @@ def test_an_unknown_evidence_gate_is_a_publication_ready_gap(tmp_path: Path) -> 
     assert ok["status"] == "publication_ready"
 
 
+@pytest.mark.parametrize("verdict", ["insufficient", "broaden"])
+def test_a_gate_that_judged_the_evidence_thin_is_a_publication_ready_gap(tmp_path: Path, verdict: str) -> None:
+    """Only "unknown" used to count. A gate that decided the evidence was thin, after which the paper was written anyway
+    (the broaden budget spent, or no literature step to broaden with retrieval off), reached publication_ready as if the
+    gate had passed it."""
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(evidence_assessment={
+        "verdict": verdict, "status": "ok", "failure": "", "gaps": ["on-topic sources"],
+    }), settings=ON)
+    assert got["status"] == "statistically_adequate"
+    assert any(f"judged the evidence {verdict}" in g and "on-topic sources" in g for g in got["gaps"]), got["gaps"]
+
+
 def test_a_failed_design_critique_is_a_publication_ready_gap(tmp_path: Path) -> None:
     """needs/DESIGN_CRITIQUE.json's last entry failing (advisory, so it never
     blocked the quest itself) must still gap publication_ready."""

@@ -332,7 +332,11 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
 
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):
-        counts = [f for f in scalars if set(_tokens(f.name)) & _RUN_WORDS and float(f.values[0]).is_integer()]
+        # A count of zero runs is never a design: it is where a tally starts (a live quest's oracle check had
+        # ``n_runs = 0`` ... ``n_runs += 2``, and was stopped as "the script sets 0 runs per setting"). Only zero is
+        # skipped, not every name the script adds to (a real setting that is also incremented somewhere is still read),
+        # and not a negative count either (that is a wrong setting, and is reported like any other).
+        counts = [f for f in scalars if set(_tokens(f.name)) & _RUN_WORDS and float(f.values[0]).is_integer() and f.values[0] != 0]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):
             first = counts[0]
             out.append(Mismatch(
