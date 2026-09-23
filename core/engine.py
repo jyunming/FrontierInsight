@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -527,6 +528,12 @@ class Engine:
         self._audit_pause = ""      # the pause kind a node is stopping for
         self._audit_seen: dict[str, str] = {}   # watched file -> sha256 last logged
         self._last_progress = ""    # the last curated progress line, so a re-entered node does not repeat itself
+        # Provenance of the most recent ``_chat(node=...)`` call, keyed by that ``node`` string (a chat "kind" like
+        # "design" or "design_self_critique", not necessarily the graph node name). ``_audit_claims`` reads this so a
+        # model_claim event can say which provider/model actually answered and hash the exact prompt/reply, without
+        # threading those values through every node body. Absent (not an error) for nodes that never called ``_chat``
+        # under that key — a rule-decided shortcut, an ensemble path, or a node with no model_claim to record.
+        self._last_chat: dict[str, dict[str, Any]] = {}
         # Skills other agents installed are read where they are. Which folders
         # is this quest's own setting, held here and passed to every lookup, so
         # quests sharing a process (--fleet) never see one another's. The skill
@@ -1276,33 +1283,75 @@ class Engine:
             problems=found[:5], record=rel, sha256=_audit_log.file_sha256(path),
         )
 
+    def _pop_rationale_into_claims(self, node: str, design: dict[str, Any]) -> dict[str, Any]:
+        """``design`` without its ``rationale`` block (if it has one), after turning it into ``model_claim`` events under
+        ``node``. Shared by the ``design`` node (via :meth:`_audit_claims`, working from its returned state patch) and
+        ``plan`` (called inline — a plan-drafted design is written straight to ``plan.md`` and never returned in the
+        state patch at all, so ``_audit_claims`` never sees it there; without this, its rationale block reached the
+        persisted file verbatim instead of the audit trace, since ``plan`` asks the same design prompt as ``design``
+        and can get the same block back)."""
+        if "rationale" not in design:
+            return design
+        design = dict(design)
+        why = design.pop("rationale")
+        if isinstance(why, dict):
+            prov = self._chat_provenance(node)
+            for a in why.get("assumptions") or []:
+                self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="assumption", claim=a, **prov)
+            for alt in why.get("alternatives_considered") or []:
+                if isinstance(alt, dict):
+                    self._audit(
+                        "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="alternative",
+                        claim=alt.get("option", ""), decision=alt.get("decision", ""), reason=alt.get("reason", ""),
+                        **prov,
+                    )
+        return design
+
     def _audit_claims(self, node: str, out: Any) -> Any:
         """Turn what a model said about why into ``model_claim`` events: the design's ``rationale`` (which is then dropped from
-        the design in the state, so the later prompts do not carry it) and a review's verdict and weaknesses."""
+        the design in the state, so the later prompts do not carry it), a review's verdict and weaknesses, the evidence
+        gate's verdict and gaps (only when a model actually decided it — see below), and analyze's stated reason for its
+        ``next_step``. Every event is merged with :meth:`_chat_provenance` for the same key, so a reader can see which
+        provider/model produced the claim and hash the exact prompt/reply it came from, not just that some call did."""
         if not isinstance(out, dict):
             return out
         if node == "design" and isinstance(out.get("design"), dict) and "rationale" in out["design"]:
-            design = dict(out["design"])
-            why = design.pop("rationale")
-            if isinstance(why, dict):
-                for a in why.get("assumptions") or []:
-                    self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="assumption", claim=a)
-                for alt in why.get("alternatives_considered") or []:
-                    if isinstance(alt, dict):
-                        self._audit(
-                            "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="alternative",
-                            claim=alt.get("option", ""), decision=alt.get("decision", ""), reason=alt.get("reason", ""),
-                        )
-            out = {**out, "design": design}
+            out = {**out, "design": self._pop_rationale_into_claims(node, out["design"])}
         if node == "review" and isinstance(out.get("review"), dict):
             review = out["review"]
+            prov = self._chat_provenance("review")
             if review.get("verdict"):
                 self._audit(
                     "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_verdict",
                     claim=str(review.get("verdict")) + (f": {review['blocking']}" if review.get("blocking") else ""),
+                    **prov,
                 )
             for w in review.get("weaknesses") or []:
-                self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w)
+                self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w, **prov)
+        if node == "evidence_gate" and isinstance(out.get("evidence_assessment"), dict):
+            assessment = out["evidence_assessment"]
+            # A rule-decided verdict (``core.engine._evidence_gate_rule``) never called a model — recording it as a
+            # model_claim would misattribute an engine decision to the model, which audit_log's own contract forbids
+            # (provenance ``model_claim`` is never mixed with a check/rule result). An "unknown" status has no real
+            # rationale to record either way (a parse failure or a provider error, not a considered verdict).
+            if assessment.get("decided_by") == "model" and assessment.get("status") == "ok":
+                prov = self._chat_provenance("evidence_gate")
+                rationale = str(assessment.get("rationale") or "").strip()
+                if rationale:
+                    self._audit(
+                        "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="verdict",
+                        claim=rationale, decision=str(assessment.get("verdict") or ""), **prov,
+                    )
+                for gap in assessment.get("gaps") or []:
+                    self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="gap", claim=gap, **prov)
+        if node == "analyze" and isinstance(out.get("analysis"), dict):
+            analysis = out["analysis"]
+            reason = str(analysis.get("next_step_reason") or "").strip()
+            if reason:
+                self._audit(
+                    "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="next_step",
+                    claim=reason, decision=str(analysis.get("next_step") or ""), **self._chat_provenance("analyze"),
+                )
         return out
 
     def _progress(self, text: str) -> None:
@@ -3107,11 +3156,12 @@ class Engine:
                 "design_self_critique", path, status=entry["status"],
                 summary="changed " + (", ".join(changed) or "nothing") if not failure else failure,
             )
+            prov = self._chat_provenance("design_self_critique")
             for o in entry["objections"]:
                 o = o if isinstance(o, dict) else {"objection": o}
                 self._audit(
                     "model_claim", provenance=_audit_log.MODEL_CLAIM, topic=f"design_self_critique/{o.get('check', '')}".rstrip("/"),
-                    claim=o.get("objection", ""), fix=o.get("fix", ""),
+                    claim=o.get("objection", ""), fix=o.get("fix", ""), **prov,
                 )
         except (OSError, ValueError, TypeError) as e:
             self._log.debug("[design_self_critique] could not record the audit: %r", e)
@@ -3197,6 +3247,13 @@ class Engine:
         extra = obj.pop("plan", None) if isinstance(obj, dict) else None
         design = obj if isinstance(obj, dict) and obj else {"hypothesis": "(parse failed)", "dependencies": []}
         design, objections = await self._audit_design(state, design)
+        if isinstance(design, dict):
+            # ``plan`` asks the same design prompt as ``design`` (``_design_prompt`` + ``_PLAN_DIRECTIVE``) and can get
+            # the same ``rationale`` block back. Unlike ``design``, this node writes straight to ``plan.md`` and never
+            # returns the design in its state patch — ``_audit_claims`` (which strips ``design``'s rationale) never
+            # sees it here, so without this the raw block would reach the persisted file (and a person reading it
+            # under ``pauses.plan: ask``) instead of the audit trace.
+            design = self._pop_rationale_into_claims("plan", design)
         normalized, why = _plan.normalize_design(design)
         repaired_notes: list[str] = []
         if normalized is None and "`protocol" in (why or "") and isinstance(design, dict):
@@ -9774,7 +9831,23 @@ class Engine:
             node=node or "",
         )
         self._log_chat_cost(node=node or "")
+        if node:
+            # ``last_provider``/``last_model`` come from the client AFTER the call so a fallback that actually served
+            # the request (core/provider.py::FallbackLLMClient) is recorded truthfully, not the one merely requested.
+            self._last_chat[node] = {
+                "provider": getattr(self._client, "last_provider", None) or self.config.provider.name,
+                "model": getattr(self._client, "last_model", None) or self._model_for_node(node) or self.config.provider.model,
+                "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
+            }
         return response
+
+    def _chat_provenance(self, node: str) -> dict[str, Any]:
+        """``provider``/``model``/``prompt_hash``/``response_hash`` of the most recent ``_chat(node=...)`` call for this
+        key, or ``{}`` when none was made under it (a rule-decided shortcut, an ensemble path) — ``_audit_claims`` merges
+        this into a ``model_claim`` event so the trace says which model actually produced the claim, not just that some
+        model did."""
+        return dict(self._last_chat.get(node, {}))
 
     def _make_fallback_factory(self, name: str):
         """Build an async factory that lazily resolves+constructs an

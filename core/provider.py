@@ -2705,6 +2705,10 @@ class LLMClient:
         # routed model can differ. Engine uses last_model to look up
         # the right pricing row when writing cost.jsonl.
         self.last_model: str | None = None
+        # Constant for a plain LLMClient (one endpoint, one provider for its whole life) — present so the Engine's
+        # audit trace can read ``last_provider`` uniformly regardless of whether ``self._client`` is this class or
+        # FallbackLLMClient (whose ``last_provider`` genuinely varies call to call).
+        self.last_provider: str | None = endpoint.provider_name or endpoint.transport
 
     async def aclose(self) -> None:
         if self._bridge is not None:
@@ -3409,8 +3413,11 @@ class FallbackLLMClient:
     can release their proxies on shutdown.
 
     Presents the read surface the Engine uses on a plain ``LLMClient``
-    (``chat`` / ``last_model`` / ``last_usage`` / ``aclose``); ``last_model``
-    and ``last_usage`` reflect whichever provider served the most recent call.
+    (``chat`` / ``last_model`` / ``last_usage`` / ``last_provider`` / ``aclose``);
+    ``last_model``, ``last_usage`` and ``last_provider`` reflect whichever
+    provider served the most recent call, not the primary that was asked first —
+    the Engine's audit trace records this one, since a fallback slot's label is
+    the truthful answer to "which model said this."
     """
 
     def __init__(
@@ -3439,6 +3446,7 @@ class FallbackLLMClient:
         # Read by the Engine cost logger immediately after each chat().
         self.last_usage: Any = None
         self.last_model: str | None = None
+        self.last_provider: str | None = None
         # Fallback providers actually materialised (for proxy release on close).
         self.built_fallback_providers: list[str] = []
 
@@ -3499,6 +3507,7 @@ class FallbackLLMClient:
             slot.record_success()
             self.last_usage = getattr(client, "last_usage", None)
             self.last_model = getattr(client, "last_model", None)
+            self.last_provider = slot.label
             if idx > 0:
                 self._log.info(
                     "[fallback] request served by %s (primary unavailable)",
