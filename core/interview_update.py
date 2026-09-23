@@ -223,6 +223,11 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         knowledge_enabled=bool(knowledge.get("enabled", False)),
         provider=provider_name,
         provider_model=provider_model,
+        provider_base_url=str(provider.get("base_url") or ""),
+        provider_api_key_env=str(provider.get("api_key_env") or ""),
+        provider_fixed_temperature=(
+            "" if provider.get("fixed_temperature") is None else str(provider.get("fixed_temperature"))
+        ),
         audience=str(output.get("audience") or "external"),
         knowledge_top_k=_coerce_int(knowledge.get("top_k", 8), 8),
         knowledge_external_top_k=_coerce_int(knowledge.get("external_top_k", 20), 20),
@@ -588,6 +593,9 @@ async def run_update_flow(
         knowledge_enabled=bool(new_partial["knowledge_enabled"]),
         provider=current.provider,  # frozen
         provider_model=current.provider_model,  # frozen
+        provider_base_url=current.provider_base_url,  # frozen
+        provider_api_key_env=current.provider_api_key_env,  # frozen
+        provider_fixed_temperature=current.provider_fixed_temperature,  # frozen
         audience=str(new_partial.get("audience", current.audience)),
         knowledge_top_k=_coerce_int("knowledge_top_k", current.knowledge_top_k),
         knowledge_external_top_k=_coerce_int(

@@ -533,6 +533,51 @@ def test_cli_update_changes_clears_or_keeps_the_page_limit(
     assert Config.from_yaml(quest_root / "config.yaml").output.page_limit == saved
 
 
+def test_update_preserves_the_provider_connection_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """provider_base_url / provider_api_key_env / provider_fixed_temperature are
+    mid_quest_editable=False, same as provider/provider_model -- a no-op --update must carry them
+    forward unchanged, not silently reset them to blank the way an omitted dataclass field would.
+    A quest configured for a custom OpenAI-compatible endpoint (Moonshot's Kimi, say) losing that
+    on the very first --update would be a real, live-quest-breaking regression."""
+    import asyncio
+
+    from core.config import Config
+    from core.interview_update import run_update_flow
+
+    output_root = tmp_path / "outputs"
+    quest_root = output_root / "q-endpoint"
+    quest_root.mkdir(parents=True)
+    (quest_root / "config.yaml").write_text(
+        answers_to_yaml(_sample(
+            provider_base_url="https://api.moonshot.ai/v1",
+            provider_api_key_env="MOONSHOT_API_KEY",
+            provider_fixed_temperature="0.6",
+        ), frontend="cli"),
+        encoding="utf-8",
+    )
+
+    async def fake_run_one(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr("launch._cli_prompt_for", lambda q, _p, _o: q.default)
+    rc = asyncio.run(run_update_flow(
+        quest_id="q-endpoint",
+        output_root=output_root,
+        vscode_bridge_port=0,
+        interactive=False,
+        supervisor=None,
+        run_one=fake_run_one,
+        apply_vscode_bridge_override=lambda _c, _p: None,
+    ))
+    assert rc == 0
+    provider = Config.from_yaml(quest_root / "config.yaml").provider
+    assert provider.base_url == "https://api.moonshot.ai/v1"
+    assert provider.api_key_env == "MOONSHOT_API_KEY"
+    assert provider.fixed_temperature == pytest.approx(0.6)
+
+
 def test_changing_the_page_limit_clears_the_shortening_count() -> None:
     """A quest that used both shortening rewrites at one limit would never be
     forced again after --update sets another: the review reads the count from

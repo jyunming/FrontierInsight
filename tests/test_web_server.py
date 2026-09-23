@@ -121,6 +121,41 @@ def test_current_node_extracted_from_log_lines() -> None:
     assert _current_node_from_log([]) == "(unknown)"
 
 
+def test_a_checks_own_narrower_tag_still_names_the_node_running_it() -> None:
+    """A quest paused mid-oracle-repair (the real shape this regressed on): the log's last lines
+    are all `[oracle]`, a tag `_node_execute`'s own oracle-gate helper logs under, never
+    `[execute]` itself in that stretch. Falling through to "(unknown)" here was the bug."""
+    lines = [
+        "[1234-foo-aa] [execute] Running the experiment.",
+        "[1234-foo-aa] [oracle] the script exited 1 without ORACLE_JSON",
+        "[1234-foo-aa] [oracle] asking for a repair (2 of 2)",
+        "[1234-foo-aa] [oracle] paused — the script has not passed its oracle checks",
+    ]
+    assert _current_node_from_log(lines) == "execute"
+
+
+@pytest.mark.parametrize(
+    "tag,node",
+    [
+        ("run_manifest", "execute"),
+        ("numeric", "execute"),
+        ("protocol", "implement"),
+        ("skills", "select_skills"),
+        ("after_literature", "pause_after_literature"),
+        ("stats", "analyze"),
+        ("numeric_oracle", "review"),
+        ("stat_claims", "review"),
+        ("figure_check", "review"),
+        ("goal_coverage", "review"),
+        ("number_provenance", "review"),
+        ("page_limit", "review"),
+        ("auto_collect", "auto_collect_data"),
+    ],
+)
+def test_every_aliased_sub_step_tag_resolves_to_the_node_that_logs_it(tag: str, node: str) -> None:
+    assert _current_node_from_log([f"[1234-foo-aa] [{tag}] something happened"]) == node
+
+
 # --- _QuestRegistry --------------------------------------------------------
 
 

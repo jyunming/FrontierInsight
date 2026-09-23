@@ -107,6 +107,29 @@ async def test_write_diagnostic_with_no_run_config_labels_pre_graph_stage(
 
 
 @pytest.mark.asyncio
+async def test_diagnostic_includes_a_note_a_provider_call_attached(
+    tmp_path: Path, request: pytest.FixtureRequest,
+) -> None:
+    """``core/provider.py::LLMClient.chat`` attaches a ``[FI] provider=…`` note (and, for a 401/
+    403/402, a second one naming the likely cause) via ``Exception.add_note`` before re-raising.
+    Before this test's fix, the diagnostic read ``exc`` with a bare ``f"{type}: {exc}"`` — notes
+    are not part of ``str(exc)``, only of ``traceback.format_exception_only`` — so both notes
+    were silently dropped and a 401 reached here as a bare, unexplained ``HTTPStatusError``."""
+    eng = _mk_engine(tmp_path, request)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+
+    exc = RuntimeError("boom")
+    exc.add_note("[FI] provider=openai, transport=http, model=kimi-k2.6, node=clarify")
+    exc.add_note("[FI] HTTP 401: openai did not accept the API key FI sent.")
+    await eng._write_quest_failed_diagnostic(exc, run_config=None)
+
+    diag = (eng.quest_root / "quest_failed.md").read_text(encoding="utf-8")
+    assert "[FI] provider=openai, transport=http, model=kimi-k2.6, node=clarify" in diag
+    assert "[FI] HTTP 401: openai did not accept the API key FI sent." in diag
+
+
+@pytest.mark.asyncio
 async def test_diagnostic_includes_provider_context(tmp_path: Path, request: pytest.FixtureRequest) -> None:
     """The diagnostic must surface the provider + model the quest was
     running with — a wall-clock timeout on ``claude_cli`` is a very

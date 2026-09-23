@@ -83,6 +83,14 @@ _TS_EXEMPT_ANSWER_FIELDS = frozenset({
     # own ``frontends`` tuple lists ``vscode``. The exemption was the bug,
     # so it is gone and the VSCode interview asks the question.
     "provider",
+    # HTTP-direct transports only (openai/codex/gemini/ollama/vllm), for an endpoint, key variable
+    # or fixed temperature other than that provider's own default. VSCode never reaches this code
+    # path at all: its one transport (``vscode_extension``) is the bridge to ``vscode.lm.*``, not an
+    # HTTP call with a base_url a person could point elsewhere, so there is nothing for a VSCode
+    # question to ask.
+    "provider_base_url",
+    "provider_api_key_env",
+    "provider_fixed_temperature",
 })
 
 

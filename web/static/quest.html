@@ -1173,31 +1173,43 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   }
   function renderCostChart(records, summary) {
     const byNode = {};
-    let totalCost = 0, totalCalls = 0;
+    let totalCost = 0, totalCalls = 0, pricedCalls = 0;
     for (const r of records) {
       const node = r.node || '(unknown)';
-      const cost = r.cost_usd || 0;
+      // ``cost_usd`` is null for a model with no listed price (core/provider.py::estimate_cost_usd
+      // returns None rather than guessing 0) -- `|| 0` used to erase that distinction, so a quest
+      // that used ONLY such a model showed a bare, confident "$0.0000" (reads as "this was free",
+      // not "unknown"). Track priced-vs-not per row instead of coercing.
+      const priced = typeof r.cost_usd === 'number';
+      const cost = priced ? r.cost_usd : 0;
       const tokens = r.usage?.total_tokens || 0;
-      if (!byNode[node]) byNode[node] = { calls: 0, cost: 0, tokens: 0 };
+      if (!byNode[node]) byNode[node] = { calls: 0, cost: 0, tokens: 0, pricedCalls: 0 };
       byNode[node].calls += 1; byNode[node].cost += cost; byNode[node].tokens += tokens;
+      if (priced) { byNode[node].pricedCalls += 1; pricedCalls += 1; }
       totalCost += cost; totalCalls += 1;
     }
-    const costNote = costPartialNote(summary);
     const costEl = document.getElementById('cost-summary');
-    costEl.textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} · $${totalCost.toFixed(4)}${costNote}`;
-    costEl.title = costNote
-      ? 'The dollar figure counts only the calls whose model has a listed price; the others are not in it, so the real cost is higher.'
-      : '';
+    if (totalCalls > 0 && pricedCalls === 0) {
+      costEl.textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} · cost unknown (no listed price for the model used)`;
+      costEl.title = 'None of these calls used a model FI has a listed price for, so no dollar figure can be shown.';
+    } else {
+      const costNote = costPartialNote(summary);
+      costEl.textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} · $${totalCost.toFixed(4)}${costNote}`;
+      costEl.title = costNote
+        ? 'The dollar figure counts only the calls whose model has a listed price; the others are not in it, so the real cost is higher.'
+        : '';
+    }
     const nodes = Object.keys(byNode).sort();
     const maxCost = Math.max(...nodes.map(n => byNode[n].cost), 0.0001);
     const html = nodes.map(n => {
       const v = byNode[n];
+      const costLabel = v.pricedCalls === 0 ? 'cost unknown' : `$${v.cost.toFixed(4)}`;
       const pct = Math.max(2, Math.round(v.cost / maxCost * 100));
       return `
         <div class="flex flex-col gap-2">
           <div class="flex justify-between font-code-md text-code-md text-on-surface">
             <span>${escapeHtml(n)}</span>
-            <span class="text-on-surface-variant">$${v.cost.toFixed(4)} · ${v.calls} call${v.calls===1?'':'s'} · ${v.tokens} tok</span>
+            <span class="text-on-surface-variant">${costLabel} · ${v.calls} call${v.calls===1?'':'s'} · ${v.tokens} tok</span>
           </div>
           <div class="w-full h-2 bg-surface-low rounded-full overflow-hidden">
             <div class="h-full bg-gradient-to-r from-primary to-secondary" style="width:${pct}%"></div>

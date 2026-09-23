@@ -292,6 +292,9 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             knowledge_enabled=new_answers.knowledge_enabled,
             provider=current.provider,
             provider_model=current.provider_model,
+            provider_base_url=current.provider_base_url,
+            provider_api_key_env=current.provider_api_key_env,
+            provider_fixed_temperature=current.provider_fixed_temperature,
             audience=new_answers.audience,
             knowledge_top_k=new_answers.knowledge_top_k,
             knowledge_external_top_k=new_answers.knowledge_external_top_k,
@@ -503,9 +506,14 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         )
     # output.page_limit: blank or null (or missing, from an older client) is
     # no set limit; anything else must be a whole number of pages >= 1.
-    from core.interview import parse_page_limit_answer
+    from core.interview import parse_fixed_temperature_answer, parse_page_limit_answer
 
     page_limit = parse_page_limit_answer(body.get("page_limit"))
+    # provider.fixed_temperature: validated here so a typo is a clear error at quest creation, not
+    # a cryptic HTTP 400 from the provider deep into the quest; the raw string is what's actually
+    # stored (answers_to_yaml parses it again at YAML-emission time, the same as the CLI path).
+    provider_fixed_temperature = body.get("provider_fixed_temperature") or ""
+    parse_fixed_temperature_answer(provider_fixed_temperature)
     return InterviewAnswers(
         topic=body["topic"],
         title=body["title"],
@@ -525,6 +533,9 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         knowledge_enabled=body["knowledge_enabled"],
         provider=body["provider"],
         provider_model=pm if pm else None,
+        provider_base_url=(body.get("provider_base_url") or "").strip(),
+        provider_api_key_env=(body.get("provider_api_key_env") or "").strip(),
+        provider_fixed_temperature=provider_fixed_temperature,
         audience=audience,
         knowledge_top_k=top_k,
         knowledge_external_top_k=external_top_k,

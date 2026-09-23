@@ -471,13 +471,44 @@ _KNOWN_NODES = frozenset({
     "clarify", "ideate", "literature", "plan", "design", "design_self_critique",
     "implement_outline", "implement", "execute", "execute_reflect",
     "analyze", "cross_check", "evidence_gate", "write", "claim_check",
-    "review", "human_feedback",
+    "review", "human_feedback", "select_skills", "pause_after_literature",
     # No-simulation routing: triggered when ``simulatability == "no"``.
     # web_plots/web_figures derive figures from collected web + literature
     # data on the no-simulation path.
     "auto_collect_data", "wait_for_data", "data_load",
     "web_plots", "web_figures",
 })
+
+# A node's OWN tag isn't always what its log lines carry — a check or a helper it calls logs under
+# its own, narrower tag. When the most recent tag in the log is one of these, the indicator should
+# still name the node running it, not fall through to "(unknown)". Traced by hand against
+# core/engine.py (each right-hand side is where the left-hand tag's `_log.*("[tag]"` call actually
+# lives): "oracle"/"run_manifest"/"numeric" -> `_node_execute` (the oracle gate, the run-manifest
+# compare and the numeric-warning scan all run from inside it); "protocol" -> `_node_implement`
+# (`_enforce_protocol`); "skills" -> `_node_select_skills` (the node's own log lines never say
+# "[select_skills]"); "after_literature" -> `_node_pause_after_literature` (same mismatch); "stats"
+# -> `_node_analyze`; "numeric_oracle"/"stat_claims"/"figure_check"/"goal_coverage"/
+# "number_provenance"/"page_limit" -> `_node_review` (the provenance/claim/figure/page-limit audits
+# it runs before accepting or sending back); "auto_collect" -> `_node_auto_collect_data`. Left out
+# on purpose: "evidence" (written by `run()` after the graph settles, not from inside any one
+# node), "cost" (an ``_ensemble_chat`` line any ensembled node can log), "audit" (the audit-trace
+# wrapper around every node) — none names a single node truthfully.
+_NODE_TAG_ALIASES: dict[str, str] = {
+    "oracle": "execute",
+    "run_manifest": "execute",
+    "numeric": "execute",
+    "protocol": "implement",
+    "skills": "select_skills",
+    "after_literature": "pause_after_literature",
+    "stats": "analyze",
+    "numeric_oracle": "review",
+    "stat_claims": "review",
+    "figure_check": "review",
+    "goal_coverage": "review",
+    "number_provenance": "review",
+    "page_limit": "review",
+    "auto_collect": "auto_collect_data",
+}
 
 
 def _current_node_from_log(
@@ -490,7 +521,11 @@ def _current_node_from_log(
     Match strict ``[lowercase_underscore]`` only, and prefer the LAST
     occurrence on a line that names a known node — otherwise random
     bracketed tokens like ``['matplotlib']`` from a pip-install log
-    line would be mistaken for the current node.
+    line would be mistaken for the current node. A tag in
+    ``_NODE_TAG_ALIASES`` (a check or helper's own, narrower tag) resolves to
+    the node that runs it before the recognisability check, so "paused —
+    the script has not passed its oracle checks" still shows "execute", not
+    "(unknown)".
 
     ``known_nodes`` lets callers inject a test fixture's node set; the
     default is the module-level ``_KNOWN_NODES`` so existing call
@@ -498,7 +533,7 @@ def _current_node_from_log(
     recognisable = known_nodes if known_nodes is not None else _KNOWN_NODES
     for line in reversed(lines):
         for m in reversed(list(_NODE_TAG_RE.finditer(line))):
-            tag = m.group(1)
+            tag = _NODE_TAG_ALIASES.get(m.group(1), m.group(1))
             if tag in recognisable:
                 return tag
     return "(unknown)"
