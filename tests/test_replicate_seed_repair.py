@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
@@ -85,8 +86,9 @@ class FakeClient:
 
 def _engine(
     tmp_path: Path, replies: list[Any], *, replicates: int = 3, background_jobs: bool = False,
+    rigor_profile: str = "default",
 ) -> tuple[Engine, FakeClient, list[tuple[int, str]]]:
-    eng = Engine(Config(
+    cfg = Config(
         topic="replicates", title="seed-repair",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
@@ -96,7 +98,14 @@ def _engine(
         execution=ExecutionConfig(sandbox="venv", timeout_s=60, background_jobs=background_jobs),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
-    ))
+    )
+    if rigor_profile != "default":
+        # model_copy, not the constructor: this file's fixtures deliberately skip the profile's
+        # other forced settings (a fresh venv per quest, etc.) to keep these tests fast and
+        # focused on the seed-repair path alone -- only rigor_profile itself needs to be "research"
+        # for _repair_ignored_replicate_seed's own check to see it.
+        cfg = cfg.model_copy(update={"rigor_profile": rigor_profile})
+    eng = Engine(cfg)
     client = FakeClient(replies)
     eng._client = client  # type: ignore[assignment]
     eng.quest_root.mkdir(parents=True, exist_ok=True)
@@ -301,6 +310,29 @@ async def test_a_repair_that_still_ignores_the_seed_warns_once_and_the_quest_pro
     _run_with_this_python(eng)
     executed = await eng._node_execute({"deps": []})  # type: ignore[arg-type]
     assert executed["result_json_replicate_seed_ignored"] is True
+
+
+@pytest.mark.asyncio
+async def test_under_research_profile_an_unrepairable_seed_pauses_instead_of_proceeding(
+    tmp_path: Path,
+) -> None:
+    """The re-audit's P1-3: outside research profile this failure only warns (the test above) --
+    under it, the quest must not silently run on results it just warned are unreproducible."""
+    eng, client, logged = _engine(
+        tmp_path, [_implement_reply(IGNORING), _repair_reply(STILL_IGNORING)], rigor_profile="research",
+    )
+    paused: dict[str, Any] = {}
+
+    def fake_pause(self, **kwargs):  # noqa: ANN001
+        paused.update(kwargs)
+        raise RuntimeError("paused")
+
+    with mock.patch.object(Engine, "_pause_for_human", fake_pause):
+        with pytest.raises(RuntimeError, match="paused"):
+            await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+    assert paused["kind"] == "replicate_seed_unrepairable" and paused["interaction"] == "supply"
+    # The script is not silently kept and run on -- the quest stopped before execute ever saw it.
+    assert _code_path(eng).read_text(encoding="utf-8") == IGNORING
 
 
 @pytest.mark.asyncio

@@ -1495,7 +1495,12 @@ REQUIRED_REVIEW_ROLES: tuple[str, ...] = ("methodologist", "statistician", "repr
 # What ``rigor_profile: research`` sets, section by section (see ``Config.rigor_profile``).
 _RESEARCH_PROFILE: dict[str, dict[str, Any]] = {
     "pauses": {"plan": "ask"},
-    "execution": {"split_analysis": True, "split_failure": "block"},
+    # A shared interpreter (FI's own, the default) lets one quest's installed package leak into
+    # another's run -- a real gap the run's own ENVIRONMENT.json already records (core/engine.py's
+    # environment-recording, #359), but recording a risk is not the same as removing it. The
+    # research profile now demands the isolation that record exists to flag: a fresh per-quest venv
+    # with nothing pre-installed but what the quest itself asks for.
+    "execution": {"split_analysis": True, "split_failure": "block", "shared_interpreter": False, "system_site_packages": False},
     "engine": {
         "protocol_check": "block", "oracle_check": "block", "numeric_warnings": "block", "run_manifest_check": "block",
         "cross_check_verify": True,

@@ -553,3 +553,54 @@ async def test_an_unknown_evidence_gate_under_research_profile_pauses_then_retri
     assert artifacts.paper_md is not None
     assert artifacts.raw_state["evidence_assessment"]["status"] == "ok"
 
+
+
+# --- the unconditional tamper check at execute's entry (P1-6) -------------------------------------------
+
+
+async def test_a_tampered_protocol_pauses_at_execute_even_with_every_named_check_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """protocol_check / oracle_check / run_manifest_check all being "off" used to mean nothing ever
+    called _resolved_frozen() at all -- a hand-edited needs/FROZEN_PROTOCOL.json ran completely
+    unchecked. _node_execute now calls it unconditionally, regardless of those three flags."""
+    cfg = _cfg(tmp_path, protocol_check="off", oracle_check="off", run_manifest_check="off")
+    eng = Engine(cfg)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    fp.freeze(eng.quest_root, P1, approved_by="auto", source="plan.md")
+    record = json.loads(fp.frozen_path(eng.quest_root).read_text(encoding="utf-8"))
+    record["protocol"]["runs_per_setting"] = 999999  # edited by hand; sha256 left as it was
+    fp.frozen_path(eng.quest_root).write_text(json.dumps(record), encoding="utf-8")
+
+    paused = {}
+
+    def fake_pause(self, **kwargs):  # noqa: ANN001
+        paused.update(kwargs)
+        raise RuntimeError("paused")
+
+    monkeypatch.setattr(Engine, "_pause_for_human", fake_pause)
+    with pytest.raises(RuntimeError, match="paused"):
+        await eng._node_execute({})  # type: ignore[arg-type]
+    assert paused["kind"] == "amendment" and "changed after it was locked" in paused["headline"]
+
+
+async def test_an_intact_protocol_does_not_pause_at_execute_with_every_named_check_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _cfg(tmp_path, protocol_check="off", oracle_check="off", run_manifest_check="off")
+    eng = Engine(cfg)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    fp.freeze(eng.quest_root, P1, approved_by="auto", source="plan.md")
+
+    def fail_if_paused(self, **kwargs):  # noqa: ANN001
+        raise AssertionError("must not pause on an untampered protocol")
+
+    monkeypatch.setattr(Engine, "_pause_for_human", fail_if_paused)
+    # Stop right after the tamper check (before the real subprocess machinery this minimal state
+    # can't drive) by making the executor's install step raise something recognisable.
+    async def boom_install(*a, **k):  # noqa: ANN001, ARG001
+        raise RuntimeError("stop-here")
+
+    eng.executor.install = boom_install  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="stop-here"):
+        await eng._node_execute({"deps": ["numpy"]})  # type: ignore[arg-type]

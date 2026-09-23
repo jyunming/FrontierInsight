@@ -493,6 +493,8 @@ def test_a_research_profile_fills_what_the_config_leaves_out_and_refuses_what_co
 
     cfg = Config.model_validate({"topic": "t", "rigor_profile": "research"})
     assert cfg.pauses.plan == "ask" and cfg.execution.split_analysis is True and cfg.execution.split_failure == "block"
+    # The re-audit's P1-1: a shared interpreter lets one quest's installed package leak into another's run.
+    assert cfg.execution.shared_interpreter is False and cfg.execution.system_site_packages is False
     assert cfg.engine.protocol_check == cfg.engine.oracle_check == cfg.engine.numeric_warnings == cfg.engine.run_manifest_check == "block"
     assert cfg.engine.cross_check_verify is True and cfg.engine.review_panel == ["methodologist", "statistician", "reproducibility", "devil_advocate"]
     # A panel of your own is kept only when it still covers the roles the profile actually needs (the audit's P1-3: a
@@ -511,6 +513,8 @@ def test_a_research_profile_fills_what_the_config_leaves_out_and_refuses_what_co
         ({"pauses": {"plan": "off"}}, "pauses.plan"), ({"execution": {"split_analysis": False}}, "execution.split_analysis"),
         ({"execution": {"split_failure": "warn"}}, "execution.split_failure"), ({"engine": {"cross_check_verify": False}}, "engine.cross_check_verify"),
         ({"engine": {"review_panel": []}}, "engine.review_panel"),
+        ({"execution": {"shared_interpreter": True}}, "execution.shared_interpreter"),
+        ({"execution": {"system_site_packages": True}}, "execution.system_site_packages"),
     ):
         with pytest.raises(Exception, match="rigor_profile: research cannot be combined with.*" + key.replace(".", r"\.")):
             Config.model_validate({"topic": "t", "rigor_profile": "research", **bad})
