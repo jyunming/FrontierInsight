@@ -205,6 +205,40 @@ async def test_the_plan_step_writes_plan_md_from_one_call_and_one_audit(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_plan_steps_own_rationale_reaches_the_audit_trace_and_never_the_file(tmp_path: Path) -> None:
+    """``plan`` asks the same design prompt as ``design`` (``_design_prompt`` + ``_PLAN_DIRECTIVE``) and can get the
+    same ``rationale`` block back. Unlike ``design``, it writes straight to ``plan.md`` and never returns the design
+    in its state patch, so ``_audit_claims`` (which strips ``design``'s rationale post-hoc) never sees it here —
+    ``_node_plan`` calls the shared ``_pop_rationale_into_claims`` helper inline instead, before the block ever
+    reaches ``plan.md`` or a person reading it under ``pauses.plan: ask``.
+
+    Calling ``_node_plan`` directly (not through the ``_audited`` graph wrapper, as every test in this file does)
+    means ``self._audit_node`` is never set, so the design_self_critique audit's own ``model_claim`` (a pre-existing,
+    unrelated event — see ``core/engine.py`` around ``design_self_critique/``) carries no ``node`` field in this
+    context; filtering on ``node == "plan"`` excludes it rather than tripping over a missing key."""
+    from core import audit_log as al
+
+    design_with_rationale = {
+        **DESIGN,
+        "rationale": {
+            "assumptions": ["EPE is comparable across the three strategies"],
+            "alternatives_considered": [{"option": "IoU metric", "decision": "rejected", "reason": "less standard in this literature"}],
+        },
+    }
+    eng = _engine(tmp_path, [_plan_reply(design_with_rationale), _audit_reply()])
+    await eng._node_plan({"topic": "OPC", "iteration": 0})
+
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    assert plan.parse(text).design == DESIGN, "rationale never reaches the persisted design block"
+    claims = {
+        (e["topic"]): e for e in al.read(eng.audit.path)
+        if e["kind"] == "model_claim" and e.get("node") == "plan"
+    }
+    assert claims["assumption"]["claim"] == "EPE is comparable across the three strategies"
+    assert claims["alternative"]["reason"] == "less standard in this literature"
+
+
+@pytest.mark.asyncio
 async def test_the_plan_step_does_not_stop_unless_asked(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [_plan_reply(), _audit_reply()])
     seen = _stop_at_pause(eng)

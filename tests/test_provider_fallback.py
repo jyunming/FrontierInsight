@@ -61,6 +61,7 @@ async def test_primary_success_never_touches_fallback():
     assert fb.calls == 0
     assert built[0] == 0, "fallback must be built lazily — not until needed"
     assert client.last_model == "primary-model"
+    assert client.last_provider == "primary"
 
 
 async def test_falls_back_when_primary_fails():
@@ -75,9 +76,11 @@ async def test_falls_back_when_primary_fails():
     assert primary.calls == 1 and fb.calls == 1
     assert built[0] == 1
     assert client.built_fallback_providers == ["fallback"]
-    # Cost fields reflect the provider that actually served the call.
+    # Cost fields — and the audit trace's provenance — reflect the provider that actually served the call, not
+    # the primary that was asked first.
     assert client.last_model == "fallback-model"
     assert client.last_usage == {"provider": "fallback"}
+    assert client.last_provider == "fallback"
 
 
 async def test_circuit_breaker_opens_and_skips_dead_primary():

@@ -23,7 +23,9 @@ On the web, open a quest and expand **Trace** (same detail and step filters). Th
 | `design: done in 1.2s, wrote design` | a step finished and which parts of the quest state it changed |
 | `check oracle: ok` | a check's verdict; the record with the detail and its hash are in the event |
 | `review: next is revise because verdict=revise, ...` | the route the quest took and the facts it read to choose |
-| `design: alternative: Wilson pooled [model claim]` | something the model said about its own reasoning |
+| `design: alternative: Wilson pooled -> rejected (assumes independence we can't verify here) [model claim]` | something the model said about its own reasoning, and — when it chose between options — what it decided and why |
+| `evidence_gate: verdict: only 2 of 6 sources are on-topic -> broaden [model claim]` | the evidence gate's own stated reason for its verdict |
+| `analyze: next_step: the effect is within noise at this sample size -> re_experiment [model claim]` | analyze's stated reason for the next step it picked |
 | `waiting for you (plan)` / `stopped for you` | the quest paused for a person; after you resume, the same step starts again from its beginning |
 
 `summary` shows steps, stops and routes; `checks` (the default) adds each check, each file written and the model's reasons; `debug` adds every step's start.
@@ -34,6 +36,7 @@ On the web, open a quest and expand **Trace** (same detail and step filters). Th
 - The trace is a record, not a control. If it cannot be written the quest goes on and says so once in `run.log`.
 - Nothing secret is written: values of environment variables that look like keys, key-shaped strings and your home folder are removed, and long text is cut with a note saying how much.
 - It is not the model's private thinking. Only what the model chose to state as reasoning, and what the engine measured, are in it.
+- A model claim also carries who actually said it (`provider`, `model` — the one that answered, even after a fallback took over) and a hash of the exact prompt and reply it came from (`prompt_hash`, `response_hash`), so a claim can be checked against the real call rather than taken on faith. These aren't in the one-line text (they'd repeat on every line and add noise); open the quest page's Trace panel or `.fi/audit.jsonl` directly to see them on an event. A rule-decided verdict (no model was asked) is never recorded as a model claim — only what a model actually said is.
 - Turn it off with `engine.audit_trace: false`.
 
 The engine's own log for a run is still `.fi/run.log`; the trace is the short, ordered, checkable version of it.

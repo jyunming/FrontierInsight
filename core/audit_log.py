@@ -361,7 +361,10 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
     if kind == "check_result":
         return f"{where}check {e.get('check')}: {e.get('status')}" + (f" - {e.get('summary')}" if e.get("summary") else "")
     if kind == "model_claim":
-        return f"{where}{e.get('topic', 'rationale')}: {e.get('claim', '')}{tag(e)}"
+        decision, reason = e.get("decision"), e.get("reason")
+        tail = f" -> {decision}" if decision else ""
+        tail += f" ({reason})" if reason else ""
+        return f"{where}{e.get('topic', 'rationale')}: {e.get('claim', '')}{tail}{tag(e)}"
     if kind == "audit_repair":
         return f"a torn last line ({e.get('dropped_bytes')} bytes) was dropped"
     if kind == "quest_started":

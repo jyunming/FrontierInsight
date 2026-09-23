@@ -526,6 +526,19 @@ async def test_chat_error_includes_provider_and_node_in_note():
     assert "node=implement" in full
 
 
+def test_last_provider_is_set_from_the_endpoint_at_construction():
+    """``last_provider`` is constant for a plain LLMClient (one endpoint for its whole life) and is set immediately —
+    the Engine's audit trace reads it the same way whether ``self._client`` is this class or FallbackLLMClient
+    (whose ``last_provider`` genuinely varies call to call; see tests/test_provider_fallback.py)."""
+    ep = ResolvedEndpoint(
+        base_url="https://api.openai.com/v1", model="gpt-5",
+        api_key="sk-test", provider_name="openai",
+    )
+    client = LLMClient(ep, http=MagicMock())
+
+    assert client.last_provider == "openai"
+
+
 @pytest.mark.parametrize(
     "status,expect",
     [
