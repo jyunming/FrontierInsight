@@ -23,8 +23,10 @@ it found wasn't there yet:
   ``replicate_seed_reaches_rng`` (an AST check that traces whether the value actually flows into an RNG-seeding
   call), not merely whether the string appears; both the closed blind spot and the honest case it must not weaken
   are covered.
-* the design self-critique prompt's report cap (P1-4, still open) -- an ``xfail`` so closing it is forced to show up
-  here as an XPASS, not silently.
+* the design self-critique prompt's report cap (P1-4, fixed by #365) -- was an ``xfail`` so closing it would show up
+  here as an XPASS, not silently; now a plain regression test
+  (``test_design_self_critique_does_not_cap_reported_findings_below_its_own_mandatory_checklist_size``) since the cap
+  was removed.
 * a cluster array that IS present but the wrong length -- a different fault than the missing-array case above, with
   its own code path in ``_pooled`` that nothing had exercised.
 * ``design_is_stochastic`` trusts the design's own wording, not the script it describes (P1-6, still open) -- a
