@@ -777,12 +777,48 @@ def test_claim_check_no_paper_skips(tmp_path: Path) -> None:
 
 
 def test_claim_check_unparseable_llm_is_safe(tmp_path: Path) -> None:
+    """A reply that isn't the expected {claims: [...]} shape must not abort the
+    quest (the ledger stays a safe, empty 0/0) -- but it also must not look
+    like a genuine "0 unsupported claims" clean bill: status is "unknown" and
+    claim_check_failed names why, so the review still marks citations
+    unchecked instead of treating this draft as fully grounded."""
     eng = _engine(tmp_path)
     _set_chat(eng, "not json at all")
     state = {"topic": "t", "paper_md": _paper(tmp_path), "literature": []}
     out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
     g = out["claim_grounding"]
     assert g["total"] == 0 and g["unsupported"] == []
+    assert g["status"] == "unknown"
+    assert out["claim_check_failed"]
+
+
+def test_claim_check_zero_claims_on_a_substantial_paper_is_suspicious(tmp_path: Path) -> None:
+    """A well-formed {claims: []} reply is normally a clean, real zero -- but
+    not when the checked paper has a substantial body: that combination is
+    much more likely the model failing to extract anything than a paper that
+    genuinely makes no substantive claims."""
+    eng = _engine(tmp_path)
+    _set_chat(eng, json.dumps({"claims": [], "summary": "nothing to check"}))
+    long_body = "# T\n\n" + ("This is a real sentence with content. " * 200)
+    state = {"topic": "t", "paper_md": _paper(tmp_path, long_body), "literature": []}
+    out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    g = out["claim_grounding"]
+    assert g["total"] == 0
+    assert g["status"] == "unknown"
+    assert out["claim_check_failed"]
+
+
+def test_claim_check_genuinely_empty_short_paper_is_clean(tmp_path: Path) -> None:
+    """The same well-formed {claims: []} reply on a short paper is a real,
+    clean zero -- not everything with 0 claims is suspicious."""
+    eng = _engine(tmp_path)
+    _set_chat(eng, json.dumps({"claims": [], "summary": "nothing to check"}))
+    state = {"topic": "t", "paper_md": _paper(tmp_path), "literature": []}
+    out = asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    g = out["claim_grounding"]
+    assert g["total"] == 0
+    assert g["status"] == "ok"
+    assert out["claim_check_failed"] == ""
 
 
 def test_claim_check_provider_failure_is_non_fatal(tmp_path: Path) -> None:

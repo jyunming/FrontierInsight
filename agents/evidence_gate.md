@@ -21,7 +21,7 @@ Return ONE verdict:
 - `"broaden"` — evidence is thin or off-target, but ONE more focused literature pass could realistically close the gap. Use only when more searching would plausibly help — not when the question is simply unanswerable from available sources.
 - `"insufficient"` — the evidence does not support the research question and more searching won't fix it (no data, no on-topic sources). The paper will still be written, but must frame itself honestly as a limited/inconclusive study; list what's missing in `gaps`.
 
-**Be calibrated.** Most well-run quests are `"sufficient"`. Reserve `"broaden"` / `"insufficient"` for genuinely weak evidence. When unsure, prefer `"sufficient"` — the downstream review and claim-check still guard quality. Never use this gate to refuse a legitimately answerable topic just because the evidence is imperfect.
+**Be calibrated, in both directions.** Reserve `"broaden"` / `"insufficient"` for evidence that is genuinely weak against the criteria above — not for a quest that is merely imperfect, and never to refuse a legitimately answerable topic just because the evidence isn't exhaustive. But when the evidence genuinely IS thin, off-topic, or unsupported, say so: do not round an honestly weak case up to `"sufficient"` to be agreeable. Base the verdict only on what you can see in the Inputs below, not on an assumption that most quests turn out fine.
 
 # Output format
 A single JSON object, no prose, no markdown fence. The first character must be `{`:

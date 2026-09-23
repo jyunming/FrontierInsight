@@ -156,6 +156,77 @@ def test_a_quest_waiting_for_the_reviews_human_decision_is_not_publication_ready
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
 
 
+def test_an_unknown_evidence_gate_is_a_publication_ready_gap(tmp_path: Path) -> None:
+    """A gate that could not be evaluated (provider/parse failure) must gap
+    publication_ready even though routing let the quest finish -- "unknown"
+    is not the same claim as "sufficient", and evidence.py must not treat a
+    quest that never got a real gate judgement as fully checked."""
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(evidence_assessment={
+        "verdict": "sufficient", "status": "unknown", "failure": "boom",
+    }), settings=ON)
+    assert got["status"] == "statistically_adequate"
+    assert any("evidence gate could not be evaluated" in g for g in got["gaps"]), got["gaps"]
+    # A genuinely decided gate is not a gap.
+    ok = evidence.assess(root, _state(evidence_assessment={
+        "verdict": "sufficient", "status": "ok", "failure": "",
+    }), settings=ON)
+    assert ok["status"] == "publication_ready"
+
+
+def test_a_failed_design_critique_is_a_publication_ready_gap(tmp_path: Path) -> None:
+    """needs/DESIGN_CRITIQUE.json's last entry failing (advisory, so it never
+    blocked the quest itself) must still gap publication_ready."""
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    (root / "needs" / "DESIGN_CRITIQUE.json").write_text(json.dumps([
+        {"iteration": 0, "status": "ok", "failure": ""},
+        {"iteration": 1, "status": "failed", "failure": "the audit call or its reply could not be used"},
+    ]), encoding="utf-8")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert any("design methodology audit did not complete" in g for g in got["gaps"]), got["gaps"]
+    # Only the LAST entry matters -- an earlier failure the quest recovered from is not a gap.
+    (root / "needs" / "DESIGN_CRITIQUE.json").write_text(json.dumps([
+        {"iteration": 0, "status": "failed", "failure": "boom"},
+        {"iteration": 1, "status": "ok", "failure": ""},
+    ]), encoding="utf-8")
+    assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
+
+
+def test_a_failed_claim_check_on_the_final_draft_is_a_publication_ready_gap(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(claim_check_failed="the grounding reply did not parse"), settings=ON)
+    assert any("claim check failed" in g for g in got["gaps"]), got["gaps"]
+    assert evidence.assess(root, _state(claim_check_failed=""), settings=ON)["status"] == "publication_ready"
+
+
+def test_an_unreviewed_single_reviewer_accept_is_not_publication_ready(tmp_path: Path) -> None:
+    """review.verdict == "accept" alone is not enough once it can be a
+    fabricated fail-open default -- status must say the review actually ran."""
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(review={"verdict": "accept", "must_flag_hits": [], "status": "unreviewed"}), settings=ON)
+    assert any("could not be completed" in g for g in got["gaps"]), got["gaps"]
+
+
+def test_a_review_panel_with_a_failed_required_role_is_not_publication_ready(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    got = evidence.assess(root, _state(
+        review={"verdict": "accept", "must_flag_hits": []},
+        review_panel=[
+            {"persona": "methodologist", "status": "ok"},
+            {"persona": "statistician", "status": "error"},
+        ],
+    ), settings=ON)
+    assert any("statistician" in g and "no real response" in g for g in got["gaps"]), got["gaps"]
+    ok = evidence.assess(root, _state(
+        review={"verdict": "accept", "must_flag_hits": []},
+        review_panel=[
+            {"persona": "methodologist", "status": "ok"},
+            {"persona": "statistician", "status": "ok"},
+        ],
+    ), settings=ON)
+    assert ok["status"] == "publication_ready"
+
+
 def test_a_level_needs_the_one_before_it(tmp_path: Path) -> None:
     """Passing the oracle does not make a run whose paper failed its audit 'validated'."""
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")

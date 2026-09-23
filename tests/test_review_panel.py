@@ -555,6 +555,9 @@ async def test_review_single_reviewer_provider_failure_is_non_fatal(tmp_path: Pa
         {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
     assert patch["review"]["verdict"] == "accept"
     assert "iteration" not in patch  # accept + no must-flags → no revise loop
+    # The "accept" above is a flow decision, not a real review outcome —
+    # status says so, for evidence.py to read instead of trusting verdict.
+    assert patch["review"]["status"] == "unreviewed"
 
 
 @pytest.mark.asyncio
@@ -579,6 +582,45 @@ async def test_review_panel_one_panelist_failure_degrades_not_aborts(tmp_path: P
     by = {r["persona"]: r for r in panel}
     assert by["statistician"]["verdict"] == "accept"  # neutral degrade
     assert patch["review"]["verdict"] == "accept"     # 3 accepts → accept, no crash
+    # Only the failed persona's receipt says so — the other two really answered.
+    assert by["statistician"]["status"] == "error"
+    assert by["methodologist"]["status"] == "ok"
+    assert by["devil_advocate"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_review_panel_a_reply_with_no_verdict_is_not_a_real_ok(tmp_path: Path) -> None:
+    """A provider that answers with well-formed JSON that never names a verdict at all (a real shape,
+    not hypothetical: a persona replying {"comment": "..."} instead of the asked-for schema) must not
+    be recorded as status="ok" just because the dict is non-empty -- that would let a persona that
+    never actually reviewed anything sail through as a real receipt."""
+    eng = Engine(_mk_cfg(tmp_path, panel=["methodologist", "statistician"]))
+    paper = _paper_on_disk(eng)
+
+    async def off_schema(prompt, *, node: str = ""):  # noqa: ANN001
+        if node == "review_moderator":
+            return "{}"
+        return json.dumps({"comment": "looks fine I guess"})  # no "verdict" key at all
+    eng._chat = off_schema  # type: ignore[assignment,method-assign]
+
+    patch = await eng._node_review(
+        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    assert all(r["status"] == "error" for r in patch["review_panel"])
+
+
+@pytest.mark.asyncio
+async def test_single_reviewer_a_reply_with_no_verdict_is_not_a_real_ok(tmp_path: Path) -> None:
+    eng = Engine(_mk_cfg(tmp_path, panel=[]))
+    paper = _paper_on_disk(eng)
+
+    async def off_schema(prompt, *, node: str = ""):  # noqa: ANN001
+        return json.dumps({"comment": "looks fine I guess"})
+    eng._chat = off_schema  # type: ignore[assignment,method-assign]
+
+    patch = await eng._node_review(
+        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    assert patch["review"]["status"] == "unreviewed"
+    assert patch["review"]["verdict"] == "accept"  # flow is unaffected
 
 
 @pytest.mark.asyncio
@@ -597,3 +639,5 @@ async def test_review_panel_all_panelists_failure_is_non_fatal(tmp_path: Path) -
         {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
     assert patch["review"]["verdict"] == "accept"
     assert len(patch["review_panel"]) == 2
+    # Every receipt says it failed — this "accept" must not read as two real reviews.
+    assert all(r["status"] == "error" for r in patch["review_panel"])

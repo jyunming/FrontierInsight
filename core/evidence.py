@@ -74,7 +74,11 @@ INFO: dict[str, dict[str, Any]] = {
         "artifacts": ["needs/FROZEN_PROTOCOL.json"],
     },
     "publication_ready": {
-        "assurance_claim": "The review accepted the paper with no must-fix finding, and the protocol was not amended after the results were seen.",
+        "assurance_claim": (
+            "The review accepted the paper with no must-fix finding, the protocol was not amended after the results were "
+            "seen, and the evidence gate, the design methodology audit and the claim check each actually ran and produced "
+            "a real judgement (none of them defaulted silently on a provider or parse failure)."
+        ),
         "known_blind_spots": ["The review is a model's opinion (and a person's decision when one was asked for); it does not re-run anything."],
         "artifacts": ["needs/DESIGN_HISTORY.json", "paper/review.json"],
     },
@@ -251,10 +255,45 @@ def assess(
     if not review:
         ready_gaps.append("the paper has not been reviewed yet")
     else:
+        # A provider/parse failure makes the engine record verdict="accept" so the
+        # quest still finishes and its outputs still render -- that is a flow
+        # decision, not a review outcome, and must not read as one here. Panel
+        # mode's per-persona receipts (review_panel) are the more precise
+        # signal when they exist; single-reviewer mode falls back to the
+        # review's own "status".
+        review_panel = state.get("review_panel")
+        if isinstance(review_panel, list) and review_panel:
+            failed_roles = [
+                str(p.get("persona")) for p in review_panel
+                if isinstance(p, dict) and p.get("status") == "error"
+            ]
+            if failed_roles:
+                ready_gaps.append(
+                    f"the review panel got no real response from: {', '.join(failed_roles)} "
+                    "(a fabricated accept, not a real review)"
+                )
+        elif review.get("status") == "unreviewed":
+            ready_gaps.append("the review could not be completed (a provider/parse failure); its accept is not a real review outcome")
         if review.get("verdict") != "accept":
             ready_gaps.append(f"the review verdict is {review.get('verdict') or 'not accept'}")
         if review.get("must_flag_hits"):
             ready_gaps.append(f"the review left {len(review['must_flag_hits'])} must-fix finding(s)")
+    # The evidence gate, the design methodology audit and the claim check must
+    # each have actually run and produced a real judgement -- a fail-open
+    # default (a broken provider call, an unparseable reply) must never look
+    # the same here as a genuine pass. Each of these can fail independently of
+    # the review above, so each gets its own check rather than riding on
+    # must_flag_hits alone.
+    gate = state.get("evidence_assessment") or {}
+    if gate.get("status") == "unknown":
+        ready_gaps.append(f"the evidence gate could not be evaluated ({gate.get('failure') or 'no usable reply'})")
+    critique_history = _json(needs / "DESIGN_CRITIQUE.json")
+    critique_last = critique_history[-1] if isinstance(critique_history, list) and critique_history else None
+    if isinstance(critique_last, dict) and critique_last.get("status") == "failed":
+        ready_gaps.append(f"the design methodology audit did not complete: {critique_last.get('failure') or 'unknown reason'}")
+    claim_failed = str(state.get("claim_check_failed") or "").strip()
+    if claim_failed:
+        ready_gaps.append(f"the claim check failed on the final draft: {claim_failed}")
     ready = adequate and not ready_gaps
 
     reached = [executed, reconciled, matched, validated, adequate, ready]
