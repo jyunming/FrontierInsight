@@ -348,24 +348,87 @@ def _value_count_findings(
         if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id"):
             continue
         metric = str(spec["id"])
+        given = str(spec.get("given") or "").strip()
+        # A mean over a subset of the trials (the final size of the runs that became major outbreaks) is backed by the
+        # size of that subset, which the proportion it is `given` counts, not by every trial: a live quest's 1022 final
+        # sizes of 2700 runs were its 1022 major outbreaks, and this check read them as 1678 trials gone missing.
+        base, over = expected_total, f"{expected_total:g} successful trial(s)"
+        if given:
+            if not _counts_listed(result_json, f"{given}_count"):
+                out.append((
+                    f"the metric `{metric}` is a mean over the trials `{given}` counts, but the analysis's RESULT_JSON "
+                    f"prints no `{given}_count`, so the subset it averages over cannot be counted",
+                    True,
+                ))
+                continue
+            base, over = _total_counts_reported(result_json, f"{given}_count"), f"the trials `{given}` counts"
+            given_total = _total_counts_reported(result_json, f"{given}_total")
+            if given_total < expected_total * 0.5:
+                out.append((
+                    f"the manifest reports {expected_total:g} successful trial(s) in total, but `{given}`, the "
+                    f"proportion `{metric}` is a mean over, counts only {given_total:g} trial(s) in its `{given}_total` "
+                    "— the claimed trial count is not backed by the data the analysis actually used",
+                    False,
+                ))
+                continue
         if not _values_listed(result_json, metric):
             out.append((
-                f"the metric `{metric}` is a mean over {expected_total:g} successful trial(s), but the analysis's "
+                f"the metric `{metric}` is a mean over {over} ({base:g}), but the analysis's "
                 f"RESULT_JSON has no `{metric}_values` list at all — the analysis must print the per-trial values it "
                 "averaged, so the claimed trial count can be checked against them",
                 True,
             ))
             continue
         got = _total_values_reported(result_json, metric)
-        if got < expected_total * 0.5:
+        if got < base * 0.5:
             out.append((
-                f"the manifest reports {expected_total:g} successful trial(s) in total, but the metric "
-                f"`{metric}` only has {got} real "
-                "per-trial value(s) in this run's own analysis output — the claimed trial count is not "
-                "backed by the data the analysis actually used",
+                (
+                    f"the metric `{metric}` is a mean over {over} ({base:g}), but it only has {got} real per-trial "
+                    "value(s) in this run's own analysis output"
+                    if given else
+                    f"the manifest reports {expected_total:g} successful trial(s) in total, but the metric "
+                    f"`{metric}` only has {got} real per-trial value(s) in this run's own analysis output"
+                )
+                + " — the claimed trial count is not backed by the data the analysis actually used"
+                + ("" if given else (
+                    ". If this mean is over a subset of the trials by design (the runs that became major outbreaks, "
+                    "say), the protocol's metric spec says so with `given`: the id of the proportion that counts them"
+                )),
                 False,
             ))
     return out
+
+
+def _total_counts_reported(result_json: Any, key: str) -> float:
+    """The sum of every number found anywhere in ``result_json`` under ``key`` (a ``<id>_count`` or ``<id>_total``)."""
+    total = 0.0
+
+    def walk(node: Any) -> None:
+        nonlocal total
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == key and isinstance(v, (int, float)) and not isinstance(v, bool):
+                    total += float(v)
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(result_json)
+    return total
+
+
+def _counts_listed(result_json: Any, key: str) -> bool:
+    """Whether ``result_json`` holds a number under ``key`` anywhere."""
+    if isinstance(result_json, dict):
+        return any(
+            (k == key and isinstance(v, (int, float)) and not isinstance(v, bool)) or _counts_listed(v, key)
+            for k, v in result_json.items()
+        )
+    if isinstance(result_json, list):
+        return any(_counts_listed(v, key) for v in result_json)
+    return False
 
 
 def analysis_output_problems(

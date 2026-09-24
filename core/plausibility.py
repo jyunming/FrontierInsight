@@ -147,6 +147,17 @@ answer for a value the method cannot give, with a flag saying why. Both cases
 seen in live quests were of that kind (a diverging Euler error set to null with
 a "diverged" flag, and a p-value set to null and reported as its log10 after
 the at-bound rule had wrongly sent it back twice), so neither is flagged.
+
+Why a count of failures may sit at 0
+====================================
+0 in every setting is what a trivial computation returns, and it is also the
+right answer for a count of failed trials when none failed. A live quest's
+``failed_run_count`` was 0 in all nine settings, its run manifest listed no
+failed trial, and the at-bound rule sent the correct script back twice, until
+the repair hid the zeros as nulls. A name cannot tell the two apart; the
+protocol can. A quantity the protocol's ``failure_policy`` names, whose 0 the
+run's own manifest does not contradict, is exempt (the engine passes it as
+``zero_expected``). Any other 0 is held to the rule as before.
 """
 
 from __future__ import annotations
@@ -653,7 +664,7 @@ def _confined_position(
 
 
 def violations(
-    result_json: Any, assertions: list[Assertion], *, code: str = "",
+    result_json: Any, assertions: list[Assertion], *, code: str = "", zero_expected: Any = (),
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
@@ -692,6 +703,8 @@ def violations(
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
                 on_bound.setdefault(bound, []).append((tokens, path))
         for bound, entries in on_bound.items():
+            if bound == 0 and a.path in zero_expected:
+                continue  # 0 is this quantity's answer: see "Why a count of failures may sit at 0"
             v = _at_bound(a, bound, entries, matched, result_json, literals)
             if v is not None:
                 out.append(v)
@@ -774,16 +787,17 @@ def bounded_paths(result_json: Any, design: Any) -> list[str]:
 
 
 def check_design(
-    result_json: Any, design: Any, *, code: str = "", seen: Any = (),
+    result_json: Any, design: Any, *, code: str = "", seen: Any = (), zero_expected: Any = (),
 ) -> list[Violation]:
     """Parse a design's assertions and apply them.
 
     ``seen`` holds the assertion paths an earlier run of this quest reported a number for (``bounded_paths``). One of
     them that this result no longer carries at all, not even as ``null``, is a ``kind="missing"`` violation: see "Why
-    a bounded quantity may not disappear" in the module docstring.
+    a bounded quantity may not disappear" in the module docstring. ``zero_expected`` holds the assertion paths whose 0
+    is the answer (see "Why a count of failures may sit at 0").
     """
     assertions = parse_assertions(design)
-    out = violations(result_json, assertions, code=code)
+    out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()})
     earlier = {str(p) for p in seen or ()}
     if earlier:
         present = list(_present_paths(result_json))

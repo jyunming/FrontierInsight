@@ -85,8 +85,49 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         paired = item.get("paired")
         if paired is not None and not isinstance(paired, bool):
             return None, f"`protocol.metrics` entry `{ident}`: `paired` must be true or false"
-        out.append({**item, "id": ident, "kind": kind})
+        given = item.get("given")
+        if given is not None and (not isinstance(given, str) or not given.strip()):
+            return None, f"`protocol.metrics` entry `{ident}`: `given` must be the id of a proportion metric"
+        entry = {**item, "id": ident, "kind": kind}
+        if given is not None:
+            entry["given"] = given.strip()
+        out.append(entry)
+    # A mean over a subset of the trials names the proportion whose successes are that subset (see ``given_counts``).
+    kinds = {m["id"]: m["kind"] for m in out}
+    for m in out:
+        if "given" not in m:
+            continue
+        if m["kind"] != "mean":
+            return None, f"`protocol.metrics` entry `{m['id']}`: only a `mean` can be `given` a subset of the trials"
+        if kinds.get(m["given"]) != "proportion":
+            return None, (
+                f"`protocol.metrics` entry `{m['id']}`: `given` must name a declared `proportion` metric, "
+                f"not `{m['given']}`"
+            )
     return out, None
+
+
+def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """``(the specs that pass, a sentence per one left out)``: :func:`normalize` entry by entry, for a draft. A live
+    plan declared one metric of a kind FI has no estimator for (`count`) beside valid ones, and the strict check threw
+    the whole list away with it."""
+    if isinstance(metrics, dict):
+        metrics = [metrics]
+    if not isinstance(metrics, list):
+        return [], [normalize(metrics)[1] or "`protocol.metrics` is not a list"]
+    kept: list[dict[str, Any]] = []
+    notes: list[str] = []
+    # A `given` names another metric, so the metrics it can name are checked first, whatever the order they came in.
+    ordered = [m for m in metrics if not (isinstance(m, dict) and m.get("given"))] + [
+        m for m in metrics if isinstance(m, dict) and m.get("given")
+    ]
+    for item in ordered:
+        clean, why = normalize(kept + [item])
+        if clean is None:
+            notes.append(why or "a `protocol.metrics` entry could not be checked")
+        else:
+            kept = clean
+    return kept, notes
 
 
 def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:

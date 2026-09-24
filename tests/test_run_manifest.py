@@ -63,6 +63,57 @@ def test_the_value_count_check_is_a_noop_without_a_mean_metric_or_a_result(tmp_p
     assert rm.problems(PROTOCOL, _manifest(), result_json=_result_json_with(10)) == []
 
 
+_GIVEN_PROTOCOL = {**PROTOCOL, "metrics": [
+    {"id": "prob_major", "kind": "proportion", "estimand": "P(major | R0)", "unit": "run"},
+    {"id": "final_size", "kind": "mean", "estimand": "E[final size | major]", "unit": "run", "given": "prob_major"},
+]}
+
+
+def _conditional(majors: dict[float, int], values_per_major: float = 1.0, total: int = 300) -> dict[str, Any]:
+    return {"by_R0": {str(r): {
+        "prob_major": k / total, "prob_major_count": k, "prob_major_total": total,
+        "final_size_values": [0.6] * int(k * values_per_major),
+    } for r, k in majors.items()}}
+
+
+def test_a_mean_over_a_declared_subset_is_backed_by_that_subset_not_by_every_trial() -> None:
+    """A live quest's final size over major outbreaks had 1022 values from 2700 runs, one per major outbreak, and this
+    check read the other 1678 runs as missing. Declared with `given`, it is checked against the outbreaks counted."""
+    majors = {0.9: 3, 1.5: 100, 3.0: 200}
+    assert rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors)) == []
+    undeclared = {**PROTOCOL, "metrics": [_GIVEN_PROTOCOL["metrics"][1] | {"given": None}]}
+    undeclared["metrics"][0].pop("given")
+    found = rm.problems(undeclared, _manifest(), result_json=_conditional(majors))
+    assert len(found) == 1 and "says so with `given`" in found[0], "without the declaration it is still flagged, and says how"
+
+
+def test_a_declared_subset_still_catches_fabricated_values_and_missing_counts() -> None:
+    majors = {0.9: 3, 1.5: 100, 3.0: 200}
+    short = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, values_per_major=0.1))
+    assert len(short) == 1 and "a mean over the trials `prob_major` counts (303)" in short[0]
+    # The proportion's own total must still account for the trials the manifest claims.
+    thin = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, total=10))
+    assert len(thin) == 1 and "counts only 30 trial(s) in its `prob_major_total`" in thin[0]
+    # No count for the subset at all: the analysis's to print.
+    no_count = {"by_R0": {str(r): {"final_size_values": [0.6] * 5} for r in (0.9, 1.5, 3.0)}}
+    assert rm.analysis_output_problems(_GIVEN_PROTOCOL, _manifest(), no_count) == rm.problems(
+        _GIVEN_PROTOCOL, _manifest(), result_json=no_count)
+    assert "prints no `prob_major_count`" in rm.analysis_output_problems(_GIVEN_PROTOCOL, _manifest(), no_count)[0]
+
+
+def test_given_must_name_a_declared_proportion_and_sit_on_a_mean() -> None:
+    from core import metric_spec as ms
+
+    prop = {"id": "p", "kind": "proportion", "estimand": "P", "unit": "run"}
+    mean = {"id": "m", "kind": "mean", "estimand": "E", "unit": "run", "given": "p"}
+    assert ms.normalize([prop, mean])[0] is not None
+    assert ms.normalize([mean])[0] is None and ms.normalize([{**prop, "given": "m"}, mean])[0] is None
+    assert ms.normalize([prop, {**mean, "given": "m"}])[0] is None
+    # In a draft, a mean declared before the proportion it is given is still kept.
+    kept, notes = ms.repair([mean, prop])
+    assert {m["id"] for m in kept} == {"p", "m"} and notes == []
+
+
 def test_an_analysis_that_lists_no_values_is_the_analysis_to_fix_not_the_simulation() -> None:
     """A live kimi-k3 quest's experiment.py printed no `<metric>_values` at all, while simulate.py had saved every final
     size on disk; the difference sent simulate.py back, and its rewrite broke the oracle checks it had passed. No list at

@@ -418,3 +418,17 @@ def test_the_prompts_ask_for_the_data_the_estimators_need_and_tell_the_analysis_
         assert "`<name>_clusters`" in text and "the same random numbers" in text, name
     analyze = (agents / "analyze.md").read_text(encoding="utf-8")
     assert "spec_statistics" in analyze and "Holm-adjusted" in analyze and "never work out significance yourself" in analyze
+
+
+def test_one_metric_of_an_unknown_kind_is_left_out_not_the_list_it_is_in() -> None:
+    """A live plan declared a failure count as `kind: count` beside valid metrics; the strict check threw the whole list
+    away, and with it the spec that would have told the pooling a mean from a probability."""
+    good = {"id": "prob_major", "kind": "proportion", "estimand": "P(major | R0, N)", "unit": "run"}
+    bad = {"id": "failed_run_count", "kind": "count", "estimand": "failed runs", "unit": "run"}
+    kept, notes = ms.repair([good, bad])
+    assert [m["id"] for m in kept] == ["prob_major"] and len(notes) == 1 and "failed_run_count" in notes[0]
+    fixed, notes = plan.repair_protocol({"runs_per_setting": 300, "metrics": [good, bad]})
+    assert [m["id"] for m in fixed["metrics"]] == ["prob_major"] and fixed["runs_per_setting"] == 300
+    assert len(notes) == 1 and "failed_run_count" in notes[0] and "left out of the plan" in notes[0]
+    # A person's own edit is still held to the strict check.
+    assert plan.normalize_protocol({"metrics": [good, bad]})[0] is None

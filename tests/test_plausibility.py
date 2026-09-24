@@ -361,3 +361,34 @@ def test_a_bound_the_design_itself_dropped_is_not_asked_for() -> None:
     """A redesign that removes an assertion also removes the demand: only the design's current bounds are held to."""
     assert pl.check_design({"other_key": 0.3}, _design({"path": "other_key", "min": 0, "max": 1}),
                            seen=["wilcoxon_p_one_sided"]) == []
+
+
+def test_a_failure_count_the_protocol_names_may_be_zero_everywhere() -> None:
+    """A live quest's failed_run_count was 0 in all nine settings and its manifest listed no failed trial; the
+    at-bound rule sent the correct script back twice."""
+    from core.engine import _zero_expected_paths
+
+    design = {
+        "result_assertions": [{"path": "failed_run_count", "min": 0, "max": 300},
+                              {"path": "final_size", "min": 0, "max": 1}],
+        "protocol": {"failure_policy": "Any solver failure is recorded in the 'failed_run_count' metric."},
+    }
+    result = {"by": {k: {"failed_run_count": 0, "final_size": 0.0} for k in ("a", "b", "c")}}
+    state = {"design": design, "result_json": result, "manifest_failed_trials": 0}
+    assert _zero_expected_paths(state) == {"failed_run_count"}
+    kinds = sorted((v.kind, v.path) for v in _assertion_violations(state))
+    assert kinds == [("at_bound", "final_size")], "only the failure count is exempt; a final size of 0 still goes back"
+    # A manifest that lists failures contradicts the zeros; no failure policy means nothing names the count.
+    assert _zero_expected_paths({**state, "manifest_failed_trials": 5}) == set()
+    assert _zero_expected_paths({**state, "design": {**design, "protocol": {}}}) == set()
+    # A name that is only a part of the one the policy names is not named by it.
+    partial = {**design, "result_assertions": [{"path": "run_count", "min": 0, "max": 300}]}
+    assert _zero_expected_paths({**state, "design": partial}) == set()
+    # No manifest read means nothing corroborates the zero.
+    assert _zero_expected_paths({**state, "manifest_failed_trials": None}) == set()
+    # A bare word in the policy's prose names nothing; the same word quoted as a name does.
+    rate = {"result_assertions": [{"path": "rate", "min": 0, "max": 1}]}
+    prose = {**rate, "protocol": {"failure_policy": "Our failure rate is expected to be 0."}}
+    named = {**rate, "protocol": {"failure_policy": "Failures are counted in `rate`."}}
+    assert _zero_expected_paths({**state, "design": prose}) == set()
+    assert _zero_expected_paths({**state, "design": named}) == {"rate"}

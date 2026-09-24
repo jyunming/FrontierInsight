@@ -355,11 +355,22 @@ try:
             # failing that, the one labelled series with the same marker shape,
             # since an uncoloured call takes the next colour in the cycle.
             # Otherwise that series' first point alone reads as "flat".
-            groups, unlabelled = [], []
+            groups, unlabelled, verticals = [], [], []
             for artist in artists:
                 label = names.get(id(artist)) or str(artist.get_label() or "")
                 try:
                     if hasattr(artist, "get_ydata"):
+                        kind = _fi_kind(ax, artist)
+                        if kind == "vline":
+                            # An axvline's y is [0, 1] in axes coordinates, not data: read as data
+                            # it was a series from 0 to 1, "flat" on any axis reaching past 100, and
+                            # a caption was then told to call a vertical line horizontal.
+                            xs = _fi_values(artist.get_xdata())
+                            if xs and label and not label.startswith("_"):
+                                verticals.append({"label": label, "x": xs[0], "shows": "vertical line"})
+                            continue
+                        if kind == "other":
+                            continue  # drawn in coordinates that are not the data's: nothing to read
                         ys = _fi_values(artist.get_ydata())
                     else:
                         ys = _fi_collection_ys(ax, artist)
@@ -381,7 +392,7 @@ try:
                 target = same_style[0] if same_style else same_marker[0] if len(same_marker) == 1 else None
                 if target is not None:
                     target[3].extend(ys)
-            series = [_fi_series(label, ys, lo, hi, log) for label, _style, _marker, ys in groups]
+            series = [_fi_series(label, ys, lo, hi, log) for label, _style, _marker, ys in groups] + verticals
             # The house style puts titles on the left, where get_title() alone misses them.
             title = " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t)
             return {
