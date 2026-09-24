@@ -249,3 +249,102 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
     assert state_flags["design_calls"] == 2
     # Final iteration counter was bumped by cross_check on the re-route.
     assert (artifacts.raw_state.get("iteration") or 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_redesigned_script_gets_its_own_repairs(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two live quests spent every repair on their first script, were sent back to design, and the new script's first
+    crash then logged "iterations exhausted" with no repair at all: the counter belonged to the old script. Both papers
+    were written with no results."""
+    flags = {"design_calls": 0, "reflect_after_redesign": 0, "analyze_calls": 0}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        head = prompt.lstrip().splitlines()[0]
+        if "Ideation" in head and "Reflection" not in head:
+            return json.dumps({"ideas": [{"title": "t", "summary": "s", "feasibility": "high", "novelty": "low"}],
+                               "chosen": {"title": "t", "rationale": "r"}})
+        if "Experiment Design" in head:
+            flags["design_calls"] += 1
+            return json.dumps({"hypothesis": "h", "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
+                               "method": "m", "expected_outcome": "monotonic", "figures_planned": ["result.png"],
+                               "dependencies": ["matplotlib"]})
+        if "Implementation" in head:
+            return json.dumps({"code": _BAD_EXPERIMENT, "deps": []})
+        if "Execute-Reflect" in head:
+            if flags["design_calls"] < 2:  # the first script's repairs all fail
+                return json.dumps({"code": _BAD_EXPERIMENT, "deps": [], "patch_summary": "tried", "give_up_reason": ""})
+            flags["reflect_after_redesign"] += 1
+            return json.dumps({"code": _GOOD_EXPERIMENT, "deps": ["matplotlib"], "patch_summary": "fixed",
+                               "give_up_reason": ""})
+        if "Analysis" in head:
+            flags["analyze_calls"] += 1
+            step = "re_experiment" if flags["analyze_calls"] == 1 else "publish"
+            return json.dumps({"summary": "s", "key_findings": ["k"], "claims_supported": [], "claims_unsupported": [],
+                               "limitations": [], "next_step": step, "next_step_reason": "r"})
+        if "Cross-Paper Check" in head:
+            return json.dumps({"supporting": [], "conflicting": [], "neutral": [], "summary": "ok"})
+        if "Writing" in head:
+            return "# rerun\n\nResults. ![r](figures/result.png)\n\n## References\n1. X 2020.\n"
+        if "Review" in head:
+            return json.dumps({"verdict": "accept", "score": 4, "strengths": [], "weaknesses": [], "suggestions": [],
+                               "blocking": ""})
+        return "{}"
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    artifacts = await Engine(cfg).run()
+    assert flags["design_calls"] == 2, "the first script's failure was sent back to design"
+    assert flags["reflect_after_redesign"] >= 1, "the redesigned script got a repair of its own"
+    assert artifacts.raw_state.get("result_json") == {"score": 0.5}
+
+
+@pytest.mark.asyncio
+async def test_a_review_that_could_not_run_stops_and_runs_again_on_resume(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two live quests hit a usage limit at the review, and FI recorded "accept, score 3": what the person was shown,
+    what an automatic accept takes, what a write-back to Axon trusts. Now the quest stops, and the resumed run asks the
+    reviewer again."""
+    flags = {"review_calls": 0}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        head = prompt.lstrip().splitlines()[0]
+        if "Ideation" in head and "Reflection" not in head:
+            return json.dumps({"ideas": [{"title": "t", "summary": "s", "feasibility": "high", "novelty": "low"}],
+                               "chosen": {"title": "t", "rationale": "r"}})
+        if "Experiment Design" in head:
+            return json.dumps({"hypothesis": "h", "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
+                               "method": "m", "expected_outcome": "monotonic", "figures_planned": ["result.png"],
+                               "dependencies": ["matplotlib"]})
+        if "Implementation" in head:
+            return json.dumps({"code": _GOOD_EXPERIMENT, "deps": ["matplotlib"]})
+        if "Analysis" in head:
+            return json.dumps({"summary": "s", "key_findings": ["k"], "claims_supported": [], "claims_unsupported": [],
+                               "limitations": [], "next_step": "publish"})
+        if "Cross-Paper Check" in head:
+            return json.dumps({"supporting": [], "conflicting": [], "neutral": [], "summary": "ok"})
+        if "Writing" in head:
+            return "# t\n\nResults. ![r](figures/result.png)\n\n## References\n1. X 2020.\n"
+        if "Review" in head:
+            flags["review_calls"] += 1
+            if flags["review_calls"] == 1:
+                raise RuntimeError("You've hit your usage limit. Try again at 8:35 PM.")
+            return json.dumps({"verdict": "accept", "score": 4, "strengths": [], "weaknesses": [], "suggestions": [],
+                               "blocking": ""})
+        return "{}"
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    first = Engine(cfg)
+    await first.run()
+    text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "its review could not run" in text and "usage limit" in text
+    assert not (first.quest_root / ".fi" / "human_review.json").exists(), "no verdict was recorded"
+    assert flags["review_calls"] == 1, "the first run stopped at the failed call"
+
+    artifacts = await Engine(cfg, resume_quest_id=first.quest_id).run()
+    assert flags["review_calls"] >= 2, "the resumed run asked the reviewer again"
+    review = artifacts.raw_state.get("review") or {}
+    assert review.get("score") == 4 and review.get("status") == "ok"

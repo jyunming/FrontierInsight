@@ -173,9 +173,12 @@ async def test_an_ignoring_script_is_repaired_once_and_its_replicates_are_then_i
     assert _code_path(eng).read_text(encoding="utf-8") == READING
     assert patch["code"] == READING
     assert _script_reads_replicate_seed(_code_path(eng))
-    # Not a repair iteration: the node hands back the script and its packages, nothing else,
-    # so the exec_reflect budget is untouched.
-    assert set(patch) == {"code", "deps"}
+    # Not a repair iteration: the node hands back the script and its packages, and a new script
+    # starts the exec_reflect budget from zero (it is never spent by the seed repair).
+    from core.engine import _FRESH_SCRIPT
+
+    assert set(patch) == {"code", "deps", *_FRESH_SCRIPT}
+    assert patch["exec_reflect_iter"] == 0 and patch["exec_reflect_history"] == []
     assert patch["deps"] == ["numpy", "scipy"]
     assert not [w for w in _warnings(logged)], _warnings(logged)
 
