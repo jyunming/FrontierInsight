@@ -885,7 +885,8 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
         return '{"verdict": "insufficient", "rationale": "asked"}'
 
     monkeypatch.setattr(engine, "_chat", fake_chat)
-    patch = await engine._node_evidence_gate({"topic": "t", **state})
+    # These cases are about the counts: the experiment produced something (a run with no results is its own case).
+    patch = await engine._node_evidence_gate({"topic": "t", "result_json": {"score": 0.5}, **state})
     ev = patch["evidence_assessment"]
     assert calls == (["evidence_gate"] if asked else [])
     assert ev["verdict"] == verdict
@@ -894,6 +895,39 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
         # A rule-decided broaden still reaches the writer's evidence note.
         assert ev["rationale"]
     assert patch["research_protocol"]["topic_type"]
+
+
+async def test_a_simulation_with_no_results_goes_back_once_then_writes_an_honest_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two live quests' final scripts crashed; the count rule still said "sufficient" (the analysis had summarised the
+    literature, and the cross-check found sources for that), and the writer got no note."""
+    cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
+    engine = Engine(cfg)
+    engine.config.knowledge.enabled = True
+    calls: list[str] = []
+
+    async def fake_chat(prompt, node=None):  # noqa: ANN001
+        calls.append(node)
+        return '{"verdict": "sufficient"}'
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    state = {"topic": "t", "literature": _gate_sources(30), "cross_check": _ONE_SUPPORTED, "result_json": {},
+             "exec_result": {"returncode": 1}, "iteration": 0}
+    first = await engine._node_evidence_gate(state)
+    ev = first["evidence_assessment"]
+    assert (ev["verdict"], ev["route"], ev["decided_by"]) == ("insufficient", "redesign", "rule") and calls == []
+    assert first["iteration"] == 1 and first["evidence_no_result_retries"] == 1
+    assert engine._route_after_evidence_gate(first) == "redesign"
+    # The second time (or with no iteration left) it writes, and the writer is told why.
+    again = await engine._node_evidence_gate({**state, **first})
+    ev = again["evidence_assessment"]
+    assert (ev["verdict"], ev["route"]) == ("insufficient", "write") and "no results (exit code 1)" in ev["gaps"][0]
+    last = await engine._node_evidence_gate({**state, "iteration": 2})
+    assert last["evidence_assessment"]["route"] == "write"
+    # A quest on user data, or with results, is not this case.
+    assert engine._no_results_verdict({**state, "no_simulation_resolved": True}) is None
+    assert engine._no_results_verdict({**state, "result_json": {"x": 1}}) is None
 
 
 async def test_auto_collect_relevance_guards_reused_literature(
@@ -1096,7 +1130,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert "evidence_gate" in g.nodes
     assert "evidence_gate" in g.branches
     ev_branch = next(iter(g.branches["evidence_gate"].values()))
-    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature"}
+    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
     # ``implement`` (for resume contract compatibility — the 609990

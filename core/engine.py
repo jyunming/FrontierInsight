@@ -323,6 +323,8 @@ class QuestState(TypedDict, total=False):
     # How many times the evidence_gate has sent the quest back to broaden
     # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
     evidence_broaden_count: int
+    # How many times the evidence_gate has sent a simulation with no results back to design (at most once).
+    evidence_no_result_retries: int
     paper_md: str
     # A fingerprint of the study the current draft was written from (design,
     # analysis, results, figures, cross-check and the user's feedback). A revise
@@ -1583,7 +1585,7 @@ class Engine:
         g.add_conditional_edges(
             "evidence_gate",
             self._audited_route("evidence_gate", self._route_after_evidence_gate),
-            {"write": "write", "broaden_lit": "literature"},
+            {"write": "write", "broaden_lit": "literature", "redesign": "design"},
         )
         # write → claim_check → review. claim_check grounds each paper claim to
         # evidence (a no-op passthrough when engine.claim_grounding is off).
@@ -4676,7 +4678,7 @@ class Engine:
     async def _node_implement(self, state: QuestState) -> QuestState:
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
-            return kept
+            return {**_FRESH_SCRIPT, **kept}
         outline = state.get("implement_outline") or {}
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
@@ -4810,7 +4812,7 @@ class Engine:
                 code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         if extracted:
             code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps)
-        return {"code": code, "deps": deps}
+        return {**_FRESH_SCRIPT, "code": code, "deps": deps}
 
     # ---- the protocol gate ---------------------------------------------------
 
@@ -7382,6 +7384,18 @@ class Engine:
                 "or normalization bug), and do NOT report the zeros as findings.\n\n"
                 + stdout_for_analyze
             )
+        elif not state.get("result_json") and not (
+            state.get("no_simulation_resolved") or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            # The degenerate note above is for an all-zero result; a script that crashed printed none at all, and the
+            # analysis then read like a literature review of the question the experiment was meant to answer.
+            stdout_for_analyze = (
+                f"[FI NOTE] The experiment produced no results (exit code {exec_result.get('returncode')}). Nothing "
+                "was measured. Say so plainly: the key findings are what the failure shows, not what the literature "
+                "says about the question, and no number may be reported as a result of this run.\n\n"
+                + stdout_for_analyze
+            )
         if state.get("result_json_replicate_seed_ignored"):
             stdout_for_analyze = (
                 "[FI NOTE] Replication was configured, but the experiment script "
@@ -7847,7 +7861,7 @@ class Engine:
                 ),
                 "key_findings_preview": [str(f)[:200] for f in findings[:6]],
             }
-            ruled = _evidence_gate_rule(
+            ruled = self._no_results_verdict(state) or _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
                 retrieval_on=self.config.knowledge.enabled,
@@ -7894,11 +7908,14 @@ class Engine:
         )
         if status == "ok" and verdict == "broaden" and not can_broaden:
             self._log.info("[evidence_gate] broaden asked, but there is no literature step to broaden (retrieval is off); writing with the gap recorded")
+        # An experiment that produced no results goes back to design once while there is an iteration left (the new
+        # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
+        redesign = bool(parsed.get("redesign")) and status == "ok"
         assessment = {
             "verdict": verdict,
             "status": status,
             "failure": failure,
-            "route": "broaden_lit" if will_broaden else "write",
+            "route": "redesign" if redesign else "broaden_lit" if will_broaden else "write",
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
@@ -7938,7 +7955,39 @@ class Engine:
         }
         if will_broaden:
             patch["evidence_broaden_count"] = broadened + 1
+        if redesign:
+            patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
+            patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
         return patch
+
+    def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
+        """The gate's verdict for a simulation whose experiment produced no results, else ``None``.
+
+        The count rule said "sufficient" for two live quests whose final script had crashed: with no results the
+        analysis summarised the literature, the cross-check found sources for those summaries, and the counts cleared
+        the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
+        once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
+        exec_result = state.get("exec_result")
+        if (
+            state.get("result_json")
+            or not isinstance(exec_result, dict) or not exec_result  # no experiment has run: not this case
+            or state.get("no_simulation_resolved")
+            or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            return None
+        why = f"the experiment produced no results (exit code {exec_result.get('returncode')!s}"
+        if state.get("exec_give_up_reason"):
+            why += f"; the repair gave up: {_one_line(state.get('exec_give_up_reason'), 160)}"
+        why += ")"
+        if (
+            int(state.get("evidence_no_result_retries") or 0) < 1
+            and int(state.get("iteration", 0) or 0) < self.config.engine.max_iterations
+        ):
+            self._log.warning("[evidence_gate] %s; sending the quest back to design once", why)
+            return {"verdict": "insufficient", "rationale": why + "; tried once more from the design", "gaps": [why],
+                    "redesign": True}
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
 
     async def _write_whole_paper(self, state: QuestState, persona_block: str) -> str:
         """The paper's markdown as the writer gives it: the whole paper, written
@@ -9498,6 +9547,22 @@ class Engine:
         self._log.warning("[page_limit] %s (shortening %d of %d)", hit, done + 1, _PAGE_LIMIT_REWRITES)
         return [hit], record
 
+    def _pause_for_review_unavailable(self, paper_path: Any, why: list[str]) -> None:
+        """Stop because the review could not be asked for (a usage limit, a provider that is down), and ask again on
+        resume. Never an accept: a failed call used to be recorded as ``accept, score 3``, which is what the person was
+        shown at the stop, what an automatic accept would have taken, and what a write-back to Axon trusts."""
+        self._pause_for_human(
+            kind="review_unavailable",
+            interaction="supply",
+            headline="the paper is written, but its review could not run",
+            steps=[
+                "Nothing was reviewed and nothing was accepted: " + "; ".join(why) + ".",
+                f"The paper is at `{paper_path}`. Resume when the model can be reached again (after a usage limit resets, "
+                "for example): the review then runs from the start.",
+            ],
+            payload={"review_unavailable": True, "quest_id": self.quest_id, "problems": why},
+        )
+
     async def _node_review(self, state: QuestState) -> QuestState:
         """Single-reviewer (default) OR panel-mode review.
 
@@ -9562,13 +9627,9 @@ class Engine:
             # path below already uses, and the pattern applied to claim_check).
             try:
                 text = await self._chat(base_prompt, node="review")
-                call_ok = True
             except Exception as e:
-                self._log.warning(
-                    "[review] review call failed (%s); accepting the paper "
-                    "as-is so its outputs still render", e,
-                )
-                text, call_ok = "", False
+                self._pause_for_review_unavailable(paper_path, [f"the review call failed ({_one_line(e, 300)})"])
+            call_ok = True
             parsed_review = _parse_json_lenient(text) if call_ok else None
             # A reply that parses as JSON but never names a "verdict" at all
             # (a real case, not hypothetical: a reply shaped like
@@ -9697,11 +9758,8 @@ class Engine:
                 text = await self._chat(prompt, node=f"review_panel.{name}")
                 call_ok = True
             except Exception as e:
-                self._log.warning(
-                    "[review] panelist %s failed (%s); recording a neutral "
-                    "accept for this persona", name, e,
-                )
-                text, call_ok = "", False
+                self._log.warning("[review] panelist %s could not be asked (%s)", name, e)
+                return {"persona": name, "status": "call_failed", "error": _one_line(e, 300)}
             parsed = (_parse_json_lenient(text) if call_ok else None) or {}
             mfh = parsed.get("must_flag_hits") or []
             if not isinstance(mfh, list):
@@ -9742,6 +9800,13 @@ class Engine:
                 self._log.warning("[review] a panelist raised unexpectedly: %r", r)
             elif isinstance(r, dict):
                 panel_results.append(r)
+        # A panelist the model could not be asked for (a usage limit, a provider that is down) has not reviewed the
+        # paper. Standing in a neutral accept for it read as a review; the quest stops instead and asks again on resume.
+        unasked = [r for r in panel_results if r.get("status") == "call_failed"]
+        if unasked or len(panel_results) < len(panel_names):
+            self._pause_for_review_unavailable(paper_path, [
+                f"the {r['persona']} reviewer could not be asked ({r.get('error') or 'no reply'})" for r in unasked
+            ] or ["a reviewer could not be asked"])
         if not panel_results:
             self._log.warning(
                 "[review] all panelists failed; accepting the paper as-is",
@@ -13448,6 +13513,16 @@ def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
         str(m["id"]): str(m.get("kind"))
         for m in metrics or [] if isinstance(m, dict) and m.get("id") and m.get("kind")
     }
+
+
+# What a newly written script starts from. The repair loop's counters belong to one script: carried into the script a
+# redesign wrote, they read as spent, and in two live quests the new script's first crash logged "iterations
+# exhausted" with no repair at all, so both papers were written with no results. Redesigns stay bounded by
+# engine.max_iterations, and each script's own repairs by engine.exec_reflect_max_iterations.
+_FRESH_SCRIPT: dict[str, Any] = {
+    "exec_reflect_iter": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
+    "run_manifest_failures": 0, "figure_overlap_repaired": False, "bounded_seen": [],
+}
 
 
 _CI_BETWEEN_SEEDS = "t_between_seeds"

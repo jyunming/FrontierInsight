@@ -339,3 +339,21 @@ corroboration rather than the metric's name; dropping one entry rather than the 
 was dropped again (terra run te3, evidence level capped). Null or empty now means no `given`. On te3's own specs all
 five metrics are kept, including the one that declared `given: major_outbreak_probability` correctly. The re-bench
 itself stayed on build 09a26b3 for every run, so its arms remain comparable with each other.
+
+## The re-bench on 09a26b3: three faults that cost results
+
+Grading the re-bench of every non-gemma4 arm on 09a26b3 traced two lost results and two fabricated verdicts to FI:
+
+- **The repair budget was never reset after a redesign.** `exec_reflect_iter` was only ever incremented, so a script
+  a redesign wrote inherited the old one's spent repairs: in te2 and cb2 its first crash logged "iterations exhausted"
+  with no repair, and both papers had no results. `implement` now resets the repair loop's state for every new script
+  (redesigns stay bounded by `engine.max_iterations`). A fake-model end-to-end test reproduces the live shape and fails
+  on the old code.
+- **A review that could not run was recorded as an accept.** When the codex account hit its usage limit at the review
+  (lu1, lu3), FI wrote `accept, score 3`: shown at the stop, taken by an automatic accept, trusted by the Axon
+  write-back. By the user's choice the quest now stops (`review_unavailable`) and the resumed run asks again; a panel
+  with any reviewer that could not be asked does the same. An end-to-end test stops, resumes and records the real review.
+- **The evidence gate passed a simulation with no results.** The count rule (15 sources and a supported finding) said
+  "sufficient" for te2 and cb2 on literature alone, with no note to the writer (the papers themselves did say the
+  experiment produced nothing). By the user's choice a simulation that ran and produced no results goes back to design
+  once while an iteration is left, then is ruled insufficient with the reason; the analysis gets a note too.

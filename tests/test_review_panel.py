@@ -542,7 +542,7 @@ def _paper_on_disk(eng: Engine) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_review_single_reviewer_provider_failure_is_non_fatal(tmp_path: Path) -> None:
+async def test_review_single_reviewer_provider_failure_stops_and_asks_again(tmp_path: Path) -> None:
     eng = Engine(_mk_cfg(tmp_path, panel=[]))
     paper = _paper_on_disk(eng)
 
@@ -550,18 +550,17 @@ async def test_review_single_reviewer_provider_failure_is_non_fatal(tmp_path: Pa
         raise RuntimeError("Copilot backend unavailable / bridge stalled")
     eng._chat = boom  # type: ignore[assignment,method-assign]
 
-    # Does NOT raise — degrades to accept so the finished paper still renders.
-    patch = await eng._node_review(
-        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
-    assert patch["review"]["verdict"] == "accept"
-    assert "iteration" not in patch  # accept + no must-flags → no revise loop
-    # The "accept" above is a flow decision, not a real review outcome —
-    # status says so, for evidence.py to read instead of trusting verdict.
-    assert patch["review"]["status"] == "unreviewed"
+    # A failed call stops the quest and asks again on resume; it was recorded as "accept, score 3", which is what
+    # the person was shown, what an automatic accept took, and what a write-back to Axon trusted.
+    with pytest.raises(BaseException):  # the pause interrupts; outside a graph that raises
+        await eng._node_review({"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    text = (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "its review could not run" in text and "Copilot backend unavailable" in text
+    assert "nothing was accepted" in text
 
 
 @pytest.mark.asyncio
-async def test_review_panel_one_panelist_failure_degrades_not_aborts(tmp_path: Path) -> None:
+async def test_review_panel_one_panelist_failure_stops_and_asks_again(tmp_path: Path) -> None:
     eng = Engine(_mk_cfg(tmp_path, panel=["methodologist", "statistician", "devil_advocate"]))
     paper = _paper_on_disk(eng)
 
@@ -574,18 +573,11 @@ async def test_review_panel_one_panelist_failure_degrades_not_aborts(tmp_path: P
                            "weaknesses": [], "suggestions": [], "blocking": ""})
     eng._chat = flaky  # type: ignore[assignment,method-assign]
 
-    patch = await eng._node_review(
-        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
-    panel = patch["review_panel"]
-    assert len(panel) == 3  # the failed persona is recorded (degraded), not dropped
-    assert {r["persona"] for r in panel} == {"methodologist", "statistician", "devil_advocate"}
-    by = {r["persona"]: r for r in panel}
-    assert by["statistician"]["verdict"] == "accept"  # neutral degrade
-    assert patch["review"]["verdict"] == "accept"     # 3 accepts → accept, no crash
-    # Only the failed persona's receipt says so — the other two really answered.
-    assert by["statistician"]["status"] == "error"
-    assert by["methodologist"]["status"] == "ok"
-    assert by["devil_advocate"]["status"] == "ok"
+    # One panelist that could not be asked means the panel has not reviewed the paper: stop, and ask again.
+    with pytest.raises(BaseException):
+        await eng._node_review({"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    text = (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "the statistician reviewer could not be asked" in text and "methodologist" not in text
 
 
 @pytest.mark.asyncio
@@ -624,7 +616,7 @@ async def test_single_reviewer_a_reply_with_no_verdict_is_not_a_real_ok(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_review_panel_all_panelists_failure_is_non_fatal(tmp_path: Path) -> None:
+async def test_review_panel_all_panelists_failure_stops_and_asks_again(tmp_path: Path) -> None:
     eng = Engine(_mk_cfg(tmp_path, panel=["methodologist", "statistician"]))
     paper = _paper_on_disk(eng)
 
@@ -634,10 +626,8 @@ async def test_review_panel_all_panelists_failure_is_non_fatal(tmp_path: Path) -
         raise RuntimeError("all providers down")
     eng._chat = boom  # type: ignore[assignment,method-assign]
 
-    # Every panelist's provider call fails — still no crash, accept as-is.
-    patch = await eng._node_review(
-        {"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
-    assert patch["review"]["verdict"] == "accept"
-    assert len(patch["review_panel"]) == 2
-    # Every receipt says it failed — this "accept" must not read as two real reviews.
-    assert all(r["status"] == "error" for r in patch["review_panel"])
+    # Every panelist's call fails: stop and ask again on resume, never "accept as-is".
+    with pytest.raises(BaseException):
+        await eng._node_review({"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    text = (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "the methodologist reviewer could not be asked" in text and "the statistician reviewer" in text
