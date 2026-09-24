@@ -199,6 +199,11 @@ async def test_the_plan_step_writes_plan_md_from_one_call_and_one_audit(tmp_path
     assert eng._client.chat.await_count == 2  # the design-and-plan call, then the audit: no extra call
     prompt = _prompt(eng._client.chat.await_args_list[0])
     assert "Also write the plan" in prompt
+    # The mistakes four live kimi-k3 rounds kept making in their plans, said before the plan is written.
+    for needle in ("A value used only to classify or summarise the same runs afterwards", "`[0, 99]` means two settings",
+                   "a method of order p has an error of order h^p", "asymptotic regime", "compares the same quantity",
+                   "must finish in seconds", "takes an absolute `tolerance`"):
+        assert needle in prompt, needle
     assert patch["design_objections"][0]["check"] == "circular_evaluation"
     rows = plan.history(eng.quest_root)
     assert [r["by"] for r in rows] == ["model"]

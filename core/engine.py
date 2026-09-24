@@ -5480,9 +5480,11 @@ class Engine:
         oracles still do not pass, ``block`` stops the quest before its main sweep and ``warn`` records it and goes on.
         Every attempt is in ``needs/ORACLE_CHECK.json``."""
         if self.config.engine.oracle_check == "off" or self.config.execution.background_jobs:
+            self._oracle_record_clear()
             return None
         protocol = self._protocol_block(state)
         if protocol is None:
+            self._oracle_record_clear()
             return None
         stride = max(1, int(self.config.engine.replicate_seed_stride))
         # A two-script quest's simulate.py reads FI_RAW_DIR unconditionally at module level (the split-experiment
@@ -5494,6 +5496,9 @@ class Engine:
         # a real seed's raw dir — keeps this pre-check honest without the prompt needing to special-case it.
         oracle_raw_dir = self._raw_root() / "oracle_check"
         oracle_raw_dir.mkdir(parents=True, exist_ok=True)
+        # What the repairs said about the checks themselves (``oracle_check.proposals``), latest per oracle. Shown to the
+        # person at the stop; never applied here.
+        self._oracle_proposals: dict[str, dict[str, Any]] = {}
         env = {
             **_replicate_env(exec_env, 0, stride), "FI_ORACLE": "1",
             _split_run.RAW_DIR_ENV: _split_run.env_value(oracle_raw_dir, self.quest_root),
@@ -5559,7 +5564,11 @@ class Engine:
             if text is not None and seed_path.name == "experiment.py":
                 new_code = text
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
-        self._oracle_record({"status": status, "judged_by": "engine", "attempts": attempts, "problems": found})
+        proposed = list(self._oracle_proposals.values())
+        self._oracle_record({
+            "status": status, "judged_by": "engine", "attempts": attempts, "problems": found,
+            **({"proposed_changes": proposed} if proposed else {}),
+        })
         if not found:
             self._log.info(
                 "[oracle] %d oracle(s) passed before the main run%s", len(attempts[-1]["oracles"]),
@@ -5569,8 +5578,24 @@ class Engine:
         if self.config.engine.oracle_check == "warn":
             self._log.warning("[oracle] the oracles did not pass: %s; going on (engine.oracle_check: warn)", "; ".join(found))
             return new_code
-        self._pause_for_oracle(found, seed_path)
+        self._pause_for_oracle(found, seed_path, list(self._oracle_proposals.values()), attempts[-1].get("judged") or [], oracles)
         return new_code  # not reached: the pause exits the run
+
+    def _oracle_record_clear(self) -> None:
+        """Remove a record this run did not write: when the gate does not run, an earlier run's verdicts must not reach the
+        analysis or count as numbers this run computed."""
+        try:
+            (self.quest_root / "needs" / "ORACLE_CHECK.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _oracle_record_read(self) -> dict[str, Any] | None:
+        """``needs/ORACLE_CHECK.json`` as the last oracle gate wrote it, or ``None``."""
+        try:
+            record = json.loads((self.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
 
     def _oracle_record(self, payload: dict[str, Any]) -> None:
         try:
@@ -5637,6 +5662,12 @@ class Engine:
         parsed: dict[str, Any] = {}
         if _strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _parse_json_lenient(text, node="implement_oracle") or {}
+        for proposal in _oracle.proposals(parsed.get("oracle_change"), oracles):
+            self._oracle_proposals[proposal["name"]] = proposal
+            self._log.info(
+                "[oracle] the repair says the check '%s' is what is wrong and proposes expected %s, tolerance %s (%s): %s",
+                proposal["name"], proposal["expected"], proposal["tolerance"], proposal["tolerance_mode"], proposal["reason"][:200],
+            )
         new_code = parsed.get("code")
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, _deps = _parse_implement_response(text)
@@ -5655,15 +5686,63 @@ class Engine:
         )
         return new_code, False
 
-    def _pause_for_oracle(self, found: list[str], seed_path: Path) -> None:
-        """Stop before the main sweep: the oracles did not pass after the repairs."""
+    def _pause_for_oracle(
+        self, found: list[str], seed_path: Path, proposed: list[dict[str, Any]] | None = None,
+        judged: list[dict[str, Any]] | None = None, oracles: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Stop before the main sweep: the oracles did not pass after the repairs. When a repair judged a check itself
+        wrong, its proposal is shown beside what the script measured, and whether accepting it would simply let this run
+        pass -- the person decides; nothing here applies it."""
+        frozen = _frozen.load(self.quest_root) is not None
+        # After the freeze an oracle changes only through an amendment, and a quest stopped here never reaches the review
+        # where one is asked for: going on with the failure recorded is the way there.
+        amend = (
+            "The protocol is frozen, so editing plan.md does not change it. To change an oracle: set "
+            "`engine.oracle_check: warn` in the quest's YAML and resume, so the run goes on with this failure recorded, "
+            "then ask for the change when the quest is refined at the review and approve the amendment it asks for."
+        )
         steps = [
             "The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + ".",
-            f"Either fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
-            f"declared oracle check and prints an `ORACLE_JSON:` line, or, if the plan is what should change, edit the "
-            f"oracles in the protocol of `{_plan.plan_path(self.quest_root)}` (or ask for a change: `--revise-plan`). "
-            "Then resume: the oracle checks run again before anything else.",
+            (
+                f"Fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
+                "declared oracle check and prints an `ORACLE_JSON:` line, then resume: the oracle checks run again before "
+                f"anything else. {amend}"
+            ) if frozen else (
+                f"Either fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
+                "declared oracle check and prints an `ORACLE_JSON:` line, or, if the plan is what should change, edit the "
+                f"oracles in the protocol of `{_plan.plan_path(self.quest_root)}` (or ask for a change: `--revise-plan`). "
+                "Then resume: the oracle checks run again before anything else."
+            ),
         ]
+        declared = {str(o.get("name")): o for o in oracles or []}
+        measured = {str(j.get("name")): j.get("value") for j in judged or []}
+        for p in proposed or []:
+            before = declared.get(p["name"], {})
+            value = measured.get(p["name"])
+            verdict = ""
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                expected, limit, _mode = _oracle.limit_of(p)
+                if expected is not None and limit is not None:
+                    passes = abs(float(value) - expected) <= limit
+                    verdict = (
+                        f" The script measured {value:g}: accepting this makes that measurement pass, so check the reason, "
+                        "not the result." if passes else f" The script measured {value:g}, which would still fail it."
+                    )
+            how = (
+                "Accepting it needs an amendment (above): ask, at the review, for this change: "
+                f"{_oracle.proposal_request(p)}"
+                if frozen else
+                f"To accept it: `python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan "
+                f"\"{_oracle.proposal_request(p)}\"` (or the same request in the quest page's Plan box, or `@fi /plan` in "
+                "VSCode), then resume. To decline, resume after fixing the script or editing plan.md yourself."
+            )
+            steps.append(
+                f"The repair judged the check `{p['name']}` itself wrong (declared: expected {before.get('expected')}, "
+                f"tolerance {before.get('tolerance')} {before.get('tolerance_mode') or 'absolute'}) and proposes expected "
+                f"{p['expected']:g}, tolerance {p['tolerance']:g} {p['tolerance_mode']}"
+                + (f", check: {p['check']}" if p.get("check") else "")
+                + f". Its reason: {p['reason']}.{verdict} {how}"
+            )
         self._pause_for_human(
             kind="oracle",
             interaction="supply",
@@ -5672,6 +5751,7 @@ class Engine:
             payload={
                 "oracle_stage": True, "quest_id": self.quest_id, "problems": found,
                 "plan_file": str(_plan.plan_path(self.quest_root)),
+                **({"proposed_changes": list(proposed)} if proposed else {}),
             },
         )
 
@@ -7290,6 +7370,8 @@ class Engine:
                 "the seed it is given.\n\n"
                 + stdout_for_analyze
             )
+        # The engine's own oracle verdicts: the script's results may re-judge the same oracles with a stale tolerance.
+        stdout_for_analyze = _oracle.analysis_note(_oracle.last_judged(self._oracle_record_read())) + stdout_for_analyze
         # Read the ACTUAL contents of any user-dropped data (the pause-drop
         # gate writes to inputs/data/). Previously only the file PATHS were
         # surfaced, so analyze never saw the numbers — a dropped latency.csv
@@ -9018,6 +9100,7 @@ class Engine:
                 comparison_stats=comparison_stats,
                 config=config_dump,
                 design=state.get("design") or {},
+                oracle_checks=_oracle.last_judged(self._oracle_record_read()),
                 n_seeds=len(replicates),
             )
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
@@ -12011,6 +12094,15 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
 `oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. The script is run once with FI_ORACLE=1 to answer them before its main run, and a run whose checks do not pass never reaches the main sweep.
+
+Mistakes that stop a run, each seen in real quests:
+- `grid` holds only the settings the simulation runs separately; each grid cell is simulated and its trials are counted. A value used only to classify or summarise the same runs afterwards (a cut-off, a threshold) is not a grid axis: put it in `thresholds`.
+- A grid axis lists every value it takes: `[0, 99]` means two settings, not 0 to 99. Repeated random instances of one setting are trials, counted in `runs_per_setting`, not a grid axis.
+- An oracle's `tolerance` is what the method can reach on that case, worked out from the method's known error at the step, size or sample count the check uses, not an ideal: a method of order p has an error of order h^p, and a conserved quantity is conserved only to that error, so a tolerance below it fails a correct script.
+- An order or ratio of convergence is read where the method is in its asymptotic regime: name the time or point and the step sizes, and keep the steps small and the horizon short; far from that regime the measured order is not the method's order.
+- An oracle that compares two methods compares the same quantity: two iterative solvers started differently can converge to different solutions of one problem, so compare a residual, or solutions found from the same start or in the same bracket.
+- Each oracle check runs on a small, fast case: all of them together must finish in seconds (the pre-check has a time limit of a fraction of the run's timeout).
+- An `expected` of 0 takes an absolute `tolerance`; a relative one around 0 cannot be judged.
 
 Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """

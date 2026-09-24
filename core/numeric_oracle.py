@@ -275,9 +275,18 @@ _CONTEXT_SKIP = re.compile(
 # mantissa ``9.65`` invents a claim the paper never made and then compares it
 # against unrelated results. Observed doing exactly that: a paper stating
 # ``1.21 \times 10^{-2}`` was reported as "paper says 1.21".
+# A closing brace takes the space before it, but a bare caret exponent leaves
+# the space after it alone: "1.25×10^-5 here" once became "1.25e-5here", which
+# the tokenizer then did not read at all.
 _LATEX_SCI = re.compile(
-    r"(-?\d+(?:\.\d+)?)\s*(?:\\times|\\cdot|×|\\!)\s*10\s*\^\s*\{?\s*(-?\+?\d+)\s*\}?"
+    r"(-?\d+(?:\.\d+)?)\s*(?:\\times|\\cdot|×|·|\\!)\s*10\s*\^\s*\{?\s*(-?\+?\d+)(?:\s*\})?"
 )
+
+# The same power of ten in Unicode superscripts: a real paper's "1.25×10⁻⁵" was
+# read as 1.25, and the number provenance check flagged it as a number the run
+# never computed (the run held 1.25e-05). Rewritten to the caret form first.
+_SUPERSCRIPT_SCI = re.compile(r"(\d)\s*([×·])\s*10([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)")
+_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺", "0123456789-+")
 
 # Number tokens: optional sign, digits, optional decimal, optional exponent.
 # Thousands separators are handled by stripping commas between digit groups.
@@ -476,6 +485,9 @@ def extract_paper_numbers(text: str) -> list[tuple[float, str, str]]:
         cleaned = pat.sub(" ", cleaned)
     # Fold `1.21 \times 10^{-2}` into `1.21e-2` so the exponent survives into
     # the extracted value instead of being dropped on the floor.
+    cleaned = _SUPERSCRIPT_SCI.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}10^{m.group(3).translate(_SUPERSCRIPT_DIGITS)}", cleaned,
+    )
     cleaned = _LATEX_SCI.sub(lambda m: f"{m.group(1)}e{m.group(2).replace('+', '')}", cleaned)
 
     out: list[tuple[float, str, str]] = []

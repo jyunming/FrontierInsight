@@ -720,3 +720,26 @@ def test_the_audit_is_written_even_when_the_paper_is_clean(tmp_path: Path) -> No
     audit = tmp_path / "paper" / "provenance_audit.json"
     assert audit.is_file()
     assert json.loads(audit.read_text(encoding="utf-8"))["ok"] is True
+
+
+# --- powers of ten and the engine's oracle checks ------------------------------------------------------------------
+
+@pytest.mark.parametrize("written", ["1.25×10⁻⁵", "1.25×10^-5", "1.25 × 10^{-5}", "1.25·10⁻⁵"])
+def test_a_power_of_ten_is_read_the_way_a_reader_reads_it(written: str) -> None:
+    """A live paper's "1.25×10⁻⁵" was read as 1.25 and flagged as a number the run never computed."""
+    from core.number_provenance import paper_numbers
+
+    assert [v for v, _t, _c in paper_numbers(f"the drift was {written} here")] == [pytest.approx(1.25e-05)]
+
+
+def test_the_live_papers_power_of_ten_is_not_flagged() -> None:
+    line = "the undamped energy-conservation oracle failed marginally (1.25×10⁻⁵ vs tolerance 1×10⁻⁶)."
+    assert check(line, result_json={"energy_drift": 1.249999926e-05, "other": 0.731}).findings == []
+
+
+def test_a_number_the_engines_oracle_check_measured_is_accounted_for() -> None:
+    """The oracle pre-check's values are numbers this run computed, though not in RESULT_JSON."""
+    line = "The grid-refinement ratio was 2.0412 before the main run."
+    judged = [{"name": "self convergence", "value": 2.0412473807, "expected": 2, "limit": 0.2, "passed_by_engine": True}]
+    assert [f.token for f in check(line, result_json={"other": 0.731}).findings] == ["2.0412"]
+    assert check(line, result_json={"other": 0.731}, oracle_checks=judged).findings == []

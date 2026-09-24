@@ -208,3 +208,15 @@ def test_report_serialises_for_the_audit_file() -> None:
     assert d["ok"] is False
     assert d["findings"][0]["result_path"] == "nils"
     assert "message" in d["findings"][0]
+
+
+@pytest.mark.parametrize("written, value", [
+    ("1.25×10⁻⁵", 1.25e-05), ("1.25·10⁻⁵", 1.25e-05), ("1.25×10^-5", 1.25e-05), ("4.5×10³", 4500.0),
+])
+def test_a_power_of_ten_in_superscripts_or_a_bare_caret_is_one_number(written: str, value: float) -> None:
+    """A real paper's "1.25×10⁻⁵" was read as 1.25; "1.25×10^-5 here" was not read at all."""
+    assert [v for v, _t, _c in no.extract_paper_numbers(f"the drift was {written} here")] == [pytest.approx(value)]
+
+
+def test_a_times_ten_with_no_exponent_is_not_folded() -> None:
+    assert no.extract_paper_numbers("a 5 × 10 grid and 2×10 runs") == []

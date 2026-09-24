@@ -17,7 +17,9 @@ same PR that adds, splits or renames one.
 - `core/run_manifest.py` — runtime check: does what the simulation says it ran (`run_manifest.json`) match the
   protocol's exact Cartesian product? Also the two-script split-analysis lint.
 - `core/oracle_check.py` — an oracle the script must pass before its main run, judged by the engine against the
-  protocol's own expected value and tolerance, not by the script's self-report.
+  protocol's own expected value and tolerance, not by the script's self-report. Also owns what a repair may propose
+  about a check (`proposals`, never applied without a person) and the note that carries the engine's verdicts to
+  `analyze` (`analysis_note`).
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
 - `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records).

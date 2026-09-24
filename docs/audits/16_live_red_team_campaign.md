@@ -201,3 +201,59 @@ What the three rounds leave: FI's gates held every time (no false number reached
 that remain are mostly the model writing a plan it cannot keep — tolerances tighter than its method, a range written
 as two grid values, an analysis parameter written as a simulation axis, oracle checks that are not small. Those are
 quality-of-plan questions for the design and oracle prompts, or for a person at the plan pause, not gate bugs.
+
+## Fourth round: `kimi-k3` on the third round's fixes
+
+Same four topics, main at the third round's fixes. 406,404 tokens, **$2.22**. No FI-caused stop and no provider
+timeout in any quest. Every quest stopped at a gate, each on the model's own plan or code:
+
+| Shape | Tokens | Stopped by |
+|---|---|---|
+| SIR | 82,100 | manifest check: the protocol grid again held an analysis-only axis (`threshold_frac`) the simulation never varies |
+| Deterministic | 105,941 | oracle gate: the Velocity-Verlet energy tolerance (1e-06, below the method's h²/8 = 1.25e-05 at h = 0.01) for the fourth round running, plus a convergence order read at t = 200 and a self-convergence ratio on steps far from the asymptotic regime |
+| Paired | 94,557 | oracle gate: Newton and an independent bracketing solver compared on roots that were not the same root (3.1 apart, tolerance 1e-08) |
+| Clustered | 123,806 | oracle gate: an M/M/1 mean wait just outside its tolerance, and a clustered-SE check declared to match OLS to 1e-10 that differed by 0.027 |
+
+The repair on the deterministic quest said in so many words that the tolerance was the problem and could do nothing
+about it: it is not allowed to loosen a declared tolerance, and it should not be. The model gets the same kinds of
+plan wrong each round, so this PR does two things: the plan directive now lists those mistakes in general terms,
+and an oracle repair can propose a change to a check (`oracle_change`), which is recorded and shown at the stop next
+to the measured value and never applied without a person.
+
+A rerun of these same four topics measures this prompt plus the model, not the model alone. The directive's list is
+written generally (no topic, integrator or estimator is named), but the mistakes were collected from these quests, so
+only a round on new topics can say whether the guidance generalises.
+
+## A person through one quest: the deterministic stop, resolved by hand
+
+Acting as the person at the fourth round's deterministic oracle stop, three oracles were corrected in `plan.md`, each
+with its reason written into the oracle's `reference`: the energy tolerance to 2e-05 (h²/8 = 1.25e-05, checked
+independently); the Euler convergence order read at t = 1 (1.05 there, 4.28 at t = 200); the self-convergence ratio
+on h = 0.02 / 0.01 / 0.005 at t = 1 with a relative tolerance of 0.1 (ratio 2.041; the declared steps give 4.692,
+which the script reproduces). The resume (160,114 more tokens, $1.47) passed all seven oracles after one script repair, froze
+the protocol, ran, analysed, wrote the paper and stopped at the human review. That is the first time in the campaign
+the deterministic quest reached a paper.
+
+The paper then said the energy and self-convergence oracles **failed**, quoting the old tolerance 1e-06. The frozen
+protocol held 2e-05 and the engine's check had passed; `experiment.py` re-judged its own oracles in `RESULT_JSON`
+with `1e-6` written into the script, and `analyze` only saw that. The engine's verdicts never reached the analysis.
+The review's number check also flagged "1.25×10⁻⁵" as a number the run never computed: it read the superscript form
+as 1.25. Both fixed here, each with a test that fails on the old code:
+
+- `analyze` is given the engine's oracle verdicts (`oracle_check.analysis_note`), with the instruction that a
+  script's own pass/fail or copy of a tolerance can be out of date and is not what the paper reports.
+- Both number checks (the provenance check and the numeric oracle share one reader) read `×10⁻⁵`, `×10^-5` and
+  `·10⁻⁵` as a power of ten, and the provenance check counts the values the oracle pre-check measured as numbers this
+  run computed. On the real paper line the finding is gone.
+
+The external review of this PR also found a hazard in the new stop message: the command it tells a person to paste
+carried the model's own reason inside double quotes, so a quote, `$(...)` or a backtick in it could run something.
+Those characters are now made plain. It also found that after the freeze the message said only that an amendment was
+needed; it now says how to get there (`engine.oracle_check: warn`, go on, ask for the change at the review).
+
+The second, targeted review of those fixes found three more, all fixed with tests that fail on the old code: the
+curly double quotes PowerShell also ends a string on were not made plain; with the gate off (or no protocol) an
+earlier run's `ORACLE_CHECK.json` stayed on disk and would have reached the analysis and the number check, so it is
+now removed when the gate does not run; and the power-of-ten fix had been made in the provenance check's own reader
+only, leaving the numeric oracle misreading the same text, so it moved into the reader both share (which also stopped
+the existing LaTeX rule from swallowing the space after `10^-5`).
