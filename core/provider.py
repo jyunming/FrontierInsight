@@ -2287,8 +2287,10 @@ async def _collect_via_streaming(
                 stderr_b = await asyncio.wait_for(proc.stderr.read(), timeout=2)
             except asyncio.TimeoutError:
                 pass
+        # The claude CLI writes nothing to stderr when the API is unreachable; the reason is in its stream.
+        reason = f" (stream error: {error_message[:500]})" if error_message is not None else ""
         raise _CliTransientError(
-            f"{argv[0]} exited rc={rc}: "
+            f"{argv[0]} exited rc={rc}{reason}: "
             f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
         )
     if error_message is not None:
@@ -2392,7 +2394,8 @@ def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None, bool]:
       itself; we don't keep the thinking-text body because it's both
       large and not useful to downstream parsers.
     - ``error`` is a fatal-error message extracted from
-      ``{"type":"error",...}`` events, else None.
+      ``{"type":"error",...}`` events or from a ``result`` envelope
+      marked ``is_error`` (or with an ``error*`` subtype), else None.
     - ``is_result_envelope`` is True when this line came from a
       ``{"type":"result", "result":"<full text>"}`` envelope. The CLI
       emits a stream of ``text_delta`` events AND a final result envelope;
@@ -2434,6 +2437,12 @@ def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None, bool]:
     # supplied the same content.
     if mtype == "result":
         result = msg.get("result")
+        # A failed call still ends with a result envelope, its text the error: with the network down the claude CLI
+        # ended `{"subtype":"success","is_error":true,"result":"API Error: Can't reach the API server ... (ENOTFOUND)"}`
+        # and exited 1, and that sentence was taken as the model's answer by a dozen nodes of one quest.
+        subtype = str(msg.get("subtype") or "")
+        if msg.get("is_error") is True or subtype.startswith("error"):
+            return "", 0, str(result or subtype or "the CLI reported an error"), False
         if isinstance(result, str):
             return result, 0, None, True
     if mtype == "error":
