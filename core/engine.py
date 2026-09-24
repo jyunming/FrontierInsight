@@ -279,6 +279,9 @@ class QuestState(TypedDict, total=False):
     # The design's asserted paths some run of this quest has reported (``plausibility.bounded_paths``). A later result
     # that no longer reports one of them is a plausibility violation: a repair must not rename or drop a bounded quantity.
     bounded_seen: list[str]
+    # How many trials the last run's own manifest lists as failed; None when no manifest was read. A count of failures
+    # the protocol's ``failure_policy`` names is not held to be a trivial answer at 0 when this is 0 (``_zero_expected_paths``).
+    manifest_failed_trials: int | None
     # Execute-repair loop counter + history. The reflect
     # node increments `exec_reflect_iter` and appends a one-line
     # record per attempt, so analyze/write/review can describe what
@@ -4894,7 +4897,7 @@ class Engine:
     def _run_manifest_problems(self, state: QuestState, split: bool, result: Any) -> tuple[str, list[str]]:
         """``(status, differences)`` of the finished first run: what its manifest says against the frozen protocol.
         Statuses other than ``ok`` and ``differs`` say why nothing was compared."""
-        self._manifest_failed_trials = 0
+        self._manifest_failed_trials: int | None = None  # None: no manifest was read, so nothing corroborates a 0
         self._manifest_analysis_problems: list[str] = []
         if self.config.engine.run_manifest_check == "off":
             return "off", []
@@ -4929,7 +4932,7 @@ class Engine:
         else:
             manifest, why = _run_manifest.read(raw_dir)
             found = _run_manifest.problems(protocol, manifest, why, result_json=result_json)
-        self._manifest_failed_trials = _run_manifest.failure_count(manifest)
+        self._manifest_failed_trials = _run_manifest.failure_count(manifest) if manifest is not None else None
         self._manifest_analysis_problems = _run_manifest.analysis_output_problems(protocol, manifest, result_json)
         return ("differs" if found else "ok"), found
 
@@ -5286,7 +5289,9 @@ class Engine:
             missed: list[str] = []
             replicates = state.get("result_json_replicates") or []
             if len(replicates) > 1:
-                aggregate = _aggregate_result_json_replicates(replicates, assertions=_replicate_assertions(state))
+                aggregate = _aggregate_result_json_replicates(
+                    replicates, assertions=_replicate_assertions(state), kinds=_replicate_metric_kinds(state),
+                )
                 self._annotate_precision(state, aggregate)
                 missed = [k for k, v in aggregate.items() if isinstance(v, dict) and v.get("precision_reached") is False]
             replicates_for_specs = state.get("result_json_replicates") or []
@@ -5327,9 +5332,19 @@ class Engine:
         protocol = self._protocol_block(state) or {}
         precision = protocol.get("precision")
         target = precision.get("target_half_width") if isinstance(precision, dict) else None
+        # The target is for the metric the protocol names (``precision.metric``), when it names one: a live quest's
+        # target for its outbreak probability was held against every pooled interval in the run.
+        named = str(precision.get("metric") or "").strip() if isinstance(precision, dict) else ""
+        if named and not any(
+            isinstance(e, dict) and e.get("ci_method") == _CI_WILSON and (k == named or k.rsplit(".", 1)[-1] == named)
+            for k, e in aggregate.items()
+        ):
+            named = ""  # a name that matches no pooled probability (prose, say): every one is held to the target
         missed: list[str] = []
         for key, entry in aggregate.items():
             if not isinstance(entry, dict) or entry.get("ci_method") != _CI_WILSON:
+                continue
+            if named and key != named and key.rsplit(".", 1)[-1] != named:
                 continue
             lo, hi = entry.get("ci_lower"), entry.get("ci_upper")
             if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
@@ -6269,7 +6284,7 @@ class Engine:
                 manifest_status = "stopped"
         self._run_manifest_record({
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
-            "failed_trials": getattr(self, "_manifest_failed_trials", 0),
+            "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
         })
         if manifest_status == "stopped":
             try:
@@ -6365,7 +6380,10 @@ class Engine:
         # left, though, nothing regenerates the result: it is the one the paper
         # is written from, so it still gets its error bars.
         gate_violations = (
-            _assertion_violations({**state, "result_json": result_json})
+            _assertion_violations({
+                **state, "result_json": result_json,
+                "manifest_failed_trials": getattr(self, "_manifest_failed_trials", None),
+            })
             if result.returncode == 0 and result_json is not None
             else []
         )
@@ -6549,6 +6567,7 @@ class Engine:
         }
         patch["numeric_warnings_accepted"] = False
         patch["run_manifest_failures"] = manifest_attempts_next
+        patch["manifest_failed_trials"] = getattr(self, "_manifest_failed_trials", None)
         if result_json:
             patch["bounded_seen"] = _bounded_seen_after(state, result_json)
         self._check_replicate_manifests(state, split, replicates_n)
@@ -7289,7 +7308,7 @@ class Engine:
         replicates = state.get("result_json_replicates") or []
         if replicates and len(replicates) > 1:
             assertions = _replicate_assertions(state)
-            agg = _aggregate_result_json_replicates(replicates, assertions=assertions)
+            agg = _aggregate_result_json_replicates(replicates, assertions=assertions, kinds=_replicate_metric_kinds(state))
             # Flattening a crossed design yields one entry per numeric leaf —
             # easily hundreds on a parameter sweep, each carrying seven stats.
             # Only the ones that actually MOVED between seeds tell the reader
@@ -9085,7 +9104,7 @@ class Engine:
             aggregate: dict[str, Any] = {}
             if replicates:
                 aggregate = _aggregate_result_json_replicates(
-                    replicates, assertions=assertions,
+                    replicates, assertions=assertions, kinds=_replicate_metric_kinds(state),
                 )
             if len(replicates) >= 2:
                 comparison_stats = self._comparison_stats(
@@ -12092,7 +12111,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>"}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise>"}],
   "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from>"}]
 }
 
@@ -13332,6 +13351,7 @@ def _aggregate_result_json_replicates(
     replicates: list[dict[str, Any]],
     *,
     assertions: list[Any] | None = None,
+    kinds: dict[str, str] | None = None,
 ) -> dict[str, dict[str, float | int]]:
     """Compute mean ± sample-std for every numeric scalar field that
     appears in EVERY replicate's ``RESULT_JSON``.
@@ -13416,8 +13436,18 @@ def _aggregate_result_json_replicates(
             # seeds that is a statement about batches, not about the number of trials behind each of them.
             "ci_method": _CI_BETWEEN_SEEDS,
         }
-    _pool_evidence(out, replicates)
+    _pool_evidence(out, replicates, kinds=kinds)
     return out
+
+
+def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
+    """``{metric id: kind}`` for the metrics the design's protocol declares (``proportion`` / ``mean``)."""
+    protocol = (state.get("design") or {}).get("protocol")
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    return {
+        str(m["id"]): str(m.get("kind"))
+        for m in metrics or [] if isinstance(m, dict) and m.get("id") and m.get("kind")
+    }
 
 
 _CI_BETWEEN_SEEDS = "t_between_seeds"
@@ -13446,7 +13476,9 @@ def _walk_paths(obj: Any, prefix: tuple[str, ...] = ()) -> dict[tuple[str, ...],
     return found
 
 
-def _pool_evidence(out: dict[str, dict[str, float | int]], replicates: list[dict[str, Any]]) -> None:
+def _pool_evidence(
+    out: dict[str, dict[str, float | int]], replicates: list[dict[str, Any]], *, kinds: dict[str, str] | None = None,
+) -> None:
     """Replace the between-seed interval of a metric by one that uses the trials, when the script gave them.
 
     A probability that a script estimates from repeated trials is reported with its counts beside it,
@@ -13455,7 +13487,15 @@ def _pool_evidence(out: dict[str, dict[str, float | int]], replicates: list[dict
     the trials: the shares are pooled, and the interval is a Wilson interval for the pooled counts, or a bootstrap
     interval for the pooled values, instead of a t interval over the seeds' own estimates (three numbers, however many
     trials there were). The mean becomes the pooled estimate, and the seeds' own mean and spread are kept as
-    ``batch_mean`` and ``batch_std``. A metric with no counts or values keeps the t interval, labelled as such."""
+    ``batch_mean`` and ``batch_std``. A metric with no counts or values keeps the t interval, labelled as such.
+
+    Which of the two a metric is comes from the protocol (``kinds``, its declared ``kind``) and only for an undeclared
+    one from the names. A live quest's conditional mean (final size over major outbreaks) printed ``_count`` and
+    ``_total`` both equal to the number of outbreaks, beside its ``_values``: read by the names it became a probability
+    of 1.0 with a Wilson interval, and the paper printed a half-width of ±0.245 for a mean whose values varied by a
+    hundredth. A declared ``mean`` is never pooled as counts; an undeclared one whose count equals its total in every
+    seed while it also lists its values is a mean too."""
+    kinds = kinds or {}
     walked = [_walk_paths(r) for r in replicates]
     if not walked:
         return
@@ -13468,7 +13508,19 @@ def _pool_evidence(out: dict[str, dict[str, float | int]], replicates: list[dict
         count_path, total_path = parent + (f"{name}_count",), parent + (f"{name}_total",)
         values_path = parent + (f"{name}_values",)
         counts = [(w.get(count_path), w.get(total_path)) for w in walked]
-        if all(isinstance(c, float) and isinstance(t, float) for c, t in counts):
+        lists = [w.get(values_path) for w in walked]
+        kind = kinds.get(name)
+        # Undeclared, a count equal to its total beside values that are not all 0/1 indicators is a mean's own
+        # denominator; a proportion of 1.0 printed with its 0/1 indicators is still a proportion.
+        a_mean_by_its_values = (
+            all(isinstance(v, list) for v in lists)
+            and all(c == t for c, t in counts)
+            and any(x not in (0.0, 1.0) for v in lists for x in v)
+        )
+        as_counts = all(isinstance(c, float) and isinstance(t, float) for c, t in counts) and (
+            kind == "proportion" or (kind != "mean" and not a_mean_by_its_values)
+        )
+        if as_counts:
             if all(c.is_integer() and t.is_integer() and 0 <= c <= t for c, t in counts):
                 k, n = sum(c for c, _t in counts), sum(t for _c, t in counts)
                 ci = _stats.wilson_interval(k, n)
@@ -13485,7 +13537,6 @@ def _pool_evidence(out: dict[str, dict[str, float | int]], replicates: list[dict
                     out.pop(".".join(count_path), None)
                     out.pop(".".join(total_path), None)
             continue
-        lists = [w.get(values_path) for w in walked]
         if all(isinstance(v, list) for v in lists):
             pooled = [x for v in lists for x in v]
             ci = _stats.bootstrap_mean_interval(pooled, cap=_VALUES_POOL_CAP)
@@ -13538,7 +13589,9 @@ def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
     replicates = state.get("result_json_replicates") or []
     if len(replicates) < 2:
         return {}
-    aggregate = _aggregate_result_json_replicates(replicates, assertions=_replicate_assertions(state))
+    aggregate = _aggregate_result_json_replicates(
+        replicates, assertions=_replicate_assertions(state), kinds=_replicate_metric_kinds(state),
+    )
     # ``ci_method`` says what the interval is an interval OF (``t_between_seeds`` or a pooled Wilson / bootstrap interval),
     # so a check that asks "is this printed interval FI's own seed-level t interval under another name" only asks it
     # about the ones that are.
@@ -14611,7 +14664,8 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
     return [
         (ax, s)
         for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)
-        for s in (ax.get("series") or []) if isinstance(s, dict) and s.get("shows") != "yes"
+        for s in (ax.get("series") or [])
+        if isinstance(s, dict) and s.get("shows") not in ("yes", "vertical line")
     ]
 
 
@@ -14707,8 +14761,11 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         for s in ax.get("series") or []:
             if not isinstance(s, dict):
                 continue
-            span = f'{s["min"]:.3g} to {s["max"]:.3g}' if "min" in s else "no points"
             shows = s.get("shows")
+            if shows == "vertical line" and isinstance(s.get("x"), (int, float)):
+                series.append(f"{s.get('label')} a vertical line at x = {s['x']:.3g}")
+                continue
+            span = f'{s["min"]:.3g} to {s["max"]:.3g}' if "min" in s else "no points"
             tail = "" if shows == "yes" else ", FLAT on this axis" if shows == "flat" else ", NOT SHOWN"
             series.append(f"{s.get('label')} {span}{tail}")
         if series:
@@ -15610,10 +15667,37 @@ def _assertion_violations(state: "QuestState") -> list:
         # reported cannot quietly disappear. See core/plausibility.py for both.
         return plausibility.check_design(
             state.get("result_json") or {}, _asserting_design(state), code=state.get("code") or "",
-            seen=state.get("bounded_seen") or (),
+            seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
         )
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
         return []
+
+
+def _zero_expected_paths(state: "QuestState") -> set[str]:
+    """The asserted quantities whose 0 is the answer, not a trivial one: a count of failures, known as one because the
+    protocol's ``failure_policy`` names it, and not contradicted by the run's own manifest (it lists no failed trial, or
+    the run kept none). A live quest reported ``failed_run_count`` = 0 in every setting, its manifest agreed, and the
+    at-bound rule sent a correct script back twice, until the repair replaced the zeros with nulls."""
+    protocol = (state.get("design") or {}).get("protocol")
+    policy = str((protocol or {}).get("failure_policy") or "") if isinstance(protocol, dict) else ""
+    failed = state.get("manifest_failed_trials")
+    # The zero must be corroborated: a manifest was read and it lists no failed trial.
+    if not policy.strip() or failed != 0 or isinstance(failed, bool):
+        return set()
+    from core import plausibility
+
+    out: set[str] = set()
+    for a in plausibility.parse_assertions(_asserting_design(state)):
+        leaf = a.path.rsplit(".", 1)[-1]
+        if not leaf:
+            continue
+        # The policy names the quantity as a name: an identifier (`failed_run_count`) as a whole word, or any name in
+        # quotes. A bare word ("rate", "count") in the policy's prose names nothing.
+        quoted = re.search(rf"[`'\"]{re.escape(leaf)}[`'\"]", policy)
+        identifier = re.search(r"[_\d]", leaf) and re.search(rf"(?<![\w]){re.escape(leaf)}(?![\w])", policy)
+        if quoted or identifier:
+            out.add(a.path)
+    return out
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:

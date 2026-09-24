@@ -312,3 +312,24 @@ look neither was renamed or deleted: each repair set the asserted value to null 
 prompt asks for, so a null is not flagged. A bounded key that disappears altogether after an earlier run reported it
 is now a plausibility violation (`kind="missing"`), asking for it back under its name. No live quest has done this
 yet; the check costs nothing on the ones that did not.
+
+## The 100-point benchmark with Gemini 3.1 Pro, and what its grading found in FI
+
+The SIR benchmark topic (literature on, isolated Axon, the rubric of `trend/grading_sheet.md`), three runs of
+`antigravity_cli` / `gemini-3.1-pro-high` on the build after the CLI fixes: **87.0, 84.5, 74.5, mean 82.0**
+(gemini-3.8-flash 83.3, gemma4 baseline 87.1, best gemma4 arm 93.6, gpt-5.6-terra 88.2). Two of the three
+stopped at the run-manifest gate on the first pass and were resumed with `engine.run_manifest_check: warn` so the
+arm is comparable with the earlier ones, which ran before that gate existed. The graders traced several of the
+points lost to FI rather than to the model, and each was reproduced on the quests' own data:
+
+| Fault | Where | On the live data, before → after |
+|---|---|---|
+| A conditional mean (final size of the major outbreaks) read as missing data: its values were under half of all trials | `run_manifest._value_count_findings` | g31p2: stop → no finding once the metric declares `given: prob_major`; without it, still flagged, and the sentence says how to declare it |
+| The same mean pooled as a probability by its `_count`/`_total` names, so its pooled mean became 1.0 with Wilson(4, 4) = ±0.245, which the paper printed | `engine._pool_evidence` | R0=0.9, N=5000: `wilson_pooled_counts` 1.0 ±0.245 → `bootstrap_pooled_values` 0.0573 ±0.0039 |
+| A precision target meant for one probability held against every pooled interval | `engine._annotate_precision` | now only against the metric `precision.metric` names (all, when it names none) |
+| An `axvline` recorded as a series from 0 to 1, "flat" on a count axis; the caption check then had the paper call it "a flat horizontal line" | `plot_style._fi_axes` | g31p3's own script re-run with the recorder: all 9 panels now "vertical line" at x = 0.0020 … 0.9412 (7 of 9 were "flat") |
+| A failure count of 0 in every setting taken for a trivial answer; two repairs spent, and the zeros nulled | `plausibility._at_bound` | g31p1: `failed_run_count` exempt (named by `failure_policy`, manifest lists no failed trial) → no violation; a final size of 0 is still flagged |
+| One metric of an unknown `kind` (`count`) threw away the whole `protocol.metrics` list | `metric_spec.normalize` via `plan.repair_protocol` | the entry alone is left out and named in the plan |
+
+The design choices (a declared `given` rather than trusting the script's own per-cell counts; manifest
+corroboration rather than the metric's name; dropping one entry rather than the list) were the user's.

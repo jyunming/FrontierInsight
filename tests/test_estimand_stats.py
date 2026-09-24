@@ -125,6 +125,40 @@ def test_values_beside_a_mean_are_pooled_into_a_bootstrap_interval() -> None:
     assert aggregate(reps)["size"] == entry, "the same pooled values give the same interval"
 
 
+def _conditional_mean_seeds() -> list[dict[str, Any]]:
+    """A live quest's conditional mean (final size over the major outbreaks only): its `_count` and `_total` are both
+    the number of outbreaks the mean is over, beside its values."""
+    sizes = ([0.58, 0.59], [0.583], [0.581, 0.586])
+    return [
+        {"_seed": s, "mfs": sum(v) / len(v), "mfs_count": len(v), "mfs_total": len(v), "mfs_values": list(v)}
+        for s, v in enumerate(sizes)
+    ]
+
+
+def test_a_mean_whose_count_is_its_total_is_not_pooled_as_a_probability() -> None:
+    """Read by the names it became a probability of 1.0 with Wilson(4, 4): the paper printed a half-width of ±0.245
+    for a mean whose values vary by a hundredth."""
+    for kinds in (None, {"mfs": "mean"}):
+        entry = aggregate(_conditional_mean_seeds(), kinds=kinds)["mfs"]
+        assert entry["ci_method"] == "bootstrap_pooled_values", kinds
+        assert entry["mean"] == pytest.approx(sum([0.58, 0.59, 0.583, 0.581, 0.586]) / 5)
+        assert entry["ci_upper"] - entry["ci_lower"] < 0.02
+
+
+def test_a_declared_kind_decides_over_the_names() -> None:
+    # A declared proportion is pooled as counts even with values beside it; a declared mean never is.
+    reps = [{**_seed(s, k), "p_values": [1.0] * k + [0.0] * (300 - k)} for s, k in enumerate((100, 99, 98))]
+    assert aggregate(reps, kinds={"p": "proportion"})["p"]["ci_method"] == "wilson_pooled_counts"
+    assert aggregate(reps, kinds={"p": "mean"})["p"]["ci_method"] == "bootstrap_pooled_values"
+    # An ordinary probability with counts and no values is still pooled as counts, declared or not.
+    assert aggregate([_seed(0, 100), _seed(1, 99)])["p"]["ci_method"] == "wilson_pooled_counts"
+    # A probability of 1.0 everywhere, printed with its 0/1 indicators, is still a probability: its Wilson interval
+    # is not replaced by a zero-width bootstrap over [1, 1, ...].
+    certain = [{**_seed(s, 300), "p_values": [1.0] * 300} for s in range(3)]
+    entry = aggregate(certain)["p"]
+    assert entry["ci_method"] == "wilson_pooled_counts" and entry["ci_lower"] < 1.0
+
+
 def test_long_value_lists_are_left_out_of_what_analyze_reads() -> None:
     shown = _elide_value_lists([{"_seed": 0, "size": 0.6, "size_values": [0.1] * 500, "short_values": [1, 2, 3]}])
     assert shown[0]["size_values"] == "<500 values, pooled in aggregate_mean_std>"
@@ -193,3 +227,26 @@ async def test_analyze_is_shown_the_pooled_interval_and_its_label(
     assert prompts, "analyze was not called"
     assert "wilson_pooled_counts" in prompts[0] and '"n_trials": 900' in prompts[0]
     assert '"n_successes": 297' in prompts[0]
+
+
+def test_the_precision_target_is_held_against_the_metric_the_protocol_names() -> None:
+    """A live quest's ±0.06 target for its outbreak probability was held against every pooled interval, including
+    one for a quantity the target was never meant for."""
+    from types import SimpleNamespace
+
+    agg = {
+        "by_R0.0.9.prob_major": {"ci_method": "wilson_pooled_counts", "ci_lower": 0.10, "ci_upper": 0.30},
+        "by_R0.0.9.other_rate": {"ci_method": "wilson_pooled_counts", "ci_lower": 0.10, "ci_upper": 0.40},
+    }
+
+    def run(precision: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        stub = SimpleNamespace(_protocol_block=lambda state: {"precision": precision})
+        copy = {k: dict(v) for k, v in agg.items()}
+        return Engine._annotate_precision(stub, {}, copy), copy
+
+    note, out = run({"target_half_width": 0.06, "metric": "prob_major"})
+    assert "by_R0.0.9.prob_major" in note and "other_rate" not in note
+    assert "precision_reached" not in out["by_R0.0.9.other_rate"]
+    # A name that matches no pooled probability (prose, say) keeps every one held to the target.
+    note, _ = run({"target_half_width": 0.06, "metric": "the outbreak probability"})
+    assert "prob_major" in note and "other_rate" in note

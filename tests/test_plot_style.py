@@ -496,3 +496,46 @@ def test_bootstrap_records_nothing_without_a_records_folder(tmp_path) -> None:
                          capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".json") == []
+
+
+def test_a_vertical_reference_line_is_recorded_as_one_not_as_a_flat_series(tmp_path) -> None:
+    """A live quest drew the deterministic final size as ``ax.axvline`` over a histogram of counts. Its y is [0, 1] in
+    axes coordinates; read as data it was a series from 0 to 1, "flat" on a count axis reaching 255, and the caption
+    check then had the paper call it "a flat horizontal line at a count of 1"."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.hist([0.1] * 200 + [0.6] * 50 + [0.58] * 30, bins=20, label='runs')\n"
+        "ax.axvline(0.583, color='k', linestyle='--', label='Deterministic')\n"
+        "ax.axhline(40, color='r', label='level')\n"
+        "ax.plot([0, 1], [0.5, 0.5], transform=ax.transAxes, label='in axes coordinates')\n"
+        "ax.legend(); fig.savefig('hist.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    (axes,) = json.loads((records / "hist.json").read_text(encoding="utf-8"))["axes"]
+    series = {s["label"]: s for s in axes["series"]}
+    assert series["Deterministic"] == {"label": "Deterministic", "x": pytest.approx(0.583), "shows": "vertical line"}
+    assert series["level"]["shows"] == "flat" and series["level"]["min"] == pytest.approx(40)
+    assert "in axes coordinates" not in series
+
+
+def test_the_engine_does_not_call_a_vertical_line_hidden_or_flat() -> None:
+    from core.engine import _figure_caption_findings, _figure_record_note, _hidden_series
+
+    record = {"axes": [{"title": "N = 1000", "ylabel": "Count", "ylim": [0, 255.0], "series": [
+        {"label": "Deterministic", "x": 0.583, "shows": "vertical line"}]}]}
+    assert _hidden_series(record) == []
+    note = _figure_record_note(record)
+    assert "Deterministic a vertical line at x = 0.583" in note and "FLAT" not in note
+    paper = "![Final sizes with the Deterministic reference](figures/hist.png)\n"
+    assert _figure_caption_findings(paper, {"hist.png": record}) == []

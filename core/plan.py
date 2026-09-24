@@ -228,6 +228,19 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         key = match.group(1) if match else ""
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
+        if key == "metrics":
+            # One metric the check refuses is left out, not the list it is in.
+            from . import metric_spec
+
+            kept, dropped = metric_spec.repair(out["metrics"])
+            if kept and dropped:
+                out["metrics"] = kept
+                notes.extend(
+                    f"a `protocol.metrics` entry was left out of the plan because it could not be checked ({reason}); "
+                    "put it right here if it matters"
+                    for reason in dropped
+                )
+                continue
         notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
         del out[key]
     return None, notes
