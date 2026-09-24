@@ -333,3 +333,9 @@ points lost to FI rather than to the model, and each was reproduced on the quest
 
 The design choices (a declared `given` rather than trusting the script's own per-cell counts; manifest
 corroboration rather than the metric's name; dropping one entry rather than the list) were the user's.
+
+**A regression in the `given` fix, found by the re-bench grading.** The plan prompt shows `given`, and a model wrote
+`"given": null` on every metric; `normalize` kept the key, read every entry as declaring a subset, and the whole list
+was dropped again (terra run te3, evidence level capped). Null or empty now means no `given`. On te3's own specs all
+five metrics are kept, including the one that declared `given: major_outbreak_probability` correctly. The re-bench
+itself stayed on build 09a26b3 for every run, so its arms remain comparable with each other.
