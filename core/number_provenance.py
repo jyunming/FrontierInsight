@@ -562,6 +562,7 @@ def build_traceable(
     comparison_stats: Any = None,
     config: Any = None,
     design: Any = None,
+    oracle_checks: Any = None,
 ) -> tuple[Traceable, int]:
     """Everything this run can account for, and how much of it came from the
     experiment itself (the second number gates the whole check: a run that
@@ -599,6 +600,12 @@ def build_traceable(
     # different question, and stat_claims already answers it.
     for path, value in flatten_numbers(comparison_stats or {}):
         values.setdefault(f"comparisons.{path}", value)
+
+    # The engine's oracle checks before the main run: what the script measured on each check case, and the expected
+    # value and limit it was judged against. These are numbers this run computed, just not in RESULT_JSON; a paper
+    # that reports "the energy drift was 1.25e-5, within 2e-5" quotes them.
+    for path, value in flatten_numbers(oracle_checks or []):
+        values.setdefault(f"oracle{path}", value)
 
     # The run configuration, including numbers the user wrote into the topic.
     if config is not None:
@@ -654,6 +661,7 @@ def check(
     comparison_stats: Any = None,
     config: Any = None,
     design: Any = None,
+    oracle_checks: Any = None,
     n_seeds: int = 0,
 ) -> ProvenanceReport:
     """Flag every number in the paper that nothing in this run accounts for.
@@ -671,6 +679,7 @@ def check(
         result_json=result_json, replicates=replicates, intervals=intervals,
         aggregate=aggregate, figure_records=figure_records,
         comparison_stats=comparison_stats, config=config, design=design,
+        oracle_checks=oracle_checks,
     )
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is

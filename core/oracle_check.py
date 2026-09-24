@@ -124,6 +124,41 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
     return out
 
 
+def last_judged(record: Any) -> list[dict[str, Any]]:
+    """The engine's verdicts from the last attempt of a ``needs/ORACLE_CHECK.json`` record that let the main run go on
+    (``ok`` or ``warned``); empty for anything else."""
+    if not isinstance(record, dict) or record.get("status") not in ("ok", "warned"):
+        return []
+    attempts = record.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict) else {}
+    return [j for j in last.get("judged") or [] if isinstance(j, dict) and j.get("name")]
+
+
+def analysis_note(judged_list: list[dict[str, Any]]) -> str:
+    """What the analysis is told about the oracles the engine judged before the main run ('' when there were none).
+
+    A script often re-judges its own oracles in its results with its own copy of each tolerance, and that copy can be
+    out of date: in one real quest a person corrected a tolerance in the plan, the engine's check passed under it, and
+    the analysis still reported the oracle as failed because the script's results carried the old value."""
+    lines = []
+    for j in judged_list:
+        value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
+        verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
+        if value is None or expected is None or limit is None:
+            lines.append(f"- {j['name']}: {verdict}")
+        else:
+            lines.append(f"- {j['name']}: measured {_fmt(value)}, expected {_fmt(expected)} within {_fmt(limit)}: {verdict}")
+    if not lines:
+        return ""
+    return (
+        "[FI NOTE] Before the main run the engine checked the protocol's oracles against the expected values and "
+        "tolerances the protocol fixes:\n" + "\n".join(lines) + "\n"
+        "These verdicts are the ones that count. If the results below also judge these oracles (a pass/fail flag, or the "
+        "script's own copy of an expected value or tolerance), that copy can be out of date: report the engine's verdicts "
+        "and numbers above, and do not report an oracle as failed or passed on the script's word.\n\n"
+    )
+
+
 def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, returncode: int, timed_out: bool = False) -> list[str]:
     """What is wrong with the oracle run, one sentence each; empty when every declared oracle ran and passed."""
     if not oracles:
@@ -183,7 +218,58 @@ def directive(oracles: list[dict[str, Any]], found: list[str]) -> str:
         "it) or the way the value is measured (fix that), and say which in `patch_summary`. Never make a check pass by "
         "measuring something else, skipping it or hard-coding its value: a check the script can always pass is not an oracle. If "
         "the checks were missing, add them for every declared oracle.\n\n"
+        "The check itself can be what is wrong: an `expected` or `tolerance` the method cannot reach on that case (below its "
+        "known error at that step or sample size), or a measurement that is not well defined (a convergence order read far "
+        "from the asymptotic regime, two methods compared on different quantities). You cannot change the protocol, and you must "
+        "not bend the script to hide it. Instead, besides `code`, return `oracle_change`: a list of {\"name\": <the declared "
+        "name>, \"expected\": <number>, \"tolerance\": <number>, \"tolerance_mode\": \"absolute\" | \"relative\", \"check\": "
+        "<the corrected check, only if the measurement itself must change>, \"reason\": <the method's known error or the flaw, "
+        "with the numbers>}. A person decides whether to accept it; nothing changes without them.\n\n"
         "Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT and "
         "FI_REPLICATE_SEED, and the same final RESULT_JSON line. Return the whole script in `code`, one sentence in "
         "`patch_summary`, and leave `give_up_reason` empty."
     )
+
+
+def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The usable entries of a repair's ``oracle_change``: each names a declared oracle, gives a finite ``expected`` and a
+    non-negative ``tolerance``, and says why. Anything else is dropped, never guessed at."""
+    names = {str(o.get("name")).strip().lower(): str(o.get("name")).strip() for o in oracles}
+    out: list[dict[str, Any]] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = names.get(str(item.get("name") or "").strip().lower())
+        expected, tolerance = _num(item.get("expected")), _num(item.get("tolerance"))
+        reason = str(item.get("reason") or "").strip()
+        if name is None or expected is None or tolerance is None or tolerance < 0 or not reason:
+            continue
+        mode = "relative" if str(item.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
+        entry: dict[str, Any] = {"name": name, "expected": expected, "tolerance": tolerance, "tolerance_mode": mode, "reason": reason[:600]}
+        check = str(item.get("check") or "").strip()
+        if check:
+            entry["check"] = check[:600]
+        out.append(entry)
+    return out
+
+
+def proposal_request(proposal: dict[str, Any]) -> str:
+    """The ``--revise-plan`` request that applies one proposal to the plan, word for word.
+
+    It is shown inside a double-quoted command a person copies into a shell, and the check and the reason are the model's
+    own words: a quote, ``$``, a backtick or a backslash in them could end the argument or run something when pasted
+    (``$(...)`` in bash, a backtick escape in PowerShell). Those become plain characters, so the pasted command only
+    ever carries text."""
+    change = f"expected {_fmt(proposal['expected'])}, tolerance {_fmt(proposal['tolerance'])} ({proposal['tolerance_mode']})"
+    if proposal.get("check"):
+        change += f", and its check reads: {proposal['check']}"
+    return _shell_safe(f"Change the oracle '{proposal['name']}' to {change}. Reason: {proposal['reason']} Change nothing else.")
+
+
+def _shell_safe(text: str) -> str:
+    """``text`` with nothing a shell acts on inside double quotes: ``"`` and the curly double quotes PowerShell also
+    ends a string on become ``'``, ``!`` (bash history) becomes ``.``, ``$``, backticks and backslashes are dropped, and
+    line breaks become spaces."""
+    text = re.sub(r'["“”„‟]', "'", text).replace("!", ".")
+    text = re.sub(r"[$`\\]", "", text)
+    return re.sub(r"\s+", " ", text).strip()

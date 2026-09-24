@@ -574,3 +574,135 @@ async def test_completing_the_plan_does_not_use_up_the_scripts_repair(
     assert artifacts.paper_md is not None
     assert calls.count("PlanRevise") == 1 and calls.count("OracleRepair") == 1
     assert _record(engine)["status"] == "ok"
+
+
+# --- a repair may say the check itself is wrong; a person decides (four kimi-k3 rounds on one topic) -----------------
+
+
+def test_a_proposed_oracle_change_is_kept_only_when_it_is_usable() -> None:
+    declared = [ORACLE]
+    good = {"name": ORACLE["name"].upper(), "expected": 1, "tolerance": 0.2, "tolerance_mode": "relative", "reason": "h^2/8 bound"}
+    got = oc.proposals([good, {"name": "not declared", "expected": 1, "tolerance": 1, "reason": "x"},
+                        {"name": ORACLE["name"], "expected": 1, "tolerance": -1, "reason": "x"},
+                        {"name": ORACLE["name"], "expected": 1, "tolerance": 1}, "junk"], declared)
+    assert got == [{"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.2, "tolerance_mode": "relative", "reason": "h^2/8 bound"}]
+    assert oc.proposals(None, declared) == [] and oc.proposals({"name": "x"}, declared) == []
+    request = oc.proposal_request(got[0])
+    assert ORACLE["name"] in request and "tolerance 0.2 (relative)" in request and "h^2/8 bound" in request
+    assert "oracle_change" in oc.directive(declared, ["x"]) and "nothing changes without them" in oc.directive(declared, ["x"])
+
+
+@pytest.mark.asyncio
+async def test_a_check_the_repair_calls_wrong_is_shown_to_the_person_and_never_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live quest's repair said, four rounds running, that the declared tolerance was below the method's own error --
+    and could do nothing about it. Now it can propose a change; the stop shows it beside the measured value, says that
+    accepting it would make that value pass, and gives the one command that applies it. The plan is not touched."""
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
+            calls.append("OracleRepair")
+            return json.dumps({
+                "code": _FAILING, "deps": [], "patch_summary": "the check, not the script",
+                "oracle_change": [{"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "reason": "the small case's own error is 0.5"}],
+            })
+        return await _fake(calls, implement=_FAILING, protocol=protocol)(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    await engine.run()
+    record = _record(engine)
+    assert record["status"] == "stopped"
+    assert record["proposed_changes"] == [{"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute", "reason": "the small case's own error is 0.5"}]
+    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "judged the check `final size closed form` itself wrong" in text
+    assert "The script measured 0.5: accepting this makes that measurement pass" in text
+    assert "--revise-plan" in text and "Change the oracle 'final size closed form' to expected 1, tolerance 0.6 (absolute)" in text
+    plan_after = plan.parse(plan.plan_path(engine.quest_root).read_text(encoding="utf-8")).design["protocol"]["oracles"]
+    assert plan_after == [ORACLE], "a proposal is never applied by the engine"
+
+
+def test_a_proposed_change_pasted_into_a_shell_only_ever_carries_text() -> None:
+    """The reason and the check are the model's words, shown inside a double-quoted command a person copies."""
+    bad = {"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute",
+           "check": 'run `whoami` then "quit"\nnext line', "reason": 'error is 0.5"; rm -rf ~; echo "$(id) \\ok! “x” „y‟'}
+    request = oc.proposal_request(bad)
+    for hazard in ('"', "$", "`", "\\", "\n", "!", "“", "”", "„", "‟"):  # the curly ones end a string in PowerShell
+        assert hazard not in request, hazard
+    assert "error is 0.5'; rm -rf ~; echo '(id) ok. 'x' 'y' Change nothing else." in request and "run whoami then 'quit' next line" in request
+
+
+@pytest.mark.asyncio
+async def test_a_record_the_gate_did_not_write_this_run_never_reaches_the_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the gate off, an earlier run's ORACLE_CHECK.json would otherwise hand the analysis stale verdicts."""
+    prompts: list[str] = []
+    inner = _fake([], implement=_UNAWARE, protocol=_PROTOCOL)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append(messages[-1]["content"])
+        return await inner(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path, oracle_check="off"))
+    stale = engine.quest_root / "needs" / "ORACLE_CHECK.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "old", "value": 9.87, "expected": 9.87, "limit": 0.1, "passed_by_engine": True}]}]}), encoding="utf-8")
+    assert (await engine.run()).paper_md is not None
+    assert not stale.exists()
+    assert not any("the engine checked the protocol's oracles" in p for p in prompts)
+
+
+def test_the_analysis_is_told_the_engines_oracle_verdicts_not_the_scripts() -> None:
+    """A live quest: the person corrected a tolerance, the engine's check passed under it, and the paper still said the
+    oracle failed -- the script's results re-judged it with the old tolerance written into the script."""
+    judged = [{"name": "energy drift", "value": 1.25e-05, "expected": 0, "limit": 2e-05, "passed_by_engine": True},
+              {"name": "order", "value": None, "expected": 1, "limit": 0.15, "passed_by_engine": None}]
+    record = {"status": "ok", "attempts": [{"judged": [{"name": "energy drift", "passed_by_engine": False}]}, {"judged": judged}]}
+    assert oc.last_judged(record) == judged
+    assert oc.last_judged({**record, "status": "stopped"}) == [] and oc.last_judged(None) == [] and oc.last_judged({"status": "ok"}) == []
+    note = oc.analysis_note(judged)
+    assert "- energy drift: measured 1.25e-05, expected 0 within 2e-05: passed" in note and "- order: not judged" in note
+    assert "do not report an oracle as failed or passed on the script's word" in note
+    assert oc.analysis_note([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_analyze_prompt_carries_the_engines_verdicts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    inner = _fake([], implement=_PASSING, protocol=protocol)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append(messages[-1]["content"])
+        return await inner(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path))
+    assert (await engine.run()).paper_md is not None
+    carrying = [p for p in prompts if "[FI NOTE] Before the main run the engine checked the protocol's oracles" in p]
+    assert carrying and "- final size closed form: measured 0.99, expected 1 within 0.05: passed" in carrying[0]
+
+
+def test_a_stop_after_the_freeze_says_how_an_oracle_can_still_change(tmp_path: Path) -> None:
+    """Once frozen, a plan edit changes nothing, and a quest stopped here never reaches the review where an amendment is
+    asked for: the stop says how to get there instead of only that an amendment is needed."""
+    from core import frozen_protocol
+
+    engine = Engine(_cfg(tmp_path))
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    frozen_protocol.freeze(engine.quest_root, {**_PROTOCOL, "oracles": [ORACLE]}, approved_by="test", source="plan.md")
+    proposal = {"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute", "reason": "own error 0.5"}
+    with pytest.raises(BaseException):  # the pause interrupts; outside a graph that raises
+        engine._pause_for_oracle(["the oracle failed"], engine.quest_root / "code" / "experiment.py", [proposal],
+                                 [{"name": ORACLE["name"], "value": 0.5}], [ORACLE])
+    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "The protocol is frozen, so editing plan.md does not change it" in text
+    assert "`engine.oracle_check: warn`" in text and "refined at the review" in text
+    assert "--revise-plan" not in text and "Change the oracle 'final size closed form' to expected 1, tolerance 0.6" in text
