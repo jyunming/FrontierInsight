@@ -276,6 +276,9 @@ class QuestState(TypedDict, total=False):
     # published in that case; this records WHY, so analyze can tell the paper it
     # holds a single measurement rather than quietly losing its error bars.
     result_json_replicate_seed_ignored: bool
+    # The design's asserted paths some run of this quest has reported (``plausibility.bounded_paths``). A later result
+    # that no longer reports one of them is a plausibility violation: a repair must not rename or drop a bounded quantity.
+    bounded_seen: list[str]
     # Execute-repair loop counter + history. The reflect
     # node increments `exec_reflect_iter` and appends a one-line
     # record per attempt, so analyze/write/review can describe what
@@ -6546,6 +6549,8 @@ class Engine:
         }
         patch["numeric_warnings_accepted"] = False
         patch["run_manifest_failures"] = manifest_attempts_next
+        if result_json:
+            patch["bounded_seen"] = _bounded_seen_after(state, result_json)
         self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
@@ -15600,22 +15605,42 @@ def _assertion_violations(state: "QuestState") -> list:
     try:
         from core import plausibility
 
-        design = dict(state.get("design") or {})
-        # A skill knows its own valid domain, so a design that calls one
-        # need not restate its bounds. Design assertions come first: a
-        # design that deliberately narrows a skill's range keeps its say.
-        extra = state.get("_skill_assertions") or []
-        if extra:
-            design["result_assertions"] = list(
-                design.get("result_assertions") or []
-            ) + list(extra)
         # The script rides along so a value capped exactly at a non-zero
-        # bound is caught too; see core/plausibility.py for why.
+        # bound is caught too; ``seen`` so a bounded quantity an earlier run
+        # reported cannot quietly disappear. See core/plausibility.py for both.
         return plausibility.check_design(
-            state.get("result_json") or {}, design, code=state.get("code") or "",
+            state.get("result_json") or {}, _asserting_design(state), code=state.get("code") or "",
+            seen=state.get("bounded_seen") or (),
         )
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
         return []
+
+
+def _asserting_design(state: "QuestState") -> dict[str, Any]:
+    """The design with a called skill's own range assertions added.
+
+    A skill knows its own valid domain, so a design that calls one need not
+    restate its bounds. Design assertions come first: a design that
+    deliberately narrows a skill's range keeps its say."""
+    design = dict(state.get("design") or {})
+    extra = state.get("_skill_assertions") or []
+    if extra:
+        design["result_assertions"] = list(design.get("result_assertions") or []) + list(extra)
+    return design
+
+
+def _bounded_seen_after(state: "QuestState", result_json: dict[str, Any]) -> list[str]:
+    """``bounded_seen`` once this result is counted: what was seen before, plus what it reports."""
+    seen = list(state.get("bounded_seen") or [])
+    try:
+        from core import plausibility
+
+        for path in plausibility.bounded_paths(result_json, _asserting_design(state)):
+            if path not in seen:
+                seen.append(path)
+    except Exception:  # noqa: BLE001 - bookkeeping must not block a quest
+        pass
+    return seen
 
 
 def _is_degenerate_result(rj: dict[str, Any]) -> bool:

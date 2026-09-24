@@ -307,3 +307,57 @@ def test_an_exact_zero_below_a_positive_min_is_out_of_range() -> None:
 def test_at_bound_reaches_the_repair_gate() -> None:
     state = {"design": _UNIT, "result_json": _sweep(a=0.0, b=0.0)}
     assert [v.kind for v in _assertion_violations(state)] == ["at_bound"]
+
+
+# --- a bounded quantity may not disappear --------------------------------------------------------------------------
+
+_P = _design({"path": "wilcoxon_p_one_sided", "min": 0, "max": 1})
+
+
+def test_a_bounded_quantity_a_repair_renamed_is_reported() -> None:
+    """A repair that renames (or deletes) a bounded key leaves the gate nothing to check and says nothing about why."""
+    first = {"by_set": {"a": {"wilcoxon_p_one_sided": 0.2}}}
+    seen = pl.bounded_paths(first, _P)
+    assert seen == ["wilcoxon_p_one_sided"]
+    renamed = {"by_set": {"a": {"wilcoxon_p_asymptotic_normal": 0.2}}}
+    v = pl.check_design(renamed, _P, seen=seen)
+    assert [x.kind for x in v] == ["missing"]
+    assert "wilcoxon_p_one_sided is no longer in the results" in v[0].describe()
+    assert "report it again under the name `wilcoxon_p_one_sided`" in v[0].describe()
+
+
+def test_a_bounded_quantity_reported_as_null_is_not_missing() -> None:
+    """The repair prompt's own answer for a value the method cannot give is null with a flag saying why. Both live
+    cases looked like this: a diverging Euler error set to null beside a "diverged: ..." flag, and a p-value set to
+    null and reported as its log10."""
+    seen = ["wilcoxon_p_one_sided"]
+    for honest in ({"by_set": {"a": {"wilcoxon_p_one_sided": None, "diverged": True}}},
+                   {"by_set": {"a": {"wilcoxon_p_one_sided": None, "wilcoxon_log10_p_one_sided": -27.07}}},
+                   {"by_set": {"a": {"wilcoxon_p_one_sided": float("nan")}}}):
+        assert pl.check_design(honest, _P, seen=seen) == []
+
+
+def test_a_name_that_never_matched_is_not_reported() -> None:
+    """A design and a script that named a quantity differently from the first run is common (63 of 295 assertions in
+    a sweep of 83 quests); nothing says which key was meant, so it is left alone."""
+    assert pl.check_design({"prob_outbreak": 0.4}, _design({"path": "outbreak_probability", "min": 0, "max": 1})) == []
+    assert pl.check_design({"prob_outbreak": 0.4}, _design({"path": "outbreak_probability", "min": 0, "max": 1}),
+                           seen=[]) == []
+
+
+def test_the_engine_remembers_what_a_run_reported_and_holds_the_next_to_it() -> None:
+    from core.engine import _assertion_violations, _bounded_seen_after
+
+    state = {"design": _P, "result_json": {"wilcoxon_p_one_sided": 0.2}}
+    state["bounded_seen"] = _bounded_seen_after(state, state["result_json"])
+    assert state["bounded_seen"] == ["wilcoxon_p_one_sided"] and _assertion_violations(state) == []
+    later = {**state, "result_json": {"wilcoxon_p_asymptotic_normal": 0.2}}
+    later["bounded_seen"] = _bounded_seen_after(later, later["result_json"])
+    assert later["bounded_seen"] == ["wilcoxon_p_one_sided"], "what was seen is kept"
+    assert [v.kind for v in _assertion_violations(later)] == ["missing"]
+
+
+def test_a_bound_the_design_itself_dropped_is_not_asked_for() -> None:
+    """A redesign that removes an assertion also removes the demand: only the design's current bounds are held to."""
+    assert pl.check_design({"other_key": 0.3}, _design({"path": "other_key", "min": 0, "max": 1}),
+                           seen=["wilcoxon_p_one_sided"]) == []

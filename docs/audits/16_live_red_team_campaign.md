@@ -278,6 +278,37 @@ counted as sitting on 0. Two `execute_reflect` repairs were spent on a correct s
 bound of 0 only an exact 0 joins the at-bound count. Replayed on the quest's own results (with the key's original
 name), main reports the 11-setting violation and the fix reports none; a test fails on the old code.
 
-The second repair then renamed the key to `wilcoxon_p_asymptotic_normal`, and with that the design's assertion
-matched nothing and the gate went quiet. Here the value was right, but it shows a repair can leave a declared bound
-with nothing to check by renaming what it bounds. Not fixed here; recorded for a decision.
+The second repair then set `wilcoxon_p_one_sided` to null and reported the p-value as its log10 beside it, and
+the gate, which checks numbers, had nothing left to check there. (Corrected below: this was first recorded as a
+rename.)
+
+## The claude CLI "hang", found; and what a repair may leave out
+
+**The hang was FI's.** `_collect_via_streaming` read the CLI's stdout with asyncio's `readline()`, whose default
+line limit is 64 KiB, and treated the exception it raises past that limit as the end of the stream. A claude
+stream-json line holds a whole message: a real call printed a 110,525-byte `assistant` line carrying nothing but its
+thinking block. The reader stopped there while the CLI, its pipe full, could never finish writing, and after the
+reap timeout FI raised `_CliWedgeError` ("stdout closed but child didn't exit ... no output collected"), word for word
+the three sonnet stops. Reproduced with a fake CLI (a 60,000-byte line passes, 70,000 fails with that exact error)
+and with the real one. Fixed: the stream limit is 256 MiB, and a line past even that is drained to the end and
+named in the error rather than taken for the end of the stream. The sonnet SIR quest that stopped at `implement`
+was resumed on the fix: `implement` wrote both scripts (about 40 KB), the oracles passed after one repair, and the
+quest went on to a gate of its own (the manifest check, on the same analysis-only grid axis `kimi-k3` wrote).
+
+**A second fault, found while checking the first.** An answer longer than the output limit arrives as several
+turns: the CLI ends one at `max_tokens`, sends a synthetic "Output token limit hit. Resume directly" message, and
+its `result` envelope holds only the last turn's text, which FI took as the whole answer. On the real CLI, a prompt
+for "alpha1 ... alpha9000" came back as alpha8116..alpha9000. Before the stream-limit fix the same call returned
+alpha1..alpha8115 instead (what streamed before the long line); neither was whole, and for `implement` either half
+is a broken script. Fixed: the text of the turns that ended at `max_tokens` just before the last is put back in
+front of the envelope's text, always; turns that ended at a tool call are still left out. Four rounds of the external review each found a way that a guard against "a CLI that already joins the turns" (never observed) could skip a join the real CLI needs; a skipped join truncates silently, a doubled one would show, so there is no guard. On the real CLI the answer now
+holds all 9,000 numbers. At the seam the model sometimes repeats or skips a few characters (one run: a number cut after `alpha8` resumed as `176`); FI joins exactly what was streamed.
+
+**What a repair may leave out.** A sweep of 83 quests (295 assertions) found 65 assertions that match nothing in the
+final result. 63 never matched in any run: the design and the script named the quantity differently from the start,
+and nothing says which key was meant, so these are left alone. The other two had matched earlier, and on a closer
+look neither was renamed or deleted: each repair set the asserted value to null (a diverging Euler error, beside a
+`"diverged: ..."` flag; the sonnet p-value above, reported as its log10). That is the honest answer the repair
+prompt asks for, so a null is not flagged. A bounded key that disappears altogether after an earlier run reported it
+is now a plausibility violation (`kind="missing"`), asking for it back under its name. No live quest has done this
+yet; the check costs nothing on the ones that did not.

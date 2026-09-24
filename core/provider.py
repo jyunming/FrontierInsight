@@ -480,6 +480,14 @@ def _extract_antigravity_response(raw: str) -> str:
     return raw.strip()
 
 
+# How long one line of a CLI's stdout may be. asyncio's default is 64 KiB, and a
+# claude stream-json line holds a whole message: a real call printed a 110,525-byte
+# `assistant` line carrying nothing but its thinking block. Past 64 KiB the reader
+# stopped as if at EOF while the CLI, its pipe full, could not exit, so three of
+# four sonnet quests died at `plan` or `implement` as a "wedge".
+_CLI_STREAM_LIMIT = 256 * 1024 * 1024
+
+
 _CLI_SPECS: dict[str, _CliSpec] = {
     "claude_cli": _CliSpec(
         # `claude --print` prints the response to stdout and exits.
@@ -1784,6 +1792,7 @@ async def _run_cli(
                 stderr=asyncio.subprocess.PIPE,
                 env=_child_env(spec),
                 cwd=call_dir,
+                limit=_CLI_STREAM_LIMIT,
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -2017,6 +2026,8 @@ async def _collect_via_streaming(
     thinking_token_count = 0
     error_message: str | None = None  # populated from stream_json error events
     result_envelope_seen = False  # see _parse_stream_json_line caller below
+    unreadable_line: str | None = None  # a line past even _CLI_STREAM_LIMIT: see read_stdout
+    turns: list[dict[str, Any]] = []  # per model turn: its streamed text and why it stopped (see the envelope below)
 
     async def write_stdin() -> None:
         if stdin_bytes is None or proc.stdin is None:
@@ -2032,10 +2043,19 @@ async def _collect_via_streaming(
 
     async def read_stdout() -> None:
         nonlocal last_activity, thinking_token_count, error_message
-        nonlocal text_chars_total, result_envelope_seen
+        nonlocal text_chars_total, result_envelope_seen, unreadable_line
         while True:
             try:
                 line = await proc.stdout.readline()
+            except ValueError as e:
+                # A line longer than the stream's limit. Stopping here used to look exactly like EOF while the CLI,
+                # its pipe full, could never exit: every long-thinking claude call then died as a "wedge" after the
+                # reap timeout, or returned only the text streamed before that line. The limit is now far above any
+                # real line (_CLI_STREAM_LIMIT); past it, drain to EOF so the child can exit, and say why.
+                unreadable_line = f"a stream line longer than {_CLI_STREAM_LIMIT} bytes ({e})"
+                while await proc.stdout.read(1 << 16):
+                    last_activity = time.monotonic()
+                return
             except Exception:
                 break
             if not line:
@@ -2053,7 +2073,32 @@ async def _collect_via_streaming(
                 text_delta, thinking_inc, err, is_result = (
                     _parse_stream_json_line(line)
                 )
+                turn_mark = _stream_turn_mark(line)
+                if turn_mark == "start":
+                    turns.append({"text": [], "stop": None})
+                elif turn_mark is not None and turns:
+                    turns[-1]["stop"] = turn_mark
+                if text_delta and not is_result and turns:
+                    turns[-1]["text"].append(text_delta)
                 if is_result:
+                    # An answer longer than the output limit arrives as several
+                    # turns: the CLI ends one at `max_tokens`, asks the model to
+                    # resume mid-thought, and the envelope carries only the last.
+                    # A real call returned alpha8116..alpha9000 of alpha1..alpha9000.
+                    # The turns cut off that way come before the envelope's text.
+                    cut = []
+                    for turn in reversed(turns[:-1]):
+                        if turn["stop"] != "max_tokens":
+                            break
+                        cut.insert(0, "".join(turn["text"]))
+                    # Always joined: every guard tried against "a CLI that joins the
+                    # turns itself" (never observed) could skip a join the real CLI
+                    # needs, and a skipped join truncates silently where a doubled
+                    # one would show. If the CLI ever changes, the doubling is seen.
+                    joined = "".join(cut)
+                    if joined:
+                        last = "".join(turns[-1]["text"]) if turns else ""
+                        text_delta = joined + (text_delta or last)
                     # The ``result`` envelope holds the answer: the final
                     # turn's text. The streamed deltas span every turn, so
                     # when the model narrates before tool calls they carry
@@ -2167,6 +2212,13 @@ async def _collect_via_streaming(
     # This fixes a regression where a successful 8-minute body call
     # got discarded because Windows took 11 s to mark claude.exe
     # exited — tenacity then re-ran the whole call from scratch.
+    if unreadable_line is not None:
+        # The answer is not all here, and returning part of it would pass a truncated script or plan off as whole.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=post_eof_reap_timeout_s)
+        except asyncio.TimeoutError:
+            await _kill_and_reap(proc, spec.argv[0])
+        raise _CliWedgeError(f"{spec.argv[0]} printed {unreadable_line}; the answer could not be read whole")
     have_output = text_chars_total > 0 or bool(aggregated)
     try:
         rc = await asyncio.wait_for(proc.wait(), timeout=post_eof_reap_timeout_s)
@@ -2198,9 +2250,9 @@ async def _collect_via_streaming(
                 pass
         raise _CliWedgeError(
             f"{spec.argv[0]} stdout closed but child didn't exit within "
-            f"{post_eof_reap_timeout_s:g}s (no output collected) — an "
-            f"extended-thinking CLI hang, not a transient blip. Retrying wedges "
-            f"the same way; the fix is a different provider for this node (e.g. "
+            f"{post_eof_reap_timeout_s:g}s (no output collected): the CLI "
+            f"closed its output without an answer and did not exit. If a resume "
+            f"stops the same way, use a different provider for this node (e.g. "
             f"resume with `--config <codex_or_openai>.yaml`). stderr tail: "
             f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
         )
@@ -2309,6 +2361,24 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process, name: str) -> bool:
             name,
         )
         return False
+
+
+def _stream_turn_mark(raw: bytes) -> str | None:
+    """``"start"`` for a stream-json line that opens a model turn, the stop
+    reason for one that ends it (``"max_tokens"``, ``"end_turn"``, ``"tool_use"``),
+    else None. Cheap: only lines naming those events are parsed."""
+    if b'"message_start"' not in raw and b'"message_delta"' not in raw:
+        return None
+    try:
+        event = (json.loads(raw.decode("utf-8", errors="replace")) or {}).get("event") or {}
+    except (ValueError, AttributeError):
+        return None
+    if event.get("type") == "message_start":
+        return "start"
+    if event.get("type") == "message_delta":
+        reason = (event.get("delta") or {}).get("stop_reason")
+        return str(reason) if reason else None
+    return None
 
 
 def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None, bool]:
