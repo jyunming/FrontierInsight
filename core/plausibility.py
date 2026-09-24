@@ -133,6 +133,20 @@ probability), and a non-zero value, however small, was computed from the data.
 So on a bound of 0 only an exact 0 joins the at-bound count; a tiny value is
 still inside the range, as before, and is simply not evidence of a trivial
 answer.
+
+Why a bounded quantity may not disappear
+========================================
+An assertion whose path matches nothing checks nothing, silently. That is
+common from the start (a sweep of 83 quests found 63 assertions a design and its
+script had named differently from the first run) and is not flagged: nothing
+says which result key was meant. What is flagged is a quantity an earlier run
+DID report that a later one leaves out altogether: a repair that renames or
+deletes a bounded key leaves the gate nothing to check, and says nothing about
+why. A key reported as ``null`` is not missing: that is the repair prompt's own
+answer for a value the method cannot give, with a flag saying why. Both cases
+seen in live quests were of that kind (a diverging Euler error set to null with
+a "diverged" flag, and a p-value set to null and reported as its log10 after
+the at-bound rule had wrongly sent it back twice), so neither is flagged.
 """
 
 from __future__ import annotations
@@ -180,7 +194,8 @@ class Violation:
     value: float
     assertion: Assertion
     # "out_of_range"; "clamped": on a bound the script caps values at;
-    # "at_bound": exactly on one bound in several settings.
+    # "at_bound": exactly on one bound in several settings; "missing": an
+    # earlier run reported this bounded quantity and this one does not.
     kind: str = "out_of_range"
     # The result paths an ``at_bound`` violation covers.
     paths: tuple[str, ...] = ()
@@ -206,6 +221,14 @@ class Violation:
                 f"settings ({shown}); {self.assertion.describe()}{why}. Several "
                 f"results exactly on a bound are what a computation returning a "
                 f"trivial answer looks like{note}"
+            )
+        if self.kind == "missing":
+            return (
+                f"{self.path} is no longer in the results, though an earlier run reported it and the design bounds it "
+                f"({self.assertion.describe()}){why}. Renaming or dropping a bounded quantity leaves its bound with "
+                f"nothing to check: report it again under the name `{self.path}`, with the value the run computes "
+                f"(a value outside the range is reported as it is; one the method cannot give is `null` with a flag "
+                f"saying why, never left out)"
             )
         if self.kind == "clamped":
             return (
@@ -513,6 +536,19 @@ def _walk_leaves(
             yield from _walk_leaves(v, tokens + (("i", i),))
 
 
+def _present_paths(obj: Any, tokens: tuple[tuple[str, Any], ...] = ()) -> Any:
+    """The dotted path of every leaf, whatever it holds: a number, ``null``, NaN, a string, a flag. A key reported as
+    ``null`` is still reported (the honest answer for a value the method cannot give)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _present_paths(v, tokens + (("k", str(k)),))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            yield from _present_paths(v, tokens + (("i", i),))
+    else:
+        yield _dotted(tokens)
+
+
 def _dotted(tokens: tuple[tuple[str, Any], ...]) -> str:
     out = ""
     for kind, val in tokens:
@@ -731,6 +767,29 @@ def _at_bound(
     )
 
 
-def check_design(result_json: Any, design: Any, *, code: str = "") -> list[Violation]:
-    """Convenience: parse a design's assertions and apply them."""
-    return violations(result_json, parse_assertions(design), code=code)
+def bounded_paths(result_json: Any, design: Any) -> list[str]:
+    """The assertion paths this result reports at least one number for."""
+    leaves = [path for _tokens, path, _value in _walk_leaves(result_json)]
+    return [a.path for a in parse_assertions(design) if any(_matches(a.path, p) for p in leaves)]
+
+
+def check_design(
+    result_json: Any, design: Any, *, code: str = "", seen: Any = (),
+) -> list[Violation]:
+    """Parse a design's assertions and apply them.
+
+    ``seen`` holds the assertion paths an earlier run of this quest reported a number for (``bounded_paths``). One of
+    them that this result no longer carries at all, not even as ``null``, is a ``kind="missing"`` violation: see "Why
+    a bounded quantity may not disappear" in the module docstring.
+    """
+    assertions = parse_assertions(design)
+    out = violations(result_json, assertions, code=code)
+    earlier = {str(p) for p in seen or ()}
+    if earlier:
+        present = list(_present_paths(result_json))
+        out += [
+            Violation(a.path, math.nan, a, kind="missing")
+            for a in assertions
+            if a.path in earlier and not any(_matches(a.path, p) for p in present)
+        ]
+    return out

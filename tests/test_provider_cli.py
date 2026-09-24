@@ -1155,3 +1155,114 @@ def test_a_usage_reporting_cli_keeps_its_stdout() -> None:
         "stdout is dropped for last_message_file CLIs; the usage_extractor "
         "exemption is what lets codex report real numbers"
     )
+
+
+# --- a stream line longer than asyncio's 64 KiB default -------------------------------------------------------------
+
+_LONG_LINE_CLI = r'''
+import json, sys
+sys.stdin.read()
+def emit(o):
+    sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
+emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}}})
+# A real claude call printed a 110,525-byte assistant line holding only its thinking block.
+emit({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "x" * 150000}]}})
+for _ in range(3000):  # more than a pipe buffer: a child nobody reads cannot finish writing these
+    emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "part "}}})
+emit({"type": "result", "subtype": "success", "result": "THE WHOLE ANSWER", "usage": {"input_tokens": 1, "output_tokens": 1}})
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_stream_line_over_64_kib_is_read_not_taken_for_the_end(tmp_path: Path) -> None:
+    """Three of four live sonnet quests died at `plan` or `implement` with "stdout closed but child didn't exit (no
+    output collected)": a thinking block printed as one line over asyncio's 64 KiB default made readline raise, the
+    reader stopped as if at EOF, and the CLI could never finish writing to its full pipe."""
+    import dataclasses
+    import sys
+
+    from core.provider import _CLI_SPECS, _run_cli
+
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_LONG_LINE_CLI, encoding="utf-8")
+    spec = dataclasses.replace(_CLI_SPECS["claude_cli"], argv=(sys.executable, str(script.resolve())))
+    with patch("core.provider.shutil.which", return_value=sys.executable):  # the real interpreter, not the stub
+        out = await _run_cli(spec, "prompt", timeout_s=60, inactivity_timeout_s=30, post_eof_reap_timeout_s=5)
+    assert out == "THE WHOLE ANSWER"
+
+
+@pytest.mark.asyncio
+async def test_a_line_past_even_the_raised_limit_is_named_not_returned_in_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the limit the answer is not all there: the call fails and says why, and never hands back the text that
+    streamed before that line as if it were the whole answer."""
+    import dataclasses
+    import sys
+
+    from core import provider
+    from core.provider import _CLI_SPECS, _CliWedgeError, _run_cli
+
+    monkeypatch.setattr(provider, "_CLI_STREAM_LIMIT", 64 * 1024)
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_LONG_LINE_CLI, encoding="utf-8")
+    spec = dataclasses.replace(_CLI_SPECS["claude_cli"], argv=(sys.executable, str(script.resolve())))
+    with patch("core.provider.shutil.which", return_value=sys.executable):
+        with pytest.raises(_CliWedgeError, match="a stream line longer than 65536 bytes"):
+            await _run_cli(spec, "prompt", timeout_s=60, inactivity_timeout_s=30, post_eof_reap_timeout_s=5)
+
+
+_TURNS_CLI = r'''
+import json, sys
+sys.stdin.read()
+stops = sys.argv[1].split(",")
+envelope = sys.argv[2]  # "last": the last turn's text; "empty": the last turn wrote nothing; "joined": every turn's
+def emit(o):
+    sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
+for i, stop in enumerate(stops):
+    emit({"type": "stream_event", "event": {"type": "message_start", "message": {}}})
+    last = i == len(stops) - 1
+    if not (envelope == "empty" and last):
+        said = {"repeat": "1;", "recurs": "x part1;"}.get(envelope, f"part{i + 1};") if last else f"part{i + 1};"
+        emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": said}}})
+    emit({"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": stop}}})
+    if stop == "max_tokens":
+        emit({"type": "user", "message": {"content": [{"type": "text", "text": "Output token limit hit. Resume directly"}]}, "isSynthetic": True})
+text = {"last": f"part{len(stops)};", "empty": "", "repeat": "1;", "reformatted": f"[part{len(stops)};]",
+        "recurs": "x part1;",
+        "joined": "".join(f"part{i + 1};" for i in range(len(stops)))}[envelope]
+emit({"type": "result", "subtype": "success", "result": text})
+'''
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stops, envelope, answer", [
+    ("max_tokens,end_turn", "last", "part1;part2;"),
+    ("max_tokens,max_tokens,end_turn", "last", "part1;part2;part3;"),
+    ("tool_use,end_turn", "last", "part2;"),  # narration before a tool call is still left out
+    ("tool_use,max_tokens,end_turn", "last", "part2;part3;"),
+    ("end_turn", "last", "part1;"),
+    ("max_tokens,end_turn", "empty", "part1;"),  # the last turn wrote nothing: the turn before it is still the answer
+    # A CLI that joined the turns itself (never observed) would show as doubled text, not as a silent truncation.
+    ("max_tokens,end_turn", "joined", "part1;part1;part2;"),
+    ("max_tokens,end_turn", "repeat", "part1;1;"),  # a continuation that repeats the cut's tail is still joined
+    ("max_tokens,end_turn", "reformatted", "part1;[part2;]"),  # an envelope unlike the deltas is still joined
+    ("max_tokens,end_turn", "recurs", "part1;x part1;"),  # a short cut that recurs later in the last turn is joined
+])
+async def test_an_answer_cut_at_the_output_limit_is_returned_whole(
+    tmp_path: Path, stops: str, envelope: str, answer: str,
+) -> None:
+    """A claude answer longer than the output limit arrives as several turns: the CLI stops one at `max_tokens`, asks
+    the model to resume mid-thought, and its result envelope holds only the last turn. A real call returned
+    alpha8116..alpha9000 of alpha1..alpha9000."""
+    import dataclasses
+    import sys
+
+    from core.provider import _CLI_SPECS, _run_cli
+
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_TURNS_CLI, encoding="utf-8")
+    spec = dataclasses.replace(_CLI_SPECS["claude_cli"], argv=(sys.executable, str(script.resolve()), stops, envelope))
+    with patch("core.provider.shutil.which", return_value=sys.executable):
+        out = await _run_cli(spec, "prompt", timeout_s=60, inactivity_timeout_s=30, post_eof_reap_timeout_s=5)
+    assert out == answer
