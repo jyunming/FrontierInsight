@@ -245,6 +245,23 @@ def test_human_feedback_writes_snapshot_json(gated_engine: Engine) -> None:
     assert snap["iteration"] == 1
     assert snap["score"] == 2
     assert "weaknesses" in snap and snap["weaknesses"] == ["unsupported claim in §3"]
+    assert snap["review_status"] == "ok" and snap["panel"] == []
+
+
+def test_human_feedback_snapshot_says_when_no_reviewer_gave_the_verdict(gated_engine: Engine) -> None:
+    state = {
+        "review": {"verdict": "accept", "score": 3, "status": "error"},
+        "review_panel": [
+            {"persona": "methodologist", "verdict": "revise", "score": 2, "status": "ok"},
+            {"persona": "statistician", "status": "error", "error": "invalid persona name"},
+        ],
+        "iteration": 0,
+    }
+    _drive_node(gated_engine, state, {"action": "accept"})
+    snap = json.loads((gated_engine.fi_dir / "human_review.json").read_text(encoding="utf-8"))
+    assert snap["review_status"] == "error"
+    assert snap["panel"][1] == {"persona": "statistician", "verdict": None, "score": None, "status": "error",
+                                "error": "invalid persona name"}
 
 
 # ---------------------------------------------------------------------------
@@ -491,3 +508,15 @@ def test_node_review_no_iteration_bump_on_clean_accept(tmp_path: Path) -> None:
     patch = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
     assert "iteration" not in patch
     assert patch["review"]["must_flag_hits"] == []
+
+
+def test_auto_accept_takes_only_a_reviewers_own_clean_accept() -> None:
+    from core.engine import _auto_accepts
+
+    assert _auto_accepts({"verdict": "accept", "must_flag_hits": [], "review_status": "ok"})
+    assert _auto_accepts({"verdict": "accept", "must_flag_hits": []})  # a snapshot from before review_status
+    # A stand-in accept (no reviewer gave it) is never accepted for the person.
+    assert not _auto_accepts({"verdict": "accept", "must_flag_hits": [], "review_status": "unreviewed"})
+    assert not _auto_accepts({"verdict": "accept", "must_flag_hits": [], "review_status": "error"})
+    assert not _auto_accepts({"verdict": "accept", "must_flag_hits": ["x"], "review_status": "ok"})
+    assert not _auto_accepts({"verdict": "revise", "must_flag_hits": [], "review_status": "ok"})

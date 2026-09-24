@@ -68,6 +68,8 @@ interface HumanReviewRequest {
         verdict?: string;
         score?: number | null;
         iteration?: number;
+        review_status?: string;
+        panel?: Array<{ persona?: string; verdict?: string; status?: string; error?: string }>;
         rationale?: string;
         weaknesses?: string[];
         suggestions?: string[];
@@ -321,6 +323,13 @@ export class Bridge {
         md += `- **Verdict:** \`${escapeMd(verdict)}\`\n`;
         md += `- **Score:** \`${escapeMd(score)}\`\n`;
         md += `- **Iteration:** \`${escapeMd(iter)}\`\n`;
+        // A verdict no reviewer gave is said so, with each panelist that did not review.
+        const notOk = (snap.panel || []).filter((p) => (p.status || "ok") !== "ok");
+        if ((snap.review_status || "ok") !== "ok" || notOk.length) {
+            md += `- ⚠️ **No reviewer gave this verdict; judge the paper yourself.**${notOk
+                .map((p) => ` ${escapeMd(p.persona || "?")}: ${escapeMd(p.error || p.status || "")}.`)
+                .join("")}\n`;
+        }
         if (snap.paper_md_path) {
             md += `- **Paper:** \`${escapeMd(snap.paper_md_path)}\`\n`;
         }

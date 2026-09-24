@@ -1679,6 +1679,13 @@ async def _cli_human_feedback_callback(
     print(f"  Verdict      : {snapshot.get('verdict')}")
     if snapshot.get("score") is not None:
         print(f"  Score        : {snapshot.get('score')}")
+    # A verdict no reviewer gave is said so, with each panelist that did not review.
+    panel = snapshot.get("panel") if isinstance(snapshot.get("panel"), list) else []
+    not_ok = [p for p in panel if isinstance(p, dict) and (p.get("status") or "ok") != "ok"]
+    if (snapshot.get("review_status") or "ok") != "ok" or not_ok:
+        print("  WARNING      : no reviewer gave this verdict; judge the paper yourself.")
+        for p in not_ok:
+            print(f"    - {p.get('persona') or '?'}: {p.get('error') or p.get('status')}")
     weaknesses = snapshot.get("weaknesses") or []
     if isinstance(weaknesses, list) and weaknesses:
         print("  Weaknesses   :")
