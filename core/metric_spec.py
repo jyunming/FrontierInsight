@@ -85,12 +85,16 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         paired = item.get("paired")
         if paired is not None and not isinstance(paired, bool):
             return None, f"`protocol.metrics` entry `{ident}`: `paired` must be true or false"
+        # No `given` (left out, null or empty) is a mean over every trial. A live plan wrote `"given": null` on every
+        # metric, the key survived into the spec, and every entry then read as declaring a subset: the list was dropped.
         given = item.get("given")
-        if given is not None and (not isinstance(given, str) or not given.strip()):
+        if isinstance(given, str):
+            given = given.strip() or None
+        if given is not None and not isinstance(given, str):
             return None, f"`protocol.metrics` entry `{ident}`: `given` must be the id of a proportion metric"
-        entry = {**item, "id": ident, "kind": kind}
+        entry = {k: v for k, v in item.items() if k != "given"} | {"id": ident, "kind": kind}
         if given is not None:
-            entry["given"] = given.strip()
+            entry["given"] = given
         out.append(entry)
     # A mean over a subset of the trials names the proportion whose successes are that subset (see ``given_counts``).
     kinds = {m["id"]: m["kind"] for m in out}

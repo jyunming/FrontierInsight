@@ -432,3 +432,14 @@ def test_one_metric_of_an_unknown_kind_is_left_out_not_the_list_it_is_in() -> No
     assert len(notes) == 1 and "failed_run_count" in notes[0] and "left out of the plan" in notes[0]
     # A person's own edit is still held to the strict check.
     assert plan.normalize_protocol({"metrics": [good, bad]})[0] is None
+
+
+def test_a_given_of_null_or_empty_is_no_given() -> None:
+    """A live plan wrote `"given": null` on every metric (the plan prompt shows the field); the key survived into the
+    spec, every entry read as declaring a subset, and the whole list was dropped."""
+    prop = {"id": "p", "kind": "proportion", "estimand": "P", "unit": "run", "given": None}
+    mean = {"id": "m", "kind": "mean", "estimand": "E", "unit": "run", "given": ""}
+    clean, why = ms.normalize([prop, mean])
+    assert why is None and [m["id"] for m in clean] == ["p", "m"] and all("given" not in m for m in clean)
+    assert ms.repair([prop, mean]) == (clean, [])
+    assert ms.normalize([prop, {**mean, "given": 5}])[0] is None, "a given that is not a name is still refused"
