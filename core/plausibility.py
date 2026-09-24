@@ -119,6 +119,20 @@ bound at *every* setting the assertion matched, which is a quantity that never
 varied with the sweep at all (a loop that captured one cell's value for all of
 them looks exactly like this) and is the trivial answer this gate exists to
 catch, whatever the bound happens to be.
+
+Why a tiny value is not on 0
+============================
+The tolerance that keeps a value on its bound from reading as outside it is
+absolute near 0 (``_BOUND_ABS_TOL``), so every value smaller than it was also
+counted as *sitting on* 0. A live quest's one-sided Wilcoxon p-values were
+8.5e-28 and similar (z about 10.9 over 183 pairs, the right answer), and the
+at-bound rule reported "equals its bound 0 in 11 settings": two repairs were
+spent on a correct script, each saying so. What a fault returns at 0 is an
+exact 0 (an empty count, a guard branch, a saturated or underflowed
+probability), and a non-zero value, however small, was computed from the data.
+So on a bound of 0 only an exact 0 joins the at-bound count; a tiny value is
+still inside the range, as before, and is simply not evidence of a trivial
+answer.
 """
 
 from __future__ import annotations
@@ -638,7 +652,8 @@ def violations(
                     out.append(Violation(path, value, a))
             elif clamps and _pinned(value, a, clamps):
                 out.append(Violation(path, value, a, kind="clamped"))
-            else:
+            elif bound != 0 or value == 0:
+                # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
                 on_bound.setdefault(bound, []).append((tokens, path))
         for bound, entries in on_bound.items():
             v = _at_bound(a, bound, entries, matched, result_json, literals)

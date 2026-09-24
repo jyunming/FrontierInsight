@@ -206,6 +206,19 @@ def test_one_quantity_on_its_bound_in_two_settings_is_a_violation() -> None:
     assert "2 settings" in v[0].describe()
 
 
+def test_tiny_p_values_are_computed_answers_not_a_zero() -> None:
+    """From a real quest: one-sided Wilcoxon p-values of 8.5e-28 and smaller (z about 10.9) were reported as
+    "equals its bound 0 in 11 settings", and two repairs were spent on a correct script. Only an exact 0 is the
+    trivial answer; a tiny value is inside the range and says nothing about the computation."""
+    p = _design({"path": "wilcoxon_p_one_sided", "min": 0, "max": 1})
+    tiny = {"by_set": {k: {"wilcoxon_p_one_sided": v} for k, v in {"a": 8.5e-28, "b": 3.1e-40, "c": 1.2e-19}.items()}}
+    assert pl.check_design(tiny, p) == []
+    zeros = {"by_set": {k: {"wilcoxon_p_one_sided": v} for k, v in {"a": 0.0, "b": 0.0, "c": 0.3}.items()}}
+    assert [x.kind for x in pl.check_design(zeros, p)] == ["at_bound"], "an exact 0 in several settings is still caught"
+    below = {"by_set": {"a": {"wilcoxon_p_one_sided": -1e-13}}}
+    assert pl.check_design(below, p) == [], "a hair below 0 is still on the minimum, not under it"
+
+
 def test_one_setting_on_a_bound_is_ordinary() -> None:
     assert pl.check_design(_sweep(r15=0.0, r30=0.94), _UNIT) == []
 
