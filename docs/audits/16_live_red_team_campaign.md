@@ -257,3 +257,27 @@ earlier run's `ORACLE_CHECK.json` stayed on disk and would have reached the anal
 now removed when the gate does not run; and the power-of-ten fix had been made in the provenance check's own reader
 only, leaving the numeric oracle misreading the same text, so it moved into the reader both share (which also stopped
 the existing LaTeX rule from swallowing the space after `10^-5`).
+
+## Fifth round: `claude_cli` / `sonnet` on the fourth round's fixes
+
+Same four topics, main at the fourth round's fixes, to see whether a stronger model gets past the plan mistakes
+`kimi-k3` kept making. Three of the four quests never got that far: the `claude` CLI hung on a node that writes a
+long answer (SIR and deterministic at `implement`, clustered at `plan`, twice, the resume reproducing it). Each time
+the stream carried thinking events for about six minutes, then stdout closed with no answer text and the child did
+not exit; FI stopped the quest with `_CliWedgeError`. The error does not keep the stream's last event, so the cause
+(the thinking using up the output limit, perhaps) is not established.
+
+The paired quest ran through: its four oracles passed on the first try (the fourth round's paired quest compared two
+roots that were not the same root), it reached a paper, and the review returned `revise` (3) with a correct catch:
+five intervals labelled "bootstrap" were the Student-t interval over the three seeds. 710,730 tokens.
+
+It also found an FI false positive. The one-sided Wilcoxon p-values were 8.5e-28 and smaller (z about 10.9 over 183
+pairs), and the plausibility gate reported `wilcoxon_p_one_sided` "equals its bound 0 in 11 settings": the tolerance
+that keeps a value on a bound from reading as outside it is absolute near 0 (1e-12), so every smaller value also
+counted as sitting on 0. Two `execute_reflect` repairs were spent on a correct script, each saying so. Fixed: on a
+bound of 0 only an exact 0 joins the at-bound count. Replayed on the quest's own results (with the key's original
+name), main reports the 11-setting violation and the fix reports none; a test fails on the old code.
+
+The second repair then renamed the key to `wilcoxon_p_asymptotic_normal`, and with that the design's assertion
+matched nothing and the gate went quiet. Here the value was right, but it shows a repair can leave a declared bound
+with nothing to check by renaming what it bounds. Not fixed here; recorded for a decision.
