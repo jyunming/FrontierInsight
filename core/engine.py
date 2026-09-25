@@ -54,6 +54,7 @@ from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
+from . import trial_runner as _trial_runner
 from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
@@ -5000,7 +5001,9 @@ class Engine:
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
         if extracted:  # nothing to seed in the stub written above
-            if simulate_code.strip():
+            if simulate_code.strip() and _trial_runner.entries(simulate_path) & {"run_trial", "run_cell"}:
+                pass  # the trial contract: FI hands every trial its seed, there is no seed for the script to read
+            elif simulate_code.strip():
                 # The seed belongs to the simulation: the analysis is deterministic.
                 _unused, deps = await self._repair_ignored_replicate_seed(
                     state, simulate_path, simulate_path.read_text(encoding="utf-8"), deps,
@@ -5109,10 +5112,28 @@ class Engine:
             return ("single_script" if _split_run.design_is_stochastic(state.get("design")) else "not_applicable"), []
         if result.returncode != 0:
             return "not_run", []
-        raw_dir = _split_run.raw_dir_for(self._raw_root(), 0)
-        # The same seed's own analysis output, so a claimed trial count can be checked against the real per-trial
-        # values the analysis had to work with, not just against the manifest's own other fields.
         result_json = _extract_result_json(getattr(result, "stdout", "") or "")
+        if getattr(self, "_trial_mode", False):
+            # FI ran the trials and wrote the ledger: its rows are the record, counted against the frozen protocol.
+            ledger = _trial_runner.read_ledger(self.quest_root)
+            if ledger is None:
+                return "differs", ["FI's own trial record (raw/ledger.jsonl) is missing: the trials did not run through FI"]
+            thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+            manifest, row_problems = _run_manifest.manifest_from_ledger(protocol, ledger, thresholds)
+            found = row_problems + _run_manifest.problems(protocol, manifest, result_json=result_json)
+            self._manifest_failed_trials = _run_manifest.failure_count(manifest)
+            self._manifest_analysis_problems = _run_manifest.analysis_output_problems(protocol, manifest, result_json)
+            return ("differs" if found else "ok"), found
+        if self.config.rigor_profile == "research":
+            # The older contract: the simulation ran its own loop and wrote its own record. Research needs FI's record,
+            # so the repair asks for the trial contract, and after it the quest stops.
+            return "differs", [
+                "simulate.py runs its own loop and writes its own trial record; this quest needs FI to run the trials: "
+                "simulate.py must define run_trial(cell, trial_id, seed) (or run_cell(cell) for a deterministic study) "
+                "that returns a dict of numbers for one trial, with no loop, no files and no RESULT_JSON, and "
+                "experiment.py must read FI's per-setting results from the file FI_TRIALS names"
+            ]
+        raw_dir = _split_run.raw_dir_for(self._raw_root(), 0)
         # v2: a per-trial ledger, when the script kept one, is counted by the engine instead of trusting a
         # self-reported summary -- the ledger row problems (an out-of-protocol cell, a duplicate trial id, a row
         # missing its status) come first, since those are wrong before the derived manifest is even compared with
@@ -5133,7 +5154,8 @@ class Engine:
             found = _run_manifest.problems(protocol, manifest, why, result_json=result_json)
         self._manifest_failed_trials = _run_manifest.failure_count(manifest) if manifest is not None else None
         self._manifest_analysis_problems = _run_manifest.analysis_output_problems(protocol, manifest, result_json)
-        return ("differs" if found else "ok"), found
+        # The older contract's record is the simulation's own statement, never the level FI's own record reaches.
+        return ("differs" if found else "self_reported"), found
 
     def _check_replicate_manifests(self, state: QuestState, split: bool, replicates: int) -> None:
         """The other seeds' manifests against the same protocol. A difference is recorded (and is a gap of the evidence
@@ -5738,7 +5760,16 @@ class Engine:
             reported: dict[str, Any] | None = None
             returncode, timed_out = 0, False
             stderr_tail = ""
-            if oracles and not incomplete:
+            if oracles and not incomplete and getattr(self, "_trial_mode", False):
+                # The trial contract: FI calls the simulation's oracle() in its own process.
+                values, why = await _trial_runner.run_oracle(
+                    self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
+                    timeout_s=timeout, env=env,
+                )
+                reported = {"checks": [{"name": k, "value": v} for k, v in values.items()]} if values is not None else None
+                returncode, timed_out = (0 if values is not None else 1), "ran out of time" in why
+                stderr_tail = getattr(self, "_packages_note", "") + why
+            elif oracles and not incomplete:
                 try:
                     ran = await self.executor.execute(
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
@@ -6247,7 +6278,17 @@ class Engine:
                 "(the code-writing step returned one script); running %s alone",
                 simulate_path.name, code_path.name,
             )
-        if split:
+        # The trial contract: simulate.py defines run_trial (or run_cell) and FI runs every trial and keeps their record
+        # (core/trial_runner.py). A simulation that still loops by itself is the older contract, whose record is its own.
+        trial_entries = _trial_runner.entries(simulate_path) if split else set()
+        self._trial_mode = bool(trial_entries & {"run_trial", "run_cell"})
+        if split and self._trial_mode:
+            runner = _trial_runner.TrialsRunner(
+                self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
+                deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
+                log=self._log,
+            )
+        elif split:
             runner = _split_run.SplitRunner(
                 self.executor, quest_root=self.quest_root,
                 raw_root=_split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir),
@@ -6581,9 +6622,9 @@ class Engine:
         # single-seed code paths are unchanged.
         # Replicates would submit the job again, once per seed.
         replicates_n = (
-            1 if self.config.execution.background_jobs
+            1 if self.config.execution.background_jobs or getattr(self, "_trial_mode", False)
             else max(1, int(self.config.engine.execute_replicates))
-        )
+        )  # under the trial contract runs_per_setting is every trial of a setting, each with its own seed
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
         # Whether the script can respond to the seed at all, whether it hands
@@ -12441,18 +12482,42 @@ Never sleep-wait for the job. Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or
 """
 
 _SPLIT_PROTOCOL = """\
-## The experiment is two scripts (execution.split_analysis is on)
+## The experiment is two scripts, and FI runs the trials (execution.split_analysis is on)
 
-This quest keeps the simulation and its analysis apart, so an analysis mistake never repeats a long simulation. That CHANGES the output format and the "single file" rule above: reply with TWO fenced Python blocks, the first starting with the line `# file: simulate.py` and the second with the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
+This quest keeps the simulation and its analysis apart, and FI itself runs every trial and keeps their record, so the
+record of what ran is never the simulation's own statement. That CHANGES the output format and the "single file" rule
+above: reply with TWO fenced Python blocks, the first starting with the line `# file: simulate.py` and the second with
+the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 
-**simulate.py** runs the simulation and nothing more: no statistics, no figures, no `RESULT_JSON`. It follows the `FI_REPLICATE_SEED` rule above (the seed belongs here). It saves EVERYTHING the analysis will need as files in the folder that the ENVIRONMENT VARIABLE `FI_RAW_DIR` names: `raw = pathlib.Path(os.environ["FI_RAW_DIR"])` then `raw.mkdir(parents=True, exist_ok=True)`. `FI_RAW_DIR` is a variable, not a folder name: FI sets it to the path chosen for this run (for example `raw/seed0`, relative to the working directory), and a folder called `FI_RAW_DIR` is not it. Save CSV, JSON, `.npy` or `.npz`, complete enough that the analysis never has to run the simulation again (the value of every run, not only its mean). It ignores `FI_PILOT`. A run that saves nothing in that folder fails.
+**simulate.py defines functions; it has no loop over settings or trials and no `if __name__ == "__main__"` block.**
+- For a study with randomness: `def run_trial(cell: dict, trial_id: int, seed: int) -> dict` runs ONE trial of ONE
+  setting. `cell` holds one value of each grid parameter (`{"R0": 1.5, "N": 1000}`); build ONE generator from `seed`
+  (`numpy.random.default_rng(seed)` or `random.Random(seed)`) and use only it. FI calls it `runs_per_setting` times for
+  every setting of the protocol's grid, each call with its own seed: the `FI_REPLICATE_SEED` rule above does not apply
+  here, and the function never picks, derives or fixes a seed of its own.
+- For a deterministic study (no randomness): `def run_cell(cell: dict) -> dict` computes one setting, called once per
+  setting.
+- The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
+  (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
+  reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
+- When the protocol lists oracles: `def oracle() -> dict` computes, with the SAME simulation code, the values the
+  protocol's oracles name (the cases with a known answer), returned as a dict keyed by the oracle names; this replaces
+  the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
 
-**experiment.py** is the analysis. It reads ONLY from that same folder, `pathlib.Path(os.environ["FI_RAW_DIR"])` (it never imports or calls simulate.py and never runs the simulation), computes the summary statistics, draws the figures into `figures/` and prints the `RESULT_JSON: {...}` last line, exactly as the rules above ask of the experiment: the figure rules, the stratification rule and the no-clamping rule are its rules. It is run once per seed straight after simulate.py, so it must be quick and deterministic.
+**experiment.py is the analysis.** FI runs it once, after all the trials. It reads FI's record of them from the file
+the environment variable `FI_TRIALS` names: `json.load(open(os.environ["FI_TRIALS"]))` gives
+`{"thresholds": {"<name>": <value>}, "cells": [{"cell": {...}, "key": "R0=1.5,N=1000", "planned": n, "ok": k,
+"failed": f, "metrics": {"<name>": {"values": [...], "count": k, "total": ...}}}]}`, one entry per setting, the values of
+the trials that succeeded, and the protocol's thresholds: a threshold the analysis applies (what counts as an outbreak,
+a success, a pass) is read from there, never written into a script as a number of its own. It never imports or calls simulate.py. It computes the summary statistics from those values, draws the
+figures into `figures/` and prints the `RESULT_JSON: {...}` last line, exactly as the rules above ask: the figure
+rules, the stratification rule and the no-clamping rule are its rules, and every `<name>_values` / `_count` / `_total`
+it reports comes from those lists, never from a number of its own. A setting with failed trials is reported with the
+trials that succeeded and says how many failed.
 
-If an outline is given, it describes the whole experiment as one program: put its simulation functions in simulate.py and its statistics, figure and `RESULT_JSON` functions in experiment.py, keep every name and signature, and let the two meet only through the files in `FI_RAW_DIR`.
+If an outline is given, it describes the whole experiment as one program: put the code of one trial in `run_trial` (or
+`run_cell`) and the statistics, figure and `RESULT_JSON` code in experiment.py, keeping every name and signature.
 """
-
-_SPLIT_PROTOCOL = _SPLIT_PROTOCOL.rstrip("\n") + "\n\n" + _run_manifest.contract().strip() + "\n"
 
 _PLAN_DIRECTIVE = """
 
@@ -12509,15 +12574,15 @@ Reply with exactly two fenced Python blocks: the first starting with the line `#
 """
 
 _SPLIT_RERUN_NOTE = """
-The experiment is two scripts. Give simulate.py back exactly as it is unless the problem the review found is IN the simulation: the raw files it already wrote are then used as they are, and only experiment.py runs again. Rewrite simulate.py only when the simulation itself has to change.
+The experiment is two scripts. Give simulate.py back exactly as it is unless the problem the review found is IN the simulation: the trials FI already ran are then used as they are, and only experiment.py runs again. Rewrite simulate.py only when the simulation itself has to change.
 """
 
 _SPLIT_REFLECT_SIMULATE = """\
-SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. experiment.py (the analysis) reads only what simulate.py saves in the folder named by FI_RAW_DIR, and it did not run. Fix simulate.py and return the whole of it; it must keep saving everything the analysis needs in FI_RAW_DIR and must not print RESULT_JSON or draw figures.
+SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI calls its run_trial(cell, trial_id, seed) (or run_cell(cell)) once per trial and keeps the record itself; no trial succeeded, so experiment.py did not run. Fix simulate.py and return the whole of it: the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, no files and no RESULT_JSON.
 """
 
 _SPLIT_REFLECT_ANALYSIS = """\
-SPLIT EXPERIMENT: this script is experiment.py, the analysis half of a two-script experiment. The simulation has already run and its raw files are on disk; this script reads only the folder named by FI_RAW_DIR and must not run the simulation again. Fix experiment.py and return the whole of it. The raw files there are:
+SPLIT EXPERIMENT: this script is experiment.py, the analysis half of a two-script experiment. FI has already run the trials; this script reads FI's per-setting results from the file the environment variable FI_TRIALS names (in the folder FI_RAW_DIR names) and must not run the simulation again. Fix experiment.py and return the whole of it. The files there are:
 {listing}
 """
 

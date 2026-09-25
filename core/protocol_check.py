@@ -299,10 +299,19 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     return out
 
 
+_FI_RUNS_TRIALS = re.compile(r"^def\s+(run_trial|run_cell)\s*\(", re.MULTILINE)
+
+
 def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mismatch]:
-    """The ways ``scripts`` (file name -> source) contradict ``protocol``; empty when they do not."""
+    """The ways ``scripts`` (file name -> source) contradict ``protocol``; empty when they do not.
+
+    Under the trial contract (simulate.py defines ``run_trial`` or ``run_cell``) FI itself hands the simulation every
+    setting of the grid, runs ``runs_per_setting`` trials of each and gives the analysis the protocol's thresholds, so
+    none of those has to appear in the scripts, and only the random-stream check applies."""
     if not isinstance(protocol, dict) or not scripts:
         return []
+    if _FI_RUNS_TRIALS.search(scripts.get("simulate.py", "")):
+        protocol = {k: v for k, v in protocol.items() if k not in ("grid", "runs_per_setting", "thresholds")}
     lists, scalars, numbers = _read(scripts)
     out: list[Mismatch] = []
 

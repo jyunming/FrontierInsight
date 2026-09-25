@@ -179,7 +179,7 @@ def _append(path: Path, row: dict[str, Any]) -> None:
         fh.write(json.dumps(row, allow_nan=True, default=str) + "\n")
 
 
-def _summary(runs: list[CellRun]) -> dict[str, Any]:
+def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
     """Per cell, each metric's values over the trials that succeeded, with their count and total: what the analysis
     script reads (``FI_TRIALS``) and what FI's statistics are computed from."""
     out = []
@@ -206,13 +206,13 @@ def _summary(runs: list[CellRun]) -> dict[str, Any]:
                 for name, values in metrics.items()
             },
         })
-    return {"schema": "fi.trials/v1", "cells": out}
+    return {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": out}
 
 
 async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
-    run_id: str = "",
+    run_id: str = "", thresholds: dict[str, Any] | None = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds each cell's process."""
@@ -282,7 +282,7 @@ async def run_trials(
             })
         runs.append(run)
     summary = raw / SUMMARY_NAME
-    summary.write_text(json.dumps(_summary(runs), indent=1, allow_nan=True), encoding="utf-8")
+    summary.write_text(json.dumps(_summary(runs, thresholds), indent=1, allow_nan=True), encoding="utf-8")
     return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
 
 
@@ -304,11 +304,11 @@ class TrialsRunner:
     returns is the analysis's run, its stderr led by every cell's (so the simulation's warnings reach the numeric
     check). ``failed_script`` says which script to repair; ``last`` keeps the trial run for the checks after it."""
 
-    def __init__(self, executor: Any, *, quest_root: Path, protocol: dict[str, Any], deterministic: bool,
+    def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
                  simulate: Path, analysis: Path, log: Any = None) -> None:
         self.executor = executor
         self.quest_root = Path(quest_root)
-        self.protocol = protocol or {}
+        self._protocol = protocol
         self.deterministic = deterministic
         self.simulate = Path(simulate)
         self.analysis = Path(analysis)
@@ -323,12 +323,21 @@ class TrialsRunner:
             return await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         started = time.monotonic()
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
-        grid = self.protocol.get("grid") if isinstance(self.protocol.get("grid"), dict) else {}
-        runs = int(self.protocol.get("runs_per_setting") or 1)
-        run = await run_trials(
-            self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
-            runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
-        )
+        protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        runs = int(protocol.get("runs_per_setting") or 1)
+        key = _run_key(self.simulate, [grid, protocol.get("thresholds")], runs, base, self.deterministic)
+        run = _load_run(self.quest_root, key)
+        if run is not None:
+            if self.log is not None:
+                self.log.info("[execute] simulate.py and the protocol are unchanged: the trials FI already ran are used")
+        else:
+            run = await run_trials(
+                self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
+                runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
+                thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+            )
+            _save_run(self.quest_root, key, run)
         self.last = run
         if self.log is not None:
             self.log.info("[execute] FI ran %d trial(s) in %d cell(s): %d ok, %d failed (ledger: %s)",
@@ -349,6 +358,42 @@ class TrialsRunner:
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+
+RUN_RECORD = Path(".fi") / "trials" / "run.json"
+
+
+def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> str:
+    """What decides a set of trials: the simulation's text, the grid, the count, the base seed and the entry."""
+    try:
+        text = Path(simulate).read_bytes()
+    except OSError:
+        text = b""
+    return hashlib.sha256(text + json.dumps([grid, runs, base, deterministic], sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
+    record = {"key": key, "cells": [
+        {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
+         "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error} for c in run.cells]}
+    try:
+        (Path(quest_root) / RUN_RECORD).write_text(json.dumps(record, allow_nan=True, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _load_run(quest_root: Path, key: str) -> TrialRun | None:
+    """The trials already run for ``key``, when their record, FI's ledger and the summary are all still there: a rerun
+    of the analysis alone (a review's revision, a repaired experiment.py) does not run the simulation again."""
+    root = Path(quest_root)
+    ledger, summary = root / RAW_DIRNAME / LEDGER_NAME, root / RAW_DIRNAME / SUMMARY_NAME
+    try:
+        record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if record.get("key") != key or not ledger.is_file() or not summary.is_file():
+        return None
+    return TrialRun(cells=[CellRun(**c) for c in record.get("cells") or []], ledger_path=ledger, summary_path=summary)
 
 
 async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,

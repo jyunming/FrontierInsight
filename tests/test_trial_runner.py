@@ -153,3 +153,32 @@ def test_the_oracle_is_its_own_function(tmp_path: Path) -> None:
     values, why = asyncio.run(trial_runner.run_oracle(
         SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", timeout_s=60))
     assert values is None and "has no function oracle()" in why
+
+
+def test_unchanged_trials_are_not_run_again_for_a_new_analysis(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class Counting(SharedInterpreterExecutor):
+        async def execute(self, cmd, **kw):  # noqa: ANN001, ANN003
+            calls.append(cmd)
+            return await super().execute(cmd, **kw)
+
+    def runner():  # noqa: ANN202
+        return trial_runner.TrialsRunner(
+            Counting(python_version="3.11"), quest_root=root, protocol=lambda: {"grid": {"R0": [1.5]}, "runs_per_setting": 2},
+            deterministic=False, simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+        )
+
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    asyncio.run(runner().execute(cmd, cwd=root, timeout_s=60, env={}))
+    assert len(calls) == 2  # one cell, then the analysis
+    again = runner()
+    asyncio.run(again.execute(cmd, cwd=root, timeout_s=60, env={}))
+    assert len(calls) == 3 and again.last is not None and again.last.ok_trials == 2, "only the analysis ran again"
+    (root / "code" / "simulate.py").write_text(SIM + "\n# changed\n", encoding="utf-8")
+    asyncio.run(runner().execute(cmd, cwd=root, timeout_s=60, env={}))
+    assert len(calls) == 5, "a changed simulation runs its trials again"
