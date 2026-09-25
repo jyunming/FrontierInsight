@@ -1037,6 +1037,19 @@ def smart_default_paper_format(partial: dict[str, Any]) -> str:
     return "generic"
 
 
+def smart_default_output_kinds(partial: dict[str, Any]) -> list[str]:
+    """Paper + PDF, and the slides, poster or talk script when the topic asks for them."""
+    topic = (partial.get("topic") or "").lower()
+    kinds = ["paper_md", "paper_pdf"]
+    if re.search(r"\bslides?\b|slide deck|presentation", topic):
+        kinds.append("slides")
+    if re.search(r"\bposter\b", topic):
+        kinds.append("poster")
+    if re.search(r"\btalk\b|\bspeech\b|talk script", topic):
+        kinds.append("speech")
+    return kinds
+
+
 def smart_default_study_depth(partial: dict[str, Any]) -> str:
     """policy_brief is by definition 2-4 pages → 'brief preprint'.
     The other formats keep the journal-length default unless the
@@ -1125,6 +1138,7 @@ def smart_default_knowledge_external_top_k(partial: dict[str, Any]) -> int:
 # considers what's already answered.
 SMART_DEFAULTS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "paper_format": smart_default_paper_format,
+    "output_kinds": smart_default_output_kinds,
     "title": smart_default_title,
     "no_simulation": smart_default_no_simulation,
     "survey_mode": smart_default_survey_mode,

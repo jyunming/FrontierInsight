@@ -59,3 +59,39 @@ def test_the_profile_is_not_served_to_a_page_on_another_machine(tmp_path) -> Non
     profile.save({"author": "Jane Chen"})
     remote = TestClient(make_app(tmp_path), client=("192.168.1.20", 5000))
     assert remote.get("/api/profile").json()["profile"] is None
+
+
+def test_a_page_behind_a_proxy_is_not_local_and_mapped_loopback_is(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    profile.save({"author": "Jane Chen"})
+    local = TestClient(make_app(tmp_path))
+    assert local.get("/api/profile", headers={"X-Forwarded-For": "203.0.113.9"}).json()["profile"] is None
+    mapped = TestClient(make_app(tmp_path), client=("::ffff:127.0.0.1", 5000))
+    assert mapped.get("/api/profile").json()["profile"]["author"] == "Jane Chen"
+
+
+def test_a_page_that_did_not_change_the_author_line_does_not_overwrite_a_newer_one(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+
+    from tests.test_web_interview_tier_flow import _author_payload
+    from web.server import make_app
+
+    seen = profile.save({"author": "Jane"})
+    profile.save({"author": "Alice"})  # another tab changed it meanwhile
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/interview/submit", json=_author_payload(author="Jane", profile_seen=seen))
+    assert r.status_code == 200 and r.json()["profile_saved"] is None
+    assert profile.load()["author"] == "Alice"
+
+
+def test_a_malformed_per_step_model_entry_is_refused() -> None:
+    import pytest
+
+    from tests.test_web_interview_tier_flow import _author_payload
+    from web.interview_routes import _parse_answers
+
+    with pytest.raises(ValueError, match="node_models"):
+        _parse_answers(_author_payload(node_models="bogus"))

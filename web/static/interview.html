@@ -593,6 +593,16 @@
     ['history of', 'essay'], ['evolution of', 'essay'], ['the story of', 'essay'], ['development of', 'essay'],
     ['retrospective', 'essay'],
   ];
+  // Mirrors core/interview.py:smart_default_output_kinds.
+  function outputKindsFor(topic) {
+    const t = String(topic || '').toLowerCase();
+    const kinds = ['paper_md', 'paper_pdf'];
+    if (/\bslides?\b|slide deck|presentation/.test(t)) kinds.push('slides');
+    if (/\bposter\b/.test(t)) kinds.push('poster');
+    if (/\btalk\b|\bspeech\b|talk script/.test(t)) kinds.push('speech');
+    return kinds;
+  }
+
   function paperFormatFor(topic) {
     const t = String(topic || '').toLowerCase();
     const hit = FORMAT_TOPIC_MARKERS.find(([m]) => t.includes(m));
@@ -638,7 +648,7 @@
     // a value the person already set is kept.
     const tier1 = { ...given };
     tier1.paper_format = tier1.paper_format || paperFormatFor(tier1.topic);
-    tier1.output_kinds = tier1.output_kinds || questionDefault('output_kinds') || ['paper_md', 'paper_pdf'];
+    tier1.output_kinds = tier1.output_kinds || outputKindsFor(tier1.topic);
     tier1.study_depth = tier1.study_depth || studyDepthFor(tier1.paper_format, tier1.topic);
     return {
       paper_format: tier1.paper_format,
@@ -731,7 +741,7 @@
     // New-quest flow: validate tier-1, derive tier-2/3, render review.
     if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
     if (!out.provider || !String(out.provider).trim()) { alert('Pick the LLM provider.'); return false; }
-    pendingAnswers = { ...(savedProfile || {}), ...out };
+    pendingAnswers = { ...(savedProfile || {}), ...out, profile_seen: savedProfile };
     editedFields.clear();
     const derived = await deriveTier2(out);
     const advanced = deriveTier3({ ...out, ...derived });
@@ -986,7 +996,7 @@
     }
     const body = await res.json();
     if (!asUpdate && body.profile_saved === false) {
-      alert('The quest was created, but your author line could not be kept for the next quests (see the server log).');
+      alert('The quest was created, but your author line could not be kept for the next quests (the server log says why).');
     }
     if (!asUpdate && body.quest_id) {
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;

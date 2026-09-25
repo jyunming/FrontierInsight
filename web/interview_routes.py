@@ -78,7 +78,11 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
     def _local(request: Request) -> bool:
         # The author line is personal and the server has no login: it is read or kept only for a page opened on this
         # machine, whatever address --serve was bound to.
+        if any(h in request.headers for h in ("x-forwarded-for", "forwarded", "x-real-ip")):
+            return False  # came through a proxy: the person is somewhere else
         host = (request.client.host if request.client else "") or ""
+        if host.startswith("::ffff:"):
+            host = host[len("::ffff:"):]
         return host in ("127.0.0.1", "::1", "localhost", "testclient")
 
     @app.get("/api/profile")
@@ -207,14 +211,22 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # read too) when it is new or was changed on the review screen, and only from a page on this machine.
         from core import profile
 
-        profile_saved: bool | None = None
         line = {k: getattr(answers, k) for k in profile.FIELDS}
-        if _local(request) and profile.load() != line:
+        seen = body.get("profile_seen")  # what the page loaded: kept only when this page changed it
+
+        def keep_profile() -> bool | None:
+            if not _local(request):
+                return None
+            saved = profile.load()
+            if saved == line or (saved is not None and isinstance(seen, dict)
+                                 and {k: str(seen.get(k) or "") for k in profile.FIELDS} == line):
+                return None
             try:
                 profile.save(line)
-                profile_saved = True
-            except OSError:
-                profile_saved = False  # the quest goes on; the page says the line was not kept
+                return True
+            except OSError as e:
+                _log.warning("the author line could not be kept in %s: %r", profile.path(), e)
+                return False  # the quest goes on; the page says the line was not kept
 
         # Optional in-server launch. Triggered by the interview form's
         # "Launch immediately after submit" checkbox (default ON). The
@@ -246,7 +258,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                     headers={"Retry-After": "30"},
                 )
             return JSONResponse({
-                "profile_saved": profile_saved,
+                "profile_saved": keep_profile(),
                 "yaml_path": str(yaml_path),
                 "quest_id": launched.quest_id,
                 "pid": launched.pid,
@@ -255,7 +267,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             })
 
         return JSONResponse({
-            "profile_saved": profile_saved,
+            "profile_saved": keep_profile(),
             "yaml_path": str(yaml_path),
             "draft_only": True,
             "next_step": (
@@ -310,6 +322,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # MUST be threaded through here — omitting them silently
         # dropped non-default values on every web --update submit.
         new = InterviewAnswers(
+            **_review_extras(body),
             topic=current.topic,
             title=current.title,
             output_kinds=new_answers.output_kinds,
@@ -618,6 +631,8 @@ def _review_extras(body: dict[str, Any]) -> dict[str, Any]:
         out[qid] = str(body[qid])
     node_models = str(body.get("node_models") or "").strip()
     if node_models:
-        parse_node_models_answer(node_models)  # raises ValueError on a malformed pair
+        pairs = [p for p in node_models.split(",") if p.strip()]
+        if len(parse_node_models_answer(node_models)) != len(pairs):
+            raise ValueError(f"node_models: each entry is step:model, comma separated, not {node_models!r}")
         out["node_models"] = node_models
     return out

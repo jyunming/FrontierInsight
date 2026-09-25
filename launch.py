@@ -3464,7 +3464,7 @@ async def _run_new(
                 fresh3 = derive_tier3({**partial, **derived})
                 advanced.update({k: v for k, v in fresh3.items()
                                  if k not in edited and k not in ("comparative_baseline", "success_metric", "budget")})
-                if row["id"] == "paper_format":
+                if row["id"] == "paper_format" and new_val != row["value"]:
                     # The suggested baseline, metric and budget were for the old format: asked again for this one.
                     print("⏳ The paper format changed; asking for topic-tuned suggestions again...")
                     try:

@@ -329,7 +329,7 @@ export async function runInterview(
 `);
 
     const paperFormat: PaperFormat = paperFormatFor(topic);
-    const outputKinds = ["paper_md", "paper_pdf"];
+    const outputKinds = outputKindsFor(topic);
     const studyDepth = studyDepthFor(paperFormat, topic);
     const missingNote = missingToolsNote(outputKinds);
     if (missingNote) stream.markdown(missingNote);
@@ -435,11 +435,15 @@ export async function runInterview(
             return answers;  // the caller keeps the author line once the config is written (keepAuthorLine)
         }
         if (action.value === "edit_default") {
+            const before = JSON.stringify(answers);
             await editTier2Field(answers, edited);
+            markChanged(before, answers, edited);
             continue;
         }
         if (action.value === "edit_advanced") {
+            const before3 = JSON.stringify(answers);
             await editTier3Field(answers, edited);
+            markChanged(before3, answers, edited);
             continue;
         }
     }
@@ -776,6 +780,30 @@ function paperFormatFor(topic: string): PaperFormat {
     return hit ? hit[1] : "generic";
 }
 
+/** The fields the person really changed in one edit (a picker opened and cancelled changes nothing). */
+function markChanged(before: string, after: InterviewAnswers, edited: Set<string>): void {
+    const old = JSON.parse(before) as Record<string, unknown>;
+    const now = after as unknown as Record<string, unknown>;
+    // What a changed paper format or depth re-derived is not the person's own change.
+    const derived = new Set(["study_depth", "no_simulation", "knowledge_top_k", "knowledge_external_top_k"]);
+    const changedFormat = old.paper_format !== now.paper_format || old.study_depth !== now.study_depth;
+    for (const k of Object.keys(now)) {
+        if (JSON.stringify(old[k]) === JSON.stringify(now[k])) continue;
+        if (changedFormat && derived.has(k) && !(k === "study_depth" && old.paper_format === now.paper_format)) continue;
+        edited.add(k);
+    }
+}
+
+/** Mirrors core/interview.py:smart_default_output_kinds. */
+function outputKindsFor(topic: string): string[] {
+    const t = topic.toLowerCase();
+    const kinds = ["paper_md", "paper_pdf"];
+    if (/\bslides?\b|slide deck|presentation/.test(t)) kinds.push("slides");
+    if (/\bposter\b/.test(t)) kinds.push("poster");
+    if (/\btalk\b|\bspeech\b|talk script/.test(t)) kinds.push("speech");
+    return kinds;
+}
+
 /** Keep the author line for the next quests (once the config is written): when it is new or was changed. */
 export function keepAuthorLine(a: InterviewAnswers): void {
     const line: AuthorLine = {
@@ -936,8 +964,6 @@ async function editTier2Field(a: InterviewAnswers, edited: Set<string> = new Set
         { title: "Edit which default?", ignoreFocusOut: true },
     );
     if (!which) return;
-    edited.add(which.value);
-    if (which.value === "no_simulation") edited.add("survey_mode");
     if (which.value === "author_line") {
         const v = await askAuthorLine(a);
         if (v) Object.assign(a, v);
@@ -1192,7 +1218,6 @@ async function editTier3Field(a: InterviewAnswers, edited: Set<string> = new Set
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
-    edited.add(which.value);
     if (which.value === "ensemble") {
         const v = await pickEnsemble();
         if (v) {
