@@ -358,8 +358,9 @@ def _a_list_the_run_holds(token: str, traceable: "Traceable") -> bool:
     is nowhere in the run but every group is: it is a list (a real paper's grid of population sizes, which the check
     called one untraceable number, and the rewrite then cut from Methods). A group with a leading zero ("1,050") is a
     thousands group, never a list member, so such a run is left as one number."""
-    groups = token.lstrip("+-").split(",")
-    if len(groups) < 2 or any(len(g) > 1 and g.startswith("0") for g in groups) or not all(g.isdigit() for g in groups):
+    groups = token.split(",")
+    digits = [g.lstrip("+-") if i == 0 else g for i, g in enumerate(groups)]  # a sign belongs to the first member
+    if len(groups) < 2 or any(len(d) > 1 and d.startswith("0") for d in digits) or not all(d.isdigit() for d in digits):
         return False
     return all(traceable.find(float(g), 0) is not None for g in groups)
 

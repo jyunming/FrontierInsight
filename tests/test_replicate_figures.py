@@ -576,3 +576,9 @@ def test_the_claim_check_sees_the_mean_over_the_seeds(tmp_path: Path) -> None:
     results_heading = "The run's results (result_json)"
     assert results_heading in seen["prompt"]
     assert seen["prompt"].index(results_heading) < seen["prompt"].index(means)
+
+
+def test_an_interval_named_only_by_its_level_or_in_parentheses_is_rewritten_cleanly() -> None:
+    from core.engine import _redrawn_band_text
+    assert _redrawn_band_text("exact (95%)", 3) == "95% CI over 3 seeds"
+    assert _redrawn_band_text("P(major) (+/- 1 SD)", 3) == "P(major) (95% CI over 3 seeds)"

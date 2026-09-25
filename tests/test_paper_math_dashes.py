@@ -229,3 +229,10 @@ def test_set_and_logic_symbols_in_prose_become_latex() -> None:
     out = text.translate(paper._LATEX_UNICODE_TRANSLATOR)
     assert not any(ord(ch) > 127 for ch in out), out
     assert r"\ensuremath{\in}" in out and r"\ensuremath{\mathbb{R}}" in out
+
+
+def test_per_mille_is_set_so_it_works_inside_math_too() -> None:
+    """``\\textperthousand`` alone is text-only: inside $...$ pdflatex warned it invalid in math mode."""
+    from generation import paper
+
+    assert "5‰".translate(paper._LATEX_UNICODE_TRANSLATOR) == r"5\ensuremath{\text{\textperthousand}}"

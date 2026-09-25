@@ -98,3 +98,14 @@ def test_figures_out_of_number_order_have_their_references_renumbered_to_where_t
     assert "![C, beside Figure 3](c.png)" in out and "Figure 3 in code" in out
     in_order = "See Figure 2.\n\n![**Figure 1.** A](a.png)\n\n![**Figure 2.** B](b.png)"
     assert numbers_off_figure_captions(in_order).startswith("See Figure 2."), "figures in order: references untouched"
+
+
+def test_renumbering_leaves_file_names_alone_and_keeps_a_range_in_order() -> None:
+    from generation._figure_captions import numbers_off_figure_captions
+    md = (
+        "![**Figure 1.** a](figures/a.png)\n\n![**Figure 3.** c](figures/figure3.png)\n\n![**Figure 2.** b](figures/b.png)\n\n"
+        "See Figure 3 and Figs. 2-3; inline ![x](figures/figure3.png) and figure3.png stay.\n"
+    )
+    out = numbers_off_figure_captions(md)
+    assert "See Figure 2 and Figs. 2-3;" in out
+    assert out.count("figures/figure3.png") == 2 and "and figure3.png stay" in out

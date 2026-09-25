@@ -44,7 +44,9 @@ def without_number(caption: str) -> str:
 _CAPTION_NUMBER_RE = re.compile(r"^\s*(?:\*\*|\*|__|_)?\s*(?:figure|fig\.?)\s*(\d+)", re.IGNORECASE)
 # "Figure 3", "Fig. 3", "Figures 2 and 3", "Figs. 2-4": a reference in the text, with every number it names.
 _REFERENCE_RE = re.compile(
-    r"\b(?P<word>Figures?|Figs?\.?)(?P<gap>\s*)(?P<nums>\d+[a-z]?(?:\s*(?:,|and|&|–|—|-|to)\s*\d+[a-z]?)*)",
+    # Not a path or a file name: "figures/figure3.png" is a link, and renumbering it broke the image.
+    r"(?<![/\\\w.-])(?P<word>Figures?|Figs?\.?)(?P<gap>\s*)"
+    r"(?P<nums>\d+[a-z]?(?:\s*(?:,|and|&|–|—|-|to)\s*\d+[a-z]?)*)(?![\w.]*\.[A-Za-z])",
     re.IGNORECASE,
 )
 
@@ -73,6 +75,9 @@ def _figure_order(lines: list[str]) -> dict[int, int] | None:
 def _renumbered(text: str, order: dict[int, int]) -> str:
     def one(m: re.Match[str]) -> str:
         nums = re.sub(r"\d+", lambda d: str(order.get(int(d.group(0)), int(d.group(0)))), m.group("nums"))
+        span = re.fullmatch(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)", nums)
+        if span and int(span.group(1)) > int(span.group(3)):  # "Figs. 2-3" with the two swapped reads "2-3", not "3-2"
+            nums = span.group(3) + span.group(2) + span.group(1)
         return m.group("word") + m.group("gap") + nums
 
     return _REFERENCE_RE.sub(one, text)

@@ -190,7 +190,7 @@ _LATEX_UNICODE_REPLACEMENTS: dict[str, str] = {
     "ℂ": r"\ensuremath{\mathbb{C}}",
     "′": r"\ensuremath{'}",
     "″": r"\ensuremath{''}",
-    "‰": r"\textperthousand{}",
+    "‰": r"\ensuremath{\text{\textperthousand}}",  # \text: the symbol is text-only, and a $5‰$ is math
     # Invisible / zero-width format characters an LLM silently emits
     # (copy-paste from rendered text, tokenizer artifacts). They render
     # as nothing but pdflatex still hard-errors ("Unicode character …

@@ -14238,11 +14238,13 @@ def _redrawn_band_text(text: Any, n: int) -> Any:
     ours = f"95% CI over {n} seeds"
 
     def method(m: re.Match[str]) -> str:
-        if not (m.group("pre") or m.group("post") or m.group("what")):
+        if not (m.group("pre") or m.group("post") or m.group("what") or m.group("paren")):
             return m.group(0)
         return ours
 
     out = _INTERVAL_METHOD_RE.sub(method, text)
+    # "(+/- 1 SD)" in parentheses is replaced whole, so no "(, 95% ...)" is left behind.
+    out = re.sub(r"\(\s*" + _SPREAD_RE.pattern.lstrip(r"\s*") + r"\s*\)", f"({ours})", out, flags=re.IGNORECASE)
     return _SPREAD_RE.sub(f", {ours}", out)
 
 

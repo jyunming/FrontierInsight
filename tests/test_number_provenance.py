@@ -755,3 +755,8 @@ def test_a_comma_list_of_three_digit_values_the_run_holds_is_a_list_not_one_numb
     assert [f.token for f in missing.findings] == ["100,250,500"]
     assert check("A total of 1,050 runs, peak 0.4121.",
                                    result_json={"a": [1, 50], "peak": 0.4121}).untraceable == 1
+
+
+def test_a_comma_list_whose_first_member_is_negative_is_still_a_list() -> None:
+    assert check("Offsets -100,250,500 and peak 0.4121.",
+                 result_json={"o": [-100, 250, 500], "peak": 0.4121}).untraceable == 0
