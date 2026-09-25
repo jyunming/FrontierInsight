@@ -203,6 +203,10 @@ def rank_by_relevance(texts: list[str], query: str) -> list[float]:
     return _lexical_scores(list(texts), query)
 
 
+#: The most of one source's text that is chunked and ranked for a prompt (about 250 chunks).
+MAX_RANKED_CHARS = 300_000
+
+
 def select_relevant_excerpt(
     content: str,
     query: str,
@@ -224,7 +228,9 @@ def select_relevant_excerpt(
     content = content or ""
     if not query or not query.strip() or len(content) <= budget_chars:
         return content[:budget_chars]
-    chunks = chunk_text(content, chunk_chars=chunk_chars)
+    # Ranked over the first MAX_RANKED_CHARS: a source's whole text can now be megabytes (a book read to the end), and
+    # every chunk is embedded on every prompt. A paper fits well inside; only a long book's later chapters go unranked.
+    chunks = chunk_text(content[:MAX_RANKED_CHARS], chunk_chars=chunk_chars)
     if len(chunks) <= 1:
         return content[:budget_chars]
 

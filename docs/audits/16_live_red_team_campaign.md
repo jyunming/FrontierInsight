@@ -391,6 +391,19 @@ packages go into the quest's environment and library skills onto its path, and t
 be installed and why. Reproduced with a real venv and the real skill: the old code logged `pip install ['numpy',
 'lieflat_charts']` rc=1 and died on `ModuleNotFoundError: No module named 'numpy'`; the new code installed numpy and
 the script ran.
+## Reading a paper whole: OCR for scanned PDFs, no 64 KB cut
+
+A user found literature coming back as snippets and cut-off articles. Measured: every PDF went through pypdf's
+`extract_text()` alone (words split mid-way), a scanned PDF (most papers from before the 1990s) gave no text at all
+and fell back to the search snippet, the text was cut at 64 KB (gp4's full-text files all sat at 40-69 KB), and
+anything over 300 characters counted as full text (gp4's lit_002 was its own abstract again, lit_021 a book's table
+of contents). `core/pdf_text.py` now reads every PDF whole (PyMuPDF if installed, else pypdfium2), scanned pages by
+OCR (tesseract, else RapidOCR; never a language model), up to 10 MB; a fetched scan is read after the fetch budget,
+cached by its SHA-256. `content_quality` tells `full_text` from `abstract_only` and `preview_only`. The state keeps
+64 KB of each source and the whole text is on disk. Measured on an image-only copy of a real two-column paper
+(ResNet, 3 pages) with RapidOCR 3.9: 95.8% of its words recovered, columns in reading order, about 11 s a page. The
+older `rapidocr_onnxruntime` dropped the spaces between English words, so it is not used.
+
 ## What was approved is what runs
 
 The re-audit asked that the settings shown on the confirm screen be the ones that run. The interview now resolves them
