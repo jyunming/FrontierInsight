@@ -55,7 +55,8 @@ def _number(v):
 def main():
     import os
     spec_path = sys.argv[1]
-    spec = json.load(open(spec_path, encoding="utf-8"))
+    with open(spec_path, encoding="utf-8") as f:  # closed before it is deleted: Windows refuses to delete an open file
+        spec = json.load(f)
     out = open(sys.argv[2], "w", encoding="utf-8")
     nonce = spec.pop("nonce")
     # What names the results file and the nonce goes before the simulation is loaded: the spec file is deleted and argv

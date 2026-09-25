@@ -79,6 +79,20 @@ def test_fi_writes_the_ledger_and_the_per_cell_summary(tmp_path: Path) -> None:
     assert [e["event"] for e in events][:1] == ["planned"] and events[-1]["warnings"] in (0, 1)
 
 
+def test_the_spec_file_is_gone_before_the_simulation_loads(tmp_path: Path) -> None:
+    """The spec names the nonce; the harness deletes it before loading the simulation. On Windows a file still open
+    cannot be deleted, so this also checks the harness closed it first."""
+    peek = '''
+import glob
+SEEN = len(glob.glob("**/cell*.json", recursive=True))
+
+def run_trial(cell, trial_id, seed):
+    return {"spec_files_seen": float(SEEN)}
+'''
+    _root, run = _run(tmp_path, peek, {"a": [1]}, runs=1)
+    assert run.ok_trials == 1 and run.cells[0].rows[0]["values"]["spec_files_seen"] == 0.0
+
+
 def test_trials_a_crashed_process_never_reported_are_failed_with_why(tmp_path: Path) -> None:
     root, run = _run(tmp_path, CRASH, {"a": [1]})
     statuses = [r.get("status") for r in run.cells[0].rows]

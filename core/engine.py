@@ -7003,6 +7003,9 @@ class Engine:
             # The trial contract: the one result holds every trial of every setting FI ran, each with its own seed; the
             # intervals, precision targets and metric statistics are computed from it (pooled counts and values).
             patch["result_json_replicates"] = [{"_seed": 0, **result_json}]
+        elif getattr(self, "_trial_mode", False):
+            # No result this pass: the previous pass's pooled trials must not stand in for it.
+            patch["result_json_replicates"] = []
         elif len(result_json_replicates) > 1 and not seed_ignored:
             patch["result_json_replicates"] = result_json_replicates
             # Lets ``analyze`` say "every seed agreed" instead of reporting an
