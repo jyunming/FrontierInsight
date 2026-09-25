@@ -29,6 +29,7 @@ import unicodedata
 import uuid
 
 import yaml
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict
@@ -2786,19 +2787,12 @@ class Engine:
         # than the old first-2000-chars slice that usually held only the
         # abstract. content_quality records whether real full text was
         # recovered or only the search snippet survived.
-        new_entries = [
-            {
-                "content": d.content,
-                "metadata": {
-                    **d.metadata,
-                    "content_quality": (
-                        "full_text" if d.metadata.get("fetched_full_text")
-                        else "snippet_only"
-                    ),
-                },
-            }
-            for d in docs
-        ]
+        # The whole text goes to disk (data/literature/full_text/, up to knowledge.full_text_max_kb); the state keeps
+        # its first _STATE_TEXT_CHARS, as it always held, so the checkpoint does not grow with a 10 MB source. Readers
+        # that need the whole text (the passage selection, the claim check's quote check) read it back through
+        # _item_content. content_quality says what the text is: full_text, abstract_only (not much more than the
+        # abstract), preview_only (a table of contents), or snippet_only (nothing fetched).
+        new_entries = [_literature_entry(self.quest_root, d.content, d.metadata) for d in docs]
         # Dedup-merge: identity is DOI when present, otherwise the
         # canonical URL, otherwise the first 200 chars of content.
         # On the first iteration ``prior`` is empty so this is a
@@ -2827,8 +2821,10 @@ class Engine:
         # a previous pause cycle. Indexes them as new ``user_supplied``
         # literature entries so the design / write nodes see real
         # full text instead of only the upstream abstracts.
-        merged, user_added = _ingest_user_dropped_papers(
-            self.quest_root, merged, seen, self._log,
+        # A thread: a scanned paper is read by OCR here, about ten seconds a page, and the event loop runs the rest of
+        # a --fleet meanwhile.
+        merged, user_added = await asyncio.to_thread(
+            _ingest_user_dropped_papers, self.quest_root, merged, seen, self._log,
         )
         if user_added:
             self._log.info(
@@ -2840,14 +2836,14 @@ class Engine:
             "+%d user-supplied, total=%d)",
             len(docs), this_iter, added, user_added, len(merged),
         )
-        full_n = sum(
-            1 for e in merged
-            if (e.get("metadata") or {}).get("content_quality") == "full_text"
-        )
+        qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
+        full_n = qualities.get("full_text", 0)
         self._log.info(
-            "[literature] full-text coverage: %d/%d sources have real full "
-            "text (%d snippet-only)",
-            full_n, len(merged), len(merged) - full_n,
+            "[literature] full-text coverage: %d/%d sources have real full text (%d by OCR of a scanned PDF); "
+            "%d abstract only, %d a preview or table of contents, %d snippet only",
+            full_n, len(merged), sum(1 for e in merged if (e.get("metadata") or {}).get("full_text_ocr")),
+            qualities.get("abstract_only", 0), qualities.get("preview_only", 0),
+            len(merged) - full_n - qualities.get("abstract_only", 0) - qualities.get("preview_only", 0),
         )
 
         # Pause-for-user-papers gate. Fires only when the user opted in
@@ -3587,8 +3583,8 @@ class Engine:
         self._maybe_pause_for_user_input(state, "after_literature")
         merged = list(state.get("literature") or [])
         seen = {i for entry in merged for i in _entry_identities(entry)}
-        merged, added = _ingest_user_dropped_papers(
-            self.quest_root, merged, seen, self._log,
+        merged, added = await asyncio.to_thread(  # a scanned paper is read by OCR here
+            _ingest_user_dropped_papers, self.quest_root, merged, seen, self._log,
         )
         if not added:
             return {}
@@ -3853,10 +3849,9 @@ class Engine:
         for idx, item in enumerate(lit, start=1):
             if isinstance(item, dict):
                 meta = item.get("metadata") or {}
-                content = item.get("content") or ""
             else:
                 meta = getattr(item, "metadata", {}) or {}
-                content = getattr(item, "content", "") or ""
+            content = _item_content(item)  # the whole text, not only the state's first part
             if not (meta.get("title") or meta.get("url")):
                 continue
             if meta.get("kind") in _FI_INTERNAL_KINDS:
@@ -11331,13 +11326,21 @@ _THIN_TEXT_CHARS = 100
 _THIN_MARKS = {"title": "title only", "blurb": "short blurb only"}
 
 
+def _has_full_text(meta: dict[str, Any]) -> bool:
+    """Whether a source's text is its full text: its ``content_quality`` when it has one (a fetch that returned only
+    the abstract or a table of contents is not), else whether a fetch returned anything (an entry from before
+    content_quality told the two apart)."""
+    quality = meta.get("content_quality")
+    return quality == "full_text" if quality else bool(meta.get("fetched_full_text"))
+
+
 def _thin_source(meta: dict[str, Any], content: str) -> str | None:
     """``"title"`` when a source's stored text is only its title, ``"blurb"``
     when it is a book without full text (all it has is a short description), and
     ``None`` for every other source, full text and abstracts included. Such a
     record cannot show a finding, a number or a mechanism, whatever it is cited
     for."""
-    if meta.get("content_quality") == "full_text" or meta.get("fetched_full_text"):
+    if _has_full_text(meta):
         return None
     title = str(meta.get("title") or meta.get("source") or "")
     if len(_format_lit_excerpt(content or "", title).strip()) < _THIN_TEXT_CHARS:
@@ -11624,7 +11627,7 @@ def _format_lit_from_state(
     lines: list[str] = []
     for label, meta, item in _labelled_sources(items, audience):
         title = meta.get("title") or meta.get("source") or f"item-{label}"
-        content = item.get("content", "") or ""
+        content = _item_content(item)  # the whole text, from disk when the state holds only its first part
         header = _format_lit_header(meta, label, _thin_source(meta, content) if mark_thin else None)
         excerpt = _format_lit_excerpt(
             content, title,
@@ -12252,7 +12255,16 @@ _CLAIM_ARRAY_MAX_ITEMS = 10
 
 
 def _item_content(item: Any) -> str:
+    """A source's whole text: from ``full_text_path`` when the state holds only its first part (``_literature_entry``),
+    else the state's copy. A file that is gone falls back to the state's copy."""
     content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+    meta = (item.get("metadata") if isinstance(item, dict) else getattr(item, "metadata", None)) or {}
+    path = meta.get("full_text_path") if isinstance(meta, dict) else None
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            pass
     return str(content or "")
 
 
@@ -16208,9 +16220,11 @@ def _ingest_user_dropped_papers(
         suffix = p.suffix.lower()
         if suffix not in (".pdf", ".md", ".txt"):
             continue
+        ocr_note = ""
         try:
             if suffix == ".pdf":
-                content = _extract_pdf_text(p)
+                content, ocr_note = _extract_pdf_text(p)
+                log.info("[literature] %s: %s", p.name, ocr_note)
             else:
                 content = p.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError) as e:
@@ -16218,41 +16232,82 @@ def _ingest_user_dropped_papers(
             continue
         content = (content or "").strip()
         if len(content) < 200:
+            if suffix == ".pdf":
+                log.warning("[literature] %s gave no text to read (%s)", p.name, ocr_note or "empty")
             continue
         ident = content[:200]
         if ident in seen:
             continue
         seen.add(ident)
-        merged.append({
-            "content": content[:8000],  # cap to keep prompt manageable
-            "metadata": {
-                "source": "user_supplied",
-                "filename": p.name,
-                "path": str(p),
-                "abstract_only": False,
-            },
-        })
+        # Whole, as every source now is: the text on disk, its first _STATE_TEXT_CHARS in the state. The old 8,000-
+        # character cut dropped most of a paper the person had gone to the trouble of supplying.
+        merged.append(_literature_entry(quest_root, content, {
+            "source": "user_supplied",
+            "filename": p.name,
+            "path": str(p),
+            "abstract_only": False,
+            "fetched_full_text": True,
+            **({"full_text_ocr": True} if "by OCR" in ocr_note else {}),
+        }, quality="full_text"))
         count += 1
     return merged, count
 
 
-def _extract_pdf_text(path: Path) -> str:
-    """Pull plain text out of a PDF via pypdf. Returns empty string on
-    failure (caller decides whether to skip). pypdf is a soft
-    dependency — when missing, returns the path name so the LLM at
-    least knows the file exists."""
-    try:
-        from pypdf import PdfReader  # type: ignore[import-not-found]
-    except ImportError:
-        return f"[pypdf not installed; user-supplied paper at {path.name}]"
-    try:
-        reader = PdfReader(str(path))
-        return "\n\n".join(
-            (page.extract_text() or "").strip() for page in reader.pages
-        )
-    except Exception as e:  # noqa: BLE001
-        # pypdf raises a zoo of exceptions on malformed PDFs.
-        return f"[pypdf could not parse {path.name}: {e}]"
+def _extract_pdf_text(path: Path) -> tuple[str, str]:
+    """Text of a PDF the person dropped in ``inputs/papers/`` (core/pdf_text.py: every page, scanned pages read by
+    OCR, up to 10 MB). Returns ``(text, one-line summary)``; the text is empty when nothing could be read."""
+    from core import pdf_text
+
+    result = pdf_text.extract(path)
+    return result.text, result.summary()
+
+
+#: What the quest state keeps of a source's text: the first this many characters, as it always held (64 KB). The
+#: whole text, up to ``knowledge.full_text_max_kb``, is on disk and read back by ``_item_content``.
+_STATE_TEXT_CHARS = 64 * 1024
+
+_TOC_LINE = re.compile(r"^.{2,120}?\s\d{1,4}$")
+
+
+def _content_quality(content: str, meta: dict[str, Any]) -> str:
+    """What a source's text is: ``full_text``, ``abstract_only`` (a fetch that brought back little more than the
+    abstract), ``preview_only`` (mostly a table of contents: lines ending in page numbers), or ``snippet_only``.
+
+    A fetch used to count as full text at 300 characters, so an abstract returned again, or a book's table of
+    contents, was read as a whole source by the claim check and the writer."""
+    if not meta.get("fetched_full_text"):
+        return "snippet_only"
+    head, sep, text = content.partition("---FULL TEXT")
+    body = text.split("---", 1)[-1] if sep else content
+    snippet = head if sep else ""
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if len(lines) >= 10 and sum(1 for ln in lines if _TOC_LINE.match(ln)) / len(lines) > 0.4:
+        return "preview_only"
+    if len(body.strip()) < max(4000, 3 * len(snippet.strip())):
+        return "abstract_only"
+    return "full_text"
+
+
+def _literature_entry(
+    quest_root: Path, content: str, meta: dict[str, Any], *, quality: str | None = None,
+) -> dict[str, Any]:
+    """A literature entry for the state: the first ``_STATE_TEXT_CHARS`` of ``content``, and, when there is more, the
+    whole text in ``data/literature/full_text/`` with its path in ``full_text_path`` (read back by ``_item_content``)."""
+    content = content or ""
+    meta = {**meta, "content_quality": quality or _content_quality(content, meta)}
+    if len(content) > _STATE_TEXT_CHARS:
+        key = hashlib.sha1(
+            (str(meta.get("doi") or meta.get("url") or meta.get("path") or "") + content[:2000]).encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        target = quest_root / "data" / "literature" / "full_text" / f"{key}.txt"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            meta["full_text_path"] = str(target)
+        except OSError:
+            pass  # the state's first part is still there
+        content = content[:_STATE_TEXT_CHARS]
+    return {"content": content, "metadata": meta}
 
 
 # Threshold below which a retrieved doc is treated as abstract-only
@@ -16376,7 +16431,7 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     md = doc.metadata or {}
     if md.get("abstract_only"):
         return True
-    if md.get("fetched_full_text") or md.get("content_quality") == "full_text":
+    if _has_full_text(md):
         return False
     if md.get("source") in ("local_paper", "user_supplied"):
         return False

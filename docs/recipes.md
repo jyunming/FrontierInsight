@@ -719,7 +719,7 @@ knowledge:
     - ~/research/spie-lithography/          # a folder of resources — all ingested
 ```
 
-The agent reads them and cites them. Requires `pip install pypdf` for PDF support.
+The agent reads them and cites them, every page: a scanned PDF (an older paper is usually page images) is read by OCR when RapidOCR or tesseract is installed (`pip install rapidocr onnxruntime`, part of `requirements.txt`), and the run log says which pages, if any, could not be read.
 
 **Or let the agent ask.** Turn on **Supply paywalled papers** in the interview (`pauses.papers: true`). When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason (and `NEXT_STEP.md` points you there). Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions. See [When the quest needs you](#when-the-quest-needs-you) for how this fits the bigger picture.
 

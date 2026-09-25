@@ -66,6 +66,7 @@ The router parallelizes calls via `asyncio.to_thread` + `asyncio.gather`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import html as _htmlmod
 import json
@@ -1096,36 +1097,55 @@ _BROWSER_HEADERS = {
 }
 
 
+#: A fetch's scanned PDFs (most pages are images with no text layer), set per fetch by ``_enrich_with_full_text``.
+#: ``asyncio.to_thread`` copies the context into the worker, so the list is the fetch's own even under ``--fleet``.
+_scanned_pdfs: "contextvars.ContextVar[list[bytes] | None]" = contextvars.ContextVar("fi_scanned_pdfs", default=None)
+#: How long the OCR stage after a fetch may take in all (OCR is about 10 s a page: never inside the fetch budget).
+OCR_BUDGET_S = 600.0
+
+
 def _pdf_bytes_to_text(body: bytes, *, cap: int) -> str | None:
-    """Extract text from in-memory PDF bytes via pypdf, capped at ``cap``
-    bytes. Returns None when pypdf is missing or the parse fails."""
-    try:
-        import pypdf  # type: ignore[import-not-found]
-        from io import BytesIO
-    except ImportError:
-        _log.info("pypdf not installed; cannot extract fetched PDF text")
+    """Text of in-memory PDF bytes (core/pdf_text.py, no OCR here), capped at ``cap`` bytes; None when there is none.
+
+    A PDF whose pages are mostly images (a scan) returns None, so the fetch goes on to its other routes, and is set
+    aside for the OCR stage that runs after the fetch budget (``_ocr_scanned``)."""
+    from core import pdf_text
+
+    result = pdf_text.extract(body, max_bytes=cap, ocr=False)
+    if result.error:
+        _log.info("fetched PDF could not be read: %s", result.error)
+    if result.unread_pages and len(result.unread_pages) * 2 >= max(1, result.pages):
+        slot = _scanned_pdfs.get()
+        if slot is not None:
+            slot.append(body)
         return None
+    return result.text or None
+
+
+def _ocr_cache_dir() -> Path:
+    return Path.home() / ".frontier-insight" / "ocr_cache"
+
+
+def _ocr_pdf_text(body: bytes, *, cap: int) -> tuple[str, str]:
+    """OCR a scanned PDF (core/pdf_text.py), cached on disk by the PDF's SHA-256 so a classic read once is not read
+    again by the next quest. Returns ``(text, one-line summary)``."""
+    from core import pdf_text
+
+    key = hashlib.sha256(body).hexdigest()
+    cache = _ocr_cache_dir() / f"{key}.json"
     try:
-        reader = pypdf.PdfReader(BytesIO(body))
-    except Exception as e:
-        _log.info("fetched PDF parse failed: %s", e)
-        return None
-    parts: list[str] = []
-    total = 0
-    for page in reader.pages:
+        hit = json.loads(cache.read_text(encoding="utf-8"))
+        return str(hit.get("text") or "")[:cap], str(hit.get("summary") or "")
+    except (OSError, ValueError, AttributeError):
+        pass
+    result = pdf_text.extract(body, max_bytes=cap, ocr=True)
+    if result.ocr_pages:
         try:
-            txt = page.extract_text() or ""
-        except Exception:
-            continue
-        if not txt.strip():
-            continue
-        parts.append(txt)
-        total += len(txt.encode("utf-8", errors="replace"))
-        if total >= cap:
-            break
-    if not parts:
-        return None
-    return "\n\n".join(parts)[:cap]
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"text": result.text, "summary": result.summary()}), encoding="utf-8")
+        except OSError:
+            pass
+    return result.text, result.summary()
 
 
 def _main_region(html: str) -> str:
@@ -2337,32 +2357,14 @@ def _load_local_paper(path: Path) -> RetrievedDoc | None:
 
 
 def _extract_pdf_text(path: Path) -> str | None:
-    """Best-effort PDF text extraction via `pypdf`. Returns None when
-    the dep is missing — engine continues with whatever did load."""
-    try:
-        import pypdf  # type: ignore[import-not-found]
-    except ImportError:
-        _log.warning(
-            "pypdf not installed; PDF %s skipped. "
-            "Install with `pip install pypdf` to enable PDF ingestion, "
-            "or convert to .md/.txt first.",
-            path.name,
-        )
-        return None
-    try:
-        reader = pypdf.PdfReader(str(path))
-    except Exception as e:
-        _log.warning("PDF %s: pypdf parse failed: %s", path.name, e)
-        return None
-    parts: list[str] = []
-    for page in reader.pages:
-        try:
-            txt = page.extract_text() or ""
-        except Exception:
-            continue
-        if txt.strip():
-            parts.append(txt)
-    return "\n\n".join(parts)
+    """Text of a PDF the person gave FI (``knowledge.local_papers``), scanned pages read by OCR (core/pdf_text.py).
+    Returns None when nothing could be read; the log says why."""
+    from core import pdf_text
+
+    result = pdf_text.extract(path)
+    if result.error or result.unread_pages or result.ocr_pages or result.truncated_at_page:
+        _log.warning("PDF %s: %s", path.name, result.summary())
+    return result.text or None
 
 
 _LOCAL_PAPER_SUFFIXES = (".pdf", ".md", ".txt", ".rst")
@@ -2542,6 +2544,41 @@ def _fetch_full_text(
     return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
 
 
+async def _ocr_scanned(enriched: list[RetrievedDoc], scanned: dict[int, list[bytes]], *, cap: int) -> int:
+    """Read the scanned PDFs a fetch set aside, by OCR, after its budget: one doc at a time within ``OCR_BUDGET_S``.
+
+    Only a doc still without full text is read. Its content gets the OCR text under its own marker, so a reader can
+    tell OCR text from a text layer; a doc not reached within the budget is logged and stays as it was. Returns how
+    many docs gained full text."""
+    todo = [(i, bodies[0]) for i, bodies in scanned.items() if bodies and not enriched[i].metadata.get("fetched_full_text")]
+    if not todo:
+        return 0
+    deadline = time.monotonic() + OCR_BUDGET_S
+    done = 0
+    for idx, body in todo:
+        if time.monotonic() >= deadline:
+            _log.info("full-text OCR: budget of %.0fs used; %d scanned PDF(s) left unread", OCR_BUDGET_S, len(todo) - done)
+            _sf.record_failure("full_text", "ocr_budget", detail=f"{len(todo) - done} scanned PDF(s) not read by OCR")
+            break
+        try:
+            text, summary = await asyncio.to_thread(_ocr_pdf_text, body, cap=cap)
+        except Exception as e:  # noqa: BLE001 -- one scan that cannot be read costs only itself
+            _log.info("full-text OCR failed: %r", e)
+            continue
+        original = enriched[idx]
+        if len(text) < _MIN_FULL_TEXT_CHARS:
+            _log.info("full-text OCR: %s -- %s", (original.metadata.get("title") or "")[:60], summary or "no text")
+            continue
+        enriched[idx] = RetrievedDoc(
+            content=f"{original.content}\n\n---FULL TEXT (OCR of a scanned PDF)---\n\n{text}",
+            metadata={**original.metadata, "fetched_full_text": True, "full_text_ocr": True,
+                      "full_text_bytes": len(text.encode("utf-8", errors="replace"))},
+        )
+        done += 1
+        _log.info("full-text OCR: %s -- %s", (original.metadata.get("title") or "")[:60], summary)
+    return done
+
+
 async def _enrich_with_full_text(
     docs: list[RetrievedDoc],
     *,
@@ -2572,12 +2609,17 @@ async def _enrich_with_full_text(
     if not targets:
         return docs
 
+    scanned: dict[int, list[bytes]] = {}
+
     async def fetch_one(idx: int) -> tuple[int, str | None]:
         # The batch budget is also the arXiv queue's deadline: a fetch that
         # could not get an arXiv slot in time gives up instead of sleeping
         # through a multi-minute backoff in a worker thread — and a thread
         # abandoned at the budget stops at its next arXiv request.
         token = _gate.fetch_deadline.set(start + total_budget_s)
+        # The scanned PDFs this doc's routes met (see _pdf_bytes_to_text), for the OCR stage below.
+        slot: list[bytes] = []
+        scanned_token = _scanned_pdfs.set(slot)
         try:
             text = await asyncio.to_thread(
                 fetch_fn,
@@ -2587,6 +2629,9 @@ async def _enrich_with_full_text(
             )
         finally:
             _gate.fetch_deadline.reset(token)
+            _scanned_pdfs.reset(scanned_token)
+        if slot:
+            scanned[idx] = slot
         return idx, text
 
     start = time.monotonic()
@@ -2662,6 +2707,8 @@ async def _enrich_with_full_text(
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
+    ocr_done = await _ocr_scanned(enriched, scanned, cap=max_kb * 1024)
+    successes += ocr_done
     if pending:
         _log.info(
             "full-text fetch budget %.1fs exceeded; "

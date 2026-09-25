@@ -103,6 +103,9 @@ knowledge = ["axon-rag>=0.4.2", "tqdb>=0.8.4"]
 # Optional: the knowledge layer falls back to a built-in extractor when
 # absent, but trafilatura gives markedly cleaner article bodies.
 web = ["trafilatura>=1.8"]
+# OCR for scanned PDFs (core/pdf_text.py): a scanned page is otherwise counted as unread. Its models (about 32 MB)
+# are fetched from modelscope.cn on first use; tesseract (with pytesseract) is used instead when installed.
+ocr = ["rapidocr>=3.0", "onnxruntime>=1.17"]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",

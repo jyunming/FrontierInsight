@@ -61,6 +61,12 @@ filelock>=3.13
 # but .pdf files are skipped with a warning.
 pypdf>=4.0
 
+# OCR for scanned PDFs (most papers from before the 1990s are page images). Without it a scanned page is
+# counted as unread and the run log says so. Its models (about 32 MB) are fetched from modelscope.cn the first
+# time; where that site is blocked, install tesseract and `pip install pytesseract` instead (used first when present).
+rapidocr>=3.0
+onnxruntime>=1.17
+
 # Web-research full-text extraction. trafilatura isolates the main article
 # body (drops nav / menus / related-article / reference cruft) far better
 # than a tag-strip; the knowledge layer falls back to a built-in extractor
