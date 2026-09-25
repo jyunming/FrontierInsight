@@ -282,20 +282,22 @@ def test_yaml_round_trips_through_config_cli_frontend() -> None:
     ])
 
 
-def test_yaml_round_trips_for_vscode_frontend_with_cost_discipline() -> None:
-    """VSCode frontend keeps the cost-discipline defaults
-    (ideate_reflect: false, cross_check_per_finding_k: 0,
-    enable_analyze_reroute: false) for parity with the existing TS
-    emitter."""
-    yaml_text = answers_to_yaml(
-        _sample_answers(provider="vscode_extension", provider_model=None),
-        frontend="vscode",
-    )
-    data = yaml.safe_load(yaml_text)
-    cfg = Config.model_validate(data)
+@pytest.mark.parametrize("frontend", ["cli", "serve", "vscode"])
+def test_the_cheaper_draft_follows_the_answer_not_the_interface(frontend: str) -> None:
+    """The three cost-saving engine settings once came from the VS Code interview alone, so the same question
+    asked in VS Code ran a weaker quest without saying so. They now follow "What is the result for?": exploring
+    writes them, on every interface; research, a decision, or no answer never does."""
+    from dataclasses import replace
+
+    base = _sample_answers(provider="vscode_extension", provider_model=None)
+    cfg = Config.model_validate(yaml.safe_load(answers_to_yaml(replace(base, result_use="explore"), frontend=frontend)))
     assert cfg.engine.ideate_reflect is False
     assert cfg.engine.cross_check_per_finding_k == 0
     assert cfg.engine.enable_analyze_reroute is False
+    assert cfg.rigor_profile == "default"
+    for use in ("", "research", "decision"):
+        text = answers_to_yaml(replace(base, result_use=use), frontend=frontend)
+        assert "ideate_reflect" not in text and "cross_check_per_finding_k" not in text
 
 
 def test_yaml_emits_prose_format_with_no_simulation() -> None:

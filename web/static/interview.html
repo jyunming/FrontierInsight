@@ -577,6 +577,16 @@
     }
   }
 
+  // Mirrors core/interview.py:resolve_review_panel, reading the roles from the schema (one source of truth): under
+  // research or a decision the panel gets every role the research profile requires, and a single reviewer becomes
+  // the profile's own panel. Exploring leaves the panel as picked.
+  function resolveReviewPanel(panel, resultUse) {
+    panel = Array.isArray(panel) ? [...panel] : [];
+    if ((resultUse || 'research') === 'explore') return panel;
+    if (!panel.length) return [...(schema.research_review_panel || [])];
+    return [...panel, ...(schema.required_review_roles || []).filter((r) => !panel.includes(r))];
+  }
+
   async function deriveTier2(tier1) {
     return {
       title: slugifyTopic(tier1.topic),
@@ -590,7 +600,9 @@
       // means single-reviewer and silently disables must-flag enforcement
       // (the methodologist owns the non-bypassable rules), so web users
       // must not quietly get weaker rigor than CLI users.
-      review_panel: ['methodologist', 'statistician', 'devil_advocate'],
+      // Research and decision add the reviewers the research profile requires (resolveReviewPanel), so the review
+      // screen shows the panel that runs.
+      review_panel: resolveReviewPanel(['methodologist', 'statistician', 'devil_advocate'], tier1.result_use),
       knowledge_enabled: await probeAxonReachable(),
       audience: 'external',
       knowledge_top_k: tier1.study_depth === 'comprehensive review' ? 12 : 8,
@@ -618,8 +630,6 @@
       // The two pauses: the review screen showed "(unset)" for them. Mirror the question defaults.
       supply_papers: true,
       pause_for_plan: false,
-      // The top-level rigor_profile: 'default' writes nothing; 'research' is recommended for a simulation study.
-      rigor_profile: 'default',
       poster_size: 'a1_portrait',
       // provider.reasoning_effort — 'default' writes nothing (mirrors the
       // question default in core/interview.py).
@@ -833,6 +843,12 @@
     if (id === 'page_limit' && !validPageLimit(value)) {
       alert(PAGE_LIMIT_MESSAGE);
       return;
+    }
+    if (id === 'review_panel') {
+      const resolved = resolveReviewPanel(value, pendingAnswers.result_use);
+      const added = resolved.filter((r) => !(value || []).includes(r));
+      if (added.length) alert(`Research needs ${added.join(', ')} on the panel; added.`);
+      value = resolved;
     }
     pendingAnswers[id] = value;
     const savedQ = schema.questions.find((x) => x.id === id);

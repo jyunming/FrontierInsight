@@ -302,6 +302,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             supply_papers=new_answers.supply_papers,
             pause_for_plan=new_answers.pause_for_plan,
             rigor_profile=current.rigor_profile,  # chosen when the quest was created; not editable mid-quest
+            result_use=current.result_use,
             ensemble_profile=new_answers.ensemble_profile,
             ensemble_models=new_answers.ensemble_models,
             max_iterations=new_answers.max_iterations,
@@ -468,6 +469,11 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
     rigor_profile = body.get("rigor_profile") or "default"
     if rigor_profile not in ("default", "research"):
         raise ValueError(f"rigor_profile must be 'default' or 'research'; got {rigor_profile!r}")
+    # result_use: "What is the result for?" -- sets the rigor profile (see core.interview.rigor_profile_for). Missing
+    # (an older client) leaves rigor_profile as sent.
+    result_use = body.get("result_use") or ""
+    if result_use not in ("", "research", "decision", "explore"):
+        raise ValueError(f"result_use must be 'research', 'decision' or 'explore'; got {result_use!r}")
     # survey_mode: optional bool (default off). A literature/history synthesis
     # with no experiment and no dataset — implies no_simulation at runtime.
     survey_mode = body.get("survey_mode", False)
@@ -543,6 +549,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         supply_papers=supply_papers,
         pause_for_plan=pause_for_plan,
         rigor_profile=rigor_profile,
+        result_use=result_use,
         ensemble_profile=ensemble_profile,
         ensemble_models=", ".join(named_models),
         max_iterations=max_iterations,

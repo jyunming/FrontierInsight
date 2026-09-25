@@ -23,12 +23,20 @@ def _cfg(tmp_path: Path, answers: InterviewAnswers) -> tuple[str, Config]:
     return text, Config.from_yaml(path)
 
 
-def test_the_question_is_an_advanced_one_that_recommends_research_and_defaults_to_the_default_profile() -> None:
-    (q,) = [q for q in QUESTIONS if q.id == "rigor_profile"]
-    assert q.tier == 3 and q.default == "default" and [c.value for c in q.choices] == ["default", "research"]
-    assert "recommended for a simulation study" in q.prompt and "recommended for a simulation study" in q.choices[1].label
-    schema_q = next(x for x in export_schema_json()["questions"] if x["id"] == "rigor_profile")
-    assert [c["value"] for c in schema_q["choices"]] == ["default", "research"]
+def test_the_result_use_question_is_asked_first_and_defaults_to_research() -> None:
+    """How strictly a quest is checked is asked as a plain question every interface puts to the person, right after
+    the topic, not a hidden "rigor profile" field; research is the default answer."""
+    assert not [q for q in QUESTIONS if q.id == "rigor_profile"], "the old advanced question is gone"
+    (q,) = [q for q in QUESTIONS if q.id == "result_use"]
+    assert q.tier == 1 and q.default == "research" and not q.mid_quest_editable
+    assert [c.value for c in q.choices] == ["research", "decision", "explore"]
+    assert set(q.frontends) == {"cli", "serve", "vscode"}
+    schema = export_schema_json()
+    assert [c["value"] for c in next(x for x in schema["questions"] if x["id"] == "result_use")["choices"]] == [
+        "research", "decision", "explore",
+    ]
+    assert schema["required_review_roles"] == ["methodologist", "statistician", "reproducibility"]
+    assert schema["research_review_panel"] == PANEL
 
 
 def test_the_cli_writes_the_profile_only_when_asked_and_the_config_then_applies_it(tmp_path: Path) -> None:
@@ -89,36 +97,44 @@ def test_the_profile_survives_an_update_of_the_other_answers(tmp_path: Path) -> 
     assert Config.from_yaml(quest / "config.yaml").rigor_profile == "research"
 
 
-def test_the_web_form_carries_the_profile_and_refuses_an_unknown_one(tmp_path: Path) -> None:
+def test_the_web_form_carries_the_answer_and_refuses_an_unknown_one(tmp_path: Path) -> None:
     client = _client(tmp_path)
-    body = _ok_answers_payload()
-    body["rigor_profile"] = "research"
-    res = client.post("/api/interview/submit", json=body)
-    assert res.status_code == 200, res.text
-    cfg = Config.from_yaml(Path(res.json()["yaml_path"]))
-    assert cfg.rigor_profile == "research" and cfg.pauses.plan == "ask"
-
-    res = client.post("/api/interview/submit", json=_ok_answers_payload())
-    assert Config.from_yaml(Path(res.json()["yaml_path"])).rigor_profile == "default"
-
-    body["rigor_profile"] = "strict"
-    assert client.post("/api/interview/submit", json=body).status_code == 400
+    for use, profile, draft in (("research", "research", False), ("decision", "research", False), ("explore", "default", True)):
+        body = {**_ok_answers_payload(), "result_use": use}
+        res = client.post("/api/interview/submit", json=body)
+        assert res.status_code == 200, res.text
+        cfg = Config.from_yaml(Path(res.json()["yaml_path"]))
+        assert cfg.rigor_profile == profile and (cfg.engine.ideate_reflect is False) is draft
+        if profile == "research":
+            # A single reviewer under research becomes the profile's own panel (written, so it is what was shown).
+            assert cfg.engine.review_panel == PANEL
+    # An older client that sends only rigor_profile still gets what it asked for.
+    res = client.post("/api/interview/submit", json={**_ok_answers_payload(), "rigor_profile": "research"})
+    assert Config.from_yaml(Path(res.json()["yaml_path"])).rigor_profile == "research"
+    assert client.post("/api/interview/submit", json={**_ok_answers_payload(), "result_use": "strict"}).status_code == 400
     page = (Path(__file__).resolve().parent.parent / "web" / "static" / "interview.html").read_text(encoding="utf-8")
-    assert "rigor_profile: 'default'" in page
+    assert "function resolveReviewPanel" in page and "rigor_profile: 'default'" not in page
 
 
 def test_vscode_emits_the_profile_and_loads(tmp_path: Path) -> None:
-    yaml_text, cfg = _emit(tmp_path, rigor_profile="research", review_panel=list(PANEL))
-    assert 'rigor_profile: "research"' in yaml_text.splitlines()
+    yaml_text, cfg = _emit(tmp_path, result_use="research", review_panel=list(PANEL))
+    assert 'rigor_profile: "research"' in yaml_text.splitlines() and "ideate_reflect" not in yaml_text
     assert cfg.rigor_profile == "research" and cfg.pauses.plan == "ask" and cfg.engine.review_panel == PANEL
-    yaml_text, cfg = _emit(tmp_path, rigor_profile="research", review_panel=[])
-    assert "review_panel" not in yaml_text and cfg.engine.review_panel == PANEL, "an empty panel would contradict the profile"
-    yaml_text, cfg = _emit(tmp_path, review_panel=[])
-    assert "rigor_profile" not in yaml_text and "review_panel: []" in yaml_text and cfg.rigor_profile == "default"
+    # A single reviewer under research is written as the profile's own panel: what the review block showed.
+    yaml_text, cfg = _emit(tmp_path, result_use="decision", review_panel=[])
+    assert cfg.engine.review_panel == PANEL and cfg.rigor_profile == "research"
+    # Exploring: the cheaper draft's three settings, from VS Code exactly as from the CLI.
+    yaml_text, cfg = _emit(tmp_path, result_use="explore", review_panel=[])
+    assert "rigor_profile" not in yaml_text and cfg.rigor_profile == "default" and cfg.engine.review_panel == []
+    assert cfg.engine.ideate_reflect is False and cfg.engine.cross_check_per_finding_k == 0
+    # No answer (an older caller): nothing the answer would add.
+    yaml_text, _cfg_ = _emit(tmp_path, review_panel=[])
+    assert "ideate_reflect" not in yaml_text and "rigor_profile" not in yaml_text
     ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
-    assert '{ label: "Rigor profile", value: "rigor_profile" }' in ts and 'case "rigor_profile"' in ts
-    assert "recommended for a simulation study" in ts
-    assert 'rigor_profile?: "default" | "research";' in (EXT / "src" / "interview-core.ts").read_text(encoding="utf-8")
+    assert '{ label: "What is the result for?", value: "result_use" }' in ts and 'case "result_use"' in ts
+    assert "resolveReviewPanel(" in ts and 'case "rigor_profile"' not in ts
+    core_ts = (EXT / "src" / "interview-core.ts").read_text(encoding="utf-8")
+    assert 'result_use?: "research" | "decision" | "explore";' in core_ts
 
 
 @pytest.mark.parametrize("surface", ["cli", "vscode"])

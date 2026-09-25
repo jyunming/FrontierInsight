@@ -212,6 +212,8 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         "knowledge_enabled": False,
         "no_simulation": False,
         "max_iterations": 2,
+        # The cheaper draft: the answer that now writes the cost-saving settings on every interface.
+        "result_use": "explore",
     }
     interview_path = str(compiled).replace("\\", "/")
     node_script = (
@@ -268,10 +270,11 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         assert cfg.knowledge.enabled is False
         assert cfg.provider.name == "vscode_extension"
         # COST DISCIPLINE — default-ON engine features (ideate_reflect,
-        # cross_check, analyze_reroute) are explicitly turned OFF by
-        # the interview. With them ON, a single quest can burn 25%+ of
-        # a 1500-req/month Copilot allotment. The interview must
-        # generate the cost-bounded values.
+        # cross_check, analyze_reroute) are turned OFF for an "Exploring"
+        # quest. With them ON, a single quest can burn 25%+ of a
+        # 1500-req/month Copilot allotment; saving that is now the person's
+        # explicit answer, the same on every interface, instead of a
+        # setting only the VS Code interview wrote.
         assert cfg.engine.ideate_reflect is False, (
             "ideate_reflect on by default fires one extra LLM call per quest"
         )
@@ -340,6 +343,8 @@ def test_interview_yaml_norway_problem_clarify_mode_off_parses_as_string(
         "knowledge_enabled": False,
         "no_simulation": False,
         "max_iterations": 2,
+        # The cheaper draft: the answer that now writes the cost-saving settings on every interface.
+        "result_use": "explore",
     }
     interview_path = str(compiled).replace("\\", "/")
     node_script = (
@@ -432,6 +437,8 @@ def test_interview_paper_format_round_trips_through_pydantic(
         "knowledge_enabled": False,
         "no_simulation": False,
         "max_iterations": 2,
+        # The cheaper draft: the answer that now writes the cost-saving settings on every interface.
+        "result_use": "explore",
     }
     interview_path = str(compiled).replace("\\", "/")
     node_script = (

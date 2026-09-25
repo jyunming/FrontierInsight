@@ -31,8 +31,10 @@ from core.interview import (
 # ---- Tier-1 contract ----
 
 
-def test_tier1_cli_is_exactly_twelve_questions() -> None:
-    """CLI and the web --serve interview both ask twelve tier-1 questions
+def test_tier1_cli_is_exactly_thirteen_questions() -> None:
+    """CLI and the web --serve interview both ask thirteen tier-1 questions.
+    ``result_use`` ("What is the result for?") comes second: it sets how
+    strictly the quest is checked, so it is asked, never hidden
     (ensemble_profile was promoted from tier-3 so the multi-model
     cost decision lives next to provider/model). The last four are the
     optional author line, asked on every frontend so a poster can carry
@@ -40,6 +42,7 @@ def test_tier1_cli_is_exactly_twelve_questions() -> None:
     ids = [q.id for q in questions_for_tier(1, "cli")]
     assert ids == [
         "topic",
+        "result_use",
         "paper_format",
         "output_kinds",
         "study_depth",
@@ -63,7 +66,7 @@ def test_tier1_serve_matches_cli() -> None:
     assert cli_ids == serve_ids
 
 
-def test_tier1_vscode_is_ten_questions_no_provider() -> None:
+def test_tier1_vscode_is_eleven_questions_no_provider() -> None:
     """VSCode pins provider=vscode_extension and grabs the Copilot
     model the user picked in the chat picker — so its tier-1 set
     drops both, but still surfaces ensemble_profile and asks which
@@ -71,6 +74,7 @@ def test_tier1_vscode_is_ten_questions_no_provider() -> None:
     ids = [q.id for q in questions_for_tier(1, "vscode")]
     assert ids == [
         "topic",
+        "result_use",
         "paper_format",
         "output_kinds",
         "study_depth",
@@ -162,11 +166,18 @@ def test_derive_tier2_defaults_clarify_auto_and_three_persona_panel() -> None:
     because the methodologist must fire for the non-bypassable
     must-flag enforcement to take effect — defaulting to no panel
     silently loses that protection."""
-    out = derive_tier2({"topic": "x", "paper_format": "generic"})
+    out = derive_tier2({"topic": "x", "paper_format": "generic", "result_use": "explore"})
     assert out["clarify_mode"] == "auto"
     assert out["review_panel"] == [
         "methodologist", "statistician", "devil_advocate",
     ]
+    # Research (the default) and a decision add the reviewer the research profile requires, before any review
+    # screen shows the panel.
+    for use in ("research", "decision", None):
+        partial = {"topic": "x", "paper_format": "generic", **({"result_use": use} if use else {})}
+        assert derive_tier2(partial)["review_panel"] == [
+            "methodologist", "statistician", "devil_advocate", "reproducibility",
+        ]
 
 
 def test_smart_default_audience_and_clarify_are_static() -> None:
@@ -176,7 +187,7 @@ def test_smart_default_audience_and_clarify_are_static() -> None:
     assert smart_default_audience({}) == "external"
     assert smart_default_audience({"topic": "anything", "paper_format": "report"}) == "external"
     assert smart_default_clarify_mode({}) == "auto"
-    assert smart_default_review_panel({}) == [
+    assert smart_default_review_panel({"result_use": "explore"}) == [
         "methodologist", "statistician", "devil_advocate",
     ]
 
@@ -201,7 +212,6 @@ def test_tier3_covers_the_advanced_fields() -> None:
     assert set(ids) == {
         "supply_papers",
         "pause_for_plan",
-        "rigor_profile",
         "comparative_baseline",
         "success_metric",
         "budget",

@@ -187,11 +187,12 @@ Or explicitly:
 The extension asks a few questions in VSCode-native input modals:
 
 1. **Topic** — what do you want to study? (free text)
-2. **Outputs** — paper only / paper + PDF / paper + slides / everything.
-3. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
-4. **Study depth** — brief preprint / journal-length / comprehensive review. Drives paper word count and citation depth. Smart-defaulted off the chosen paper format.
-5. **Multi-model ensemble** — off (a single model, the default) or one of three fan-out profiles that run selected nodes across several models and merge the answers: `cross_check` alone, then `ideate` as well, then `analyze` too. Each option states its cost multiplier (~1.3× / ~2.0× / ~2.5×), since that is the trade-off being made. When you pick a profile, a multi-select lists the models Copilot Chat offers you and you tick at least two; the extension picks none for you, and picking fewer than two runs the quest single-model. Maps to `provider.node_ensemble`.
-6. **Author line (optional)** — four boxes for author, affiliation, contact email and a project link. Press Enter on an empty box to skip it. The paper prints them under the title, the slides on the title slide, and the poster in its header, with the link as a QR code. They go only into your own output files.
+2. **What is the result for?** — research (the default) or a decision gets every check a trusted result needs: the plan waits for you, every check can stop the quest, the experiment runs in a clean environment, and four reviewers read the paper. Exploring is a cheaper preliminary draft (no idea self-critique, no per-finding cross-check, no redesign after the analysis). The same answer writes the same settings as the CLI and the web form.
+3. **Outputs** — paper only / paper + PDF / paper + slides / everything.
+4. **Paper format** — generic / NeurIPS / ICLR / IEEE Access / Nature MI (scientific); essay / report / policy brief / whitepaper (prose). Maps to `output.paper_format`.
+5. **Study depth** — brief preprint / journal-length / comprehensive review. Drives paper word count and citation depth. Smart-defaulted off the chosen paper format.
+6. **Multi-model ensemble** — off (a single model, the default) or one of three fan-out profiles that run selected nodes across several models and merge the answers: `cross_check` alone, then `ideate` as well, then `analyze` too. Each option states its cost multiplier (~1.3× / ~2.0× / ~2.5×), since that is the trade-off being made. When you pick a profile, a multi-select lists the models Copilot Chat offers you and you tick at least two; the extension picks none for you, and picking fewer than two runs the quest single-model. Maps to `provider.node_ensemble`.
+7. **Author line (optional)** — four boxes for author, affiliation, contact email and a project link. Press Enter on an empty box to skip it. The paper prints them under the title, the slides on the title slide, and the poster in its header, with the link as a QR code. They go only into your own output files.
 
 Then it shows the derived defaults for review: the title (slugged from the topic), the **research approach** — computational (a Python script can produce the data), observational (real-world data needed), or **literature synthesis / survey** (a history / overview with no experiment and no dataset), mapping to `engine.no_simulation` (+ `engine.survey_mode`) and auto-suggested for "history of X" / "evolution of X" topics — the clarify mode, reviewer panel, knowledge layer, web research, paywalled-paper pause, the mid-quest pause for your own papers / datasets, paper audience, retrieval count and author line. **Edit a default** changes any of them; **Edit an advanced field** sets the comparative baseline, success metric, time / compute budget, per-node models, web retrieval count, the paper style (LaTeX article or the Frontier Insight briefing look), the design-revise iteration budget, or the poster size (A1 portrait by default, A0 portrait, or 48 × 36 in landscape).
 
@@ -680,7 +681,12 @@ epidemic model) on gemma4 through Ollama, with the default engine settings
 - Outputs add one request each for the slide deck, poster and talk script. A slides or poster redo after the visual check adds one more. With `output.visual_check_ai: true`, each checked output (paper, slides, pptx, poster) and each redo's new check add one more as well. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
 
 On Copilot Pro (~300 premium requests/month) that is about 10–13 quests
-of this size a month. On Business / Enterprise the ceiling is much higher.
+of this size a month. Those runs used the settings above; a quest answered
+*research* or *a decision* (the default) also runs a four-person review panel
+and the per-finding cross-check with its verification, so it takes more
+requests (not measured here). Answer *exploring* to save requests: it turns
+off the idea self-critique, the per-finding cross-check and the redesign
+after the analysis. On Business / Enterprise the ceiling is much higher.
 
 ## Why this path
 

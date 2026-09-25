@@ -93,6 +93,10 @@ export interface InterviewAnswers {
     // together what a study needs before its result can be trusted (docs/rigor.md). Must stay in sync with
     // core/interview.py:InterviewAnswers.rigor_profile.
     rigor_profile?: "default" | "research";
+    // The "What is the result for?" answer: "research" | "decision" | "explore". When set it decides rigor_profile
+    // (rigorProfileFor) and, for "explore", writes the draft's three cost-saving engine settings. Must stay in sync
+    // with core/interview.py:InterviewAnswers.result_use.
+    result_use?: "research" | "decision" | "explore";
     // Mid-quest stop so you can drop reference PDFs into inputs/papers/
     // and datasets into inputs/data/ before the engine continues, then
     // resume. Maps to pauses.supply via SUPPLY_TO_PAUSE; "never" (the
@@ -150,6 +154,31 @@ export const REQUIRED_REVIEW_ROLES: readonly string[] = ["methodologist", "stati
  * interview.ts) — predates the research profile's role requirement above, so it is missing
  * ``reproducibility``. Must match ``REVIEW_PANELS[0].value`` in core/interview.py. */
 export const SMART_DEFAULT_REVIEW_PANEL: readonly string[] = ["methodologist", "statistician", "devil_advocate"];
+
+/** The panel the research profile runs when none is written — must match the profile's ``review_panel`` in
+ * core/config.py (``RESEARCH_REVIEW_PANEL`` in core/interview.py). */
+export const RESEARCH_REVIEW_PANEL: readonly string[] = ["methodologist", "statistician", "reproducibility", "devil_advocate"];
+
+/** The draft's cost-saving engine settings, written for ``result_use: explore`` only — must match
+ * ``DRAFT_ENGINE_SETTINGS`` in core/interview.py. */
+export const DRAFT_ENGINE_SETTINGS: readonly (readonly [string, string])[] = [
+    ["ideate_reflect", "false"],
+    ["cross_check_per_finding_k", "0"],
+    ["enable_analyze_reroute", "false"],
+];
+
+/** Mirrors core/interview.py:rigor_profile_for. */
+export function rigorProfileFor(resultUse: string): "default" | "research" {
+    return resultUse === "explore" ? "default" : "research";
+}
+
+/** Mirrors core/interview.py:resolve_review_panel: the panel as it will run, applied before the confirm screen. */
+export function resolveReviewPanel(panel: readonly string[], resultUse: string): string[] {
+    const out = [...panel];
+    if (rigorProfileFor(resultUse) !== "research") { return out; }
+    if (out.length === 0) { return [...RESEARCH_REVIEW_PANEL]; }
+    return [...out, ...REQUIRED_REVIEW_ROLES.filter((r) => !out.includes(r))];
+}
 
 /**
  * The model ids the user named for an ensemble: comma / semicolon / newline
@@ -346,7 +375,8 @@ export function answersToYaml(answers: InterviewAnswers): string {
     // string field is the cheap, defensive fix.
     lines.push(`title: "${yamlEscape(answers.title)}"`);
     lines.push("");
-    if (answers.rigor_profile === "research") {
+    const rigorProfile = answers.result_use ? rigorProfileFor(answers.result_use) : answers.rigor_profile;
+    if (rigorProfile === "research") {
         lines.push('rigor_profile: "research"');
         lines.push("");
     }
@@ -414,30 +444,29 @@ export function answersToYaml(answers: InterviewAnswers): string {
     if (surveyMode) {
         lines.push(`${indent}survey_mode: true`);
     }
-    // ---- COST DISCIPLINE — these defaults are LOW so a basic quest is
-    // ~6 LLM calls instead of ~26. Each line below switches off an
-    // expensive feature that the Python defaults turn ON. A user who
-    // wants the full research-quality loop edits the YAML by hand.
-    lines.push(`${indent}ideate_reflect: false`);
-    lines.push(`${indent}cross_check_per_finding_k: 0`);
-    lines.push(`${indent}enable_analyze_reroute: false`);
-    if (answers.review_panel.length > 0) {
-        let panel = answers.review_panel;
+    // A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface (this
+    // interview once wrote them for every quest). Mirrors core/interview.py:answers_to_yaml.
+    if (answers.result_use === "explore") {
+        for (const [key, value] of DRAFT_ENGINE_SETTINGS) {
+            lines.push(`${indent}${key}: ${value}`);
+        }
+    }
+    let panel = answers.result_use
+        ? resolveReviewPanel(answers.review_panel, answers.result_use)
+        : [...answers.review_panel];
+    if (panel.length > 0) {
         const isSmartDefault =
             panel.length === SMART_DEFAULT_REVIEW_PANEL.length &&
             panel.every((role, i) => role === SMART_DEFAULT_REVIEW_PANEL[i]);
-        if (answers.rigor_profile === "research" && isSmartDefault) {
-            // Mirrors core/interview.py:answers_to_yaml — the smart default predates the research
-            // profile's role requirement; complete it here rather than writing a config the engine
-            // would refuse. A custom panel (not this exact preset) is written as given and, if still
-            // incomplete, refused by Config with the role named, same as any other hand-edited config.
+        if (!answers.result_use && rigorProfile === "research" && isSmartDefault) {
+            // A caller that does not set result_use: the old narrow completion of the smart default.
             panel = [...panel, ...REQUIRED_REVIEW_ROLES.filter((r) => !panel.includes(r))];
         }
         lines.push(`${indent}review_panel:`);
         for (const persona of panel) {
             lines.push(`${indent}${indent}- "${yamlEscape(persona)}"`);
         }
-    } else if (answers.rigor_profile !== "research") {
+    } else if (rigorProfile !== "research") {
         // An empty panel written beside the research profile would contradict it (the profile brings its own panel).
         lines.push(`${indent}review_panel: []`);
     }

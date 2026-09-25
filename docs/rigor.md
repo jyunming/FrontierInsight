@@ -57,7 +57,7 @@ A check that was turned off is a gap, not a pass — and so is one that ran but 
 
 ## 8. The research profile
 
-`rigor_profile: research` (default `default`; the `--new` / `/interview` / `@fi /new` interview asks for it as an advanced question and recommends `research` for a simulation study; it is chosen when the quest is created, so `--update` does not offer it) turns on together what a study needs before its result can be trusted:
+`rigor_profile: research` (default `default`; the `--new` / `/interview` / `@fi /new` interview sets it from its second question, *What is the result for?*: research, the default answer, or a decision turns it on, and exploring leaves it off and runs a cheaper preliminary draft; it is chosen when the quest is created, so `--update` does not offer it) turns on together what a study needs before its result can be trusted:
 
 - the plan is held for you to read before the protocol is frozen (`pauses.plan: ask`);
 - the simulation and its analysis stay in two scripts, and a reply without both stops the quest instead of running as one script (`execution.split_analysis: true`, `split_failure: block`);

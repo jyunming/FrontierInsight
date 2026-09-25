@@ -6,7 +6,7 @@ Pick the path that matches what you want to do.
 
 1. **[Your first quest](first-quest.md)**: install, set a key, run the bundled example, find your paper. Start here.
 2. **[Glossary](glossary.md)**: the words FI uses, one sentence each.
-3. Your own topic: `fi --new` asks a few questions and writes the config ([first-quest.md](first-quest.md#7-your-own-question)).
+3. Your own topic: `fi --new` asks a few questions, starting with the topic and what the result is for, and writes the config ([first-quest.md](first-quest.md#7-your-own-question)).
 
 ## I want to change how it runs
 

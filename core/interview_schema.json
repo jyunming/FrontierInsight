@@ -19,6 +19,39 @@
       "tier": 1
     },
     {
+      "id": "result_use",
+      "label": "What is the result for?",
+      "prompt": "Research or a decision gets every check the result needs before it can be trusted; exploring is a cheaper, preliminary draft.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "research",
+          "label": "Research (default)",
+          "description": "Checked the way a study must be before its result can be trusted: the plan waits for you to read it, every check stops the quest instead of only reporting, the experiment runs in its own clean environment, and four reviewers (method, statistics, reproducibility, devil's advocate) read the paper. Slower, and it stops for you more often. Written as rigor_profile: research."
+        },
+        {
+          "value": "decision",
+          "label": "A decision",
+          "description": "The same checks as Research: a result someone will act on needs every one of them."
+        },
+        {
+          "value": "explore",
+          "label": "Exploring (cheaper draft)",
+          "description": "A quick look: fewer model calls (no self-critique of the ideas, no per-finding cross-check, no redesign after the analysis), and the result is a preliminary draft, never ready to publish as it stands."
+        }
+      ],
+      "placeholder": "",
+      "default": "research",
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 1
+    },
+    {
       "id": "paper_format",
       "label": "Paper format / venue",
       "prompt": "Picks the LaTeX template + writing persona. 'generic' is safe for scientific topics; 'essay' for non-computational humanities/social-science.",
@@ -626,34 +659,6 @@
       "placeholder": "",
       "default": false,
       "mid_quest_editable": true,
-      "frontends": [
-        "cli",
-        "vscode",
-        "serve"
-      ],
-      "allow_other": false,
-      "tier": 3
-    },
-    {
-      "id": "rigor_profile",
-      "label": "Rigor profile",
-      "prompt": "How strictly the experiment is checked. 'research' (recommended for a simulation study) makes the plan wait for you, keeps the simulation and its analysis in two scripts, makes every check stop the quest instead of only reporting, and turns on the cross-check verification and a review panel. 'default' changes nothing. The finished quest ends with an evidence level either way.",
-      "kind": "single",
-      "choices": [
-        {
-          "value": "default",
-          "label": "Default",
-          "description": "The checks run and the evidence level says what was and was not shown, but a check can be turned down and the plan does not wait for you. Fine for a quick look or a survey."
-        },
-        {
-          "value": "research",
-          "label": "Research (recommended for a simulation study)",
-          "description": "Turns on together what a study needs before its result can be trusted: the plan is held for you to read before the protocol is frozen, the simulation and its analysis stay in two scripts, the protocol / oracle / numeric-warning / run-manifest checks stop the quest and cannot be turned off, and the cross-check verification and a review panel are on. Slower, and it stops for you more often. Written as rigor_profile: research."
-        }
-      ],
-      "placeholder": "",
-      "default": "default",
-      "mid_quest_editable": false,
       "frontends": [
         "cli",
         "vscode",
@@ -1355,6 +1360,17 @@
       }
     ]
   },
+  "required_review_roles": [
+    "methodologist",
+    "statistician",
+    "reproducibility"
+  ],
+  "research_review_panel": [
+    "methodologist",
+    "statistician",
+    "reproducibility",
+    "devil_advocate"
+  ],
   "editable_fields": [
     "affiliation",
     "audience",
