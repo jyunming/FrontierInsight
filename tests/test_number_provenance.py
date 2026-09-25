@@ -743,3 +743,15 @@ def test_a_number_the_engines_oracle_check_measured_is_accounted_for() -> None:
     judged = [{"name": "self convergence", "value": 2.0412473807, "expected": 2, "limit": 0.2, "passed_by_engine": True}]
     assert [f.token for f in check(line, result_json={"other": 0.731}).findings] == ["2.0412"]
     assert check(line, result_json={"other": 0.731}, oracle_checks=judged).findings == []
+
+
+def test_a_comma_list_of_three_digit_values_the_run_holds_is_a_list_not_one_number() -> None:
+    """A real paper's grid "N in 100,250,500" was read as 100250500 and flagged; the rewrite then cut the grid."""
+    paper = "We ran N in 100,250,500 and saw a peak of 0.4121. A total of 1,050 runs."
+    held = check(paper, result_json={"N_grid": [100, 250, 500], "peak": 0.4121, "total": 1050})
+    assert held.untraceable == 0
+    # A member the run does not hold keeps the whole run flagged, and a leading-zero group is a thousands group.
+    missing = check(paper, result_json={"N_grid": [100, 500], "peak": 0.4121, "total": 1050})
+    assert [f.token for f in missing.findings] == ["100,250,500"]
+    assert check("A total of 1,050 runs, peak 0.4121.",
+                                   result_json={"a": [1, 50], "peak": 0.4121}).untraceable == 1

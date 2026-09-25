@@ -241,7 +241,9 @@ _RANGE_DASH = re.compile(r"(?<=[\d%])\s*(?:-{1,3}|[‐-―])\s*(?=\d)")
 # is read on its own. A well-formed run ("1,000" and "1,000,000") is left alone,
 # and so are "1,000, 2,000" and "3, 4, 5", which the tokenizer already reads as
 # two and three numbers. A well-formed run that is really a list ("202,206,189")
-# cannot be told from one number by its digits, and is not touched.
+# cannot be told from one number by its digits, and is not touched here: it is
+# read as a list only when the check finds the number nowhere and every member in
+# the run (_a_list_the_run_holds).
 _COMMA_RUN = re.compile(r"(?<![\w.,])\d{1,3}(?:,\d{1,3})+(?!\w|\.\d|,\d)")
 _THOUSANDS_RUN = re.compile(r"\d{1,3}(?:,\d{3})+")
 
@@ -349,6 +351,17 @@ def _spaced_if_a_list(m: re.Match[str]) -> str:
     """A comma run whose groups are not all thousands groups is a list."""
     run = m.group(0)
     return run if _THOUSANDS_RUN.fullmatch(run) else ", ".join(run.split(","))
+
+
+def _a_list_the_run_holds(token: str, traceable: "Traceable") -> bool:
+    """A comma run of three-digit groups ("100,250,500") read as one number with thousands separators, when that number
+    is nowhere in the run but every group is: it is a list (a real paper's grid of population sizes, which the check
+    called one untraceable number, and the rewrite then cut from Methods). A group with a leading zero ("1,050") is a
+    thousands group, never a list member, so such a run is left as one number."""
+    groups = token.lstrip("+-").split(",")
+    if len(groups) < 2 or any(len(g) > 1 and g.startswith("0") for g in groups) or not all(g.isdigit() for g in groups):
+        return False
+    return all(traceable.find(float(g), 0) is not None for g in groups)
 
 
 def _either_sign(token: str, context: str) -> bool:
@@ -712,6 +725,8 @@ def check(
         if hedged and traceable.find_near(value, HEDGED_REL_TOL) is not None:
             continue
         if _derivable(value, token, context, traceable):
+            continue
+        if _a_list_the_run_holds(token, traceable):
             continue
         report.untraceable += 1
         if value in seen:

@@ -433,3 +433,14 @@ def test_the_dashboard_and_the_quest_page_name_the_protocol_stop() -> None:
     static = Path(__file__).resolve().parent.parent / "web" / "static"
     for page in ("index.html", "quest.html"):
         assert "protocol: 'protocol'" in (static / page).read_text(encoding="utf-8"), page
+
+
+def test_a_list_of_indices_is_not_read_as_an_axis_that_shares_its_numbers() -> None:
+    """A real run's REPRESENTATIVE_RUN_INDICES = [0, 1, 2] was read as the initial_infectives axis (1, 2): two repairs."""
+    script = (
+        "REPRESENTATIVE_RUN_INDICES = [0, 1, 2]\n"
+        "for i0 in json.load(open('cells.json'))['initial_infectives']:\n"
+        "    run(i0)\n"
+    )
+    found = pc.check({"grid": {"initial_infectives": [1, 2]}}, {"experiment.py": script})
+    assert not [m for m in found if m.kind == "grid"]
